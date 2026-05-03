@@ -1,0 +1,10 @@
+<Component name="ViewSource" method.open="sourceModal.open()">
+  <DataSource id="src" url="{$props.file}" dataType="text" />
+  <DataSource id="desc" url="{$props.file.replace('.xmlui', '.md')}" dataType="text" when="{$props.hasDescription}" />
+  <variable name="fence" value="{'```'}" />
+  <variable name="descText" value="{desc.value ? desc.value + '\n\n' : ''}" />
+  <variable name="formatted" value="{descText + fence + 'xmlui\n' + src.value + '\n' + fence}" />
+  <ModalDialog id="sourceModal" title="{$props.file}" maxWidth="80vw">
+    <Markdown content="{formatted}" fontSize="$fontSize-sm" />
+  </ModalDialog>
+</Component>

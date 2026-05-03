@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>right pane placeholder</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 24px;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #222;
+        background: #fafafa;
+        height: 100vh;
+        box-sizing: border-box;
+      }
+      h1 { font-size: 16px; margin: 0 0 12px; }
+      p { font-size: 13px; line-height: 1.5; color: #555; }
+      button {
+        font: inherit;
+        padding: 6px 12px;
+        border: 1px solid #888;
+        border-radius: 4px;
+        background: #fff;
+        cursor: pointer;
+      }
+      button:hover { background: #eee; }
+      .log { margin-top: 12px; font-family: ui-monospace, monospace; font-size: 11px; color: #888; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <h1>right pane (placeholder)</h1>
+    <p>This pane will host an XMLUI app loaded from <code>xmlui-standalone.umd.js</code>. For now it's a stub that exercises the right-pane &rarr; Rust IPC channel.</p>
+    <button id="ping">ping rust</button>
+    <div class="log" id="log"></div>
+    <script>
+      const log = document.getElementById("log");
+      let n = 0;
+      document.getElementById("ping").addEventListener("click", () => {
+        n += 1;
+        const payload = { kind: "ping", n, at: new Date().toISOString() };
+        parent.postMessage({ type: "right-pane", payload }, "*");
+        log.textContent += `sent: ${JSON.stringify(payload)}\n`;
+      });
+    </script>
+  </body>
+</html>

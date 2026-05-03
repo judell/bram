@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>xmlui right pane</title>
+    <script>
+      // Three intents the right pane can send to the parent shell:
+      //   to-shell      → inject text into the PTY (foreground process reads it as user input)
+      //   log           → record in cargo run stderr only, don't bother the shell
+      //   open-devtools → internal command (handled by parent.invoke)
+      window.toShell = function (text) {
+        window.parent.postMessage(
+          { type: "right-pane", kind: "to-shell", text: String(text) },
+          "*",
+        );
+      };
+      window.logToHost = function (payload) {
+        window.parent.postMessage(
+          { type: "right-pane", kind: "log", payload },
+          "*",
+        );
+      };
+
+      // Surface JS errors and lifecycle events to the host log channel.
+      window.addEventListener("error", (e) => {
+        logToHost({
+          kind: "error",
+          message: e.message,
+          source: e.filename,
+          lineno: e.lineno,
+          colno: e.colno,
+          stack: e.error && e.error.stack,
+          at: new Date().toISOString(),
+        });
+      });
+      window.addEventListener("unhandledrejection", (e) => {
+        logToHost({
+          kind: "unhandledrejection",
+          reason: String(e.reason),
+          stack: e.reason && e.reason.stack,
+          at: new Date().toISOString(),
+        });
+      });
+      logToHost({ kind: "boot", stage: "before-xmlui-load", at: new Date().toISOString() });
+    </script>
+    <script src="../vendor/xmlui-standalone.umd.js"></script>
+    <script src="../vendor/xmlui-echart.js"></script>
+    <script src="../vendor/xs-trace.js"></script>
+    <script>
+      logToHost({ kind: "boot", stage: "after-xmlui-load", at: new Date().toISOString() });
+    </script>
+  </head>
+  <body></body>
+</html>

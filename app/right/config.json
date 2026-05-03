@@ -1,0 +1,10 @@
+{
+  "appGlobals": {
+    "xsVerbose": true,
+    "xsVerboseLogMax": 200
+  },
+  "resources": {
+    "icon.code": "resources/code.svg",
+    "icon.wrench": "resources/wrench.svg"
+  }
+}

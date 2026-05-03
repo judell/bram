@@ -1,0 +1,69 @@
+<App>
+  <DataSource id="manualSrc" url="manual.md" />
+
+  <AppHeader title="XMLUI">
+    <property name="profileMenuTemplate">
+      <HStack gap="$space-2" verticalAlignment="center">
+        <Button
+          icon="wrench"
+          variant="ghost"
+          tooltip="Open developer tools"
+          onClick="window.parent.postMessage({ type: 'right-pane', kind: 'open-devtools' }, '*')" />
+        <Button
+          icon="code"
+          variant="ghost"
+          tooltip="View source of Main.xmlui"
+          onClick="mainSrc.open()" />
+        <Button
+          icon="help"
+          variant="ghost"
+          tooltip="Open the user manual"
+          onClick="manualDialog.open()" />
+        <Inspector />
+      </HStack>
+    </property>
+  </AppHeader>
+
+  <Theme maxWidth-ModalDialog="820px">
+    <ModalDialog id="manualDialog" title="User manual">
+      <Theme
+        marginTop-H1-markdown="0"
+        marginBottom-H1-markdown="$space-2"
+        marginTop-H2-markdown="$space-3"
+        marginBottom-H2-markdown="$space-1"
+        marginTop-H3-markdown="$space-2"
+        marginBottom-H3-markdown="$space-1"
+        marginBottom-Text-markdown="$space-1"
+        marginBottom-Ul-markdown="$space-2"
+        marginBottom-Ol-markdown="$space-2"
+        marginBottom-Li-markdown="$space-1">
+        <Markdown content="{manualSrc.value}" showHeadingAnchors="{true}" />
+      </Theme>
+    </ModalDialog>
+  </Theme>
+
+  <VStack padding="$space-6" gap="$space-3" maxWidth="640px">
+    <Heading level="h1">Welcome to xmlui-claude-code-desktop</Heading>
+    <Text>
+      Ask Claude to write XMLUI on the fly that uses this space to display
+      complex results and request complex input.
+    </Text>
+    <ViewSource id="mainSrc" file="Main.xmlui" />
+    <Text>
+      For example, this chart is Claude Code's response to &ldquo;Add a line
+      chart of [1,3,2,5,4] using EChart&rdquo;.
+    </Text>
+    <Card height="400px">
+      <EChart
+        height="100%"
+        option="{
+          {
+            tooltip: { trigger: 'axis' },
+            xAxis: { type: 'category', data: [1, 2, 3, 4, 5] },
+            yAxis: { type: 'value' },
+            series: [{ type: 'line', data: [1, 3, 2, 5, 4] }]
+          }
+        }" />
+    </Card>
+  </VStack>
+</App>

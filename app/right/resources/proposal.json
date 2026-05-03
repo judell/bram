@@ -1,0 +1,10 @@
+{
+  "title": "Sample selective-approval proposal",
+  "description": "Placeholder items demonstrating the workflow. Replace this file with real proposals when scoping a task.",
+  "items": [
+    { "id": "1", "file": "src/utils/text.ts", "before": "slugify_str", "after": "slugify" },
+    { "id": "2", "file": "src/utils/text.ts", "before": "camelize_string", "after": "camelize" },
+    { "id": "3", "file": "src/api/client.ts", "before": "fetch_user_data", "after": "fetchUserData" },
+    { "id": "4", "file": "src/legacy/old-helper.ts", "before": "(unused)", "after": "(delete file)" }
+  ]
+}

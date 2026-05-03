@@ -1,4 +1,6 @@
-<Component name="Playground" var.selectedSha="{null}">
+<Component name="Playground" var.selectedSha="{null}" var.unchecked="{[]}">
+  <DataSource id="proposal" url="resources/proposal.json" />
+
   <DataSource
     id="commits"
     url="https://api.github.com/repos/judell/xmlui-claude-code-desktop/commits"
@@ -9,7 +11,31 @@
     url="https://api.github.com/repos/judell/xmlui-claude-code-desktop/commits/{selectedSha}"
     when="{!!selectedSha}" />
 
-  <VStack padding="$space-6" gap="$space-4">
+  <VStack padding="$space-6" gap="$space-6">
+    <VStack gap="$space-3" when="{proposal.value}">
+      <Heading level="h2" value="{proposal.value.title}" />
+      <Text value="{proposal.value.description}" />
+      <Items data="{proposal.value.items}">
+        <HStack gap="$space-3" verticalAlignment="center">
+          <Checkbox
+            initialValue="true"
+            onDidChange="(v) => { unchecked = v ? unchecked.filter(id => id !== $item.id) : [...unchecked, $item.id] }" />
+          <Text width="220px" value="{$item.file}" variant="code" maxLines="1" />
+          <Text value="{$item.before}" />
+          <Text value="→" />
+          <Text value="{$item.after}" />
+        </HStack>
+      </Items>
+      <HStack gap="$space-3" verticalAlignment="center">
+        <Button
+          label="Approve selected ({proposal.value.items.length - unchecked.length})"
+          onClick="toTurn('approved: ' + JSON.stringify(proposal.value.items.filter(i => !unchecked.includes(i.id))))" />
+        <Text fontSize="$fontSize-sm" color="$textColor-secondary">
+          Sends the approved subset to the chat as a fresh user message.
+        </Text>
+      </HStack>
+    </VStack>
+
     <Heading level="h2">Recent commits</Heading>
     <Text fontSize="$fontSize-sm">Click a SHA to view its diff. Click the GitHub icon to open on github.com.</Text>
     <Table data="{commits.value}" width="100%">

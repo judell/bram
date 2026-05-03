@@ -38,26 +38,27 @@
           </VStack>
         </HStack>
       </Items>
-      <TextArea
-        id="feedback"
-        placeholder="Optional feedback (sent with whichever button you click)..."
-        rows="2"
-        width="*" />
-      <HStack
+      <VStack
         gap="$space-3"
-        verticalAlignment="center"
         when="{proposal.value.items && proposal.value.items.length > 0}">
-        <Button
-          label="Approve selected ({proposal.value.items.length - unchecked.length})"
-          onClick="toTurn('approved: ' + JSON.stringify({ items: proposal.value.items.filter(i => !unchecked.includes(i.id)), feedback: feedback.value })); feedback.setValue('')" />
-        <Button
-          label="Drop selected ({proposal.value.items.length - unchecked.length})"
-          variant="outlined"
-          onClick="toTurn('drop: ' + JSON.stringify({ ids: proposal.value.items.filter(i => !unchecked.includes(i.id)).map(i => i.id), feedback: feedback.value })); feedback.setValue('')" />
-        <Text fontSize="$fontSize-sm" color="$textColor-secondary">
-          Approve to act on the checked items; Drop to remove them from the worklist.
-        </Text>
-      </HStack>
+        <TextArea
+          id="feedback"
+          placeholder="Optional feedback (sent with whichever button you click)..."
+          rows="2"
+          width="*" />
+        <HStack gap="$space-3" verticalAlignment="center">
+          <Button
+            label="Approve selected ({proposal.value.items.length - unchecked.length})"
+            onClick="toTurn('approved: ' + JSON.stringify({ items: proposal.value.items.filter(i => !unchecked.includes(i.id)), feedback: feedback.value })); feedback.setValue('')" />
+          <Button
+            label="Drop selected ({proposal.value.items.length - unchecked.length})"
+            variant="outlined"
+            onClick="toTurn('drop: ' + JSON.stringify({ ids: proposal.value.items.filter(i => !unchecked.includes(i.id)).map(i => i.id), feedback: feedback.value })); feedback.setValue('')" />
+          <Text fontSize="$fontSize-sm" color="$textColor-secondary">
+            Approve to act on the checked items; Drop to remove them from the worklist.
+          </Text>
+        </HStack>
+      </VStack>
 
       <VStack gap="$space-2" paddingTop="$space-3">
         <Heading level="h3">Latest response</Heading>

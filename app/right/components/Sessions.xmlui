@@ -1,0 +1,75 @@
+<Component name="Sessions" var.expandedId="{null}">
+  <DataSource id="sessionsList" url="/__sessions/list" />
+  <DataSource
+    id="sessionContent"
+    url="/__sessions/{expandedId}"
+    when="{!!expandedId}" />
+
+  <VStack padding="$space-6" gap="$space-4">
+    <HStack gap="$space-3" verticalAlignment="center">
+      <Heading level="h2">Past sessions</Heading>
+      <Button
+        icon="refresh"
+        variant="ghost"
+        size="xs"
+        tooltip="Reload session list"
+        onClick="sessionsList.refetch()" />
+    </HStack>
+    <Text fontSize="$fontSize-sm">Click a row to expand the session inline. Reverse-chronological by mtime.</Text>
+
+    <VStack gap="0" width="100%">
+      <HStack
+        gap="$space-3"
+        paddingHorizontal="$space-3"
+        paddingVertical="$space-2"
+        backgroundColor="$color-surface-100"
+        borderBottom="1px solid $borderColor">
+        <Text width="280px" fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary" value="ID" />
+        <Text width="160px" fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary" value="MODIFIED" />
+        <Text width="80px" fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary" value="SIZE" />
+        <Text width="*" fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary" value="FIRST USER MESSAGE" />
+      </HStack>
+      <Items data="{sessionsList.value}">
+        <VStack gap="0" borderBottom="1px solid $borderColor">
+          <HStack
+            gap="$space-3"
+            paddingHorizontal="$space-3"
+            paddingVertical="$space-2"
+            verticalAlignment="center">
+            <Link width="280px" onClick="expandedId = (expandedId === $item.id ? null : $item.id)" noIndicator>
+              <Text value="{$item.id}" variant="code" fontSize="$fontSize-sm" />
+            </Link>
+            <Text width="160px" fontSize="$fontSize-sm" value="{formatDateTime(new Date($item.mtime * 1000), 'yyyy-MM-dd HH:mm')}" />
+            <Text width="80px" fontSize="$fontSize-sm" value="{Math.round($item.size / 1024) + ' KB'}" />
+            <Text width="*" fontSize="$fontSize-sm" maxLines="1" value="{$item.firstUserMessage || '(no user message)'}" />
+          </HStack>
+
+          <VStack
+            gap="$space-3"
+            when="{expandedId === $item.id}"
+            paddingHorizontal="$space-3"
+            paddingVertical="$space-3"
+            backgroundColor="$color-surface-50"
+            borderTop="1px dashed $borderColor">
+            <Text when="{sessionContent.inProgress}">Loading…</Text>
+            <Items
+              when="{sessionContent.value}"
+              data="{sessionTurns(sessionContent.value)}">
+              <VStack
+                gap="$space-1"
+                paddingVertical="$space-2"
+                borderTop="1px solid $borderColor">
+                <Text
+                  fontSize="$fontSize-sm"
+                  fontWeight="$fontWeight-bold"
+                  color="{$item.role === 'user' ? '$color-info-700' : '$color-success-700'}"
+                  value="{$item.role}" />
+                <Markdown content="{$item.text}" />
+              </VStack>
+            </Items>
+          </VStack>
+        </VStack>
+      </Items>
+    </VStack>
+  </VStack>
+</Component>

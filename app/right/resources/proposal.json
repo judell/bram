@@ -1,23 +1,4 @@
 {
-  "description": "Past sessions browser. Backend is in (URI scheme sessions://list, sessions://latest, sessions://<id>); the Latest response pane already exercises it. Remaining work builds the full browser surface.",
-  "items": [
-    {
-      "id": "sessions-list",
-      "file": "app/right/components/Sessions.xmlui (new)",
-      "before": "no UI for past sessions",
-      "after": "table of sessions: id, mtime, size, first-user-message preview; reverse-mtime sorted"
-    },
-    {
-      "id": "sessions-expand",
-      "file": "app/right/components/Sessions.xmlui",
-      "before": "list only",
-      "after": "click row to expand inline; render filtered user/assistant turns in order (skip permission-mode, file-history-snapshot)"
-    },
-    {
-      "id": "sessions-navlink",
-      "file": "app/right/Main.xmlui",
-      "before": "two NavLinks (Playground, Architecture)",
-      "after": "add Sessions NavLink + Page route"
-    }
-  ]
+  "description": "",
+  "items": []
 }

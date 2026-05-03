@@ -36,12 +36,16 @@
 
   <NavPanel>
     <NavLink label="Playground" to="/" />
+    <NavLink label="Sessions" to="/sessions" />
     <NavLink label="Architecture" to="/architecture" />
   </NavPanel>
 
   <Pages fallbackPath="/">
     <Page url="/">
       <Playground />
+    </Page>
+    <Page url="/sessions">
+      <Sessions />
     </Page>
     <Page url="/architecture">
       <Architecture />

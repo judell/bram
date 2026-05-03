@@ -78,23 +78,23 @@ function scrollSessionTranscriptToBottom() {
     return;
   }
 
-  setTimeout(() => {
-    const root = document.getElementById("session-transcript-scroller");
-    if (!root) {
-      return;
-    }
+  delay(0);
 
-    const viewport =
-      root.querySelector("[data-overlayscrollbars-viewport]") ||
-      root.querySelector(".os-viewport") ||
-      root;
+  const root = document.getElementById("session-transcript-scroller");
+  if (!root) {
+    return;
+  }
 
-    try {
-      viewport.scrollTo({ top: viewport.scrollHeight, behavior: "smooth" });
-    } catch (e) {
-      viewport.scrollTop = viewport.scrollHeight;
-    }
-  }, 0);
+  const viewport =
+    root.querySelector("[data-overlayscrollbars-viewport]") ||
+    root.querySelector(".os-viewport") ||
+    root;
+
+  try {
+    viewport.scrollTo({ top: viewport.scrollHeight, behavior: "smooth" });
+  } catch (e) {
+    viewport.scrollTop = viewport.scrollHeight;
+  }
 }
 
 function maybeAutoScrollSessionTranscript(data, isRefetch) {

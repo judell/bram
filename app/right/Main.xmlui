@@ -3,7 +3,7 @@
 
   <AppHeader title="XMLUI">
     <Text fontSize="$fontSize-sm">
-      Ask Claude or Codex to use this app to ask for complex input or present complex information
+      Claude or Codex can use this app for interaction and display
     </Text>
     <property name="profileMenuTemplate">
       <HStack gap="$space-2" verticalAlignment="center">

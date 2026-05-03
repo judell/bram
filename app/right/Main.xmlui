@@ -2,6 +2,9 @@
   <DataSource id="manualSrc" url="manual.md" />
 
   <AppHeader title="XMLUI">
+    <Text fontSize="$fontSize-sm">
+      Ask Claude or Codex to use this app to ask for complex input or present complex information
+    </Text>
     <property name="profileMenuTemplate">
       <HStack gap="$space-2" verticalAlignment="center">
         <Button
@@ -42,28 +45,6 @@
     </ModalDialog>
   </Theme>
 
-  <VStack padding="$space-6" gap="$space-3" maxWidth="640px">
-    <Heading level="h1">Welcome to xmlui-claude-code-desktop</Heading>
-    <Text>
-      Ask Claude to write XMLUI on the fly that uses this space to display
-      complex results and request complex input.
-    </Text>
-    <ViewSource id="mainSrc" file="Main.xmlui" />
-    <Text>
-      For example, this chart is Claude Code's response to &ldquo;Add a line
-      chart of [1,3,2,5,4] using EChart&rdquo;.
-    </Text>
-    <Card height="400px">
-      <EChart
-        height="100%"
-        option="{
-          {
-            tooltip: { trigger: 'axis' },
-            xAxis: { type: 'category', data: [1, 2, 3, 4, 5] },
-            yAxis: { type: 'value' },
-            series: [{ type: 'line', data: [1, 3, 2, 5, 4] }]
-          }
-        }" />
-    </Card>
-  </VStack>
+  <ViewSource id="mainSrc" file="Main.xmlui" />
+
 </App>

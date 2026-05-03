@@ -87,6 +87,6 @@
   </Theme>
 
   <ViewSource id="mainSrc" file="Main.xmlui" />
-  <XmluiComponentTabs />
+  <Architecture />
 
 </App>

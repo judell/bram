@@ -66,9 +66,6 @@ and https://echarts.apache.org/en/option.html for the full option API.
 ## Files you'll edit most
 
 - `app/right/Main.xmlui` — the XMLUI surface (the one)
-- `app/right/live/AgentEcho.md` — the live markdown transcript shown in
-  the `AgentEcho` pane
-- `app/right/sessions/catalog.json` — the archived session table data
 - `app/right/manual.md` — user-facing manual (renders when the help
   icon is clicked)
 - `app/right/config.json` — XMLUI app config (resources, appGlobals)
@@ -81,22 +78,6 @@ and https://echarts.apache.org/en/option.html for the full option API.
   filesystem watcher, IPC command handlers)
 - `app/main.js`, `app/index.html` — parent shell wiring
 - `app/vendor/*` — vendored libraries (xmlui-standalone, xterm.js, etc.)
-
-## AgentEcho workflow
-
-`AgentEcho` is special.
-
-- The live transcript file is `app/right/live/AgentEcho.md`.
-- At the **start of a session**, the host shell rolls over any leftover
-  live transcript into a session archive, then resets the live file for
-  the new session.
-- During the session, append each user/agent turn to
-  `app/right/live/AgentEcho.md`.
-- Do **not** mention routine `AgentEcho` transcript appends in normal
-  user-facing replies unless the user explicitly asks about transcript
-  state or verification.
-- Session archives live in `app/right/sessions/` and are listed by
-  `app/right/sessions/catalog.json`.
 
 ## Inspector
 

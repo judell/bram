@@ -1,0 +1,158 @@
+<Component name="Architecture">
+  <VStack padding="$space-4" gap="$space-4">
+
+    <Card title="xmlui-claude-code-desktop"
+          subtitle="A Tauri shell with a real PTY on the left and an XMLUI iframe on the right">
+      <Text>
+        The Rust backend owns the PTY, a custom xmlui:// URI scheme that serves
+        files from app/, and a filesystem watcher that triggers right-pane
+        reloads. The web parent (main.js) bridges xterm.js, the iframe, and
+        Tauri's IPC. The right pane is an XMLUI app loaded into an iframe; it
+        talks back to the shell via window.postMessage.
+      </Text>
+    </Card>
+
+    <Card title="Data flow">
+      <EChart
+        height="560px"
+        option="{{
+          tooltip: { show: true, formatter: function(p) { return p.dataType === 'edge' ? p.data.value : p.data.name; } },
+          animation: false,
+          series: [{
+            type: 'graph',
+            layout: 'none',
+            roam: true,
+            symbol: 'roundRect',
+            symbolSize: [150, 56],
+            label: { show: true, fontSize: 12, color: '#fff', fontWeight: 'bold' },
+            edgeLabel: { show: true, fontSize: 10, formatter: '{c}' },
+            edgeSymbol: ['none', 'arrow'],
+            edgeSymbolSize: [4, 9],
+            lineStyle: { opacity: 0.85, width: 1.5, curveness: 0.05 },
+            data: [
+              { name: 'User',                 x: 420, y: 30,  itemStyle: { color: '#666' } },
+              { name: 'Terminal (xterm.js)',  x: 150, y: 150, itemStyle: { color: '#0b6' } },
+              { name: 'XMLUI iframe',         x: 690, y: 150, itemStyle: { color: '#06b' } },
+              { name: 'Parent shell main.js', x: 420, y: 280, itemStyle: { color: '#444' } },
+              { name: 'Rust / Tauri backend', x: 420, y: 410, itemStyle: { color: '#a40' } },
+              { name: 'Claude / Codex CLI',   x: 420, y: 540, itemStyle: { color: '#840' } }
+            ],
+            links: [
+              { source: 'User',                 target: 'Terminal (xterm.js)',  value: 'keystrokes' },
+              { source: 'User',                 target: 'XMLUI iframe',         value: 'clicks / sees' },
+              { source: 'Terminal (xterm.js)',  target: 'Parent shell main.js', value: 'term.onData' },
+              { source: 'Parent shell main.js', target: 'Terminal (xterm.js)', value: 'term.write', lineStyle: { curveness: -0.2 } },
+              { source: 'XMLUI iframe',         target: 'Parent shell main.js', value: 'postMessage' },
+              { source: 'Parent shell main.js', target: 'XMLUI iframe',         value: 'iframe.src reload', lineStyle: { curveness: -0.2 } },
+              { source: 'Parent shell main.js', target: 'Rust / Tauri backend', value: 'invoke()' },
+              { source: 'Rust / Tauri backend', target: 'Parent shell main.js', value: 'Channel + emit', lineStyle: { curveness: -0.2 } },
+              { source: 'Rust / Tauri backend', target: 'Claude / Codex CLI',   value: 'PTY stdin' },
+              { source: 'Claude / Codex CLI',   target: 'Rust / Tauri backend', value: 'PTY stdout', lineStyle: { curveness: -0.2 } }
+            ]
+          }]
+        }}" />
+    </Card>
+
+    <Tabs>
+      <TabItem label="Three layers">
+        <VStack gap="$space-3" padding="$space-3">
+          <Card title="1. Rust / Tauri backend"
+                subtitle="src-tauri/src/lib.rs">
+            <Text>
+              Owns the PTY (portable_pty), spawns the child shell with the project
+              root as cwd, streams stdout to JS via a tauri::ipc::Channel, accepts
+              stdin via pty_write. Registers a custom xmlui:// URI scheme that maps
+              to files under app/. Spawns a notify watcher on app/right and
+              app/vendor that emits a "right-pane-reload" event (debounced 100ms).
+              Also handles trace export and url opening.
+            </Text>
+          </Card>
+          <Card title="2. Parent shell (web)"
+                subtitle="app/index.html + app/main.js">
+            <Text>
+              The window's host page. Mounts xterm.js into the left pane, mounts
+              an iframe pointing at xmlui://localhost/right/index.html into the
+              right pane. Bridges three flows: terminal keystrokes → PTY,
+              PTY output → terminal, and right-pane postMessages → IPC commands
+              (with watcher events → iframe reload coming back the other way).
+            </Text>
+          </Card>
+          <Card title="3. XMLUI right pane"
+                subtitle="app/right/index.html + Main.xmlui">
+            <Text>
+              A separate document loaded over xmlui://, so it is cross-origin
+              from the tauri:// parent. Boots the standalone XMLUI build plus
+              the EChart and xs-trace extensions. Exposes window.toShell,
+              window.toTurn, window.logToHost, window.openExternal — thin
+              postMessage wrappers — so XMLUI components can drive the shell
+              just by calling functions.
+            </Text>
+          </Card>
+        </VStack>
+      </TabItem>
+
+      <TabItem label="Rust IPC commands">
+        <Table data="{[
+          { name: 'pty_spawn',           purpose: 'Open a PTY, spawn the shell, stream output via Channel' },
+          { name: 'pty_write',           purpose: 'Write bytes to the PTY (typed input or right-pane injection)' },
+          { name: 'pty_resize',          purpose: 'Resize the PTY when xterm reflows' },
+          { name: 'log_from_right_pane', purpose: 'Forward iframe log payloads to cargo run stderr' },
+          { name: 'open_devtools',       purpose: 'Open the webview devtools (debug builds)' },
+          { name: 'open_url',            purpose: 'Open an external URL with the host OS opener' },
+          { name: 'save_trace_export',   purpose: 'Write an Inspector trace export to ~/Downloads' }
+        ]}">
+          <Column bindTo="name"    header="Command" width="280px" />
+          <Column bindTo="purpose" header="Purpose" />
+        </Table>
+      </TabItem>
+
+      <TabItem label="postMessage intents">
+        <VStack gap="$space-3" padding="$space-3">
+          <Text>
+            The right-pane iframe sends typed messages to its parent. main.js
+            switches on data.kind:
+          </Text>
+          <Table data="{[
+            { kind: 'to-shell',          effect: 'Inject text + newline into the PTY (raw, like typing it)' },
+            { kind: 'to-turn',           effect: 'Inject text wrapped in bracketed-paste markers + CR (one Claude/Codex turn)' },
+            { kind: 'open-devtools',     effect: 'Calls open_devtools' },
+            { kind: 'open-url',          effect: 'Calls open_url with data.url' },
+            { kind: 'save-trace-export', effect: 'Calls save_trace_export, replies to source via postMessage' },
+            { kind: 'log',               effect: 'Forwards payload to cargo run stderr (silent to the agent)' }
+          ]}">
+            <Column bindTo="kind"   header="kind"   width="220px" />
+            <Column bindTo="effect" header="effect" />
+          </Table>
+          <Text>
+            On the iframe side, three globals are exposed in app/right/index.html:
+            toShell(text), toTurn(text), logToHost(payload), openExternal(url).
+            Components call these directly from event handlers.
+          </Text>
+        </VStack>
+      </TabItem>
+
+      <TabItem label="Hot reload + xmlui://">
+        <VStack gap="$space-3" padding="$space-3">
+          <Card title="Why a custom URI scheme">
+            <Text>
+              Tauri's bundled-frontend protocol stamps unknown extensions as
+              text/html, which xmlui-standalone rejects. The xmlui:// handler
+              in lib.rs reads files directly from app/ and sets correct
+              MIME types — including .xmlui and .xs as text/plain so they
+              load. It also sets Access-Control-Allow-Origin: *.
+            </Text>
+          </Card>
+          <Card title="Cross-origin reload trick">
+            <Text>
+              The parent is on tauri://, the iframe on xmlui://. That makes
+              iframe.contentWindow.location.reload() throw. Workaround: the
+              parent reassigns iframe.src with a fresh ?t= cache-buster.
+            </Text>
+          </Card>
+        </VStack>
+      </TabItem>
+
+    </Tabs>
+
+  </VStack>
+</Component>

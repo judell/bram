@@ -1,11 +1,10 @@
 use std::borrow::Cow;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::thread;
 
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
-use serde::{Deserialize, Serialize};
 use tauri::{ipc::Channel, AppHandle, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 
@@ -16,23 +15,6 @@ struct PtyState {
 
 #[derive(Default)]
 struct AppState(Mutex<Option<PtyState>>);
-
-#[derive(Default)]
-struct TranscriptState(Mutex<()>);
-
-#[derive(Debug, Serialize, Deserialize)]
-struct SessionCatalogEntry {
-    filename: String,
-    path: String,
-    #[serde(rename = "createdAt")]
-    created_at: String,
-    note: String,
-}
-
-const LIVE_AGENT_ECHO_TEMPLATE: &str = r#"# Session transcript
-
-_This is the raw running transcript for the current session, formatted in markdown rather than summarized as cards._
-"#;
 
 fn resolve_app_root<R: tauri::Runtime>(app: Option<&AppHandle<R>>) -> Option<PathBuf> {
     let mut candidates = Vec::new();
@@ -59,26 +41,6 @@ fn resolve_app_root<R: tauri::Runtime>(app: Option<&AppHandle<R>>) -> Option<Pat
     }
 
     candidates.into_iter().find(|path| path.exists())
-}
-
-fn transcript_has_turns(content: &str) -> bool {
-    content.contains("### User") || content.contains("### Agent")
-}
-
-fn ensure_parent_dir(path: &std::path::Path) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
-fn agent_echo_live_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
-    let app_root = resolve_app_root(Some(app)).ok_or("could not resolve app root")?;
-    Ok(app_root.join("right").join("live").join("AgentEcho.md"))
-}
-
-fn is_runtime_right_path(path: &Path, right_root: &Path) -> bool {
-    path.starts_with(right_root.join("live")) || path.starts_with(right_root.join("sessions"))
 }
 
 #[tauri::command]
@@ -220,94 +182,6 @@ fn save_trace_export(filename: String, content: String, mime_type: String) -> Re
     Ok(target.display().to_string())
 }
 
-#[tauri::command]
-fn append_agent_echo(
-    text: String,
-    app: AppHandle,
-    transcript_state: State<'_, TranscriptState>,
-) -> Result<(), String> {
-    let _guard = transcript_state.0.lock().unwrap();
-    let live_path = agent_echo_live_path(&app)?;
-    ensure_parent_dir(&live_path)?;
-    if !live_path.exists() {
-        std::fs::write(&live_path, LIVE_AGENT_ECHO_TEMPLATE).map_err(|e| e.to_string())?;
-    }
-
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&live_path)
-        .map_err(|e| e.to_string())?;
-    file.write_all(text.as_bytes()).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn rollover_agent_echo_session(
-    archive_timestamp: String,
-    created_at: String,
-    app: AppHandle,
-    transcript_state: State<'_, TranscriptState>,
-) -> Result<bool, String> {
-    let _guard = transcript_state.0.lock().unwrap();
-    let app_root = resolve_app_root(Some(&app)).ok_or("could not resolve app root")?;
-    let right_root = app_root.join("right");
-    let live_path = agent_echo_live_path(&app)?;
-    let sessions_dir = right_root.join("sessions");
-    let catalog_path = sessions_dir.join("catalog.json");
-
-    ensure_parent_dir(&live_path)?;
-    std::fs::create_dir_all(&sessions_dir).map_err(|e| e.to_string())?;
-
-    if !live_path.exists() {
-        std::fs::write(&live_path, LIVE_AGENT_ECHO_TEMPLATE).map_err(|e| e.to_string())?;
-    }
-    if !catalog_path.exists() {
-        std::fs::write(&catalog_path, "[]\n").map_err(|e| e.to_string())?;
-    }
-
-    let live_content = std::fs::read_to_string(&live_path).map_err(|e| e.to_string())?;
-    if !transcript_has_turns(&live_content) {
-        if live_content.trim() != LIVE_AGENT_ECHO_TEMPLATE.trim() {
-            std::fs::write(&live_path, LIVE_AGENT_ECHO_TEMPLATE).map_err(|e| e.to_string())?;
-        }
-        return Ok(false);
-    }
-
-    let filename = format!("AgentEcho-{}.md", archive_timestamp);
-    let archive_path = sessions_dir.join(&filename);
-    std::fs::write(&archive_path, live_content.as_bytes()).map_err(|e| e.to_string())?;
-
-    let mut catalog: Vec<SessionCatalogEntry> = serde_json::from_str(
-        &std::fs::read_to_string(&catalog_path).map_err(|e| e.to_string())?,
-    )
-    .unwrap_or_default();
-
-    let archive_rel_path = format!("sessions/{}", filename);
-    if catalog.iter().any(|entry| entry.path == archive_rel_path) {
-        std::fs::write(&live_path, LIVE_AGENT_ECHO_TEMPLATE).map_err(|e| e.to_string())?;
-        return Ok(false);
-    }
-
-    catalog.push(SessionCatalogEntry {
-        filename: filename.clone(),
-        path: archive_rel_path,
-        created_at,
-        note: "Recovered live AgentEcho transcript at session startup.".to_string(),
-    });
-
-    std::fs::write(
-        &catalog_path,
-        format!(
-            "{}\n",
-            serde_json::to_string_pretty(&catalog).map_err(|e| e.to_string())?
-        ),
-    )
-    .map_err(|e| e.to_string())?;
-    std::fs::write(&live_path, LIVE_AGENT_ECHO_TEMPLATE).map_err(|e| e.to_string())?;
-
-    Ok(true)
-}
-
 fn mime_for(path: &std::path::Path) -> &'static str {
     match path.extension().and_then(|e| e.to_str()) {
         Some("html") => "text/html; charset=utf-8",
@@ -349,7 +223,6 @@ pub fn run() {
             }
         })
         .manage(AppState::default())
-        .manage(TranscriptState::default())
         .invoke_handler(tauri::generate_handler![
             pty_spawn,
             pty_write,
@@ -358,8 +231,6 @@ pub fn run() {
             open_devtools,
             open_url,
             save_trace_export,
-            append_agent_echo,
-            rollover_agent_echo_session,
         ])
         .setup(move |app| {
             use tauri::Emitter;
@@ -368,8 +239,7 @@ pub fn run() {
                 eprintln!("[watcher] could not resolve app root");
                 return Ok(());
             };
-            let right_root = app_root.join("right");
-            let watch_paths = vec![right_root.clone(), app_root.join("vendor")];
+            let watch_paths = vec![app_root.join("right"), app_root.join("vendor")];
             let app_handle = app.handle().clone();
             std::thread::spawn(move || {
                 use notify::{recommended_watcher, Event, EventKind, RecursiveMode, Watcher};
@@ -399,14 +269,6 @@ pub fn run() {
                         event.kind,
                         EventKind::Modify(_) | EventKind::Create(_)
                     ) {
-                        continue;
-                    }
-                    if !event.paths.is_empty()
-                        && event
-                            .paths
-                            .iter()
-                            .all(|path| is_runtime_right_path(path, &right_root))
-                    {
                         continue;
                     }
                     // Editors often write twice (atomic save). Debounce 100ms.

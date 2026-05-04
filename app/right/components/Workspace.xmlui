@@ -20,7 +20,8 @@
 
   <DataSource
     id="commits"
-    url="/__commits" />
+    url="/__commits"
+    pollIntervalInSeconds="5" />
 
   <DataSource
     id="commitDetail"
@@ -122,15 +123,7 @@
       </VStack>
     </VStack>
 
-    <HStack gap="$space-3" verticalAlignment="center">
-      <Heading level="h2">Recent commits</Heading>
-      <Button
-        icon="refresh"
-        variant="ghost"
-        size="xs"
-        tooltip="Refresh from GitHub"
-        onClick="commits.refetch()" />
-    </HStack>
+    <Heading level="h2">Recent commits</Heading>
     <Text fontSize="$fontSize-sm">Click a SHA to view its diff. ✓ = pushed; empty box = unpushed (click to git push).</Text>
     <VStack gap="0" width="100%">
       <HStack

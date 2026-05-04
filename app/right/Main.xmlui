@@ -32,14 +32,14 @@
   <ViewSource id="mainSrc" file="{currentSourceFile($pathname)}" />
 
   <NavPanel>
-    <NavLink label="Playground" to="/" />
+    <NavLink label="Workspace" to="/" />
     <NavLink label="Sessions" to="/sessions" />
     <NavLink label="Architecture" to="/architecture" />
   </NavPanel>
 
   <Pages fallbackPath="/">
     <Page url="/">
-      <Playground />
+      <Workspace />
     </Page>
     <Page url="/sessions">
       <Sessions />

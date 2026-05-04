@@ -1,4 +1,4 @@
-<Component name="Playground" var.selectedSha="{null}" var.unchecked="{[]}" var.submitting="{!!getInflight()}">
+<Component name="Workspace" var.selectedSha="{null}" var.unchecked="{[]}" var.submitting="{!!getInflight()}">
   <DataSource id="proposal" url="resources/proposal.json" />
 
   <DataSource

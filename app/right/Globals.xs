@@ -1,7 +1,7 @@
 function currentSourceFile(pathname) {
   if (pathname === '/sessions') return 'components/Sessions.xmlui';
   if (pathname === '/architecture') return 'components/Architecture.xmlui';
-  if (pathname === '/') return 'components/Playground.xmlui';
+  if (pathname === '/') return 'components/Workspace.xmlui';
   return 'Main.xmlui';
 }
 

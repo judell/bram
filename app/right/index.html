@@ -50,6 +50,31 @@
           "*",
         );
       };
+      // In-flight marker that persists across iframe reloads (the agent
+      // rewrites files mid-batch, which the watcher reloads). The XMLUI
+      // side compares the stored snapshot against the latest assistant
+      // text; when they differ, the turn is done.
+      window.markInflight = function (text) {
+        try {
+          localStorage.setItem(
+            "inflight",
+            JSON.stringify({ text: text == null ? "" : String(text) })
+          );
+        } catch (e) {}
+      };
+      window.getInflight = function () {
+        try {
+          var raw = localStorage.getItem("inflight");
+          return raw ? JSON.parse(raw) : null;
+        } catch (e) {
+          return null;
+        }
+      };
+      window.clearInflight = function () {
+        try {
+          localStorage.removeItem("inflight");
+        } catch (e) {}
+      };
       // Route external (http/https) anchor clicks through openExternal so
       // Markdown links and any other <a> tags open in the system browser
       // instead of trying to navigate the Tauri WebView (which 404s).

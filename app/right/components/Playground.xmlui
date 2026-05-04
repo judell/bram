@@ -1,10 +1,20 @@
-<Component name="Playground" var.selectedSha="{null}" var.unchecked="{[]}" var.submitting="{false}">
+<Component name="Playground" var.selectedSha="{null}" var.unchecked="{[]}" var.submitting="{!!getInflight()}">
   <DataSource id="proposal" url="resources/proposal.json" />
 
   <DataSource
     id="latestSession"
     url="/__sessions/latest"
-    pollIntervalInSeconds="2" />
+    pollIntervalInSeconds="2"
+    onLoaded="(data, isRefetch) => {
+      if (!isRefetch) return;
+      const stored = getInflight();
+      if (!stored) return;
+      const newText = lastAssistantText(data) || '';
+      if (newText !== stored.text) {
+        clearInflight();
+        submitting = false;
+      }
+    }" />
 
   <DataSource
     id="commits"
@@ -15,6 +25,8 @@
     id="commitDetail"
     url="https://api.github.com/repos/judell/xmlui-desktop/commits/{selectedSha}"
     when="{!!selectedSha}" />
+
+  <variable name="latestText" value="{lastAssistantText(latestSession.value) || ''}" />
 
   <VStack padding="$space-6" gap="$space-6">
     <VStack gap="$space-3" when="{proposal.value}">
@@ -53,12 +65,12 @@
             <Button
               label="Approve selected ({proposal.value.items.length - unchecked.length})"
               enabled="{!submitting}"
-              onClick="submitting = true; toTurn('approved: ' + JSON.stringify({ items: proposal.value.items.filter(i => !unchecked.includes(i.id)), feedback: feedback.value })); feedback.setValue('')" />
+              onClick="markInflight(latestText); submitting = true; toTurn('approved: ' + JSON.stringify({ items: proposal.value.items.filter(i => !unchecked.includes(i.id)), feedback: feedback.value })); feedback.setValue('')" />
             <Button
               label="Drop selected ({proposal.value.items.length - unchecked.length})"
               variant="outlined"
               enabled="{!submitting}"
-              onClick="submitting = true; toTurn('drop: ' + JSON.stringify({ ids: proposal.value.items.filter(i => !unchecked.includes(i.id)).map(i => i.id), feedback: feedback.value })); feedback.setValue('')" />
+              onClick="markInflight(latestText); submitting = true; toTurn('drop: ' + JSON.stringify({ ids: proposal.value.items.filter(i => !unchecked.includes(i.id)).map(i => i.id), feedback: feedback.value })); feedback.setValue('')" />
             <Text fontSize="$fontSize-sm" color="$textColor-secondary">
               Approve to act on the checked items; Drop to remove them from the worklist.
             </Text>

@@ -256,10 +256,14 @@ const { listen } = window.__TAURI__.event;
     return;
   }
   const RIGHT_PANE_SRC = base + "/index.html";
+  const TOOLS_PANE_SRC = base + "/__tools/index.html";
+  const tools = document.getElementById("tools-pane");
   function reloadRightPane() {
     iframe.src = RIGHT_PANE_SRC + "?t=" + Date.now();
+    if (tools) tools.src = TOOLS_PANE_SRC + "?t=" + Date.now();
   }
   iframe.src = RIGHT_PANE_SRC;
+  if (tools) tools.src = TOOLS_PANE_SRC;
   document
     .getElementById("reload-right")
     ?.addEventListener("click", reloadRightPane);

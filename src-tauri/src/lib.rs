@@ -752,6 +752,8 @@ fn route_request<R: tauri::Runtime>(
         app_root.join("__shell").join(rest)
     } else if let Some(rest) = path.strip_prefix("__vendor/") {
         app_root.join("vendor").join(rest)
+    } else if let Some(rest) = path.strip_prefix("__tools/") {
+        app_root.join("tools").join(rest)
     } else {
         let proj = project_root(Some(app)).unwrap_or_else(|| PathBuf::from("."));
         proj.join(path)
@@ -848,6 +850,7 @@ pub fn run() {
                 proj_root,
                 app_root.join("__shell"),
                 app_root.join("vendor"),
+                app_root.join("tools"),
             ];
             let app_handle = app.handle().clone();
             std::thread::spawn(move || {

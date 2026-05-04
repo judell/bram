@@ -50,6 +50,40 @@
           "*",
         );
       };
+      // Push local commits to origin and refetch a DataSource (typically
+      // the commits list) when the push completes, so the pushed flags
+      // refresh without a manual reload.
+      var _gitPushPending = null;
+      window.gitPush = function (commitsDs) {
+        var invoke = getTauriInvoke();
+        if (invoke) {
+          invoke("git_push", {})
+            .then(function () {
+              if (commitsDs && typeof commitsDs.refetch === "function") {
+                commitsDs.refetch();
+              }
+            })
+            .catch(function (e) {
+              window.logToHost({ kind: "git-push", phase: "err", error: String(e) });
+            });
+          return;
+        }
+        // No direct invoke (cross-origin iframe). Round-trip via the parent
+        // shell; the parent posts back a "git-push-result" we listen for.
+        _gitPushPending = commitsDs;
+        window.parent.postMessage(
+          { type: "right-pane", kind: "git-push" },
+          "*"
+        );
+      };
+      window.addEventListener("message", function (event) {
+        var data = event.data;
+        if (!data || data.type !== "git-push-result") return;
+        if (_gitPushPending && typeof _gitPushPending.refetch === "function") {
+          _gitPushPending.refetch();
+        }
+        _gitPushPending = null;
+      });
       // In-flight marker that persists across iframe reloads. At click
       // time we snapshot the current proposal's item IDs; the XMLUI side
       // clears the flag whenever proposal.json's items differ from that

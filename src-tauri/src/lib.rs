@@ -16,6 +16,153 @@ struct PtyState {
 #[derive(Default)]
 struct AppState(Mutex<Option<PtyState>>);
 
+fn project_root<R: tauri::Runtime>(app: Option<&AppHandle<R>>) -> Option<PathBuf> {
+    resolve_app_root(app).and_then(|app_root| app_root.parent().map(|p| p.to_path_buf()))
+}
+
+fn git_run<R: tauri::Runtime>(app: &AppHandle<R>, args: &[&str]) -> Result<String, String> {
+    let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
+    let out = std::process::Command::new("git")
+        .current_dir(&root)
+        .args(args)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn git_log_recent<R: tauri::Runtime>(app: &AppHandle<R>, count: usize) -> Result<Vec<u8>, String> {
+    use std::collections::HashSet;
+    // Determine which commits are ahead of the remote; treat the rest as pushed.
+    // If there's no upstream tracking, we just call everything "unpushed".
+    let unpushed: HashSet<String> = git_run(app, &["rev-list", "@{u}..HEAD"])
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    // Resolve the GitHub URL for the html_url field, if any.
+    let remote_url = git_run(app, &["remote", "get-url", "origin"])
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let html_base = remote_to_html(&remote_url);
+
+    let count_arg = format!("-n{}", count);
+    let format = "--format=%H%x09%an%x09%aI%x09%s";
+    let log_out = git_run(app, &["log", &count_arg, format])?;
+
+    let mut commits: Vec<serde_json::Value> = Vec::new();
+    for line in log_out.lines() {
+        let parts: Vec<&str> = line.splitn(4, '\t').collect();
+        if parts.len() != 4 {
+            continue;
+        }
+        let sha = parts[0].to_string();
+        let pushed = !unpushed.contains(&sha);
+        let html_url = if html_base.is_empty() {
+            String::new()
+        } else {
+            format!("{}/commit/{}", html_base, sha)
+        };
+        commits.push(serde_json::json!({
+            "sha": sha,
+            "html_url": html_url,
+            "pushed": pushed,
+            "commit": {
+                "author": { "name": parts[1], "date": parts[2] },
+                "message": parts[3],
+            },
+        }));
+    }
+    serde_json::to_vec(&commits).map_err(|e| e.to_string())
+}
+
+fn remote_to_html(remote: &str) -> String {
+    let r = remote.trim().trim_end_matches(".git");
+    if let Some(rest) = r.strip_prefix("git@github.com:") {
+        return format!("https://github.com/{}", rest);
+    }
+    if r.starts_with("https://github.com/") || r.starts_with("http://github.com/") {
+        return r.to_string();
+    }
+    String::new()
+}
+
+fn git_commit_detail<R: tauri::Runtime>(app: &AppHandle<R>, sha: &str) -> Result<Vec<u8>, String> {
+    if sha.is_empty() || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("invalid sha".to_string());
+    }
+    // numstat first, then patch — git lets us combine in one call.
+    let numstat = git_run(app, &["show", "--format=", "--numstat", sha])?;
+    let mut total_add: u64 = 0;
+    let mut total_del: u64 = 0;
+    let mut files: Vec<(String, u64, u64)> = Vec::new();
+    for line in numstat.lines() {
+        let parts: Vec<&str> = line.splitn(3, '\t').collect();
+        if parts.len() != 3 {
+            continue;
+        }
+        let a: u64 = parts[0].parse().unwrap_or(0);
+        let d: u64 = parts[1].parse().unwrap_or(0);
+        total_add += a;
+        total_del += d;
+        files.push((parts[2].to_string(), a, d));
+    }
+
+    // Per-file patch via `git show -p --format= -- <file>` would be cleanest,
+    // but that's N git invocations. Use one show and split on `diff --git`.
+    let patch_all = git_run(app, &["show", "--format=", "-p", sha])?;
+    let mut patches: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut current_file = String::new();
+    let mut current_buf = String::new();
+    for line in patch_all.lines() {
+        if line.starts_with("diff --git ") {
+            if !current_file.is_empty() {
+                patches.insert(current_file.clone(), current_buf.clone());
+            }
+            current_buf.clear();
+            current_buf.push_str(line);
+            current_buf.push('\n');
+            // Extract filename from "diff --git a/<path> b/<path>"
+            // Use the b/ side for renames.
+            if let Some(rest) = line.strip_prefix("diff --git ") {
+                if let Some(b_idx) = rest.find(" b/") {
+                    current_file = rest[b_idx + 3..].to_string();
+                } else {
+                    current_file.clear();
+                }
+            }
+        } else {
+            current_buf.push_str(line);
+            current_buf.push('\n');
+        }
+    }
+    if !current_file.is_empty() {
+        patches.insert(current_file, current_buf);
+    }
+
+    let files_json: Vec<serde_json::Value> = files
+        .iter()
+        .map(|(name, a, d)| {
+            serde_json::json!({
+                "filename": name,
+                "additions": a,
+                "deletions": d,
+                "patch": patches.get(name).cloned().unwrap_or_default(),
+            })
+        })
+        .collect();
+    let detail = serde_json::json!({
+        "sha": sha,
+        "stats": { "additions": total_add, "deletions": total_del },
+        "files": files_json,
+    });
+    serde_json::to_vec(&detail).map_err(|e| e.to_string())
+}
+
 fn resolve_app_root<R: tauri::Runtime>(app: Option<&AppHandle<R>>) -> Option<PathBuf> {
     let mut candidates = Vec::new();
 
@@ -145,6 +292,11 @@ fn open_devtools(window: tauri::WebviewWindow) {
     window.open_devtools();
     #[cfg(not(debug_assertions))]
     let _ = window;
+}
+
+#[tauri::command]
+fn git_push(app: AppHandle) -> Result<(), String> {
+    git_run(&app, &["push"]).map(|_| ())
 }
 
 #[tauri::command]
@@ -358,6 +510,52 @@ pub fn run() {
             let query = request.uri().query().unwrap_or("");
             let app = ctx.app_handle();
 
+            // Local-git commit list with pushed/unpushed flags.
+            if path == "__commits" {
+                return match git_log_recent(app, 30) {
+                    Ok(bytes) => tauri::http::Response::builder()
+                        .status(200)
+                        .header("Content-Type", "application/json; charset=utf-8")
+                        .header("Access-Control-Allow-Origin", "*")
+                        .body(Cow::Owned(bytes))
+                        .unwrap(),
+                    Err(e) => {
+                        eprintln!("[xmlui://__commits] {}", e);
+                        tauri::http::Response::builder()
+                            .status(500)
+                            .body(Cow::Owned(e.into_bytes()))
+                            .unwrap()
+                    }
+                };
+            }
+
+            // Local-git per-commit detail (mirrors GitHub API shape enough to
+            // reuse the existing inline-diff renderer).
+            if path == "__commit" {
+                let mut sha = String::new();
+                for pair in query.split('&') {
+                    if let Some(v) = pair.strip_prefix("sha=") {
+                        sha = percent_decode(v);
+                        break;
+                    }
+                }
+                return match git_commit_detail(app, &sha) {
+                    Ok(bytes) => tauri::http::Response::builder()
+                        .status(200)
+                        .header("Content-Type", "application/json; charset=utf-8")
+                        .header("Access-Control-Allow-Origin", "*")
+                        .body(Cow::Owned(bytes))
+                        .unwrap(),
+                    Err(e) => {
+                        eprintln!("[xmlui://__commit sha={}] {}", sha, e);
+                        tauri::http::Response::builder()
+                            .status(500)
+                            .body(Cow::Owned(e.into_bytes()))
+                            .unwrap()
+                    }
+                };
+            }
+
             // Serve arbitrary local files (used by the Sessions browser to
             // render inline image attachments inside the xmlui:// origin,
             // since file:// can't load cross-origin).
@@ -445,6 +643,7 @@ pub fn run() {
             open_devtools,
             open_url,
             save_trace_export,
+            git_push,
         ])
         .setup(move |app| {
             use tauri::Emitter;

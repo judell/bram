@@ -25,6 +25,25 @@
         src="xmlui://localhost/right/index.html"
       ></iframe>
     </div>
-    <script src="main.js"></script>
+    <script>
+      // Confirm index.html itself reloaded fresh (writes to cargo run stderr
+      // via the existing log_from_right_pane command — same channel as the
+      // iframe uses so we can compare timestamps).
+      if (window.__TAURI__ && window.__TAURI__.core) {
+        window.__TAURI__.core
+          .invoke("log_from_right_pane", {
+            payload: {
+              kind: "index.html-loaded",
+              at: new Date().toISOString(),
+            },
+          })
+          .catch(function () {});
+      }
+      // Cache-bust main.js on every load so JS edits are picked up after a
+      // restart without fighting the webview cache.
+      document.write(
+        '<script src="main.js?v=' + Date.now() + '"></' + 'script>'
+      );
+    </script>
   </body>
 </html>

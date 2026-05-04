@@ -1,4 +1,4 @@
-<Component name="Workspace" var.selectedSha="{null}" var.unchecked="{[]}" var.submitting="{!!getInflight()}" var.expandedItemId="{null}">
+<Component name="Workspace" var.selectedSha="{null}" var.unchecked="{[]}" var.submitting="{!!getInflight()}" var.expandedItemId="{null}" var.commitsExpanded="{false}">
   <DataSource
     id="proposal"
     url="resources/proposal.json"
@@ -20,12 +20,12 @@
 
   <DataSource
     id="commits"
-    url="https://api.github.com/repos/judell/xmlui-desktop/commits"
-    queryParams="{{ per_page: 12 }}" />
+    url="/__commits" />
 
   <DataSource
     id="commitDetail"
-    url="https://api.github.com/repos/judell/xmlui-desktop/commits/{selectedSha}"
+    url="/__commit"
+    queryParams="{{ sha: selectedSha }}"
     when="{!!selectedSha}" />
 
   <VStack padding="$space-6" gap="$space-6">
@@ -131,7 +131,7 @@
         tooltip="Refresh from GitHub"
         onClick="commits.refetch()" />
     </HStack>
-    <Text fontSize="$fontSize-sm">Click a SHA to view its diff inline. Click the GitHub icon to open on github.com.</Text>
+    <Text fontSize="$fontSize-sm">Click a SHA to view its diff. ✓ = pushed; empty box = unpushed (click to git push).</Text>
     <VStack gap="0" width="100%">
       <HStack
         gap="$space-3"
@@ -139,23 +139,38 @@
         paddingVertical="$space-2"
         backgroundColor="$color-surface-100"
         borderBottom="1px solid $borderColor">
+        <Text width="36px" fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary" value="↑" />
         <Text width="120px" fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary" value="SHA" />
         <Text width="160px" fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary" value="DATE" />
         <Text width="*" fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary" value="SUBJECT" />
         <Text width="120px" fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary" value="AUTHOR" />
       </HStack>
-      <Items data="{commits.value}">
+      <Items data="{(commits.value || []).slice(0, commitsExpanded ? 999 : 10)}">
         <VStack gap="0" borderBottom="1px solid $borderColor">
           <HStack
             gap="$space-3"
             paddingHorizontal="$space-3"
             paddingVertical="$space-2"
             verticalAlignment="center">
+            <HStack width="36px" verticalAlignment="center" horizontalAlignment="center">
+              <Text
+                when="{$item.pushed}"
+                value="✓"
+                color="$color-success-600"
+                fontSize="$fontSize-lg"
+                fontWeight="$fontWeight-bold" />
+              <Checkbox
+                when="{!$item.pushed}"
+                value="{false}"
+                tooltip="Click to git push"
+                onDidChange="(v) => { if (v) gitPush(commits) }" />
+            </HStack>
             <HStack width="120px" gap="$space-2" verticalAlignment="center">
               <Link onClick="selectedSha = (selectedSha === $item.sha ? null : $item.sha)" noIndicator>
                 <Text value="{$item.sha.slice(0, 7)}" variant="code" />
               </Link>
               <Button
+                when="{$item.html_url && $item.pushed}"
                 icon="link"
                 variant="ghost"
                 size="xs"
@@ -210,6 +225,18 @@
           </VStack>
         </VStack>
       </Items>
+      <HStack
+        when="{commits.value && commits.value.length > 10}"
+        padding="$space-2"
+        horizontalAlignment="center">
+        <Link
+          onClick="commitsExpanded = !commitsExpanded"
+          noIndicator>
+          <Text
+            fontSize="$fontSize-sm"
+            value="{commitsExpanded ? 'Show fewer' : 'More (' + (commits.value.length - 10) + ' more)'}" />
+        </Link>
+      </HStack>
     </VStack>
   </VStack>
 </Component>

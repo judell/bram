@@ -2,6 +2,10 @@
 // https://v2.tauri.app/reference/javascript/api/
 const { invoke, Channel } = window.__TAURI__.core;
 
+invoke("log_from_right_pane", {
+  payload: { kind: "main.js-loaded", at: new Date().toISOString() },
+}).catch(() => {});
+
 const term = new Terminal({
   fontFamily: 'Menlo, Monaco, "Courier New", monospace',
   fontSize: 13,
@@ -120,6 +124,25 @@ window.addEventListener("message", (ev) => {
       invoke("open_url", { url: String(data.url ?? "") }).catch((e) =>
         console.error("open_url", e),
       );
+      return;
+    case "git-push":
+      invoke("git_push")
+        .then(() => {
+          if (ev.source && typeof ev.source.postMessage === "function") {
+            ev.source.postMessage({ type: "git-push-result", ok: true }, "*");
+          }
+        })
+        .catch((e) => {
+          invoke("log_from_right_pane", {
+            payload: { kind: "git-push", phase: "err", error: String(e) },
+          }).catch(() => {});
+          if (ev.source && typeof ev.source.postMessage === "function") {
+            ev.source.postMessage(
+              { type: "git-push-result", ok: false, error: String(e) },
+              "*"
+            );
+          }
+        });
       return;
     case "save-trace-export":
       invoke("save_trace_export", {

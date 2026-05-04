@@ -27,6 +27,12 @@ body {
   -webkit-app-region: drag;
 }
 
+.toolbar.bottom {
+  border-bottom: none;
+  border-top: 1px solid #444;
+  -webkit-app-region: no-drag;
+}
+
 .toolbar button {
   -webkit-app-region: no-drag;
   background: transparent;
@@ -63,13 +69,35 @@ body {
   box-sizing: border-box;
 }
 
-.pane-right {
+.right-column {
   flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: 100%;
+}
+
+.pane-project {
+  flex: 1 1 0;
+  min-height: 0;
   background: #fff;
 }
 
-iframe.pane-right {
+.pane-tools {
+  flex: 0 0 240px;
+  min-height: 0;
+  background: #fff;
+}
+
+iframe.pane-project,
+iframe.pane-tools {
   border: 0;
+  width: 100%;
+}
+
+.pane-tools.hidden,
+.h-splitter.hidden {
+  display: none;
 }
 
 .splitter {
@@ -79,13 +107,23 @@ iframe.pane-right {
   user-select: none;
 }
 
+.h-splitter {
+  flex: 0 0 6px;
+  background: #333;
+  cursor: row-resize;
+  user-select: none;
+}
+
 .splitter:hover,
-.splitter.dragging {
+.splitter.dragging,
+.h-splitter:hover,
+.h-splitter.dragging {
   background: #4a90d9;
 }
 
-/* While dragging, block iframe from swallowing pointer events. */
-body.splitter-dragging iframe.pane-right {
+/* While dragging any splitter, block iframes from swallowing pointer events. */
+body.splitter-dragging iframe.pane-project,
+body.splitter-dragging iframe.pane-tools {
   pointer-events: none;
 }
 

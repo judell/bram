@@ -11,7 +11,7 @@
     <script src="vendor/addon-webgl.js"></script>
   </head>
   <body>
-    <div class="toolbar">
+    <div class="toolbar top">
       <button id="reload-right" title="Reload the XMLUI right pane">
         &#x21bb; reload right pane
       </button>
@@ -19,10 +19,26 @@
     <div class="split">
       <div id="terminal" class="pane pane-left"></div>
       <div id="splitter" class="splitter" role="separator" aria-orientation="vertical"></div>
-      <iframe
-        id="right-pane"
-        class="pane pane-right"
-      ></iframe>
+      <div class="right-column">
+        <iframe
+          id="right-pane"
+          class="pane pane-project"
+        ></iframe>
+        <div
+          id="h-splitter"
+          class="h-splitter hidden"
+          role="separator"
+          aria-orientation="horizontal"
+        ></div>
+        <iframe
+          id="tools-pane"
+          class="pane pane-tools hidden"
+          src="about:blank"
+        ></iframe>
+      </div>
+    </div>
+    <div class="toolbar bottom">
+      <button id="toggle-tools" title="Toggle tools drawer">tools</button>
     </div>
     <script>
       // Confirm index.html itself reloaded fresh (writes to cargo run stderr

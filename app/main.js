@@ -68,6 +68,58 @@ window.addEventListener("resize", () => fitAddon.fit());
   });
 })();
 
+// Horizontal splitter resizes the tools drawer (only operative when drawer
+// is open; the splitter is `display: none` when the .hidden class is set).
+(() => {
+  const hSplitter = document.getElementById("h-splitter");
+  const tools = document.getElementById("tools-pane");
+  const column = document.querySelector(".right-column");
+  if (!hSplitter || !tools || !column) return;
+
+  const MIN_PX = 80;
+
+  hSplitter.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    hSplitter.setPointerCapture(e.pointerId);
+    hSplitter.classList.add("dragging");
+    document.body.classList.add("splitter-dragging");
+
+    const onMove = (ev) => {
+      const rect = column.getBoundingClientRect();
+      // Drawer height = distance from pointer to bottom of column.
+      let h = rect.bottom - ev.clientY;
+      const max = rect.height - MIN_PX - hSplitter.offsetHeight;
+      if (h < MIN_PX) h = MIN_PX;
+      if (h > max) h = max;
+      tools.style.flexBasis = h + "px";
+    };
+    const onUp = (ev) => {
+      hSplitter.releasePointerCapture(ev.pointerId);
+      hSplitter.classList.remove("dragging");
+      document.body.classList.remove("splitter-dragging");
+      hSplitter.removeEventListener("pointermove", onMove);
+      hSplitter.removeEventListener("pointerup", onUp);
+    };
+    hSplitter.addEventListener("pointermove", onMove);
+    hSplitter.addEventListener("pointerup", onUp);
+  });
+})();
+
+// Bottom-toolbar drawer toggle. v1 has a single "tools" button — later
+// stages will add per-tool buttons (Workspace, Sessions) that swap the
+// tools iframe's hash route while keeping the drawer open.
+(() => {
+  const btn = document.getElementById("toggle-tools");
+  const tools = document.getElementById("tools-pane");
+  const hSplitter = document.getElementById("h-splitter");
+  if (!btn || !tools || !hSplitter) return;
+  btn.addEventListener("click", () => {
+    const opening = tools.classList.contains("hidden");
+    tools.classList.toggle("hidden", !opening);
+    hSplitter.classList.toggle("hidden", !opening);
+  });
+})();
+
 // PTY wiring: stdout from Rust arrives over a Channel; stdin goes via invoke.
 // https://v2.tauri.app/develop/calling-frontend/#channels
 const ptyChannel = new Channel();

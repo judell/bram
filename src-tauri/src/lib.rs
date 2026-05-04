@@ -418,6 +418,16 @@ pub fn run() {
                     ) {
                         continue;
                     }
+                    // Skip changes under right/resources/ — those are data files
+                    // (proposal.json etc.) that DataSources poll on their own.
+                    // Reloading the iframe for them wipes in-flight UI state
+                    // (e.g., the Pending-items gray-out).
+                    if event.paths.iter().all(|p| {
+                        p.components()
+                            .any(|c| c.as_os_str() == "resources")
+                    }) {
+                        continue;
+                    }
                     // Editors often write twice (atomic save). Debounce 100ms.
                     if last_emit.elapsed() < Duration::from_millis(100) {
                         continue;

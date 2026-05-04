@@ -17,15 +17,7 @@
   </ModalDialog>
 
   <VStack padding="$space-6" gap="$space-4">
-    <HStack gap="$space-3" verticalAlignment="center">
-      <Heading level="h2">Sessions</Heading>
-      <Button
-        icon="refresh"
-        variant="ghost"
-        size="xs"
-        tooltip="Reload session list"
-        onClick="sessionsList.refetch()" />
-    </HStack>
+    <Heading level="h2">Sessions</Heading>
     <Text fontSize="$fontSize-sm">Click a row to expand the session inline. Reverse-chronological by mtime.</Text>
 
     <VStack gap="0" width="100%">

@@ -1,11 +1,13 @@
-<Component name="Workspace" var.selectedSha="{null}" var.unchecked="{[]}" var.submitting="{isInflight()}">
+<Component name="Workspace" var.selectedSha="{null}" var.unchecked="{[]}" var.submitting="{!!getInflight()}">
   <DataSource
     id="proposal"
     url="resources/proposal.json"
     pollIntervalInSeconds="2"
-    onLoaded="(data, isRefetch) => {
-      if (!isRefetch) return;
-      if (submitting) {
+    onLoaded="(data) => {
+      const stored = getInflight();
+      if (!stored) return;
+      const currentIds = ((data && data.items) || []).map(i => i.id).sort().join(',');
+      if (currentIds !== (stored.ids || '')) {
         clearInflight();
         submitting = false;
       }
@@ -63,12 +65,12 @@
             <Button
               label="Approve selected ({proposal.value.items.length - unchecked.length})"
               enabled="{!submitting}"
-              onClick="markInflight(); submitting = true; toTurn('approved: ' + JSON.stringify({ items: proposal.value.items.filter(i => !unchecked.includes(i.id)), feedback: feedback.value })); feedback.setValue('')" />
+              onClick="markInflight(proposal.value && proposal.value.items); submitting = true; toTurn('approved: ' + JSON.stringify({ items: proposal.value.items.filter(i => !unchecked.includes(i.id)), feedback: feedback.value })); feedback.setValue('')" />
             <Button
               label="Drop selected ({proposal.value.items.length - unchecked.length})"
               variant="outlined"
               enabled="{!submitting}"
-              onClick="markInflight(); submitting = true; toTurn('drop: ' + JSON.stringify({ ids: proposal.value.items.filter(i => !unchecked.includes(i.id)).map(i => i.id), feedback: feedback.value })); feedback.setValue('')" />
+              onClick="markInflight(proposal.value && proposal.value.items); submitting = true; toTurn('drop: ' + JSON.stringify({ ids: proposal.value.items.filter(i => !unchecked.includes(i.id)).map(i => i.id), feedback: feedback.value })); feedback.setValue('')" />
           </HStack>
         </VStack>
       </VStack>

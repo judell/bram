@@ -50,20 +50,29 @@
           "*",
         );
       };
-      // In-flight marker that persists across iframe reloads (the agent
-      // rewrites files mid-batch, which the watcher reloads). The XMLUI
-      // side clears it when proposal.json changes — the agent's prune at
-      // end of a batch is the definitive "done" signal.
-      window.markInflight = function () {
+      // In-flight marker that persists across iframe reloads. At click
+      // time we snapshot the current proposal's item IDs; the XMLUI side
+      // clears the flag whenever proposal.json's items differ from that
+      // snapshot — works on the initial fetch too (so refresh recovers
+      // from a stale flag), not just on refetches.
+      window.markInflight = function (items) {
         try {
-          localStorage.setItem("inflight", "1");
+          var ids = (items || [])
+            .map(function (i) { return i && i.id; })
+            .filter(Boolean)
+            .sort()
+            .join(",");
+          localStorage.setItem("inflight", JSON.stringify({ ids: ids }));
         } catch (e) {}
       };
-      window.isInflight = function () {
+      window.getInflight = function () {
         try {
-          return localStorage.getItem("inflight") === "1";
+          var raw = localStorage.getItem("inflight");
+          if (!raw) return null;
+          var v = JSON.parse(raw);
+          return v && typeof v === "object" ? v : null;
         } catch (e) {
-          return false;
+          return null;
         }
       };
       window.clearInflight = function () {

@@ -61,8 +61,10 @@
             <Text>
               Owns the PTY (portable_pty), spawns the child shell with the project
               root as cwd, streams stdout to JS via a tauri::ipc::Channel, accepts
-              stdin via pty_write. Registers a custom xmlui:// URI scheme that maps
-              to files under app/. Spawns a notify watcher on app/right and
+              stdin via pty_write. Registers a custom xmlui:// URI scheme that
+              serves project files from the project root, plus binary-bundled
+              namespaces (__shell/, __vendor/, __sessions/, __commits, __file).
+              Spawns a notify watcher on the project root, app/__shell, and
               app/vendor that emits a "right-pane-reload" event (debounced 100ms).
               Also handles trace export and url opening.
             </Text>
@@ -71,14 +73,14 @@
                 subtitle="app/index.html + app/main.js">
             <Text>
               The window's host page. Mounts xterm.js into the left pane, mounts
-              an iframe pointing at xmlui://localhost/right/index.html into the
+              an iframe pointing at xmlui://localhost/index.html into the
               right pane. Bridges three flows: terminal keystrokes → PTY,
               PTY output → terminal, and right-pane postMessages → IPC commands
               (with watcher events → iframe reload coming back the other way).
             </Text>
           </Card>
           <Card title="3. XMLUI right pane"
-                subtitle="app/right/index.html + Main.xmlui">
+                subtitle="index.html + Main.xmlui (at the project root)">
             <Text>
               A separate document loaded over xmlui://, so it is cross-origin
               from the tauri:// parent. Boots the standalone XMLUI build plus
@@ -124,7 +126,8 @@
             <Column bindTo="effect" header="effect" />
           </Table>
           <Text>
-            On the iframe side, three globals are exposed in app/right/index.html:
+            On the iframe side, helpers are exposed in app/__shell/helpers.js
+            (loaded by index.html via xmlui://localhost/__shell/helpers.js):
             toShell(text), toTurn(text), logToHost(payload), openExternal(url).
             Components call these directly from event handlers.
           </Text>

@@ -4,7 +4,7 @@
     url="resources/proposal.json"
     pollIntervalInSeconds="2"
     onLoaded="(data) => {
-      const currentIds = ((data && data.items) || []).map(i => i.id).sort().join(',');
+      const currentIds = ((data && data.items) || []).map(i => i.id + ':' + (i.status || 'applied')).sort().join(',');
       const stored = getInflight();
       if (stored && currentIds !== (stored.ids || '')) {
         clearInflight();

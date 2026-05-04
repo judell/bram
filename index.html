@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>xmlui right pane</title>
+    <script>
+      (function () {
+        var cfg = {};
+        try {
+          var cfgXhr = new XMLHttpRequest();
+          cfgXhr.open("GET", "config.json?_=" + Date.now(), false);
+          cfgXhr.send();
+          if (cfgXhr.status >= 200 && cfgXhr.status < 300 && cfgXhr.responseText) {
+            cfg = JSON.parse(cfgXhr.responseText);
+          }
+        } catch (e) {}
+        window.APP_CONFIG = cfg;
+        window.appGlobals = cfg.appGlobals || {};
+        window.APP_VERSION = "dev-" + Date.now();
+      })();
+    </script>
+    <script src="xmlui://localhost/__shell/helpers.js"></script>
+    <script>
+      logToHost({ kind: "boot", stage: "before-xmlui-load", at: new Date().toISOString() });
+    </script>
+    <script>
+      document.write('<script src="/__vendor/xmlui-standalone.umd.js?v=' + window.APP_VERSION + '"><\/script>');
+      document.write('<script src="/__vendor/xmlui-echart.js?v=' + window.APP_VERSION + '"><\/script>');
+      document.write('<script src="/__vendor/xs-trace.js?v=' + window.APP_VERSION + '"><\/script>');
+    </script>
+    <script>
+      logToHost({ kind: "boot", stage: "after-xmlui-load", at: new Date().toISOString() });
+    </script>
+  </head>
+  <body></body>
+</html>

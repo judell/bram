@@ -15,6 +15,6 @@
       variant="ghost"
       tooltip="Open the user manual"
       onClick="emitEvent('viewManual')" />
-    <Inspector src="{'../vendor/xs-diff.html?v=' + window.APP_VERSION}" />
+    <Inspector src="{'/__vendor/xs-diff.html?v=' + window.APP_VERSION}" />
   </HStack>
 </Component>

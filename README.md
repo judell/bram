@@ -4,23 +4,24 @@ A Tauri-based **workspace for XMLUI development with AI agents**.
 
 - **Left pane** — a real terminal, where you run an AI coding agent
   (e.g. `claude` or `codex`).
-- **Right pane** — the XMLUI app you're developing, served from a
-  static local server out of `app/`.
-- **File watcher** — as the agent rewrites XMLUI markup under `app/`,
-  the right pane reloads automatically. No manual refresh.
+- **Right pane** — the project's XMLUI app (`Main.xmlui` at the repo
+  root), served via the binary's `xmlui://` URI scheme.
+- **File watcher** — as files in the project change, the right pane
+  reloads automatically. No manual refresh.
 
 The two panes can also talk: XMLUI components in the right pane post
 text back into the terminal via `window.toShell` / `window.toTurn`
-helpers (defined in `app/index.html`), so buttons, selects, and forms
-can become input to whatever agent is running on the left.
+helpers (loaded from `xmlui://localhost/__shell/helpers.js`), so
+buttons, selects, and forms can become input to whatever agent is
+running on the left.
 
 See [`CLAUDE.md`](./CLAUDE.md) for the conventions Claude Code follows
 when driving the right pane.
 
 ## Build
 
-The frontend in `app/` is static — no bundler, no `package.json`. The
-only build step is the Tauri/Rust build.
+The frontend is static — no bundler, no `package.json`. The only build
+step is the Tauri/Rust build.
 
 From `src-tauri/`:
 
@@ -31,8 +32,10 @@ Tauri docs: <https://tauri.app/develop/>, <https://tauri.app/distribute/>.
 
 ## Layout
 
-- `app/` — static frontend served to the right pane (the XMLUI app
-  under development lives in `app/right/`)
+- `Main.xmlui`, `components/`, `resources/`, `manual.md`, `Globals.xs`,
+  `config.json`, `index.html` — the XMLUI app at the repo root.
+- `app/` — parent shell (Tauri webview entry, terminal wiring, vendor
+  scripts, and `__shell/helpers.js` that the right pane includes).
 - `src-tauri/` — Rust backend (PTY for the terminal, custom `xmlui://`
-  URI scheme, filesystem watcher, IPC handlers)
-- `scripts/` — auxiliary scripts
+  URI scheme, filesystem watcher, IPC handlers).
+- `scripts/` — auxiliary scripts.

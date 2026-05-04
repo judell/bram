@@ -9,8 +9,9 @@ The window has two panes:
 - **Left pane**: a real terminal (xterm.js + a Rust PTY child) where you
   can run `claude`, `bash`, or anything else.
 - **Right pane**: this XMLUI surface. Its content lives at
-  `~/xmlui-desktop/app/right/Main.xmlui`. Edit that file from
-  the left pane (or anywhere) and the right pane reloads automatically.
+  `~/xmlui-desktop/Main.xmlui` (with components under `components/`).
+  Edit those files from the left pane (or anywhere) and the right
+  pane reloads automatically.
 
 ## Closing the loop
 
@@ -28,7 +29,7 @@ Claude can react to.
 
 ## Editing this manual
 
-This document lives at `app/right/manual.md`. Edit it the same way you
+This document lives at `manual.md` at the project root. Edit it the same way you
 edit `Main.xmlui` &mdash; changes auto-reload thanks to the filesystem
 watcher in the Rust shell.
 

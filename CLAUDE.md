@@ -8,8 +8,8 @@ pane while talking to you. Use it.
 
 When the user asks for something that benefits from structured output
 (tables, lists, charts, multi-line text) or structured input (selectors,
-forms, multi-step flows), **edit `app/right/Main.xmlui`** so the right
-pane renders it. A filesystem watcher reloads the iframe automatically
+forms, multi-step flows), **edit `Main.xmlui`** (or one of the
+`components/` files) so the right pane renders it. A filesystem watcher reloads the iframe automatically
 when you save — you do not need to ask the user to reload.
 
 Examples:
@@ -57,7 +57,7 @@ chose) as a fresh user message.
 
 ## Coordinating via proposal.json (canonical worklist)
 
-`app/right/resources/proposal.json` is the canonical surface for
+`resources/proposal.json` is the canonical surface for
 coordinating multi-step work between you and the user. The Playground
 page renders it as a checklist under the heading "Pending items". Use
 it whenever you'd otherwise enumerate small, independently-approvable
@@ -121,12 +121,14 @@ and https://echarts.apache.org/en/option.html for the full option API.
 
 ## Files you'll edit most
 
-- `app/right/Main.xmlui` — the XMLUI surface (the one)
-- `app/right/manual.md` — user-facing manual (renders when the help
-  icon is clicked)
-- `app/right/config.json` — XMLUI app config (resources, appGlobals)
-- `app/right/resources/*.svg` — custom icons; register in
+- `Main.xmlui` — the XMLUI surface (the one)
+- `components/*.xmlui` — Workspace, Sessions, Toolbar, Architecture, etc.
+- `manual.md` — user-facing manual (renders when the help icon is clicked)
+- `config.json` — XMLUI app config (resources, appGlobals)
+- `resources/*.svg` — custom icons; register in
   `config.json` under `resources` with the `icon.<name>` prefix
+- `app/__shell/helpers.js` — window helpers loaded by `index.html` via
+  `xmlui://localhost/__shell/helpers.js`
 
 ## Files to leave alone unless asked
 

@@ -759,8 +759,17 @@ pub fn run() {
                 };
             }
 
+            // System namespaces served from the binary's bundled app/ dir.
+            // Project-relative paths everywhere else.
             let app_root = resolve_app_root(Some(app)).unwrap_or_else(|| PathBuf::from("."));
-            let full = app_root.join(path);
+            let full: PathBuf = if let Some(rest) = path.strip_prefix("__shell/") {
+                app_root.join("__shell").join(rest)
+            } else if let Some(rest) = path.strip_prefix("__vendor/") {
+                app_root.join("vendor").join(rest)
+            } else {
+                let proj = project_root(Some(app)).unwrap_or_else(|| PathBuf::from("."));
+                proj.join(path)
+            };
             match std::fs::read(&full) {
                 Ok(bytes) => tauri::http::Response::builder()
                     .status(200)
@@ -792,7 +801,15 @@ pub fn run() {
                 eprintln!("[watcher] could not resolve app root");
                 return Ok(());
             };
-            let watch_paths = vec![app_root.join("right"), app_root.join("vendor")];
+            let Some(proj_root) = project_root(Some(app.handle())) else {
+                eprintln!("[watcher] could not resolve project root");
+                return Ok(());
+            };
+            let watch_paths = vec![
+                proj_root,
+                app_root.join("__shell"),
+                app_root.join("vendor"),
+            ];
             let app_handle = app.handle().clone();
             std::thread::spawn(move || {
                 use notify::{recommended_watcher, Event, EventKind, RecursiveMode, Watcher};
@@ -824,13 +841,14 @@ pub fn run() {
                     ) {
                         continue;
                     }
-                    // Skip changes under right/resources/ — those are data files
-                    // (proposal.json etc.) that DataSources poll on their own.
-                    // Reloading the iframe for them wipes in-flight UI state
-                    // (e.g., the Pending-items gray-out).
+                    // Skip events whose paths are entirely inside noisy or
+                    // data-only directories. resources/ is data the DataSource
+                    // polls; target/, .git/, node_modules/ are build/VCS noise.
+                    let ignored = ["resources", "target", ".git", "node_modules"];
                     if event.paths.iter().all(|p| {
-                        p.components()
-                            .any(|c| c.as_os_str() == "resources")
+                        p.components().any(|c| {
+                            ignored.iter().any(|ig| c.as_os_str() == *ig)
+                        })
                     }) {
                         continue;
                     }

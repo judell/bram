@@ -189,7 +189,7 @@ window.addEventListener("message", (ev) => {
 
 // Reassigning src works cross-origin; iframe.contentWindow.location.reload()
 // is blocked because the parent shell is on tauri:// and the iframe on xmlui://.
-const RIGHT_PANE_SRC = "xmlui://localhost/right/index.html";
+const RIGHT_PANE_SRC = "xmlui://localhost/index.html";
 function reloadRightPane() {
   const iframe = document.getElementById("right-pane");
   if (!iframe) return;
@@ -201,6 +201,7 @@ document
   ?.addEventListener("click", reloadRightPane);
 
 // Live reload: Rust filesystem watcher emits "right-pane-reload" when files in
-// app/right/ change. https://v2.tauri.app/develop/calling-frontend/#event-system
+// the project root (or the binary's __shell/vendor) change.
+// https://v2.tauri.app/develop/calling-frontend/#event-system
 const { listen } = window.__TAURI__.event;
 listen("right-pane-reload", reloadRightPane);

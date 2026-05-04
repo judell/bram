@@ -16,7 +16,33 @@ struct PtyState {
 #[derive(Default)]
 struct AppState(Mutex<Option<PtyState>>);
 
+// Active project root — resolved once at startup from a CLI arg
+// (xmlui-desktop /path/to/project) or std::env::current_dir(). Read by
+// the URI handler, watcher, git/sessions/PTY commands.
+struct ActiveProjectState(Mutex<PathBuf>);
+
+fn determine_project_root() -> PathBuf {
+    let args: Vec<String> = std::env::args().collect();
+    let candidate: PathBuf = if args.len() >= 2 && !args[1].starts_with('-') {
+        PathBuf::from(&args[1])
+    } else {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    };
+    candidate.canonicalize().unwrap_or(candidate)
+}
+
 fn project_root<R: tauri::Runtime>(app: Option<&AppHandle<R>>) -> Option<PathBuf> {
+    if let Some(a) = app {
+        if let Some(state) = a.try_state::<ActiveProjectState>() {
+            if let Ok(p) = state.0.lock() {
+                if !p.as_os_str().is_empty() {
+                    return Some(p.clone());
+                }
+            }
+        }
+    }
+    // Fallback for code paths that run before .manage() (rare; mostly
+    // setup-time helpers). Old behavior.
     resolve_app_root(app).and_then(|app_root| app_root.parent().map(|p| p.to_path_buf()))
 }
 
@@ -214,9 +240,7 @@ fn pty_spawn(
     for a in args {
         command.arg(a);
     }
-    let project_root = resolve_app_root(Some(&app))
-        .and_then(|app_root| app_root.parent().map(|parent| parent.to_path_buf()));
-    if let Some(root) = project_root {
+    if let Some(root) = project_root(Some(&app)) {
         command.cwd(root);
     } else if let Ok(home) = std::env::var("HOME") {
         command.cwd(home);
@@ -354,10 +378,8 @@ struct SessionEntry {
 }
 
 fn sessions_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
-    let project_root = resolve_app_root(Some(app))
-        .and_then(|app_root| app_root.parent().map(|p| p.to_path_buf()))
-        .ok_or("could not resolve project root")?;
-    let abs = project_root.canonicalize().map_err(|e| e.to_string())?;
+    let root = project_root(Some(app)).ok_or("could not resolve project root")?;
+    let abs = root.canonicalize().map_err(|e| e.to_string())?;
     let encoded = abs.to_string_lossy().replace('/', "-");
     let home = std::env::var("HOME").map_err(|_| "no HOME")?;
     Ok(PathBuf::from(home).join(".claude").join("projects").join(encoded))
@@ -626,6 +648,13 @@ fn mime_for(path: &std::path::Path) -> &'static str {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let initial_proj = determine_project_root();
+    eprintln!("[xmlui-desktop] project root: {}", initial_proj.display());
+    if !initial_proj.join("index.html").exists() {
+        eprintln!(
+            "[xmlui-desktop] WARNING: no index.html at project root; the right pane will fail to load. Run with `xmlui-desktop /path/to/project` or cd into the project before launching."
+        );
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .register_uri_scheme_protocol("xmlui", move |ctx, request| {
@@ -784,6 +813,7 @@ pub fn run() {
             }
         })
         .manage(AppState::default())
+        .manage(ActiveProjectState(Mutex::new(initial_proj)))
         .invoke_handler(tauri::generate_handler![
             pty_spawn,
             pty_write,

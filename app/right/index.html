@@ -52,22 +52,18 @@
       };
       // In-flight marker that persists across iframe reloads (the agent
       // rewrites files mid-batch, which the watcher reloads). The XMLUI
-      // side compares the stored snapshot against the latest assistant
-      // text; when they differ, the turn is done.
-      window.markInflight = function (text) {
+      // side clears it when proposal.json changes — the agent's prune at
+      // end of a batch is the definitive "done" signal.
+      window.markInflight = function () {
         try {
-          localStorage.setItem(
-            "inflight",
-            JSON.stringify({ text: text == null ? "" : String(text) })
-          );
+          localStorage.setItem("inflight", "1");
         } catch (e) {}
       };
-      window.getInflight = function () {
+      window.isInflight = function () {
         try {
-          var raw = localStorage.getItem("inflight");
-          return raw ? JSON.parse(raw) : null;
+          return localStorage.getItem("inflight") === "1";
         } catch (e) {
-          return null;
+          return false;
         }
       };
       window.clearInflight = function () {

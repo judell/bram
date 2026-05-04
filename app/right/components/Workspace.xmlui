@@ -1,20 +1,20 @@
-<Component name="Workspace" var.selectedSha="{null}" var.unchecked="{[]}" var.submitting="{!!getInflight()}">
-  <DataSource id="proposal" url="resources/proposal.json" />
-
+<Component name="Workspace" var.selectedSha="{null}" var.unchecked="{[]}" var.submitting="{isInflight()}">
   <DataSource
-    id="latestSession"
-    url="/__sessions/latest"
+    id="proposal"
+    url="resources/proposal.json"
     pollIntervalInSeconds="2"
     onLoaded="(data, isRefetch) => {
       if (!isRefetch) return;
-      const stored = getInflight();
-      if (!stored) return;
-      const newText = lastAssistantText(data) || '';
-      if (newText !== stored.text) {
+      if (submitting) {
         clearInflight();
         submitting = false;
       }
     }" />
+
+  <DataSource
+    id="latestSession"
+    url="/__sessions/latest"
+    pollIntervalInSeconds="2" />
 
   <DataSource
     id="commits"
@@ -25,8 +25,6 @@
     id="commitDetail"
     url="https://api.github.com/repos/judell/xmlui-desktop/commits/{selectedSha}"
     when="{!!selectedSha}" />
-
-  <variable name="latestText" value="{lastAssistantText(latestSession.value) || ''}" />
 
   <VStack padding="$space-6" gap="$space-6">
     <VStack gap="$space-3" when="{proposal.value}">
@@ -65,12 +63,12 @@
             <Button
               label="Approve selected ({proposal.value.items.length - unchecked.length})"
               enabled="{!submitting}"
-              onClick="markInflight(latestText); submitting = true; toTurn('approved: ' + JSON.stringify({ items: proposal.value.items.filter(i => !unchecked.includes(i.id)), feedback: feedback.value })); feedback.setValue('')" />
+              onClick="markInflight(); submitting = true; toTurn('approved: ' + JSON.stringify({ items: proposal.value.items.filter(i => !unchecked.includes(i.id)), feedback: feedback.value })); feedback.setValue('')" />
             <Button
               label="Drop selected ({proposal.value.items.length - unchecked.length})"
               variant="outlined"
               enabled="{!submitting}"
-              onClick="markInflight(latestText); submitting = true; toTurn('drop: ' + JSON.stringify({ ids: proposal.value.items.filter(i => !unchecked.includes(i.id)).map(i => i.id), feedback: feedback.value })); feedback.setValue('')" />
+              onClick="markInflight(); submitting = true; toTurn('drop: ' + JSON.stringify({ ids: proposal.value.items.filter(i => !unchecked.includes(i.id)).map(i => i.id), feedback: feedback.value })); feedback.setValue('')" />
           </HStack>
         </VStack>
       </VStack>

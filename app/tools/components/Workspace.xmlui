@@ -1,7 +1,7 @@
 <Component name="Workspace" var.selectedSha="{null}" var.unchecked="{[]}" var.submitting="{!!getInflight()}" var.expandedItemId="{null}" var.commitsExpanded="{false}">
   <DataSource
     id="proposal"
-    url="resources/proposal.json"
+    url="/resources/proposal.json"
     pollIntervalInSeconds="2"
     onLoaded="(data) => {
       const currentIds = ((data && data.items) || []).map(i => i.id + ':' + (i.status || 'applied')).sort().join(',');

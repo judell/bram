@@ -1,52 +1,20 @@
-<App layout="horizontal">
-  <DataSource id="manualSrc" url="manual.md" />
-
+<App layout="vertical">
   <AppHeader>
-    <property name="profileMenuTemplate">
-      <Toolbar onViewSource="mainSrc.open()" onViewManual="manualDialog.open()" />
-    </property>
+    <Text fontWeight="bold">xmlui-desktop</Text>
   </AppHeader>
 
-  <Footer>
-    <Toolbar onViewSource="mainSrc.open()" onViewManual="manualDialog.open()" />
-  </Footer>
-
-  <Theme maxWidth-ModalDialog="820px">
-    <ModalDialog id="manualDialog" title="About XMLUI Desktop">
-      <VStack gap="$space-4">
-        <Theme
-          marginTop-H1-markdown="0"
-          marginBottom-H1-markdown="$space-2"
-          marginTop-H2-markdown="$space-3"
-          marginBottom-H2-markdown="$space-1"
-          marginTop-H3-markdown="$space-2"
-          marginBottom-H3-markdown="$space-1"
-          marginBottom-Text-markdown="$space-1"
-          marginBottom-Ul-markdown="$space-2"
-          marginBottom-Ol-markdown="$space-2"
-          marginBottom-Li-markdown="$space-1">
-          <Markdown content="{manualSrc.value}" showHeadingAnchors="{true}" />
-        </Theme>
-        <Heading level="h2">Architecture</Heading>
-        <Architecture />
-      </VStack>
-    </ModalDialog>
-  </Theme>
-
-  <ViewSource id="mainSrc" file="{currentSourceFile($pathname)}" />
-
-  <NavPanel>
-    <NavLink label="Workspace" to="/" />
-    <NavLink label="Sessions" to="/sessions" />
-  </NavPanel>
-
-  <Pages fallbackPath="/">
-    <Page url="/">
-      <Workspace />
-    </Page>
-    <Page url="/sessions">
-      <Sessions />
-    </Page>
-  </Pages>
-
+  <VStack padding="$space-6" gap="$space-4" maxWidth="640px">
+    <Heading level="h1">Welcome</Heading>
+    <Text>
+      This is the xmlui-desktop dogfood project. Open the tools drawer
+      using the bottom-toolbar `tools` button to access Workspace,
+      Sessions, and Architecture.
+    </Text>
+    <Text>
+      Point xmlui-desktop at any other XMLUI project root to use it as
+      a development surface for that project — the tools drawer
+      remains available regardless of which project loads in the right
+      pane.
+    </Text>
+  </VStack>
 </App>

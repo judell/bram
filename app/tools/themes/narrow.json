@@ -1,0 +1,10 @@
+{
+  "id": "narrow",
+  "name": "Narrow viewport",
+  "extends": "xmlui",
+  "themeVars": {
+    "maxWidth-phone": "320px",
+    "maxWidth-landscape-phone": "360px",
+    "maxWidth-tablet": "400px"
+  }
+}

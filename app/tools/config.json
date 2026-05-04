@@ -1,0 +1,15 @@
+{
+  "appGlobals": {
+    "xsVerbose": true,
+    "xsVerboseLogMax": 200
+  },
+  "themes": ["themes/narrow.json"],
+  "defaultTheme": "narrow",
+  "resources": {
+    "logo": "resources/xmlui-logo.svg",
+    "icon.code": "resources/code.svg",
+    "icon.down": "resources/down.svg",
+    "icon.up": "resources/up.svg",
+    "icon.wrench": "resources/wrench.svg"
+  }
+}

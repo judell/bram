@@ -267,5 +267,10 @@ const { listen } = window.__TAURI__.event;
   document
     .getElementById("reload-right")
     ?.addEventListener("click", reloadRightPane);
+  document
+    .getElementById("open-devtools")
+    ?.addEventListener("click", () => {
+      invoke("open_devtools").catch((e) => console.error("open_devtools", e));
+    });
   listen("right-pane-reload", reloadRightPane);
 })();

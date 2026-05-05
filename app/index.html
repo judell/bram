@@ -13,7 +13,13 @@
   <body>
     <div class="toolbar top">
       <button id="reload-right" title="Reload the XMLUI right pane">
-        &#x21bb; reload right pane
+        &#x21bb; reload xmlui app
+      </button>
+      <button id="open-devtools" title="Open WebView devtools">
+        &#x1F50D; browser devtools
+      </button>
+      <button id="toggle-tools" title="Toggle the agent tools drawer">
+        &#x1F6E0; agent tools
       </button>
     </div>
     <div class="split">
@@ -36,9 +42,6 @@
           src="about:blank"
         ></iframe>
       </div>
-    </div>
-    <div class="toolbar bottom">
-      <button id="toggle-tools" title="Toggle tools drawer">tools</button>
     </div>
     <script>
       // Confirm index.html itself reloaded fresh (writes to cargo run stderr

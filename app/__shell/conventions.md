@@ -108,6 +108,14 @@ nothing is checked — but be defensive), treat it the same as
 When *not* to use this: one-or-two-item decisions, free-text input, or
 anything where typing in chat is faster than rendering UI.
 
+**Hook enforcement.** xmlui-desktop installs a PreToolUse hook at
+`.claude/hooks/proposal-guard.py` that validates Write/Edit operations
+on `resources/proposal.json`. If you remove an item without an explicit
+`drop:` authorization in the user's last message, the harness rejects
+the write with a stderr message explaining the violation. Read it; the
+hook is the convention's enforcement mechanism, not a bug to work
+around.
+
 ## Right-pane helpers (opt-in, only needed for project-side hooks)
 
 The Workspace and Sessions tabs in the agent tools drawer already use

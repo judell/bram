@@ -1062,70 +1062,233 @@ fn mime_for(path: &std::path::Path) -> &'static str {
 const ENHANCE_MARKER_START: &str = "<!-- xmlui-desktop:start -->";
 const ENHANCE_MARKER_END: &str = "<!-- xmlui-desktop:end -->";
 const ENHANCE_SIDECAR_REL: &str = ".claude/xmlui-desktop-conventions.md";
+const ENHANCE_HOOK_SCRIPT_REL: &str = ".claude/hooks/proposal-guard.py";
+const ENHANCE_SETTINGS_REL: &str = ".claude/settings.json";
+const ENHANCE_HOOK_BUNDLE_REL: &str = "__shell/proposal-guard.py";
+const ENHANCE_HOOK_COMMAND: &str = "$CLAUDE_PROJECT_DIR/.claude/hooks/proposal-guard.py";
+// Presence of this file in the project root means the project IS the
+// xmlui-desktop source repo (it bundles the conventions). enhance_status
+// treats it as a valid sidecar location; run_enhance skips the parts
+// that would otherwise self-overwrite the source.
+const ENHANCE_SOURCE_BUNDLE_REL: &str = "app/__shell/conventions.md";
+
+fn settings_has_proposal_guard_hook(settings_path: &Path) -> bool {
+    let content = match std::fs::read_to_string(settings_path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let value: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    value
+        .get("hooks")
+        .and_then(|h| h.get("PreToolUse"))
+        .and_then(|p| p.as_array())
+        .map(|arr| {
+            arr.iter().any(|entry| {
+                entry
+                    .get("hooks")
+                    .and_then(|h| h.as_array())
+                    .map(|hs| {
+                        hs.iter().any(|h| {
+                            h.get("command")
+                                .and_then(|c| c.as_str())
+                                .map(|s| s.contains("proposal-guard.py"))
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+// Idempotent merge: append a PreToolUse hook entry referencing
+// proposal-guard.py to settings.json, preserving other keys. Returns
+// Ok(true) if the entry was added, Ok(false) if it was already present.
+fn merge_proposal_guard_into_settings(settings_path: &Path) -> Result<bool, String> {
+    let existing = std::fs::read_to_string(settings_path).unwrap_or_default();
+    let mut value: serde_json::Value = if existing.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(&existing)
+            .map_err(|e| format!("parse {}: {}", settings_path.display(), e))?
+    };
+    if !value.is_object() {
+        return Err(format!(
+            "{} root is not a JSON object",
+            settings_path.display()
+        ));
+    }
+    let root = value.as_object_mut().unwrap();
+    let hooks = root
+        .entry("hooks".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !hooks.is_object() {
+        return Err(format!(
+            "{}: hooks is not a JSON object",
+            settings_path.display()
+        ));
+    }
+    let hooks_obj = hooks.as_object_mut().unwrap();
+    let pre = hooks_obj
+        .entry("PreToolUse".to_string())
+        .or_insert_with(|| serde_json::json!([]));
+    if !pre.is_array() {
+        return Err(format!(
+            "{}: hooks.PreToolUse is not a JSON array",
+            settings_path.display()
+        ));
+    }
+    let pre_arr = pre.as_array_mut().unwrap();
+    let already_present = pre_arr.iter().any(|entry| {
+        entry
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .map(|hs| {
+                hs.iter().any(|h| {
+                    h.get("command")
+                        .and_then(|c| c.as_str())
+                        .map(|s| s.contains("proposal-guard.py"))
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    });
+    if already_present {
+        return Ok(false);
+    }
+    pre_arr.push(serde_json::json!({
+        "matcher": "Write|Edit",
+        "hooks": [{
+            "type": "command",
+            "command": ENHANCE_HOOK_COMMAND,
+        }]
+    }));
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create {}: {}", parent.display(), e))?;
+    }
+    let serialized = serde_json::to_string_pretty(&value)
+        .map_err(|e| format!("serialize settings.json: {}", e))?;
+    std::fs::write(settings_path, format!("{}\n", serialized))
+        .map_err(|e| format!("write {}: {}", settings_path.display(), e))?;
+    Ok(true)
+}
 
 fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String> {
     let proj = project_root(Some(app)).ok_or("no project root")?;
     let claude_md = proj.join("CLAUDE.md");
     let sidecar = proj.join(ENHANCE_SIDECAR_REL);
+    let hook_script = proj.join(ENHANCE_HOOK_SCRIPT_REL);
+    let settings = proj.join(ENHANCE_SETTINGS_REL);
     let claude_md_has_marker = std::fs::read_to_string(&claude_md)
         .map(|s| s.contains(ENHANCE_MARKER_START))
         .unwrap_or(false);
-    let sidecar_exists = sidecar.exists();
+    // Source repo treats the bundle itself as the canonical sidecar.
+    let sidecar_exists = sidecar.exists() || proj.join(ENHANCE_SOURCE_BUNDLE_REL).exists();
+    let hook_script_exists = hook_script.exists();
+    let hook_registered = settings_has_proposal_guard_hook(&settings);
     let body = serde_json::json!({
-        "enhanced": claude_md_has_marker && sidecar_exists,
+        "enhanced": claude_md_has_marker && sidecar_exists && hook_script_exists && hook_registered,
         "claudeMd": claude_md_has_marker,
         "sidecar": sidecar_exists,
+        "hookScript": hook_script_exists,
+        "hookRegistered": hook_registered,
         "claudeMdPath": claude_md.display().to_string(),
         "sidecarPath": sidecar.display().to_string(),
+        "hookScriptPath": hook_script.display().to_string(),
+        "settingsPath": settings.display().to_string(),
     });
     serde_json::to_vec(&body).map_err(|e| e.to_string())
 }
 
 fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String> {
     let proj = project_root(Some(app)).ok_or("no project root")?;
-    let (conventions_bytes, _mime) = serve_app_file(Some(app), "__shell/conventions.md")
-        .ok_or_else(|| "conventions template not found".to_string())?;
-    let conventions = String::from_utf8(conventions_bytes)
-        .map_err(|e| format!("conventions template not utf-8: {}", e))?;
+    // When running on the source repo, skip writes that would
+    // self-overwrite (recreating the deleted local sidecar, reverting
+    // the @-import path in CLAUDE.md). Idempotent installs (hook
+    // script, settings.json merge) still run.
+    let is_source_repo = proj.join(ENHANCE_SOURCE_BUNDLE_REL).exists();
 
+    let mut wrote: Vec<String> = Vec::new();
+
+    // Conventions sidecar — skipped on the source repo.
     let sidecar_path = proj.join(ENHANCE_SIDECAR_REL);
-    if let Some(parent) = sidecar_path.parent() {
+    if !is_source_repo {
+        let (conventions_bytes, _mime) = serve_app_file(Some(app), "__shell/conventions.md")
+            .ok_or_else(|| "conventions template not found".to_string())?;
+        let conventions = String::from_utf8(conventions_bytes)
+            .map_err(|e| format!("conventions template not utf-8: {}", e))?;
+        if let Some(parent) = sidecar_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create {}: {}", parent.display(), e))?;
+        }
+        std::fs::write(&sidecar_path, &conventions)
+            .map_err(|e| format!("write sidecar: {}", e))?;
+        wrote.push(sidecar_path.display().to_string());
+    }
+
+    // Proposal-guard hook script (idempotent — same content on re-run).
+    let (hook_bytes, _mime) = serve_app_file(Some(app), ENHANCE_HOOK_BUNDLE_REL)
+        .ok_or_else(|| "proposal-guard.py bundle not found".to_string())?;
+    let hook_path = proj.join(ENHANCE_HOOK_SCRIPT_REL);
+    if let Some(parent) = hook_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("create {}: {}", parent.display(), e))?;
     }
-    std::fs::write(&sidecar_path, &conventions)
-        .map_err(|e| format!("write sidecar: {}", e))?;
+    std::fs::write(&hook_path, &hook_bytes)
+        .map_err(|e| format!("write hook: {}", e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&hook_path)
+            .map_err(|e| format!("stat hook: {}", e))?
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&hook_path, perms)
+            .map_err(|e| format!("chmod hook: {}", e))?;
+    }
+    wrote.push(hook_path.display().to_string());
 
+    // Register hook in settings.json (idempotent merge).
+    let settings_path = proj.join(ENHANCE_SETTINGS_REL);
+    merge_proposal_guard_into_settings(&settings_path)?;
+    wrote.push(settings_path.display().to_string());
+
+    // CLAUDE.md marker block — skipped on the source repo.
     let claude_md_path = proj.join("CLAUDE.md");
-    let existing = std::fs::read_to_string(&claude_md_path).unwrap_or_default();
-    let block = format!(
-        "{}\n@{}\n{}",
-        ENHANCE_MARKER_START, ENHANCE_SIDECAR_REL, ENHANCE_MARKER_END
-    );
-    let new_content = if let Some(start_idx) = existing.find(ENHANCE_MARKER_START) {
-        // Replace existing block in-place.
-        let tail = &existing[start_idx..];
-        let end_offset = tail
-            .find(ENHANCE_MARKER_END)
-            .map(|i| start_idx + i + ENHANCE_MARKER_END.len())
-            .unwrap_or(existing.len());
-        let mut s = existing.clone();
-        s.replace_range(start_idx..end_offset, &block);
-        s
-    } else if existing.is_empty() {
-        format!("{}\n", block)
-    } else {
-        format!("{}\n\n{}\n", existing.trim_end(), block)
-    };
-    std::fs::write(&claude_md_path, &new_content)
-        .map_err(|e| format!("write CLAUDE.md: {}", e))?;
+    if !is_source_repo {
+        let existing = std::fs::read_to_string(&claude_md_path).unwrap_or_default();
+        let block = format!(
+            "{}\n@{}\n{}",
+            ENHANCE_MARKER_START, ENHANCE_SIDECAR_REL, ENHANCE_MARKER_END
+        );
+        let new_content = if let Some(start_idx) = existing.find(ENHANCE_MARKER_START) {
+            // Replace existing block in-place.
+            let tail = &existing[start_idx..];
+            let end_offset = tail
+                .find(ENHANCE_MARKER_END)
+                .map(|i| start_idx + i + ENHANCE_MARKER_END.len())
+                .unwrap_or(existing.len());
+            let mut s = existing.clone();
+            s.replace_range(start_idx..end_offset, &block);
+            s
+        } else if existing.is_empty() {
+            format!("{}\n", block)
+        } else {
+            format!("{}\n\n{}\n", existing.trim_end(), block)
+        };
+        std::fs::write(&claude_md_path, &new_content)
+            .map_err(|e| format!("write CLAUDE.md: {}", e))?;
+        wrote.push(claude_md_path.display().to_string());
+    }
 
     let body = serde_json::json!({
         "enhanced": true,
-        "wrote": [
-            sidecar_path.display().to_string(),
-            claude_md_path.display().to_string(),
-        ],
+        "isSourceRepo": is_source_repo,
+        "wrote": wrote,
     });
     serde_json::to_vec(&body).map_err(|e| e.to_string())
 }

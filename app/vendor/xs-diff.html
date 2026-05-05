@@ -361,6 +361,17 @@
         100% { background-color: transparent; }
       }
 
+      /* Button flash to confirm export succeeded — the status text is
+         easy to miss, the button itself is what the user just clicked. */
+      @keyframes button-flash-success {
+        0%   { background-color: rgba(34, 197, 94, 0.85); color: #064e3b; }
+        30%  { background-color: rgba(34, 197, 94, 0.85); color: #064e3b; }
+        100% { background-color: transparent; color: inherit; }
+      }
+      #exportJson.flash-success {
+        animation: button-flash-success 1.2s ease-out;
+      }
+
       .highlight-line {
         display: block;
         background: rgba(255, 200, 0, 0.2);
@@ -7095,6 +7106,15 @@
         el.style.color = isError ? "var(--color-error)" : "var(--color-text-muted)";
       }
 
+      function flashExportButton() {
+        const btn = document.getElementById("exportJson");
+        if (!btn) return;
+        btn.classList.remove("flash-success");
+        // Force reflow so the animation can re-fire on subsequent clicks.
+        void btn.offsetWidth;
+        btn.classList.add("flash-success");
+      }
+
       function downloadFile(filename, content, mimeType) {
         const blob = new Blob([content], { type: mimeType });
         const url = URL.createObjectURL(blob);
@@ -7188,6 +7208,7 @@
               mimeType: "application/json",
             });
             setExportStatus(`Saved to ${savedPath}`, false);
+            flashExportButton();
             return;
           }
 
@@ -7195,6 +7216,7 @@
           try {
             const savedPath = await requestShellExport(filename, jsonContent, "application/json");
             setExportStatus(`Saved to ${savedPath}`, false);
+            flashExportButton();
             return;
           } catch (bridgeErr) {
             console.warn("host bridge export failed, falling back to browser download", bridgeErr);
@@ -7203,6 +7225,7 @@
           setExportStatus("Downloading via browser...", false);
           downloadFile(filename, jsonContent, "application/json");
           setExportStatus(`Download started for ${filename}`, false);
+          flashExportButton();
         } catch (err) {
           console.error("exportJson failed", err);
           setExportStatus(`Export failed: ${err && err.message ? err.message : err}`, true);

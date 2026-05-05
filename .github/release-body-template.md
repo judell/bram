@@ -1,6 +1,8 @@
 ## Prerequisites
 
-xmlui-desktop opens an XMLUI app next to your terminal — you need a project for it to open. If you don't already have one, follow <https://xmlui.org/get-started> to scaffold one, then run `xmlui-desktop` from its root.
+`xmlui-desktop` opens an XMLUI app next to your terminal — you need a project for it to open. If you don't already have one, follow the installation steps at <https://xmlui.org/get-started>. That gets you the XMLUI CLI (which includes the MCP server). If you followed those instructions to completion and have created ~/xmlui-weather, remove it and instead `git clone https://github.com/xmlui-org/xmlui-weather`. That will give you a repo with pre-existing git history to explore in the xmlui-desktop Workspace. You will be able to stage work items as local git commits to get a feel for what that's like.
+
+Now continue with the steps here.
 
 ## Install
 

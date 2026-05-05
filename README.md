@@ -1,6 +1,6 @@
 # xmlui-desktop
 
-A Tauri-based **workspace for XMLUI development with AI agents**.
+A desktop app that pairs an AI coding agent with the XMLUI app it's building.
 
 - **Left pane** — a real terminal, where you run an AI coding agent
   (e.g. `claude` or `codex`).
@@ -11,23 +11,15 @@ A Tauri-based **workspace for XMLUI development with AI agents**.
 
 The two panes can also talk: XMLUI components in the right pane post
 text back into the terminal via `window.toShell` / `window.toTurn`
-helpers (loaded from `xmlui://localhost/__shell/helpers.js`), so
-buttons, selects, and forms can become input to whatever agent is
-running on the left.
+helpers, so buttons, selects, and forms can become input to whatever
+agent is running on the left.
 
 See [`CLAUDE.md`](./CLAUDE.md) for the conventions Claude Code follows
 when driving the right pane.
 
-
-
-
-
-
 https://github.com/user-attachments/assets/3d617d7a-f864-41f4-bc77-c6449a8c1bf2
 
-
-
-
+## [Download the latest release →](https://github.com/judell/xmlui-desktop/releases/latest)
 
 ## Build
 

@@ -6,9 +6,26 @@ invoke("log_from_right_pane", {
   payload: { kind: "main.js-loaded", at: new Date().toISOString() },
 }).catch(() => {});
 
+const TERM_FONT_KEY = "xmlui-desktop.terminal.fontSize";
+const TERM_FONT_MIN = 8;
+const TERM_FONT_MAX = 32;
+const TERM_FONT_DEFAULT = 13;
+
+const clampFontSize = (n) =>
+  Math.max(TERM_FONT_MIN, Math.min(TERM_FONT_MAX, Math.round(Number(n) || 0)));
+
+const readSavedFontSize = () => {
+  try {
+    const raw = parseInt(localStorage.getItem(TERM_FONT_KEY) ?? "", 10);
+    return Number.isFinite(raw) ? clampFontSize(raw) : TERM_FONT_DEFAULT;
+  } catch {
+    return TERM_FONT_DEFAULT;
+  }
+};
+
 const term = new Terminal({
   fontFamily: 'Menlo, Monaco, "Courier New", monospace',
-  fontSize: 13,
+  fontSize: readSavedFontSize(),
   cursorBlink: true,
   theme: { background: "#000000", foreground: "#e0e0e0" },
   scrollback: 10000,
@@ -31,6 +48,32 @@ try {
 
 fitAddon.fit();
 window.addEventListener("resize", () => fitAddon.fit());
+
+const setTerminalFontSize = (n) => {
+  const size = clampFontSize(n);
+  term.options.fontSize = size;
+  fitAddon.fit();
+  try {
+    localStorage.setItem(TERM_FONT_KEY, String(size));
+  } catch {}
+};
+
+term.attachCustomKeyEventHandler((ev) => {
+  if (ev.type !== "keydown" || !ev.metaKey) return true;
+  if (ev.key === "=" || ev.key === "+") {
+    setTerminalFontSize(term.options.fontSize + 1);
+    return false;
+  }
+  if (ev.key === "-" || ev.key === "_") {
+    setTerminalFontSize(term.options.fontSize - 1);
+    return false;
+  }
+  if (ev.key === "0") {
+    setTerminalFontSize(TERM_FONT_DEFAULT);
+    return false;
+  }
+  return true;
+});
 
 (() => {
   const splitter = document.getElementById("splitter");

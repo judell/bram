@@ -28,18 +28,22 @@ jobs:
         include:
           - os: ubuntu-latest
             label: linux-amd64
+            target: x86_64-unknown-linux-gnu
             ext: ""
             archive: tar.gz
           - os: macos-latest
             label: macos-arm64
+            target: aarch64-apple-darwin
             ext: ""
             archive: tar.gz
-          - os: macos-13
+          - os: macos-latest
             label: macos-intel
+            target: x86_64-apple-darwin
             ext: ""
             archive: tar.gz
           - os: windows-latest
             label: windows-amd64
+            target: x86_64-pc-windows-msvc
             ext: .exe
             archive: zip
     runs-on: ${{ matrix.os }}
@@ -51,10 +55,13 @@ jobs:
           node-version: "20"
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          key: ${{ matrix.target }}
 
       - name: Install Linux dependencies (Tauri webkit2gtk + friends)
         if: matrix.os == 'ubuntu-latest'
@@ -74,19 +81,19 @@ jobs:
 
       - name: Build (debug; debug is the shipping format)
         working-directory: src-tauri
-        run: cargo build
+        run: cargo build --target ${{ matrix.target }}
 
       - name: Package (Unix)
         if: matrix.os != 'windows-latest'
         run: |
-          cp src-tauri/target/debug/xmlui-desktop${{ matrix.ext }} ./xmlui-desktop${{ matrix.ext }}
+          cp src-tauri/target/${{ matrix.target }}/debug/xmlui-desktop${{ matrix.ext }} ./xmlui-desktop${{ matrix.ext }}
           tar -czf xmlui-desktop-${{ matrix.label }}.${{ matrix.archive }} xmlui-desktop${{ matrix.ext }}
 
       - name: Package (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
-          Copy-Item src-tauri/target/debug/xmlui-desktop${{ matrix.ext }} -Destination ./xmlui-desktop${{ matrix.ext }}
+          Copy-Item src-tauri/target/${{ matrix.target }}/debug/xmlui-desktop${{ matrix.ext }} -Destination ./xmlui-desktop${{ matrix.ext }}
           Compress-Archive -Path xmlui-desktop${{ matrix.ext }} -DestinationPath xmlui-desktop-${{ matrix.label }}.${{ matrix.archive }}
 
       - name: Upload to GitHub release

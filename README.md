@@ -19,6 +19,13 @@ when driving the right pane.
 
 https://github.com/user-attachments/assets/3d617d7a-f864-41f4-bc77-c6449a8c1bf2
 
+## Prerequisites
+
+xmlui-desktop opens an XMLUI app next to your terminal — you need a
+project for it to open. If you don't already have one, follow
+<https://xmlui.org/get-started> to scaffold one, then run
+`xmlui-desktop` from its root.
+
 ## [Download the latest release →](https://github.com/judell/xmlui-desktop/releases/latest)
 
 ## Build

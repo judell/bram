@@ -7,7 +7,8 @@
       const items = (data && data.items) || [];
       const currentIds = items.map(i => i.id + ':' + (i.status || 'proposed')).sort().join(',');
       const stored = getInflight();
-      if (stored && currentIds !== (stored.ids || '')) {
+      const stale = stored && stored.ts && (Date.now() - stored.ts) > 60000;
+      if (stored && (currentIds !== (stored.ids || '') || stale)) {
         clearInflight();
         submitting = false;
         saveChecked([]);
@@ -124,6 +125,11 @@
               variant="outlined"
               enabled="{!submitting && checked.length > 0}"
               onClick="markInflight(proposal.value && proposal.value.items); submitting = true; toTurn('drop: ' + JSON.stringify({ ids: proposal.value.items.filter(i => checked.includes(i.id)).map(i => i.id), feedback: feedback.value })); feedback.setValue('')" />
+            <Button
+              when="{submitting}"
+              label="Cancel pending"
+              variant="outlined"
+              onClick="clearInflight(); submitting = false" />
           </HStack>
           <TextArea
             id="feedback"

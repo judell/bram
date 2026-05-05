@@ -83,7 +83,7 @@ window.markInflight = function (items) {
       .map(function (i) { return i.id + ":" + (i.status || "proposed"); })
       .sort()
       .join(",");
-    localStorage.setItem("inflight", JSON.stringify({ ids: sig }));
+    localStorage.setItem("inflight", JSON.stringify({ ids: sig, ts: Date.now() }));
   } catch (e) {}
 };
 window.getInflight = function () {

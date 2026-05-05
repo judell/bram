@@ -80,7 +80,7 @@ window.markInflight = function (items) {
   try {
     var sig = (items || [])
       .filter(function (i) { return i && i.id; })
-      .map(function (i) { return i.id + ":" + (i.status || "applied"); })
+      .map(function (i) { return i.id + ":" + (i.status || "proposed"); })
       .sort()
       .join(",");
     localStorage.setItem("inflight", JSON.stringify({ ids: sig }));
@@ -100,6 +100,35 @@ window.clearInflight = function () {
   try {
     localStorage.removeItem("inflight");
   } catch (e) {}
+};
+// Workspace pending-items selection persists across iframe reloads.
+// Stored as a single JSON array of currently-checked item ids.
+window.loadChecked = function () {
+  try {
+    var raw = localStorage.getItem("workspace-checked");
+    if (!raw) return [];
+    var v = JSON.parse(raw);
+    return Array.isArray(v) ? v : [];
+  } catch (e) { return []; }
+};
+window.saveChecked = function (ids) {
+  try {
+    localStorage.setItem("workspace-checked", JSON.stringify(ids || []));
+  } catch (e) {}
+};
+// Drop ids from saved selection that no longer appear in the live
+// proposal (executed/dropped). Returns the pruned array.
+window.pruneChecked = function (validIds) {
+  try {
+    var current = window.loadChecked();
+    var valid = {};
+    (validIds || []).forEach(function (id) { valid[id] = true; });
+    var pruned = current.filter(function (id) { return valid[id]; });
+    if (pruned.length !== current.length) {
+      window.saveChecked(pruned);
+    }
+    return pruned;
+  } catch (e) { return []; }
 };
 // Route external (http/https/file) anchor clicks through openExternal so
 // Markdown links and any other <a> tags open in the system browser

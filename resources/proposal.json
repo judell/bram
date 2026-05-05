@@ -2,13 +2,6 @@
   "description": "Cross-platform release artifacts for xmlui-desktop: matrix CI build, single-file binary (app/ embedded), install scripts, and a /releases page that mirrors xmlui.org/get-started's shape.",
   "items": [
     {
-      "id": "pending-checkboxes-persist-selection",
-      "status": "proposed",
-      "file": "app/tools/components/Workspace.xmlui",
-      "before": "Pending-items selection (`checked` array) is in-memory only and resets on reload",
-      "after": "Persist `checked` to `localStorage` keyed by item id. Restore on mount. When ids disappear from `proposal.json` (executed/dropped), clean their entries out of `localStorage` so it doesn't accumulate stale ids."
-    },
-    {
       "id": "embed-app-assets",
       "status": "proposed",
       "file": "src-tauri/src/lib.rs (+ Cargo.toml)",

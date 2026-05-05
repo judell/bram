@@ -153,5 +153,5 @@ cross-origin iframe reload) — lives at
 mechanism here surprises you.
 
 <!-- xmlui-desktop:start -->
-@.claude/xmlui-desktop-conventions.md
+@app/__shell/conventions.md
 <!-- xmlui-desktop:end -->

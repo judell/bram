@@ -47,17 +47,23 @@ The `status` field controls the badge in the Workspace tab and what
 the user is being asked to approve:
 
 - `"proposed"` (the default if omitted) → badge **TO APPLY**. The user
-  is approving you to *make* the change. After they approve, you apply
-  the edits to the file(s), then prune the items from
-  `proposal.json`.
-- `"applied"` → badge **TO COMMIT**. Use this only when the change is
-  already on disk and you're asking the user to approve a commit. The
-  Approve button then means "yes, commit these". Most flows skip this
-  state — apply, prune, and decide about commits separately.
+  is approving you to *make* the change. After they approve, apply
+  the edits, then **re-add the same item with `status: "applied"`** —
+  do not prune yet.
+- `"applied"` → badge **TO COMMIT**. The change is on disk and you're
+  asking the user to approve a `git commit`. After they approve,
+  create the commit and prune the item from `proposal.json`. Push is
+  decided separately via the "Push N unpushed commits" button.
 
-Default to omitting the status (or setting `"proposed"`) when you
-first add items. Don't pre-mark things as `"applied"` unless they
-truly are.
+Default to the two-stage flow: every approved `proposed` item should
+transition to `applied` before being pruned, so the user explicitly
+approves both the edit and the commit. Skip the `applied` stage only
+if the user says "apply and commit" (or similar) up front. Dropped
+items are pruned directly with no `applied` stage.
+
+When you first add items, default to omitting the status (or setting
+`"proposed"`). Don't pre-mark things as `"applied"` unless the change
+is genuinely already on disk.
 
 You do not need to create `resources/proposal.json` in advance — when
 the file is missing, xmlui-desktop serves an empty default and the
@@ -79,7 +85,12 @@ Lifecycle:
      touch `proposal.json`.
    - *Approve selected (N)* — only enabled when ≥1 item is checked.
      You receive `approved: {"items":[...], "feedback":"..."}`.
-     Execute the items in the array; respond to the optional feedback.
+     **Execute ONLY the items in that JSON array — do NOT re-read
+     `resources/proposal.json` to figure out what to do.** The user has
+     already triaged; items they unchecked are deliberately absent from
+     the array even though they're still in the file. Treat the array
+     as authoritative; treat `proposal.json` at this moment as stale.
+     Respond to the optional feedback.
    - *Drop selected (N)* — only enabled when ≥1 item is checked.
      You receive `drop: {"ids":[...], "feedback":"..."}`. Remove the
      listed ids from `proposal.json` without acting; respond to the

@@ -1,6 +1,20 @@
 <App layout="vertical">
   <AppHeader>
     <Text fontWeight="bold">xmlui-desktop</Text>
+    <Theme paddingHorizontal-Button-sm="$space-1">
+      <HStack gap="$space-0_5">
+        <Button
+          label="A−"
+          variant="ghost"
+          tooltip="Decrease app font size"
+          onClick="window.setAppFontSize(window.getAppFontSize() - 1)" />
+        <Button
+          label="A+"
+          variant="ghost"
+          tooltip="Increase app font size"
+          onClick="window.setAppFontSize(window.getAppFontSize() + 1)" />
+      </HStack>
+    </Theme>
   </AppHeader>
 
   <VStack padding="$space-6" gap="$space-4" maxWidth="640px">
@@ -10,6 +24,6 @@ This is the xmlui-desktop project. Unless you are developing this
 project, you probably want to launch `xmlui-desktop` in a directory
 that contains your own XMLUI project. Then use the top-toolbar
 `agent tools` button to access Workspace (track pending items and
-commits) and Sessions (read/search Claude sessions)." />
+commits) and Sessions (read/search Claude and Codex sessions)." />
   </VStack>
 </App>

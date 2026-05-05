@@ -259,6 +259,66 @@ window.addEventListener("message", async (event) => {
   );
 });
 
+// Adjustable root font-size for the xmlui surface (mirrors the terminal-side
+// pattern in app/main.js). Buttons in AppHeader call setAppFontSize /
+// getAppFontSize. The right pane and the agent tools drawer share origin
+// and localStorage; a BroadcastChannel keeps their runtime sizes in lockstep.
+(function () {
+  var APP_FONT_KEY = "xmlui-desktop.app.fontSize";
+  var APP_FONT_MIN = 10;
+  var APP_FONT_MAX = 28;
+  var APP_FONT_DEFAULT = 16;
+
+  function clampAppFontSize(n) {
+    var v = Math.round(Number(n) || 0);
+    if (v < APP_FONT_MIN) v = APP_FONT_MIN;
+    if (v > APP_FONT_MAX) v = APP_FONT_MAX;
+    return v;
+  }
+
+  function applyFontSize(size) {
+    try {
+      document.documentElement.style.fontSize = size + "px";
+    } catch (e) {}
+  }
+
+  var bc = null;
+  try {
+    bc = new BroadcastChannel(APP_FONT_KEY);
+    bc.onmessage = function (ev) {
+      if (!ev || !ev.data) return;
+      applyFontSize(clampAppFontSize(ev.data.size));
+    };
+  } catch (e) {}
+
+  window.getAppFontSize = function () {
+    try {
+      var raw = parseInt(localStorage.getItem(APP_FONT_KEY) || "", 10);
+      return isFinite(raw) ? clampAppFontSize(raw) : APP_FONT_DEFAULT;
+    } catch (e) {
+      return APP_FONT_DEFAULT;
+    }
+  };
+
+  window.setAppFontSize = function (n) {
+    var size = clampAppFontSize(n);
+    applyFontSize(size);
+    try {
+      localStorage.setItem(APP_FONT_KEY, String(size));
+    } catch (e) {}
+    if (bc) {
+      try { bc.postMessage({ size: size }); } catch (e) {}
+    }
+    return size;
+  };
+
+  window.resetAppFontSize = function () {
+    return window.setAppFontSize(APP_FONT_DEFAULT);
+  };
+
+  applyFontSize(window.getAppFontSize());
+})();
+
 // Surface JS errors and lifecycle events to the host log channel.
 window.addEventListener("error", (e) => {
   logToHost({

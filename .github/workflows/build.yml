@@ -26,84 +26,14 @@ jobs:
         run: |
           PREV_TAG=$(git tag --sort=-creatordate | grep -v "^${TAG}\$" | head -1 || true)
           if [ -n "$PREV_TAG" ]; then
-            CHANGELOG_BODY=$(git log "${PREV_TAG}..HEAD" --pretty=format:'- %s' --no-merges)
+            CHANGELOG=$(git log "${PREV_TAG}..HEAD" --pretty=format:'- %s' --no-merges)
           else
-            CHANGELOG_BODY=$(git log HEAD --pretty=format:'- %s' --no-merges)
+            CHANGELOG=$(git log HEAD --pretty=format:'- %s' --no-merges)
           fi
-
-          cat > release-body.md <<'INSTALL_EOF'
-          ## Prerequisites
-
-          xmlui-desktop opens an XMLUI app next to your terminal — you need a project for it to open. If you don't already have one, follow <https://xmlui.org/get-started> to scaffold one, then run `xmlui-desktop` from its root.
-
-          ## Install
-
-          ### macOS / Linux
-
-          ```bash
-          curl -fsSL https://github.com/judell/xmlui-desktop/releases/latest/download/install.sh | sh
-          ```
-
-          The script detects your platform, verifies the archive's SHA256 against the published `SHA256SUMS`, extracts the binary, and copies it to `/usr/local/bin` (if writable) or `~/.local/bin`. On macOS it also clears the `com.apple.quarantine` xattr. No `sudo` required.
-
-          Confirm the install:
-
-          ```bash
-          xmlui-desktop --help
-          ```
-
-          ### Windows
-
-          ```powershell
-          powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/judell/xmlui-desktop/releases/latest/download/install.ps1 | iex"
-          ```
-
-          Downloads `xmlui-desktop-windows-amd64.zip`, verifies its SHA256, extracts `xmlui-desktop.exe` to `~/bin`, and adds `~/bin` to your user `PATH`.
-
-          Confirm the install in a new PowerShell window:
-
-          ```powershell
-          xmlui-desktop --help
-          ```
-
-          ## Audit-friendly manual install
-
-          ```bash
-          # Download artifact + checksums
-          curl -fsSLO https://github.com/judell/xmlui-desktop/releases/download/${{ github.event.inputs.tag }}/SHA256SUMS
-          curl -fsSLO https://github.com/judell/xmlui-desktop/releases/download/${{ github.event.inputs.tag }}/xmlui-desktop-macos-arm64.tar.gz   # or your platform
-          shasum -a 256 -c SHA256SUMS --ignore-missing
-          tar -xzf xmlui-desktop-*.tar.gz
-          sudo mv xmlui-desktop /usr/local/bin/
-          ```
-
-          Other platforms: replace `xmlui-desktop-macos-arm64.tar.gz` with `xmlui-desktop-macos-intel.tar.gz`, `xmlui-desktop-linux-amd64.tar.gz`, or `xmlui-desktop-windows-amd64.zip`.
-
-          On macOS, if installing from a browser download instead of `curl`, also run:
-
-          ```bash
-          xattr -d com.apple.quarantine xmlui-desktop
-          ```
-
-          On Windows, use `Expand-Archive` on `xmlui-desktop-windows-amd64.zip`, then move `xmlui-desktop.exe` to a directory on your `PATH`.
-
-          INSTALL_EOF
-
-          {
-            echo "## Change log"
-            echo ""
-            echo "${CHANGELOG_BODY}"
-            echo ""
-          } >> release-body.md
-
-          cat >> release-body.md <<'TROUBLESHOOT_EOF'
-          ## Troubleshooting
-
-          - **`xmlui-desktop` not found on PATH.** Re-run the install script, or follow its printed PATH advice.
-          - **macOS Gatekeeper blocks first launch.** The install script clears the quarantine xattr automatically. For browser downloads, run the `xattr -d com.apple.quarantine` command above.
-          - **Update.** Re-run the install command.
-          - **Uninstall.** Delete the binary from `/usr/local/bin/xmlui-desktop`, `~/.local/bin/xmlui-desktop`, or `~/bin/xmlui-desktop.exe`.
-          TROUBLESHOOT_EOF
+          export TAG CHANGELOG
+          envsubst '${TAG} ${CHANGELOG}' \
+            < .github/release-body-template.md \
+            > release-body.md
 
           echo "::group::Composed release body"
           cat release-body.md

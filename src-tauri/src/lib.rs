@@ -96,6 +96,37 @@ fn determine_project_root() -> PathBuf {
     candidate.canonicalize().unwrap_or(candidate)
 }
 
+fn parse_cli_flags() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() < 2 {
+        return;
+    }
+    match args[1].as_str() {
+        "-h" | "--help" => {
+            println!(
+                "Usage: xmlui-desktop [PROJECT_DIR]\n\n\
+                 Tauri shell that pairs a terminal with an XMLUI surface.\n\n\
+                 Arguments:\n  \
+                   [PROJECT_DIR]    Path to the XMLUI project to load (defaults to current directory)\n\n\
+                 Options:\n  \
+                   -h, --help       Print this help and exit\n  \
+                   -V, --version    Print version and exit"
+            );
+            std::process::exit(0);
+        }
+        "-V" | "--version" => {
+            println!("xmlui-desktop {}", env!("CARGO_PKG_VERSION"));
+            std::process::exit(0);
+        }
+        s if s.starts_with('-') => {
+            eprintln!("xmlui-desktop: unknown option '{}'", s);
+            eprintln!("Try 'xmlui-desktop --help' for more information.");
+            std::process::exit(1);
+        }
+        _ => {}
+    }
+}
+
 fn project_root<R: tauri::Runtime>(app: Option<&AppHandle<R>>) -> Option<PathBuf> {
     if let Some(a) = app {
         if let Some(state) = a.try_state::<ActiveProjectState>() {
@@ -989,6 +1020,7 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, request: tiny_http::Reques
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    parse_cli_flags();
     let initial_proj = determine_project_root();
     eprintln!("[xmlui-desktop] project root: {}", initial_proj.display());
     if !initial_proj.join("index.html").exists() {

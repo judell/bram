@@ -24,4 +24,7 @@ dist-ssr
 *.sw?
 
 # Local launcher symlink to the current debug build
-xmlui-claude-code-desktop
+xmlui-desktop
+
+# Project-local Claude Code permissions (per-user, do not share)
+.claude/settings.local.json

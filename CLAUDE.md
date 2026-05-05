@@ -151,3 +151,7 @@ we hit (Tauri's SPA fallback, XMLUI's hidden `config.json` requirement,
 cross-origin iframe reload) — lives at
 `~/.agents/scout/projects/claude-code-desktop.md`. Read it if a
 mechanism here surprises you.
+
+<!-- xmlui-desktop:start -->
+@.claude/xmlui-desktop-conventions.md
+<!-- xmlui-desktop:end -->

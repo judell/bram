@@ -70,8 +70,8 @@ jobs:
 
           ```bash
           # Download artifact + checksums
-          curl -fsSLO https://github.com/judell/xmlui-desktop/releases/${{ github.event.inputs.tag }}/download/SHA256SUMS
-          curl -fsSLO https://github.com/judell/xmlui-desktop/releases/${{ github.event.inputs.tag }}/download/xmlui-desktop-macos-arm64.tar.gz   # or your platform
+          curl -fsSLO https://github.com/judell/xmlui-desktop/releases/download/${{ github.event.inputs.tag }}/SHA256SUMS
+          curl -fsSLO https://github.com/judell/xmlui-desktop/releases/download/${{ github.event.inputs.tag }}/xmlui-desktop-macos-arm64.tar.gz   # or your platform
           shasum -a 256 -c SHA256SUMS --ignore-missing
           tar -xzf xmlui-desktop-*.tar.gz
           sudo mv xmlui-desktop /usr/local/bin/

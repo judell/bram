@@ -26,14 +26,16 @@ jobs:
         run: |
           PREV_TAG=$(git tag --sort=-creatordate | grep -v "^${TAG}\$" | head -1 || true)
           if [ -n "$PREV_TAG" ]; then
-            CHANGELOG_HEADER="## Changes since ${PREV_TAG}"
             CHANGELOG_BODY=$(git log "${PREV_TAG}..HEAD" --pretty=format:'- %s' --no-merges)
           else
-            CHANGELOG_HEADER="## Changes"
             CHANGELOG_BODY=$(git log HEAD --pretty=format:'- %s' --no-merges)
           fi
 
           cat > release-body.md <<'INSTALL_EOF'
+          ## Prerequisites
+
+          xmlui-desktop opens an XMLUI app next to your terminal — you need a project for it to open. If you don't already have one, follow <https://xmlui.org/get-started> to scaffold one, then run `xmlui-desktop` from its root.
+
           ## Install
 
           ### macOS / Linux
@@ -88,7 +90,7 @@ jobs:
           INSTALL_EOF
 
           {
-            echo "${CHANGELOG_HEADER}"
+            echo "## Change log"
             echo ""
             echo "${CHANGELOG_BODY}"
             echo ""

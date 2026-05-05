@@ -4,7 +4,7 @@
     url="/resources/proposal.json"
     pollIntervalInSeconds="2"
     onLoaded="(data) => {
-      const currentIds = ((data && data.items) || []).map(i => i.id + ':' + (i.status || 'applied')).sort().join(',');
+      const currentIds = ((data && data.items) || []).map(i => i.id + ':' + (i.status || 'proposed')).sort().join(',');
       const stored = getInflight();
       if (stored && currentIds !== (stored.ids || '')) {
         clearInflight();
@@ -51,10 +51,10 @@
               <VStack gap="$space-1" width="*">
                 <HStack gap="$space-2" verticalAlignment="center">
                   <Text
-                    value="{($item.status || 'applied') === 'applied' ? 'TO COMMIT' : 'TO APPLY'}"
+                    value="{($item.status || 'proposed') === 'applied' ? 'TO COMMIT' : 'TO APPLY'}"
                     fontSize="$fontSize-xs"
                     fontWeight="$fontWeight-bold"
-                    color="{($item.status || 'applied') === 'applied' ? '$color-success-600' : '$color-info-600'}" />
+                    color="{($item.status || 'proposed') === 'applied' ? '$color-success-600' : '$color-info-600'}" />
                   <Text value="{$item.id}" fontWeight="$fontWeight-bold" />
                   <Link
                     when="{$item.diff}"
@@ -98,22 +98,35 @@
           gap="$space-3"
           when="{proposal.value.items && proposal.value.items.length > 0}">
           <TextArea
-            id="feedback"
-            placeholder="Optional feedback (sent with whichever button you click)..."
+            id="talk"
+            placeholder="Talk to agent (questions, comments — no items approved or dropped)..."
             rows="2"
             width="*"
             enabled="{!submitting}" />
+          <HStack>
+            <Button
+              label="Talk to agent"
+              variant="outlined"
+              enabled="{!submitting && talk.value && talk.value.trim().length > 0}"
+              onClick="toTurn('talk: ' + talk.value); talk.setValue('')" />
+          </HStack>
           <HStack gap="$space-3" verticalAlignment="center">
             <Button
               label="Approve selected ({proposal.value.items.length - unchecked.length})"
-              enabled="{!submitting}"
+              enabled="{!submitting && (proposal.value.items.length - unchecked.length) > 0}"
               onClick="markInflight(proposal.value && proposal.value.items); submitting = true; toTurn('approved: ' + JSON.stringify({ items: proposal.value.items.filter(i => !unchecked.includes(i.id)), feedback: feedback.value })); feedback.setValue('')" />
             <Button
               label="Drop selected ({proposal.value.items.length - unchecked.length})"
               variant="outlined"
-              enabled="{!submitting}"
+              enabled="{!submitting && (proposal.value.items.length - unchecked.length) > 0}"
               onClick="markInflight(proposal.value && proposal.value.items); submitting = true; toTurn('drop: ' + JSON.stringify({ ids: proposal.value.items.filter(i => !unchecked.includes(i.id)).map(i => i.id), feedback: feedback.value })); feedback.setValue('')" />
           </HStack>
+          <TextArea
+            id="feedback"
+            placeholder="Optional extra instructions (sent along with Approve or Drop)..."
+            rows="2"
+            width="*"
+            enabled="{!submitting}" />
         </VStack>
       </VStack>
 
@@ -123,8 +136,15 @@
       </VStack>
     </VStack>
 
-    <Heading level="h2">Recent commits</Heading>
-    <Text fontSize="$fontSize-sm">Click a SHA to view its diff. ✓ = pushed; empty box = unpushed (click to git push).</Text>
+    <HStack gap="$space-3" verticalAlignment="center">
+      <Heading level="h2">Recent commits</Heading>
+      <Button
+        when="{(commits.value || []).filter(c => !c.pushed).length > 0}"
+        label="Push {(commits.value || []).filter(c => !c.pushed).length} unpushed commit(s)"
+        size="sm"
+        onClick="gitPush(commits)" />
+    </HStack>
+    <Text fontSize="$fontSize-sm">Click a SHA to view its diff. ✓ = pushed; blank = unpushed.</Text>
     <VStack gap="0" width="100%">
       <HStack
         gap="$space-3"
@@ -152,11 +172,6 @@
                 color="$color-success-600"
                 fontSize="$fontSize-lg"
                 fontWeight="$fontWeight-bold" />
-              <Checkbox
-                when="{!$item.pushed}"
-                value="{false}"
-                tooltip="Click to git push"
-                onDidChange="(v) => { if (v) gitPush(commits) }" />
             </HStack>
             <HStack width="120px" gap="$space-2" verticalAlignment="center">
               <Link onClick="selectedSha = (selectedSha === $item.sha ? null : $item.sha)" noIndicator>

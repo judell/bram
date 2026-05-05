@@ -35,18 +35,22 @@ function stripImagePaths(text) {
 function lastAssistantText(jsonlText) {
   if (!jsonlText) return '';
   const lines = jsonlText.split('\n');
-  let last = null;
+  let lastClaude = null;
+  let lastCodex = '';
   for (const line of lines) {
     if (!line) continue;
     try {
       const r = JSON.parse(line);
       if (r.type === 'assistant' && r.message && r.message.content) {
-        last = r;
+        lastClaude = r;
+      } else if (r.type === 'event_msg' && r.payload && r.payload.type === 'agent_message') {
+        lastCodex = r.payload.message || '';
       }
     } catch (e) {}
   }
-  if (!last) return '';
-  const content = last.message.content;
+  if (lastCodex) return rewriteXmluiDocUrls(lastCodex);
+  if (!lastClaude) return '';
+  const content = lastClaude.message.content;
   if (typeof content === 'string') return rewriteXmluiDocUrls(content);
   return rewriteXmluiDocUrls(
     (Array.isArray(content) ? content : [])
@@ -63,29 +67,37 @@ function sessionTurns(jsonlText) {
     if (!line) continue;
     let r;
     try { r = JSON.parse(line); } catch (e) { continue; }
-    if (r.type !== 'user' && r.type !== 'assistant') continue;
-    if (!r.message || !r.message.content) continue;
+    let role = null;
     let text = '';
     const inlineImages = [];
-    const content = r.message.content;
-    if (typeof content === 'string') {
-      text = content;
-    } else if (Array.isArray(content)) {
-      text = content
-        .filter(c => c && c.type === 'text')
-        .map(c => c.text)
-        .join('\n\n');
-      for (const c of content) {
-        if (c && c.type === 'image' && c.source && c.source.type === 'base64' && c.source.data) {
-          const mt = c.source.media_type || 'image/png';
-          inlineImages.push('data:' + mt + ';base64,' + c.source.data);
+    if (r.type === 'user' || r.type === 'assistant') {
+      if (!r.message || !r.message.content) continue;
+      role = r.type;
+      const content = r.message.content;
+      if (typeof content === 'string') {
+        text = content;
+      } else if (Array.isArray(content)) {
+        text = content
+          .filter(c => c && c.type === 'text')
+          .map(c => c.text)
+          .join('\n\n');
+        for (const c of content) {
+          if (c && c.type === 'image' && c.source && c.source.type === 'base64' && c.source.data) {
+            const mt = c.source.media_type || 'image/png';
+            inlineImages.push('data:' + mt + ';base64,' + c.source.data);
+          }
         }
       }
+    } else if (r.type === 'event_msg' && r.payload) {
+      if (r.payload.type === 'user_message') role = 'user';
+      if (r.payload.type === 'agent_message') role = 'assistant';
+      text = r.payload.message || '';
     }
+    if (!role) continue;
     if (!text && inlineImages.length === 0) continue;
     const rewritten = rewriteXmluiDocUrls(text);
     turns.push({
-      role: r.type,
+      role,
       text: stripImagePaths(rewritten),
       images: extractImagePaths(rewritten).concat(inlineImages)
     });

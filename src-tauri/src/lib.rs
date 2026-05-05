@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -361,6 +362,13 @@ fn pty_spawn(
         command.env(k, v);
     }
     command.env("TERM", "xterm-256color");
+    if let Ok(hint_path) = active_agent_hint_path(&app) {
+        if let Some(parent) = hint_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::remove_file(&hint_path);
+        command.env("XMLUI_DESKTOP_AGENT_HINT", hint_path.to_string_lossy().into_owned());
+    }
 
     let _child = pair
         .slave
@@ -498,9 +506,62 @@ struct SessionEntry {
     mtime: u64,
     size: u64,
     title: Option<String>,
+    provider: SessionProvider,
+    current: bool,
 }
 
-fn sessions_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+#[derive(Clone, Copy, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum SessionProvider {
+    Claude,
+    Codex,
+}
+
+impl SessionProvider {
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "claude" => Some(Self::Claude),
+            "codex" => Some(Self::Codex),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SessionRecord {
+    provider: SessionProvider,
+    id: String,
+    path: PathBuf,
+    mtime: u64,
+    size: u64,
+    title: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct SessionsMeta {
+    provider: SessionProvider,
+    count: usize,
+    current_id: Option<String>,
+}
+
+fn active_agent_hint_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+    let root = project_root(Some(app)).ok_or("could not resolve project root")?;
+    let abs = root.canonicalize().map_err(|e| e.to_string())?;
+    let encoded = abs.to_string_lossy().replace('/', "-");
+    let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+    Ok(cache_dir
+        .join("agent-hints")
+        .join(format!("{}.json", encoded)))
+}
+
+fn hinted_session_provider<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<SessionProvider> {
+    let path = active_agent_hint_path(app).ok()?;
+    let content = std::fs::read_to_string(path).ok()?;
+    let record = serde_json::from_str::<serde_json::Value>(&content).ok()?;
+    SessionProvider::from_str(record.get("provider")?.as_str()?)
+}
+
+fn claude_sessions_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     let root = project_root(Some(app)).ok_or("could not resolve project root")?;
     let abs = root.canonicalize().map_err(|e| e.to_string())?;
     let encoded = abs.to_string_lossy().replace('/', "-");
@@ -510,7 +571,7 @@ fn sessions_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String
 
 // Best-effort label for a session: prefers the most recent custom-title record
 // (set via /rename), falls back to a snippet of the first user message.
-fn session_title(path: &Path) -> std::io::Result<Option<String>> {
+fn claude_session_title(path: &Path) -> std::io::Result<Option<String>> {
     let reader = BufReader::new(std::fs::File::open(path)?);
     let mut custom_title: Option<String> = None;
     let mut first_user: Option<String> = None;
@@ -543,7 +604,7 @@ fn session_title(path: &Path) -> std::io::Result<Option<String>> {
     Ok(custom_title.or(first_user))
 }
 
-fn message_text(record: &serde_json::Value) -> String {
+fn claude_message_text(record: &serde_json::Value) -> String {
     let Some(content) = record.pointer("/message/content") else {
         return String::new();
     };
@@ -562,6 +623,130 @@ fn message_text(record: &serde_json::Value) -> String {
             .join("\n\n"),
         _ => String::new(),
     }
+}
+
+fn codex_message_text(record: &serde_json::Value) -> Option<String> {
+    if record.get("type").and_then(|v| v.as_str()) != Some("event_msg") {
+        return None;
+    }
+    let payload = record.get("payload")?;
+    match payload.get("type").and_then(|v| v.as_str()) {
+        Some("user_message") | Some("agent_message") => payload
+            .get("message")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
+fn canonical_path_string(path: &Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn codex_session_index() -> Result<HashMap<String, String>, String> {
+    let home = std::env::var("HOME").map_err(|_| "no HOME")?;
+    let path = PathBuf::from(home).join(".codex").join("session_index.jsonl");
+    let file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let reader = BufReader::new(file);
+    let mut titles = HashMap::new();
+    for line in reader.lines() {
+        let line = line.map_err(|e| e.to_string())?;
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let Some(id) = record.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(title) = record.get("thread_name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        titles.insert(id.to_string(), title.to_string());
+    }
+    Ok(titles)
+}
+
+fn collect_codex_session_paths(dir: &Path, paths: &mut Vec<PathBuf>) -> Result<(), String> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.to_string()),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_codex_session_paths(&path, paths)?;
+            continue;
+        }
+        if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
+            paths.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn codex_session_meta(path: &Path) -> std::io::Result<Option<(String, String)>> {
+    let reader = BufReader::new(std::fs::File::open(path)?);
+    for line in reader.lines().take(20) {
+        let line = line?;
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if record.get("type").and_then(|v| v.as_str()) != Some("session_meta") {
+            continue;
+        }
+        let Some(payload) = record.get("payload") else {
+            continue;
+        };
+        let Some(id) = payload.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(cwd) = payload.get("cwd").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        return Ok(Some((id.to_string(), cwd.to_string())));
+    }
+    Ok(None)
+}
+
+fn codex_session_title(path: &Path) -> std::io::Result<Option<String>> {
+    let reader = BufReader::new(std::fs::File::open(path)?);
+    for line in reader.lines() {
+        let line = line?;
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if record.get("type").and_then(|v| v.as_str()) != Some("event_msg") {
+            continue;
+        }
+        let Some(payload) = record.get("payload") else {
+            continue;
+        };
+        if payload.get("type").and_then(|v| v.as_str()) != Some("user_message") {
+            continue;
+        }
+        let Some(message) = payload.get("message").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        return Ok(Some(message.chars().take(120).collect()));
+    }
+    Ok(None)
 }
 
 fn find_snippets(text: &str, q_lower: &str, max_count: usize) -> Vec<String> {
@@ -598,84 +783,23 @@ fn find_snippets(text: &str, q_lower: &str, max_count: usize) -> Vec<String> {
     snippets
 }
 
-fn search_sessions<R: tauri::Runtime>(
+fn discover_claude_sessions<R: tauri::Runtime>(
     app: &AppHandle<R>,
-    query: &str,
-    limit: usize,
-) -> Result<Vec<serde_json::Value>, String> {
-    let q = query.trim();
-    if q.is_empty() {
-        return Ok(Vec::new());
-    }
-    let dir = sessions_dir(app)?;
-    let q_lower = q.to_lowercase();
+) -> Result<Vec<SessionRecord>, String> {
+    let dir = claude_sessions_dir(app)?;
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.to_string()),
+    };
 
-    let mut entries: Vec<(PathBuf, std::time::SystemTime, u64)> = Vec::new();
-    for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
+    let mut sessions = Vec::new();
+    for entry in entries {
         let Ok(entry) = entry else { continue };
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
             continue;
         }
-        let Ok(meta) = entry.metadata() else { continue };
-        let Ok(modified) = meta.modified() else { continue };
-        entries.push((path, modified, meta.len()));
-    }
-    entries.sort_by(|a, b| b.1.cmp(&a.1));
-    entries.truncate(limit);
-
-    let mut results: Vec<serde_json::Value> = Vec::new();
-    for (path, modified, size) in entries {
-        let title = session_title(&path).ok().flatten();
-        let Ok(content) = std::fs::read_to_string(&path) else { continue };
-        let mut all_text = String::new();
-        for line in content.lines() {
-            let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
-                continue;
-            };
-            let role = record.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            if role != "user" && role != "assistant" {
-                continue;
-            }
-            let text = message_text(&record);
-            if !text.is_empty() {
-                all_text.push_str(&text);
-                all_text.push('\n');
-            }
-        }
-        let snippets = find_snippets(&all_text, &q_lower, 3);
-        if !snippets.is_empty() {
-            let id = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
-            let mtime_secs = modified
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            results.push(serde_json::json!({
-                "id": id,
-                "title": title,
-                "mtime": mtime_secs,
-                "size": size,
-                "snippets": snippets,
-            }));
-        }
-    }
-    Ok(results)
-}
-
-fn list_sessions<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<SessionEntry>, String> {
-    let dir = sessions_dir(app)?;
-    let mut entries = Vec::new();
-    for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
-        let Ok(entry) = entry else { continue };
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-            continue;
-        }
-        let id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
         let metadata = entry.metadata().map_err(|e| e.to_string())?;
         let mtime = metadata
             .modified()
@@ -683,46 +807,208 @@ fn list_sessions<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<SessionEnt
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let size = metadata.len();
-        let title = session_title(&path).ok().flatten();
-        entries.push(SessionEntry { id, mtime, size, title });
+        let id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        let title = claude_session_title(&path).ok().flatten();
+        sessions.push(SessionRecord {
+            provider: SessionProvider::Claude,
+            id,
+            path,
+            mtime,
+            size: metadata.len(),
+            title,
+        });
     }
-    entries.sort_by(|a, b| b.mtime.cmp(&a.mtime));
-    Ok(entries)
+    sessions.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    Ok(sessions)
 }
 
-fn read_session<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> Result<Vec<u8>, String> {
+fn discover_codex_sessions<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Vec<SessionRecord>, String> {
+    let project = project_root(Some(app)).ok_or("could not resolve project root")?;
+    let project_cwd = canonical_path_string(&project);
+    let home = std::env::var("HOME").map_err(|_| "no HOME")?;
+    let sessions_root = PathBuf::from(home).join(".codex").join("sessions");
+    let titles = codex_session_index()?;
+    let mut paths = Vec::new();
+    collect_codex_session_paths(&sessions_root, &mut paths)?;
+
+    let mut sessions = Vec::new();
+    for path in paths {
+        let Some((id, cwd)) = codex_session_meta(&path).map_err(|e| e.to_string())? else {
+            continue;
+        };
+        if canonical_path_string(Path::new(&cwd)) != project_cwd {
+            continue;
+        }
+        let metadata = path.metadata().map_err(|e| e.to_string())?;
+        let mtime = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let title = titles
+            .get(&id)
+            .cloned()
+            .or_else(|| codex_session_title(&path).ok().flatten());
+        sessions.push(SessionRecord {
+            provider: SessionProvider::Codex,
+            id: id.clone(),
+            path,
+            mtime,
+            size: metadata.len(),
+            title,
+        });
+    }
+    sessions.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    Ok(sessions)
+}
+
+fn choose_session_provider(
+    preferred: Option<SessionProvider>,
+    claude: &[SessionRecord],
+    codex: &[SessionRecord],
+) -> SessionProvider {
+    if let Some(provider) = preferred {
+        return provider;
+    }
+    match (codex.first(), claude.first()) {
+        (Some(codex_latest), Some(claude_latest)) if codex_latest.mtime >= claude_latest.mtime => {
+            SessionProvider::Codex
+        }
+        (Some(_), None) => SessionProvider::Codex,
+        _ => SessionProvider::Claude,
+    }
+}
+
+fn sessions_for_provider<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    preferred: Option<SessionProvider>,
+) -> Result<(SessionProvider, Vec<SessionRecord>), String> {
+    let claude = discover_claude_sessions(app)?;
+    let codex = discover_codex_sessions(app)?;
+    let preferred = preferred.or_else(|| hinted_session_provider(app));
+    let provider = choose_session_provider(preferred, &claude, &codex);
+    let sessions = match provider {
+        SessionProvider::Claude => claude,
+        SessionProvider::Codex => codex,
+    };
+    Ok((provider, sessions))
+}
+
+fn session_meta<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    preferred: Option<SessionProvider>,
+) -> Result<SessionsMeta, String> {
+    let (provider, sessions) = sessions_for_provider(app, preferred)?;
+    Ok(SessionsMeta {
+        provider,
+        count: sessions.len(),
+        current_id: sessions.first().map(|s| s.id.clone()),
+    })
+}
+
+fn search_sessions<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    query: &str,
+    limit: usize,
+    preferred: Option<SessionProvider>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    let q_lower = q.to_lowercase();
+    let (provider, mut sessions) = sessions_for_provider(app, preferred)?;
+    sessions.truncate(limit);
+
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    for session in sessions {
+        let Ok(content) = std::fs::read_to_string(&session.path) else {
+            continue;
+        };
+        let mut all_text = String::new();
+        for line in content.lines() {
+            let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let text = match provider {
+                SessionProvider::Claude => {
+                    let role = record.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    if role != "user" && role != "assistant" {
+                        continue;
+                    }
+                    claude_message_text(&record)
+                }
+                SessionProvider::Codex => match codex_message_text(&record) {
+                    Some(text) => text,
+                    None => continue,
+                },
+            };
+            if !text.is_empty() {
+                all_text.push_str(&text);
+                all_text.push('\n');
+            }
+        }
+        let snippets = find_snippets(&all_text, &q_lower, 3);
+        if !snippets.is_empty() {
+            results.push(serde_json::json!({
+                "id": session.id,
+                "title": session.title,
+                "mtime": session.mtime,
+                "size": session.size,
+                "provider": session.provider,
+                "current": false,
+                "snippets": snippets,
+            }));
+        }
+    }
+    Ok(results)
+}
+
+fn list_sessions<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    preferred: Option<SessionProvider>,
+) -> Result<Vec<SessionEntry>, String> {
+    let (_, sessions) = sessions_for_provider(app, preferred)?;
+    Ok(sessions
+        .into_iter()
+        .enumerate()
+        .map(|(idx, session)| SessionEntry {
+            id: session.id,
+            mtime: session.mtime,
+            size: session.size,
+            title: session.title,
+            provider: session.provider,
+            current: idx == 0,
+        })
+        .collect())
+}
+
+fn read_session<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    preferred: Option<SessionProvider>,
+) -> Result<Vec<u8>, String> {
     if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return Err("invalid session id".to_string());
     }
-    let dir = sessions_dir(app)?;
-    let path = dir.join(format!("{}.jsonl", id));
-    let resolved = path.canonicalize().map_err(|e| e.to_string())?;
-    let dir_canon = dir.canonicalize().map_err(|e| e.to_string())?;
-    if !resolved.starts_with(&dir_canon) {
-        return Err("path traversal".to_string());
-    }
-    std::fs::read(&resolved).map_err(|e| e.to_string())
+    let (_, sessions) = sessions_for_provider(app, preferred)?;
+    let session = sessions
+        .into_iter()
+        .find(|session| session.id == id)
+        .ok_or("session not found")?;
+    std::fs::read(&session.path).map_err(|e| e.to_string())
 }
 
-fn read_latest_session<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String> {
-    let dir = sessions_dir(app)?;
-    let mut latest: Option<(PathBuf, std::time::SystemTime)> = None;
-    for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
-        let Ok(entry) = entry else { continue };
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-            continue;
-        }
-        let Ok(meta) = entry.metadata() else { continue };
-        let Ok(modified) = meta.modified() else { continue };
-        match &latest {
-            Some((_, t)) if modified <= *t => {}
-            _ => latest = Some((path, modified)),
-        }
-    }
-    let (path, _) = latest.ok_or("no sessions found")?;
-    std::fs::read(&path).map_err(|e| e.to_string())
+fn read_latest_session<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    preferred: Option<SessionProvider>,
+) -> Result<Vec<u8>, String> {
+    let (_, sessions) = sessions_for_provider(app, preferred)?;
+    let session = sessions.first().ok_or("no sessions found")?;
+    std::fs::read(&session.path).map_err(|e| e.to_string())
 }
 
 fn percent_decode(s: &str) -> String {
@@ -896,32 +1182,47 @@ fn route_request<R: tauri::Runtime>(
     }
 
     if let Some(rest) = path.strip_prefix("__sessions/") {
-        let (content_type, result): (&'static str, Result<Vec<u8>, String>) = if rest == "list" {
+        let mut provider: Option<SessionProvider> = None;
+        let mut session_id = String::new();
+        let mut q = String::new();
+        let mut scope = String::from("recent");
+        for pair in query.split('&') {
+            if let Some(v) = pair.strip_prefix("provider=") {
+                provider = SessionProvider::from_str(&percent_decode(v));
+            } else if let Some(v) = pair.strip_prefix("id=") {
+                session_id = percent_decode(v);
+            } else if let Some(v) = pair.strip_prefix("q=") {
+                q = percent_decode(v);
+            } else if let Some(v) = pair.strip_prefix("scope=") {
+                scope = percent_decode(v);
+            }
+        }
+
+        let (content_type, result): (&'static str, Result<Vec<u8>, String>) = if rest == "meta" {
             (
                 "application/json; charset=utf-8",
-                list_sessions(app)
+                session_meta(app, provider)
+                    .and_then(|meta| serde_json::to_vec(&meta).map_err(|e| e.to_string())),
+            )
+        } else if rest == "list" {
+            (
+                "application/json; charset=utf-8",
+                list_sessions(app, provider)
                     .and_then(|entries| serde_json::to_vec(&entries).map_err(|e| e.to_string())),
             )
         } else if rest == "latest" {
-            ("text/plain; charset=utf-8", read_latest_session(app))
+            ("text/plain; charset=utf-8", read_latest_session(app, provider))
+        } else if rest == "content" {
+            ("text/plain; charset=utf-8", read_session(app, &session_id, provider))
         } else if rest == "search" {
-            let mut q = String::new();
-            let mut scope = String::from("recent");
-            for pair in query.split('&') {
-                if let Some(v) = pair.strip_prefix("q=") {
-                    q = percent_decode(v);
-                } else if let Some(v) = pair.strip_prefix("scope=") {
-                    scope = percent_decode(v);
-                }
-            }
             let limit = if scope == "all" { usize::MAX } else { 10 };
             (
                 "application/json; charset=utf-8",
-                search_sessions(app, &q, limit)
+                search_sessions(app, &q, limit, provider)
                     .and_then(|entries| serde_json::to_vec(&entries).map_err(|e| e.to_string())),
             )
         } else {
-            ("text/plain; charset=utf-8", read_session(app, rest))
+            ("text/plain; charset=utf-8", read_session(app, rest, provider))
         };
         return match result {
             Ok(bytes) => (200, content_type, bytes),

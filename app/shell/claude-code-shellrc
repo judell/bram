@@ -1,1 +1,17 @@
 echo "You can launch claude or codex here."
+
+_xmlui_mark_agent() {
+  [ -n "$XMLUI_DESKTOP_AGENT_HINT" ] || return 0
+  mkdir -p "$(dirname "$XMLUI_DESKTOP_AGENT_HINT")" 2>/dev/null || return 0
+  printf '{"provider":"%s"}\n' "$1" >"$XMLUI_DESKTOP_AGENT_HINT"
+}
+
+claude() {
+  _xmlui_mark_agent "claude"
+  command claude "$@"
+}
+
+codex() {
+  _xmlui_mark_agent "codex"
+  command codex "$@"
+}

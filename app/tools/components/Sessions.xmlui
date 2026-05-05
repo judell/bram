@@ -1,15 +1,31 @@
 <Component
   name="Sessions"
+  var.currentProvider="{null}"
   var.expandedId="{null}"
+  var.expandedProvider="{null}"
   var.fullscreenImage="{null}"
   var.queryDraft=""
   var.query=""
   var.scope="recent">
-  <DataSource id="sessionsList" url="/__sessions/list" />
+  <DataSource
+    id="sessionsMeta"
+    url="/__sessions/meta"
+    pollIntervalInSeconds="2"
+    onLoaded="(data) => {
+      if (!data || !data.provider) return;
+      if (currentProvider !== data.provider) {
+        currentProvider = data.provider;
+        expandedId = null;
+        expandedProvider = null;
+      }
+    }" />
+  <DataSource id="sessionsList" url="/__sessions/list" pollIntervalInSeconds="2" />
   <DataSource
     id="sessionContent"
-    url="/__sessions/{expandedId}"
-    when="{!!expandedId}" />
+    url="/__sessions/content"
+    queryParams="{{ id: expandedId, provider: expandedProvider }}"
+    pollIntervalInSeconds="2"
+    when="{!!expandedId && !!expandedProvider}" />
   <DataSource
     id="searchResults"
     url="/__sessions/search"
@@ -38,6 +54,11 @@
 
   <VStack padding="$space-6" gap="$space-4">
     <Heading level="h2">Sessions</Heading>
+    <Text
+      when="{sessionsMeta.value}"
+      fontSize="$fontSize-sm"
+      color="$textColor-secondary"
+      value="{sessionsMeta.value.count > 0 ? ('Auto-detected provider: ' + sessionsMeta.value.provider + ' (' + sessionsMeta.value.count + ' session' + (sessionsMeta.value.count === 1 ? '' : 's') + ')') : ('Auto-detected provider: ' + sessionsMeta.value.provider + ' (no sessions yet)')}" />
     <HStack gap="$space-3" verticalAlignment="center">
       <Button
         label="✕"
@@ -84,8 +105,13 @@
             paddingHorizontal="$space-3"
             paddingVertical="$space-2"
             verticalAlignment="start">
-            <Link width="*" onClick="expandedId = (expandedId === $item.id ? null : $item.id)" noIndicator>
-              <Text width="100%" value="{$item.title || '(untitled)'}" />
+            <Link
+              width="*"
+              onClick="if (expandedId === $item.id && expandedProvider === $item.provider) { expandedId = null; expandedProvider = null; } else { expandedId = $item.id; expandedProvider = $item.provider; }"
+              noIndicator>
+              <Text
+                width="100%"
+                value="{($item.current ? '[current] ' : '') + ($item.title || '(untitled)')}" />
             </Link>
             <Text width="160px" fontSize="$fontSize-sm" value="{formatDateTime(new Date($item.mtime * 1000), 'yyyy-MM-dd HH:mm')}" />
             <Text width="80px" fontSize="$fontSize-sm" value="{Math.round($item.size / 1024) + ' KB'}" />
@@ -101,7 +127,7 @@
 
           <VStack
             gap="$space-3"
-            when="{expandedId === $item.id}"
+            when="{expandedId === $item.id && expandedProvider === $item.provider}"
             paddingHorizontal="$space-3"
             paddingVertical="$space-3"
             backgroundColor="$color-surface-50"
@@ -114,7 +140,7 @@
                 tooltip="Scroll to bottom"
                 onClick="window.scrollAllToBottom()" />
             </HStack>
-            <Text when="{sessionContent.inProgress}">Loading…</Text>
+            <Text when="{sessionContent.inProgress && !sessionContent.loaded}">Loading…</Text>
             <Items
               when="{sessionContent.value}"
               data="{sessionTurns(sessionContent.value)}">

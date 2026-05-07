@@ -87,6 +87,18 @@ jobs:
           workspaces: src-tauri
           key: ${{ matrix.target }}
 
+      - name: Bump version to match tag
+        shell: bash
+        env:
+          TAG: ${{ github.event.inputs.tag }}
+        run: |
+          VERSION="${TAG#v}"
+          sed -i.bak "s/^version = \".*\"/version = \"${VERSION}\"/" src-tauri/Cargo.toml
+          sed -i.bak "s/\"version\": \"[^\"]*\"/\"version\": \"${VERSION}\"/" src-tauri/tauri.conf.json
+          rm src-tauri/Cargo.toml.bak src-tauri/tauri.conf.json.bak
+          grep "^version" src-tauri/Cargo.toml
+          grep '"version"' src-tauri/tauri.conf.json
+
       - name: Install Linux dependencies (Tauri webkit2gtk + friends)
         if: matrix.os == 'ubuntu-latest'
         run: |

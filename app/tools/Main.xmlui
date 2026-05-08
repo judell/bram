@@ -1,3 +1,4 @@
+<Theme width-navPanel-App="$space-40">
 <App layout="vertical-sticky" var.recording="{false}">
   <DataSource id="enhanceStatus" url="/__enhance/status" />
 
@@ -102,3 +103,4 @@ What setup deliberately does **not** do:
     <Page url="/readme"><Readme /></Page>
   </Pages>
 </App>
+</Theme>

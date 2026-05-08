@@ -1,4 +1,4 @@
-<Component name="Talk" var.turns="{sessionTurns(latestSession.value)}">
+<Component name="Talk" var.turns="{sessionTurns(latestSession.value)}" var.fullscreenImage="{null}">
   <DataSource
     id="latestSession"
     url="/__sessions/latest"
@@ -11,6 +11,17 @@
   <ChangeListener
     listenTo="{turns.filter(t => t.role === 'user' && !t.text.startsWith('[Request interrupted')).length}"
     onDidChange="escSuppressed = false" />
+
+  <ModalDialog
+    when="{!!fullscreenImage}"
+    fullScreen="true"
+    onClose="fullscreenImage = null">
+    <Image
+      src="{(fullscreenImage || '').startsWith('data:') || (fullscreenImage || '').startsWith('http') ? fullscreenImage : '/__file?path=' + encodeURIComponent(fullscreenImage || '')}"
+      fit="contain"
+      width="100%"
+      height="100%" />
+  </ModalDialog>
 
   <VStack padding="$space-6" gap="$space-3">
     <StickyBox to="top">
@@ -45,6 +56,16 @@
           value="{$item.role === 'user' ? 'You' : 'Claude'}" />
         <Markdown
           content="{$item.role === 'user' ? formatUserTurnForTranscript($item.text) : $item.text}" />
+        <VStack gap="$space-2" when="{$item.images && $item.images.length > 0}">
+          <Items data="{$item.images}">
+            <Link onClick="fullscreenImage = $item" noIndicator>
+              <Image
+                src="{$item.startsWith('data:') || $item.startsWith('http') ? $item : '/__file?path=' + encodeURIComponent($item)}"
+                maxHeight="200px"
+                fit="contain" />
+            </Link>
+          </Items>
+        </VStack>
       </VStack>
     </Items>
 

@@ -1,4 +1,4 @@
-<Component name="Issues" var.issuesExpanded="{false}" var.expandedNumber="{null}">
+<Component name="Issues" var.issuesExpanded="{false}" var.expandedNumber="{null}" var.fullscreenImage="{null}">
   <DataSource
     id="issues"
     url="/__issues"
@@ -13,6 +13,17 @@
     url="/__issue"
     queryParams="{{ number: expandedNumber }}"
     when="{!!expandedNumber}" />
+
+  <ModalDialog
+    when="{!!fullscreenImage}"
+    fullScreen="true"
+    onClose="fullscreenImage = null">
+    <Image
+      src="{fullscreenImage}"
+      fit="contain"
+      width="100%"
+      height="100%" />
+  </ModalDialog>
 
   <VStack padding="$space-6" gap="$space-6">
     <HStack gap="$space-3" verticalAlignment="center">
@@ -85,7 +96,19 @@
             <Text when="{issueDetail.inProgress}">Loading…</Text>
             <Markdown
               when="{issueDetail.value && issueDetail.value.body}"
-              content="{issueDetail.value.body}" />
+              content="{stripMarkdownImages(issueDetail.value.body)}" />
+            <VStack
+              gap="$space-2"
+              when="{issueDetail.value && issueDetail.value.body && extractMarkdownImages(issueDetail.value.body).length > 0}">
+              <Items data="{extractMarkdownImages(issueDetail.value.body)}">
+                <Link onClick="fullscreenImage = $item" noIndicator>
+                  <Image
+                    src="{$item}"
+                    maxHeight="200px"
+                    fit="contain" />
+                </Link>
+              </Items>
+            </VStack>
             <HStack horizontalAlignment="end">
               <Button
                 label="Open on github.com"

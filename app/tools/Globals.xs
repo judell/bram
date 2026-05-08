@@ -28,14 +28,34 @@ function rewriteXmluiDocUrls(text) {
 function extractImagePaths(text) {
   if (!text) return [];
   const paths = [];
-  const re = /\[Image: source: ([^\]]+)\]/g;
+  const re = /\[Image: source: (\/[^\]]+\.(?:png|jpg|jpeg|gif|webp))\]/gi;
   let m;
   while ((m = re.exec(text)) !== null) paths.push(m[1]);
   return paths;
 }
 function stripImagePaths(text) {
   if (!text) return text;
-  return text.replace(/\n*\[Image: source: [^\]]+\]/g, '');
+  return text.replace(/\n*\[Image: source: \/[^\]]+\.(?:png|jpg|jpeg|gif|webp)\]/gi, '');
+}
+
+// Same shape as extractImagePaths/stripImagePaths but for GitHub-flavored
+// markdown: `![alt](url)` and `<img src="url">`. Used by Issues to mirror
+// Sessions' thumbnail-with-fullscreen pattern.
+function extractMarkdownImages(text) {
+  if (!text) return [];
+  const urls = [];
+  const md = /!\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
+  let m;
+  while ((m = md.exec(text)) !== null) urls.push(m[1]);
+  const html = /<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi;
+  while ((m = html.exec(text)) !== null) urls.push(m[1]);
+  return urls;
+}
+function stripMarkdownImages(text) {
+  if (!text) return text;
+  return text
+    .replace(/\n*!\[[^\]]*\]\([^)\s]+(?:\s+"[^"]*")?\)/g, '')
+    .replace(/\n*<img\b[^>]*\bsrc=["'][^"']+["'][^>]*>/gi, '');
 }
 
 // True when the latest JSONL record is an assistant tool_use without a
@@ -187,11 +207,12 @@ function sessionTurns(jsonlText) {
     }
     if (!role) continue;
     if (!text && inlineImages.length === 0) continue;
+    if (role === 'user' && inlineImages.length === 0 && /^(\[Image: source: [^\]]+\]\s*)+$/.test(text.trim())) continue;
     const rewritten = rewriteXmluiDocUrls(text);
     turns.push({
       role,
       text: stripImagePaths(rewritten),
-      images: extractImagePaths(rewritten).concat(inlineImages)
+      images: inlineImages.length > 0 ? inlineImages : extractImagePaths(rewritten)
     });
   }
   return turns;

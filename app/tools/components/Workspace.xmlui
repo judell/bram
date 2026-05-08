@@ -1,4 +1,4 @@
-<Component name="Workspace" var.selectedSha="{null}" var.checked="{loadChecked()}" var.submitting="{!!getInflight()}" var.expandedItemId="{null}" var.commitsExpanded="{false}" var.talkRecording="{false}">
+<Component name="Workspace" var.selectedSha="{null}" var.checked="{loadChecked()}" var.submitting="{!!getInflight()}" var.expandedItemId="{null}" var.commitsExpanded="{false}">
   <DataSource
     id="proposal"
     url="/resources/proposal.json"
@@ -103,11 +103,6 @@
           gap="$space-3"
           when="{proposal.value.items && proposal.value.items.length > 0}">
           <HStack gap="$space-3" verticalAlignment="center">
-            <Button
-              label="{talkRecording ? '⏹ stop' : '🎤 talk to agent'}"
-              variant="outlined"
-              enabled="{!submitting}"
-              onClick="talkRecording ? (talkRecording = false, voiceStop(t => { if (t) toTurn('voice: ' + t); })) : (voiceStart(), talkRecording = true)" />
             <Button
               label="Approve selected ({checked.length})"
               enabled="{!submitting && checked.length > 0}"

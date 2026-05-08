@@ -1,5 +1,5 @@
 <Theme width-navPanel-App="$space-40">
-<App layout="vertical">
+<App layout="vertical" var.recording="{false}">
   <DataSource id="enhanceStatus" url="/__enhance/status" />
 
   <AppHeader>
@@ -16,6 +16,11 @@
           variant="ghost"
           tooltip="Increase app font size"
           onClick="window.setAppFontSize(window.getAppFontSize() + 1)" />
+        <Button
+          label="{recording ? '⏹ stop' : '🎤 voice'}"
+          variant="ghost"
+          tooltip="Voice input — click to start, click again to send"
+          onClick="recording ? (recording = false, voiceStop(t => { if (t) toTurn('voice: ' + t); })) : (voiceStart(), recording = true)" />
       </HStack>
     </Theme>
   </AppHeader>

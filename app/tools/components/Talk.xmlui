@@ -16,6 +16,7 @@
     <StickyBox to="top">
       <HStack gap="$space-3" verticalAlignment="center" paddingVertical="$space-2">
         <Heading level="h2">Transcript</Heading>
+        <SpaceFiller />
         <Button
           icon="down"
           variant="ghost"

@@ -132,7 +132,7 @@
             paddingVertical="$space-3"
             backgroundColor="$color-surface-50"
             borderTop="1px dashed $borderColor">
-            <HStack horizontalAlignment="end">
+            <HStack width="100%" horizontalAlignment="end">
               <Button
                 icon="down"
                 variant="ghost"
@@ -166,7 +166,7 @@
                 </VStack>
               </VStack>
             </Items>
-            <HStack horizontalAlignment="end">
+            <HStack width="100%" horizontalAlignment="end">
               <Button
                 icon="up"
                 variant="ghost"

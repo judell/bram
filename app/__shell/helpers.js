@@ -25,6 +25,15 @@ window.toTurn = function (text) {
     "*",
   );
 };
+// sendKeys writes raw bytes to the PTY with NO trailing newline (unlike
+// toShell which always appends \n). Use it for control sequences like ESC,
+// arrow keys, or single-keypress menu shortcuts.
+window.sendKeys = function (text) {
+  window.parent.postMessage(
+    { type: "right-pane", kind: "send-keys", text: String(text) },
+    "*",
+  );
+};
 window.logToHost = function (payload) {
   window.parent.postMessage(
     { type: "right-pane", kind: "log", payload },

@@ -1,4 +1,4 @@
-<Component name="Talk" var.turns="{sessionTurns(latestSession.value)}">
+<Component name="Talk" var.turns="{sessionTurns(latestSession.value)}" var.escSuppressed="{false}">
   <DataSource
     id="latestSession"
     url="/__sessions/latest"
@@ -8,14 +8,14 @@
     listenTo="{turns.length}"
     onDidChange="if (window.wasPinnedToBottom()) window.scrollAllToBottom()" />
 
+  <ChangeListener
+    listenTo="{turns.filter(t => t.role === 'user' && !t.text.startsWith('[Request interrupted')).length}"
+    onDidChange="escSuppressed = false" />
+
   <VStack padding="$space-6" gap="$space-3">
     <StickyBox to="top">
       <HStack gap="$space-3" verticalAlignment="center" paddingVertical="$space-2">
         <Heading level="h2">Transcript</Heading>
-        <Spinner
-          when="{isWaitingForAssistant(latestSession.value)}"
-          size="sm"
-          delay="{200}" />
         <Button
           icon="down"
           variant="ghost"
@@ -34,12 +34,6 @@
           size="xs"
           tooltip="Send: no"
           onClick="toTurn('no')" />
-        <Button
-          label="Esc"
-          variant="ghost"
-          size="xs"
-          tooltip="Send Esc to interrupt"
-          onClick="toShell('\x1b')" />
       </HStack>
     </StickyBox>
 
@@ -64,6 +58,20 @@
           content="{$item.role === 'user' ? formatUserTurnForTranscript($item.text) : $item.text}" />
       </VStack>
     </Items>
+
+    <HStack
+      when="{isWaitingForAssistant(latestSession.value) && !escSuppressed}"
+      paddingVertical="$space-3"
+      gap="$space-3"
+      verticalAlignment="center">
+      <Spinner size="sm" delay="{200}" />
+      <Button
+        label="Esc"
+        variant="ghost"
+        size="xs"
+        tooltip="Send Esc to interrupt"
+        onClick="(sendKeys('\x1b'), escSuppressed = true)" />
+    </HStack>
 
     <StickyBox to="bottom">
       <HStack horizontalAlignment="end" paddingVertical="$space-2">

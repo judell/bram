@@ -245,6 +245,11 @@ window.addEventListener("message", (ev) => {
         data: "\x1b[200~" + String(data.text ?? "") + "\x1b[201~\r",
       }).catch((e) => console.error("pty_write turn", e));
       return;
+    case "send-keys":
+      invoke("pty_write", { data: String(data.text ?? "") }).catch((e) =>
+        console.error("pty_write send-keys", e),
+      );
+      return;
     case "open-devtools":
       invoke("open_devtools").catch((e) =>
         console.error("open_devtools", e),

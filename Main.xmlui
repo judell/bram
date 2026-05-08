@@ -23,7 +23,15 @@
 This is the xmlui-desktop project. Unless you are developing this
 project, you probably want to launch `xmlui-desktop` in a directory
 that contains your own XMLUI project. Then use the top-toolbar
-`agent tools` button to access Workspace (track pending items and
-commits) and Sessions (read/search Claude and Codex sessions)." />
+`agent tools` button to open the drawer with five views:
+
+- **Talk** — live transcript of the current agent session (alternating
+  user / assistant turns, spinner while waiting). The drawer's pinned
+  AppHeader has 🎤 voice — click from any tab to dictate.
+- **Worklist** — pending items the agent has proposed
+  (`resources/proposal.json`); approve or drop with one click.
+- **Commits** — recent commits with one-click push.
+- **Sessions** — read/search past Claude and Codex transcripts.
+- **README** — this project's README for quick reference." />
   </VStack>
 </App>

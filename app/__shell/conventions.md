@@ -129,6 +129,17 @@ user speech, treated the same as typed talk — informational, not an
 instruction to act on the worklist. If a verbal phrase is ambiguous,
 ask one focused question instead of acting.
 
+**Hold the commit while a related TO APPLY item is in flight.** When
+the worklist contains both a TO COMMIT item and a TO APPLY item that
+touch the same surface (e.g., a feature plus a tuning adjustment, a
+fix plus a follow-up regression patch), do **not** process the commit
+when the user's `approved:` payload happens to cover both. Apply the
+proposed item only; leave the prior item in TO COMMIT. The user
+verifies the combined behavior, then approves a single commit covering
+both. This avoids landing intermediate "kinda-works" commits where
+the feature is split from its companion fix — those make git history
+hard to read and bisect against.
+
 When *not* to use this: one-or-two-item decisions, free-text input, or
 anything where typing in chat is faster than rendering UI.
 

@@ -1,9 +1,10 @@
 # Working with xmlui-desktop
 
-This project runs inside the **xmlui-desktop** Tauri shell. The shell
-puts a real terminal alongside an XMLUI surface, plus an "agent tools"
-drawer that includes a Workspace (worklist + commits) and a Sessions
-browser. The user sees the right pane while talking to you — use it.
+xmlui-desktop is a **workspace for XMLUI development with AI agents**.
+The shell puts a real terminal alongside an XMLUI surface, plus an
+"agent tools" drawer that includes a Worklist (pending items + commits)
+and a Sessions browser. The user sees the right pane while talking to
+you — use it.
 
 > Note on memory: this file is loaded into every session in this
 > project via a `@`-import in `CLAUDE.md`. Don't write memory entries
@@ -11,6 +12,18 @@ browser. The user sees the right pane while talking to you — use it.
 > helper APIs, etc. Memory is for cross-session context that wouldn't
 > otherwise be available; project conventions are already available
 > by virtue of being in this file.
+
+## Naming and user-facing copy
+
+- **Don't call xmlui-desktop an IDE** in user-facing copy (README, UI
+  strings, manual.md). Frame it as a workspace, desktop shell, or
+  describe what it does. Don't recommend external IDE tooling
+  (rust-analyzer, VS Code extensions) in this project's docs —
+  xmlui-desktop is the workspace.
+- **Don't call this repo a "dogfood project"** or use similar
+  internal-team jargon in committed text. It's the xmlui-desktop
+  project; users developing their own XMLUI app launch xmlui-desktop
+  in their own project directory.
 
 ## Render structured output in the right pane
 
@@ -23,8 +36,8 @@ automatically — you don't need to ask the user to refresh.
 ## Coordinate via proposal.json
 
 `resources/proposal.json` is the canonical surface for multi-step
-coordination between you and the user. The Workspace tab in the agent
-tools drawer renders it as a checklist under "Pending items".
+coordination between you and the user. The Worklist tab in the agent
+tools drawer renders it as a checklist under "Worklist".
 
 Schema:
 
@@ -43,7 +56,7 @@ Schema:
 }
 ```
 
-The `status` field controls the badge in the Workspace tab and what
+The `status` field controls the badge in the Worklist tab and what
 the user is being asked to approve:
 
 - `"proposed"` (the default if omitted) → badge **TO APPLY**. The user
@@ -67,7 +80,7 @@ is genuinely already on disk.
 
 You do not need to create `resources/proposal.json` in advance — when
 the file is missing, xmlui-desktop serves an empty default and the
-Workspace tab shows *(none)*. Just write to the file the first time
+Worklist tab shows *(none)*. Just write to the file the first time
 you actually have items to propose; xmlui-desktop will create it.
 
 Lifecycle:
@@ -119,6 +132,25 @@ ask one focused question instead of acting.
 When *not* to use this: one-or-two-item decisions, free-text input, or
 anything where typing in chat is faster than rendering UI.
 
+### When to route through the worklist
+
+Default to proposing items in `resources/proposal.json` whenever a
+change spans more than one file, or has more than ~2 discrete
+sub-edits in a single file, even after the user has verbally said
+"do it". The two-stage proposed→applied flow lets the user uncheck
+individual sub-edits before any code is touched. Single-file tweaks,
+typo fixes, and direct corrections to in-progress code can still be
+edited directly.
+
+### Test Worklist UX through the worklist itself
+
+When a change touches the Worklist UX itself (Approve/Drop button
+states, gray-out behavior, feedback flow, proposal-pruning), prefer
+to surface it as a pending item even when the diff is already on
+disk. Approving the item then exercises the new behavior end-to-end
+— your file rewrites, the proposal pruning, the Talk-page update —
+which is the actual test.
+
 **Hook enforcement.** xmlui-desktop installs a PreToolUse hook at
 `.claude/hooks/proposal-guard.py` that validates Write/Edit operations
 on `resources/proposal.json`. If you remove an item without an explicit
@@ -129,7 +161,7 @@ around.
 
 ## Right-pane helpers (opt-in, only needed for project-side hooks)
 
-The Workspace and Sessions tabs in the agent tools drawer already use
+The Worklist and Sessions tabs in the agent tools drawer already use
 these helpers internally — you get the worklist Approve/Drop flow with
 no extra setup. The script tag below is only needed if **your own**
 xmlui markup wants to talk back to the running agent (e.g., a custom
@@ -148,6 +180,95 @@ available inside xmlui markup:
 
 Use `toTurn` for one-shot form submissions (Approve buttons, Confirm
 buttons). Use `toShell` to inject text the user can edit before sending.
+
+## UI patterns
+
+### Fold optional companion input into existing actions
+
+When a surface already has clear primary actions (Approve / Drop /
+Submit) and a new optional input is added (free-text feedback, notes,
+override flag), fold the input value into the existing actions'
+onClick payloads rather than adding a separate Submit / Send button.
+Render the input above or beside the primary buttons; clear it after
+submission. A separate submit button creates a third decision point
+("which button do I click for what?") and forces the user to send
+two messages when one would do. Only add a separate submit button if
+the auxiliary input is genuinely independent of the primary actions.
+
+### Keep empty scaffolding files
+
+When emptying a file that's part of an XMLUI app's expected structure
+(`Globals.xs`, components referenced from `Main.xmlui`, etc.), keep
+the empty file rather than deleting it — the slot signals where
+future code can land. Distinguish between files whose existence is
+incidental (orphan components, dead scripts: delete them) and files
+whose existence is structural (expected entry points, conventional
+configs: empty them out and leave the file in place). When in doubt,
+ask.
+
+## Citing XMLUI docs
+
+When citing an XMLUI component or howto, the canonical URL form is:
+
+- Components: `https://www.xmlui.org/docs/reference/components/<Name>`
+- Howtos: `https://www.xmlui.org/docs/howto/<slug>`
+
+The `xmlui-mcp` server's `Source:` lines and "Documentation URLs:"
+footers print the `docs.xmlui.org/...` form, which 404s on the live
+site. Rewrite before citing: `docs.xmlui.org/<path>` →
+`www.xmlui.org/docs/reference/<path>` (the `reference/` segment is on
+the working URLs).
+
+## Build vs. runtime-served files
+
+The xmlui-desktop binary ships with the `app/` tree embedded at build
+time (Tauri's `frontendDist: "../app"`). At runtime, xmlui-desktop
+prefers an on-disk `app/` next to the binary if present, otherwise
+falls back to the embedded copy.
+
+A filesystem watcher (in `src-tauri/src/lib.rs`) watches three
+directories under the on-disk `app/` and reloads iframes when they
+change:
+
+| path | reloads |
+|---|---|
+| `app/__shell/` | both iframes (right pane and agent-tools drawer) |
+| `app/vendor/` | both iframes |
+| `app/tools/` | the agent-tools drawer iframe only |
+| user's project directory | the right-pane iframe only (drawer stays put) |
+
+Files under those paths are hot-reloaded — no rebuild, no restart.
+
+The **parent shell** (`app/index.html`, `app/main.js`, `app/styles.css`,
+plus anything else loaded once at WebView startup) is **not**
+hot-reloaded. After editing those, run `cargo build` and have the
+user restart. Don't suggest `cargo run` as an alternative — the user
+prefers rebuild + restart, and the incremental build is fast.
+
+## Building and releasing
+
+Debug builds are the shipping format. Don't propose `cargo build
+--release`, code signing, notarization, or installer pipelines. The
+Rust side is thin glue (PTY relay, loopback HTTP file server, small
+git/sessions queries); the heavy lifting is XMLUI's TypeScript
+runtime in the WebView, which is identical between debug and release.
+The audience is XMLUI developers, who benefit from devtools being
+accessible.
+
+Cutting a new release:
+
+1. Bump `version` in `src-tauri/Cargo.toml` and
+   `src-tauri/tauri.conf.json`.
+2. Run `cargo build` to refresh `Cargo.lock`.
+3. Commit and push.
+4. Manually dispatch `.github/workflows/build.yml` from the GitHub
+   Actions UI with the tag string. The workflow is `workflow_dispatch`
+   only — it builds debug binaries for linux-amd64, macos-arm64,
+   macos-intel, and windows-amd64, generates SHA256SUMS, and attaches
+   `install.sh` / `install.ps1`.
+
+It's fine to leave `#[cfg(debug_assertions)]` gates in code (e.g.,
+`open_devtools`) — they work in the only build we ship.
 
 ## Charting
 

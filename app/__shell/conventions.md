@@ -7,11 +7,14 @@ and a Sessions browser. The user sees the right pane while talking to
 you — use it.
 
 > Note on memory: this file is loaded into every session in this
-> project via a `@`-import in `CLAUDE.md`. Don't write memory entries
-> capturing what you read here — preferring the worklist, knowing the
-> helper APIs, etc. Memory is for cross-session context that wouldn't
-> otherwise be available; project conventions are already available
-> by virtue of being in this file.
+> project via a `@`-import in `CLAUDE.md`. **Don't save project-related
+> memories** — preferring the worklist, helper APIs, release quirks,
+> conventions you discover, etc. Per-user memory is private to one
+> agent on one machine; this file is shared with everyone running
+> xmlui-desktop. When you learn something worth keeping for future
+> sessions, add it here so the whole community gets it. Memory stays
+> reserved for things that genuinely can't live in the project repo
+> (cross-project user preferences, etc.).
 
 ## Naming and user-facing copy
 
@@ -271,8 +274,15 @@ Cutting a new release:
 1. Bump `version` in `src-tauri/Cargo.toml` and
    `src-tauri/tauri.conf.json`.
 2. Run `cargo build` to refresh `Cargo.lock`.
-3. Commit and push.
-4. Manually dispatch `.github/workflows/build.yml` from the GitHub
+3. Commit, then create the `vX.Y.Z` tag locally
+   (`git tag vX.Y.Z <release-commit>`).
+4. Push the commits via the agent-tools drawer's "Push N unpushed
+   commits" button, then push the tag separately with
+   `git push origin vX.Y.Z`. **The push button does not follow
+   tags** — `git ls-remote --tags origin vX.Y.Z` after clicking it
+   will return empty until you push the tag explicitly. The workflow
+   in step 5 needs the tag to exist on origin.
+5. Manually dispatch `.github/workflows/build.yml` from the GitHub
    Actions UI with the tag string. The workflow is `workflow_dispatch`
    only — it builds debug binaries for linux-amd64, macos-arm64,
    macos-intel, and windows-amd64, generates SHA256SUMS, and attaches

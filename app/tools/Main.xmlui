@@ -66,13 +66,13 @@
     backgroundColor="$color-info-50"
     borderBottom="1px solid $color-info-200">
     <Heading level="h3">Configure agent coordination</Heading>
-    <Markdown content="The agent tools drawer hosts these views, all driven by data the agent produces or your interaction with it. The header at the top is pinned, so the 🎤 voice toggle and font-size controls stay reachable from any tab.
+    <Markdown content="The agent tools drawer hosts these views, all driven by data the agent produces or your interaction with it. The header at the top is pinned, so font-size controls (`A−` / `A+`), the 🎤 voice toggle, menu keystrokes (`1` / `2` for the agent's permission prompts), conversational replies (`Yes` / `No`), and `Esc` (interrupt) all stay reachable from any tab.
 
-- **Talk** — live transcript of the current session, with alternating user / assistant turns and a spinner that shows while you wait for a reply. Click 🎤 voice in the AppHeader to dictate from any tab; clicking it again sends the transcript as a fresh user turn. Yes / No / Esc buttons in Talk's own sticky header send one-click replies.
-- **Worklist** — renders `resources/proposal.json` as a checklist of pending items the agent has proposed. You triage with checkboxes; *Approve selected* and *Drop selected* round-trip the result back to the agent as a fresh user turn (via the `toTurn` shell helper). Optional feedback typed in the box rides along with the action.
+- **Talk** — live transcript of the current session, with alternating user / assistant turns and a spinner that shows while you wait for a reply. Click 🎤 voice in the AppHeader to dictate from any tab; clicking it again sends the transcript as a fresh user turn. Pasted screenshots render inline as clickable thumbnails (click for fullscreen).
+- **Worklist** — renders `resources/proposal.json` as a checklist of pending items the agent has proposed. You triage with checkboxes; *Talk to agent*, *Approve selected*, and *Drop selected* round-trip the result back to the agent as a fresh user turn (via the `toTurn` shell helper). Optional feedback typed in the box rides along with the action.
 - **Commits** — recent commits, with one-click push to origin when you are ahead.
 - **Sessions** — browse and search past agent sessions for this project. Claude Code and Codex histories are auto-detected from local transcripts.
-- **Issues** — list of open / closed GitHub issues for the current repo (via the local `gh` CLI), with a one-click button to open the New-issue page on github.com.
+- **Issues** — list of open / closed GitHub issues for the current repo (via the local `gh` CLI), with a one-click button to open the New-issue page on github.com. Click an issue to expand its body inline; pasted screenshots render as clickable thumbnails.
 - **README** — this project's README rendered for quick reference.
 
 Setting up writes:

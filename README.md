@@ -8,6 +8,11 @@ A desktop app that pairs an AI coding agent with the XMLUI app it's building.
   root), served via the binary's `xmlui://` URI scheme.
 - **File watcher** — as files in the project change, the right pane
   reloads automatically. No manual refresh.
+- **Agent-tools drawer** — toggle from the toolbar to open a side
+  panel with Talk (live transcript), Worklist (proposed → applied →
+  committed flow), Commits, Sessions, Issues, and README tabs.
+  Drives multi-step coordination between you and the agent without
+  typing in the terminal.
 
 The two panes can also talk: XMLUI components in the right pane post
 text back into the terminal via `window.toShell` / `window.toTurn`

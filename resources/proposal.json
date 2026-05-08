@@ -1,4 +1,11 @@
 {
-  "description": "",
-  "items": []
+  "description": "Drop the AppHeader and fold its A−/A+ controls into Talk's sticky header. Trade-off: A−/A+ become Talk-tab-only.",
+  "items": [
+    {
+      "id": "drop-appheader",
+      "file": "app/tools/Main.xmlui (remove AppHeader) + app/tools/components/Talk.xmlui (add A−/A+ buttons to sticky header)",
+      "before": "Main.xmlui has an <AppHeader> with 'Tools' label, A−, A+, and 🎤 voice buttons. The header takes a full row of vertical space at the top of the drawer iframe — and now that the voice button on it just navigates to /talk, the only unique buttons it adds are the font-size controls. Talk's StickyBox top already has Heading + Spinner + down-arrow + voice; the result is two sticky-ish rows stacked.",
+      "after": "Two sub-edits: (1) Main.xmlui — delete the entire <AppHeader>…</AppHeader> block (lines ~5–26) including the inner <Theme paddingHorizontal-Button-sm>. The XMLUI App still renders without it; the NavPanel's auto brand ('xmlui') and the Pages region remain. (2) Talk.xmlui — in the StickyBox top HStack, add two ghost Buttons before the spinner (or after the down-arrow — same row): label='A−', tooltip 'Decrease app font size', onClick=\"window.setAppFontSize(window.getAppFontSize() - 1)\"; label='A+', tooltip 'Increase app font size', onClick=\"window.setAppFontSize(window.getAppFontSize() + 1)\". Tradeoff: the font-size controls are only visible on the Talk tab; on Worklist/Commits/Sessions/README, the user can't adjust font without first navigating to Talk. The user accepted this in calling for 'everything into the transcript row'. No helpers.js change needed (setAppFontSize/getAppFontSize already exposed)."
+    }
+  ]
 }

@@ -361,6 +361,26 @@ window.addEventListener("message", async (event) => {
   applyFontSize(window.getAppFontSize());
 })();
 
+// Pin-to-bottom tracking for transcript-style views (Talk, etc).
+// _talkPinned reflects whether the user is currently within ~100px of
+// the bottom of the page. Auto-scroll-on-new-turn handlers consult
+// wasPinnedToBottom() before scrolling, so the user is never yanked
+// down while re-reading earlier content.
+(function () {
+  var PIN_THRESHOLD = 100;
+  window._talkPinned = true;
+  function recompute() {
+    var root = document.scrollingElement || document.documentElement || document.body;
+    if (!root) return;
+    var dist = root.scrollHeight - root.scrollTop - root.clientHeight;
+    window._talkPinned = dist < PIN_THRESHOLD;
+  }
+  window.addEventListener("scroll", recompute, { passive: true });
+  window.wasPinnedToBottom = function () {
+    return window._talkPinned !== false;
+  };
+})();
+
 // Surface JS errors and lifecycle events to the host log channel.
 window.addEventListener("error", (e) => {
   logToHost({

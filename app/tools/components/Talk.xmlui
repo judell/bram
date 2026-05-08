@@ -1,18 +1,67 @@
-<Component name="Talk">
+<Component name="Talk" var.turns="{sessionTurns(latestSession.value)}" var.recording="{false}">
   <DataSource
     id="latestSession"
     url="/__sessions/latest"
     pollIntervalInSeconds="2" />
 
-  <VStack padding="$space-6" gap="$space-4">
-    <HStack gap="$space-3" verticalAlignment="center">
-      <Heading level="h2">Latest response</Heading>
-      <Spinner
-        when="{isWaitingForAssistant(latestSession.value)}"
-        size="sm"
-        delay="{200}" />
-    </HStack>
-    <Markdown
-      content="{lastAssistantText(latestSession.value) || '(no assistant message yet)'}" />
+  <ChangeListener
+    listenTo="{turns.length}"
+    onDidChange="if (window.wasPinnedToBottom()) window.scrollAllToBottom()" />
+
+  <VStack padding="$space-6" gap="$space-3">
+    <StickyBox to="top">
+      <HStack gap="$space-3" verticalAlignment="center" paddingVertical="$space-2">
+        <Heading level="h2">Transcript</Heading>
+        <Spinner
+          when="{isWaitingForAssistant(latestSession.value)}"
+          size="sm"
+          delay="{200}" />
+        <Button
+          icon="down"
+          variant="ghost"
+          size="xs"
+          tooltip="Scroll to bottom"
+          onClick="window.scrollAllToBottom()" />
+        <Button
+          label="{recording ? '⏹ stop' : '🎤 voice'}"
+          variant="ghost"
+          size="xs"
+          tooltip="Voice input — click to start, click again to send"
+          onClick="recording ? (recording = false, voiceStop(t => { if (t) toTurn('voice: ' + t); })) : (voiceStart(), recording = true)" />
+      </HStack>
+    </StickyBox>
+
+    <Text
+      when="{!turns || turns.length === 0}"
+      color="$textColor-secondary">
+      (no messages yet)
+    </Text>
+
+    <Items data="{turns}">
+      <VStack
+        gap="$space-1"
+        padding="$space-3"
+        borderRadius="$borderRadius"
+        backgroundColor="{$item.role === 'user' ? '$color-info-50' : '$color-surface-50'}">
+        <Text
+          fontSize="$fontSize-sm"
+          fontWeight="$fontWeight-bold"
+          color="{$item.role === 'user' ? '$color-info-700' : '$color-success-700'}"
+          value="{$item.role === 'user' ? 'You' : 'Claude'}" />
+        <Markdown
+          content="{$item.role === 'user' ? formatUserTurnForTranscript($item.text) : $item.text}" />
+      </VStack>
+    </Items>
+
+    <StickyBox to="bottom">
+      <HStack horizontalAlignment="end" paddingVertical="$space-2">
+        <Button
+          icon="up"
+          variant="ghost"
+          size="xs"
+          tooltip="Scroll to top"
+          onClick="window.scrollAllToTop()" />
+      </HStack>
+    </StickyBox>
   </VStack>
 </Component>

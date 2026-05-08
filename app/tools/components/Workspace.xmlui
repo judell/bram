@@ -60,11 +60,15 @@
                   paddingTop="$space-2">
                   <VStack gap="$space-1" when="{$item.before}">
                     <Text fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" value="Before" />
-                    <Markdown content="{$item.before}" />
+                    <Items data="{$item.before.split('\n').filter(l => l.trim())}">
+                      <Text value="{$item}" whiteSpace="pre-wrap" />
+                    </Items>
                   </VStack>
                   <VStack gap="$space-1" when="{$item.after}">
                     <Text fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" value="After" />
-                    <Markdown content="{$item.after}" />
+                    <Items data="{$item.after.split('\n').filter(l => l.trim())}">
+                      <Text value="{$item}" whiteSpace="pre-wrap" />
+                    </Items>
                   </VStack>
                 </VStack>
               </VStack>

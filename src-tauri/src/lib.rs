@@ -75,6 +75,20 @@ struct PtyState {
 #[derive(Default)]
 struct AppState(Mutex<Option<PtyState>>);
 
+// Lifecycle owner for an optional whisper-server child. Spawn via the
+// whisper_start command; killed by whisper_stop or on app exit.
+#[derive(Default)]
+struct WhisperState(Mutex<Option<std::process::Child>>);
+
+fn expand_tilde(p: &str) -> String {
+    if let Some(rest) = p.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return format!("{}/{}", home, rest);
+        }
+    }
+    p.to_string()
+}
+
 // Active project root — resolved once at startup from a CLI arg
 // (xmlui-desktop /path/to/project) or std::env::current_dir(). Read by
 // the HTTP server, watcher, git/sessions/PTY commands.
@@ -423,6 +437,86 @@ fn pty_resize(cols: u16, rows: u16, state: State<'_, AppState>) -> Result<(), St
             pixel_height: 0,
         })
         .map_err(|e| e.to_string())
+}
+
+#[derive(serde::Serialize)]
+struct WhisperStatusReport {
+    running: bool,
+    pid: Option<u32>,
+}
+
+#[tauri::command]
+fn whisper_start(
+    model_path: String,
+    state: State<'_, WhisperState>,
+) -> Result<u32, String> {
+    let mut guard = state.0.lock().unwrap();
+    if let Some(child) = guard.as_mut() {
+        match child.try_wait() {
+            Ok(None) => return Err("whisper-server already running".into()),
+            Ok(Some(_)) => {}
+            Err(_) => {}
+        }
+    }
+    let model = expand_tilde(&model_path);
+    let candidates = ["whisper-server", "/opt/homebrew/bin/whisper-server"];
+    let mut last_err = String::new();
+    for bin in &candidates {
+        match std::process::Command::new(bin)
+            .arg("-m")
+            .arg(&model)
+            .arg("--convert")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(child) => {
+                let pid = child.id();
+                eprintln!("[whisper] spawned {} pid={} -m {}", bin, pid, model);
+                *guard = Some(child);
+                return Ok(pid);
+            }
+            Err(e) => last_err = format!("{}: {}", bin, e),
+        }
+    }
+    Err(format!("failed to spawn whisper-server: {}", last_err))
+}
+
+#[tauri::command]
+fn whisper_stop(state: State<'_, WhisperState>) -> Result<(), String> {
+    let mut guard = state.0.lock().unwrap();
+    if let Some(mut child) = guard.take() {
+        let pid = child.id();
+        let _ = child.kill();
+        let _ = child.wait();
+        eprintln!("[whisper] killed pid={}", pid);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn whisper_status(state: State<'_, WhisperState>) -> WhisperStatusReport {
+    let mut guard = state.0.lock().unwrap();
+    if let Some(child) = guard.as_mut() {
+        match child.try_wait() {
+            Ok(None) => WhisperStatusReport {
+                running: true,
+                pid: Some(child.id()),
+            },
+            _ => {
+                *guard = None;
+                WhisperStatusReport {
+                    running: false,
+                    pid: None,
+                }
+            }
+        }
+    } else {
+        WhisperStatusReport {
+            running: false,
+            pid: None,
+        }
+    }
 }
 
 #[tauri::command]
@@ -1495,6 +1589,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(AppState::default())
+        .manage(WhisperState::default())
         .manage(ActiveProjectState(Mutex::new(initial_proj)))
         .manage(RightPaneUrlState(Mutex::new(String::new())))
         .invoke_handler(tauri::generate_handler![
@@ -1507,6 +1602,9 @@ pub fn run() {
             save_trace_export,
             git_push,
             get_right_pane_url,
+            whisper_start,
+            whisper_stop,
+            whisper_status,
         ])
         .setup(move |app| {
             use tauri::Emitter;
@@ -1623,6 +1721,18 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                let state = app.state::<WhisperState>();
+                let mut guard = state.0.lock().unwrap();
+                if let Some(mut child) = guard.take() {
+                    let pid = child.id();
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    eprintln!("[whisper] killed pid={} on exit", pid);
+                }
+            }
+        });
 }

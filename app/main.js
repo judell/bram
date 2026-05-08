@@ -336,3 +336,258 @@ const { listen } = window.__TAURI__.event;
   listen("right-pane-reload", reloadRightPaneOnly);
   listen("tools-pane-reload", reloadAll);
 })();
+
+(() => {
+  const WHISPER_HOST = "http://127.0.0.1:8080";
+  const WHISPER_URL = WHISPER_HOST + "/inference";
+  const MODEL_PATH = "~/.local/share/whisper-models/ggml-small.en.bin";
+  const READY_TIMEOUT_MS = 15000;
+  const READY_POLL_MS = 300;
+
+  const overlay = document.getElementById("voice-overlay");
+  const input = document.getElementById("voice-input");
+  const status = document.getElementById("voice-status");
+  const openBtn = document.getElementById("voice-open");
+  const recordBtn = document.getElementById("voice-record");
+  const sendBtn = document.getElementById("voice-send");
+  const cancelBtn = document.getElementById("voice-cancel");
+  const serverStatus = document.getElementById("voice-server-status");
+  const serverStartBtn = document.getElementById("voice-server-start");
+  const serverStopBtn = document.getElementById("voice-server-stop");
+  const serverRestartBtn = document.getElementById("voice-server-restart");
+  if (
+    !overlay || !input || !status || !openBtn || !recordBtn || !sendBtn ||
+    !cancelBtn || !serverStatus || !serverStartBtn || !serverStopBtn ||
+    !serverRestartBtn
+  ) {
+    return;
+  }
+
+  let mediaRecorder = null;
+  let audioChunks = [];
+  let stream = null;
+  let serverState = "stopped";
+
+  const setStatus = (text, kind) => {
+    status.textContent = text;
+    status.dataset.kind = kind || "idle";
+  };
+
+  const setServerState = (state, label) => {
+    serverState = state;
+    serverStatus.dataset.state = state;
+    serverStatus.textContent =
+      "Server: " + (label || state.charAt(0).toUpperCase() + state.slice(1));
+    serverStartBtn.disabled = state === "running" || state === "starting";
+    serverStopBtn.disabled = state === "stopped" || state === "starting";
+    serverRestartBtn.disabled = state === "starting";
+    recordBtn.disabled = state !== "running";
+  };
+
+  const waitForServerReady = async () => {
+    const deadline = Date.now() + READY_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      try {
+        const res = await fetch(WHISPER_HOST + "/", { method: "GET" });
+        if (res.ok) return true;
+      } catch (_) {}
+      await new Promise((r) => setTimeout(r, READY_POLL_MS));
+    }
+    return false;
+  };
+
+  const refreshServerStatus = async () => {
+    try {
+      const r = await invoke("whisper_status");
+      setServerState(r && r.running ? "running" : "stopped");
+    } catch (e) {
+      console.error("whisper_status", e);
+      setServerState("stopped");
+    }
+  };
+
+  const startServer = async () => {
+    setServerState("starting");
+    setStatus("Starting whisper-server…", "working");
+    try {
+      await invoke("whisper_start", { modelPath: MODEL_PATH });
+    } catch (e) {
+      setServerState("failed", "Failed");
+      setStatus("Could not start: " + e, "error");
+      return;
+    }
+    const ready = await waitForServerReady();
+    if (ready) {
+      setServerState("running");
+      setStatus("Ready", "idle");
+    } else {
+      setServerState("failed", "Failed");
+      setStatus(
+        "Server did not become ready within " +
+          READY_TIMEOUT_MS / 1000 +
+          "s. Check stderr for whisper-server output.",
+        "error",
+      );
+    }
+  };
+
+  const stopServer = async () => {
+    try {
+      await invoke("whisper_stop");
+    } catch (e) {
+      console.error("whisper_stop", e);
+    }
+    setServerState("stopped");
+    setStatus("", "idle");
+  };
+
+  const restartServer = async () => {
+    await stopServer();
+    await startServer();
+  };
+
+  const setRecordLabel = (recording) => {
+    recordBtn.textContent = recording ? "⏹ Stop" : "🎤 Record";
+  };
+
+  const stopStream = () => {
+    if (stream) {
+      stream.getTracks().forEach((t) => t.stop());
+      stream = null;
+    }
+  };
+
+  const open = () => {
+    overlay.classList.remove("hidden");
+    setStatus("", "idle");
+    setRecordLabel(false);
+    refreshServerStatus();
+    input.focus();
+  };
+
+  const close = () => {
+    if (mediaRecorder && mediaRecorder.state !== "inactive") {
+      try { mediaRecorder.stop(); } catch (_) {}
+    }
+    stopStream();
+    overlay.classList.add("hidden");
+    overlay.classList.remove("recording");
+    input.value = "";
+    setStatus("", "idle");
+    setRecordLabel(false);
+    term.focus();
+  };
+
+  const send = () => {
+    const text = input.value;
+    if (text.length === 0) {
+      close();
+      return;
+    }
+    invoke("pty_write", {
+      data: "\x1b[200~" + text + "\x1b[201~\r",
+    }).catch((e) => console.error("pty_write voice", e));
+    close();
+  };
+
+  const transcribe = async (blob) => {
+    setStatus("Transcribing…", "working");
+    try {
+      const formData = new FormData();
+      formData.append("file", blob, "recording.webm");
+      formData.append("response_format", "json");
+      const res = await fetch(WHISPER_URL, { method: "POST", body: formData });
+      if (!res.ok) {
+        throw new Error("HTTP " + res.status + " " + res.statusText);
+      }
+      const data = await res.json();
+      const transcript = (data.text || "").trim();
+      input.value = input.value
+        ? input.value.replace(/\s+$/, "") + " " + transcript
+        : transcript;
+      setStatus("Ready", "idle");
+      input.focus();
+    } catch (e) {
+      setStatus(
+        "Whisper unreachable (" +
+          e.message +
+          "). Click Start above to launch the server.",
+        "error",
+      );
+      setServerState("stopped");
+    }
+  };
+
+  const startRecording = async () => {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) {
+      setStatus("Microphone access denied: " + e.message, "error");
+      return;
+    }
+    audioChunks = [];
+    mediaRecorder = new MediaRecorder(stream);
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) audioChunks.push(e.data);
+    };
+    mediaRecorder.onstop = () => {
+      stopStream();
+      overlay.classList.remove("recording");
+      setRecordLabel(false);
+      const blob = new Blob(audioChunks, { type: "audio/webm" });
+      audioChunks = [];
+      if (blob.size === 0) {
+        setStatus("No audio captured", "error");
+        return;
+      }
+      transcribe(blob);
+    };
+    mediaRecorder.start();
+    overlay.classList.add("recording");
+    setRecordLabel(true);
+    setStatus("Recording… click Stop when done", "recording");
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorder && mediaRecorder.state === "recording") {
+      mediaRecorder.stop();
+    }
+  };
+
+  const toggleRecording = () => {
+    if (overlay.classList.contains("recording")) stopRecording();
+    else startRecording();
+  };
+
+  openBtn.addEventListener("click", open);
+  cancelBtn.addEventListener("click", close);
+  sendBtn.addEventListener("click", send);
+  recordBtn.addEventListener("click", toggleRecording);
+  serverStartBtn.addEventListener("click", startServer);
+  serverStopBtn.addEventListener("click", stopServer);
+  serverRestartBtn.addEventListener("click", restartServer);
+
+  input.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") {
+      ev.preventDefault();
+      close();
+    } else if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) {
+      ev.preventDefault();
+      send();
+    }
+  });
+
+  overlay.addEventListener("click", (ev) => {
+    if (ev.target === overlay) close();
+  });
+
+  window.addEventListener("keydown", (ev) => {
+    if (ev.key === "d" && ev.shiftKey && (ev.metaKey || ev.ctrlKey)) {
+      ev.preventDefault();
+      if (overlay.classList.contains("hidden")) open();
+      else close();
+    }
+  });
+
+  setServerState("stopped");
+})();

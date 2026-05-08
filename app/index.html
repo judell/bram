@@ -27,6 +27,32 @@
       <button id="font-larger" title="Increase terminal font size (Cmd+=)">
         A+
       </button>
+      <button id="voice-open" title="Voice input via local Whisper (Cmd+Shift+D)">
+        &#x1F3A4; voice
+      </button>
+    </div>
+    <div id="voice-overlay" class="voice-overlay hidden" role="dialog" aria-label="Voice input">
+      <div class="card">
+        <h2>Voice input</h2>
+        <p class="hint">Click Record, speak, click Stop. The transcript appears below — review and edit, then Send (or Cmd/Ctrl+Enter) to submit to the terminal as a fresh user turn. Esc cancels.</p>
+        <div class="server-row">
+          <span id="voice-server-status" class="server-status" data-state="stopped">Server: Stopped</span>
+          <span class="server-actions">
+            <button id="voice-server-start">Start</button>
+            <button id="voice-server-stop">Stop</button>
+            <button id="voice-server-restart">Restart</button>
+          </span>
+        </div>
+        <div id="voice-status" class="status" data-kind="idle"></div>
+        <div class="record-row">
+          <button id="voice-record" class="record">&#x1F3A4; Record</button>
+        </div>
+        <textarea id="voice-input" placeholder="Transcript will appear here…"></textarea>
+        <div class="actions">
+          <button id="voice-cancel">Cancel</button>
+          <button id="voice-send" class="primary">Send</button>
+        </div>
+      </div>
     </div>
     <div class="split">
       <div id="terminal" class="pane pane-left"></div>

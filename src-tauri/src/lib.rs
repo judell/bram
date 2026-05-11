@@ -80,10 +80,18 @@ struct AppState(Mutex<Option<PtyState>>);
 #[derive(Default)]
 struct WhisperState(Mutex<Option<std::process::Child>>);
 
+// Cross-platform home directory: $HOME on Unix, %USERPROFILE% on Windows.
+// Returned as PathBuf so callers can .join() directly without re-parsing.
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
 fn expand_tilde(p: &str) -> String {
     if let Some(rest) = p.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{}/{}", home, rest);
+        if let Some(home) = home_dir() {
+            return format!("{}/{}", home.display(), rest);
         }
     }
     p.to_string()
@@ -499,7 +507,7 @@ fn pty_spawn(
     }
     if let Some(root) = project_root(Some(&app)) {
         command.cwd(root);
-    } else if let Ok(home) = std::env::var("HOME") {
+    } else if let Some(home) = home_dir() {
         command.cwd(home);
     }
     for (k, v) in std::env::vars() {
@@ -758,8 +766,7 @@ fn save_trace_export(filename: String, content: String, mime_type: String) -> Re
         })
         .collect::<String>();
 
-    let base_dir = std::env::var_os("HOME")
-        .map(PathBuf::from)
+    let base_dir = home_dir()
         .map(|home| home.join("Downloads"))
         .filter(|path| path.exists())
         .or_else(|| std::env::current_dir().ok())
@@ -841,8 +848,8 @@ fn claude_sessions_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf,
     let root = project_root(Some(app)).ok_or("could not resolve project root")?;
     let abs = strip_unc_prefix(root.canonicalize().map_err(|e| e.to_string())?);
     let encoded = encode_path_for_filename(&abs);
-    let home = std::env::var("HOME").map_err(|_| "no HOME")?;
-    Ok(PathBuf::from(home).join(".claude").join("projects").join(encoded))
+    let home = home_dir().ok_or("no HOME or USERPROFILE")?;
+    Ok(home.join(".claude").join("projects").join(encoded))
 }
 
 // Best-effort label for a session: prefers the most recent custom-title record
@@ -923,8 +930,8 @@ fn canonical_path_string(path: &Path) -> String {
 }
 
 fn codex_session_index() -> Result<HashMap<String, String>, String> {
-    let home = std::env::var("HOME").map_err(|_| "no HOME")?;
-    let path = PathBuf::from(home).join(".codex").join("session_index.jsonl");
+    let home = home_dir().ok_or("no HOME or USERPROFILE")?;
+    let path = home.join(".codex").join("session_index.jsonl");
     let file = match std::fs::File::open(&path) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
@@ -1103,8 +1110,8 @@ fn discover_codex_sessions<R: tauri::Runtime>(
 ) -> Result<Vec<SessionRecord>, String> {
     let project = project_root(Some(app)).ok_or("could not resolve project root")?;
     let project_cwd = canonical_path_string(&project);
-    let home = std::env::var("HOME").map_err(|_| "no HOME")?;
-    let sessions_root = PathBuf::from(home).join(".codex").join("sessions");
+    let home = home_dir().ok_or("no HOME or USERPROFILE")?;
+    let sessions_root = home.join(".codex").join("sessions");
     let titles = codex_session_index()?;
     let mut paths = Vec::new();
     collect_codex_session_paths(&sessions_root, &mut paths)?;

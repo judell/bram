@@ -5228,7 +5228,7 @@ dependencies = [
 
 [[package]]
 name = "xmlui-desktop"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "include_dir",
  "notify",

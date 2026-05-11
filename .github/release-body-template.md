@@ -9,7 +9,7 @@ Now continue with the steps here.
 ### macOS / Linux
 
 ```bash
-curl -fsSL https://github.com/judell/xmlui-desktop/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/judell/xmlui-desktop/releases/latest/download/install.sh | bash
 ```
 
 The script detects your platform, verifies the archive's SHA256 against the published `SHA256SUMS`, extracts the binary, and copies it to `/usr/local/bin` (if writable) or `~/.local/bin`. On macOS it also clears the `com.apple.quarantine` xattr. No `sudo` required.
@@ -63,5 +63,6 @@ ${CHANGELOG}
 
 - **`xmlui-desktop` not found on PATH.** Re-run the install script, or follow its printed PATH advice.
 - **macOS Gatekeeper blocks first launch.** The install script clears the quarantine xattr automatically. For browser downloads, run the `xattr -d com.apple.quarantine` command above.
+- **Linux/WSL: `error while loading shared libraries: libwebkit2gtk-4.1.so.0`.** Tauri's WebView dynamically links WebKitGTK. On Ubuntu/Debian 24.04+, install the runtime libs with `sudo apt install -y libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 librsvg2-2`. On Ubuntu 22.04, the `4.1` package isn't in the repos — upgrade to 24.04. WSL2 also needs WSLg (ships with Windows 11 and recent Windows 10 builds).
 - **Update.** Re-run the install command.
 - **Uninstall.** Delete the binary from `/usr/local/bin/xmlui-desktop`, `~/.local/bin/xmlui-desktop`, or `~/bin/xmlui-desktop.exe`.

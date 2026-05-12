@@ -1914,14 +1914,11 @@ fn read_latest_session_pending<R: tauri::Runtime>(
             break;
         }
         let arr = content.unwrap();
-        let has_text = arr
-            .iter()
-            .any(|c| c.get("type").and_then(|t| t.as_str()) == Some("text"));
         let has_tool_use = arr
             .iter()
             .any(|c| c.get("type").and_then(|t| t.as_str()) == Some("tool_use"));
-        if has_text || !has_tool_use {
-            last_break_reason = if has_text { "assistant-has-text" } else { "assistant-no-tool-use" };
+        if !has_tool_use {
+            last_break_reason = "assistant-no-tool-use";
             break;
         }
         // Return the first tool_use whose id is NOT in `resolved`.

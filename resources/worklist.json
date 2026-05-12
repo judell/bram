@@ -1,12 +1,4 @@
 {
-  "description": "Talk-pane perf investigation, remaining items. talk-clear-pending-on-jsonl-match has been refined twice and still has intermittent repro; latest tweak normalizes whitespace on both sides of the match. talk-scroll-on-pending-appear is new and not yet exercised.",
-  "items": [
-    {
-      "id": "talk-scroll-on-pending-appear",
-      "status": "applied",
-      "file": "app/tools/components/Talk.xmlui",
-      "before": "When the approval menu (pendingPoll.value.pending) appears below the last turn, the Talk pane doesn't scroll to keep the menu in view — content has grown but the existing scroll-to-bottom listener only fires on turns.length changes (Talk.xmlui:27-29). User has to manually scroll down to see / interact with the new menu.",
-      "after": "Added a ChangeListener keyed on pendingPoll.value && pendingPoll.value.pending && pendingPoll.value.pending.id that calls window.scrollAllToBottom() when the pending tool id changes. Guarded with window.wasPinnedToBottom() so manual scroll-up isn't yanked back. Separate listener from the existing turns.length / pendingUserText scroll triggers."
-    }
-  ]
+  "description": "",
+  "items": []
 }

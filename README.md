@@ -153,6 +153,21 @@ microphone permission. We haven't actually tested any of this; if you
 try it, please open an issue with what worked or didn't so we can
 firm up these instructions.
 
+## Screen capture
+
+Click the 📸 button (in the parent shell's toolbar or in the agent
+tools drawer's AppHeader) to grab an interactive rect-select
+screenshot. xmlui-desktop writes the PNG to the OS app cache and
+injects `Read this screenshot: @<path>` into the terminal as a fresh
+user turn, so the agent picks it up via its `Read` tool. No install
+ceremony — it shells out to a system binary.
+
+Currently **macOS-only**: the implementation invokes
+`/usr/sbin/screencapture -i`, which ships with macOS. On Linux and
+Windows the 📸 button returns "screenshot capture is currently
+macOS-only"; if you want a port (e.g. via `grim` / `slurp` on Wayland
+or a PowerShell snippet on Windows), please open an issue.
+
 ## Working with a real backend
 
 xmlui-desktop binds the right-pane HTTP server to

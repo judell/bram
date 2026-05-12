@@ -451,6 +451,10 @@ function sessionTurns(jsonlText) {
   if (sessionTurns._cacheKey === jsonlText && sessionTurns._cacheValue) {
     return sessionTurns._cacheValue;
   }
+  // Instrumentation: log cache-miss parses. Tracks how often we do real
+  // work and how long it takes.
+  const _t0 = (typeof performance !== 'undefined') ? performance.now() : 0;
+  sessionTurns._parseCount = (sessionTurns._parseCount || 0) + 1;
   const turns = [];
   // tool_use_id → entry, so a later user-turn tool_result can flag the
   // originating tool as errored.
@@ -544,5 +548,19 @@ function sessionTurns(jsonlText) {
   }
   sessionTurns._cacheKey = jsonlText;
   sessionTurns._cacheValue = turns;
+  if (_t0) {
+    const _elapsed = performance.now() - _t0;
+    if (_elapsed > 5) {
+      try {
+        logToHost({
+          kind: 'sessionTurns-parse',
+          ms: Math.round(_elapsed),
+          len: jsonlText.length,
+          turns: turns.length,
+          n: sessionTurns._parseCount,
+        });
+      } catch (e) {}
+    }
+  }
   return turns;
 }

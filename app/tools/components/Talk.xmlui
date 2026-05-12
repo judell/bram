@@ -3,13 +3,13 @@
   var.turns="{sessionTurns(lastJsonl)}"
   var.fullscreenImage="{null}"
   var.openToolId="{null}"
-  var.turnLimit="{100}"
+  var.turnLimit="{50}"
   var.sessionTick="{0}"
   var.showAll="{false}">
   <DataSource
     id="sessionMeta"
     url="/__sessions/latest-meta"
-    pollIntervalInSeconds="1" />
+    pollIntervalInSeconds="0.5" />
   <DataSource
     id="pendingPoll"
     url="/__sessions/latest-pending"
@@ -21,7 +21,7 @@
   <DataSource
     id="latestSession"
     url="/__sessions/latest-tail"
-    queryParams="{{ t: sessionTick, lines: showAll ? 'all' : 200 }}"
+    queryParams="{{ t: '' + sessionTick, lines: showAll ? 'all' : '200' }}"
     dataType="text"
     structuralSharing="false"
   />
@@ -29,6 +29,10 @@
   <ChangeListener
     listenTo="{turns.length}"
     onDidChange="if (window.wasPinnedToBottom()) window.scrollAllToBottom()" />
+
+  <ChangeListener
+    listenTo="{pendingUserText}"
+    onDidChange="if (pendingUserText &amp;&amp; window.wasPinnedToBottom()) window.scrollAllToBottom()" />
 
   <ChangeListener
     listenTo="{turns.filter(t => t.role === 'user' && !t.text.startsWith('[Request interrupted')).length}"

@@ -405,6 +405,12 @@ window.addEventListener("message", (ev) => {
   const iframe = document.getElementById("right-pane");
   if (!iframe || typeof ResizeObserver !== "function") return;
   const broadcast = () => {
+    // Drag-throttle: while a splitter is being dragged, broadcasting on
+    // every pointer-move event cascades through both iframes' reactivity
+    // and locks up the UI. The class is set by the v-splitter and
+    // h-splitter handlers; cleared on pointerup. We broadcast once on
+    // release via the pointerup handler below.
+    if (document.body.classList.contains("splitter-dragging")) return;
     const rect = iframe.getBoundingClientRect();
     const payload = {
       type: "right-pane-size-changed",
@@ -420,6 +426,14 @@ window.addEventListener("message", (ev) => {
     }
   };
   new ResizeObserver(broadcast).observe(iframe);
+  // After a splitter drag ends, fire one final broadcast so subscribers
+  // see the post-drag size. Using capture phase + body-level listener so
+  // we don't have to plumb through every splitter handler.
+  document.addEventListener("pointerup", () => {
+    // The class is removed by the splitter handlers' onUp; defer one
+    // frame to make sure that's happened, then broadcast.
+    requestAnimationFrame(broadcast);
+  });
 })();
 
 // Right-pane base URL is provisioned by the Rust backend on startup

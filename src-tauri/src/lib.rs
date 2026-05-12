@@ -1674,11 +1674,42 @@ fn read_session<R: tauri::Runtime>(
 
 fn read_latest_session<R: tauri::Runtime>(
     app: &AppHandle<R>,
-    preferred: Option<SessionProvider>,
+    _preferred: Option<SessionProvider>,
 ) -> Result<Vec<u8>, String> {
-    let (_, sessions) = sessions_for_provider(app, preferred)?;
-    let session = sessions.first().ok_or("no sessions found")?;
-    std::fs::read(&session.path).map_err(|e| e.to_string())
+    let path = latest_claude_session_path(app)?.ok_or("no sessions found")?;
+    std::fs::read(&path).map_err(|e| e.to_string())
+}
+
+// Fast lookup for the most-recent Claude session JSONL by mtime alone.
+// Avoids `discover_claude_sessions` which reads each file to extract a
+// title — fine for the Sessions tab but catastrophic to call on every
+// pending-poll (60+ sessions × multi-MB each = ~1GB of disk I/O per
+// call). Latest-* endpoints only need the path; titles are unused.
+fn latest_claude_session_path<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let dir = claude_sessions_dir(app)?;
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    };
+    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else { continue };
+        let Ok(mtime) = metadata.modified() else { continue };
+        match best {
+            None => best = Some((mtime, path)),
+            Some((bt, _)) if mtime > bt => best = Some((mtime, path)),
+            _ => {}
+        }
+    }
+    Ok(best.map(|(_, p)| p))
 }
 
 // Tail variant: return only the last N records of the JSONL. Lets Talk
@@ -1687,13 +1718,12 @@ fn read_latest_session<R: tauri::Runtime>(
 // proportional to N, not file size.
 fn read_latest_session_tail<R: tauri::Runtime>(
     app: &AppHandle<R>,
-    preferred: Option<SessionProvider>,
+    _preferred: Option<SessionProvider>,
     lines: usize,
 ) -> Result<Vec<u8>, String> {
     use std::io::{Read, Seek, SeekFrom};
-    let (_, sessions) = sessions_for_provider(app, preferred)?;
-    let session = sessions.first().ok_or("no sessions found")?;
-    let mut file = std::fs::File::open(&session.path).map_err(|e| e.to_string())?;
+    let path = latest_claude_session_path(app)?.ok_or("no sessions found")?;
+    let mut file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
     let file_size = file
         .metadata()
         .map_err(|e| e.to_string())?
@@ -1743,12 +1773,12 @@ fn read_latest_session_tail<R: tauri::Runtime>(
 // cheap to poll aggressively (drives Talk's approval-menu render).
 fn read_latest_session_pending<R: tauri::Runtime>(
     app: &AppHandle<R>,
-    preferred: Option<SessionProvider>,
+    _preferred: Option<SessionProvider>,
 ) -> Result<Vec<u8>, String> {
     use std::io::{Read, Seek, SeekFrom};
-    let (_, sessions) = sessions_for_provider(app, preferred)?;
-    let session = sessions.first().ok_or("no sessions found")?;
-    let mut file = std::fs::File::open(&session.path).map_err(|e| e.to_string())?;
+    let _start = std::time::Instant::now();
+    let path = latest_claude_session_path(app)?.ok_or("no sessions found")?;
+    let mut file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
     let file_size = file.metadata().map_err(|e| e.to_string())?.len();
     let want: u64 = 64 * 1024;
     let read_from = file_size.saturating_sub(want);
@@ -1797,7 +1827,17 @@ fn read_latest_session_pending<R: tauri::Runtime>(
         break;
     }
     let body = serde_json::json!({ "pending": pending });
-    serde_json::to_vec(&body).map_err(|e| e.to_string())
+    let result = serde_json::to_vec(&body).map_err(|e| e.to_string());
+    let elapsed = _start.elapsed();
+    if elapsed > std::time::Duration::from_millis(10) {
+        eprintln!(
+            "[pending-endpoint] slow: {}ms (file_size={}, tail_read={})",
+            elapsed.as_millis(),
+            file_size,
+            file_size - read_from
+        );
+    }
+    result
 }
 
 // Cheap variant for polling: just the file size + mtime. Lets Talk
@@ -1806,11 +1846,10 @@ fn read_latest_session_pending<R: tauri::Runtime>(
 // real fetch only when size has changed.
 fn read_latest_session_meta<R: tauri::Runtime>(
     app: &AppHandle<R>,
-    preferred: Option<SessionProvider>,
+    _preferred: Option<SessionProvider>,
 ) -> Result<Vec<u8>, String> {
-    let (_, sessions) = sessions_for_provider(app, preferred)?;
-    let session = sessions.first().ok_or("no sessions found")?;
-    let md = std::fs::metadata(&session.path).map_err(|e| e.to_string())?;
+    let path = latest_claude_session_path(app)?.ok_or("no sessions found")?;
+    let md = std::fs::metadata(&path).map_err(|e| e.to_string())?;
     let mtime = md
         .modified()
         .ok()
@@ -2538,11 +2577,17 @@ fn route_request<R: tauri::Runtime>(
                     lines_param = Some(percent_decode(v));
                 }
             }
+            eprintln!("[latest-tail] query={:?} lines_param={:?}", query, lines_param);
+            // Default-safe: when lines is absent or unparseable, tail to
+            // the last 200 records. `?lines=all` is the only way to
+            // request the full file via this route. Prevents accidental
+            // 17MB fetches when XMLUI doesn't pass our queryParam.
             let body = match lines_param.as_deref() {
-                Some("all") | None => read_latest_session(app, provider),
+                Some("all") => read_latest_session(app, provider),
+                None => read_latest_session_tail(app, provider, 200),
                 Some(s) => match s.parse::<usize>() {
                     Ok(n) => read_latest_session_tail(app, provider, n),
-                    Err(_) => read_latest_session(app, provider),
+                    Err(_) => read_latest_session_tail(app, provider, 200),
                 },
             };
             ("text/plain; charset=utf-8", body)

@@ -412,17 +412,28 @@ window.scrollAllToBottom = function () {
   if (root) {
     window.scrollTo({ top: root.scrollHeight, behavior: "smooth" });
   }
-
-  var nodes = document.querySelectorAll("*");
-  for (var i = 0; i < nodes.length; i += 1) {
-    var el = nodes[i];
-    if (!el) continue;
-    if (el.scrollHeight > el.clientHeight + 8) {
-      try {
-        el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-      } catch (e) {
-        el.scrollTop = el.scrollHeight;
+  // Cache the inner scrollable elements after the first scan; querySelectorAll('*')
+  // on a deep DOM is expensive when fired on every poll cycle. The list rarely
+  // changes — when it does, the worst case is a missed inner scroll until the
+  // next page load.
+  if (!window._scrollables) {
+    var nodes = document.querySelectorAll("*");
+    var found = [];
+    for (var i = 0; i < nodes.length; i += 1) {
+      var el = nodes[i];
+      if (el && el.scrollHeight > el.clientHeight + 8) {
+        found.push(el);
       }
+    }
+    window._scrollables = found;
+  }
+  for (var j = 0; j < window._scrollables.length; j += 1) {
+    var sc = window._scrollables[j];
+    if (!sc) continue;
+    try {
+      sc.scrollTo({ top: sc.scrollHeight, behavior: "smooth" });
+    } catch (e) {
+      sc.scrollTop = sc.scrollHeight;
     }
   }
 };

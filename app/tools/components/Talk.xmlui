@@ -37,6 +37,10 @@
     onDidChange="(c) => { try { logToHost({ kind: 'pendingPoll-transition', oldId: c.prevValue || null, newId: c.newValue || null, name: (pendingPoll.value &amp;&amp; pendingPoll.value.pending &amp;&amp; pendingPoll.value.pending.name) || null }) } catch (e) {}; if (window.wasPinnedToBottom()) window.scrollAllToBottom() }" />
 
   <ChangeListener
+    listenTo="{(isWaitingForAssistant(lastJsonl) || pendingUserText) &amp;&amp; !escSuppressed &amp;&amp; !(pendingPoll.value &amp;&amp; pendingPoll.value.pending)}"
+    onDidChange="(c) => { try { logToHost({ kind: 'spinner-state', visible: !!c.newValue, isWaiting: isWaitingForAssistant(lastJsonl), pendingUserText: !!pendingUserText, escSuppressed: escSuppressed, hasPending: !!(pendingPoll.value &amp;&amp; pendingPoll.value.pending) }) } catch (e) {} }" />
+
+  <ChangeListener
     listenTo="{turns.filter(t => t.role === 'user' && !t.text.startsWith('[Request interrupted')).length}"
     onDidChange="escSuppressed = false" />
 

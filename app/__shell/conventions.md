@@ -2,8 +2,9 @@
 
 xmlui-desktop is a **workspace for XMLUI development with AI agents**.
 The shell puts a real terminal alongside an XMLUI surface, plus an
-"agent tools" drawer that includes a Worklist (pending items + commits)
-and a Sessions browser. The user sees the right pane while talking to
+"agent tools" drawer that includes a Worklist (pending items + commits),
+a Sessions browser, and a Context viewer (CLAUDE.md + memory + hooks +
+settings, searchable). The user sees the right pane while talking to
 you — use it.
 
 > Note on memory: this file is loaded into every session in this

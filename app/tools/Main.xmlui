@@ -133,6 +133,7 @@
 - **Commits** — recent commits, with one-click push to origin when you are ahead.
 - **Issues** — list of open / closed GitHub issues for the current repo (via the local `gh` CLI), with a one-click button to open the New-issue page on github.com. Click an issue to expand its body inline; pasted screenshots render as clickable thumbnails.
 - **Sessions** — browse and search past agent sessions for this project. Claude Code and Codex histories are auto-detected from local transcripts.
+- **Context** — see what Claude Code is loading for this project (CLAUDE.md + one-hop @-imports, the per-project memory tree, hooks, settings) with substring search across all four and grep -C style hit snippets. Cross-references inside memory files (e.g. MEMORY.md's `[foo.md](memory/foo.md)`) navigate inline.
 - **README** — this project's README rendered for quick reference.
 
 Setting up writes:

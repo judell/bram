@@ -10,9 +10,12 @@ A desktop app that pairs an AI coding agent with the XMLUI app it's building.
   reloads automatically. No manual refresh.
 - **Agent-tools drawer** — toggle from the toolbar to open a side
   panel with Talk (live transcript), Worklist (proposed → applied →
-  committed flow), Commits, Sessions, Issues, and README tabs.
-  Drives multi-step coordination between you and the agent without
-  typing in the terminal.
+  committed flow), Commits, Issues, Sessions, Context, and README
+  tabs. Drives multi-step coordination between you and the agent
+  without typing in the terminal. The Context tab shows what Claude
+  Code is loading for the current project — CLAUDE.md and its
+  @-imports, the per-project memory tree, hooks, and settings — with
+  substring search and grep-style hit snippets.
 
 The two panes can also talk: XMLUI components in the right pane post
 text back into the terminal via `window.toShell` / `window.toTurn`

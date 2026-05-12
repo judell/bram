@@ -22,8 +22,9 @@
 
 This is the xmlui-desktop project. Unless you are developing this
 project, you probably want to launch `xmlui-desktop` in a directory
-that contains your own XMLUI project. Then use the top-toolbar
-`agent tools` button to open the drawer with five views:
+that contains your own app, which might be an XMLUI app or any web
+app. Then use the top-toolbar `agent tools` button to open the
+drawer with seven views:
 
 - **Talk** — live transcript of the current agent session (alternating
   user / assistant turns, spinner while waiting). The drawer's pinned
@@ -31,7 +32,12 @@ that contains your own XMLUI project. Then use the top-toolbar
 - **Worklist** — pending items the agent has proposed
   (`resources/worklist.json`); approve or drop with one click.
 - **Commits** — recent commits with one-click push.
+- **Issues** — open / closed GitHub issues for the current repo (via
+  the local `gh` CLI), with one-click to file a new one.
 - **Sessions** — read/search past Claude and Codex transcripts.
+- **Context** — what Claude Code is loading for this project
+  (CLAUDE.md + @-imports, the per-project memory tree, hooks,
+  settings) with substring search across all four.
 - **README** — this project's README for quick reference." />
   </VStack>
 </App>

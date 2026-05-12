@@ -1681,6 +1681,27 @@ fn read_latest_session<R: tauri::Runtime>(
     std::fs::read(&session.path).map_err(|e| e.to_string())
 }
 
+// Cheap variant for polling: just the file size + mtime. Lets Talk
+// detect changes without re-fetching the full (multi-MB) JSONL each
+// tick. The frontend then bumps a cache-busting param to trigger a
+// real fetch only when size has changed.
+fn read_latest_session_meta<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    preferred: Option<SessionProvider>,
+) -> Result<Vec<u8>, String> {
+    let (_, sessions) = sessions_for_provider(app, preferred)?;
+    let session = sessions.first().ok_or("no sessions found")?;
+    let md = std::fs::metadata(&session.path).map_err(|e| e.to_string())?;
+    let mtime = md
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let body = format!(r#"{{"size":{},"mtime":{}}}"#, md.len(), mtime);
+    Ok(body.into_bytes())
+}
+
 fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.as_bytes() {
@@ -2386,6 +2407,8 @@ fn route_request<R: tauri::Runtime>(
             )
         } else if rest == "latest" {
             ("text/plain; charset=utf-8", read_latest_session(app, provider))
+        } else if rest == "latest-meta" {
+            ("application/json; charset=utf-8", read_latest_session_meta(app, provider))
         } else if rest == "content" {
             ("text/plain; charset=utf-8", read_session(app, &session_id, provider))
         } else if rest == "search" {
@@ -2489,6 +2512,11 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, request: tiny_http::Reques
         )
         .with_header(
             tiny_http::Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap(),
+        )
+        .with_header(
+            // Internal API endpoints serve live state (sessions JSONL, git
+            // status, etc.). Browser HTTP caching would defeat polling.
+            tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"no-store, no-cache, must-revalidate"[..]).unwrap(),
         );
     let _ = request.respond(response);
 }
@@ -2650,8 +2678,20 @@ pub fn run() {
             } else {
                 eprintln!("[watcher] no on-disk app/; using embedded tree (no app/ reload)");
             }
+            // Claude Code's per-project session JSONL lives under
+            // ~/.claude/projects/<encoded>/<session-id>.jsonl. Watch the
+            // directory (not the file — the file rotates per session and may
+            // not exist at startup). Used to push talk-session-changed events
+            // so the Talk pane sees pending tool_use prompts immediately
+            // rather than waiting on the DataSource poll.
+            let sessions_dir = claude_sessions_dir(&app.handle()).ok();
             let mut watch_paths: Vec<std::path::PathBuf> = vec![proj_root_path.clone()];
             watch_paths.extend(tools_pane_paths.iter().cloned());
+            if let Some(ref sd) = sessions_dir {
+                if sd.exists() {
+                    watch_paths.push(sd.clone());
+                }
+            }
             let app_handle = app.handle().clone();
             std::thread::spawn(move || {
                 use notify::{recommended_watcher, Event, EventKind, RecursiveMode, Watcher};
@@ -2676,8 +2716,28 @@ pub fn run() {
 
                 let mut last_emit = Instant::now() - Duration::from_secs(1);
                 let mut last_config_emit = Instant::now() - Duration::from_secs(1);
+                let mut last_session_emit = Instant::now() - Duration::from_secs(1);
                 for res in rx {
                     let Ok(event) = res else { continue };
+
+                    // Claude Code session JSONL changes get their own
+                    // dispatch. The Talk pane subscribes to talk-session-changed
+                    // and refetches its DataSource so the approval menu
+                    // appears without waiting on the regular poll interval.
+                    let is_session_event = sessions_dir.as_ref().map_or(false, |sd| {
+                        event.paths.iter().any(|p| {
+                            p.starts_with(sd)
+                                && p.extension().map_or(false, |e| e == "jsonl")
+                        })
+                    });
+                    if is_session_event {
+                        if last_session_emit.elapsed() < Duration::from_millis(100) {
+                            continue;
+                        }
+                        last_session_emit = Instant::now();
+                        let _ = app_handle.emit("talk-session-changed", ());
+                        continue;
+                    }
 
                     // .xmlui-desktop.json gets its own dispatch: we have to
                     // process it on any event kind (editors atomic-save via

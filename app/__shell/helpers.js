@@ -9,6 +9,36 @@
 
 window._xsLogs = window._xsLogs || [];
 
+// Persist the tools-pane route across iframe reloads. main.js reassigns
+// tools.src on every tools-pane-reload event (drawer code changed under
+// app/tools/), which drops the hash and lands the user on the default
+// route (Worklist). We solve this from inside the iframe: restore the
+// saved hash on boot, save the current hash on change.
+//
+// Scoped to the tools iframe — user-project apps in the right pane have
+// their own route conventions and should not be affected.
+(function persistToolsRoute() {
+  if (window.location.pathname.indexOf("/__tools/") === -1) return;
+  var key = "xmlui-desktop.tools.route";
+  try {
+    var current = window.location.hash;
+    if (!current || current === "#/") {
+      var saved = localStorage.getItem(key);
+      if (saved && saved !== "#/") {
+        window.location.hash = saved;
+      }
+    }
+    // react-router-dom uses history.pushState which doesn't fire
+    // hashchange, so poll instead of listening.
+    setInterval(function () {
+      var h = window.location.hash;
+      if (h && h !== localStorage.getItem(key)) {
+        localStorage.setItem(key, h);
+      }
+    }, 500);
+  } catch (e) {}
+})();
+
 // Three intents the right pane can send to the parent shell:
 //   to-shell      → inject text into the PTY (foreground process reads it as user input)
 //   log           → record in cargo run stderr only, don't bother the shell
@@ -186,6 +216,22 @@ window.getRightPaneSize = function (callback) {
     "*",
   );
 };
+
+// Subscribe to "Claude Code session JSONL changed" events pushed by the
+// parent shell. Used by Talk to refetch its DataSource immediately on
+// any session-file write — eliminates the poll-window lag where the
+// approval menu could come and go between ticks.
+var __talkSessionSubscriber = null;
+window.onTalkSessionChange = function (fn) {
+  __talkSessionSubscriber = typeof fn === "function" ? fn : null;
+};
+window.addEventListener("message", function (ev) {
+  var d = ev && ev.data;
+  if (!d || d.type !== "talk-session-changed") return;
+  if (typeof __talkSessionSubscriber === "function") {
+    __talkSessionSubscriber();
+  }
+});
 
 // Continuous variant: register a callback that fires on every resize of
 // the right pane (via the ResizeObserver in main.js) plus once with the

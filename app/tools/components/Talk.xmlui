@@ -1,8 +1,23 @@
-<Component name="Talk" var.turns="{sessionTurns(latestSession.value)}" var.fullscreenImage="{null}">
+<Component name="Talk"
+  var.turns="{sessionTurns(latestSession.value)}"
+  var.fullscreenImage="{null}"
+  var.expandedToolIds="{[]}"
+  var.turnLimit="{100}"
+  var.sessionTick="{0}">
+  <DataSource
+    id="sessionMeta"
+    url="/__sessions/latest-meta"
+    pollIntervalInSeconds="1" />
+  <ChangeListener
+    listenTo="{sessionMeta.value &amp;&amp; sessionMeta.value.size}"
+    onDidChange="if (!latestSession.inProgress) sessionTick = sessionTick + 1" />
   <DataSource
     id="latestSession"
     url="/__sessions/latest"
-    pollIntervalInSeconds="2" />
+    queryParams="{{ t: sessionTick }}"
+    dataType="text"
+    structuralSharing="false"
+  />
 
   <ChangeListener
     listenTo="{turns.length}"
@@ -23,7 +38,8 @@
       height="100%" />
   </ModalDialog>
 
-  <VStack padding="$space-6" gap="$space-3">
+  <VStack padding="$space-6" gap="$space-3"
+    onInit="onTalkSessionChange(() => sessionTick = sessionTick + 1)">
     <StickyBox to="top">
       <HStack gap="$space-3" verticalAlignment="center" paddingVertical="$space-2">
         <Heading level="h2">Transcript</Heading>
@@ -37,27 +53,157 @@
       </HStack>
     </StickyBox>
 
-    <Text
-      when="{!turns || turns.length === 0}"
-      color="$textColor-secondary">
-      (no messages yet)
-    </Text>
+    <Link
+      when="{turns.length > turnLimit}"
+      onClick="turnLimit = turns.length"
+      noIndicator="true">
+      <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{'Show all (' + (turns.length - turnLimit) + ' earlier)'}" />
+    </Link>
 
-    <Items data="{turns}">
+    <Items data="{turns.slice(-turnLimit)}">
       <VStack
         gap="$space-1"
         padding="$space-3"
         borderRadius="$borderRadius"
-        backgroundColor="{$item.role === 'user' ? '$color-info-50' : '$color-surface-50'}">
+        backgroundColor="{$item.role === 'user' ? '$color-info-50' : '$color-surface-50'}"
+        var.turnRole="{$item.role}"
+        var.turnImages="{$item.images}">
         <Text
           fontSize="$fontSize-sm"
           fontWeight="$fontWeight-bold"
-          color="{$item.role === 'user' ? '$color-info-700' : '$color-success-700'}"
-          value="{$item.role === 'user' ? 'You' : 'Claude'}" />
-        <Markdown
-          content="{$item.role === 'user' ? formatUserTurnForTranscript($item.text) : $item.text}" />
-        <VStack gap="$space-2" when="{$item.images && $item.images.length > 0}">
-          <Items data="{$item.images}">
+          color="{turnRole === 'user' ? '$color-info-700' : '$color-success-700'}"
+          value="{turnRole === 'user' ? 'You' : 'Claude'}" />
+        <Items data="{$item.entries}">
+          <Markdown
+            when="{$item.kind === 'text'}"
+            content="{turnRole === 'user' ? formatUserTurnForTranscript($item.text) : $item.text}" />
+          <VStack
+            when="{$item.kind === 'tool'}"
+            gap="$space-1"
+            padding="$space-2"
+            borderRadius="$borderRadius"
+            border="1px solid $borderColor"
+            backgroundColor="$color-surface-100"
+            var.toolId="{$item.id}"
+            var.toolName="{$item.name}"
+            var.toolErrored="{$item.errored}"
+            var.toolErrorText="{$item.errorText}"
+            var.toolSummaryText="{$item.summary}">
+            <Link
+              onClick="expandedToolIds = expandedToolIds.includes(toolId) ? expandedToolIds.filter((x) => x !== toolId) : [...expandedToolIds, toolId]"
+              noIndicator="true">
+              <HStack gap="$space-2" verticalAlignment="center">
+                <Text
+                  fontFamily="$fontFamily-monospace"
+                  fontSize="$fontSize-xs"
+                  fontWeight="$fontWeight-bold"
+                  paddingHorizontal="$space-1_5"
+                  paddingVertical="$space-0_5"
+                  borderRadius="$borderRadius"
+                  backgroundColor="$color-surface-200"
+                  value="{toolName}" />
+                <Text fontSize="$fontSize-sm" value="{toolSummaryText}" />
+                <SpaceFiller />
+                <Text fontFamily="$fontFamily-monospace" fontSize="$fontSize-xs" color="$textColor-secondary" value="{expandedToolIds.includes(toolId) ? '▾' : '▸'}" />
+              </HStack>
+            </Link>
+            <Text
+              when="{toolErrored &amp;&amp; toolErrorText}"
+              color="$color-danger-700"
+              fontSize="$fontSize-sm"
+              value="{toolErrorText}" />
+            <VStack
+              when="{expandedToolIds.includes(toolId)}"
+              gap="{0}"
+              var.detail="{getToolDetail(latestSession.value, toolId)}"
+              var.toolInput="{detail &amp;&amp; detail.input}"
+              var.toolResult="{detail &amp;&amp; detail.result}">
+              <Items when="{toolName === 'Edit' || toolName === 'MultiEdit'}" data="{editDiffLines(toolInput)}">
+                <Text
+                  fontFamily="$fontFamily-monospace"
+                  fontSize="$fontSize-sm"
+                  whiteSpace="pre-wrap"
+                  paddingHorizontal="$space-2"
+                  backgroundColor="{$item.kind === 'del' ? '$color-danger-100' : '$color-success-100'}"
+                  value="{$item.sign + ' ' + $item.text}" />
+              </Items>
+              <VStack when="{toolName === 'Write'}" gap="{0}" var.writeBody="{writeBodyLines(toolInput, 20)}">
+                <Items data="{writeBody.lines}">
+                  <Text
+                    fontFamily="$fontFamily-monospace"
+                    fontSize="$fontSize-sm"
+                    whiteSpace="pre-wrap"
+                    paddingHorizontal="$space-2"
+                    value="{$item}" />
+                </Items>
+                <Text
+                  when="{writeBody.remaining > 0}"
+                  fontSize="$fontSize-xs"
+                  color="$textColor-secondary"
+                  paddingHorizontal="$space-2"
+                  value="{writeBody.remaining + ' more line' + (writeBody.remaining === 1 ? '' : 's') + '…'}" />
+              </VStack>
+              <VStack when="{toolName === 'Bash'}" gap="$space-1">
+                <Text
+                  fontFamily="$fontFamily-monospace"
+                  fontSize="$fontSize-sm"
+                  whiteSpace="pre-wrap"
+                  paddingHorizontal="$space-2"
+                  value="{toolInput.command}" />
+                <Text
+                  when="{toolInput.description}"
+                  fontSize="$fontSize-xs"
+                  color="$textColor-secondary"
+                  paddingHorizontal="$space-2"
+                  value="{toolInput.description}" />
+              </VStack>
+              <VStack
+                when="{toolName !== 'Edit' &amp;&amp; toolName !== 'MultiEdit' &amp;&amp; toolName !== 'Write' &amp;&amp; toolName !== 'Bash'}"
+                gap="{0}"
+                var.genericBody="{toolInputJsonLines(toolInput, 20)}">
+                <Items data="{genericBody.lines}">
+                  <Text
+                    fontFamily="$fontFamily-monospace"
+                    fontSize="$fontSize-sm"
+                    whiteSpace="pre-wrap"
+                    paddingHorizontal="$space-2"
+                    value="{$item}" />
+                </Items>
+                <Text
+                  when="{genericBody.remaining > 0}"
+                  fontSize="$fontSize-xs"
+                  color="$textColor-secondary"
+                  paddingHorizontal="$space-2"
+                  value="{genericBody.remaining + ' more line' + (genericBody.remaining === 1 ? '' : 's') + '…'}" />
+              </VStack>
+              <VStack when="{toolResult &amp;&amp; toolResult.lines.length > 0}" gap="{0}" marginTop="$space-2">
+                <Text
+                  fontSize="$fontSize-xs"
+                  fontWeight="$fontWeight-bold"
+                  color="$textColor-secondary"
+                  paddingHorizontal="$space-2"
+                  value="Result" />
+                <Items data="{toolResult.lines}">
+                  <Text
+                    fontFamily="$fontFamily-monospace"
+                    fontSize="$fontSize-sm"
+                    whiteSpace="pre-wrap"
+                    paddingHorizontal="$space-2"
+                    color="{toolErrored ? '$color-danger-700' : ''}"
+                    value="{$item}" />
+                </Items>
+                <Text
+                  when="{toolResult.remaining > 0}"
+                  fontSize="$fontSize-xs"
+                  color="$textColor-secondary"
+                  paddingHorizontal="$space-2"
+                  value="{toolResult.remaining + ' more line' + (toolResult.remaining === 1 ? '' : 's') + '…'}" />
+              </VStack>
+            </VStack>
+          </VStack>
+        </Items>
+        <VStack gap="$space-2" when="{turnImages &amp;&amp; turnImages.length > 0}">
+          <Items data="{turnImages}">
             <Link onClick="fullscreenImage = $item" noIndicator>
               <Image
                 src="{$item.startsWith('data:') || $item.startsWith('http') ? $item : '/__file?path=' + encodeURIComponent($item)}"
@@ -69,21 +215,67 @@
       </VStack>
     </Items>
 
+    <VStack
+      when="{pendingPermissionMenu(latestSession.value)}"
+      gap="$space-2"
+      padding="$space-3"
+      borderRadius="$borderRadius"
+      border="1px solid $color-warn-200"
+      backgroundColor="$color-warn-50"
+      var.menu="{pendingPermissionMenu(latestSession.value)}">
+      <Text fontSize="$fontSize-sm" color="$color-warn-800">
+        Claude wants to use <Text fontFamily="$fontFamily-monospace" inline="true">{menu.toolName}</Text>{menu.toolSummary ? ' — ' : ''}<Text fontFamily="$fontFamily-monospace" inline="true">{menu.toolSummary}</Text>
+      </Text>
+      <HStack gap="$space-2" wrapContent="true">
+        <Items data="{menu.choices}">
+          <Button
+            label="{$item.key + '. ' + $item.label}"
+            variant="outlined"
+            size="sm"
+            onClick="sendKeys($item.key + '\r')" />
+        </Items>
+      </HStack>
+    </VStack>
+
     <HStack
-      when="{isWaitingForAssistant(latestSession.value) && !escSuppressed}"
+      when="{isWaitingForAssistant(latestSession.value) &amp;&amp; !escSuppressed &amp;&amp; !pendingPermissionMenu(latestSession.value)}"
       paddingVertical="$space-3"
       verticalAlignment="center">
       <Spinner size="sm" delay="{200}" />
     </HStack>
 
     <StickyBox to="bottom">
-      <HStack horizontalAlignment="end" paddingVertical="$space-2">
+      <HStack
+        gap="$space-2"
+        padding="$space-2"
+        backgroundColor="$color-surface-50"
+        borderTop="1px solid $borderColor"
+        verticalAlignment="end">
         <Button
           icon="up"
           variant="ghost"
           size="xs"
           tooltip="Scroll to top"
           onClick="window.scrollAllToTop()" />
+        <Form
+          width="*"
+          onSubmit="if (inputBox.value &amp;&amp; inputBox.value.trim()) { toTurn(inputBox.value); inputBox.setValue(''); window.scrollAllToBottom() }">
+          <property name="buttonRowTemplate">
+            <Fragment/>
+          </property>
+          <HStack gap="$space-2" verticalAlignment="end">
+            <TextArea
+              id="inputBox"
+              enterSubmits="true"
+              enabled="{!isWaitingForAssistant(latestSession.value)}"
+              placeholder="Message Claude — Enter sends, Shift+Enter newline"
+              autoSize="true"
+              minRows="1"
+              maxRows="6"
+              width="*" />
+            <Button label="Send" type="submit" size="sm" />
+          </HStack>
+        </Form>
       </HStack>
     </StickyBox>
   </VStack>

@@ -1,4 +1,11 @@
 {
-  "description": "",
-  "items": []
+  "description": "One proposed follow-up to address Talk's permission-menu reliability — the only known limitation of the just-committed batch.",
+  "items": [
+    {
+      "id": "talk-tail-endpoint",
+      "file": "src-tauri/src/lib.rs + app/tools/components/Talk.xmlui",
+      "before": "Talk fetches the full session JSONL (10MB+ for a long session) every time `sessionTick` bumps. At sub-second polling the fetch can't finish before the next bump would abort it; we added an in-progress gate that prevents the abort but can miss a single size-change window during a fetch — which is exactly when a brief pending `tool_use` would be visible. So the approval menu is unreliable: it shows when the pending window is long, but a fast permission resolve slips past.",
+      "after": "Add `/__sessions/latest-tail?lines=N` (Rust) that returns only the last N records of the JSONL file. For N=200 the payload is ~50KB regardless of total file size, so polling can drop well under 1s without abort risk. Talk's `latestSession` DataSource switches to this endpoint with a tunable `lines` value. The 'Show all (M earlier)' link still needs the full file — extend `latestSession` (or add a second DataSource) so that path fetches `/__sessions/latest` only when explicitly requested. `pendingPermissionMenu` and the recent-turns render both only need the tail, so the common case becomes cheap. Implementation note: tailing JSONL means seeking from EOF, scanning backward for `\\n` count = N, returning the slice — straightforward in Rust with `seek + read`."
+    }
+  ]
 }

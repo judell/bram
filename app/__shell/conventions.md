@@ -174,6 +174,15 @@ the write with a stderr message explaining the violation. Read it; the
 hook is the convention's enforcement mechanism, not a bug to work
 around.
 
+**Don't ask before editing the worklist.** `Write(./resources/worklist.json)`
+and `Edit(./resources/worklist.json)` are in `.claude/settings.json`'s
+`permissions.allow`, and the guard hook validates the content. There's
+no need to verbally confirm with the user before adding, advancing, or
+pruning worklist items — the channel is already approved and the hook
+will reject anything unsafe. Save the verbal back-and-forth for design
+decisions (which items to propose, what choices to bake in), not for the
+mechanical write.
+
 ## Right-pane helpers (opt-in, only needed for project-side hooks)
 
 The Worklist and Sessions tabs in the agent tools drawer already use

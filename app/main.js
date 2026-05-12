@@ -158,7 +158,8 @@ document
   hSplitter.addEventListener("pointerdown", (e) => {
     // Re-query the tools iframe on each drag — swapToolsIframe replaces
     // it on every watcher reload, and a captured reference from IIFE
-    // boot would point at a detached node.
+    // boot would point at a detached node (cursor changed on hover but
+    // dragging silently set flexBasis on a node no longer in the layout).
     const tools = document.getElementById("tools-pane");
     if (!tools) return;
     e.preventDefault();

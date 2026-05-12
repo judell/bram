@@ -418,19 +418,25 @@ function _refreshScrollables() {
   return found;
 }
 
+// Click-driven; scan the DOM per call. _scrollables cache is for the
+// RAF loop in scrollAfterDomUpdate, not here — it would poison
+// after the first call if the DOM happened to have no scrollables
+// at that moment ([] is truthy, so the || fallback would never fire).
 window.scrollAllToTop = function () {
   var root = document.scrollingElement || document.documentElement || document.body;
   if (root) {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
-  var list = window._scrollables || _refreshScrollables();
-  for (var i = 0; i < list.length; i += 1) {
-    var el = list[i];
+  var nodes = document.querySelectorAll("*");
+  for (var i = 0; i < nodes.length; i += 1) {
+    var el = nodes[i];
     if (!el) continue;
-    try {
-      el.scrollTo({ top: 0, behavior: "smooth" });
-    } catch (e) {
-      el.scrollTop = 0;
+    if (el.scrollHeight > el.clientHeight + 8) {
+      try {
+        el.scrollTo({ top: 0, behavior: "smooth" });
+      } catch (e) {
+        el.scrollTop = 0;
+      }
     }
   }
 };
@@ -439,18 +445,16 @@ window.scrollAllToBottom = function () {
   if (root) {
     window.scrollTo({ top: root.scrollHeight, behavior: "smooth" });
   }
-  // Cache the inner scrollable elements after the first scan; querySelectorAll('*')
-  // on a deep DOM is expensive when fired on every poll cycle. The list rarely
-  // changes — when it does, the worst case is a missed inner scroll until the
-  // next page load.
-  var list = window._scrollables || _refreshScrollables();
-  for (var j = 0; j < list.length; j += 1) {
-    var sc = list[j];
+  var nodes = document.querySelectorAll("*");
+  for (var j = 0; j < nodes.length; j += 1) {
+    var sc = nodes[j];
     if (!sc) continue;
-    try {
-      sc.scrollTo({ top: sc.scrollHeight, behavior: "smooth" });
-    } catch (e) {
-      sc.scrollTop = sc.scrollHeight;
+    if (sc.scrollHeight > sc.clientHeight + 8) {
+      try {
+        sc.scrollTo({ top: sc.scrollHeight, behavior: "smooth" });
+      } catch (e) {
+        sc.scrollTop = sc.scrollHeight;
+      }
     }
   }
 };

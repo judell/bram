@@ -1,17 +1,26 @@
-<Theme width-navPanel-App="$space-40">
-<App layout="vertical-sticky" var.recording="{false}">
+<Theme width-navPanel-App="$space-28">
+<App layout="vertical-sticky" var.recording="{false}" var.rightPaneSize="(measuring…)"
+  onInit="subscribeRightPaneSize((s) => rightPaneSize = s.width + ' × ' + s.height)">
   <DataSource id="enhanceStatus" url="/__enhance/status" />
   <DataSource id="rpInfo" url="/__right-pane-info" />
 
-  <ModalDialog id="urlInfoDialog" title="Right-pane URL">
+  <ModalDialog id="urlInfoDialog" title="Right-pane info">
     <VStack gap="$space-3">
-      <Text fontFamily="$fontFamily-monospace" fontSize="$fontSize-sm">{rpInfo.value && rpInfo.value.url}</Text>
-      <HStack gap="$space-2">
-        <Button
-          label="Open in browser"
-          size="sm"
-          onClick="rpInfo.value &amp;&amp; openExternal(rpInfo.value.url)" />
-      </HStack>
+      <VStack gap="$space-1">
+        <Text fontWeight="bold">URL</Text>
+        <Text fontFamily="$fontFamily-monospace" fontSize="$fontSize-sm">{rpInfo.value && rpInfo.value.url}</Text>
+        <HStack gap="$space-2">
+          <Button
+            label="Open in browser"
+            size="sm"
+            onClick="rpInfo.value &amp;&amp; openExternal(rpInfo.value.url)" />
+        </HStack>
+      </VStack>
+
+      <VStack gap="$space-1" marginTop="$space-2">
+        <Text fontWeight="bold">Screen size</Text>
+        <Text fontFamily="$fontFamily-monospace" value="{rightPaneSize}" />
+      </VStack>
 
       <VStack when="{rpInfo.value &amp;&amp; rpInfo.value.spawned}" gap="$space-1" marginTop="$space-2">
         <Text fontWeight="bold">Project server (.xmlui-desktop.json)</Text>
@@ -45,9 +54,15 @@
   </ModalDialog>
 
   <AppHeader>
-    <Text fontWeight="bold" fontSize="$fontSize-md">Tools</Text>
     <Theme paddingHorizontal-Button-sm="$space-1" fontSize-Button="$fontSize-md">
       <HStack gap="$space-0_5" verticalAlignment="center">
+        <Theme fontSize-Button="$fontSize-lg">
+          <Button
+            label="ⓘ"
+            variant="ghost"
+            tooltip="Show right-pane info"
+            onClick="rpInfo.refetch(); urlInfoDialog.open()" />
+        </Theme>
         <Button
           label="A−"
           variant="ghost"
@@ -98,18 +113,14 @@
           variant="ghost"
           tooltip="Send Esc to interrupt"
           onClick="(sendKeys('\x1b'), escSuppressed = true)" />
-        <Theme fontSize-Button="$fontSize-lg">
-          <Button
-            label="ⓘ"
-            variant="ghost"
-            tooltip="Show right-pane URL"
-            onClick="rpInfo.refetch(); urlInfoDialog.open()" />
-        </Theme>
       </HStack>
     </Theme>
   </AppHeader>
 
   <NavPanel>
+    <property name="logoTemplate">
+      <Fragment/>
+    </property>
     <NavLink label="Talk" to="/talk" />
     <NavLink label="Worklist" to="/" exact="true" />
     <NavLink label="Commits" to="/commits" />

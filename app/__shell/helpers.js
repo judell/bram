@@ -165,6 +165,46 @@ window.voiceStop = function (callback) {
     "*",
   );
 };
+// Ask the parent shell for the right-pane iframe's current pixel
+// size. Round-trips through main.js, which measures via
+// getBoundingClientRect. Callback receives { width, height } as
+// integers (rounded).
+window.getRightPaneSize = function (callback) {
+  var requestId =
+    "rps-" + Date.now() + "-" + Math.random().toString(36).slice(2);
+  function onResult(ev) {
+    var d = ev && ev.data;
+    if (!d || d.type !== "right-pane-size-result" || d.requestId !== requestId) return;
+    window.removeEventListener("message", onResult);
+    if (typeof callback === "function") {
+      callback({ width: d.width, height: d.height });
+    }
+  }
+  window.addEventListener("message", onResult);
+  window.parent.postMessage(
+    { type: "right-pane", kind: "get-right-pane-size", requestId: requestId },
+    "*",
+  );
+};
+
+// Continuous variant: register a callback that fires on every resize of
+// the right pane (via the ResizeObserver in main.js) plus once with the
+// current size at registration time. Use this when you want a readout
+// that stays live, not just a snapshot on a button click.
+var __rpsSubscriber = null;
+window.subscribeRightPaneSize = function (callback) {
+  __rpsSubscriber = typeof callback === "function" ? callback : null;
+  if (__rpsSubscriber) {
+    window.getRightPaneSize(__rpsSubscriber);
+  }
+};
+window.addEventListener("message", function (ev) {
+  var d = ev && ev.data;
+  if (!d || d.type !== "right-pane-size-changed") return;
+  if (typeof __rpsSubscriber === "function") {
+    __rpsSubscriber({ width: d.width, height: d.height });
+  }
+});
 // Push local commits to origin and refetch a DataSource (typically
 // the commits list) when the push completes, so the pushed flags
 // refresh without a manual reload.

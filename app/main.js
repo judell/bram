@@ -288,6 +288,22 @@ window.addEventListener("message", (ev) => {
         console.error("open_url", e),
       );
       return;
+    case "get-right-pane-size": {
+      const iframe = document.getElementById("right-pane");
+      const rect = iframe ? iframe.getBoundingClientRect() : { width: 0, height: 0 };
+      if (ev.source && typeof ev.source.postMessage === "function") {
+        ev.source.postMessage(
+          {
+            type: "right-pane-size-result",
+            requestId: data.requestId,
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+          },
+          "*",
+        );
+      }
+      return;
+    }
     case "git-push":
       invoke("git_push")
         .then(() => {
@@ -378,6 +394,33 @@ window.addEventListener("message", (ev) => {
       return;
   }
 });
+
+// Broadcast the right-pane iframe's pixel size to any subscribed iframe
+// whenever it resizes — window resize, splitter drag, drawer toggle,
+// anything that changes its box. ResizeObserver covers them all without
+// having to instrument each interaction. helpers.js'
+// subscribeRightPaneSize() picks this up and forwards to a callback so
+// the info-dialog "Screen size" readout stays live.
+(() => {
+  const iframe = document.getElementById("right-pane");
+  if (!iframe || typeof ResizeObserver !== "function") return;
+  const broadcast = () => {
+    const rect = iframe.getBoundingClientRect();
+    const payload = {
+      type: "right-pane-size-changed",
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+    };
+    const tools = document.getElementById("tools-pane");
+    if (tools && tools.contentWindow) {
+      tools.contentWindow.postMessage(payload, "*");
+    }
+    if (iframe.contentWindow) {
+      iframe.contentWindow.postMessage(payload, "*");
+    }
+  };
+  new ResizeObserver(broadcast).observe(iframe);
+})();
 
 // Right-pane base URL is provisioned by the Rust backend on startup
 // (loopback HTTP server bound to a random port). We have to ask for it

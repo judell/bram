@@ -2345,6 +2345,64 @@ fn read_session<R: tauri::Runtime>(
     std::fs::read(&session.path).map_err(|e| e.to_string())
 }
 
+// Remove a session's JSONL file. Validates the id is a safe filename
+// (alphanumeric + hyphen, same as read_session) and resolves the path
+// via sessions_for_provider so we never touch anything outside the
+// session dirs.
+fn delete_session<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    preferred: Option<SessionProvider>,
+) -> Result<Vec<u8>, String> {
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err("invalid session id".to_string());
+    }
+    let (_, sessions) = sessions_for_provider(app, preferred)?;
+    let session = sessions
+        .into_iter()
+        .find(|session| session.id == id)
+        .ok_or("session not found")?;
+    std::fs::remove_file(&session.path).map_err(|e| e.to_string())?;
+    Ok(b"{\"ok\":true}".to_vec())
+}
+
+// Append a `custom-title` record to a Claude session JSONL so the title
+// reader (claude_session_title at lib.rs:1893) picks it up on next read.
+// Codex sessions have no override hook (codex_session_title derives only
+// from the first user_message), so we return an error in that case.
+fn rename_session<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    preferred: Option<SessionProvider>,
+    title: &str,
+) -> Result<Vec<u8>, String> {
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err("invalid session id".to_string());
+    }
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return Err("empty title".to_string());
+    }
+    let (provider, sessions) = sessions_for_provider(app, preferred)?;
+    if !matches!(provider, SessionProvider::Claude) {
+        return Err("rename is only supported for Claude sessions".to_string());
+    }
+    let session = sessions
+        .into_iter()
+        .find(|session| session.id == id)
+        .ok_or("session not found")?;
+    let record = serde_json::json!({ "type": "custom-title", "customTitle": trimmed });
+    let mut line = serde_json::to_string(&record).map_err(|e| e.to_string())?;
+    line.push('\n');
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&session.path)
+        .map_err(|e| e.to_string())?;
+    use std::io::Write;
+    f.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(b"{\"ok\":true}".to_vec())
+}
+
 fn read_latest_session<R: tauri::Runtime>(
     app: &AppHandle<R>,
     _preferred: Option<SessionProvider>,
@@ -3357,6 +3415,7 @@ fn route_request<R: tauri::Runtime>(
         let mut session_id = String::new();
         let mut q = String::new();
         let mut scope = String::from("recent");
+        let mut title = String::new();
         for pair in query.split('&') {
             if let Some(v) = pair.strip_prefix("provider=") {
                 provider = SessionProvider::from_str(&percent_decode(v));
@@ -3366,6 +3425,8 @@ fn route_request<R: tauri::Runtime>(
                 q = percent_decode(v);
             } else if let Some(v) = pair.strip_prefix("scope=") {
                 scope = percent_decode(v);
+            } else if let Some(v) = pair.strip_prefix("title=") {
+                title = percent_decode(v);
             }
         }
 
@@ -3418,6 +3479,10 @@ fn route_request<R: tauri::Runtime>(
                 search_sessions(app, &q, limit, provider)
                     .and_then(|entries| serde_json::to_vec(&entries).map_err(|e| e.to_string())),
             )
+        } else if rest == "delete" {
+            ("application/json; charset=utf-8", delete_session(app, &session_id, provider))
+        } else if rest == "rename" {
+            ("application/json; charset=utf-8", rename_session(app, &session_id, provider, &title))
         } else {
             ("text/plain; charset=utf-8", read_session(app, rest, provider))
         };

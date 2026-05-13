@@ -351,6 +351,37 @@ window.saveChecked = function (ids) {
     localStorage.setItem("workspace-checked", JSON.stringify(ids || []));
   } catch (e) {}
 };
+// Sessions tab: pending-delete and pending-rename ids persist across
+// iframe reloads, so the dim+disable state survives until the user
+// explicitly clears it (or the JSONL stops resolving to the same id).
+// Two separate keys mirror the in-memory pendingDeletes / pendingRenames
+// vars in Sessions.xmlui.
+window.loadPendingSessionDeletes = function () {
+  try {
+    var raw = localStorage.getItem("session-pending-deletes");
+    if (!raw) return [];
+    var v = JSON.parse(raw);
+    return Array.isArray(v) ? v : [];
+  } catch (e) { return []; }
+};
+window.savePendingSessionDeletes = function (ids) {
+  try {
+    localStorage.setItem("session-pending-deletes", JSON.stringify(ids || []));
+  } catch (e) {}
+};
+window.loadPendingSessionRenames = function () {
+  try {
+    var raw = localStorage.getItem("session-pending-renames");
+    if (!raw) return [];
+    var v = JSON.parse(raw);
+    return Array.isArray(v) ? v : [];
+  } catch (e) { return []; }
+};
+window.savePendingSessionRenames = function (ids) {
+  try {
+    localStorage.setItem("session-pending-renames", JSON.stringify(ids || []));
+  } catch (e) {}
+};
 // Drop ids from saved selection that no longer appear in the live
 // worklist (executed/dropped). Returns the pruned array.
 window.pruneChecked = function (validIds) {

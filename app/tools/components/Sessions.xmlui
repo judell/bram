@@ -7,7 +7,14 @@
   var.queryDraft=""
   var.query=""
   var.scope="recent"
-  var.selectedSnippet="{false}">
+  var.selectedSnippet="{false}"
+  var.renamingSession="{null}"
+  var.renameDraft=""
+  var.pendingDeletes="{loadPendingSessionDeletes()}"
+  var.pendingRenames="{loadPendingSessionRenames()}"
+  var.lastDeleteId="{null}"
+  var.lastDeleteProvider="{null}"
+  var.lastRenameId="{null}">
 
   <DataSource
     id="sessionsMeta"
@@ -59,6 +66,44 @@
       fit="contain"
       width="100%"
       height="100%" />
+  </ModalDialog>
+
+  <APICall
+    id="deleteSession"
+    url="/__sessions/delete"
+    method="get"
+    queryParams="{{ id: $param.id, provider: $param.provider }}"
+    confirmTitle="Delete session?"
+    confirmMessage="This cannot be undone."
+    completedNotificationMessage="Session deleted. Restart claude to refresh its session list."
+    onSuccess="pendingDeletes = pendingDeletes.concat([lastDeleteId]); savePendingSessionDeletes(pendingDeletes); if (expandedId === lastDeleteId &amp;&amp; expandedProvider === lastDeleteProvider) { expandedId = null; expandedProvider = null; } sessionsList.refetch();" />
+
+  <APICall
+    id="renameSession"
+    url="/__sessions/rename"
+    method="get"
+    queryParams="{{ id: $param.id, provider: $param.provider, title: $param.title }}"
+    completedNotificationMessage="Session renamed. Restart claude to see the new title."
+    onSuccess="pendingRenames = pendingRenames.concat([lastRenameId]); savePendingSessionRenames(pendingRenames); renamingSession = null; renameDraft = ''; sessionsList.refetch();" />
+
+  <ModalDialog
+    when="{renamingSession}"
+    onClose="renamingSession = null; renameDraft = ''"
+    title="Rename session">
+    <VStack gap="$space-3" padding="$space-4">
+      <TextBox
+        id="renameBox"
+        width="*"
+        initialValue="{renamingSession &amp;&amp; (renamingSession.title || '')}"
+        onDidChange="(v) => renameDraft = v" />
+      <HStack horizontalAlignment="end" gap="$space-2">
+        <Button label="Cancel" variant="outlined" onClick="renamingSession = null; renameDraft = ''" />
+        <Button
+          label="Rename"
+          enabled="{renameDraft &amp;&amp; renameDraft.trim().length > 0}"
+          onClick="lastRenameId = renamingSession.id; renameSession.execute({ id: renamingSession.id, provider: renamingSession.provider, title: renameDraft })" />
+      </HStack>
+    </VStack>
   </ModalDialog>
 
   <HSplitter height="100%" initialPrimarySize="50%">
@@ -115,10 +160,26 @@
         <Items data="{displayedSessions}">
           <VStack gap="0" borderBottom="1px solid $borderColor">
             <HStack
-              gap="$space-3"
+              gap="$space-2"
               paddingHorizontal="$space-3"
               paddingVertical="$space-2"
-              verticalAlignment="start">
+              verticalAlignment="start"
+              opacity="{(pendingDeletes.includes($item.id) || pendingRenames.includes($item.id)) ? 0.5 : 1}">
+              <Button
+                label="✕"
+                variant="ghost"
+                size="xs"
+                enabled="{!(pendingDeletes.includes($item.id) || pendingRenames.includes($item.id))}"
+                tooltip="{pendingDeletes.includes($item.id) ? 'delete pending' : (pendingRenames.includes($item.id) ? 'rename pending' : 'Delete session (restart required)')}"
+                onClick="lastDeleteId = $item.id; lastDeleteProvider = $item.provider; deleteSession.execute({ id: $item.id, provider: $item.provider })" />
+              <Button
+                when="{$item.provider === 'claude'}"
+                label="✎"
+                variant="ghost"
+                size="xs"
+                enabled="{!(pendingDeletes.includes($item.id) || pendingRenames.includes($item.id))}"
+                tooltip="{pendingDeletes.includes($item.id) ? 'delete pending' : (pendingRenames.includes($item.id) ? 'rename pending' : 'Rename session (restart required)')}"
+                onClick="renamingSession = { id: $item.id, provider: $item.provider, title: ($item.title || '') }; renameDraft = ($item.title || '')" />
               <Link
                 width="*"
                 onClick="expandedId = $item.id; expandedProvider = $item.provider; selectedSnippet = false"

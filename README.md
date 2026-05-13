@@ -42,6 +42,8 @@ directly. Run it inside a local git repo.
    parent shell's toolbar and the agent-tools drawer's AppHeader. See
    [Voice input](#voice-input) below for per-platform install.
 
+5. **XMLUI CLI - optional.** If you are developing an XMLUI app, or if you are developing`xmlui-desktop` itself (the agent-tools UI is an embedded XMLUI app) you will want the XMLUI MCP server. Follow the steps [here](https://xmlui.org/get-started) to get it.
+
 ## [Download the latest release →](https://github.com/judell/xmlui-desktop/releases/latest)
 
 ### Agent tools

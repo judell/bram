@@ -20,7 +20,8 @@ It is a desktop app that pairs an AI coding agent with the web app it's building
 See [`CLAUDE.md`](./CLAUDE.md) for the conventions Claude Code follows
 when driving the right pane.
 
-https://github.com/user-attachments/assets/3d617d7a-f864-41f4-bc77-c6449a8c1bf2
+<img width="1379" height="857" alt="image" src="https://github.com/user-attachments/assets/51728554-ae75-4508-b70c-0716ed555479" />
+
 
 ## Prerequisites
 

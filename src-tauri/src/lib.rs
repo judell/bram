@@ -1073,10 +1073,18 @@ fn git_commit_detail<R: tauri::Runtime>(app: &AppHandle<R>, sha: &str) -> Result
             })
         })
         .collect();
+    // Full commit message (%B). Used by the right-pane expander so a
+    // commit's body paragraphs are available without `git show` in a
+    // terminal.
+    let message = git_run(app, &["show", "-s", "--format=%B", sha])
+        .unwrap_or_default()
+        .trim_end_matches('\n')
+        .to_string();
     let detail = serde_json::json!({
         "sha": sha,
         "stats": { "additions": total_add, "deletions": total_del },
         "files": files_json,
+        "message": message,
     });
     serde_json::to_vec(&detail).map_err(|e| e.to_string())
 }

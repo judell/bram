@@ -194,8 +194,92 @@
     </VStack>
 
     <VStack when="{selectedSha}" padding="$space-4" gap="$space-3" overflowY="auto">
+      <variable
+        name="commitMessageBody"
+        value="{(commitDetail.value &amp;&amp; commitDetail.value.message) ? commitDetail.value.message.split('\n\n').slice(1).join('\n\n').trim() : ''}" />
+      <variable
+        name="commitHits"
+        value="{(selectedCommit &amp;&amp; selectedCommit.hits) ? selectedCommit.hits : []}" />
+      <ChangeListener
+        listenTo="{selectedSha}"
+        onDidChange="(function () {
+          if (!messageExpander) return;
+          const fromSearch = ((searchResults.value &amp;&amp; searchResults.value.results) || []).find(c => c.sha === selectedSha);
+          const hits = (fromSearch &amp;&amp; fromSearch.hits) || [];
+          if (hits.length > 0) messageExpander.expand(); else messageExpander.collapse();
+        })()" />
       <VStack gap="$space-3">
-        <HStack gap="$space-2" verticalAlignment="center">
+        <ExpandableItem
+          id="messageExpander"
+          when="{commitMessageBody || commitHits.length > 0}"
+          initiallyExpanded="false"
+          iconPosition="start"
+          fullWidthSummary="true">
+          <property name="summary">
+            <HStack gap="$space-2" verticalAlignment="center">
+              <Text value="{selectedSha &amp;&amp; selectedSha.slice(0, 7)}" variant="code" fontSize="$fontSize-sm" />
+              <Text
+                when="{selectedCommit}"
+                value="{selectedCommit.commit.message.split('\n')[0]}"
+                fontWeight="$fontWeight-bold" />
+              <Button
+                when="{selectedCommit &amp;&amp; selectedCommit.html_url &amp;&amp; selectedCommit.pushed}"
+                icon="link"
+                variant="ghost"
+                size="xs"
+                tooltip="Open on github.com"
+                onClick="openExternal(selectedCommit.html_url)" />
+            </HStack>
+          </property>
+          <VStack
+            when="{commitHits.length > 0 &amp;&amp; selectedCommit &amp;&amp; selectedCommit.body}"
+            gap="$space-3">
+            <Items data="{commitHits}">
+              <VStack
+                gap="$space-1"
+                var.hitLine="{$item.line}"
+                var.hitField="{$item.field}"
+                var.hitSnippet="{$item.snippet}">
+                <Text
+                  value="{hitField === 'author' ? 'author · ' + hitSnippet : hitField + ' · line ' + hitLine}"
+                  fontSize="$fontSize-xs"
+                  color="$textColor-secondary" />
+                <Items
+                  when="{hitLine > 0}"
+                  data="{snippetAroundLine(selectedCommit.body, hitLine, 6)}">
+                  <HStack
+                    gap="$space-2"
+                    backgroundColor="{$item.isMatch ? '$color-warn-100' : 'transparent'}"
+                    padding="$space-0_5">
+                    <Text
+                      value="{$item.line}"
+                      fontFamily="$fontFamily-monospace"
+                      fontSize="$fontSize-xs"
+                      color="$textColor-secondary"
+                      width="40px"
+                      textAlign="right" />
+                    <Text
+                      value="{$item.text}"
+                      fontFamily="$fontFamily-monospace"
+                      fontSize="$fontSize-sm"
+                      whiteSpace="pre"
+                      fontWeight="{$item.isMatch ? '$fontWeight-bold' : '$fontWeight-normal'}" />
+                  </HStack>
+                </Items>
+              </VStack>
+            </Items>
+          </VStack>
+          <Text
+            when="{commitHits.length === 0 &amp;&amp; commitMessageBody}"
+            fontFamily="$fontFamily-monospace"
+            fontSize="$fontSize-sm"
+            whiteSpace="pre-wrap"
+            value="{commitMessageBody}" />
+        </ExpandableItem>
+        <HStack
+          when="{!commitMessageBody &amp;&amp; commitHits.length === 0}"
+          gap="$space-2"
+          verticalAlignment="center">
           <Text value="{selectedSha &amp;&amp; selectedSha.slice(0, 7)}" variant="code" fontSize="$fontSize-sm" />
           <Text
             when="{selectedCommit}"
@@ -215,33 +299,8 @@
           color="$textColor-secondary"
           value="{selectedCommit.commit.author.name} · {formatDateTime(selectedCommit.commit.author.date, 'yyyy-MM-dd HH:mm')}" />
 
-        <VStack when="{selectedLine &amp;&amp; selectedCommit &amp;&amp; selectedCommit.body}" gap="$space-1">
-          <Link onClick="selectedLine = null" noIndicator="true">
-            <Text value="↥ Show full diff" fontSize="$fontSize-xs" />
-          </Link>
-          <Items data="{snippetAroundLine(selectedCommit.body, selectedLine, 6)}">
-            <HStack
-              gap="$space-2"
-              backgroundColor="{$item.isMatch ? '$color-warn-100' : 'transparent'}"
-              padding="$space-0_5">
-              <Text
-                value="{$item.line}"
-                fontFamily="$fontFamily-monospace"
-                fontSize="$fontSize-xs"
-                color="$textColor-secondary"
-                width="40px"
-                textAlign="right" />
-              <Text
-                value="{$item.text}"
-                fontFamily="$fontFamily-monospace"
-                fontSize="$fontSize-sm"
-                whiteSpace="pre"
-                fontWeight="{$item.isMatch ? '$fontWeight-bold' : '$fontWeight-normal'}" />
-            </HStack>
-          </Items>
-        </VStack>
-        <Text when="{!selectedLine &amp;&amp; commitDetail.inProgress}">Loading…</Text>
-        <VStack gap="$space-4" when="{!selectedLine &amp;&amp; commitDetail.value}">
+        <Text when="{commitDetail.inProgress}">Loading…</Text>
+        <VStack gap="$space-4" when="{commitDetail.value}">
           <Text fontSize="$fontSize-sm">
             +{commitDetail.value.stats.additions} / -{commitDetail.value.stats.deletions}
             {' across '}

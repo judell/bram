@@ -663,34 +663,231 @@ fn git_log_recent<R: tauri::Runtime>(app: &AppHandle<R>, count: usize) -> Result
         .to_string();
     let html_base = remote_to_html(&remote_url);
 
+    // Local git identity + GitHub login so we can map commits authored by
+    // the current user to their actual GH username (not just their email
+    // local-part — `jon@jonudell.info` resolves to GH login `judell`).
+    let local_email = git_run(app, &["config", "user.email"])
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let local_login: Option<String> = project_root(Some(app)).and_then(|root| {
+        std::process::Command::new("gh")
+            .current_dir(&root)
+            .args(&["api", "/user", "--jq", ".login"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+    });
+
     let count_arg = format!("-n{}", count);
-    let format = "--format=%H%x09%an%x09%aI%x09%s";
-    let log_out = git_run(app, &["log", &count_arg, format])?;
+    // __C__ sentinel marks the start of each commit; --shortstat lines
+    // appear in between. Merge commits and commits with no file changes
+    // emit no shortstat line, so we finalize on the next sentinel.
+    // %ae = full author email (matched against local git user.email);
+    // %al = email local-part used as a fallback / for non-local authors.
+    let format = "--format=__C__%H%x09%an%x09%aI%x09%ae%x09%al%x09%s";
+    let log_out = git_run(app, &["log", &count_arg, "--shortstat", format])?;
 
     let mut commits: Vec<serde_json::Value> = Vec::new();
+    let mut header_parts: Option<(String, String, String, String, String)> = None;
+    let mut additions: u64 = 0;
+    let mut deletions: u64 = 0;
+
+    let finalize = |hdr: &Option<(String, String, String, String, String)>,
+                    adds: u64,
+                    dels: u64,
+                    out: &mut Vec<serde_json::Value>| {
+        if let Some((sha, author, date, login, subject)) = hdr {
+            let pushed = !unpushed.contains(sha);
+            let html_url = if html_base.is_empty() {
+                String::new()
+            } else {
+                format!("{}/commit/{}", html_base, sha)
+            };
+            out.push(serde_json::json!({
+                "sha": sha,
+                "html_url": html_url,
+                "pushed": pushed,
+                "additions": adds,
+                "deletions": dels,
+                "commit": {
+                    "author": { "name": author, "date": date, "login": login },
+                    "message": subject,
+                },
+            }));
+        }
+    };
+
     for line in log_out.lines() {
-        let parts: Vec<&str> = line.splitn(4, '\t').collect();
+        if let Some(rest) = line.strip_prefix("__C__") {
+            finalize(&header_parts, additions, deletions, &mut commits);
+            additions = 0;
+            deletions = 0;
+            let parts: Vec<&str> = rest.splitn(6, '\t').collect();
+            if parts.len() == 6 {
+                let author_email = parts[3];
+                let raw_local = parts[4];
+                // Prefer the live `gh api /user` login when the commit was
+                // authored with the local git identity; otherwise strip the
+                // GitHub noreply `<digits>+` prefix from the email local-part.
+                let login = if !author_email.is_empty()
+                    && author_email == local_email
+                    && local_login.is_some()
+                {
+                    local_login.clone().unwrap()
+                } else if let Some(idx) = raw_local.find('+') {
+                    if !raw_local[..idx].is_empty()
+                        && raw_local[..idx].chars().all(|c| c.is_ascii_digit())
+                    {
+                        raw_local[idx + 1..].to_string()
+                    } else {
+                        raw_local.to_string()
+                    }
+                } else {
+                    raw_local.to_string()
+                };
+                header_parts = Some((
+                    parts[0].to_string(),
+                    parts[1].to_string(),
+                    parts[2].to_string(),
+                    login,
+                    parts[5].to_string(),
+                ));
+            } else {
+                header_parts = None;
+            }
+        } else if header_parts.is_some() {
+            // Shortstat line, e.g.: " 3 files changed, 18 insertions(+), 2 deletions(-)"
+            for part in line.trim().split(", ") {
+                if let Some(idx) = part.find(' ') {
+                    let n: u64 = part[..idx].parse().unwrap_or(0);
+                    let rest = &part[idx + 1..];
+                    if rest.contains("insertion") {
+                        additions = n;
+                    } else if rest.contains("deletion") {
+                        deletions = n;
+                    }
+                }
+            }
+        }
+    }
+    finalize(&header_parts, additions, deletions, &mut commits);
+
+    serde_json::to_vec(&commits).map_err(|e| e.to_string())
+}
+
+// Full-history commit search. Walks `git log` (full body via %B) and
+// matches each commit's subject+body lines and author against the
+// query (case-insensitive substring). Returns the Context-shaped
+// payload: `{ results: [{...commit fields, hits: [{line, snippet,
+// field}]}], truncated }`. Capped at MAX_RESULTS commits scanned and
+// MAX_HITS total hits so a wide-net query doesn't pin git.
+fn git_log_search<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    query: &str,
+) -> Result<Vec<u8>, String> {
+    use std::collections::HashSet;
+    use serde_json::json;
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(b"{\"results\":[],\"truncated\":false}".to_vec());
+    }
+    let needle = q.to_lowercase();
+    const MAX_RESULTS: usize = 50;
+    const MAX_HITS: usize = 200;
+
+    let unpushed: HashSet<String> = git_run(app, &["rev-list", "@{u}..HEAD"])
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let remote_url = git_run(app, &["remote", "get-url", "origin"])
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let html_base = remote_to_html(&remote_url);
+
+    // Use record/field separators that won't appear in commit
+    // messages so we can reassemble multi-line bodies safely.
+    // %x1e between records, %x1f between fields, body last.
+    let format = "--format=%H%x1f%an%x1f%aI%x1f%B%x1e";
+    let log_out = git_run(app, &["log", "-n2000", format])?;
+
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    let mut total_hits = 0usize;
+    let mut truncated = false;
+
+    for record in log_out.split('\x1e') {
+        let record = record.trim_start_matches('\n');
+        if record.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = record.splitn(4, '\x1f').collect();
         if parts.len() != 4 {
             continue;
         }
+        if results.len() >= MAX_RESULTS || total_hits >= MAX_HITS {
+            truncated = true;
+            break;
+        }
         let sha = parts[0].to_string();
+        let author = parts[1];
+        let date = parts[2];
+        let body = parts[3].trim_end_matches('\n');
+        let subject = body.lines().next().unwrap_or("").to_string();
+
+        let mut hits: Vec<serde_json::Value> = Vec::new();
+        for (i, line) in body.lines().enumerate() {
+            if total_hits >= MAX_HITS {
+                truncated = true;
+                break;
+            }
+            if line.to_lowercase().contains(&needle) {
+                let snippet: String = line.trim().chars().take(200).collect();
+                hits.push(json!({
+                    "line": i + 1,
+                    "snippet": snippet,
+                    "field": if i == 0 { "subject" } else { "body" },
+                }));
+                total_hits += 1;
+            }
+        }
+        if author.to_lowercase().contains(&needle) && total_hits < MAX_HITS {
+            hits.push(json!({
+                "line": 0,
+                "snippet": author,
+                "field": "author",
+            }));
+            total_hits += 1;
+        }
+
+        if hits.is_empty() {
+            continue;
+        }
         let pushed = !unpushed.contains(&sha);
         let html_url = if html_base.is_empty() {
             String::new()
         } else {
             format!("{}/commit/{}", html_base, sha)
         };
-        commits.push(serde_json::json!({
+        results.push(json!({
             "sha": sha,
             "html_url": html_url,
             "pushed": pushed,
             "commit": {
-                "author": { "name": parts[1], "date": parts[2] },
-                "message": parts[3],
+                "author": { "name": author, "date": date },
+                "message": subject,
             },
+            "body": body,
+            "hits": hits,
         }));
     }
-    serde_json::to_vec(&commits).map_err(|e| e.to_string())
+
+    serde_json::to_vec(&json!({ "results": results, "truncated": truncated }))
+        .map_err(|e| e.to_string())
 }
 
 // Shell out to `gh` to list issues for the current repo. Returns the raw
@@ -2894,6 +3091,23 @@ fn route_request<R: tauri::Runtime>(
             Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
             Err(e) => {
                 eprintln!("[http /__commits] {}", e);
+                (500, "text/plain; charset=utf-8", e.into_bytes())
+            }
+        };
+    }
+
+    if path == "__commits/search" {
+        let mut q = String::new();
+        for pair in query.split('&') {
+            if let Some(enc) = pair.strip_prefix("q=") {
+                q = percent_decode(enc);
+                break;
+            }
+        }
+        return match git_log_search(app, &q) {
+            Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
+            Err(e) => {
+                eprintln!("[http /__commits/search q={}] {}", q, e);
                 (500, "text/plain; charset=utf-8", e.into_bytes())
             }
         };

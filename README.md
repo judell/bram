@@ -1,20 +1,34 @@
 # xmlui-desktop
 
-## Who is this for?
+## What is it?
 
-You are managing AI agents doing software development, and want to coordinate their use of git and GitHub on your behalf so the project's evolution is orderly and well-documented. You also want to search and manage git/GitHub issues and commits, as well as agent sessions and memories, in a consistent way.
+An app that helps you manage an AI-assisted product or project.
 
-## What does the app do?
+## Who is it for?
 
-It is a desktop app that pairs an AI coding agent with the web app it's building.
+Maybe you if:
+
+1 you find yourself managing an AI-assisted project/product
+
+2 you want to give AI agents the best possible context to work with
+
+3 you want the project/product to evolve in a predictable and accountable way
+
+This app has opinions about 2 and 3. For 2, it thinks versioning and collaboration are well handled by git and GitHub, and that guiding agents to best practices in that environment enables you to make best use of the agents. For 2, AIs read context that lives durably in git and/or GitHub.
+
+For 3, it helps you follow one of those best practices: project/product evolution is orderly and well-documented because agents chronicle their progress in git and/or GitHub so their future selves can absorb architecture before enhancing, or consult it when debugging. For 3, AIs *write* context that lives durably in git and/or GitHub.
+
+tl;dr many people and business are newly involved in project management as teams of agents automate routine tasks. This app helps you be a PM in that environment.
+
+## How does it work
+
+It is a desktop app that connects an agent like Claude or Codex to the app you are using an agent to build.
 
 - **Left pane** — a real terminal, where you run an AI coding agent
   (e.g. `claude` or `codex`).
-- **Right pane** — the project's web app that is under development.
-- **File watcher** — as files in the project change, the right pane
-  reloads automatically. No manual refresh.
-- **Agent-tools drawer** — toggle from the toolbar to open a side
-  panel with Talk (live transcript), Worklist (proposed → applied →
+- **Right pane** — the app that is under development in a local repo
+- **File watcher** — as files in the project change, the right pane reloads automatically
+- **Agent-tools drawer** — toggle from the toolbar to open a side panel with Talk (live transcript), Worklist (proposed → applied →
   committed flow), Commits, Issues, Sessions, Context, and README.
 
 See [`CLAUDE.md`](./CLAUDE.md) for the conventions Claude Code follows

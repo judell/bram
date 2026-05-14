@@ -61,6 +61,28 @@ directly. Run it inside a local git repo.
 
 ## [Download the latest release →](https://github.com/judell/xmlui-desktop/releases/latest)
 
+## Install
+
+### macOS / Linux
+
+```bash
+curl -fsSL https://github.com/judell/xmlui-desktop/releases/latest/download/install.sh | bash
+```
+
+The script detects your platform, verifies the archive's SHA256 against the published `SHA256SUMS`, extracts the binary, and copies it to `/usr/local/bin` (if writable) or `~/.local/bin`. On macOS it also clears the `com.apple.quarantine` xattr. No `sudo` required.
+
+### Windows
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/judell/xmlui-desktop/releases/latest/download/install.ps1 | iex"
+```
+
+Downloads `xmlui-desktop-windows-amd64.zip`, verifies its SHA256, extracts `xmlui-desktop.exe` to `~/bin`, and adds `~/bin` to your user `PATH`.
+
+#### Smart App Control
+
+On some Windows 11 setups, Smart App Control may block the unsigned binary — most users report no problem. If you do hit a block, you can disable SAC under **Windows Security → App & browser control → Smart App Control settings**. Before flipping the switch, read Microsoft's [Smart App Control FAQ](https://support.microsoft.com/en-us/windows/smart-app-control-frequently-asked-questions-285ea03d-fa88-4d56-882e-6698afdb7003) so you understand the consequences for your machine — the re-enable path has changed across Windows updates.
+
 ### Agent tools
 
 - **Talk** — live transcript of the active claude/codex session, rendered as it streams. Includes 🎤 voice dictation, scroll-to-bottom and scroll-to-top controls, and an Inspector launcher for XMLUI trace export (helps you identify and report issues with xmlui-desktop).

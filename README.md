@@ -129,6 +129,19 @@ Pinned across the top of the agent-tools drawer (stays reachable from any tab):
 - **Esc** — send `Esc` to interrupt the agent mid-response.
 - **🔍 Inspector** — open the XMLUI Inspector to reproduce a UI issue and export a trace JSON for analysis.
 
+### How Set up enforces the worklist flow
+
+The agent-tools drawer's **Set up** button writes a Claude Code `PreToolUse` hook into the project: `.claude/hooks/worklist-guard.py`, registered in `.claude/settings.json` to fire on `Write|Edit`. PreToolUse hooks are Claude Code's harness-level extension point — they run *before* Claude actually invokes a tool, receive a JSON payload describing the pending call on stdin, and can exit 0 to allow it, exit 2 to block it (stderr goes back to Claude as a tool error), or fail to launch (non-blocking — the tool call still proceeds, with a warning shown).
+
+`worklist-guard.py` watches Write/Edit operations targeting `resources/worklist.json`. It simulates the change, diffs items by `id`, and for any item that would disappear it checks the `status`:
+
+- `applied` (TO COMMIT) — removal allowed. Commit-then-prune is legitimate.
+- `proposed` (TO APPLY) — removal allowed **only** if the user's most recent message starts with `drop: {"ids":[...]}` listing that id.
+
+Violating writes are rejected with a "Blocked: removing X (status=proposed)..." stderr message that Claude sees and reacts to. Without the hook, the two-stage worklist flow described in `app/__shell/conventions.md` would rely entirely on the agent's discipline; the hook is what makes it physically enforceable.
+
+The hook is a Python script (shebang `#!/usr/bin/env python3`) and needs a Python 3 interpreter on the agent's PATH to run. On macOS and Linux that's almost always the case; on Windows it depends on how Python was installed. If the interpreter can't be found, Claude Code shows "Failed with non-blocking status code" for every Write/Edit and the validator is silently inert — writes still proceed, but the worklist guard isn't actually checking them. Install Python 3 (and on Windows, ensure it's on PATH or the `py` launcher is available) to enable enforcement.
+
 ## Build
 
 The frontend is static — no bundler, no `package.json`. The only build

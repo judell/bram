@@ -20,7 +20,7 @@ For 3, it helps you follow one of those best practices: project/product evolutio
 
 tl;dr many people and business are newly involved in project management as teams of agents automate routine tasks. This app helps you be a PM in that environment.
 
-## How does it work
+## How does it work?
 
 It is a desktop app that connects an agent like Claude or Codex to the app you are using an agent to build.
 

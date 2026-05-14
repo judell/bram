@@ -2774,6 +2774,15 @@ const ENHANCE_SIDECAR_REL: &str = ".claude/xmlui-desktop-conventions.md";
 const ENHANCE_HOOK_SCRIPT_REL: &str = ".claude/hooks/worklist-guard.py";
 const ENHANCE_SETTINGS_REL: &str = ".claude/settings.json";
 const ENHANCE_HOOK_BUNDLE_REL: &str = "__shell/worklist-guard.py";
+// On Unix, the bare path runs via the script's `#!/usr/bin/env python3`
+// shebang (set executable by run_enhance under #[cfg(unix)]). On Windows
+// there's no shebang resolution and no chmod, so we invoke through the
+// `py` launcher — it ships with the python.org installer and resolves
+// Python via the registry, independent of PATH.
+#[cfg(windows)]
+const ENHANCE_HOOK_COMMAND: &str =
+    "py -3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/worklist-guard.py\"";
+#[cfg(not(windows))]
 const ENHANCE_HOOK_COMMAND: &str = "$CLAUDE_PROJECT_DIR/.claude/hooks/worklist-guard.py";
 // Presence of this file in the project root means the project IS the
 // xmlui-desktop source repo (it bundles the conventions). enhance_status
@@ -2813,9 +2822,63 @@ fn settings_has_worklist_guard_hook(settings_path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-// Idempotent merge: append a PreToolUse hook entry referencing
-// worklist-guard.py to settings.json, preserving other keys. Returns
-// Ok(true) if the entry was added, Ok(false) if it was already present.
+// Remove any PreToolUse hook entries whose `command` contains
+// `proposal-guard.py` (the pre-rename script name, see bc3ee31). Hooks
+// arrays emptied by the prune are dropped; entries with no remaining
+// hooks are removed. Returns Ok(true) if anything was changed, Ok(false)
+// if there was nothing to prune (or the file/JSON shape made it a no-op).
+fn prune_proposal_guard_from_settings(settings_path: &Path) -> Result<bool, String> {
+    let existing = match std::fs::read_to_string(settings_path) {
+        Ok(s) => s,
+        Err(_) => return Ok(false),
+    };
+    if existing.trim().is_empty() {
+        return Ok(false);
+    }
+    let mut value: serde_json::Value = serde_json::from_str(&existing)
+        .map_err(|e| format!("parse {}: {}", settings_path.display(), e))?;
+    let Some(pre_arr) = value
+        .get_mut("hooks")
+        .and_then(|h| h.get_mut("PreToolUse"))
+        .and_then(|p| p.as_array_mut())
+    else {
+        return Ok(false);
+    };
+    let mut changed = false;
+    pre_arr.retain_mut(|entry| {
+        let Some(hooks_arr) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
+            return true;
+        };
+        let before = hooks_arr.len();
+        hooks_arr.retain(|h| {
+            !h.get("command")
+                .and_then(|c| c.as_str())
+                .map(|s| s.contains("proposal-guard.py"))
+                .unwrap_or(false)
+        });
+        if hooks_arr.len() != before {
+            changed = true;
+        }
+        !hooks_arr.is_empty()
+    });
+    if !changed {
+        return Ok(false);
+    }
+    let serialized = serde_json::to_string_pretty(&value)
+        .map_err(|e| format!("serialize settings.json: {}", e))?;
+    std::fs::write(settings_path, format!("{}\n", serialized))
+        .map_err(|e| format!("write {}: {}", settings_path.display(), e))?;
+    Ok(true)
+}
+
+// Ensure settings.json contains exactly one PreToolUse hook entry whose
+// command matches ENHANCE_HOOK_COMMAND for this platform, preserving
+// other keys. Existing worklist-guard.py entries with a different
+// command string (e.g. the pre-cfg-windows bare path on a Windows
+// project that was set up before the py-launcher migration) are
+// removed and the correct entry is appended. Returns Ok(true) if any
+// change was made, Ok(false) if the settings already had the exact
+// entry and nothing needed migrating.
 fn merge_worklist_guard_into_settings(settings_path: &Path) -> Result<bool, String> {
     let existing = std::fs::read_to_string(settings_path).unwrap_or_default();
     let mut value: serde_json::Value = if existing.trim().is_empty() {
@@ -2851,7 +2914,30 @@ fn merge_worklist_guard_into_settings(settings_path: &Path) -> Result<bool, Stri
         ));
     }
     let pre_arr = pre.as_array_mut().unwrap();
-    let already_present = pre_arr.iter().any(|entry| {
+
+    // Drop worklist-guard.py entries whose command differs from the
+    // current platform's ENHANCE_HOOK_COMMAND. Migrates an existing
+    // bare-path Windows install to `py -3 ...` (and would also handle
+    // the reverse if a project moved between platforms).
+    let mut migrated = false;
+    pre_arr.retain_mut(|entry| {
+        let Some(hooks_arr) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
+            return true;
+        };
+        let before = hooks_arr.len();
+        hooks_arr.retain(|h| {
+            let Some(cmd) = h.get("command").and_then(|c| c.as_str()) else {
+                return true;
+            };
+            !(cmd.contains("worklist-guard.py") && cmd != ENHANCE_HOOK_COMMAND)
+        });
+        if hooks_arr.len() != before {
+            migrated = true;
+        }
+        !hooks_arr.is_empty()
+    });
+
+    let exact_present = pre_arr.iter().any(|entry| {
         entry
             .get("hooks")
             .and_then(|h| h.as_array())
@@ -2859,22 +2945,24 @@ fn merge_worklist_guard_into_settings(settings_path: &Path) -> Result<bool, Stri
                 hs.iter().any(|h| {
                     h.get("command")
                         .and_then(|c| c.as_str())
-                        .map(|s| s.contains("worklist-guard.py"))
+                        .map(|s| s == ENHANCE_HOOK_COMMAND)
                         .unwrap_or(false)
                 })
             })
             .unwrap_or(false)
     });
-    if already_present {
+    if exact_present && !migrated {
         return Ok(false);
     }
-    pre_arr.push(serde_json::json!({
-        "matcher": "Write|Edit",
-        "hooks": [{
-            "type": "command",
-            "command": ENHANCE_HOOK_COMMAND,
-        }]
-    }));
+    if !exact_present {
+        pre_arr.push(serde_json::json!({
+            "matcher": "Write|Edit",
+            "hooks": [{
+                "type": "command",
+                "command": ENHANCE_HOOK_COMMAND,
+            }]
+        }));
+    }
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("create {}: {}", parent.display(), e))?;
@@ -3156,8 +3244,15 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String>
     }
     wrote.push(hook_path.display().to_string());
 
-    // Register hook in settings.json (idempotent merge).
+    // Pre-rename leftover script (bc3ee31). Idempotent: NotFound is fine.
+    let old_hook_path = proj.join(".claude/hooks/proposal-guard.py");
+    let _ = std::fs::remove_file(&old_hook_path);
+
+    // Register hook in settings.json (idempotent merge). Prune any
+    // pre-rename proposal-guard.py PreToolUse entries first so upgraded
+    // projects don't end up running both hooks on every Write/Edit.
     let settings_path = proj.join(ENHANCE_SETTINGS_REL);
+    prune_proposal_guard_from_settings(&settings_path)?;
     merge_worklist_guard_into_settings(&settings_path)?;
     wrote.push(settings_path.display().to_string());
 

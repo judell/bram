@@ -1,5 +1,5 @@
 {
-  "description": "Setup-flow aftermath of the proposal→worklist rename (issue #20). Recommended order: setup-button-always-reachable → purge-proposal-guard-on-enhance → windows-hook-python-launcher. The show-diff item is unrelated; sequence at your discretion.",
+  "description": "",
   "items": [
     {
       "id": "worklist-show-diff-for-applied-items",
@@ -7,20 +7,6 @@
       "file": "app/tools/components/Workspace.xmlui",
       "before": "Worklist rows show only the before/after summary text. When an item is TO COMMIT (status: applied), the user has no in-app way to review the actual file diff before approving the commit — they have to run `git diff <file>` in the terminal or switch to another tool.",
       "after": "Add an in-row diff viewer for TO COMMIT items: an expandable section (e.g., a 'Show diff' toggle, or always-expanded code block) that renders `git diff -- <file>` for the listed file. Backed by a new Rust IPC command `git_diff_file(path) -> String` shelling out to `git diff -- <path>`, surfaced through helpers.js similar to gitPush, and rendered with a monospace code block or a syntax-highlighted diff component. Scope to TO COMMIT rows initially; TO APPLY rows have no on-disk diff yet."
-    },
-    {
-      "id": "purge-proposal-guard-on-enhance",
-      "status": "proposed",
-      "file": "src-tauri/src/lib.rs",
-      "before": "After the bc3ee31 rename (proposal-guard.py → worklist-guard.py), `run_enhance` is purely additive: `merge_worklist_guard_into_settings` (lib.rs:2819) appends the new PreToolUse entry without removing entries whose command contains `proposal-guard.py`, and `run_enhance` (lib.rs:3138) writes the new hook script without deleting the old `.claude/hooks/proposal-guard.py` file. Result: upgraded projects end up with two hooks firing on every Write/Edit, doubling the 'Python was not found' noise on Windows. Reported in issue #16.",
-      "after": "Make `run_enhance` actively prune proposal-guard remnants: (1) extend `merge_worklist_guard_into_settings` (or add a sibling helper called before it) to remove any PreToolUse hook entries whose `command` string contains `proposal-guard.py`, collapsing empty matcher entries; (2) in `run_enhance` after writing the new hook script, delete `.claude/hooks/proposal-guard.py` if it exists (ignore NotFound). Both operations idempotent — safe on fresh projects."
-    },
-    {
-      "id": "windows-hook-python-launcher",
-      "status": "proposed",
-      "file": "src-tauri/src/lib.rs",
-      "before": "`ENHANCE_HOOK_COMMAND` (lib.rs:2777) is the bare path `$CLAUDE_PROJECT_DIR/.claude/hooks/worklist-guard.py`. On Unix that works via shebang + the `#[cfg(unix)]` chmod 0o755 at lib.rs:3147. On Windows there's no shebang resolution; the command relies on `.py` being associated with Python or `python` being on PATH. For users without that wiring (Andrew's case in issue #16), every Write/Edit produces two 'Python was not found' non-blocking errors, and the worklist validator is silently inert.",
-      "after": "On Windows, write the PreToolUse `command` as `py -3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/worklist-guard.py\"`. The `py` launcher ships with the python.org Windows installer and resolves Python independently of PATH. Detect target OS at write time in `merge_worklist_guard_into_settings` (or via `cfg!(windows)`) and pick the command form accordingly. Keep the bare path on Unix. Add a one-line note to the conventions sidecar / README that the hook requires Python (any platform) for validation to fire — graceful degradation (non-blocking) is fine but users should know what's missing."
     }
   ]
 }

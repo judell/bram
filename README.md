@@ -141,7 +141,7 @@ The agent-tools drawer's **Set up** button (replaced by a hat-glasses icon in th
 
 Violating writes are rejected with a "Blocked: removing X (status=proposed)..." stderr message that Claude sees and reacts to. Without the hook, the two-stage worklist flow described in `app/__shell/conventions.md` would rely entirely on the agent's discipline; the hook is what makes it physically enforceable.
 
-The hook is a Python script (shebang `#!/usr/bin/env python3`) and needs a Python 3 interpreter on the agent's PATH to run. On macOS and Linux that's almost always the case; on Windows it depends on how Python was installed. If the interpreter can't be found, Claude Code shows "Failed with non-blocking status code" for every Write/Edit and the validator is silently inert — writes still proceed, but the worklist guard isn't actually checking them. Install Python 3 (and on Windows, ensure it's on PATH or the `py` launcher is available) to enable enforcement.
+The hook is a Python script and needs Python 3 to run. On macOS and Linux it's invoked directly via its shebang (`#!/usr/bin/env python3`), so `python3` must be on PATH — almost always the case. On Windows it's invoked via `py -3 <path>`; the `py` launcher ships with the python.org installer and resolves Python via the Windows registry, independent of PATH. If Python isn't installed at all, Claude Code shows "Failed with non-blocking status code" for every Write/Edit and the validator is silently inert — writes still proceed, but the worklist guard isn't actually checking them. Install Python 3 to enable enforcement.
 
 ## Build
 

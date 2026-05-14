@@ -101,6 +101,10 @@ On some Windows 11 setups, Smart App Control may block the unsigned binary — m
 
 ### Toolbar
 
+Voice status: the toolbar voice button is currently non-functional in
+both Claude and Codex. Use the agent's own `/voice` command where it is
+available; see [Voice input](#voice-input).
+
 - **↻ reload xmlui app** — force-reload the right-pane iframe (file watcher does this automatically, but useful after edits to the parent shell).
 - **🔍 browser devtools** — open the WebView devtools for debugging the right pane.
 - **🛠 agent tools** — toggle the agent-tools drawer above.
@@ -109,6 +113,10 @@ On some Windows 11 setups, Smart App Control may block the unsigned binary — m
 - **🎤 voice** — toggle Whisper-based voice dictation into the terminal (Cmd+Shift+D).
 
 ### Agent Toolbar
+
+Voice status: the drawer voice button is currently non-functional in
+both Claude and Codex. Use the agent's own `/voice` command where it is
+available; see [Voice input](#voice-input).
 
 Pinned across the top of the agent-tools drawer (stays reachable from any tab):
 
@@ -145,10 +153,19 @@ Tauri docs: <https://tauri.app/develop/>, <https://tauri.app/distribute/>.
 
 ## Voice input
 
-Click the 🎤 button (in the parent shell's toolbar or in the agent
-tools drawer's AppHeader) once to start recording, click again to stop.
-The transcript is sent to the agent in the terminal as a `voice: ...`
-line so it's distinguishable from typed input.
+Current status:
+
+- On native Windows, Claude's `/voice` command works.
+- On native Windows, Codex's `/voice` command does not currently work.
+- The xmlui-desktop voice buttons in the parent toolbar and the
+  agent-tools drawer do not currently start a usable voice flow in
+  either Claude or Codex.
+
+The intended button flow is: click the 🎤 button (in the parent shell's
+toolbar or in the agent tools drawer's AppHeader) once to start
+recording, click again to stop. The transcript should be sent to the
+agent in the terminal as a `voice: ...` line so it's distinguishable
+from typed input.
 
 xmlui-desktop spawns a local
 [`whisper-server`](https://github.com/ggml-org/whisper.cpp/tree/master/examples/server)

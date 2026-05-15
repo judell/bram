@@ -1,7 +1,7 @@
 <Theme width-navPanel-App="$space-28">
 <App layout="vertical-sticky" var.recording="{false}" var.rightPaneSize="(measuring…)" var.updateBannerDismissed="{false}"
   onInit="subscribeRightPaneSize((s) => rightPaneSize = s.width + ' × ' + s.height)">
-  <DataSource id="enhanceStatus" url="/__enhance/status" />
+  <DataSource id="enhanceStatus" url="/__enhance/status" pollIntervalInSeconds="2" />
   <DataSource id="rpInfo" url="/__right-pane-info" />
   <DataSource id="appInfo" url="/__app-info" />
 
@@ -151,12 +151,6 @@
           variant="ghost"
           tooltip="Send Esc to interrupt"
           onClick="(sendKeys('\x1b'), escSuppressed = true)" />
-        <Button
-          when="{enhanceStatus.value && enhanceStatus.value.enhanced}"
-          icon="hat-glasses"
-          variant="ghost"
-          tooltip="Re-run agent setup (see README)"
-          onClick="window.fetch('/__enhance/run').then(() => enhanceStatus.refetch())" />
         <Inspector src="{'/__vendor/xs-diff.html?v=' + window.APP_VERSION}" />
       </HStack>
     </Theme>
@@ -176,39 +170,34 @@
   </NavPanel>
 
   <VStack
-    when="{enhanceStatus.value && !enhanceStatus.value.enhanced}"
+    when="{enhanceStatus.value && enhanceStatus.value.activeProvider && enhanceStatus.value.providerNeedsSetup}"
     padding="$space-4"
     gap="$space-3"
     backgroundColor="$color-info-50"
     borderBottom="1px solid $color-info-200">
-    <Heading level="h3">Configure agent coordination</Heading>
-    <Markdown content="The agent tools drawer hosts these views, all driven by data the agent produces or your interaction with it. The header at the top is pinned, so font-size controls (`A−` / `A+`), the 🎤 voice toggle, menu keystrokes (`1` / `2` for the agent's permission prompts), conversational replies (`Yes` / `No`), and `Esc` (interrupt) all stay reachable from any tab.
-
-- **Talk** — live transcript of the current session, with alternating user / assistant turns and a spinner that shows while you wait for a reply. Click 🎤 voice in the AppHeader to dictate from any tab; clicking it again sends the transcript as a fresh user turn. Pasted screenshots render inline as clickable thumbnails (click for fullscreen).
-- **Worklist** — renders `resources/worklist.json` as a checklist of pending items the agent has proposed. You triage with checkboxes; *Talk to agent*, *Approve selected*, and *Drop selected* round-trip the result back to the agent as a fresh user turn (via the `toTurn` shell helper). Optional feedback typed in the box rides along with the action.
-- **Commits** — recent commits, with one-click push to origin when you are ahead.
-- **Issues** — list of open / closed GitHub issues for the current repo (via the local `gh` CLI), with a one-click button to open the New-issue page on github.com. Click an issue to expand its body inline; pasted screenshots render as clickable thumbnails.
-- **Sessions** — browse and search past agent sessions for this project. Claude Code and Codex histories are auto-detected from local transcripts.
-- **Context** — see what Claude Code is loading for this project (CLAUDE.md + one-hop @-imports, the per-project memory tree, hooks, settings) with substring search across all four and grep -C style hit snippets. Cross-references inside memory files (e.g. MEMORY.md's `[foo.md](memory/foo.md)`) navigate inline.
-- **README** — this project's README rendered for quick reference.
-
-Setting up writes:
-- `.claude/xmlui-desktop-conventions.md` — the conventions sidecar (worklist schema and lifecycle, helper APIs, charting via `EChart`, what belongs in the right pane).
-- An `@`-import line in `CLAUDE.md` (created if missing, appended idempotently if present) so every new Claude Code session in this project pulls those conventions in automatically.
-
-What setup deliberately does **not** do:
-
-- Create `resources/worklist.json`. The Worklist tab works without it — when the file is missing, the route serves an empty default and the worklist shows *(none)*. The agent writes to the file the first time it proposes items.
-- Inject `&lt;script src=&quot;/__shell/helpers.js&quot;&gt;` into your `index.html`. That script is only needed if your own xmlui markup wants to call `toShell`/`toTurn`/`openExternal`/`logToHost` (e.g., a custom Approve button you wire). The drawer's tabs work either way." />
-    <Text fontSize="$fontSize-sm" color="$textColor-secondary">
-      Existing Claude Code sessions in this project need /clear or restart
-      to pick up the new CLAUDE.md.
-    </Text>
-    <HStack>
-      <Button
-        label="Set up"
-        onClick="window.fetch('/__enhance/run').then(() => enhanceStatus.refetch())" />
-    </HStack>
+<Heading level="h3">{enhanceStatus.value.activeProvider === 'claude' ? 'Set Up Claude For This Repo' : 'Set Up This Repo For Agent Coordination'}</Heading>
+<Text fontSize="$fontSize-sm">
+  {enhanceStatus.value.activeProvider === 'claude'
+    ? 'Claude is active in this repo. Run setup once to install the shared worklist-enforcement core plus the Claude-specific conventions import and hook.'
+    : 'Codex is active in this repo. Run setup once to install the shared worklist-enforcement core. Today that same setup run also installs the Claude-side conventions import and hook, so a later Claude launch in this repo will usually not prompt again.'}
+</Text>
+<Text
+  when="{enhanceStatus.value.activeProvider === 'claude'}"
+  fontSize="$fontSize-sm"
+  color="$textColor-secondary">
+  After this runs, later Claude launches in this repo should not prompt again unless setup artifacts are removed.
+</Text>
+<Text
+  when="{enhanceStatus.value.activeProvider === 'codex'}"
+  fontSize="$fontSize-sm"
+  color="$textColor-secondary">
+  After setup runs, later Codex launches in this repo should not prompt again unless the shared core is removed. Because setup also seeds the current Claude adapter, later Claude launches should usually skip the prompt too.
+</Text>
+<HStack>
+  <Button
+    label="{enhanceStatus.value.activeProvider === 'claude' ? 'Run Claude Setup' : 'Run Repo Setup'}"
+    onClick="window.fetch('/__enhance/run').then(() => enhanceStatus.refetch())" />
+</HStack>
   </VStack>
 
   <Pages fallbackPath="/">

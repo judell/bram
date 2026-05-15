@@ -3184,12 +3184,14 @@ fn context_search<R: tauri::Runtime>(app: &AppHandle<R>, q: &str) -> serde_json:
 }
 
 fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String> {
+    use serde_json::json;
     let proj = project_root(Some(app)).ok_or("no project root")?;
     let claude_md = proj.join("CLAUDE.md");
     let sidecar = proj.join(ENHANCE_SIDECAR_REL);
     let hook_script = proj.join(ENHANCE_HOOK_SCRIPT_REL);
     let settings = proj.join(ENHANCE_SETTINGS_REL);
     let worklist_auth = proj.join(WORKLIST_AUTH_REL);
+    let active_provider = hinted_session_provider(app);
     let claude_md_has_marker = std::fs::read_to_string(&claude_md)
         .map(|s| s.contains(ENHANCE_MARKER_START))
         .unwrap_or(false);
@@ -3200,11 +3202,27 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
     let core_installed = worklist_auth.exists();
     let claude_installed =
         claude_md_has_marker && sidecar_exists && hook_script_exists && hook_registered;
+    let claude_needs_setup = !core_installed || !claude_installed;
+    let codex_needs_setup = !core_installed;
+    let provider_needs_setup = match active_provider {
+        Some(SessionProvider::Claude) => claude_needs_setup,
+        Some(SessionProvider::Codex) => codex_needs_setup,
+        None => false,
+    };
+    let active_provider_json = match active_provider {
+        Some(SessionProvider::Claude) => json!("claude"),
+        Some(SessionProvider::Codex) => json!("codex"),
+        None => serde_json::Value::Null,
+    };
     let body = serde_json::json!({
         "enhanced": core_installed && claude_installed,
+        "activeProvider": active_provider_json,
         "coreInstalled": core_installed,
         "claudeInstalled": claude_installed,
         "codexInstalled": core_installed,
+        "claudeNeedsSetup": claude_needs_setup,
+        "codexNeedsSetup": codex_needs_setup,
+        "providerNeedsSetup": provider_needs_setup,
         "claudeMd": claude_md_has_marker,
         "sidecar": sidecar_exists,
         "hookScript": hook_script_exists,

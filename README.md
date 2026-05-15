@@ -133,7 +133,25 @@ Pinned across the top of the agent-tools drawer (stays reachable from any tab):
 - **Yes / No** — send "yes" or "no" as a complete user turn (handy for the agent's conversational prompts).
 - **Esc** — send `Esc` to interrupt the agent mid-response.
 - **🔍 Inspector** — open the XMLUI Inspector to reproduce a UI issue and export a trace JSON for analysis.
-- **Re-run setup** (hat-glasses icon, only visible once the project is already set up) — re-runs `/__enhance/run`. Idempotent; safe to invoke anytime conventions may have drifted, e.g., after upgrading xmlui-desktop. See [How `conventions.md` governs both agents](#how-conventionsmd-governs-both-agents) below.
+
+### Provider-aware setup
+
+Once you launch an agent through the wrapped terminal functions (`claude` or `codex`), the drawer checks what that provider still needs for the current repo and prompts only when setup is missing.
+
+Current behavior:
+
+- **Claude in a fresh repo** — prompt once. Setup installs the provider-neutral core plus the Claude-specific adapter.
+- **Claude in a repo that is already set up** — no prompt.
+- **Codex in a fresh repo** — prompt once. The prompt is provider-aware, but the current installer is shared, so running setup from Codex also seeds the current Claude-side adapter artifacts.
+- **Codex in a repo where setup has already run** — no prompt. There is currently no separate Codex adapter to install.
+
+When the prompt runs, xmlui-desktop installs two layers:
+
+- A provider-neutral core: xmlui-desktop records the latest structured `approved:` / `drop:` payload in `resources/.worklist-authorization.json` and uses that local record when validating worklist removals. The desktop watcher can therefore revert an invalid prune even when the active provider has no native pre-tool hook support.
+- A Claude adapter: `.claude/hooks/worklist-guard.py`, registered in `.claude/settings.json` to fire on `Write|Edit`. PreToolUse hooks are Claude Code's harness-level extension point — they run *before* Claude actually invokes a tool, receive a JSON payload describing the pending call on stdin, and can exit 0 to allow it, exit 2 to block it (stderr goes back to Claude as a tool error), or fail to launch (non-blocking — the tool call still proceeds, with a warning shown).
+
+That means first-run setup is provider-aware in when it prompts, but not yet provider-specific in what it installs: today, launching either `claude` or `codex` and accepting the prompt will set up both the shared core and the current Claude adapter.
+
 
 ### How `conventions.md` governs both agents
 

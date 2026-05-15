@@ -113,7 +113,7 @@ platform matrix.
 - **↻ reload xmlui app** — force-reload the right-pane iframe (file watcher does this automatically, but useful after edits to the parent shell).
 - **🔍 browser devtools** — open the WebView devtools for debugging the right pane.
 - **🛠 agent tools** — toggle the agent-tools drawer above.
-- **▢ terminal** — toggle the terminal pane (hide it to give the web app full width).
+- **▢ terminal** — toggle the terminal pane (hide it to give the web app full width). Window and splitter resizes preserve the terminal viewport instead of snapping scrollback to the top.
 - **A− / A+** — decrease / increase the terminal font size (Cmd+− / Cmd+=).
 - **🎤 voice** — toggle Whisper-based voice dictation into the terminal (Cmd+Shift+D).
 

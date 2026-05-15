@@ -2,16 +2,6 @@
   "description": "Codex-themed release: provider-neutral setup core, provider-aware first-run prompting, Transcript-first drawer surface, provider-aware Context, terminal resize polish, and release-copy cleanup are in place.",
   "items": [
     {
-      "id": "preserve-terminal-viewport-on-resize-for-codex",
-      "status": "applied",
-      "files": [
-        "app/main.js",
-        "README.md"
-      ],
-      "before": "When the terminal is resized while running Codex, the viewport jumps to the top. The resize path in xmlui-desktop is shared across providers (`fitAddon.fit()` plus `pty_resize`), so this looks less like a provider-specific code branch and more like an interaction between Codex's TUI redraw behavior and how aggressively the host resizes the terminal during window and splitter changes. Claude does not exhibit the same visible jump, which makes the current behavior feel especially rough in a Codex-themed release.",
-      "after": "Polish terminal resizing so Codex does not jump the viewport to the top during window or splitter resizes. Preserve or restore the visible xterm viewport around `fitAddon.fit()`, and debounce resize traffic enough to avoid flooding Codex with redraw-triggering size changes while dragging. Keep the existing provider-agnostic PTY plumbing, but make the resize experience stable enough that Codex feels first-class in the terminal pane. Frontend: `app/main.js` now wraps terminal fitting in `captureViewport` / `restoreViewport`, uses `scheduleTerminalFit` to coalesce repeated `fit()` requests to one per animation frame, and uses a throttled `flushPtyResize` path so `pty_resize` calls are not fired on every intermediate drag tick. Window resize, terminal show/hide, splitter drag, and font-size changes all route through the same viewport-preserving fit path. README: the terminal toolbar bullet now says window/splitter resizes preserve the terminal viewport instead of snapping scrollback to the top."
-    },
-    {
       "id": "codex-release-doc-cleanup",
       "status": "applied",
       "files": [

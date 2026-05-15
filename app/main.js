@@ -34,6 +34,8 @@ const term = new Terminal({
 
 const fitAddon = new FitAddon.FitAddon();
 term.loadAddon(fitAddon);
+const PTY_RESIZE_MIN_INTERVAL_MS = 40;
+const VIEWPORT_RESTORE_WINDOW_MS = 750;
 
 const container = document.getElementById("terminal");
 term.open(container);
@@ -46,13 +48,99 @@ try {
   console.warn("webgl addon failed, falling back to canvas/dom renderer", e);
 }
 
-fitAddon.fit();
-window.addEventListener("resize", () => fitAddon.fit());
+const captureViewport = () => {
+  const buffer = term.buffer?.active;
+  if (!buffer) return null;
+  const viewportEl = container.querySelector(".xterm-viewport");
+  return {
+    viewportY: buffer.viewportY || 0,
+    baseY: buffer.baseY || 0,
+    atBottom: (buffer.baseY || 0) - (buffer.viewportY || 0) <= 1,
+    domScrollTop: viewportEl ? viewportEl.scrollTop : null,
+  };
+};
+
+const restoreViewport = (snapshot) => {
+  if (!snapshot) return;
+  const buffer = term.buffer?.active;
+  if (!buffer) return;
+  const viewportEl = container.querySelector(".xterm-viewport");
+  if (snapshot.atBottom) {
+    term.scrollToBottom();
+    if (viewportEl) viewportEl.scrollTop = viewportEl.scrollHeight;
+    return;
+  }
+  const maxViewport = buffer.baseY || 0;
+  const target = Math.max(0, Math.min(snapshot.viewportY, maxViewport));
+  term.scrollToLine(target);
+  if (viewportEl && snapshot.domScrollTop !== null) {
+    viewportEl.scrollTop = snapshot.domScrollTop;
+  }
+};
+
+let pendingViewportRestore = null;
+let pendingViewportRestoreUntil = 0;
+let pendingViewportRestoreTimer = null;
+
+const clearPendingViewportRestore = () => {
+  pendingViewportRestore = null;
+  pendingViewportRestoreUntil = 0;
+  clearTimeout(pendingViewportRestoreTimer);
+  pendingViewportRestoreTimer = null;
+};
+
+const armViewportRestore = (snapshot) => {
+  if (!snapshot) return;
+  pendingViewportRestore = snapshot;
+  pendingViewportRestoreUntil = Date.now() + VIEWPORT_RESTORE_WINDOW_MS;
+  clearTimeout(pendingViewportRestoreTimer);
+  pendingViewportRestoreTimer = setTimeout(
+    clearPendingViewportRestore,
+    VIEWPORT_RESTORE_WINDOW_MS,
+  );
+};
+
+const restorePendingViewport = () => {
+  if (!pendingViewportRestore) return;
+  if (Date.now() > pendingViewportRestoreUntil) {
+    clearPendingViewportRestore();
+    return;
+  }
+  restoreViewport(pendingViewportRestore);
+};
+
+const runTerminalFit = ({ preserveViewport = true } = {}) => {
+  const snapshot = preserveViewport ? captureViewport() : null;
+  fitAddon.fit();
+  if (!snapshot) return;
+  armViewportRestore(snapshot);
+  requestAnimationFrame(() => {
+    restoreViewport(snapshot);
+    requestAnimationFrame(() => restoreViewport(snapshot));
+  });
+};
+
+let fitScheduled = false;
+let fitNeedsViewportPreserve = false;
+const scheduleTerminalFit = ({ preserveViewport = true } = {}) => {
+  fitNeedsViewportPreserve = fitNeedsViewportPreserve || preserveViewport;
+  if (fitScheduled) return;
+  fitScheduled = true;
+  requestAnimationFrame(() => {
+    const shouldPreserve = fitNeedsViewportPreserve;
+    fitScheduled = false;
+    fitNeedsViewportPreserve = false;
+    runTerminalFit({ preserveViewport: shouldPreserve });
+  });
+};
+
+scheduleTerminalFit({ preserveViewport: false });
+window.addEventListener("resize", () => scheduleTerminalFit());
 
 const setTerminalFontSize = (n) => {
   const size = clampFontSize(n);
   term.options.fontSize = size;
-  fitAddon.fit();
+  runTerminalFit();
   try {
     localStorage.setItem(TERM_FONT_KEY, String(size));
   } catch {}
@@ -135,7 +223,7 @@ document
     document.body.classList.toggle("terminal-hidden", hidden);
     if (!hidden) {
       // Re-measure xterm.js once the layout settles.
-      requestAnimationFrame(() => fitAddon.fit());
+      scheduleTerminalFit();
     }
   };
 
@@ -175,7 +263,7 @@ document
       if (x < MIN_PX) x = MIN_PX;
       if (x > max) x = max;
       left.style.flexBasis = x + "px";
-      fitAddon.fit();
+      scheduleTerminalFit();
     };
     const onUp = (ev) => {
       splitter.releasePointerCapture(ev.pointerId);
@@ -183,7 +271,7 @@ document
       document.body.classList.remove("splitter-dragging");
       splitter.removeEventListener("pointermove", onMove);
       splitter.removeEventListener("pointerup", onUp);
-      fitAddon.fit();
+      runTerminalFit();
     };
     splitter.addEventListener("pointermove", onMove);
     splitter.addEventListener("pointerup", onUp);
@@ -253,14 +341,51 @@ const ptyChannel = new Channel();
 
 ptyChannel.onmessage = (chunk) => {
   term.write(new Uint8Array(chunk));
+  if (pendingViewportRestore) {
+    requestAnimationFrame(() => {
+      restorePendingViewport();
+      requestAnimationFrame(() => restorePendingViewport());
+    });
+  }
 };
 
 term.onData((data) => {
   invoke("pty_write", { data }).catch((e) => console.error("pty_write", e));
 });
 
+let pendingPtySize = null;
+let lastSentPtySize = null;
+let ptyResizeTimer = null;
+let lastPtyResizeAt = 0;
+
+const samePtySize = (a, b) => !!a && !!b && a.cols === b.cols && a.rows === b.rows;
+
+const flushPtyResize = () => {
+  if (!pendingPtySize) return;
+  const now = Date.now();
+  const sinceLast = now - lastPtyResizeAt;
+  if (sinceLast < PTY_RESIZE_MIN_INTERVAL_MS) {
+    clearTimeout(ptyResizeTimer);
+    ptyResizeTimer = setTimeout(
+      flushPtyResize,
+      PTY_RESIZE_MIN_INTERVAL_MS - sinceLast,
+    );
+    return;
+  }
+  const next = pendingPtySize;
+  pendingPtySize = null;
+  if (samePtySize(next, lastSentPtySize)) return;
+  armViewportRestore(captureViewport());
+  lastSentPtySize = next;
+  lastPtyResizeAt = now;
+  invoke("pty_resize", next).catch((e) => console.error("pty_resize", e));
+};
+
 term.onResize(({ cols, rows }) => {
-  invoke("pty_resize", { cols, rows }).catch((e) => console.error("pty_resize", e));
+  const next = { cols, rows };
+  if (samePtySize(next, pendingPtySize) || samePtySize(next, lastSentPtySize)) return;
+  pendingPtySize = next;
+  flushPtyResize();
 });
 
 const isWindows = navigator.userAgent.toLowerCase().includes("windows");

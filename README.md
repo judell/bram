@@ -34,10 +34,11 @@ It is a desktop app that connects an agent like Claude or Codex to the app you a
 Project conventions are authored in
 [`app/__shell/conventions.md`](./app/__shell/conventions.md). Claude is
 bound to that file directly through `CLAUDE.md` and the installed
-`.claude` hook/config path. Codex does not yet have an equivalent
-repo-local prompt import path, so today it is governed automatically by
-the shared provider-neutral worklist/setup machinery plus local Codex
-config, memories, and rules.
+`.claude` hook/config path. Wrapped Codex launches do not have an
+equivalent repo-local prompt import path, but xmlui-desktop now seeds
+them with a concise startup instruction block covering the worklist
+flow, then relies on the same shared provider-neutral setup machinery
+plus local Codex config, memories, and rules.
 
 <img width="1379" height="857" alt="image" src="https://github.com/user-attachments/assets/51728554-ae75-4508-b70c-0716ed555479" />
 
@@ -140,11 +141,11 @@ That means first-run setup is provider-aware in when it prompts, but not yet pro
 It governs Claude and Codex in different ways:
 
 - **Claude: direct prompt binding plus enforcement.** Setup copies that file to `.claude/xmlui-desktop-conventions.md`, adds an `@`-import block to `CLAUDE.md`, and installs the `worklist-guard.py` PreToolUse hook. A new Claude session therefore reads the conventions file directly and is also mechanically blocked from unsafe worklist edits.
-- **Codex: shared local enforcement, not full prompt binding.** Codex does not currently have a repo-local equivalent of Claude's `CLAUDE.md` import chain, so xmlui-desktop does not inject the full conventions file into every Codex session. Instead, Codex is governed automatically by the subset of those conventions that the app turns into shared local behavior, especially the worklist lifecycle and authorization rules enforced through `resources/.worklist-authorization.json` and the watcher-revert fallback.
+- **Codex: startup seed plus shared local enforcement.** Codex does not have a repo-local equivalent of Claude's `CLAUDE.md` import chain, so xmlui-desktop does not inject the full conventions file into every Codex session. Instead, wrapped `codex` launches receive a concise startup seed covering the worklist lifecycle, and the app reinforces that with shared local behavior, especially the authorization rules enforced through `resources/.worklist-authorization.json` and the watcher-revert fallback.
 
 So the practical rule is: both agents are governed by the worklist
 conventions, but only Claude currently auto-loads the full
-`conventions.md` text as session instructions.
+`conventions.md` text as repo-bound session instructions.
 
 `worklist-guard.py` watches Write/Edit operations targeting `resources/worklist.json`. It simulates the change, diffs items by `id`, and for any item that would disappear it checks the `status`:
 

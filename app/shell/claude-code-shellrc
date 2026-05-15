@@ -2,10 +2,34 @@ echo "You can launch claude or codex here."
 # To auto-launch one on shell start, add to .xmlui-desktop.json:
 #   { "shell": { "agent": "claude --continue" } }
 
+_XMLUI_SHELL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 _xmlui_mark_agent() {
   [ -n "$XMLUI_DESKTOP_AGENT_HINT" ] || return 0
   mkdir -p "$(dirname "$XMLUI_DESKTOP_AGENT_HINT")" 2>/dev/null || return 0
   printf '{"provider":"%s"}\n' "$1" >"$XMLUI_DESKTOP_AGENT_HINT"
+}
+
+_xmlui_has_repo_setup() {
+  [ -f "resources/.worklist-authorization.json" ] || [ -f ".claude/xmlui-desktop-conventions.md" ]
+}
+
+_xmlui_codex_seed_text() {
+  local seed_path
+  seed_path="$_XMLUI_SHELL_DIR/codex-startup-instructions.md"
+  [ -f "$seed_path" ] || return 1
+  cat "$seed_path"
+}
+
+_xmlui_codex_is_subcommand() {
+  case "$1" in
+    exec|review|login|logout|mcp|plugin|mcp-server|app-server|remote-control|app|completion|update|sandbox|debug|apply|resume|fork|cloud|exec-server|features|help)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 claude() {
@@ -15,5 +39,57 @@ claude() {
 
 codex() {
   _xmlui_mark_agent "codex"
-  command codex "$@"
+  if ! _xmlui_has_repo_setup; then
+    command codex "$@"
+    return
+  fi
+  local seed_text
+  seed_text="$(_xmlui_codex_seed_text)" || {
+    command codex "$@"
+    return
+  }
+  if [ $# -eq 0 ]; then
+    command codex "$seed_text"
+    return
+  fi
+  local args=()
+  local prompt=""
+  local expect_value=0
+  while [ $# -gt 0 ]; do
+    local arg="$1"
+    shift
+    if [ "$expect_value" -eq 1 ]; then
+      args+=("$arg")
+      expect_value=0
+      continue
+    fi
+    case "$arg" in
+      -c|--config|--enable|--disable|-i|--image|-m|--model|-p|--profile|-s|--sandbox|-C|--cd|--add-dir|-a|--ask-for-approval|--remote|--remote-auth-token-env|--local-provider|--output-schema|-o|--output-last-message)
+        args+=("$arg")
+        expect_value=1
+        continue
+        ;;
+      --*=*)
+        args+=("$arg")
+        continue
+        ;;
+      -*)
+        args+=("$arg")
+        continue
+        ;;
+      *)
+        if _xmlui_codex_is_subcommand "$arg"; then
+          command codex "${args[@]}" "$arg" "$@"
+          return
+        fi
+        prompt="$arg"
+        break
+        ;;
+    esac
+  done
+  if [ -n "$prompt" ]; then
+    command codex "${args[@]}" "$seed_text"$'\n\n'"Additional user request: $prompt"
+  else
+    command codex "${args[@]}" "$seed_text"
+  fi
 }

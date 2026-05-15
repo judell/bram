@@ -58,11 +58,7 @@ directly. Run it inside a local git repo.
    `gh auth login` once. Without it, the Issues tab shows an empty
    state.
 
-4. **`whisper-server` — optional.** Powers the 🎤 voice toggle in the
-   parent shell's toolbar and the agent-tools drawer's AppHeader. See
-   [Voice input](#voice-input) below for per-platform install.
-
-5. **XMLUI CLI - optional.** If you are developing an XMLUI app, or if you are developing`xmlui-desktop` itself (the agent-tools UI is an embedded XMLUI app) you will want the XMLUI MCP server. Follow the steps [here](https://xmlui.org/get-started) to get it.
+4. **XMLUI CLI - optional.** If you are developing an XMLUI app, or if you are developing`xmlui-desktop` itself (the agent-tools UI is an embedded XMLUI app) you will want the XMLUI MCP server. Follow the steps [here](https://xmlui.org/get-started) to get it.
 
 ## [Download the latest release →](https://github.com/judell/xmlui-desktop/releases/latest)
 
@@ -106,34 +102,20 @@ On some Windows 11 setups, Smart App Control may block the unsigned binary — m
 
 ### Toolbar
 
-Voice status: the toolbar voice button works on macOS and is currently
-broken on native Windows; see [Voice input](#voice-input) for the
-platform matrix.
-
 - **↻ reload xmlui app** — force-reload the right-pane iframe (file watcher does this automatically, but useful after edits to the parent shell).
 - **🔍 browser devtools** — open the WebView devtools for debugging the right pane.
 - **🛠 agent tools** — toggle the agent-tools drawer above.
 - **▢ terminal** — toggle the terminal pane (hide it to give the web app full width). Window and splitter resizes preserve the terminal viewport instead of snapping scrollback to the top.
 - **A− / A+** — decrease / increase the terminal font size (Cmd+− / Cmd+=).
-- **🎤 voice** — toggle Whisper-based voice dictation into the terminal (Cmd+Shift+D).
-
-### Agent Toolbar
-
-Voice status: the drawer voice button works on macOS and is currently
-broken on native Windows; see [Voice input](#voice-input) for the
-platform matrix.
 
 Pinned across the top of the agent-tools drawer (stays reachable from any tab):
 
 - **ⓘ info** — show a right-pane info modal (URL, project-server status, "Open in browser").
 - **A− / A+** — decrease / increase the right-pane / drawer iframe font size.
-- **🎤 voice** — local-Whisper dictation; click to start, click again to send the transcript as a fresh user turn. Same engine as the parent-shell toolbar's voice button.
-- **📸 screenshot** — capture a region of the screen and attach it to the agent as an image input.
-- **1 / 2 / 3** — send numeric keystrokes for claude's permission menus (Allow once / Allow always / Deny).
+- **1 / 2 / 3** — send numeric keystrokes to the active agent's terminal session.
 - **Yes / No** — send "yes" or "no" as a complete user turn (handy for the agent's conversational prompts).
 - **Esc** — send `Esc` to interrupt the agent mid-response.
 - **🔍 Inspector** — open the XMLUI Inspector to reproduce a UI issue and export a trace JSON for analysis.
-
 ### Provider-aware setup
 
 Once you launch an agent through the wrapped terminal functions (`claude` or `codex`), the drawer checks what that provider still needs for the current repo and prompts only when setup is missing.
@@ -151,7 +133,6 @@ When the prompt runs, xmlui-desktop installs two layers:
 - A Claude adapter: `.claude/hooks/worklist-guard.py`, registered in `.claude/settings.json` to fire on `Write|Edit`. PreToolUse hooks are Claude Code's harness-level extension point — they run *before* Claude actually invokes a tool, receive a JSON payload describing the pending call on stdin, and can exit 0 to allow it, exit 2 to block it (stderr goes back to Claude as a tool error), or fail to launch (non-blocking — the tool call still proceeds, with a warning shown).
 
 That means first-run setup is provider-aware in when it prompts, but not yet provider-specific in what it installs: today, launching either `claude` or `codex` and accepting the prompt will set up both the shared core and the current Claude adapter.
-
 
 ### How `conventions.md` governs both agents
 
@@ -196,126 +177,18 @@ Tauri docs: <https://tauri.app/develop/>, <https://tauri.app/distribute/>.
   URI scheme, filesystem watcher, IPC handlers).
 - `scripts/` — auxiliary scripts.
 
-## Voice input
-
-xmlui-desktop offers two voice paths:
-
-- **The agent's own `/voice` command** — no local setup, but support
-  varies by agent and platform (see below).
-- **The 🎤 buttons in the toolbar and agent-tools drawer** — local
-  whisper-based dictation. Verified on macOS; expected to work on
-  non-WSL Linux (untested); currently broken on native Windows.
-
-On macOS (and probably non-WSL Linux) both work; there may be reasons
-to prefer the local whisper path over `/voice`, but the case is
-unproven. On native Windows the whisper path is broken, so `/voice`
-(Claude only) is the working path today.
-
-### Agent `/voice`
-
-Run `/voice` in the terminal and follow the agent's prompts.
-
-- **Claude** — works on macOS and native Windows. WSL is not
-  supported. Native Linux is untested.
-- **Codex** — does not currently work on native Windows. macOS and
-  Linux are unverified.
-
-### xmlui-desktop microphone button
-
-The intended flow is: click the 🎤 button (in the parent shell's
-toolbar or in the agent tools drawer's AppHeader) once to start
-recording, click again to stop. The transcript is sent to the agent
-in the terminal as a `voice: ...` line so it's distinguishable from
-typed input.
-
-Status by platform:
-
-- **macOS** — verified working. You may prefer this path to `/voice`
-  (lower latency, choice of model, different transcription quality),
-  but the case is unproven. Setup below.
-- **Linux (non-WSL)** — expected to work, untested. Setup below. If
-  you try it please open an issue.
-- **Windows** — does not currently start a usable flow. Setup below
-  installs the local prerequisites so it's ready when the button flow
-  is fixed; meanwhile use `/voice`.
-
-xmlui-desktop spawns a local
-[`whisper-server`](https://github.com/ggml-org/whisper.cpp/tree/master/examples/server)
-on first record click and kills it on app exit. You don't manage the
-process; you just need the binary, ffmpeg, and a model file installed.
-
-#### macOS — verified
-
-```bash
-brew install whisper-cpp ffmpeg
-mkdir -p ~/.local/share/whisper-models
-curl -L -o ~/.local/share/whisper-models/ggml-small.en.bin \
-  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin
-```
-
-`small.en` is ~466 MB, English-only, real-time on Apple Silicon. Swap
-in a different model from the same Hugging Face repo if you want
-different size/accuracy/language. The bundled `Info.plist` declares
-`NSMicrophoneUsageDescription`, so WKWebView's `getUserMedia` triggers
-the standard macOS mic permission prompt on first use.
-
-#### Linux — expected to work, untested
-
-Both pieces are available via native package managers, though the
-exact incantation depends on your distro:
-
-```bash
-# Arch
-sudo pacman -S whisper.cpp ffmpeg
-
-# Debian/Ubuntu — ffmpeg is in apt; whisper.cpp usually needs a build
-# from source: https://github.com/ggml-org/whisper.cpp#build
-sudo apt install ffmpeg
-git clone https://github.com/ggml-org/whisper.cpp && cd whisper.cpp && cmake -B build && cmake --build build -j
-
-# Or, if you have Linuxbrew:
-brew install whisper-cpp ffmpeg
-```
-
-Make sure `whisper-server` is on `PATH`. The model download path is
-the same as on macOS. WebKit2GTK supports `getUserMedia` and prompts
-via the desktop's standard mic permission flow. If something doesn't
-work, please open an issue.
-
-#### Windows — best guess, untested
-
-There's no official one-line installer for whisper.cpp on Windows.
-Best guess at the rough shape:
-
-1. Grab a prebuilt release from
-   <https://github.com/ggml-org/whisper.cpp/releases> (look for an
-   x64 binary asset) and put `whisper-server.exe` somewhere on `PATH`.
-   Or build from source with CMake / Visual Studio.
-2. Install ffmpeg via Chocolatey (`choco install ffmpeg`) or Scoop
-   (`scoop install ffmpeg`).
-3. Download the model into a directory of your choice. Note: the path
-   used by the `whisper_start` Rust command is currently hardcoded to
-   `~/.local/share/whisper-models/ggml-small.en.bin`, which expands to
-   `%USERPROFILE%\.local\share\whisper-models\ggml-small.en.bin` —
-   create that path or expect to patch the const.
-
-WebView2 (Chromium) handles `getUserMedia` with the standard Windows
-microphone permission. We haven't actually tested any of this; if you
-try it, please open an issue with what worked or didn't so we can
-firm up these instructions.
-
 ## Screen capture
 
-Click the 📸 button (in the parent shell's toolbar or in the agent
-tools drawer's AppHeader) to grab an interactive rect-select
-screenshot. xmlui-desktop writes the PNG to the OS app cache and
+The screenshot helper currently exists but is not surfaced in the
+default Codex-themed UI. When enabled, it grabs an interactive
+rect-select screenshot, writes the PNG to the OS app cache, and
 injects `Read this screenshot: @<path>` into the terminal as a fresh
-user turn, so the agent picks it up via its `Read` tool. No install
+user turn so the agent picks it up via its `Read` tool. No install
 ceremony — it shells out to a system binary.
 
 Currently **macOS-only**: the implementation invokes
 `/usr/sbin/screencapture -i`, which ships with macOS. On Linux and
-Windows the 📸 button returns "screenshot capture is currently
+Windows it returns "screenshot capture is currently
 macOS-only"; if you want a port (e.g. via `grim` / `slurp` on Wayland
 or a PowerShell snippet on Windows), please open an issue.
 

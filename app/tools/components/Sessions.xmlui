@@ -75,7 +75,7 @@
     queryParams="{{ id: $param.id, provider: $param.provider }}"
     confirmTitle="Delete session?"
     confirmMessage="This cannot be undone."
-    completedNotificationMessage="Session deleted. Restart claude to refresh its session list."
+    completedNotificationMessage="Session deleted. Restart the agent to refresh its session list."
     onSuccess="pendingDeletes = pendingDeletes.concat([lastDeleteId]); savePendingSessionDeletes(pendingDeletes); if (expandedId === lastDeleteId &amp;&amp; expandedProvider === lastDeleteProvider) { expandedId = null; expandedProvider = null; } sessionsList.refetch();" />
 
   <APICall
@@ -83,7 +83,7 @@
     url="/__sessions/rename"
     method="get"
     queryParams="{{ id: $param.id, provider: $param.provider, title: $param.title }}"
-    completedNotificationMessage="Session renamed. Restart claude to see the new title."
+    completedNotificationMessage="Session renamed. Restart the agent to see the new title."
     onSuccess="pendingRenames = pendingRenames.concat([lastRenameId]); savePendingSessionRenames(pendingRenames); renamingSession = null; renameDraft = ''; sessionsList.refetch();" />
 
   <ModalDialog

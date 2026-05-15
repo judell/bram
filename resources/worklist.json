@@ -2,17 +2,6 @@
   "description": "Codex-themed release: provider-neutral setup core, provider-aware first-run prompting, Transcript-first drawer surface, provider-aware Context, terminal resize polish, and release-copy cleanup are in place.",
   "items": [
     {
-      "id": "codex-release-doc-cleanup",
-      "status": "applied",
-      "files": [
-        "README.md",
-        "Main.xmlui",
-        "app/tools/components/Sessions.xmlui"
-      ],
-      "before": "After the Codex-focused feature work landed, some user-facing copy still reflected the older Claude-leaning UI. The built-in welcome page still described Context as what Claude loads, the README still implied the drawer voice/screenshot controls were visible in the current UI, and session notifications still told users to restart Claude specifically. That left the release copy lagging behind the actual Codex-themed product surface.",
-      "after": "Clean up the remaining release-facing copy so the docs and in-app messaging match the current Codex-themed UI. README now describes the Claude-side convention path more precisely, no longer implies hidden drawer voice/screenshot controls are still exposed, and explains the screenshot helper as currently hidden in the default UI. The built-in welcome page now describes Context as provider-aware rather than Claude-only. Session notifications now tell users to restart the agent rather than Claude specifically."
-    },
-    {
       "id": "add-codex-tool-cards-to-transcript",
       "status": "applied",
       "files": [

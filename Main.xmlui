@@ -35,9 +35,9 @@ drawer with seven views:
 - **Issues** — open / closed GitHub issues for the current repo (via
   the local `gh` CLI), with one-click to file a new one.
 - **Sessions** — read/search past Claude and Codex transcripts.
-- **Context** — what Claude Code is loading for this project
-  (CLAUDE.md + @-imports, the per-project memory tree, hooks,
-  settings) with substring search across all four.
+- **Context** — the active provider's durable local context sources:
+  Claude shows `CLAUDE.md`, imports, memory, hooks, and settings;
+  Codex shows local Codex config, memories, and rules.
 - **README** — this project's README for quick reference." />
   </VStack>
 </App>

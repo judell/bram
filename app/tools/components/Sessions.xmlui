@@ -96,6 +96,10 @@
         width="*"
         initialValue="{renamingSession &amp;&amp; (renamingSession.title || '')}"
         onDidChange="(v) => renameDraft = v" />
+      <Text
+        color="$textColor-secondary"
+        fontSize="$fontSize-sm"
+        value="Note: codex /resume creates a forked session with a new id, so the [current] marker will not follow the renamed session. The rename does persist in codex's /resume picker — use it to find this session by name." />
       <HStack horizontalAlignment="end" gap="$space-2">
         <Button label="Cancel" variant="outlined" onClick="renamingSession = null; renameDraft = ''" />
         <Button
@@ -173,7 +177,6 @@
                 tooltip="{pendingDeletes.includes($item.id) ? 'delete pending' : (pendingRenames.includes($item.id) ? 'rename pending' : 'Delete session (restart required)')}"
                 onClick="lastDeleteId = $item.id; lastDeleteProvider = $item.provider; deleteSession.execute({ id: $item.id, provider: $item.provider })" />
               <Button
-                when="{$item.provider === 'claude'}"
                 label="✎"
                 variant="ghost"
                 size="xs"

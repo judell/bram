@@ -8,6 +8,24 @@
     listenTo="{enhanceStatus.value &amp;&amp; enhanceStatus.value.providerNeedsSetup}"
     onDidChange="(c) => { if (c.newValue) { if ($pathname !== '/') navigate('/'); window.scrollAllToTop(); } }" />
 
+  <ModalDialog id="setupInfoDialog" title="About repo setup">
+    <VStack gap="$space-3">
+      <Text>
+        Setup configures this repo so AI agents share a worklist-driven coordination flow. It installs a small, idempotent set of files; rerunning is safe.
+      </Text>
+      <VStack gap="$space-1">
+        <Text fontWeight="bold">What setup does</Text>
+        <Text>• Writes the shared `resources/.worklist-authorization.json` record that every adapter consumes.</Text>
+        <Text>• Installs the Claude adapter: a `CLAUDE.md` @-import of the conventions sidecar plus `.claude/hooks/worklist-guard.py` (PreToolUse).</Text>
+        <Text>• Installs the Codex adapter: an `AGENTS.md` block teaching Codex the worklist flow plus a `~/.codex/config.toml` PreToolUse hook.</Text>
+      </VStack>
+      <VStack gap="$space-1">
+        <Text fontWeight="bold">After setup runs</Text>
+        <Text>Later launches of any supported agent in this repo will not prompt again unless the setup artifacts are removed. Additional agent adapters can plug into the same flow in the future.</Text>
+      </VStack>
+    </VStack>
+  </ModalDialog>
+
   <ModalDialog id="urlInfoDialog" title="Right-pane info">
     <VStack gap="$space-3">
       <VStack gap="$space-1">
@@ -174,27 +192,18 @@
     gap="$space-3"
     backgroundColor="$color-info-50"
     borderBottom="1px solid $color-info-200">
-<Heading level="h3">{enhanceStatus.value.activeProvider === 'claude' ? 'Set Up Claude For This Repo' : 'Set Up This Repo For Agent Coordination'}</Heading>
-<Text fontSize="$fontSize-sm">
-  {enhanceStatus.value.activeProvider === 'claude'
-    ? 'Claude is active in this repo. Run setup once to install the shared worklist-enforcement core plus the Claude-specific conventions import and hook.'
-    : 'Codex is active in this repo. Run setup once to install the shared worklist-enforcement core plus a repo-local AGENTS.md block that teaches Codex the worklist flow. The same setup run also installs the Claude-side conventions import and hook, so a later Claude launch in this repo will usually not prompt again.'}
-</Text>
-<Text
-  when="{enhanceStatus.value.activeProvider === 'claude'}"
-  fontSize="$fontSize-sm"
-  color="$textColor-secondary">
-  After this runs, later Claude launches in this repo should not prompt again unless setup artifacts are removed.
-</Text>
-<Text
-  when="{enhanceStatus.value.activeProvider === 'codex'}"
-  fontSize="$fontSize-sm"
-  color="$textColor-secondary">
-  After setup runs, later Codex launches in this repo should read the repo-local AGENTS.md guidance and should not prompt again unless those artifacts are removed. Because setup also seeds the current Claude adapter, later Claude launches should usually skip the prompt too.
-</Text>
+<HStack verticalAlignment="center" gap="$space-2">
+  <Heading level="h3">Set Up This Repo For Agent Coordination</Heading>
+  <Button
+    label="ⓘ"
+    variant="ghost"
+    size="sm"
+    tooltip="About repo setup"
+    onClick="setupInfoDialog.open()" />
+</HStack>
 <HStack>
   <Button
-    label="{enhanceStatus.value.activeProvider === 'claude' ? 'Run Claude Setup' : 'Run Repo Setup'}"
+    label="Run Setup"
     onClick="window.fetch('/__enhance/run').then(() => enhanceStatus.refetch())" />
 </HStack>
   </VStack>

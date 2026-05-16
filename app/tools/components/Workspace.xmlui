@@ -105,30 +105,6 @@
           color="$textColor-secondary">
           (none)
         </Text>
-        <VStack
-          when="{!worklist.value.exists}"
-          gap="$space-2"
-          padding="$space-3"
-          backgroundColor="$color-surface-50"
-          borderRadius="$borderRadius">
-          <Text
-            color="$textColor-secondary"
-            value="No repo-local worklist exists yet. Create `resources/worklist.json` when you want to coordinate multi-step changes here." />
-          <Text
-            when="{!worklist.value.resourcesExists}"
-            color="$textColor-secondary"
-            fontSize="$fontSize-sm"
-            value="This repo does not have a `resources/` folder yet; xmlui-desktop can create both the folder and the worklist file." />
-          <Text
-            when="{worklist.value.path}"
-            value="{worklist.value.path}"
-            variant="code" />
-          <HStack>
-            <Button
-              label="{worklist.value.resourcesExists ? 'Create worklist.json' : 'Create resources/worklist.json'}"
-              onClick="window.fetch('/__worklist/init').then(() => worklist.refetch())" />
-          </HStack>
-        </VStack>
         <Text
           when="{worklist.value.items && worklist.value.items.length > 0}"
           value="{worklist.value.description}" />

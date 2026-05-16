@@ -3704,6 +3704,20 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String>
         wrote.push(worklist_auth_path.display().to_string());
     }
 
+    // Empty worklist.json — created here so setup is the single on-ramp for
+    // worklist-driven coordination. init_worklist_file and /__worklist/init
+    // remain available but the UI no longer surfaces a manual init button.
+    if let Some(worklist_path) = worklist_file(app) {
+        if !worklist_path.exists() {
+            std::fs::write(&worklist_path, empty_worklist_json())
+                .map_err(|e| format!("write {}: {}", worklist_path.display(), e))?;
+            if let Ok(mut guard) = last_worklist_cell().lock() {
+                *guard = Some(empty_worklist_json().to_string());
+            }
+            wrote.push(worklist_path.display().to_string());
+        }
+    }
+
     // Conventions sidecar — skipped on the source repo.
     let sidecar_path = proj.join(ENHANCE_SIDECAR_REL);
     if !is_source_repo {

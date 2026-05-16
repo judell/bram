@@ -132,7 +132,7 @@ def normalize_target(project_root, target):
         return ""
     prefix = abs_root + os.sep
     if abs_target.startswith(prefix):
-        return abs_target[len(prefix):]
+        return abs_target[len(prefix):].replace(os.sep, "/")
     return None
 
 

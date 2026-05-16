@@ -32,14 +32,19 @@
       overflowY="auto"
       onInit="registerContextMemorySelector((basename) => { let memorySection = ((ctxList.value &amp;&amp; ctxList.value.sections) || []).find((s) => s.key === 'memory'); let f = ((memorySection &amp;&amp; memorySection.items) || []).find((x) => x.display === basename); if (f) { selectedPath = f.path; selectedDisplay = f.display; selectedLine = null; } })"
       onCleanup="clearContextMemorySelector()">
-      <VStack gap="$space-1">
+      <ModalDialog id="contextInfoDialog" title="About Context">
+        <Text value="{ctxList.value &amp;&amp; ctxList.value.summary}" />
+      </ModalDialog>
+      <HStack verticalAlignment="center" gap="$space-2">
         <Heading level="h4">Context</Heading>
-        <Text
+        <Button
           when="{ctxList.value &amp;&amp; ctxList.value.summary}"
-          value="{ctxList.value.summary}"
-          fontSize="$fontSize-sm"
-          color="$textColor-secondary" />
-      </VStack>
+          label="ⓘ"
+          variant="ghost"
+          size="sm"
+          tooltip="About Context"
+          onClick="contextInfoDialog.open()" />
+      </HStack>
 
       <HStack gap="$space-2" verticalAlignment="center">
         <Button

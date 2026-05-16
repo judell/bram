@@ -5,8 +5,7 @@
   var.expandedItemId="{null}"
   var.activeSnapshot="{null}"
   var.lastJsonl="{null}"
-  var.sessionTick="{0}"
-  var.sessionRefreshArmed="{false}">
+  var.sessionTick="{0}">
   <DataSource
     id="sessionMeta"
     url="/__sessions/latest-meta"
@@ -90,12 +89,10 @@
     padding="$space-6"
     gap="$space-6"
     onInit="onTalkSessionChange(() => {
-      if (!submitting || sessionRefreshArmed) return;
-      sessionRefreshArmed = true;
-      setTimeout(() => {
-        sessionRefreshArmed = false;
+      if (!submitting) return;
+      debounce(400, () => {
         if (submitting) sessionTick = sessionTick + 1;
-      }, 400);
+      });
     })">
     <VStack gap="$space-3" when="{worklist.value}">
       <VStack gap="$space-3" opacity="{submitting ? 0.3 : 1}">
@@ -179,12 +176,12 @@
             <Button
               label="Approve selected ({checked.length})"
               enabled="{!submitting && checked.length > 0}"
-              onClick="markInflight(worklist.value && worklist.value.items); submitting = true; toTurn('approved: ' + JSON.stringify({ items: worklist.value.items.filter(i => checked.includes(i.id)), feedback: '' }))" />
+              onClick="markInflight(worklist.value && worklist.value.items); submitting = true; toTurn('approved: ' + JSON.stringify({ items: worklist.value.items.filter(i => checked.includes(i.id)).map(i => ({id: i.id, hash: i.hash})), feedback: '' }))" />
             <Button
               label="Drop selected ({checked.length})"
               variant="outlined"
               enabled="{!submitting && checked.length > 0}"
-              onClick="markInflight(worklist.value && worklist.value.items); submitting = true; toTurn('drop: ' + JSON.stringify({ ids: worklist.value.items.filter(i => checked.includes(i.id)).map(i => i.id), feedback: '' }))" />
+              onClick="markInflight(worklist.value && worklist.value.items); submitting = true; toTurn('drop: ' + JSON.stringify({ items: worklist.value.items.filter(i => checked.includes(i.id)).map(i => ({id: i.id, hash: i.hash})), feedback: '' }))" />
             <Spinner when="{submitting}" size="sm" />
             <Button
               when="{submitting}"

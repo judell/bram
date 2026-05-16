@@ -130,24 +130,41 @@ Lifecycle:
      dropped**. Respond to the message; do not edit files, do not
      touch `worklist.json`.
    - *Approve selected (N)* — only enabled when ≥1 item is checked.
-     You receive `approved: {"items":[...], "feedback":"..."}`.
-     **Execute ONLY the items in that JSON array — do NOT re-read
-     `resources/worklist.json` to figure out what to do.** The user has
-     already triaged; items they unchecked are deliberately absent from
-     the array even though they're still in the file. Treat the array
-     as authoritative; treat `worklist.json` at this moment as stale.
-     Respond to the optional feedback.
+     You receive `approved: {"items":[{"id":"...","hash":"..."}, ...],
+     "feedback":"..."}`. The payload is intentionally minimal: ids
+     plus per-item content hashes, no `before` / `after` prose. The
+     PTY watcher verifies each hash against `resources/worklist.json`
+     at the moment the line arrives and writes the verified item
+     content into `resources/.worklist-authorization.json`.
+     **To act on the approval, GET `/__worklist/resolve` from the
+     loopback HTTP server** (the same origin that serves `/__worklist`
+     for the Worklist tab — see the project's `.xmlui-desktop.json` or
+     run `curl http://localhost:<port>/__worklist/resolve`). The
+     response is one of:
+     - `{"kind":"approved", "items":[<full verified content>], ...}` —
+       execute these items. The user has already triaged; do NOT
+       re-read `resources/worklist.json` to second-guess what was
+       approved.
+     - `{"kind":"rejected_stale", "mismatched_ids":[...]}` — the
+       worklist file changed between the user's click and the watcher
+       reading it. Do not edit files; surface the staleness to the
+       user and ask them to re-triage.
+     Respond to the optional feedback in either case. Never parse the
+     `approved:` turn line yourself for content — the line carries
+     only ids and hashes.
    - *Drop selected (N)* — only enabled when ≥1 item is checked.
-     You receive `drop: {"ids":[...], "feedback":"..."}`. Remove the
-     listed ids from `worklist.json` without acting; respond to the
-     optional feedback.
+     You receive `drop: {"items":[{"id":"...","hash":"..."}, ...],
+     "feedback":"..."}`. Same shape, same `/__worklist/resolve` flow:
+     `{"kind":"drop"}` → remove those ids from `worklist.json`
+     without acting on them; `{"kind":"rejected_stale"}` → surface
+     the staleness, do not edit. Respond to the optional feedback.
 3. **Prune** — after either action, rewrite `resources/worklist.json`
    with only the still-pending items. The worklist is *pending* work,
    not history; completed items belong in commit messages.
 4. **Empty state is fine** — leave it as `{ "description": "", "items": [] }`.
 
 If you ever do receive `approved: {"items":[]}` or
-`drop: {"ids":[]}` (shouldn't happen — the buttons are disabled when
+`drop: {"items":[]}` (shouldn't happen — the buttons are disabled when
 nothing is checked — but be defensive), treat it the same as
 `talk:` — feedback only, take no action.
 

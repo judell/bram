@@ -83,9 +83,19 @@ struct WhisperState(Mutex<Option<std::process::Child>>);
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WorklistAuthorizationRecord {
+    // "approved" | "drop" | "rejected_stale" | "none"
     kind: String,
     #[serde(default)]
     ids: Vec<String>,
+    // Full verified item objects, populated when the approve/drop payload
+    // arrived with per-item content hashes that matched the on-disk file.
+    // Empty for legacy payloads (no hash supplied) and for rejected_stale.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    items: Vec<serde_json::Value>,
+    // Ids whose supplied hash did not match the current `worklist.json`.
+    // Non-empty implies kind == "rejected_stale".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    mismatched_ids: Vec<String>,
     issued_at_ms: i64,
     source: String,
     #[serde(default)]
@@ -3693,6 +3703,8 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String>
         let core_stub = WorklistAuthorizationRecord {
             kind: "none".to_string(),
             ids: Vec::new(),
+            items: Vec::new(),
+            mismatched_ids: Vec::new(),
             issued_at_ms: 0,
             source: "setup".to_string(),
             consumed_at_ms: None,
@@ -4066,6 +4078,26 @@ fn empty_worklist_json() -> &'static str {
     "{\n  \"description\": \"\",\n  \"items\": []\n}\n"
 }
 
+// Per-item content hash exposed via /__worklist. The UI reads it and
+// propagates it verbatim into the `approved:` / `drop:` payload, so the
+// PTY watcher can recompute the same fingerprint from the on-disk file
+// and detect mid-flight drift without ever shipping full item content
+// back into the conversation context.
+//
+// Canonicalization: serde_json is built WITHOUT the preserve_order
+// feature in this crate, so its Map is BTreeMap-backed and
+// `to_string` emits keys in sorted order at every depth. That gives
+// us a deterministic byte sequence on both sides of the channel
+// without needing a separate canonicalizer.
+fn canonical_item_hash(item: &serde_json::Value) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let canonical = serde_json::to_string(item).unwrap_or_default();
+    let mut hasher = DefaultHasher::new();
+    canonical.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
 fn worklist_doc<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
     use serde_json::json;
 
@@ -4099,6 +4131,21 @@ fn worklist_doc<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
         }
         if !obj.contains_key("items") {
             obj.insert("items".to_string(), serde_json::Value::Array(Vec::new()));
+        }
+        // Inject per-item hashes computed from the RAW item content (i.e.
+        // before any server-added fields like `hash` or `diff`). The PTY
+        // watcher recomputes against the same on-disk raw content, so the
+        // fingerprint round-trips through the UI without drift.
+        if let Some(items) = obj.get_mut("items").and_then(|v| v.as_array_mut()) {
+            for item in items {
+                let hash = canonical_item_hash(item);
+                if let Some(item_obj) = item.as_object_mut() {
+                    item_obj.insert(
+                        "hash".to_string(),
+                        serde_json::Value::String(hash),
+                    );
+                }
+            }
         }
         doc
     } else {
@@ -4198,43 +4245,64 @@ fn worklist_description(doc: &serde_json::Value) -> String {
 }
 
 fn normalize_turn_submission(data: &str) -> String {
+    // toTurn in app/main.js sends `\x15\x1b[200~<text>\x1b[201~\r` — the
+    // leading \x15 (NAK, Ctrl-U) clears any pre-existing input line before
+    // the bracketed-paste payload arrives. After stripping the bracketed-
+    // paste markers, trim any remaining C0 control characters (NAK, CR,
+    // LF, etc.) so the structured-line prefix check finds `approved:` /
+    // `drop:` at offset 0 instead of `\x15approved:`.
     data.replace("\u{1b}[200~", "")
         .replace("\u{1b}[201~", "")
-        .trim_matches(|c| c == '\r' || c == '\n')
+        .trim_matches(|c: char| c.is_control())
         .trim()
         .to_string()
 }
 
-fn parse_worklist_authorization_message(text: &str) -> Option<WorklistAuthorizationRecord> {
+// Pure parser of an `approved:` / `drop:` turn line. Returns the kind
+// and the list of (id, optional supplied hash) requests. The hash is
+// None for legacy payloads that arrived as full item objects
+// (`{items: [<full>]}` or `{ids: [...]}` for old drop), or as plain
+// items without a `hash` field.
+struct ParsedWorklistAuthorization {
+    kind: String,
+    requests: Vec<(String, Option<String>)>,
+}
+
+fn parse_worklist_authorization_message(text: &str) -> Option<ParsedWorklistAuthorization> {
     let trimmed = text.trim();
     for (prefix, kind) in [("approved:", "approved"), ("drop:", "drop")] {
         let Some(rest) = trimmed.strip_prefix(prefix) else {
             continue;
         };
         let value = serde_json::from_str::<serde_json::Value>(rest.trim()).ok()?;
-        let ids = if kind == "drop" {
-            value
-                .get("ids")
-                .and_then(|v| v.as_array())
-                .into_iter()
-                .flatten()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect::<Vec<_>>()
-        } else {
-            value
-                .get("items")
-                .and_then(|v| v.as_array())
-                .into_iter()
-                .flatten()
-                .filter_map(|v| v.get("id").and_then(|id| id.as_str()).map(str::to_string))
-                .collect::<Vec<_>>()
-        };
-        return Some(WorklistAuthorizationRecord {
+        let mut requests: Vec<(String, Option<String>)> = Vec::new();
+        // Preferred shape (new and legacy approve both use it):
+        //   {items: [{id, hash?}, ...], feedback: "..."}
+        if let Some(items) = value.get("items").and_then(|v| v.as_array()) {
+            for item in items {
+                let Some(id) = item.get("id").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let hash = item
+                    .get("hash")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                requests.push((id.to_string(), hash));
+            }
+        }
+        // Legacy drop shape: {ids: [...]} — accept if items[] wasn't present.
+        if requests.is_empty() {
+            if let Some(ids) = value.get("ids").and_then(|v| v.as_array()) {
+                for v in ids {
+                    if let Some(id) = v.as_str() {
+                        requests.push((id.to_string(), None));
+                    }
+                }
+            }
+        }
+        return Some(ParsedWorklistAuthorization {
             kind: kind.to_string(),
-            ids,
-            issued_at_ms: unix_now_ms(),
-            source: "pty-write".to_string(),
-            consumed_at_ms: None,
+            requests,
         });
     }
     None
@@ -4242,9 +4310,73 @@ fn parse_worklist_authorization_message(text: &str) -> Option<WorklistAuthorizat
 
 fn record_worklist_authorization_from_input<R: tauri::Runtime>(app: &AppHandle<R>, data: &str) {
     let normalized = normalize_turn_submission(data);
-    let Some(record) = parse_worklist_authorization_message(&normalized) else {
+    let Some(parsed) = parse_worklist_authorization_message(&normalized) else {
         return;
     };
+
+    // Look up each requested id in the on-disk worklist, recompute its
+    // canonical hash, and compare against the supplied hash. Mismatches
+    // (or supplied-but-missing items) flip the record to "rejected_stale"
+    // so the agent surfaces the staleness rather than acting blind.
+    let on_disk_items: Vec<serde_json::Value> = worklist_file(app)
+        .and_then(|p| std::fs::read_to_string(&p).ok())
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|doc| doc.get("items").cloned())
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+
+    let mut ids: Vec<String> = Vec::with_capacity(parsed.requests.len());
+    let mut verified_items: Vec<serde_json::Value> = Vec::new();
+    let mut mismatched_ids: Vec<String> = Vec::new();
+    let mut any_hash_supplied = false;
+
+    for (id, supplied_hash) in &parsed.requests {
+        ids.push(id.clone());
+        let found = on_disk_items.iter().find(|it| {
+            it.get("id")
+                .and_then(|v| v.as_str())
+                .map_or(false, |x| x == id)
+        });
+        match (supplied_hash, found) {
+            (Some(supplied), Some(item)) => {
+                any_hash_supplied = true;
+                if &canonical_item_hash(item) == supplied {
+                    verified_items.push(item.clone());
+                } else {
+                    mismatched_ids.push(id.clone());
+                }
+            }
+            (Some(_), None) => {
+                any_hash_supplied = true;
+                mismatched_ids.push(id.clone());
+            }
+            (None, _) => {
+                // Legacy payload — no hash to verify, no items array stored.
+            }
+        }
+    }
+
+    let kind = if any_hash_supplied && !mismatched_ids.is_empty() {
+        "rejected_stale".to_string()
+    } else {
+        parsed.kind
+    };
+    let items = if mismatched_ids.is_empty() {
+        verified_items
+    } else {
+        Vec::new()
+    };
+
+    let record = WorklistAuthorizationRecord {
+        kind,
+        ids,
+        items,
+        mismatched_ids,
+        issued_at_ms: unix_now_ms(),
+        source: "pty-write".to_string(),
+        consumed_at_ms: None,
+    };
+
     let Some(path) = worklist_auth_file(app) else {
         return;
     };
@@ -5218,6 +5350,73 @@ fn route_request<R: tauri::Runtime>(
             Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
             Err(e) => (500, "text/plain; charset=utf-8", e.into_bytes()),
         };
+    }
+
+    // /__worklist/resolve[?ids=foo,bar] — verified-authorization endpoint
+    // the agent reads instead of parsing the `approved:` / `drop:` turn
+    // line. Returns the current `.worklist-authorization.json` body, with
+    // optional id-filtering. `kind: "rejected_stale"` signals the on-disk
+    // worklist drifted between the user's click and the watcher reading
+    // it — the agent should surface staleness rather than apply.
+    if path == "__worklist/resolve" {
+        let mut id_filter: Option<Vec<String>> = None;
+        for pair in query.split('&') {
+            if let Some(enc) = pair.strip_prefix("ids=") {
+                let decoded = percent_decode(enc);
+                let parsed: Vec<String> = decoded
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !parsed.is_empty() {
+                    id_filter = Some(parsed);
+                }
+                break;
+            }
+        }
+        let Some(auth_path) = worklist_auth_file(app) else {
+            return (404, "text/plain; charset=utf-8", b"no project root".to_vec());
+        };
+        let Ok(raw) = std::fs::read_to_string(&auth_path) else {
+            return (
+                404,
+                "text/plain; charset=utf-8",
+                b"no authorization record".to_vec(),
+            );
+        };
+        let mut record_value: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(_) => {
+                return (
+                    500,
+                    "text/plain; charset=utf-8",
+                    b"malformed authorization record".to_vec(),
+                );
+            }
+        };
+        if let Some(filter) = id_filter {
+            if let Some(items) = record_value
+                .get_mut("items")
+                .and_then(|v| v.as_array_mut())
+            {
+                items.retain(|it| {
+                    it.get("id")
+                        .and_then(|v| v.as_str())
+                        .map_or(false, |id| filter.iter().any(|f| f == id))
+                });
+            }
+            if let Some(ids_v) = record_value
+                .get_mut("ids")
+                .and_then(|v| v.as_array_mut())
+            {
+                ids_v.retain(|v| {
+                    v.as_str()
+                        .map_or(false, |id| filter.iter().any(|f| f == id))
+                });
+            }
+        }
+        let body = record_value.to_string().into_bytes();
+        return (200, "application/json; charset=utf-8", body);
     }
 
     // /__git-diff?path=<file> — plain text `git diff -- <path>` output.

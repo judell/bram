@@ -1,5 +1,19 @@
 {
-  "description": "",
+  "description": "Two items got their applied state preserved in the working tree but lost their worklist tracking when a later proposal overwrote the file. Re-adding for the commit-approval step.",
   "items": [
+    {
+      "id": "conventions-default-to-worklist",
+      "status": "applied",
+      "file": "app/__shell/conventions.md",
+      "before": "The 'When to route through the worklist' subsection at conventions.md:219 currently reads: 'Default to proposing items in resources/worklist.json whenever a change spans more than one file, or has more than ~2 discrete sub-edits in a single file, even after the user has verbally said \"do it\". The two-stage proposed→applied flow lets the user uncheck individual sub-edits before any code is touched. Single-file tweaks, typo fixes, and direct corrections to in-progress code can still be edited directly.' Wording has been in place since 74a69b9 (May 8). The rule is technically working but the default is wrong for the user's intent: an LLM reading 'Single-file tweaks ... can still be edited directly' takes that as license to direct-edit any single-attribute change, including fresh change requests like 'let's fix the top row layout'. The user's mental model is the opposite default: propose for every change request, allow opt-out only on explicit user request.",
+      "after": "Rewrote the 'When to route through the worklist' subsection. New text leads with '**Default: every change request goes through resources/worklist.json.** Single-file, single-line, single-attribute — size doesn't matter.' Then lists three skip-the-worklist contexts (explicit opt-out in the same turn, correcting just-written code, iterating on uncommitted draft), each tied to specific context rather than size. Six worked examples follow, including 'let's fix the top row layout' → propose. Re-adding as applied because the original worklist tracking got overwritten before commit approval landed."
+    },
+    {
+      "id": "history-taxonomy-lifecycle-aligned",
+      "status": "applied",
+      "file": "src-tauri/src/lib.rs",
+      "before": "generate_worklist_changelog() classified each diff as proposed / advanced / renamed / pruned, where 'advanced' was the status-change bucket and 'pruned' lumped committed/dropped together. 'renamed' was dead since rename_from was removed in 67eff19. Per user feedback: the relevant phases are proposed → applied → committed (and dropped as an alternate outcome). Per follow-up 'also drop pruned' directive: unauthorized removals are already blocked by maybe_enforce_worklist_policy upstream, so the pruned fallback was theoretical.",
+      "after": "Rewrote generate_worklist_changelog: takes AppHandle now; reads resources/.worklist-authorization.json once at the top to classify removals; renamed advanced → applied; removed renamed and pruned buckets entirely; new four-way taxonomy is proposed / applied / committed / dropped. Summary line joins only non-empty buckets. Suppress condition updated to check the new buckets. Removed the rename_from lookup and renamed_olds HashSet. Section headers updated to match. Re-adding as applied because the original worklist tracking got overwritten before commit approval landed."
+    }
   ]
 }

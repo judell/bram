@@ -204,6 +204,18 @@ soft-reset approach is only safe on unpushed history.
 When *not* to use this: one-or-two-item decisions, free-text input, or
 anything where typing in chat is faster than rendering UI.
 
+### Refer to items by id, not by ordinal
+
+When you mention worklist items in chat, name them by their `id`
+verbatim (e.g. `codex-launcher-require-hook`), never by ordinal
+position ("item 3", "items 3 and 5", "the second one"). Numbers are
+unstable — they shift as items are approved, applied, dropped, or
+pruned, and they don't match what the user sees in the Worklist tab
+UI which is keyed by id. Ids stay stable across the item's lifetime
+and are what the structured `approved:` / `drop:` payloads
+reference, so naming them keeps chat aligned with both the UI and
+the authorization channel.
+
 ### When to route through the worklist
 
 Default to proposing items in `resources/worklist.json` whenever a

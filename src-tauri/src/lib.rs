@@ -2921,6 +2921,25 @@ const ENHANCE_CODEX_CONFIG_REL: &str = ".codex/config.toml";
 // config.toml so re-runs can replace it without disturbing surrounding entries.
 const ENHANCE_CODEX_TOML_MARKER_START: &str = "# xmlui-desktop:start";
 const ENHANCE_CODEX_TOML_MARKER_END: &str = "# xmlui-desktop:end";
+// developer_instructions is a top-level scalar in config.toml. TOML requires
+// top-level keys to come BEFORE any [section] table, so this block lives at
+// the head of the file in its own marker. Verified via `codex debug
+// prompt-input` to land in the developer-role context part between
+// permissions_instructions and skills_instructions — a higher-priority slot
+// than the user-role AGENTS.md path. That's why this surface carries the gate
+// prose now instead of a per-turn UserPromptSubmit injection.
+const ENHANCE_CODEX_INSTR_MARKER_START: &str = "# xmlui-desktop-instructions:start";
+const ENHANCE_CODEX_INSTR_MARKER_END: &str = "# xmlui-desktop-instructions:end";
+// Single-source-of-truth gate prose embedded in xmlui-desktop binary. Mirrors
+// what the original UserPromptSubmit injection emitted, kept in sync with
+// the convention in app/__shell/conventions.md.
+const ENHANCE_CODEX_GATE_PROSE: &str = "xmlui-desktop worklist gate. \
+First response to a change request must be (a) clarify, \
+(b) propose items to resources/worklist.json (each with non-empty \
+id, file or files, before, and after), or (c) read-only investigation \
+prefaced \"I don't yet have enough context to propose\". Mutations \
+outside approved items are blocked at runtime by a PreToolUse hook. \
+Full convention: .claude/xmlui-desktop-conventions.md";
 const WORKLIST_AUTH_REL: &str = "resources/.worklist-authorization.json";
 // On Unix, the bare path runs via the script's `#!/usr/bin/env python3`
 // shebang (set executable by run_enhance under #[cfg(unix)]). On Windows
@@ -3694,6 +3713,10 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String>
     for path in &codex_hook_install.wrote {
         wrote.push(path.clone());
     }
+    // Developer-instructions install — top-level config.toml scalar carrying
+    // the gate prose. Replaced the per-turn UserPromptSubmit injection after
+    // verifying developer-role context is salient enough on its own.
+    install_codex_developer_instructions()?;
 
     let body = serde_json::json!({
         "enhanced": true,
@@ -3759,11 +3782,11 @@ fn install_codex_worklist_guard<R: tauri::Runtime>(
     // and only blocks MCP calls whose names signal mutation (write/edit/create/
     // delete/move/...).
     //
-    // A second registration on UserPromptSubmit uses the same script to inject
-    // an additionalContext reminder at every turn in managed repos. The
-    // PreToolUse hook catches mutations at the tool boundary; the
-    // UserPromptSubmit injection is the pre-emptive nudge that aims to prevent
-    // codex from narrating intent to edit before proposing in the worklist.
+    // The pre-emptive nudge (was UserPromptSubmit injection earlier) is now
+    // carried by `developer_instructions` at top-level config — verified to
+    // be rendered in the developer-role context part, higher priority than
+    // AGENTS.md (which is user-role). install_codex_developer_instructions
+    // writes that field; this function only installs the runtime backstop.
     let toml_block = format!(
         "{start}\n\
          [[hooks.PreToolUse]]\n\
@@ -3774,14 +3797,6 @@ fn install_codex_worklist_guard<R: tauri::Runtime>(
          command = {command_quoted}\n\
          timeout = 10\n\
          statusMessage = \"xmlui-desktop worklist guard\"\n\
-         \n\
-         [[hooks.UserPromptSubmit]]\n\
-         \n\
-         [[hooks.UserPromptSubmit.hooks]]\n\
-         type = \"command\"\n\
-         command = {command_quoted}\n\
-         timeout = 10\n\
-         statusMessage = \"xmlui-desktop gate reminder\"\n\
          {end}",
         start = ENHANCE_CODEX_TOML_MARKER_START,
         end = ENHANCE_CODEX_TOML_MARKER_END,
@@ -3817,6 +3832,66 @@ fn install_codex_worklist_guard<R: tauri::Runtime>(
         config_path: config_path.display().to_string(),
         wrote,
     })
+}
+
+fn install_codex_developer_instructions() -> Result<(), String> {
+    let home = home_dir().ok_or("no HOME or USERPROFILE")?;
+    let config_path = home.join(ENHANCE_CODEX_CONFIG_REL);
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create {}: {}", parent.display(), e))?;
+    }
+    let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
+
+    // Strip any legacy test-marker block from earlier experiments. Without
+    // this, the file would carry two top-level `developer_instructions = ...`
+    // lines (the legacy one and ours), which TOML rejects as a duplicate key.
+    let cleaned = strip_marker_block(&existing, "# xmlui-desktop-test-instr:start", "# xmlui-desktop-test-instr:end");
+
+    let block = format!(
+        "{start}\ndeveloper_instructions = {body}\n{end}",
+        start = ENHANCE_CODEX_INSTR_MARKER_START,
+        end = ENHANCE_CODEX_INSTR_MARKER_END,
+        body = toml_basic_string(ENHANCE_CODEX_GATE_PROSE),
+    );
+
+    let new_content = if let Some(start_idx) = cleaned.find(ENHANCE_CODEX_INSTR_MARKER_START) {
+        let tail = &cleaned[start_idx..];
+        let end_offset = tail
+            .find(ENHANCE_CODEX_INSTR_MARKER_END)
+            .map(|i| start_idx + i + ENHANCE_CODEX_INSTR_MARKER_END.len())
+            .unwrap_or(cleaned.len());
+        let mut s = cleaned.clone();
+        s.replace_range(start_idx..end_offset, &block);
+        s
+    } else if cleaned.trim().is_empty() {
+        format!("{}\n", block)
+    } else {
+        // Prepend at top of file. developer_instructions is a top-level scalar
+        // and TOML requires those before any [section] table.
+        format!("{}\n\n{}", block, cleaned.trim_start_matches('\n'))
+    };
+    std::fs::write(&config_path, &new_content)
+        .map_err(|e| format!("write codex config.toml: {}", e))?;
+    Ok(())
+}
+
+fn strip_marker_block(content: &str, start: &str, end: &str) -> String {
+    let mut result = content.to_string();
+    while let Some(start_idx) = result.find(start) {
+        let tail = &result[start_idx..];
+        let end_offset = match tail.find(end) {
+            Some(i) => start_idx + i + end.len(),
+            None => result.len(),
+        };
+        // Also consume the trailing newline if present, so we don't leave a blank line.
+        let mut cut_to = end_offset;
+        if result.as_bytes().get(cut_to) == Some(&b'\n') {
+            cut_to += 1;
+        }
+        result.replace_range(start_idx..cut_to, "");
+    }
+    result
 }
 
 // Quote a string as a TOML basic string literal — wraps in double quotes and

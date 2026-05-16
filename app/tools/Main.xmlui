@@ -59,6 +59,12 @@
           <Text>path:</Text>
           <Text fontFamily="$fontFamily-monospace">{rpInfo.value.spawned.path}</Text>
         </HStack>
+        <HStack gap="$space-2" marginTop="$space-1">
+          <Button
+            label="Restart project server"
+            size="sm"
+            onClick="window.fetch('/__restart-server').then((r) => { if (r.ok) rpInfo.refetch(); })" />
+        </HStack>
       </VStack>
 
       <VStack

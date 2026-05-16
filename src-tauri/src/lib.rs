@@ -29,9 +29,12 @@ fn serve_app_file<R: tauri::Runtime>(
         let p = root.join(rel);
         return std::fs::read(&p).ok().map(|bytes| (bytes, mime_for(&p)));
     }
-    EMBEDDED_APP
-        .get_file(rel)
-        .map(|file| (file.contents().to_vec(), mime_for(std::path::Path::new(rel))))
+    EMBEDDED_APP.get_file(rel).map(|file| {
+        (
+            file.contents().to_vec(),
+            mime_for(std::path::Path::new(rel)),
+        )
+    })
 }
 
 // Resolve a path within `app/` to a real on-disk path. If the
@@ -39,10 +42,7 @@ fn serve_app_file<R: tauri::Runtime>(
 // extracts the embedded file into a per-binary cache dir and returns
 // that path. Used for things that need a real filesystem path —
 // bash --rcfile, etc. — not just bytes.
-fn extract_app_file<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    rel: &str,
-) -> Result<PathBuf, String> {
+fn extract_app_file<R: tauri::Runtime>(app: &AppHandle<R>, rel: &str) -> Result<PathBuf, String> {
     if let Some(root) = resolve_app_root(Some(app)) {
         let p = root.join(rel);
         return if p.exists() {
@@ -405,7 +405,10 @@ fn pty_menu_update(chunk: &[u8]) {
                 *menu = Some(new_menu);
             }
             (None, Some(old)) => {
-                eprintln!("[pty-menu] Some(tool={}) -> None (buffer evicted)", old.tool);
+                eprintln!(
+                    "[pty-menu] Some(tool={}) -> None (buffer evicted)",
+                    old.tool
+                );
                 *menu = None;
             }
             (None, None) => {}
@@ -543,8 +546,16 @@ fn pty_menu_detect(tail: &[u8]) -> Option<PtyMenu> {
 fn pty_menu_guess_tool(context: &[u8]) -> String {
     let s = String::from_utf8_lossy(context);
     for tool in &[
-        "MultiEdit", "ToolSearch", "WebFetch", "WebSearch",
-        "Bash", "Edit", "Write", "Read", "Grep", "Glob",
+        "MultiEdit",
+        "ToolSearch",
+        "WebFetch",
+        "WebSearch",
+        "Bash",
+        "Edit",
+        "Write",
+        "Read",
+        "Grep",
+        "Glob",
     ] {
         if s.contains(tool) {
             return (*tool).to_string();
@@ -573,7 +584,10 @@ fn pty_menu_clear() {
         tail.clear();
     }
     if let Some(tool) = dismissed_tool {
-        eprintln!("[pty-menu] cleared by user input (tool={}, suppressing for 2s)", tool);
+        eprintln!(
+            "[pty-menu] cleared by user input (tool={}, suppressing for 2s)",
+            tool
+        );
         if let Ok(mut s) = pty_menu_suppressed_cell().lock() {
             *s = Some((tool, std::time::Instant::now()));
         }
@@ -611,9 +625,8 @@ fn hex_dump(bytes: &[u8]) -> String {
 }
 
 fn compare_versions(current: &str, latest: &str) -> bool {
-    let parse = |s: &str| -> Vec<u32> {
-        s.split('.').filter_map(|x| x.parse::<u32>().ok()).collect()
-    };
+    let parse =
+        |s: &str| -> Vec<u32> { s.split('.').filter_map(|x| x.parse::<u32>().ok()).collect() };
     parse(latest) > parse(current)
 }
 
@@ -628,27 +641,49 @@ fn fetch_app_info() -> AppInfo {
     let output = std::process::Command::new("curl")
         .args([
             "-sf",
-            "-m", "5",
-            "-H", "User-Agent: xmlui-desktop",
-            "-H", "Accept: application/vnd.github+json",
+            "-m",
+            "5",
+            "-H",
+            "User-Agent: xmlui-desktop",
+            "-H",
+            "Accept: application/vnd.github+json",
             "https://api.github.com/repos/judell/xmlui-desktop/releases/latest",
         ])
         .output();
 
     let bytes = match output {
         Ok(o) if o.status.success() => o.stdout,
-        _ => return AppInfo { current, latest: None, has_update: false, release_url: None },
+        _ => {
+            return AppInfo {
+                current,
+                latest: None,
+                has_update: false,
+                release_url: None,
+            }
+        }
     };
 
     let v: serde_json::Value = match serde_json::from_slice(&bytes) {
         Ok(v) => v,
-        Err(_) => return AppInfo { current, latest: None, has_update: false, release_url: None },
+        Err(_) => {
+            return AppInfo {
+                current,
+                latest: None,
+                has_update: false,
+                release_url: None,
+            }
+        }
     };
 
     let tag = v.get("tag_name").and_then(|x| x.as_str()).unwrap_or("");
     let latest_str = tag.trim_start_matches('v').to_string();
     if latest_str.is_empty() {
-        return AppInfo { current, latest: None, has_update: false, release_url: None };
+        return AppInfo {
+            current,
+            latest: None,
+            has_update: false,
+            release_url: None,
+        };
     }
     let release_url = v.get("html_url").and_then(|x| x.as_str()).map(String::from);
     let has_update = compare_versions(&current, &latest_str);
@@ -809,12 +844,9 @@ fn git_log_recent<R: tauri::Runtime>(app: &AppHandle<R>, count: usize) -> Result
 // payload: `{ results: [{...commit fields, hits: [{line, snippet,
 // field}]}], truncated }`. Capped at MAX_RESULTS commits scanned and
 // MAX_HITS total hits so a wide-net query doesn't pin git.
-fn git_log_search<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    query: &str,
-) -> Result<Vec<u8>, String> {
-    use std::collections::HashSet;
+fn git_log_search<R: tauri::Runtime>(app: &AppHandle<R>, query: &str) -> Result<Vec<u8>, String> {
     use serde_json::json;
+    use std::collections::HashSet;
     let q = query.trim();
     if q.is_empty() {
         return Ok(b"{\"results\":[],\"truncated\":false}".to_vec());
@@ -956,10 +988,7 @@ fn gh_issues_list<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
 // shape as Commits search: { results: [{...fields, hits: [{line, snippet,
 // field}]}], truncated }. On any gh failure returns the empty envelope so
 // the frontend renders cleanly.
-fn gh_issues_search<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    query: &str,
-) -> Result<Vec<u8>, String> {
+fn gh_issues_search<R: tauri::Runtime>(app: &AppHandle<R>, query: &str) -> Result<Vec<u8>, String> {
     use serde_json::json;
     let q = query.trim();
     if q.is_empty() {
@@ -1291,7 +1320,10 @@ fn pty_spawn(
             let _ = std::fs::create_dir_all(parent);
         }
         let _ = std::fs::remove_file(&hint_path);
-        command.env("XMLUI_DESKTOP_AGENT_HINT", hint_path.to_string_lossy().into_owned());
+        command.env(
+            "XMLUI_DESKTOP_AGENT_HINT",
+            hint_path.to_string_lossy().into_owned(),
+        );
     }
 
     let _child = pair
@@ -1388,11 +1420,7 @@ fn load_project_config(root: &Path) -> Option<ProjectConfig> {
             Some(cfg)
         }
         Err(e) => {
-            eprintln!(
-                "[project-config] failed to parse {}: {}",
-                path.display(),
-                e
-            );
+            eprintln!("[project-config] failed to parse {}: {}", path.display(), e);
             None
         }
     }
@@ -1428,7 +1456,11 @@ fn probe_port_http(port: u16, path: &str) -> PortStatus {
     let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
     let req_path = {
         let p = path.split('?').next().unwrap_or("/");
-        if p.is_empty() { "/" } else { p }
+        if p.is_empty() {
+            "/"
+        } else {
+            p
+        }
     };
     let req = format!(
         "GET {} HTTP/1.0\r\nHost: localhost:{}\r\nConnection: close\r\n\r\n",
@@ -1539,10 +1571,7 @@ fn wait_for_port(port: u16, total_ms: u64) -> bool {
 // right-pane-reload so main.js re-fetches the URL. Port changes do respawn,
 // but the iframe origin shifts — service workers (XMLUI's apiInterceptor,
 // MSW) won't rebind cleanly, so we log a warning telling the user to restart.
-fn handle_project_config_reload<R: tauri::Runtime>(
-    app_handle: &AppHandle<R>,
-    proj_root: &Path,
-) {
+fn handle_project_config_reload<R: tauri::Runtime>(app_handle: &AppHandle<R>, proj_root: &Path) {
     use tauri::Emitter;
 
     let new_cfg = load_project_config(proj_root);
@@ -1607,15 +1636,13 @@ fn handle_project_config_reload<R: tauri::Runtime>(
 
     let new_right_pane_url = match new_server.as_ref() {
         Some(cfg) => format!("http://localhost:{}{}", cfg.port, cfg.path),
-        None => {
-            app_handle
-                .state::<PaneUrlsState>()
-                .0
-                .lock()
-                .unwrap()
-                .default_right_pane
-                .clone()
-        }
+        None => app_handle
+            .state::<PaneUrlsState>()
+            .0
+            .lock()
+            .unwrap()
+            .default_right_pane
+            .clone(),
     };
     {
         let state = app_handle.state::<PaneUrlsState>();
@@ -1816,7 +1843,11 @@ fn capture_screenshot<R: tauri::Runtime>(app: AppHandle<R>) -> Result<String, St
 }
 
 #[tauri::command]
-fn save_trace_export(filename: String, content: String, mime_type: String) -> Result<String, String> {
+fn save_trace_export(
+    filename: String,
+    content: String,
+    mime_type: String,
+) -> Result<String, String> {
     let safe_name = filename
         .chars()
         .map(|c| match c {
@@ -2171,7 +2202,11 @@ fn discover_claude_sessions<R: tauri::Runtime>(
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        let id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
         let title = claude_session_title(&path).ok().flatten();
         sessions.push(SessionRecord {
             provider: SessionProvider::Claude,
@@ -2467,8 +2502,7 @@ fn rename_session<R: tauri::Runtime>(
     use std::io::Write;
     match provider {
         SessionProvider::Claude => {
-            let record =
-                serde_json::json!({ "type": "custom-title", "customTitle": trimmed });
+            let record = serde_json::json!({ "type": "custom-title", "customTitle": trimmed });
             let mut line = serde_json::to_string(&record).map_err(|e| e.to_string())?;
             line.push('\n');
             let mut f = std::fs::OpenOptions::new()
@@ -2533,8 +2567,12 @@ fn latest_claude_session_path<R: tauri::Runtime>(
         if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
             continue;
         }
-        let Ok(metadata) = entry.metadata() else { continue };
-        let Ok(mtime) = metadata.modified() else { continue };
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let Ok(mtime) = metadata.modified() else {
+            continue;
+        };
         all.push((mtime, path));
     }
     if all.is_empty() {
@@ -2768,7 +2806,8 @@ fn read_latest_session_pending<R: tauri::Runtime>(
     let file_size = file.metadata().map_err(|e| e.to_string())?.len();
     let want: u64 = 32 * 1024;
     let read_from = file_size.saturating_sub(want);
-    file.seek(SeekFrom::Start(read_from)).map_err(|e| e.to_string())?;
+    file.seek(SeekFrom::Start(read_from))
+        .map_err(|e| e.to_string())?;
     let mut tail = Vec::with_capacity((file_size - read_from) as usize);
     file.read_to_end(&mut tail).map_err(|e| e.to_string())?;
     let text = String::from_utf8_lossy(&tail);
@@ -2852,7 +2891,8 @@ fn read_latest_session_pending<R: tauri::Runtime>(
         break;
     }
     // Always log the outcome (cheap; helps diagnose missing-menu reports).
-    let tool_name = pending.as_ref()
+    let tool_name = pending
+        .as_ref()
         .and_then(|p| p.get("name"))
         .and_then(|n| n.as_str())
         .unwrap_or("");
@@ -2899,12 +2939,7 @@ fn read_latest_session_meta<R: tauri::Runtime>(
         .ok()
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let body = format!(
-        r#"{{"size":{},"mtime":{},"now":{}}}"#,
-        md.len(),
-        mtime,
-        now
-    );
+    let body = format!(r#"{{"size":{},"mtime":{},"now":{}}}"#, md.len(), mtime, now);
     Ok(body.into_bytes())
 }
 
@@ -2912,11 +2947,8 @@ fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.as_bytes() {
         let c = *b;
-        let unreserved = c.is_ascii_alphanumeric()
-            || c == b'-'
-            || c == b'_'
-            || c == b'.'
-            || c == b'~';
+        let unreserved =
+            c.is_ascii_alphanumeric() || c == b'-' || c == b'_' || c == b'.' || c == b'~';
         if unreserved {
             out.push(c as char);
         } else {
@@ -3021,8 +3053,7 @@ const WORKLIST_AUTH_REL: &str = "resources/.worklist-authorization.json";
 // `py` launcher — it ships with the python.org installer and resolves
 // Python via the registry, independent of PATH.
 #[cfg(windows)]
-const ENHANCE_HOOK_COMMAND: &str =
-    "py -3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/worklist-guard.py\"";
+const ENHANCE_HOOK_COMMAND: &str = "py -3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/worklist-guard.py\"";
 #[cfg(not(windows))]
 const ENHANCE_HOOK_COMMAND: &str = "$CLAUDE_PROJECT_DIR/.claude/hooks/worklist-guard.py";
 // Presence of this file in the project root means the project IS the
@@ -3684,8 +3715,7 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String>
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("create {}: {}", parent.display(), e))?;
         }
-        std::fs::write(&sidecar_path, &conventions)
-            .map_err(|e| format!("write sidecar: {}", e))?;
+        std::fs::write(&sidecar_path, &conventions).map_err(|e| format!("write sidecar: {}", e))?;
         wrote.push(sidecar_path.display().to_string());
     }
 
@@ -3727,8 +3757,7 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String>
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("create {}: {}", parent.display(), e))?;
     }
-    std::fs::write(&hook_path, &hook_bytes)
-        .map_err(|e| format!("write hook: {}", e))?;
+    std::fs::write(&hook_path, &hook_bytes).map_err(|e| format!("write hook: {}", e))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -3736,8 +3765,7 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String>
             .map_err(|e| format!("stat hook: {}", e))?
             .permissions();
         perms.set_mode(0o755);
-        std::fs::set_permissions(&hook_path, perms)
-            .map_err(|e| format!("chmod hook: {}", e))?;
+        std::fs::set_permissions(&hook_path, perms).map_err(|e| format!("chmod hook: {}", e))?;
     }
     wrote.push(hook_path.display().to_string());
 
@@ -3920,7 +3948,11 @@ fn install_codex_developer_instructions() -> Result<(), String> {
     // Strip any legacy test-marker block from earlier experiments. Without
     // this, the file would carry two top-level `developer_instructions = ...`
     // lines (the legacy one and ours), which TOML rejects as a duplicate key.
-    let cleaned = strip_marker_block(&existing, "# xmlui-desktop-test-instr:start", "# xmlui-desktop-test-instr:end");
+    let cleaned = strip_marker_block(
+        &existing,
+        "# xmlui-desktop-test-instr:start",
+        "# xmlui-desktop-test-instr:end",
+    );
 
     let block = format!(
         "{start}\ndeveloper_instructions = {body}\n{end}",
@@ -4046,7 +4078,10 @@ fn worklist_doc<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
         );
         obj.insert("path".to_string(), serde_json::Value::String(path_str));
         if !obj.contains_key("description") {
-            obj.insert("description".to_string(), serde_json::Value::String(String::new()));
+            obj.insert(
+                "description".to_string(),
+                serde_json::Value::String(String::new()),
+            );
         }
         if !obj.contains_key("items") {
             obj.insert("items".to_string(), serde_json::Value::Array(Vec::new()));
@@ -4091,7 +4126,11 @@ fn unix_now_ms() -> i64 {
 // avoid pulling in chrono just for one timestamp formatter.
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719468;
-    let era = if z >= 0 { z / 146097 } else { (z - 146096) / 146097 };
+    let era = if z >= 0 {
+        z / 146097
+    } else {
+        (z - 146096) / 146097
+    };
     let doe = (z - era * 146097) as u64;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
     let y = yoe as i64 + era * 400;
@@ -4304,7 +4343,7 @@ fn maybe_enforce_worklist_policy<R: tauri::Runtime>(
         .iter()
         .map(|(id, status)| format!("\"{}\" (status={})", id, status))
         .collect::<Vec<_>>()
-        .join(", " );
+        .join(", ");
     eprintln!(
         "[worklist-enforce] reverting unauthorized removal of {} via watcher fallback; last auth kind={}",
         bad,
@@ -4462,7 +4501,10 @@ fn generate_worklist_changelog<R: tauri::Runtime>(
 
     if description_changed {
         out.push_str("## Description changed\n\n");
-        out.push_str(&format!("Was: `{}`\nNow: `{}`\n\n", prior_desc, current_desc));
+        out.push_str(&format!(
+            "Was: `{}`\nNow: `{}`\n\n",
+            prior_desc, current_desc
+        ));
     }
 
     if !proposed.is_empty() {
@@ -4477,17 +4519,11 @@ fn generate_worklist_changelog<R: tauri::Runtime>(
             ));
             let before = worklist_item_str_field(item, "before");
             if !before.is_empty() {
-                out.push_str(&format!(
-                    "  - **Before:** {}\n",
-                    before.replace('\n', " ")
-                ));
+                out.push_str(&format!("  - **Before:** {}\n", before.replace('\n', " ")));
             }
             let after = worklist_item_str_field(item, "after");
             if !after.is_empty() {
-                out.push_str(&format!(
-                    "  - **After:** {}\n",
-                    after.replace('\n', " ")
-                ));
+                out.push_str(&format!("  - **After:** {}\n", after.replace('\n', " ")));
             }
         }
         out.push('\n');
@@ -4517,17 +4553,11 @@ fn generate_worklist_changelog<R: tauri::Runtime>(
             ));
             let before = worklist_item_str_field(item, "before");
             if !before.is_empty() {
-                out.push_str(&format!(
-                    "  - **Before:** {}\n",
-                    before.replace('\n', " ")
-                ));
+                out.push_str(&format!("  - **Before:** {}\n", before.replace('\n', " ")));
             }
             let after = worklist_item_str_field(item, "after");
             if !after.is_empty() {
-                out.push_str(&format!(
-                    "  - **After:** {}\n",
-                    after.replace('\n', " ")
-                ));
+                out.push_str(&format!("  - **After:** {}\n", after.replace('\n', " ")));
             }
         }
         out.push('\n');
@@ -4549,8 +4579,12 @@ fn generate_worklist_changelog<R: tauri::Runtime>(
 // changelog .md. Best-effort: errors here must not break the underlying
 // worklist write, which has already completed.
 fn maybe_snapshot_worklist<R: tauri::Runtime>(app: &AppHandle<R>) {
-    let Some(file) = worklist_file(app) else { return };
-    let Some(history_dir) = worklist_history_dir(app) else { return };
+    let Some(file) = worklist_file(app) else {
+        return;
+    };
+    let Some(history_dir) = worklist_history_dir(app) else {
+        return;
+    };
     let current_str = match std::fs::read_to_string(&file) {
         Ok(s) => s,
         Err(_) => return,
@@ -4611,7 +4645,9 @@ fn maybe_snapshot_worklist<R: tauri::Runtime>(app: &AppHandle<R>) {
 }
 
 fn init_worklist_cache<R: tauri::Runtime>(app: &AppHandle<R>) {
-    let Some(file) = worklist_file(app) else { return };
+    let Some(file) = worklist_file(app) else {
+        return;
+    };
     if let Ok(s) = std::fs::read_to_string(&file) {
         if let Ok(mut guard) = last_worklist_cell().lock() {
             *guard = Some(s);
@@ -4695,6 +4731,83 @@ fn route_request<R: tauri::Runtime>(
         };
         let body = serde_json::to_vec(&info).unwrap_or_default();
         return (200, "application/json; charset=utf-8", body);
+    }
+
+    if path == "__restart-server" {
+        use tauri::Emitter;
+
+        let (cfg, pid) = {
+            let spawn_state = app.state::<SpawnedServerState>();
+            let mut guard = spawn_state.0.lock().unwrap();
+            let Some(mut spawned) = guard.take() else {
+                return (
+                    400,
+                    "text/plain; charset=utf-8",
+                    b"no spawned project server".to_vec(),
+                );
+            };
+            let cfg = spawned.config.clone();
+            let Some(proj_root) = project_root(Some(app)) else {
+                let body = serde_json::json!({
+                    "ok": false,
+                    "error": "no project root",
+                });
+                return (
+                    500,
+                    "application/json; charset=utf-8",
+                    serde_json::to_vec(&body).unwrap_or_default(),
+                );
+            };
+
+            let old_pid = spawned.child.id();
+            let _ = spawned.child.kill();
+            let _ = spawned.child.wait();
+            eprintln!("[server] killed pid={} on manual restart", old_pid);
+
+            match spawn_project_server(&cfg, &proj_root) {
+                Ok(child) => {
+                    let pid = child.id();
+                    *guard = Some(SpawnedServer {
+                        child,
+                        config: cfg.clone(),
+                    });
+                    (cfg, pid)
+                }
+                Err(e) => {
+                    eprintln!("[server] restart failed: {}", e);
+                    let body = serde_json::json!({
+                        "ok": false,
+                        "error": e,
+                    });
+                    return (
+                        500,
+                        "application/json; charset=utf-8",
+                        serde_json::to_vec(&body).unwrap_or_default(),
+                    );
+                }
+            }
+        };
+
+        let port_up = wait_for_port(cfg.port, 5000);
+        if !port_up {
+            eprintln!(
+                "[server] WARNING: restarted port {} did not come up within 5s; right-pane iframe will retry",
+                cfg.port
+            );
+        } else {
+            eprintln!("[server] restarted pid={}; port {} is up", pid, cfg.port);
+        }
+        let _ = app.emit("right-pane-reload", ());
+        let body = serde_json::json!({
+            "ok": true,
+            "pid": pid,
+            "port_up": port_up,
+        });
+        return (
+            200,
+            "application/json; charset=utf-8",
+            serde_json::to_vec(&body).unwrap_or_default(),
+        );
     }
 
     if path == "__error" {
@@ -4874,11 +4987,20 @@ fn route_request<R: tauri::Runtime>(
                     .and_then(|entries| serde_json::to_vec(&entries).map_err(|e| e.to_string())),
             )
         } else if rest == "latest" {
-            ("text/plain; charset=utf-8", read_latest_session(app, provider))
+            (
+                "text/plain; charset=utf-8",
+                read_latest_session(app, provider),
+            )
         } else if rest == "latest-meta" {
-            ("application/json; charset=utf-8", read_latest_session_meta(app, provider))
+            (
+                "application/json; charset=utf-8",
+                read_latest_session_meta(app, provider),
+            )
         } else if rest == "latest-pending" {
-            ("application/json; charset=utf-8", read_latest_session_pending(app, provider))
+            (
+                "application/json; charset=utf-8",
+                read_latest_session_pending(app, provider),
+            )
         } else if rest == "latest-tail" {
             // ?lines=N → last N records. ?lines=all (or absent) → full file.
             let mut lines_param: Option<String> = None;
@@ -4887,7 +5009,10 @@ fn route_request<R: tauri::Runtime>(
                     lines_param = Some(percent_decode(v));
                 }
             }
-            eprintln!("[latest-tail] query={:?} lines_param={:?}", query, lines_param);
+            eprintln!(
+                "[latest-tail] query={:?} lines_param={:?}",
+                query, lines_param
+            );
             // Default-safe: when lines is absent or unparseable, tail to
             // the last 200 records. `?lines=all` is the only way to
             // request the full file via this route. Prevents accidental
@@ -4902,7 +5027,10 @@ fn route_request<R: tauri::Runtime>(
             };
             ("text/plain; charset=utf-8", body)
         } else if rest == "content" {
-            ("text/plain; charset=utf-8", read_session(app, &session_id, provider))
+            (
+                "text/plain; charset=utf-8",
+                read_session(app, &session_id, provider),
+            )
         } else if rest == "search" {
             let limit = if scope == "all" { usize::MAX } else { 10 };
             (
@@ -4911,11 +5039,20 @@ fn route_request<R: tauri::Runtime>(
                     .and_then(|entries| serde_json::to_vec(&entries).map_err(|e| e.to_string())),
             )
         } else if rest == "delete" {
-            ("application/json; charset=utf-8", delete_session(app, &session_id, provider))
+            (
+                "application/json; charset=utf-8",
+                delete_session(app, &session_id, provider),
+            )
         } else if rest == "rename" {
-            ("application/json; charset=utf-8", rename_session(app, &session_id, provider, &title))
+            (
+                "application/json; charset=utf-8",
+                rename_session(app, &session_id, provider, &title),
+            )
         } else {
-            ("text/plain; charset=utf-8", read_session(app, rest, provider))
+            (
+                "text/plain; charset=utf-8",
+                read_session(app, rest, provider),
+            )
         };
         return match result {
             Ok(bytes) => (200, content_type, bytes),
@@ -5011,22 +5148,21 @@ fn route_request<R: tauri::Runtime>(
                 }
                 // Item scope: prefer `files: [...]` array, fall back to the
                 // legacy single `file: <string>` for backward compat.
-                let file_paths: Vec<String> = if let Some(arr) =
-                    item.get("files").and_then(|v| v.as_array())
-                {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .filter(|s| !s.is_empty())
-                        .collect()
-                } else if let Some(s) = item.get("file").and_then(|v| v.as_str()) {
-                    if s.is_empty() {
-                        Vec::new()
+                let file_paths: Vec<String> =
+                    if let Some(arr) = item.get("files").and_then(|v| v.as_array()) {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .filter(|s| !s.is_empty())
+                            .collect()
+                    } else if let Some(s) = item.get("file").and_then(|v| v.as_str()) {
+                        if s.is_empty() {
+                            Vec::new()
+                        } else {
+                            vec![s.to_string()]
+                        }
                     } else {
-                        vec![s.to_string()]
-                    }
-                } else {
-                    Vec::new()
-                };
+                        Vec::new()
+                    };
                 if file_paths.is_empty() {
                     continue;
                 }
@@ -5224,7 +5360,11 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, request: tiny_http::Reques
         .with_header(
             // Internal API endpoints serve live state (sessions JSONL, git
             // status, etc.). Browser HTTP caching would defeat polling.
-            tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"no-store, no-cache, must-revalidate"[..]).unwrap(),
+            tiny_http::Header::from_bytes(
+                &b"Cache-Control"[..],
+                &b"no-store, no-cache, must-revalidate"[..],
+            )
+            .unwrap(),
         );
     let _ = request.respond(response);
 }

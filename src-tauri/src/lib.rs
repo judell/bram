@@ -5262,11 +5262,69 @@ fn route_request<R: tauri::Runtime>(
                 .lines()
                 .find(|l| l.starts_with("**Summary:**"))
                 .map(|l| l.trim_start_matches("**Summary:**").trim().to_string())
-                .unwrap_or_else(|| String::from("change"));
+                .unwrap_or_else(|| {
+                    // No item transitions in this snapshot. If the changelog
+                    // recorded a description edit, label it explicitly rather
+                    // than the generic fallback "change".
+                    if changelog.contains("## Description changed") {
+                        String::from("description changed")
+                    } else {
+                        String::from("change")
+                    }
+                });
+            // Item ids are the leading-backtick tokens on changelog bullets.
+            // Three shapes exist across the lifecycle:
+            //   - `<id>` (was applied, `<path>`)        ← committed
+            //   - `<id>` (proposed, `<path>`)           ← newly proposed
+            //   - `<id>`: proposed → applied            ← applied (status change)
+            // The discriminator after the closing backtick is either ` (` or
+            // `: ` followed by one of the lifecycle status keywords, which
+            // doesn't collide with backtick-bearing nested bullets in
+            // before/after prose.
+            let mut ids: Vec<String> = Vec::new();
+            for line in changelog.lines() {
+                if !line.starts_with("- `") {
+                    continue;
+                }
+                let rest = &line[3..];
+                if let Some(end) = rest.find('`') {
+                    let after = &rest[end + 1..];
+                    let looks_like_item = after.starts_with(" (was ")
+                        || after.starts_with(" (proposed")
+                        || after.starts_with(" (applied")
+                        || after.starts_with(" (committed")
+                        || after.starts_with(" (dropped")
+                        || after.starts_with(": proposed")
+                        || after.starts_with(": applied")
+                        || after.starts_with(": committed")
+                        || after.starts_with(": dropped");
+                    if looks_like_item {
+                        ids.push(rest[..end].to_string());
+                    }
+                }
+            }
+            // Fallback for snapshots with no item transitions (e.g.
+            // description-only edits): read the sibling `.json` worklist
+            // snapshot and surface the ids that were present at that moment,
+            // so the row carries context instead of an empty "items" cell.
+            if ids.is_empty() {
+                if let Ok(raw) = std::fs::read_to_string(&json_path) {
+                    if let Ok(doc) = serde_json::from_str::<serde_json::Value>(&raw) {
+                        if let Some(items) = doc.get("items").and_then(|v| v.as_array()) {
+                            for item in items {
+                                if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                                    ids.push(id.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             entries.push(serde_json::json!({
                 "ts": ts,
                 "iso": format_iso_utc(ts),
                 "summary": summary,
+                "ids": ids,
                 "changelog": changelog,
             }));
         }

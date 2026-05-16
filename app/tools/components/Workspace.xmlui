@@ -3,7 +3,7 @@
   var.checked="{loadChecked()}"
   var.submitting="{!!getInflight()}"
   var.expandedItemId="{null}"
-  var.expandedSnapshotTs="{null}"
+  var.activeSnapshot="{null}"
   var.lastJsonl="{null}"
   var.sessionTick="{0}"
   var.sessionRefreshArmed="{false}">
@@ -198,26 +198,28 @@
 
     <VStack gap="$space-3" when="{history.value && history.value.length > 0}">
       <Heading level="h2">History</Heading>
-      <Items data="{history.value}">
-        <VStack gap="$space-1" paddingVertical="$space-2">
-          <HStack gap="$space-2" verticalAlignment="center">
-            <Link
-              onClick="expandedSnapshotTs = (expandedSnapshotTs === $item.ts ? null : $item.ts)"
-              noIndicator>
-              <Text value="{expandedSnapshotTs === $item.ts ? 'hide' : 'show'}" fontSize="$fontSize-xs" />
-            </Link>
-            <Text value="{$item.iso}" fontFamily="$fontFamily-monospace" fontSize="$fontSize-sm" />
-            <Text value="{$item.summary}" color="$textColor-secondary" fontSize="$fontSize-sm" />
-          </HStack>
-          <VStack
-            when="{expandedSnapshotTs === $item.ts && $item.changelog}"
-            gap="$space-3"
-            marginLeft="$space-6"
-            paddingTop="$space-2">
-            <Markdown content="{$item.changelog}" />
-          </VStack>
-        </VStack>
-      </Items>
+      <ModalDialog id="historySnapshotDialog" title="{activeSnapshot &amp;&amp; activeSnapshot.iso}">
+        <Markdown content="{activeSnapshot &amp;&amp; activeSnapshot.changelog}" />
+      </ModalDialog>
+      <Table data="{history.value}">
+        <Column header="details" width="80px">
+          <Link
+            onClick="activeSnapshot = $item; historySnapshotDialog.open()"
+            noIndicator>
+            <Text value="show" fontSize="$fontSize-xs" />
+          </Link>
+        </Column>
+        <Column bindTo="summary" header="action" width="140px" />
+        <Column header="items">
+          <Text
+            value="{$item.ids &amp;&amp; $item.ids.join(', ')}"
+            overflowMode="flow"
+            breakMode="word" />
+        </Column>
+        <Column header="when" width="160px">
+          <Text value="{$item.iso &amp;&amp; $item.iso.slice(0, 16)}" fontSize="$fontSize-sm" />
+        </Column>
+      </Table>
     </VStack>
   </VStack>
 </Component>

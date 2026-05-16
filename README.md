@@ -42,6 +42,9 @@ rules.
 
 <img width="1508" height="852" alt="image" src="https://github.com/user-attachments/assets/c5954062-0eca-4c8e-a875-22ec84a09b27" />
 
+<img width="1096" height="637" alt="image" src="https://github.com/user-attachments/assets/b81b8736-487f-4d63-bcac-38e4e789be2f" />
+
+
 
 ## Prerequisites
 

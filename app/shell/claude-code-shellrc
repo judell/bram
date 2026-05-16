@@ -37,11 +37,35 @@ claude() {
   command claude "$@"
 }
 
+# Verify the user-global codex worklist guard is wired (script present +
+# marker block in ~/.codex/config.toml). Used to refuse launching codex in a
+# managed repo without enforcement — otherwise the convention is silently
+# unprotected and the user thinks they have a gate when they don't.
+_xmlui_codex_hook_installed() {
+  local script="$HOME/.xmlui-desktop/codex-worklist-guard.py"
+  local config="$HOME/.codex/config.toml"
+  [ -x "$script" ] || return 1
+  [ -f "$config" ] || return 1
+  grep -q '^# xmlui-desktop:start' "$config" || return 1
+  return 0
+}
+
 codex() {
   _xmlui_mark_agent "codex"
   if ! _xmlui_has_repo_setup; then
     command codex "$@"
     return
+  fi
+  if ! _xmlui_codex_hook_installed; then
+    printf '%s\n' \
+      "Codex requires the xmlui-desktop worklist guard, but it is not installed." \
+      "" \
+      "Expected:" \
+      "  - script:  ~/.xmlui-desktop/codex-worklist-guard.py (executable)" \
+      "  - config:  ~/.codex/config.toml containing the xmlui-desktop:start marker" \
+      "" \
+      "Run Setup in xmlui-desktop to install the guard, then retry." >&2
+    return 1
   fi
   local seed_text
   seed_text="$(_xmlui_codex_seed_text)" || {

@@ -1,17 +1,22 @@
 {
-  "description": "Codex worklist enforcement follow-ups: launcher refuses to start without the hook installed; seed acknowledges runtime enforcement.",
+  "description": "Codex worklist enforcement follow-ups.",
   "items": [
-    {
-      "id": "codex-launcher-require-hook",
-      "file": "app/shell/claude-code-shellrc",
-      "before": "Current codex() wrapper marks the agent hint and seeds the startup instructions if _xmlui_has_repo_setup is true. It does not check whether the codex worklist-guard hook is actually installed and registered. If a user launches codex in a repo where setup ran but the codex hook wasn't installed (e.g. older xmlui-desktop binary, manual config drift), the prose-only convention is the only protection — which is precisely the configuration we just declared unsupported.",
-      "after": "Modify the codex() wrapper to verify two preconditions before launching: (1) the user-global hook script exists at ~/.xmlui-desktop/codex-worklist-guard.py; (2) ~/.codex/config.toml contains the xmlui-desktop marker block. If either check fails, print a clear refusal message ('Codex requires the xmlui-desktop worklist guard; run Setup in xmlui-desktop to install it') and exit without launching codex. No silent degradation, no warning-then-launch — codex without the hook is treated as a setup error, not a fallback mode."
-    },
     {
       "id": "codex-seed-acknowledge-hook",
       "file": "app/shell/codex-startup-instructions.md",
       "before": "The current seed (post-loophole-fix in a4723f8) describes the convention as if compliance were optional. It says 'STOP' / 'do NOT run apply_patch' but doesn't tell codex that the runtime will actually deny the call if it tries anyway.",
-      "after": "Add one short paragraph after the gate section: 'A PreToolUse hook is installed in this codex config. If your first action on a multi-file task is apply_patch / Edit / Write / Bash without a covering worklist item, the hook will return permissionDecision:deny and your tool call will be blocked with the message: Tool call blocked by PreToolUse hook: <reason>. The hook is enforcement, the convention above is the cooperative path. Follow the convention and your work succeeds; ignore it and you will see deny messages until you propose first.' This converts the seed from polite request to documented runtime constraint."
+      "after": "Add one short paragraph after the gate section: 'A PreToolUse hook is installed in this codex config. If your first action on a multi-file task is apply_patch / Edit / Write / Bash without a covering worklist item, the hook will return permissionDecision:deny and your tool call will be blocked with the message: Tool call blocked by PreToolUse hook: <reason>. The hook is enforcement, the convention above is the cooperative path. Follow the convention and your work succeeds; ignore it and you will see deny messages until you propose first.' Light reinforcement since the UserPromptSubmit injection already conveys this at every change-request turn."
+    },
+    {
+      "id": "codex-developer-instructions-investigation",
+      "status": "applied",
+      "files": [
+        "src-tauri/src/lib.rs",
+        "app/shell/codex-startup-instructions.md",
+        "app/__shell/conventions.md"
+      ],
+      "before": "Phase 1 finding (research, no code): codex's developer_instructions field is rendered in the developer-role context part between permissions_instructions and skills_instructions (verified via `codex debug prompt-input` with -c developer_instructions=...). That's a higher-priority slot than AGENTS.md content, which user_instructions.rs renders with role: user under the marker '# AGENTS.md instructions for <dir>'. Phase 1 test in config (iii) (developer_instructions populated + UPS injection removed from ~/.codex/config.toml) showed codex following the gate on the first try: explicit path-(c) preface, read-only investigation, transition to worklist write. Developer_instructions alone is sufficient; UPS injection per turn is not needed.",
+      "after": "Phase 2 applied: (1) src-tauri/src/lib.rs: added ENHANCE_CODEX_INSTR_MARKER_START/END constants, ENHANCE_CODEX_GATE_PROSE single-source-of-truth gate string, install_codex_developer_instructions() function, and strip_marker_block() helper. The install function writes developer_instructions at the top of ~/.codex/config.toml in a # xmlui-desktop-instructions:start/end block (TOML requires top-level scalars before any [section] table), strips any legacy # xmlui-desktop-test-instr block from the v1 experiments, and idempotently rewrites in place on re-run. install_codex_worklist_guard no longer emits a [[hooks.UserPromptSubmit]] entry — the runtime hook is PreToolUse-only now. run_enhance calls install_codex_developer_instructions after install_codex_worklist_guard. (2) app/shell/codex-startup-instructions.md: rewrote AGENTS.md adapter as a short pointer (~10 lines) deferring to developer_instructions + the conventions file rather than duplicating the full gate prose. The seed acknowledges that mutations are blocked at runtime and points at the conventions sidecar for detail. (3) app/__shell/conventions.md: added a new subsection under 'Coordinate via worklist.json' titled 'Refer to items by id, not by ordinal' — agents must name items by their id verbatim in chat, never by ordinal position. Folded in here because the rule surfaced during this work and is a worklist-convention refinement, same surface as the rest of this item. cargo build clean. Manual /hooks re-trust needed once after rebuild + Setup re-run since the PreToolUse handler bytes are unchanged but the file content above may shift."
     }
   ]
 }

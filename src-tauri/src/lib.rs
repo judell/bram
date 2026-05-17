@@ -6,7 +6,7 @@ use std::thread;
 
 use include_dir::{include_dir, Dir};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
-use tauri::{http, ipc::Channel, AppHandle, Manager, State};
+use tauri::{http, ipc::Channel, AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 
 // The `app/` tree is embedded in the binary at compile time so
@@ -163,6 +163,12 @@ struct PaneUrls {
     // external server based on .xmlui-desktop.json at startup and on
     // config reload.
     right_pane_upstream: String,
+    // Always the internal-loopback base URL (ends with `/`), regardless of
+    // any external dev-server declared in .xmlui-desktop.json. Used by the
+    // scheme handler to route xd-internal `/__*` requests (sessions,
+    // worklist, app-info, etc.) — these never live on the project's dev
+    // server even when one is declared.
+    loopback_origin: String,
 }
 
 // Project-level config read from .xmlui-desktop.json at the project
@@ -380,7 +386,7 @@ fn pty_menu_suppressed_cell() -> &'static Mutex<Option<(String, std::time::Insta
 // ("1. Yes" + "2. Yes" within proximity); transitions PTY_MENU accordingly.
 // Logs every state transition to stderr so failures-to-render can be
 // correlated against actual detector activity.
-fn pty_menu_update(chunk: &[u8]) {
+fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
     let tail_cell = pty_tail_cell();
     let mut tail = match tail_cell.lock() {
         Ok(g) => g,
@@ -414,32 +420,40 @@ fn pty_menu_update(chunk: &[u8]) {
         }
     }
 
+    // Compute transition + apply under lock, then emit outside the lock.
+    // Emitting under the lock would risk deadlock if listeners synchronously
+    // call back into pty_menu_cell (they don't today, but cheap to avoid).
+    let mut emit_payload: Option<Option<PtyMenu>> = None;
+
     if let Ok(mut menu) = pty_menu_cell().lock() {
-        match (detected, menu.as_ref()) {
-            (Some(new_menu), None) => {
-                eprintln!("[pty-menu] None -> Some(tool={})", new_menu.tool);
-                *menu = Some(new_menu);
+        let prev_tool = menu.as_ref().map(|m| m.tool.clone());
+        let next_tool = detected.as_ref().map(|m| m.tool.clone());
+        let state_changed = prev_tool != next_tool;
+
+        match (&detected, menu.as_ref()) {
+            (Some(nm), None) => eprintln!("[pty-menu] None -> Some(tool={})", nm.tool),
+            (Some(nm), Some(o)) if o.tool != nm.tool => {
+                eprintln!("[pty-menu] Some(tool={}) -> Some(tool={})", o.tool, nm.tool)
             }
-            (Some(new_menu), Some(old)) if old.tool != new_menu.tool => {
-                eprintln!(
-                    "[pty-menu] Some(tool={}) -> Some(tool={})",
-                    old.tool, new_menu.tool
-                );
-                *menu = Some(new_menu);
+            (None, Some(o)) => {
+                eprintln!("[pty-menu] Some(tool={}) -> None (buffer evicted)", o.tool)
             }
-            (Some(new_menu), Some(_)) => {
-                // Same tool, no transition log; still refresh in case text changed.
-                *menu = Some(new_menu);
-            }
-            (None, Some(old)) => {
-                eprintln!(
-                    "[pty-menu] Some(tool={}) -> None (buffer evicted)",
-                    old.tool
-                );
-                *menu = None;
-            }
-            (None, None) => {}
+            _ => {}
         }
+
+        *menu = detected;
+
+        if state_changed {
+            // The bottom line of the demo: emit only when the *visible*
+            // state flips (presence, or tool identity). Skip the every-
+            // chunk "same tool, refreshed text" case — subscribers don't
+            // need a re-render for a stable menu.
+            emit_payload = Some(menu.clone());
+        }
+    }
+
+    if let Some(payload) = emit_payload {
+        let _ = app.emit("pty-menu-changed", &payload);
     }
 }
 
@@ -595,7 +609,7 @@ fn pty_menu_guess_tool(context: &[u8]) -> String {
 // tool name into PTY_MENU_SUPPRESSED so the detector won't immediately
 // re-fire when the next PTY chunk arrives (the dismissed text is still
 // in the rolling buffer).
-fn pty_menu_clear() {
+fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>) {
     let dismissed_tool: Option<String> = match pty_menu_cell().lock() {
         Ok(mut menu) => {
             let tool = menu.as_ref().map(|m| m.tool.clone());
@@ -618,6 +632,10 @@ fn pty_menu_clear() {
         if let Ok(mut s) = pty_menu_suppressed_cell().lock() {
             *s = Some((tool, std::time::Instant::now()));
         }
+        // Tell subscribers the menu went away. Emit AFTER releasing all
+        // pty_menu_* locks for the same anti-deadlock reason as in
+        // pty_menu_update.
+        let _ = app.emit::<Option<PtyMenu>>("pty-menu-changed", None);
     }
 }
 
@@ -1367,13 +1385,14 @@ fn pty_spawn(
         writer,
     });
 
+    let app_for_thread = app.clone();
     thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    pty_menu_update(&buf[..n]);
+                    pty_menu_update(&app_for_thread, &buf[..n]);
                     if on_data.send(buf[..n].to_vec()).is_err() {
                         break;
                     }
@@ -1411,7 +1430,7 @@ fn pty_write(app: AppHandle, data: String, state: State<'_, AppState>) -> Result
     // User input dismisses any visible permission menu. Clear before
     // writing so the agent-pane menu disappears immediately on click.
     if !data.is_empty() {
-        pty_menu_clear();
+        pty_menu_clear(&app);
         record_worklist_authorization_from_input(&app, &data);
     }
     let mut guard = state.0.lock().unwrap();
@@ -5728,20 +5747,22 @@ fn handle_tauri_scheme<R: tauri::Runtime>(
     let path = uri.path();
     let rel = path.trim_start_matches('/');
 
-    // Explicit /__project/* paths: strip prefix and proxy to upstream.
-    // This is the iframe's own URL pattern.
+    // Tier 1: /__project/* — project content escape hatch under the __
+    // namespace. Strip prefix and proxy to right_pane_upstream (loopback
+    // default or external dev server).
     if let Some(after) = rel.strip_prefix("__project/") {
-        return proxy_to_upstream_path(app, after, uri.query(), request);
+        let upstream = {
+            let state = app.state::<PaneUrlsState>();
+            let urls = state.0.lock().unwrap();
+            urls.right_pane_upstream.clone()
+        };
+        return proxy_to_target(upstream, after, uri.query(), request);
     }
 
-    // Try shell asset first. The shell loads its own resources via
-    // relative URLs (vendor/xterm.js, styles.css, main.js, etc.) that
-    // resolve to absolute paths under the origin. Anything the project
-    // iframe also references with an absolute path will land here too —
-    // if it matches a shell asset, we serve it. Conflict only arises if
-    // a project independently uses `/vendor/...` etc. as absolute paths;
-    // in practice projects use `/__vendor/` (xmlui-desktop convention)
-    // or `/xmlui/...` (xmlui-weather etc.), neither of which collides.
+    // Tier 2: shell assets from xd's app/ tree. Covers the shell's own
+    // index.html, main.js, styles.css, vendor/*, and the tools pane at
+    // tools/index.html + tools/components/*, tools/manual.md, etc.
+    // Both panes can hit this directly via tauri://localhost/<path>.
     let app_rel = if rel.is_empty() { "index.html" } else { rel };
     if let Some((bytes, mime)) = serve_app_file(Some(app), app_rel) {
         return http::Response::builder()
@@ -5756,26 +5777,42 @@ fn handle_tauri_scheme<R: tauri::Runtime>(
             });
     }
 
-    // Fall through: proxy to the upstream as a project resource. The
-    // loopback knows how to route /__vendor/, /__shell/, /__sessions/,
-    // /__worklist, project-root files, etc. External dev servers
-    // (Vite, etc.) handle their own routing. Both Just Work because
-    // we keep the path intact.
-    proxy_to_upstream_path(app, rel, uri.query(), request)
-}
+    // Tier 3: other /__* paths — xd-internal HTTP endpoints (sessions,
+    // worklist, app-info, file, error, enhance, restart-server, etc.).
+    // These always live on the loopback regardless of which project is
+    // loaded; the loopback's own routing (route_request in lib.rs) knows
+    // how to serve them. Includes the __vendor / __shell namespaces,
+    // which the loopback maps to xd's app/vendor and app/__shell when
+    // serve_app_file misses (e.g., for the `__vendor` -> `vendor`
+    // prefix-strip mapping in the loopback's handler).
+    if rel.starts_with("__") {
+        let loopback = {
+            let state = app.state::<PaneUrlsState>();
+            let urls = state.0.lock().unwrap();
+            urls.loopback_origin.clone()
+        };
+        return proxy_to_target(loopback, rel, uri.query(), request);
+    }
 
-fn proxy_to_upstream_path<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    path_after_origin: &str,
-    query: Option<&str>,
-    request: http::Request<Vec<u8>>,
-) -> http::Response<Vec<u8>> {
+    // Tier 4: everything else — project content at a non-`__*` absolute
+    // path (e.g., /xmlui/foo.js for xmlui-weather, /Main.xmlui,
+    // /resources/foo.svg). Proxy to right_pane_upstream so external dev
+    // servers also work.
     let upstream = {
         let state = app.state::<PaneUrlsState>();
         let urls = state.0.lock().unwrap();
         urls.right_pane_upstream.clone()
     };
-    let mut url = format!("{}{}", upstream, path_after_origin);
+    proxy_to_target(upstream, rel, uri.query(), request)
+}
+
+fn proxy_to_target(
+    upstream_base: String,
+    path_after_origin: &str,
+    query: Option<&str>,
+    request: http::Request<Vec<u8>>,
+) -> http::Response<Vec<u8>> {
+    let mut url = format!("{}{}", upstream_base, path_after_origin);
     if let Some(q) = query {
         url.push('?');
         url.push_str(q);
@@ -5930,7 +5967,10 @@ pub fn run() {
                 .ok_or("right-pane server bound to non-ip address")?;
             let internal_origin = format!("http://127.0.0.1:{}", port);
             eprintln!("[xmlui-desktop] internal HTTP server: {}", internal_origin);
-            let tools_url = format!("{}/__tools/index.html", internal_origin);
+            // Tools pane lives at xd's app/tools/index.html, served via
+            // the scheme handler's Tier 2 (shell asset) directly. Same
+            // origin as the shell.
+            let tools_url = "tauri://localhost/tools/index.html".to_string();
 
             // .xmlui-desktop.json may declare an external server for the
             // right pane. The tools-pane URL always points at the internal
@@ -6020,6 +6060,7 @@ pub fn run() {
                 tools: tools_url,
                 default_right_pane,
                 right_pane_upstream,
+                loopback_origin: internal_base.clone(),
             };
 
             let server_app = app.handle().clone();
@@ -6101,7 +6142,6 @@ pub fn run() {
 
                 let mut last_emit = Instant::now() - Duration::from_secs(1);
                 let mut last_config_emit = Instant::now() - Duration::from_secs(1);
-                let mut last_session_emit = Instant::now() - Duration::from_secs(1);
                 // Debounce tools-pane reloads: defer the emit until 500ms
                 // after the last tools-pane event, so a rapid burst of
                 // saves coalesces into a single reload (single flash
@@ -6138,12 +6178,85 @@ pub fn run() {
                                 || codex_sessions_dir.as_ref().map_or(false, |sd| p.starts_with(sd)))
                     });
                     if is_session_event {
-                        if last_session_emit.elapsed() < Duration::from_millis(100) {
-                            continue;
-                        }
-                        last_session_emit = Instant::now();
+                        // Removed the 100ms leading-edge debounce: it
+                        // suppressed the FINAL write of an agent
+                        // response burst (the one that flips
+                        // isWaitingForAssistant to false), wedging the
+                        // tools-pane spinner + disabled input until the
+                        // next user activity. XMLUI dedupes refetches
+                        // via structural sharing, so burst-emitting per
+                        // event is fine.
                         let _ = app_handle.emit("talk-session-changed", ());
                         continue;
+                    }
+
+                    // enhance-status (agent-setup state) changes when any
+                    // of these files are touched. The tools-pane
+                    // Main.xmlui listens for `enhance-status-changed` and
+                    // refetches /__enhance/status, replacing the prior
+                    // 2-second poll that ran while the user was typing.
+                    // Not a `continue` — the regular tools-pane reload
+                    // still fires on its normal path below.
+                    let is_enhance_event = event.paths.iter().any(|p| {
+                        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        let in_claude_dir = p.components().any(|c| c.as_os_str() == ".claude");
+                        name == "CLAUDE.md"
+                            || name == "AGENTS.md"
+                            || (in_claude_dir
+                                && (name == "settings.json"
+                                    || name == "settings.local.json"
+                                    || name == "worklist-guard.py"))
+                    });
+                    if is_enhance_event {
+                        let _ = app_handle.emit("enhance-status-changed", ());
+                    }
+
+                    // sessions-list-changed: any mutation under either
+                    // Claude or Codex sessions dir — broader than
+                    // talk-session-changed (which is JSONL-write-only).
+                    // Sessions.xmlui listens for this to refetch its
+                    // list (renames, deletes, new sessions all surface).
+                    let is_sessions_list_event = event.paths.iter().any(|p| {
+                        claude_sessions_dir
+                            .as_ref()
+                            .map_or(false, |sd| p.starts_with(sd))
+                            || codex_sessions_dir
+                                .as_ref()
+                                .map_or(false, |sd| p.starts_with(sd))
+                    });
+                    if is_sessions_list_event {
+                        let _ = app_handle.emit("sessions-list-changed", ());
+                    }
+
+                    // worklist-changed: resources/worklist.json or any
+                    // file under resources/worklist-history/. Workspace
+                    // refetches its DataSources on this.
+                    let is_worklist_change = event.paths.iter().any(|p| {
+                        let in_resources = p.components().any(|c| c.as_os_str() == "resources");
+                        let file = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        let in_history = p
+                            .components()
+                            .any(|c| c.as_os_str() == "worklist-history");
+                        in_resources && (file == "worklist.json" || in_history)
+                    });
+                    if is_worklist_change {
+                        let _ = app_handle.emit("worklist-changed", ());
+                    }
+
+                    // git-status-changed: any project file change that's
+                    // not in the standard ignored directories. Commits
+                    // refetches its log. Noisier than the others but
+                    // bounded by the watcher's existing 100ms debounce.
+                    let in_ignored_dir = |p: &std::path::Path| {
+                        let igs = [".git", "target", "node_modules", "resources"];
+                        p.components()
+                            .any(|c| igs.iter().any(|ig| c.as_os_str() == *ig))
+                    };
+                    let is_git_status_event = event.paths.iter().any(|p| {
+                        p.starts_with(&proj_root_path) && !in_ignored_dir(p)
+                    });
+                    if is_git_status_event {
+                        let _ = app_handle.emit("git-status-changed", ());
                     }
 
                     // .xmlui-desktop.json gets its own dispatch: we have to

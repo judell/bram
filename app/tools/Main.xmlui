@@ -1,7 +1,7 @@
 <Theme width-navPanel-App="$space-28">
 <App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissed="{false}"
-  onInit="subscribeRightPaneSize((s) => rightPaneSize = s.width + ' × ' + s.height); $pathname !== '/' && navigate('/')">
-  <DataSource id="enhanceStatus" url="/__enhance/status" pollIntervalInSeconds="2" />
+  onInit="subscribeRightPaneSize((s) => rightPaneSize = s.width + ' × ' + s.height); $pathname !== '/' &amp;&amp; navigate('/'); (() => { const tauri = (window.parent &amp;&amp; window.parent.__TAURI__) || window.__TAURI__; if (tauri &amp;&amp; tauri.event &amp;&amp; tauri.event.listen) { tauri.event.listen('enhance-status-changed', () => enhanceStatus.refetch()); } })()">
+  <DataSource id="enhanceStatus" url="/__enhance/status" />
   <DataSource id="rpInfo" url="/__right-pane-info" />
   <DataSource id="appInfo" url="/__app-info" />
   <ChangeListener

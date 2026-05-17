@@ -7,13 +7,6 @@
   var.lastJsonl="{null}"
   var.sessionTick="{0}">
   <DataSource
-    id="sessionMeta"
-    url="/__sessions/latest-meta"
-    pollIntervalInSeconds="5" />
-  <ChangeListener
-    listenTo="{sessionMeta.value && (sessionMeta.value.size + ':' + sessionMeta.value.mtime)}"
-    onDidChange="sessionTick = sessionTick + 1" />
-  <DataSource
     id="sessionTail"
     url="/__sessions/latest-tail?lines=200&amp;t={sessionTick}"
     dataType="text" />
@@ -47,7 +40,6 @@
   <DataSource
     id="worklist"
     url="/__worklist"
-    pollIntervalInSeconds="2"
     onLoaded="(data) => {
       const items = (data && data.items) || [];
       const stored = getInflight();
@@ -82,8 +74,7 @@
     }" />
   <DataSource
     id="history"
-    url="/__worklist-history/list"
-    pollIntervalInSeconds="10" />
+    url="/__worklist-history/list" />
 
   <VStack
     padding="$space-6"
@@ -93,7 +84,8 @@
       debounce(400, () => {
         if (submitting) sessionTick = sessionTick + 1;
       });
-    })">
+    });
+    (() => { const tauri = (window.parent &amp;&amp; window.parent.__TAURI__) || window.__TAURI__; if (tauri &amp;&amp; tauri.event &amp;&amp; tauri.event.listen) { tauri.event.listen('worklist-changed', () => { worklist.refetch(); history.refetch(); }); } })()">
     <VStack gap="$space-3" when="{worklist.value}">
       <VStack gap="$space-3" opacity="{submitting ? 0.3 : 1}">
         <Heading level="h2">Worklist</Heading>

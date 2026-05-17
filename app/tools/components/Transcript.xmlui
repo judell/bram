@@ -5,14 +5,8 @@
   var.openToolId="{null}"
   var.turnLimit="{50}"
   var.sessionTick="{0}"
-  var.showAll="{false}">
-  <DataSource
-    id="sessionMeta"
-    url="/__sessions/latest-meta?provider={activeProvider || ''}"
-    pollIntervalInSeconds="1" />
-  <ChangeListener
-    listenTo="{sessionMeta.value &amp;&amp; sessionMeta.value.size}"
-    onDidChange="sessionTick = sessionTick + 1" />
+  var.showAll="{false}"
+  var.pendingMenu="{null}">
   <DataSource
     id="latestSession"
     url="/__sessions/latest-tail?provider={activeProvider || ''}&amp;lines={showAll ? 'all' : '200'}&amp;t={sessionTick}"
@@ -141,7 +135,7 @@
   </ModalDialog>
 
   <VStack padding="$space-6" gap="$space-3"
-    onInit="onTalkSessionChange(() => sessionTick = sessionTick + 1); try { logToHost({ kind: 'transcript-mount', at: new Date().toISOString() }) } catch (e) {}">
+    onInit="(() => { const tauri = (window.parent &amp;&amp; window.parent.__TAURI__) || window.__TAURI__; if (tauri &amp;&amp; tauri.event &amp;&amp; tauri.event.listen) { tauri.event.listen('talk-session-changed', () => { sessionTick = sessionTick + 1; }); tauri.event.listen('pty-menu-changed', (e) => { pendingMenu = e &amp;&amp; e.payload ? e.payload : null; }); } })(); try { logToHost({ kind: 'transcript-mount', at: new Date().toISOString() }) } catch (e) {}">
     <StickyBox to="top">
       <HStack gap="$space-3" verticalAlignment="center" paddingVertical="$space-2">
         <Heading level="h2">Transcript</Heading>
@@ -228,11 +222,49 @@
       </VStack>
     </Items>
 
+    <VStack
+      when="{pendingMenu}"
+      gap="$space-2"
+      padding="$space-3"
+      borderRadius="$borderRadius"
+      border="1px solid $color-warn-200"
+      backgroundColor="$color-warn-50">
+      <Text fontSize="$fontSize-sm" color="$color-warn-800">
+        Agent wants to use <Text fontFamily="$fontFamily-monospace" inline="true">{pendingMenu.tool}</Text>
+      </Text>
+      <HStack gap="$space-2" wrapContent="true">
+        <Button label="1. Yes" variant="outlined" size="sm" onClick="sendKeys('1\r')" />
+        <Button label="2. Yes, allow and don't ask again" variant="outlined" size="sm" onClick="sendKeys('2\r')" />
+        <Button label="3. No, and tell agent what to do" variant="outlined" size="sm" onClick="sendKeys('3\r')" />
+      </HStack>
+    </VStack>
+
     <HStack
-      when="{isWaitingForAssistant(lastJsonl) &amp;&amp; sessionMeta.value &amp;&amp; (sessionMeta.value.now - sessionMeta.value.mtime) &lt; 300000}"
+      when="{isWaitingForAssistant(lastJsonl) &amp;&amp; !pendingMenu}"
       paddingVertical="$space-3"
       verticalAlignment="center">
       <Spinner size="sm" delay="{200}" />
     </HStack>
+
+    <StickyBox to="bottom">
+      <HStack gap="$space-2" padding="$space-2"
+        backgroundColor="$color-surface-50"
+        borderTop="1px solid $borderColor"
+        verticalAlignment="end">
+        <Button icon="up" variant="ghost" size="xs"
+          tooltip="Scroll to top" onClick="window.scrollAllToTop()" />
+        <Form width="*"
+          onSubmit="if (inputBox.value &amp;&amp; inputBox.value.trim()) { toTurn(inputBox.value); inputBox.setValue('') }">
+          <property name="buttonRowTemplate"><Fragment/></property>
+          <HStack gap="$space-2" verticalAlignment="end">
+            <TextArea id="inputBox" enterSubmits="true"
+              enabled="{!isWaitingForAssistant(lastJsonl)}"
+              placeholder="Message agent — Enter sends, Shift+Enter newline"
+              autoSize="true" minRows="1" maxRows="6" width="*" />
+            <Button label="Send" type="submit" size="sm" />
+          </HStack>
+        </Form>
+      </HStack>
+    </StickyBox>
   </VStack>
 </Component>

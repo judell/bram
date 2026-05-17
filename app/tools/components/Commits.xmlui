@@ -8,8 +8,7 @@
 
   <DataSource
     id="commits"
-    url="/__commits"
-    pollIntervalInSeconds="5" />
+    url="/__commits" />
 
   <DataSource
     id="commitDetail"
@@ -32,7 +31,8 @@
     name="selectedCommit"
     value="{!selectedSha ? null : ((((searchResults.value &amp;&amp; searchResults.value.results) || []).find(c => c.sha === selectedSha)) || ((commits.value || []).find(c => c.sha === selectedSha)))}" />
 
-  <HSplitter height="100%" initialPrimarySize="50%">
+  <HSplitter height="100%" initialPrimarySize="50%"
+    onInit="(() => { const tauri = (window.parent &amp;&amp; window.parent.__TAURI__) || window.__TAURI__; if (tauri &amp;&amp; tauri.event &amp;&amp; tauri.event.listen) { tauri.event.listen('git-status-changed', () => commits.refetch()); } })()">
 
     <VStack padding="$space-4" gap="$space-4" overflowY="auto">
       <HStack gap="$space-3" verticalAlignment="center">

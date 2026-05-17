@@ -19,7 +19,6 @@
   <DataSource
     id="sessionsMeta"
     url="/__sessions/meta"
-    pollIntervalInSeconds="2"
     onLoaded="(data) => {
       if (!data || !data.provider) return;
       if (currentProvider !== data.provider) {
@@ -29,13 +28,12 @@
       }
     }" />
 
-  <DataSource id="sessionsList" url="/__sessions/list" pollIntervalInSeconds="2" />
+  <DataSource id="sessionsList" url="/__sessions/list" />
 
   <DataSource
     id="sessionContent"
     url="/__sessions/content"
     queryParams="{{ id: expandedId, provider: expandedProvider }}"
-    pollIntervalInSeconds="2"
     when="{!!expandedId &amp;&amp; !!expandedProvider}" />
 
   <DataSource
@@ -110,7 +108,8 @@
     </VStack>
   </ModalDialog>
 
-  <HSplitter height="100%" initialPrimarySize="50%">
+  <HSplitter height="100%" initialPrimarySize="50%"
+    onInit="(() => { const tauri = (window.parent &amp;&amp; window.parent.__TAURI__) || window.__TAURI__; if (tauri &amp;&amp; tauri.event &amp;&amp; tauri.event.listen) { tauri.event.listen('sessions-list-changed', () => { sessionsMeta.refetch(); sessionsList.refetch(); if (expandedId &amp;&amp; expandedProvider) sessionContent.refetch(); }); } })()">
 
     <VStack padding="$space-4" gap="$space-3" overflowY="auto">
       <Heading level="h2">Sessions</Heading>

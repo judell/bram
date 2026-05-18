@@ -1689,35 +1689,50 @@ fn handle_project_config_reload<R: tauri::Runtime>(app_handle: &AppHandle<R>, pr
         );
     }
 
-    // With the tauri:// scheme proxy, the iframe URL itself is constant
-    // (`tauri://localhost/__project/index.html`). Config changes affect
-    // the upstream the proxy fetches from, not the iframe src. Compute
-    // the new upstream and update state; the iframe reload below
-    // re-fetches via the new upstream automatically.
-    let new_right_pane_upstream = match new_server.as_ref() {
-        Some(cfg) => format!("http://localhost:{}{}", cfg.port, cfg.path),
+    // The iframe URL splices `cfg.path` into the /__project namespace,
+    // and the upstream is the bare origin (http://host:port/). Both
+    // change when the config changes; main.js re-reads them via
+    // get_right_pane_url() on the right-pane-reload event below.
+    let (new_right_pane_url, new_right_pane_upstream) = match new_server.as_ref() {
+        Some(cfg) => {
+            let path = if cfg.path.starts_with('/') {
+                cfg.path.clone()
+            } else {
+                format!("/{}", cfg.path)
+            };
+            (
+                format!("{}/__project{}", SHELL_ORIGIN, path),
+                format!("http://localhost:{}/", cfg.port),
+            )
+        }
         None => {
-            // default_right_pane ends in `/index.html`; the upstream
-            // wants the origin + trailing slash. Strip the filename.
+            // Default fallback: iframe loads /__project/index.html and
+            // the proxy forwards to the internal loopback (origin +
+            // trailing slash). Derive both from default_right_pane.
             let default = {
                 let state = app_handle.state::<PaneUrlsState>();
                 let urls = state.0.lock().unwrap();
                 urls.default_right_pane.clone()
             };
-            default
+            let upstream = default
                 .rsplit_once('/')
                 .map(|(base, _)| format!("{}/", base))
-                .unwrap_or(default)
+                .unwrap_or_else(|| default.clone());
+            (
+                format!("{}/__project/index.html", SHELL_ORIGIN),
+                upstream,
+            )
         }
     };
     {
         let state = app_handle.state::<PaneUrlsState>();
         let mut urls = state.0.lock().unwrap();
+        urls.right_pane = new_right_pane_url.clone();
         urls.right_pane_upstream = new_right_pane_upstream.clone();
     }
     eprintln!(
-        "[project-config] reloaded; right-pane upstream -> {}",
-        new_right_pane_upstream
+        "[project-config] reloaded; right-pane url -> {} upstream -> {}",
+        new_right_pane_url, new_right_pane_upstream
     );
     let _ = app_handle.emit("right-pane-reload", ());
 }
@@ -6011,21 +6026,29 @@ pub fn run() {
             let internal_base = format!("{}/", internal_origin);
             // `right_pane` is the URL the iframe loads. With the
             // tauri:// scheme proxy, it's always a same-origin URL
-            // under /__project/. `right_pane_upstream` is the actual
-            // HTTP target the scheme handler proxies to.
-            let right_pane_proxy_url = format!("{}/__project/index.html", SHELL_ORIGIN);
+            // under /__project/. `right_pane_upstream` is the bare
+            // origin (http://host:port/) the scheme handler proxies
+            // to; the configured `cfg.path` (including any query)
+            // gets spliced into the iframe URL so the browser's own
+            // relative-URL resolution produces clean sub-resource
+            // paths that pass through the proxy unchanged.
             let (right_pane_url, right_pane_upstream) = if let Some(cfg) = project_cfg.as_ref().and_then(|c| c.server.as_ref()) {
-                // External base URL ends with `/` after concatenating
-                // the config's `path` (defaults to "/"). The scheme
-                // handler appends the iframe-relative path directly.
-                let external_base = format!("http://localhost:{}{}", cfg.port, cfg.path);
+                let external_origin = format!("http://localhost:{}/", cfg.port);
+                let right_pane_external = {
+                    let path = if cfg.path.starts_with('/') {
+                        cfg.path.clone()
+                    } else {
+                        format!("/{}", cfg.path)
+                    };
+                    format!("{}/__project{}", SHELL_ORIGIN, path)
+                };
                 match probe_port_http(cfg.port, &cfg.path) {
                     PortStatus::Live => {
                         eprintln!(
                             "[server] port {} is live (HTTP responsive); reusing (skipping spawn of `{}`)",
                             cfg.port, cfg.command
                         );
-                        (right_pane_proxy_url.clone(), external_base)
+                        (right_pane_external.clone(), external_origin.clone())
                     }
                     PortStatus::Unresponsive(reason) => {
                         eprintln!(
@@ -6075,11 +6098,14 @@ pub fn run() {
                                 }
                             }
                         }
-                        (right_pane_proxy_url.clone(), external_base)
+                        (right_pane_external.clone(), external_origin.clone())
                     }
                 }
             } else {
-                (right_pane_proxy_url.clone(), internal_base.clone())
+                (
+                    format!("{}/__project/index.html", SHELL_ORIGIN),
+                    internal_base.clone(),
+                )
             };
             eprintln!("[xmlui-desktop] right pane URL: {}", right_pane_url);
             eprintln!("[xmlui-desktop] right pane upstream: {}", right_pane_upstream);

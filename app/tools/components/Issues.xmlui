@@ -2,6 +2,7 @@
   var.issuesExpanded="{false}"
   var.expandedNumber="{null}"
   var.fullscreenImage="{null}"
+  var.showNewIssueHint="{false}"
   var.queryDraft=""
   var.query=""
   var.selectedHitLine="{null}"
@@ -63,6 +64,34 @@
       height="100%" />
   </ModalDialog>
 
+  <ModalDialog
+    when="{showNewIssueHint}"
+    title="File an issue through the agent"
+    onClose="showNewIssueHint = false">
+    <VStack gap="$space-3" padding="$space-2">
+      <Text>
+        The agent in your terminal has the full conversation you've been having —
+        what you were trying to do, what broke, what you've already tried. If
+        you ask it to file an issue ("file an issue about X"), it can write a
+        title and body that include that context, link related items, and
+        decide whether the work also belongs on the worklist.
+      </Text>
+      <Text>
+        Filing directly on github.com skips that step; you end up rewriting
+        the context from memory.
+      </Text>
+      <HStack gap="$space-2">
+        <Button
+          label="Got it"
+          onClick="showNewIssueHint = false" />
+        <Button
+          label="Open GitHub anyway"
+          variant="outlined"
+          onClick="showNewIssueHint = false; openExternal(repoOrigin.value.issuesNewUrl)" />
+      </HStack>
+    </VStack>
+  </ModalDialog>
+
   <HSplitter height="100%" initialPrimarySize="40%">
 
     <VStack padding="$space-4" gap="$space-4" overflowY="auto">
@@ -72,7 +101,7 @@
           when="{repoOrigin.value &amp;&amp; repoOrigin.value.issuesNewUrl}"
           label="+ New issue"
           size="xs"
-          onClick="openExternal(repoOrigin.value.issuesNewUrl)" />
+          onClick="showNewIssueHint = true" />
         <Button
           when="{repoOrigin.value &amp;&amp; repoOrigin.value.issuesUrl}"
           label="All on GitHub"

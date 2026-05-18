@@ -6135,6 +6135,14 @@ pub fn run() {
             // immediately instead of waiting on fallback polling.
             let claude_sessions_dir = claude_sessions_dir(&app.handle()).ok();
             let codex_sessions_dir = home_dir().map(|h| h.join(".codex").join("sessions"));
+            // Agent-hint file lives at <app_cache>/agent-hints/<encoded-cwd>.json
+            // and is rewritten by the shell wrapper's _xmlui_mark_agent when
+            // the user switches between `claude` and `codex`. Watching this
+            // dir lets the agent-tools drawer refetch /__enhance/status when
+            // the active provider flips.
+            let agent_hints_dir = active_agent_hint_path(&app.handle())
+                .ok()
+                .and_then(|p| p.parent().map(|p| p.to_path_buf()));
             let mut watch_paths: Vec<std::path::PathBuf> = vec![proj_root_path.clone()];
             watch_paths.extend(tools_pane_paths.iter().cloned());
             if let Some(ref sd) = claude_sessions_dir {
@@ -6145,6 +6153,11 @@ pub fn run() {
             if let Some(ref sd) = codex_sessions_dir {
                 if sd.exists() {
                     watch_paths.push(sd.clone());
+                }
+            }
+            if let Some(ref ah) = agent_hints_dir {
+                if ah.exists() {
+                    watch_paths.push(ah.clone());
                 }
             }
             let app_handle = app.handle().clone();
@@ -6229,12 +6242,16 @@ pub fn run() {
                     let is_enhance_event = event.paths.iter().any(|p| {
                         let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
                         let in_claude_dir = p.components().any(|c| c.as_os_str() == ".claude");
+                        let in_agent_hints = agent_hints_dir
+                            .as_ref()
+                            .map_or(false, |ah| p.starts_with(ah));
                         name == "CLAUDE.md"
                             || name == "AGENTS.md"
                             || (in_claude_dir
                                 && (name == "settings.json"
                                     || name == "settings.local.json"
                                     || name == "worklist-guard.py"))
+                            || in_agent_hints
                     });
                     if is_enhance_event {
                         let _ = app_handle.emit("enhance-status-changed", ());

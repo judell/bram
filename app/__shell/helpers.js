@@ -91,7 +91,7 @@ window.toTurn = function (text) {
     },
   }).catch(function () {});
   invoke("pty_write", {
-    data: "\x15\x1b[200~" + normalized + "\x1b[201~\r",
+    data: "\x15\x1b[200~" + normalized + "\x1b[201~\r\n",
   }).catch(function (e) {
     console.error("toTurn pty_write", e);
   });

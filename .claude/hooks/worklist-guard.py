@@ -93,12 +93,14 @@ def parse_auth(msg):
                 data = json.loads(msg[len(prefix):].strip())
             except Exception:
                 return kind, set()
-            if kind == "drop":
-                return kind, set(data.get("ids", []))
-            return kind, {
-                it.get("id") for it in data.get("items", [])
-                if isinstance(it, dict)
-            }
+            items = data.get("items")
+            if isinstance(items, list):
+                return kind, {
+                    it.get("id") for it in items
+                    if isinstance(it, dict) and it.get("id")
+                }
+            # Legacy fallback: drop: {"ids":[...]}
+            return kind, set(data.get("ids", []))
     return None, set()
 
 
@@ -253,7 +255,7 @@ def main():
                 f"  - 'proposed' must transition to 'applied' (re-add the item) "
                 f"before pruning.\n"
                 f"  - Direct removal is allowed only when the user's last "
-                f"message was `drop: {{\"ids\":[...]}}`.\n"
+                f"message was `drop: {{\"items\":[{{\"id\":\"...\"}}]}}`.\n"
                 f"Last user authorization kind: {kind or 'none'}.",
                 file=sys.stderr,
             )

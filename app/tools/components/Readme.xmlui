@@ -1,5 +1,0 @@
-<Component name="Readme">
-  <VStack padding="$space-6" gap="$space-4">
-    <Markdown data="/README.md" />
-  </VStack>
-</Component>

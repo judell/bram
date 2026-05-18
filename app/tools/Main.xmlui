@@ -59,6 +59,16 @@
         </Text>
       </VStack>
 
+      <VStack gap="$space-1" marginTop="$space-2">
+        <Text fontWeight="bold">About xmlui-desktop</Text>
+        <HStack gap="$space-2">
+          <Button
+            label="README on GitHub"
+            size="sm"
+            onClick="openExternal('https://github.com/judell/xmlui-desktop/blob/main/README.md')" />
+        </HStack>
+      </VStack>
+
       <VStack when="{rpInfo.value &amp;&amp; rpInfo.value.spawned}" gap="$space-1" marginTop="$space-2">
         <Text fontWeight="bold">Project server (.xmlui-desktop.json)</Text>
         <HStack gap="$space-2">
@@ -178,12 +188,13 @@
       <Fragment/>
     </property>
     <NavLink label="Transcript" to="/" exact="true" />
+    <HStack height="1px" backgroundColor="$borderColor" marginVertical="$space-2" />
+    <NavLink label="Issues" to="/issues" />
     <NavLink label="Worklist" to="/worklist" />
     <NavLink label="Commits" to="/commits" />
-    <NavLink label="Issues" to="/issues" />
+    <HStack height="1px" backgroundColor="$borderColor" marginVertical="$space-2" />
     <NavLink label="Sessions" to="/sessions" />
     <NavLink label="Context" to="/context" />
-    <NavLink label="README" to="/readme" />
   </NavPanel>
 
   <VStack
@@ -215,7 +226,6 @@
     <Page url="/context"><Context activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}" /></Page>
     <Page url="/issues"><Issues /></Page>
     <Page url="/commits"><Commits /></Page>
-    <Page url="/readme"><Readme /></Page>
   </Pages>
 </App>
 </Theme>

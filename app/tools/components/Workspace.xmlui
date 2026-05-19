@@ -5,7 +5,8 @@
   var.expandedItemId="{null}"
   var.activeSnapshot="{null}"
   var.lastJsonl="{null}"
-  var.sessionTick="{0}">
+  var.sessionTick="{0}"
+  var.statusHelpFor="{null}">
   <DataSource
     id="sessionTail"
     url="/__sessions/latest-tail?lines=200&amp;t={sessionTick}"
@@ -111,6 +112,13 @@
                     fontSize="$fontSize-xs"
                     fontWeight="$fontWeight-bold"
                     color="{($item.status || 'proposed') === 'applied' ? '$color-success-600' : '$color-info-600'}" />
+                  <Button
+                    when="{$itemIndex === worklist.value.items.findIndex(i => (i.status || 'proposed') === ($item.status || 'proposed'))}"
+                    label="ⓘ"
+                    variant="ghost"
+                    size="xs"
+                    tooltip="What does this badge mean?"
+                    onClick="statusHelpFor = ($item.status || 'proposed')" />
                   <Text value="{$item.id}" fontWeight="$fontWeight-bold" />
                   <Link
                     onClick="expandedItemId = (expandedItemId === $item.id ? null : $item.id)"
@@ -184,6 +192,45 @@
         </VStack>
       </VStack>
     </VStack>
+
+    <ModalDialog
+      when="{statusHelpFor === 'proposed'}"
+      title="TO APPLY"
+      onClose="statusHelpFor = null">
+      <VStack gap="$space-3" padding="$space-2">
+        <Text>
+          The agent is asking permission to make file edits. Nothing has happened
+          on disk yet. In this phase you can:
+        </Text>
+        <Markdown content="- **Check** the items you want to authorize, **uncheck** the rest.
+- Click **Approve selected** to authorize the checked items — the agent applies the edits and the items transition to TO COMMIT.
+- Click **Drop selected** to discard items you don't want at all — they're removed without any file changes.
+- Ask the agent in chat to tweak an item's scope, before/after prose, or split it up — useful when the proposal is *almost* right." />
+        <HStack>
+          <Button label="Got it" onClick="statusHelpFor = null" />
+        </HStack>
+      </VStack>
+    </ModalDialog>
+
+    <ModalDialog
+      when="{statusHelpFor === 'applied'}"
+      title="TO COMMIT"
+      onClose="statusHelpFor = null">
+      <VStack gap="$space-3" padding="$space-2">
+        <Text>
+          The agent has made the file edits and the change is sitting in your
+          working tree, not yet committed. This phase is intentionally
+          fluid — you don't have to approve or drop right away. You can:
+        </Text>
+        <Markdown content="- **Verify** the change actually does what was promised — reload the right pane, run the affected feature, read the diff.
+- **Ask for follow-on tweaks** that get folded into the *same* item (the agent expands the item's `after` and applies more edits, the commit you eventually approve covers the whole thing). This is preferred over proposing a sibling item.
+- Click **Approve selected** when you're satisfied — the agent creates the git commit with the item's prose as the message.
+- Click **Drop selected** if it turned out wrong — the worklist entry is removed, but **the disk edits stay** (the agent doesn't revert files unilaterally). Ask the agent to *discard those changes if you want them gone* — it knows how to use git commands like `git checkout -- &lt;file&gt;` or `git restore &lt;file&gt;`." />
+        <HStack>
+          <Button label="Got it" onClick="statusHelpFor = null" />
+        </HStack>
+      </VStack>
+    </ModalDialog>
 
     <VStack gap="$space-3" when="{history.value && history.value.length > 0}">
       <Heading level="h2">History</Heading>

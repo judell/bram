@@ -5792,13 +5792,19 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| serde_json::json!({}));
     let auth_kind = auth.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-    if auth_kind != required_kind {
+    // For prune, also accept kind=approved (post-commit prune case);
+    // applied-status check happens after the worklist read below.
+    let kind_ok = auth_kind == required_kind
+        || (op == "prune" && auth_kind == "approved");
+    if !kind_ok {
         return (
             400,
             "application/json; charset=utf-8",
             format!(
-                "{{\"error\":\"auth kind mismatch: expected {}, got {}\"}}",
-                required_kind, auth_kind
+                "{{\"error\":\"auth kind mismatch: expected {}{}, got {}\"}}",
+                required_kind,
+                if op == "prune" { " or approved" } else { "" },
+                auth_kind
             )
             .into_bytes(),
         );
@@ -5843,6 +5849,32 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
             );
         }
     };
+
+    // Post-commit prune safeguard: pruning with kind=approved is only
+    // allowed when every requested id is already status=applied —
+    // blocks an agent from pruning an as-yet-unapplied approved item,
+    // which would lose the work.
+    if op == "prune" && auth_kind == "approved" {
+        for id in &ids {
+            let item = items.iter().find(|it| {
+                it.get("id").and_then(|v| v.as_str()) == Some(id.as_str())
+            });
+            let status = item
+                .and_then(|it| it.get("status").and_then(|v| v.as_str()))
+                .unwrap_or("proposed");
+            if status != "applied" {
+                return (
+                    400,
+                    "application/json; charset=utf-8",
+                    format!(
+                        "{{\"error\":\"post-commit prune requires applied status: {} is {}\"}}",
+                        id, status
+                    )
+                    .into_bytes(),
+                );
+            }
+        }
+    }
 
     let mut affected: Vec<String> = Vec::new();
     if op == "prune" {

@@ -2,34 +2,36 @@
 
 ## What is it?
 
-An app that helps you manage an AI-assisted product or project.
+A desktop app that helps you make best use of git and GitHub for AI-assisted software development.
 
 ## Who is it for?
 
-Maybe you if:
+Anyone who wants to use AI coding agents in a safe and accountable way.
 
-1 you find yourself managing an AI-assisted project/product
+<img width="1719" height="1082" alt="image" src="https://github.com/user-attachments/assets/3da680a2-1f9a-411d-93f0-5c87dbf80413" />
 
-2 you want to give AI agents the best possible context to work with
 
-3 you want the project/product to evolve in a predictable and accountable way
 
-This app has opinions about 2 and 3. For 2, it thinks versioning and collaboration are well handled by git and GitHub, and that guiding agents to best practices in that environment enables you to make best use of the agents. For 2, AIs read context that lives durably in git and/or GitHub.
+This app has opinions. It thinks versioning and collaboration are well-handled by git and GitHub, so it guides agents to make best use of them on your behalf, in conversation with you. And it thinks GitHub is great for accountability, so it also guides agents to join you in orderly and well-documented collaboration that leaves an auditable trail. 
 
-For 3, it helps you follow one of those best practices: project/product evolution is orderly and well-documented because agents chronicle their progress in git and/or GitHub so their future selves can absorb architecture before enhancing, or consult it when debugging. For 3, AIs *write* context that lives durably in git and/or GitHub.
-
-tl;dr many people and business are newly involved in project management as teams of agents automate routine tasks. This app helps you be a PM in that environment.
 
 ## How does it work?
 
-It is a desktop app that connects an agent like Claude or Codex to the app you are using an agent to build.
+### Layout
 
-- **Left pane** — a real terminal, where you run an AI coding agent
-  (e.g. `claude` or `codex`).
-- **Right pane** — the app that is under development in a local repo
-- **File watcher** — as files in the project change, the right pane reloads automatically
-- **Agent-tools drawer** — toggle from the toolbar to open a side panel with Transcript (current session), Worklist (proposed → applied →
-  committed flow), Commits, Issues, Sessions, Context, and README.
+- **Left pane** - A terminal where you run an AI coding agent  (e.g. `claude` or `codex`).
+
+- **Right pane top** — An app under development in a local repo.
+
+- **Right pane bottom** - An embedded app that talks to the terminal. (In this case it *is* the app under development.)
+
+As files in the project change, the right pane reloads automatically
+
+### Workflow
+
+There are three phases for an item on the worklist: **proposed*** → **applied** → **committed**. The arrows between the phases are approval gates where you converse with the agent as it works on the proposed item: researching and writing code; creating or closing issues; organizing commits as an orderly and well-defined audit trail.
+
+### Agent conventions
 
 Project conventions are authored in
 [`app/__shell/conventions.md`](./app/__shell/conventions.md). Claude is
@@ -40,10 +42,7 @@ backup for wrapped launches, then reinforced by the shared
 provider-neutral setup machinery plus local Codex config, memories, and
 rules.
 
-<img width="1508" height="852" alt="image" src="https://github.com/user-attachments/assets/c5954062-0eca-4c8e-a875-22ec84a09b27" />
-
-<img width="1096" height="637" alt="image" src="https://github.com/user-attachments/assets/b81b8736-487f-4d63-bcac-38e4e789be2f" />
-
+<img width="1384" height="878" alt="image" src="https://github.com/user-attachments/assets/81fdac93-783e-489a-82b4-e0062950b83a" />
 
 
 ## Prerequisites

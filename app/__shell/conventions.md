@@ -287,17 +287,23 @@ Worked examples:
 - "add a chart" + "let's fix the layout too" → propose (multi-step,
   but this was always the case).
 
-### Write item prose for the future-agent reader
+### Match prose verbosity to change complexity
 
-Write item `before`/`after` prose with the future-agent reader in
-mind, not just the human triaging it today. Name alternatives
-considered and why they were rejected, not just the chosen path.
-The agent who reads this snapshot months from now does not have
-the conversation that produced it — if the repo has opted in to
-committing worklist history, that archive (see
-`docs/worklist-history.md`) is their retrieval. A terse
-"add the diff viewer" leaves nothing for them to grep; an item
-whose `after` reads like
+Match `before` / `after` prose to the size and judgment-load of the
+change. Two regimes:
+
+**Small, mechanical changes** — single-file tweak, typo fix, one-line
+CSS adjustment, rename, clear bug with one obvious fix. A short
+paragraph or two for `before` and `after` is enough. Don't pad with
+alternatives-considered when there was effectively one path; the
+commit message + diff already carry the audit trail.
+
+**Complex or judgment-load changes** — anything where several
+reasonable approaches existed and you had to choose, anything
+touching multiple files in non-mechanical ways, anything whose
+*why* will fade from memory in a month. Name the alternatives you
+considered and why you rejected them; mark `[chosen]` on the
+picked path. For example:
 
 > Alternatives considered:
 >
@@ -305,7 +311,12 @@ whose `after` reads like
 > - Full-tree diff at the top of the worklist — rejected: hides per-item attribution.
 > - **[chosen]** Server augmentation via `/__worklist` — single payload, per-item diffs travel with each row.
 
-is the kind of audit trail that earns its keep.
+This is the audit trail future-agent grep will hit (especially when
+the repo commits `docs/worklist-history.md`) — earn it.
+
+If in doubt: would a reader six months from now reconstruct the
+decision from the current code + git log alone? Yes → short.
+No → fulsome.
 
 ### Use Markdown in item prose
 

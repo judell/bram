@@ -460,6 +460,16 @@ const { listen } = window.__TAURI__.event;
     if (!parent || toolsSwapping) return;
     toolsSwapping = true;
 
+    // Preserve the current XMLUI route across hot-reload. Without this,
+    // the new iframe loads tools/index.html with no hash → router
+    // restarts at "/" (Transcript), yanking the user away from
+    // /worklist or wherever else they were. Same-origin iframe
+    // (tauri://localhost), so contentWindow.location.hash is readable.
+    let preservedHash = "";
+    try {
+      preservedHash = (oldTools.contentWindow && oldTools.contentWindow.location.hash) || "";
+    } catch (e) {}
+
     const newTools = document.createElement("iframe");
     newTools.setAttribute("allow", oldTools.getAttribute("allow") || "");
     // Load off-screen so the user never sees the blank intermediate
@@ -480,7 +490,7 @@ const { listen } = window.__TAURI__.event;
     }
     newTools.addEventListener("load", onLoad);
     parent.appendChild(newTools);
-    newTools.src = newSrc;
+    newTools.src = newSrc + preservedHash;
   }
   // reloadAll: reload BOTH iframes. Used by the manual "reload xmlui app"
   // toolbar button and by the "tools-pane-reload" watcher event (drawer

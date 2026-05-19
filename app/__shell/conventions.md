@@ -123,19 +123,23 @@ Lifecycle:
    items to the file does **not** mean they are approved — it means
    you are *asking* the user to approve them.
 2. **User triages** — unchecks anything they don't want, then clicks
-   one of three buttons:
+   one of these buttons:
    - *Talk to agent* (with a comment typed above it) → you receive
      `talk: <text>` as a fresh user turn. The user is asking a
      question or giving feedback with **no items approved and none
      dropped**. Respond to the message; do not edit files, do not
      touch `worklist.json`.
    - *Approve selected (N)* — only enabled when ≥1 item is checked.
-     You receive `approved: {"items":[{"id":"...","hash":"..."}, ...],
-     "feedback":"..."}`. The payload is intentionally minimal: ids
-     plus per-item content hashes, no `before` / `after` prose. The
-     PTY watcher verifies each hash against `resources/worklist.json`
-     at the moment the line arrives and writes the verified item
-     content into `resources/.worklist-authorization.json`.
+     You receive `approved: {"items":[{"id":"...","hash":"...","feedback":"..."}, ...]}`.
+     The payload is intentionally minimal: ids plus per-item content
+     hashes plus optional per-item feedback text (empty string when
+     the user didn't expand that item's feedback input), no `before`
+     / `after` prose. Per-item feedback is the user's note attached
+     specifically to that item — different items can have different
+     notes, or none. The PTY watcher verifies each hash against
+     `resources/worklist.json` at the moment the line arrives and
+     writes the verified item content into
+     `resources/.worklist-authorization.json`.
      **To act on the approval, GET `/__worklist/resolve` from the
      loopback HTTP server.** xmlui-desktop injects `XMLUI_DESKTOP_PORT`
      into the PTY child's environment at spawn time, so the agent can
@@ -161,20 +165,48 @@ Lifecycle:
      `approved:` turn line yourself for content — the line carries
      only ids and hashes.
    - *Drop selected (N)* — only enabled when ≥1 item is checked.
-     You receive `drop: {"items":[{"id":"...","hash":"..."}, ...],
-     "feedback":"..."}`. Same shape, same `/__worklist/resolve` flow:
+     You receive `drop: {"items":[{"id":"...","hash":"...","feedback":"..."}, ...]}`.
+     Same shape, same `/__worklist/resolve` flow:
      `{"kind":"drop"}` → remove those ids from `worklist.json`
      without acting on them; `{"kind":"rejected_stale"}` → surface
-     the staleness, do not edit. Respond to the optional feedback.
+     the staleness, do not edit. Respond to any per-item feedback
+     (often the user's reason for dropping that specific item).
+   - *Iterate (N)* — enabled when an item is selected AND its
+     per-item feedback box has non-empty content (no-direction
+     Iterate is meaningless and the button reflects that). You
+     receive `iterate: {"items":[{"id":"...","hash":"...","feedback":"..."}, ...]}`.
+     **Unlike approved/drop, iterate does NOT route through
+     `/__worklist/resolve`** — no worklist state change is being
+     authorized, so the watcher doesn't write an auth record for it.
+     Re-read items directly from `resources/worklist.json` and act
+     per each item's current status, scoped by that item's own
+     feedback:
+     - **`proposed` (TO APPLY):** revise the item's `before` /
+       `after` / `files` in `resources/worklist.json` per the
+       feedback. Item stays `proposed`. No file edits on disk.
+     - **`applied` (TO COMMIT):** edit the on-disk files per the
+       feedback AND update the item's `after` (and `files` if scope
+       expanded) to reflect the new scope. Item stays `applied`.
+     Iterate is the channel for "refine in place" — the user wants
+     to keep working these items without yet approving or dropping.
+     After iterating, the items are ready for the user to re-triage
+     on the next click.
+
+     The Worklist tab's spinner clears when your turn ends with
+     `stop_reason: end_turn` — the agent-idle ChangeListener on the
+     session JSONL is the primary clear path. There's also a 60s
+     stale-timeout backstop for cases where that chain breaks. End
+     your turn cleanly with a text response so the user's spinner
+     clears promptly.
 3. **Prune** — after either action, rewrite `resources/worklist.json`
    with only the still-pending items. The worklist is *pending* work,
    not history; completed items belong in commit messages.
 4. **Empty state is fine** — leave it as `{ "description": "", "items": [] }`.
 
-If you ever do receive `approved: {"items":[]}` or
-`drop: {"items":[]}` (shouldn't happen — the buttons are disabled when
-nothing is checked — but be defensive), treat it the same as
-`talk:` — feedback only, take no action.
+If you ever do receive `approved: {"items":[]}`, `drop: {"items":[]}`,
+or `iterate: {"items":[]}` (shouldn't happen — the buttons are
+disabled when nothing is checked — but be defensive), treat it the
+same as `talk:` — feedback only, take no action.
 
 **Don't infer commit / drop / advance from feedback.** When the user
 says things like "looks good", "seems pretty good", "it works", or
@@ -369,6 +401,40 @@ adding, advancing, or pruning worklist items — unsafe removals will be
 rejected or reverted.
 Save the verbal back-and-forth for design decisions (which items to
 propose, what choices to bake in), not for the mechanical write.
+
+**Minimize the bytes of each worklist edit.** Worklist items often have
+multi-paragraph `before` / `after` prose. A naive `Edit` with the
+whole item as `old_string` and the slightly-changed item as
+`new_string` doubles the per-edit token cost and floods the user's
+transcript with redundant text. Prefer:
+
+- Narrow `Edit` targets for the smallest possible string that uniquely
+  identifies the change. Flipping `"status": "proposed"` → `"status":
+  "applied"` only needs those two strings, not the whole item.
+- When you're appending to an item's `after` (e.g., adding a new
+  sub-section after an iterate), `old_string` is the last paragraph
+  you want to preserve and `new_string` is that same paragraph plus
+  the appended content — not the entire `after`.
+- Full-item rewrites (`Write` over `worklist.json` from scratch) are
+  fine for batch operations like pruning multiple items at once, but
+  avoid them for single-status flips or one-paragraph tweaks.
+
+The hook validates the resulting file regardless of edit shape, so the
+choice is purely about token economy and transcript noise.
+
+**Don't `grep -n` a single-line JSON file** (like `worklist.json`) to
+find an anchor for an `Edit`. The matching "line" *is* the whole
+file, and the grep tool result dumps it into the transcript. Find
+your anchor by recalling the structure from prior turns, using
+`Read` with `offset`/`limit`, or `jq` to extract just what you need.
+
+**Don't update an item's `after` field on every iterate.** Small
+refinements during TO-COMMIT iteration don't need an audit trail in
+the worklist — the commit message captures the final state and the
+file diff is reviewable in git. Only update `after` when scope
+materially expands (new file added to `files`, or the change's
+intent shifts). Otherwise leave it; the iteration history doesn't
+need to live in the item.
 
 ## Right-pane helpers (opt-in, only needed for project-side hooks)
 

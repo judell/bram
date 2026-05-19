@@ -1,12 +1,17 @@
 <Component
   name="Workspace"
-  var.checked="{loadChecked()}"
+  var.selected="{null}"
+  var.submittedItemId="{null}"
   var.submitting="{!!getInflight()}"
   var.expandedItemId="{null}"
   var.activeSnapshot="{null}"
   var.lastJsonl="{null}"
   var.sessionTick="{0}"
-  var.statusHelpFor="{null}">
+  var.statusHelpFor="{null}"
+  var.feedbackHelpFor="{null}"
+  var.feedbackExpanded="{false}"
+  var.selectedFeedback="{''}"
+  var.lastWorklistSig="{''}">
   <DataSource
     id="sessionTail"
     url="/__sessions/latest-tail?lines=200&amp;t={sessionTick}"
@@ -33,8 +38,10 @@
       if (!isAgentIdle(c.newValue)) return;
       clearInflight();
       submitting = false;
-      saveChecked([]);
-      checked = [];
+      selected = null;
+      submittedItemId = null;
+      selectedFeedback = '';
+      feedbackExpanded = false; expandedItemId = null;
       worklist.refetch();
       history.refetch();
     }" />
@@ -53,25 +60,37 @@
         if (sig !== (stored.ids || '')) {
           clearInflight();
           submitting = false;
-          saveChecked([]);
-          checked = [];
-          checked = pruneChecked(items.map(i => i.id));
+          if (selected && !items.some(i => i.id === selected)) selected = null;
+          submittedItemId = null;
+          selectedFeedback = '';
+          feedbackExpanded = false; expandedItemId = null;
           return;
         }
-        // 180s stale-timeout safety net for cases where the agent never
-        // emits a textful response (e.g., it crashes or the user kills
-        // the session). The session-activity clear lives in the
-        // ChangeListener above; this branch is only here to recover from
-        // a stuck inflight flag.
-        if (Date.now() - (stored.ts || 0) > 180000) {
+        // 60s stale-timeout safety net for cases where the agent-idle
+        // ChangeListener never fires (chain breakage, no-op iterates
+        // that don't end with a clean `stop_reason: end_turn`, or
+        // agent crashes). Long enough to outlast any reasonable
+        // agent response — a previous attempt at 10s false-cleared
+        // mid-response, and the previous 180s was way too long to
+        // wait when the chain genuinely breaks.
+        if (Date.now() - (stored.ts || 0) > 60000) {
           clearInflight();
           submitting = false;
-          saveChecked([]);
-          checked = [];
+          selected = null;
+          submittedItemId = null;
+          selectedFeedback = '';
+          feedbackExpanded = false; expandedItemId = null;
           return;
         }
       }
-      checked = pruneChecked(items.map(i => i.id));
+      if (selected && !items.some(i => i.id === selected)) selected = null;
+      const currentSig = items.filter(i => i && i.id).map(i => i.id + ':' + (i.status || 'proposed')).sort().join(',');
+      if (lastWorklistSig && currentSig !== lastWorklistSig) {
+        selected = null;
+        selectedFeedback = '';
+        feedbackExpanded = false; expandedItemId = null;
+      }
+      lastWorklistSig = currentSig;
     }" />
   <DataSource
     id="history"
@@ -101,10 +120,13 @@
         <Items data="{worklist.value.items}">
           <VStack gap="$space-1">
             <HStack gap="$space-3" verticalAlignment="start">
-              <Checkbox
-                value="{checked.includes($item.id)}"
+              <Button
+                label="{selected === $item.id ? '●' : '○'}"
+                variant="ghost"
+                size="xs"
                 enabled="{!submitting}"
-                onDidChange="(v) => { checked = v ? [...checked, $item.id] : checked.filter(id => id !== $item.id); saveChecked(checked); }" />
+                tooltip="Select this item"
+                onClick="selected = (selected === $item.id ? null : $item.id); selectedFeedback = ''; feedbackExpanded = false" />
               <VStack gap="$space-1" width="*">
                 <HStack gap="$space-2" verticalAlignment="center">
                   <Text
@@ -127,8 +149,46 @@
                       value="{expandedItemId === $item.id ? 'hide details' : 'show details'}"
                       fontSize="$fontSize-xs" />
                   </Link>
+                  <Theme size-Spinner="1em">
+                    <Spinner when="{submitting && submittedItemId === $item.id}" />
+                  </Theme>
                 </HStack>
                 <Text value="{$item.file}" variant="code" />
+                <HStack
+                  when="{selected === $item.id && !feedbackExpanded}"
+                  gap="$space-1"
+                  verticalAlignment="center">
+                  <Link
+                    onClick="feedbackExpanded = true"
+                    noIndicator>
+                    <Text value="+ feedback" fontSize="$fontSize-xs" />
+                  </Link>
+                  <Button
+                    label="ⓘ"
+                    variant="ghost"
+                    size="xs"
+                    tooltip="What does the feedback do?"
+                    onClick="feedbackHelpFor = ($item.status || 'proposed')" />
+                </HStack>
+                <HStack
+                  when="{selected === $item.id && feedbackExpanded}"
+                  gap="$space-2"
+                  verticalAlignment="start">
+                  <TextArea
+                    initialValue="{selectedFeedback}"
+                    placeholder="Message to agent"
+                    rows="2"
+                    width="*"
+                    fontSize="$fontSize-sm"
+                    enabled="{!submitting}"
+                    onDidChange="(v) => selectedFeedback = v" />
+                  <Button
+                    label="×"
+                    variant="ghost"
+                    size="xs"
+                    tooltip="Collapse feedback"
+                    onClick="feedbackExpanded = false; expandedItemId = null; selectedFeedback = ''" />
+                </HStack>
                 <VStack
                   when="{expandedItemId === $item.id}"
                   gap="$space-2"
@@ -174,22 +234,32 @@
           when="{worklist.value.items && worklist.value.items.length > 0}">
           <HStack gap="$space-3" verticalAlignment="center">
             <Button
-              label="Approve selected ({checked.length})"
-              enabled="{!submitting && checked.length > 0}"
-              onClick="markInflight(worklist.value && worklist.value.items); submitting = true; toTurn('approved: ' + JSON.stringify({ items: worklist.value.items.filter(i => checked.includes(i.id)).map(i => ({id: i.id, hash: i.hash})), feedback: '' }))" />
+              label="Approve"
+              variant="ghost"
+              enabled="{!submitting && !!selected}"
+              onClick="submittedItemId = selected; markInflight(worklist.value && worklist.value.items); submitting = true; toTurn('approved: ' + JSON.stringify({ items: worklist.value.items.filter(i => i.id === selected).map(i => ({id: i.id, hash: i.hash, feedback: selectedFeedback})) }))" />
             <Button
-              label="Drop selected ({checked.length})"
-              variant="outlined"
-              enabled="{!submitting && checked.length > 0}"
-              onClick="markInflight(worklist.value && worklist.value.items); submitting = true; toTurn('drop: ' + JSON.stringify({ items: worklist.value.items.filter(i => checked.includes(i.id)).map(i => ({id: i.id, hash: i.hash})), feedback: '' }))" />
-            <Spinner when="{submitting}" size="sm" />
+              label="Iterate"
+              variant="ghost"
+              enabled="{!submitting && !!selected && selectedFeedback.trim().length > 0}"
+              onClick="submittedItemId = selected; markInflight(worklist.value && worklist.value.items); submitting = true; toTurn('iterate: ' + JSON.stringify({ items: worklist.value.items.filter(i => i.id === selected).map(i => ({id: i.id, hash: i.hash, feedback: selectedFeedback})) }))" />
+            <Button
+              label="Drop"
+              variant="ghost"
+              enabled="{!submitting && !!selected}"
+              onClick="submittedItemId = selected; markInflight(worklist.value && worklist.value.items); submitting = true; toTurn('drop: ' + JSON.stringify({ items: worklist.value.items.filter(i => i.id === selected).map(i => ({id: i.id, hash: i.hash, feedback: selectedFeedback})) }))" />
             <Button
               when="{submitting}"
-              label="Cancel pending"
-              variant="outlined"
-              onClick="clearInflight(); submitting = false" />
+              label="Cancel"
+              variant="ghost"
+              onClick="clearInflight(); submitting = false; submittedItemId = null; selectedFeedback = ''; feedbackExpanded = false; expandedItemId = null; selected = null" />
           </HStack>
         </VStack>
+      </VStack>
+
+      <VStack gap="$space-1" when="{worklist.value && worklist.value.items && worklist.value.items.length > 0 && lastAssistantText(lastJsonl)}">
+        <Heading level="h4">Last agent response</Heading>
+        <Markdown content="{lastAssistantText(lastJsonl)}" />
       </VStack>
     </VStack>
 
@@ -202,12 +272,46 @@
           The agent is asking permission to make file edits. Nothing has happened
           on disk yet. In this phase you can:
         </Text>
-        <Markdown content="- **Check** the items you want to authorize, **uncheck** the rest.
-- Click **Approve selected** to authorize the checked items — the agent applies the edits and the items transition to TO COMMIT.
-- Click **Drop selected** to discard items you don't want at all — they're removed without any file changes.
+        <Markdown content="- **Select** the item you want to act on by clicking its radio button (`○` becomes `●` when selected) — only one item is active at a time.
+- Click **Approve** to authorize the edits — the agent applies and the item transitions to TO COMMIT.
+- Click **Drop** to discard the item — it's removed without any file changes.
 - Ask the agent in chat to tweak an item's scope, before/after prose, or split it up — useful when the proposal is *almost* right." />
         <HStack>
           <Button label="Got it" onClick="statusHelpFor = null" />
+        </HStack>
+      </VStack>
+    </ModalDialog>
+
+    <ModalDialog
+      when="{feedbackHelpFor === 'proposed'}"
+      title="Per-item feedback (TO APPLY)"
+      onClose="feedbackHelpFor = null">
+      <VStack gap="$space-3" padding="$space-2">
+        <Text>
+          Your note travels with this specific item, whichever button you click:
+        </Text>
+        <Markdown content="- **Approve** — extra guidance for the agent while applying the proposal.
+- **Iterate** — refinement direction; item stays TO APPLY (the agent revises the proposal text in place).
+- **Drop** — reason for the drop." />
+        <HStack>
+          <Button label="Got it" onClick="feedbackHelpFor = null" />
+        </HStack>
+      </VStack>
+    </ModalDialog>
+
+    <ModalDialog
+      when="{feedbackHelpFor === 'applied'}"
+      title="Per-item feedback (TO COMMIT)"
+      onClose="feedbackHelpFor = null">
+      <VStack gap="$space-3" padding="$space-2">
+        <Text>
+          Your note travels with this specific item, whichever button you click:
+        </Text>
+        <Markdown content="- **Approve** — extra guidance for the agent when committing.
+- **Iterate** — refinement direction; item stays TO COMMIT (the agent edits files in place and expands the item's after).
+- **Drop** — reason for the drop. Files stay on disk; ask the agent to discard if you want them gone." />
+        <HStack>
+          <Button label="Got it" onClick="feedbackHelpFor = null" />
         </HStack>
       </VStack>
     </ModalDialog>
@@ -224,8 +328,8 @@
         </Text>
         <Markdown content="- **Verify** the change actually does what was promised — reload the right pane, run the affected feature, read the diff.
 - **Ask for follow-on tweaks** that get folded into the *same* item (the agent expands the item's `after` and applies more edits, the commit you eventually approve covers the whole thing). This is preferred over proposing a sibling item.
-- Click **Approve selected** when you're satisfied — the agent creates the git commit with the item's prose as the message.
-- Click **Drop selected** if it turned out wrong — the worklist entry is removed, but **the disk edits stay** (the agent doesn't revert files unilaterally). Ask the agent to *discard those changes if you want them gone* — it knows how to use git commands like `git checkout -- &lt;file&gt;` or `git restore &lt;file&gt;`." />
+- Click **Approve** when you're satisfied — the agent creates the git commit with the item's prose as the message.
+- Click **Drop** if it turned out wrong — the worklist entry is removed, but **the disk edits stay** (the agent doesn't revert files unilaterally). Ask the agent to *discard those changes if you want them gone* — it knows how to use git commands like `git checkout -- &lt;file&gt;` or `git restore &lt;file&gt;`." />
         <HStack>
           <Button label="Got it" onClick="statusHelpFor = null" />
         </HStack>

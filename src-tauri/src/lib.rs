@@ -4366,7 +4366,7 @@ fn normalize_turn_submission(data: &str) -> String {
 // items without a `hash` field.
 struct ParsedWorklistAuthorization {
     kind: String,
-    requests: Vec<(String, Option<String>)>,
+    requests: Vec<(String, Option<String>, Option<String>)>,
 }
 
 fn parse_worklist_authorization_message(text: &str) -> Option<ParsedWorklistAuthorization> {
@@ -4376,9 +4376,9 @@ fn parse_worklist_authorization_message(text: &str) -> Option<ParsedWorklistAuth
             continue;
         };
         let value = serde_json::from_str::<serde_json::Value>(rest.trim()).ok()?;
-        let mut requests: Vec<(String, Option<String>)> = Vec::new();
-        // Preferred shape (new and legacy approve both use it):
-        //   {items: [{id, hash?}, ...], feedback: "..."}
+        let mut requests: Vec<(String, Option<String>, Option<String>)> = Vec::new();
+        // Preferred shape (new per-item, plus legacy approve which carried
+        // top-level feedback): {items: [{id, hash?, feedback?}, ...]}.
         if let Some(items) = value.get("items").and_then(|v| v.as_array()) {
             for item in items {
                 let Some(id) = item.get("id").and_then(|v| v.as_str()) else {
@@ -4388,7 +4388,11 @@ fn parse_worklist_authorization_message(text: &str) -> Option<ParsedWorklistAuth
                     .get("hash")
                     .and_then(|v| v.as_str())
                     .map(str::to_string);
-                requests.push((id.to_string(), hash));
+                let feedback = item
+                    .get("feedback")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                requests.push((id.to_string(), hash, feedback));
             }
         }
         // Legacy drop shape: {ids: [...]} — accept if items[] wasn't present.
@@ -4396,7 +4400,7 @@ fn parse_worklist_authorization_message(text: &str) -> Option<ParsedWorklistAuth
             if let Some(ids) = value.get("ids").and_then(|v| v.as_array()) {
                 for v in ids {
                     if let Some(id) = v.as_str() {
-                        requests.push((id.to_string(), None));
+                        requests.push((id.to_string(), None, None));
                     }
                 }
             }
@@ -4431,7 +4435,7 @@ fn record_worklist_authorization_from_input<R: tauri::Runtime>(app: &AppHandle<R
     let mut mismatched_ids: Vec<String> = Vec::new();
     let mut any_hash_supplied = false;
 
-    for (id, supplied_hash) in &parsed.requests {
+    for (id, supplied_hash, supplied_feedback) in &parsed.requests {
         ids.push(id.clone());
         let found = on_disk_items.iter().find(|it| {
             it.get("id")
@@ -4442,7 +4446,21 @@ fn record_worklist_authorization_from_input<R: tauri::Runtime>(app: &AppHandle<R
             (Some(supplied), Some(item)) => {
                 any_hash_supplied = true;
                 if &canonical_item_hash(item) == supplied {
-                    verified_items.push(item.clone());
+                    // Clone the on-disk item, then attach the per-item
+                    // feedback from the incoming payload so the agent
+                    // sees it via /__worklist/resolve. Always set the
+                    // field (even when empty) so consumers can read it
+                    // uniformly.
+                    let mut enriched = item.clone();
+                    if let Some(obj) = enriched.as_object_mut() {
+                        obj.insert(
+                            "feedback".to_string(),
+                            serde_json::Value::String(
+                                supplied_feedback.clone().unwrap_or_default(),
+                            ),
+                        );
+                    }
+                    verified_items.push(enriched);
                 } else {
                     mismatched_ids.push(id.clone());
                 }
@@ -6385,8 +6403,12 @@ pub fn run() {
                     last_emit = Instant::now();
                     // Classify: any path under a tools_pane_paths root → tools event.
                     // Otherwise (paths only under proj_root) → right-pane-only event.
+                    // Skip doc-only changes (e.g. conventions.md edits)
+                    // from triggering a tools-pane-reload. They don't run
+                    // code; the rebuild would only churn live UI state.
                     let is_tools_event = event.paths.iter().any(|p| {
-                        tools_pane_paths.iter().any(|tp| p.starts_with(tp))
+                        let is_doc = p.extension().map_or(false, |e| e == "md");
+                        !is_doc && tools_pane_paths.iter().any(|tp| p.starts_with(tp))
                     });
                     if is_tools_event {
                         // Defer the emit; pending_tools_since either starts

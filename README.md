@@ -92,7 +92,7 @@ On some Windows 11 setups, Smart App Control may block the unsigned binary — m
 
 - **Transcript** — the current active-session transcript for Claude or Codex. It follows the current session and renders turns plus inline tool activity for both providers, but it is intentionally a reader, not a full realtime control surface. Use Sessions to browse/search older transcripts.
 
-- **Worklist** — the two-stage `proposed → applied → committed` approval surface that coordinates multi-step agent work. Each item is a small, independently approvable diff with a `before → after` summary; the agent applies on TO APPLY approval and commits only on TO COMMIT approval, never unilaterally. xmlui-desktop always writes local `resources/worklist-history/` snapshots for auditability, while committing that directory is an opt-in repo policy.
+- **Worklist** — the `proposed → applied → committed` approval surface that coordinates multi-step agent work. Each item is a small, independently approvable diff with a `before → after` summary. Select one item at a time (radio); three ghost actions act on it — **Approve** (TO APPLY → on-disk edits, transitions to TO COMMIT; TO COMMIT → git commit), **Iterate** (refine in place — agent revises the proposed text or edits the on-disk files per your feedback, item keeps its state), **Drop** (remove the item; for TO COMMIT, disk edits stay until you ask the agent to revert). Each row's `+ feedback` link expands a per-item message-to-agent textarea that travels with whichever action you click. The agent never advances state unilaterally. xmlui-desktop always writes local `resources/worklist-history/` snapshots for auditability, while committing that directory is an opt-in repo policy.
 
 - **Commits** — HSplitter list of recent commits on the left, selected commit on the right. Full-history search via `git log --grep` across subject, body, and author; matched commits expand to clickable hit-row snippets, and the right pane stacks `snippetAroundLine` previews for every hit. The right-pane header is an `ExpandableItem` revealing the full commit message body. Unpushed commits surface a "Push" button that runs `git push origin`.
 
@@ -102,7 +102,7 @@ On some Windows 11 setups, Smart App Control may block the unsigned binary — m
 
 - **Context** — provider-aware HSplitter view of the active agent's durable local context sources. For Claude, that means `CLAUDE.md`, its `@`-imports, the per-project memory tree, hooks, and settings. For Codex, that means repo-local `AGENTS.md` when present plus Codex-side sources such as `~/.codex/config.toml`, project-local `.codex/` files, memories, and rules. Substring search shows grep-style hit snippets in the list and `snippetAroundLine` context on the right.
 
-- **README** — the rendered project README, so the agent and the user share the same source-of-truth doc.
+The toolbar's `ⓘ` (top-right of the drawer's AppHeader) opens a right-pane info modal with the current URL, version, project-server config, and a `README on GitHub` link to this document.
 
 ### Toolbar
 

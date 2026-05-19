@@ -663,6 +663,25 @@ function visibleTurns(turns, n) {
   return out;
 }
 
+// Extract just the text of the most recent assistant turn from a session
+// JSONL tail. Used by Workspace's inline Agent-response panel — a slim
+// "final response" readout next to the worklist, without reproducing
+// Transcript's full timeline / tool-call rendering. Returns '' if no
+// assistant text turn is present in the tail.
+function lastAssistantText(jsonlText) {
+  const turns = sessionTurns(jsonlText);
+  for (let i = turns.length - 1; i >= 0; i--) {
+    if (turns[i].role === 'assistant') {
+      const text = (turns[i].entries || [])
+        .filter(e => e.kind === 'text')
+        .map(e => e.text)
+        .join('\n\n');
+      if (text) return text;
+    }
+  }
+  return '';
+}
+
 function sessionTurns(jsonlText) {
   // Sticky empty: during a refetch the DataSource value can briefly be
   // null/undefined. Returning [] would blank the transcript and cause a

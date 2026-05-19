@@ -1,6 +1,6 @@
 <Theme width-navPanel-App="$space-28">
 <App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissed="{false}"
-  onInit="subscribeRightPaneSize((s) => rightPaneSize = s.width + ' × ' + s.height); $pathname !== '/' &amp;&amp; navigate('/'); (() => { const tauri = (window.parent &amp;&amp; window.parent.__TAURI__) || window.__TAURI__; if (tauri &amp;&amp; tauri.event &amp;&amp; tauri.event.listen) { tauri.event.listen('enhance-status-changed', () => enhanceStatus.refetch()); } })()">
+  onInit="subscribeRightPaneSize((s) => rightPaneSize = s.width + ' × ' + s.height); (() => { const tauri = (window.parent &amp;&amp; window.parent.__TAURI__) || window.__TAURI__; if (tauri &amp;&amp; tauri.event &amp;&amp; tauri.event.listen) { tauri.event.listen('enhance-status-changed', () => enhanceStatus.refetch()); } })()">
   <DataSource id="enhanceStatus" url="/__enhance/status" />
   <DataSource id="rpInfo" url="/__right-pane-info" />
   <DataSource id="appInfo" url="/__app-info" />
@@ -221,7 +221,7 @@
 
   <Pages fallbackPath="/">
     <Page url="/"><Transcript activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}" /></Page>
-    <Page url="/worklist"><Workspace /></Page>
+    <Page url="/worklist"><Workspace activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}" /></Page>
     <Page url="/sessions"><Sessions /></Page>
     <Page url="/context"><Context activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}" /></Page>
     <Page url="/issues"><Issues /></Page>

@@ -88,7 +88,7 @@
     });
     (() => { const tauri = (window.parent &amp;&amp; window.parent.__TAURI__) || window.__TAURI__; if (tauri &amp;&amp; tauri.event &amp;&amp; tauri.event.listen) { tauri.event.listen('worklist-changed', () => { worklist.refetch(); history.refetch(); }); } })()">
     <VStack gap="$space-3" when="{worklist.value}">
-      <VStack gap="$space-3" opacity="{submitting ? 0.3 : 1}">
+      <VStack gap="$space-3">
         <Heading level="h2">Worklist</Heading>
         <Text
           when="{worklist.value.exists && (!worklist.value.items || worklist.value.items.length === 0)}"

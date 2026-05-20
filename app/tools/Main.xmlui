@@ -192,12 +192,11 @@
     <property name="logoTemplate">
       <Fragment/>
     </property>
-    <NavLink label="Transcript" to="/" exact="true" />
-    <HStack height="1px" backgroundColor="$borderColor" marginVertical="$space-2" />
     <NavLink label="Issues" to="/issues" />
     <NavLink label="Worklist" to="/worklist" />
     <NavLink label="Commits" to="/commits" />
     <HStack height="1px" backgroundColor="$borderColor" marginVertical="$space-2" />
+    <NavLink label="Transcript" to="/" exact="true" />
     <NavLink label="Sessions" to="/sessions" />
     <NavLink label="Context" to="/context" />
   </NavPanel>

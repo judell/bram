@@ -1,5 +1,5 @@
 <Theme width-navPanel-App="$space-28">
-<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissed="{false}"
+<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissed="{false}" var.recording="{false}"
   onInit="subscribeRightPaneSize((s) => rightPaneSize = s.width + ' × ' + s.height); (() => { const tauri = (window.parent &amp;&amp; window.parent.__TAURI__) || window.__TAURI__; if (tauri &amp;&amp; tauri.event &amp;&amp; tauri.event.listen) { tauri.event.listen('enhance-status-changed', () => enhanceStatus.refetch()); } })()">
   <DataSource id="enhanceStatus" url="/__enhance/status" />
   <DataSource id="rpInfo" url="/__right-pane-info" />
@@ -148,6 +148,11 @@
           variant="ghost"
           tooltip="Increase app font size"
           onClick="window.setAppFontSize(window.getAppFontSize() + 1)" />
+        <Button
+          label="{recording ? '⏹ stop' : '🎤 voice'}"
+          variant="ghost"
+          tooltip="Voice input — click to start, click again to send"
+          onClick="recording ? (recording = false, voiceStop(t => { if (t) toTurn('voice: ' + t); })) : (voiceStart(), recording = true)" />
         <Button
           label="1"
           variant="ghost"

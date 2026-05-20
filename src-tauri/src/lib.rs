@@ -1019,7 +1019,7 @@ fn gh_issues_list<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
             "issue",
             "list",
             "--json",
-            "number,title,state,author,createdAt,updatedAt,labels,url",
+            "number,title,state,author,createdAt,updatedAt,labels,url,comments",
             "--limit",
             "50",
             "--state",
@@ -1027,7 +1027,19 @@ fn gh_issues_list<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         ])
         .output();
     match out {
-        Ok(out) if out.status.success() => Ok(out.stdout),
+        Ok(out) if out.status.success() => {
+            let mut issues: Vec<serde_json::Value> = match serde_json::from_slice(&out.stdout) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("[gh issue list] parse: {}", e);
+                    return Ok(b"[]".to_vec());
+                }
+            };
+            for issue in &mut issues {
+                enrich_issue_activity(issue);
+            }
+            serde_json::to_vec(&issues).map_err(|e| e.to_string())
+        }
         Ok(out) => {
             eprintln!(
                 "[gh issue list] non-zero exit: {}",
@@ -1066,7 +1078,7 @@ fn gh_issues_search<R: tauri::Runtime>(app: &AppHandle<R>, query: &str) -> Resul
             "--search",
             q,
             "--json",
-            "number,title,state,author,createdAt,updatedAt,labels,url,body",
+            "number,title,state,author,createdAt,updatedAt,labels,url,body,comments",
             "--limit",
             "50",
             "--state",
@@ -1099,7 +1111,8 @@ fn gh_issues_search<R: tauri::Runtime>(app: &AppHandle<R>, query: &str) -> Resul
     let mut total_hits = 0usize;
     let mut truncated = false;
 
-    for issue in issues {
+    for mut issue in issues {
+        enrich_issue_activity(&mut issue);
         if total_hits >= MAX_HITS {
             truncated = true;
             break;
@@ -1163,7 +1176,17 @@ fn gh_issue_view<R: tauri::Runtime>(app: &AppHandle<R>, number: u64) -> Result<V
         ])
         .output();
     match out {
-        Ok(out) if out.status.success() => Ok(out.stdout),
+        Ok(out) if out.status.success() => {
+            let mut issue: serde_json::Value = match serde_json::from_slice(&out.stdout) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("[gh issue view {}] parse: {}", n, e);
+                    return Ok(b"{}".to_vec());
+                }
+            };
+            enrich_issue_activity(&mut issue);
+            serde_json::to_vec(&issue).map_err(|e| e.to_string())
+        }
         Ok(out) => {
             eprintln!(
                 "[gh issue view {}] non-zero exit: {}",
@@ -1175,6 +1198,76 @@ fn gh_issue_view<R: tauri::Runtime>(app: &AppHandle<R>, number: u64) -> Result<V
         Err(e) => {
             eprintln!("[gh issue view {}] failed to spawn: {}", n, e);
             Ok(b"{}".to_vec())
+        }
+    }
+}
+
+fn issue_actor_label(value: &serde_json::Value) -> Option<String> {
+    if let Some(s) = value.as_str() {
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    let obj = value.as_object()?;
+    for key in ["login", "name"] {
+        let Some(s) = obj.get(key).and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+fn enrich_issue_activity(issue: &mut serde_json::Value) {
+    let Some(obj) = issue.as_object_mut() else {
+        return;
+    };
+
+    let mut latest_comment_at: Option<String> = None;
+    let mut latest_comment_author: Option<String> = None;
+    if let Some(comments) = obj.get("comments").and_then(|v| v.as_array()) {
+        for comment in comments {
+            let Some(created_at) = comment.get("createdAt").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let should_replace = latest_comment_at
+                .as_deref()
+                .map(|current| created_at > current)
+                .unwrap_or(true);
+            if should_replace {
+                latest_comment_at = Some(created_at.to_string());
+                latest_comment_author = comment
+                    .get("author")
+                    .and_then(issue_actor_label)
+                    .or_else(|| Some(String::new()));
+            }
+        }
+    }
+
+    let activity_at = latest_comment_at
+        .clone()
+        .or_else(|| obj.get("updatedAt").and_then(|v| v.as_str()).map(str::to_string))
+        .or_else(|| obj.get("createdAt").and_then(|v| v.as_str()).map(str::to_string));
+
+    if let Some(activity_at) = activity_at {
+        obj.insert("activityAt".to_string(), serde_json::Value::String(activity_at));
+    }
+    if let Some(latest_comment_at) = latest_comment_at {
+        obj.insert(
+            "latestCommentAt".to_string(),
+            serde_json::Value::String(latest_comment_at),
+        );
+    }
+    if let Some(latest_comment_author) = latest_comment_author {
+        if !latest_comment_author.is_empty() {
+            obj.insert(
+                "latestCommentAuthor".to_string(),
+                serde_json::Value::String(latest_comment_author),
+            );
         }
     }
 }

@@ -51,7 +51,7 @@
 
   <variable
     name="selectedIssue"
-    value="{!expandedNumber ? null : ((((searchResults.value &amp;&amp; searchResults.value.results) || []).find(i => i.number === expandedNumber)) || (sortedIssues || []).find(i => i.number === expandedNumber))}" />
+    value="{!expandedNumber ? null : (((issueDetail.value &amp;&amp; issueDetail.value.number === expandedNumber) ? issueDetail.value : ((((searchResults.value &amp;&amp; searchResults.value.results) || []).find(i => i.number === expandedNumber)) || (sortedIssues || []).find(i => i.number === expandedNumber))))}" />
 
   <ModalDialog
     when="{!!fullscreenImage}"
@@ -198,14 +198,27 @@
                 <Link
                   onClick="expandedNumber = $item.number; selectedHitLine = null"
                   noIndicator>
-                  <Text
-                    value="#{$item.number} {$item.title}"
-                    fontWeight="{expandedNumber === $item.number ? '$fontWeight-bold' : '$fontWeight-normal'}"
-                    maxLines="1" />
+                  <VStack gap="0">
+                    <Text
+                      value="#{$item.number} {$item.title}"
+                      fontWeight="{expandedNumber === $item.number ? '$fontWeight-bold' : '$fontWeight-normal'}"
+                      maxLines="1" />
+                    <Text
+                      fontSize="$fontSize-xs"
+                      color="$textColor-secondary"
+                      maxLines="1"
+                      value="{(($item.author &amp;&amp; ($item.author.login || $item.author.name)) || 'unknown') + ' opened ' + getDateUntilNow($item.createdAt) + ' ago'}" />
+                    <Text
+                      when="{$item.latestCommentAuthor &amp;&amp; $item.latestCommentAt}"
+                      fontSize="$fontSize-xs"
+                      color="$textColor-secondary"
+                      maxLines="1"
+                      value="{$item.latestCommentAuthor + ' commented ' + getDateUntilNow($item.latestCommentAt) + ' ago'}" />
+                  </VStack>
                 </Link>
               </HStack>
               <HStack when="{!expandedNumber}" width="90px" verticalAlignment="center">
-                <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{getDateUntilNow($item.updatedAt)}" />
+                <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{getDateUntilNow($item.activityAt || $item.updatedAt || $item.createdAt)}" />
               </HStack>
             </HStack>
 
@@ -281,6 +294,17 @@
           tooltip="Open on github.com"
           onClick="openExternal(selectedIssue.url)" />
       </HStack>
+      <VStack when="{selectedIssue}" gap="0">
+        <Text
+          fontSize="$fontSize-sm"
+          color="$textColor-secondary"
+          value="{((selectedIssue.author &amp;&amp; (selectedIssue.author.login || selectedIssue.author.name)) || 'unknown') + ' opened ' + getDateUntilNow(selectedIssue.createdAt) + ' ago'}" />
+        <Text
+          when="{selectedIssue.latestCommentAuthor &amp;&amp; selectedIssue.latestCommentAt}"
+          fontSize="$fontSize-sm"
+          color="$textColor-secondary"
+          value="{selectedIssue.latestCommentAuthor + ' commented ' + getDateUntilNow(selectedIssue.latestCommentAt) + ' ago'}" />
+      </VStack>
       <Link
         when="{selectedHitLine &amp;&amp; query &amp;&amp; query.trim().length >= 2}"
         onClick="selectedHitLine = null"

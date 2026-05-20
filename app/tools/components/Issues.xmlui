@@ -280,19 +280,16 @@
           fontWeight="$fontWeight-bold"
           color="{selectedIssue.state === 'OPEN' ? '$color-success-700' : '$textColor-secondary'}"
           value="{selectedIssue.state === 'OPEN' ? 'open' : 'closed'}" />
-        <Text
+        <Link
           when="{selectedIssue}"
-          fontWeight="$fontWeight-bold"
-          value="#{selectedIssue.number} {selectedIssue.title}"
           width="*"
-          maxLines="2" />
-        <Button
-          when="{selectedIssue &amp;&amp; selectedIssue.url}"
-          icon="link"
-          variant="ghost"
-          size="xs"
-          tooltip="Open on github.com"
-          onClick="openExternal(selectedIssue.url)" />
+          noIndicator
+          onClick="selectedIssue.url ? openExternal(selectedIssue.url) : null">
+          <Text
+            fontWeight="$fontWeight-bold"
+            value="#{selectedIssue.number} {selectedIssue.title}"
+            maxLines="2" />
+        </Link>
       </HStack>
       <VStack when="{selectedIssue}" gap="0">
         <Text

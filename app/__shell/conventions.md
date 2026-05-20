@@ -1,6 +1,6 @@
-# Working with xmlui-desktop
+# Working with Bram
 
-xmlui-desktop is a **workspace for XMLUI development with AI agents**.
+Bram is a **workspace for XMLUI development with AI agents**.
 The shell puts a real terminal alongside an XMLUI surface, plus an
 "agent tools" drawer that includes a Worklist (pending items + commits),
 a Sessions browser, and a Context viewer (CLAUDE.md + memory + hooks +
@@ -12,21 +12,21 @@ you — use it.
 > memories** — preferring the worklist, helper APIs, release quirks,
 > conventions you discover, etc. Per-user memory is private to one
 > agent on one machine; this file is shared with everyone running
-> xmlui-desktop. When you learn something worth keeping for future
+> Bram. When you learn something worth keeping for future
 > sessions, add it here so the whole community gets it. Memory stays
 > reserved for things that genuinely can't live in the project repo
 > (cross-project user preferences, etc.).
 
 ## Naming and user-facing copy
 
-- **Don't call xmlui-desktop an IDE** in user-facing copy (README, UI
+- **Don't call Bram an IDE** in user-facing copy (README, UI
   strings, manual.md). Frame it as a workspace, desktop shell, or
   describe what it does. Don't recommend external IDE tooling
   (rust-analyzer, VS Code extensions) in this project's docs —
-  xmlui-desktop is the workspace.
+  Bram is the workspace.
 - **Don't call this repo a "dogfood project"** or use similar
-  internal-team jargon in committed text. It's the xmlui-desktop
-  project; users developing their own XMLUI app launch xmlui-desktop
+  internal-team jargon in committed text. It's the Bram
+  project; users developing their own XMLUI app launch Bram
   in their own project directory.
 
 ## Render structured output in the right pane
@@ -141,17 +141,18 @@ Lifecycle:
      writes the verified item content into
      `resources/.worklist-authorization.json`.
      **To act on the approval, GET `/__worklist/resolve` from the
-     loopback HTTP server.** xmlui-desktop injects `XMLUI_DESKTOP_PORT`
+     loopback HTTP server.** Bram injects `BRAM_PORT`
+     (legacy `XMLUI_DESKTOP_PORT` also supported)
      into the PTY child's environment at spawn time, so the agent can
      reach the endpoint without rediscovering the random loopback port:
 
      ```
-     curl -s "http://localhost:$XMLUI_DESKTOP_PORT/__worklist/resolve"
+     curl -s "http://localhost:${BRAM_PORT:-$XMLUI_DESKTOP_PORT}/__worklist/resolve"
      ```
 
      If the env var is unset (the rare case where the agent was launched
      outside the wrapped PTY shell), fall back to discovering the port
-     via `lsof -nP -iTCP -sTCP:LISTEN | grep xmlui-desktop`. The
+     via `lsof -nP -iTCP -sTCP:LISTEN | grep bram`. The
      response is one of:
      - `{"kind":"approved", "items":[<full verified content>], ...}` —
        execute these items. The user has already triaged; do NOT
@@ -472,7 +473,7 @@ available inside xmlui markup:
 | `toShell(text)` | inject text into stdin; user must press Enter |
 | `toTurn(text)` | submit text as a complete user turn (auto-Enter) |
 | `openExternal(url)` | open URL in the system browser |
-| `logToHost(payload)` | log to xmlui-desktop stderr without bothering you |
+| `logToHost(payload)` | log to Bram stderr without bothering you |
 
 Use `toTurn` for one-shot form submissions (Approve buttons, Confirm
 buttons). Use `toShell` to inject text the user can edit before sending.
@@ -545,8 +546,8 @@ the working URLs).
 
 ## Build vs. runtime-served files
 
-The xmlui-desktop binary ships with the `app/` tree embedded at build
-time (Tauri's `frontendDist: "../app"`). At runtime, xmlui-desktop
+The Bram binary ships with the `app/` tree embedded at build
+time (Tauri's `frontendDist: "../app"`). At runtime, Bram
 prefers an on-disk `app/` next to the binary if present, otherwise
 falls back to the embedded copy.
 

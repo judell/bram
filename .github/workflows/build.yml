@@ -118,20 +118,20 @@ jobs:
       - name: Package (Unix)
         if: matrix.os != 'windows-latest'
         run: |
-          cp src-tauri/target/${{ matrix.target }}/debug/xmlui-desktop${{ matrix.ext }} ./xmlui-desktop${{ matrix.ext }}
-          tar -czf xmlui-desktop-${{ matrix.label }}.${{ matrix.archive }} xmlui-desktop${{ matrix.ext }}
+          cp src-tauri/target/${{ matrix.target }}/debug/bram${{ matrix.ext }} ./bram${{ matrix.ext }}
+          tar -czf bram-${{ matrix.label }}.${{ matrix.archive }} bram${{ matrix.ext }}
 
       - name: Package (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
-          Copy-Item src-tauri/target/${{ matrix.target }}/debug/xmlui-desktop${{ matrix.ext }} -Destination ./xmlui-desktop${{ matrix.ext }}
-          Compress-Archive -Path xmlui-desktop${{ matrix.ext }} -DestinationPath xmlui-desktop-${{ matrix.label }}.${{ matrix.archive }}
+          Copy-Item src-tauri/target/${{ matrix.target }}/debug/bram${{ matrix.ext }} -Destination ./bram${{ matrix.ext }}
+          Compress-Archive -Path bram${{ matrix.ext }} -DestinationPath bram-${{ matrix.label }}.${{ matrix.archive }}
 
       - name: Upload to GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: xmlui-desktop-${{ matrix.label }}.${{ matrix.archive }}
+          files: bram-${{ matrix.label }}.${{ matrix.archive }}
           tag_name: ${{ github.event.inputs.tag }}
 
   publish-checksums:
@@ -143,10 +143,10 @@ jobs:
           mkdir artifacts
           cd artifacts
           for asset in \
-            xmlui-desktop-linux-amd64.tar.gz \
-            xmlui-desktop-macos-arm64.tar.gz \
-            xmlui-desktop-macos-intel.tar.gz \
-            xmlui-desktop-windows-amd64.zip; do
+            bram-linux-amd64.tar.gz \
+            bram-macos-arm64.tar.gz \
+            bram-macos-intel.tar.gz \
+            bram-windows-amd64.zip; do
             curl -fsSL -o "${asset}" \
               "https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.tag }}/${asset}"
           done

@@ -1,4 +1,4 @@
-// Shell-side helpers exposed to any XMLUI app served by the xmlui-desktop
+// Shell-side helpers exposed to any XMLUI app served by Bram
 // binary. Include from your project's index.html with:
 //
 //   <script src="tauri://localhost/__shell/helpers.js"></script>
@@ -40,11 +40,12 @@ window._xsLogs = window._xsLogs || [];
 // their own route conventions and should not be affected.
 (function persistToolsRoute() {
   if (window.location.pathname.indexOf("/__tools/") === -1) return;
-  var key = "xmlui-desktop.tools.route";
+  var key = "bram.tools.route";
+  var legacyKey = "xmlui-desktop.tools.route";
   try {
     var current = window.location.hash;
     if (!current || current === "#/") {
-      var saved = localStorage.getItem(key);
+      var saved = localStorage.getItem(key) || localStorage.getItem(legacyKey);
       if (saved && saved !== "#/") {
         window.location.hash = saved;
       }
@@ -529,12 +530,13 @@ window.addEventListener("message", async (event) => {
   }
 });
 
-// Adjustable root font-size for the xmlui surface (mirrors the terminal-side
+// Adjustable root font-size for the XMLUI surface (mirrors the terminal-side
 // pattern in app/main.js). Buttons in AppHeader call setAppFontSize /
 // getAppFontSize. The right pane and the agent tools drawer share origin
 // and localStorage; a BroadcastChannel keeps their runtime sizes in lockstep.
 (function () {
-  var APP_FONT_KEY = "xmlui-desktop.app.fontSize";
+  var APP_FONT_KEY = "bram.app.fontSize";
+  var LEGACY_APP_FONT_KEY = "xmlui-desktop.app.fontSize";
   var APP_FONT_MIN = 10;
   var APP_FONT_MAX = 28;
   var APP_FONT_DEFAULT = 16;
@@ -563,7 +565,12 @@ window.addEventListener("message", async (event) => {
 
   window.getAppFontSize = function () {
     try {
-      var raw = parseInt(localStorage.getItem(APP_FONT_KEY) || "", 10);
+      var raw = parseInt(
+        localStorage.getItem(APP_FONT_KEY) ||
+          localStorage.getItem(LEGACY_APP_FONT_KEY) ||
+          "",
+        10
+      );
       return isFinite(raw) ? clampAppFontSize(raw) : APP_FONT_DEFAULT;
     } catch (e) {
       return APP_FONT_DEFAULT;

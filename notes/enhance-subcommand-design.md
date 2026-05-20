@@ -1,8 +1,8 @@
-# `xmlui-desktop enhance` subcommand — design notes
+# `bram enhance` subcommand — design notes
 
-A planned subcommand of the `xmlui-desktop` binary (not the `xmlui` CLI —
+A planned subcommand of the `bram` binary (not the `xmlui` CLI —
 that has its own `add-inspector`). Run from any XMLUI project root,
-idempotent, makes the project work well inside xmlui-desktop.
+idempotent, makes the project work well inside Bram.
 
 ## v0 scope
 

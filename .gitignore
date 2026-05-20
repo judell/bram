@@ -24,12 +24,14 @@ dist-ssr
 *.sw?
 
 # Local launcher symlink to the current debug build
+bram
 xmlui-desktop
 
 # Project-local Claude Code permissions (per-user, do not share)
 .claude/settings.local.json
 
 # Project shell-startup config (committed as a default; local edits stay local)
+.bram.json
 .xmlui-desktop.json
 
 # This repo opts out of committed worklist-history snapshots for the

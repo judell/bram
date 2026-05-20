@@ -1,4 +1,4 @@
-# xmlui-desktop
+# Bram
 
 You are running in the **left pane** of a Tauri desktop shell that puts
 a real terminal next to an XMLUI surface. The user can SEE the right

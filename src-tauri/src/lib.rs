@@ -268,7 +268,7 @@ fn parse_cli_flags() {
     match args[1].as_str() {
         "-h" | "--help" => {
             println!(
-                "Usage: xmlui-desktop [PROJECT_DIR]\n\n\
+                "Usage: bram [PROJECT_DIR]\n\n\
                  Tauri shell that pairs a terminal with an XMLUI surface.\n\n\
                  Arguments:\n  \
                    [PROJECT_DIR]    Path to the XMLUI project to load (defaults to current directory)\n\n\
@@ -279,16 +279,27 @@ fn parse_cli_flags() {
             std::process::exit(0);
         }
         "-V" | "--version" => {
-            println!("xmlui-desktop {}", env!("CARGO_PKG_VERSION"));
+            println!("bram {}", env!("CARGO_PKG_VERSION"));
             std::process::exit(0);
         }
         s if s.starts_with('-') => {
-            eprintln!("xmlui-desktop: unknown option '{}'", s);
-            eprintln!("Try 'xmlui-desktop --help' for more information.");
+            eprintln!("bram: unknown option '{}'", s);
+            eprintln!("Try 'bram --help' for more information.");
             std::process::exit(1);
         }
         _ => {}
     }
+}
+
+fn first_nonempty_env(names: &[&str]) -> Option<String> {
+    for name in names {
+        if let Ok(value) = std::env::var(name) {
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
 }
 
 fn project_root<R: tauri::Runtime>(app: Option<&AppHandle<R>>) -> Option<PathBuf> {
@@ -682,9 +693,7 @@ fn compare_versions(current: &str, latest: &str) -> bool {
 }
 
 fn fetch_app_info() -> AppInfo {
-    let current = std::env::var("XMLUI_DESKTOP_FAKE_CURRENT")
-        .ok()
-        .filter(|s| !s.is_empty())
+    let current = first_nonempty_env(&["BRAM_FAKE_CURRENT", "XMLUI_DESKTOP_FAKE_CURRENT"])
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
 
     // curl ships on macOS / Linux / Windows 10+; avoids pulling in an HTTP
@@ -695,10 +704,10 @@ fn fetch_app_info() -> AppInfo {
             "-m",
             "5",
             "-H",
-            "User-Agent: xmlui-desktop",
+            "User-Agent: bram",
             "-H",
             "Accept: application/vnd.github+json",
-            "https://api.github.com/repos/judell/xmlui-desktop/releases/latest",
+            "https://api.github.com/repos/judell/bram/releases/latest",
         ])
         .output();
 
@@ -1371,12 +1380,12 @@ fn pty_spawn(
             let _ = std::fs::create_dir_all(parent);
         }
         let _ = std::fs::remove_file(&hint_path);
-        command.env(
-            "XMLUI_DESKTOP_AGENT_HINT",
-            hint_path.to_string_lossy().into_owned(),
-        );
+        let hint = hint_path.to_string_lossy().into_owned();
+        command.env("BRAM_AGENT_HINT", hint.clone());
+        command.env("XMLUI_DESKTOP_AGENT_HINT", hint);
     }
     if let Some(p) = LOOPBACK_PORT.get() {
+        command.env("BRAM_PORT", p.to_string());
         command.env("XMLUI_DESKTOP_PORT", p.to_string());
     }
 
@@ -1464,21 +1473,32 @@ fn pty_resize(cols: u16, rows: u16, state: State<'_, AppState>) -> Result<(), St
         .map_err(|e| e.to_string())
 }
 
-// --- Project-server (.xmlui-desktop.json) ---------------------------------
+// --- Project-server (.bram.json / legacy .xmlui-desktop.json) -------------
 
 fn load_project_config(root: &Path) -> Option<ProjectConfig> {
-    let path = root.join(".xmlui-desktop.json");
-    let bytes = std::fs::read(&path).ok()?;
-    match serde_json::from_slice::<ProjectConfig>(&bytes) {
-        Ok(cfg) => {
-            eprintln!("[project-config] loaded {}", path.display());
-            Some(cfg)
-        }
-        Err(e) => {
-            eprintln!("[project-config] failed to parse {}: {}", path.display(), e);
-            None
-        }
+    for rel in [".bram.json", ".xmlui-desktop.json"] {
+        let path = root.join(rel);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
+        };
+        return match serde_json::from_slice::<ProjectConfig>(&bytes) {
+            Ok(cfg) => {
+                eprintln!("[project-config] loaded {}", path.display());
+                Some(cfg)
+            }
+            Err(e) => {
+                eprintln!("[project-config] failed to parse {}: {}", path.display(), e);
+                None
+            }
+        };
     }
+    None
+}
+
+fn is_project_config_path(path: &Path) -> bool {
+    path.file_name()
+        .map_or(false, |n| n == ".bram.json" || n == ".xmlui-desktop.json")
 }
 
 fn is_port_listening(port: u16) -> bool {
@@ -1685,7 +1705,7 @@ fn handle_project_config_reload<R: tauri::Runtime>(app_handle: &AppHandle<R>, pr
 
     if port_changed {
         eprintln!(
-            "[server] WARNING: port changed via .xmlui-desktop.json; service workers were bound to the old origin and will not rebind cleanly — restart xmlui-desktop to fully apply"
+            "[server] WARNING: port changed via .bram.json; service workers were bound to the old origin and will not rebind cleanly — restart Bram to fully apply"
         );
     }
 
@@ -1718,10 +1738,7 @@ fn handle_project_config_reload<R: tauri::Runtime>(app_handle: &AppHandle<R>, pr
                 .rsplit_once('/')
                 .map(|(base, _)| format!("{}/", base))
                 .unwrap_or_else(|| default.clone());
-            (
-                format!("{}/__project/index.html", SHELL_ORIGIN),
-                upstream,
-            )
+            (format!("{}/__project/index.html", SHELL_ORIGIN), upstream)
         }
     };
     {
@@ -1870,8 +1887,7 @@ fn git_push(app: AppHandle) -> Result<(), String> {
         Ok(_) => return Ok(()),
         Err(e) => e,
     };
-    let is_nonff = stderr.contains("non-fast-forward")
-        || stderr.contains("fetch first");
+    let is_nonff = stderr.contains("non-fast-forward") || stderr.contains("fetch first");
     if !is_nonff {
         return Err(stderr);
     }
@@ -1891,15 +1907,21 @@ fn auto_rebase_and_push<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), Str
     if dirty {
         git_run(
             app,
-            &["stash", "push", "--include-untracked", "-m", "xmlui-desktop-auto-rebase"],
+            &[
+                "stash",
+                "push",
+                "--include-untracked",
+                "-m",
+                "bram-auto-rebase",
+            ],
         )
         .map_err(|e| format!("auto-stash failed: {}", e))?;
         stashed = true;
     }
 
     let result: Result<(), String> = (|| {
-        let branch = git_run(app, &["rev-parse", "--abbrev-ref", "HEAD"])
-            .map(|s| s.trim().to_string())?;
+        let branch =
+            git_run(app, &["rev-parse", "--abbrev-ref", "HEAD"]).map(|s| s.trim().to_string())?;
         git_run(app, &["fetch", "origin"])?;
         let upstream = format!("origin/{}", branch);
         match git_run(app, &["rebase", &upstream]) {
@@ -4304,10 +4326,7 @@ fn worklist_doc<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
             for item in items {
                 let hash = canonical_item_hash(item);
                 if let Some(item_obj) = item.as_object_mut() {
-                    item_obj.insert(
-                        "hash".to_string(),
-                        serde_json::Value::String(hash),
-                    );
+                    item_obj.insert("hash".to_string(), serde_json::Value::String(hash));
                 }
             }
         }
@@ -5153,10 +5172,10 @@ fn route_request<R: tauri::Runtime>(
                 .replace('"', "&quot;")
         };
         let html = format!(
-            "<!doctype html><meta charset=utf-8><title>xmlui-desktop: project server unavailable</title>\
+            "<!doctype html><meta charset=utf-8><title>Bram: project server unavailable</title>\
              <style>body{{font-family:system-ui,-apple-system,sans-serif;padding:32px;background:#1e1e1e;color:#e0e0e0;line-height:1.5}}\
              h1{{color:#ff7a7a;margin:0 0 16px;font-size:18px}}p{{margin:8px 0}}code{{background:#333;color:#e0e0e0;padding:2px 6px;border-radius:4px;font-family:Menlo,Monaco,monospace}}</style>\
-             <h1>xmlui-desktop: project server unavailable</h1>\
+             <h1>Bram: project server unavailable</h1>\
              <p>{}</p>",
             escape(&reason)
         );
@@ -5557,7 +5576,11 @@ fn route_request<R: tauri::Runtime>(
             }
         }
         let Some(auth_path) = worklist_auth_file(app) else {
-            return (404, "text/plain; charset=utf-8", b"no project root".to_vec());
+            return (
+                404,
+                "text/plain; charset=utf-8",
+                b"no project root".to_vec(),
+            );
         };
         let Ok(raw) = std::fs::read_to_string(&auth_path) else {
             return (
@@ -5577,20 +5600,14 @@ fn route_request<R: tauri::Runtime>(
             }
         };
         if let Some(filter) = id_filter {
-            if let Some(items) = record_value
-                .get_mut("items")
-                .and_then(|v| v.as_array_mut())
-            {
+            if let Some(items) = record_value.get_mut("items").and_then(|v| v.as_array_mut()) {
                 items.retain(|it| {
                     it.get("id")
                         .and_then(|v| v.as_str())
                         .map_or(false, |id| filter.iter().any(|f| f == id))
                 });
             }
-            if let Some(ids_v) = record_value
-                .get_mut("ids")
-                .and_then(|v| v.as_array_mut())
-            {
+            if let Some(ids_v) = record_value.get_mut("ids").and_then(|v| v.as_array_mut()) {
                 ids_v.retain(|v| {
                     v.as_str()
                         .map_or(false, |id| filter.iter().any(|f| f == id))
@@ -5818,7 +5835,11 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
     let ids: Vec<String> = req_json
         .get("ids")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     if ids.is_empty() {
         return (
@@ -5857,8 +5878,7 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
     let auth_kind = auth.get("kind").and_then(|v| v.as_str()).unwrap_or("");
     // For prune, also accept kind=approved (post-commit prune case);
     // applied-status check happens after the worklist read below.
-    let kind_ok = auth_kind == required_kind
-        || (op == "prune" && auth_kind == "approved");
+    let kind_ok = auth_kind == required_kind || (op == "prune" && auth_kind == "approved");
     if !kind_ok {
         return (
             400,
@@ -5875,7 +5895,11 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
     let auth_ids: Vec<String> = auth
         .get("ids")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     for id in &ids {
         if !auth_ids.iter().any(|aid| aid == id) {
@@ -5919,9 +5943,9 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
     // which would lose the work.
     if op == "prune" && auth_kind == "approved" {
         for id in &ids {
-            let item = items.iter().find(|it| {
-                it.get("id").and_then(|v| v.as_str()) == Some(id.as_str())
-            });
+            let item = items
+                .iter()
+                .find(|it| it.get("id").and_then(|v| v.as_str()) == Some(id.as_str()));
             let status = item
                 .and_then(|it| it.get("status").and_then(|v| v.as_str()))
                 .unwrap_or("proposed");
@@ -5990,7 +6014,11 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
         result_key,
         serde_json::to_string(&affected).unwrap_or_else(|_| "[]".to_string())
     );
-    (200, "application/json; charset=utf-8", response.into_bytes())
+    (
+        200,
+        "application/json; charset=utf-8",
+        response.into_bytes(),
+    )
 }
 
 fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Request) {
@@ -6005,11 +6033,7 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
     // POST-only routes (route_request is GET-only).
     let (status, content_type, body) = if path == "__worklist/mutate" {
         if method != "POST" {
-            (
-                405,
-                "text/plain; charset=utf-8",
-                b"POST only".to_vec(),
-            )
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
         } else {
             let mut buf = Vec::new();
             let _ = request.as_reader().read_to_end(&mut buf);
@@ -6160,10 +6184,7 @@ fn proxy_to_target(
     proxy_to_upstream(url, request)
 }
 
-fn proxy_to_upstream(
-    url: String,
-    request: http::Request<Vec<u8>>,
-) -> http::Response<Vec<u8>> {
+fn proxy_to_upstream(url: String, request: http::Request<Vec<u8>>) -> http::Response<Vec<u8>> {
     let method = request.method().clone();
     let (parts, body) = request.into_parts();
 
@@ -6204,11 +6225,7 @@ fn proxy_to_upstream(
     let header_names = response.headers_names();
     let header_pairs: Vec<(String, String)> = header_names
         .iter()
-        .filter_map(|name| {
-            response
-                .header(name)
-                .map(|v| (name.clone(), v.to_string()))
-        })
+        .filter_map(|name| response.header(name).map(|v| (name.clone(), v.to_string())))
         .collect();
 
     let mut body_bytes = Vec::new();
@@ -6260,7 +6277,10 @@ fn is_hop_by_hop(name: &str) -> bool {
 fn raise_open_files_limit() {
     use libc::{getrlimit, rlimit, setrlimit, RLIMIT_NOFILE};
     unsafe {
-        let mut current = rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut current = rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         if getrlimit(RLIMIT_NOFILE, &mut current) != 0 {
             eprintln!("[rlimit] getrlimit failed; not bumping");
             return;
@@ -6284,7 +6304,10 @@ fn raise_open_files_limit() {
                 current.rlim_cur, new_cur, current.rlim_max
             );
         } else {
-            eprintln!("[rlimit] setrlimit failed; staying at soft={}", current.rlim_cur);
+            eprintln!(
+                "[rlimit] setrlimit failed; staying at soft={}",
+                current.rlim_cur
+            );
         }
     }
 }
@@ -6296,10 +6319,10 @@ pub fn run() {
     raise_open_files_limit();
     parse_cli_flags();
     let initial_proj = determine_project_root();
-    eprintln!("[xmlui-desktop] project root: {}", initial_proj.display());
+    eprintln!("[bram] project root: {}", initial_proj.display());
     if !initial_proj.join("index.html").exists() {
         eprintln!(
-            "[xmlui-desktop] WARNING: no index.html at project root; the right pane will fail to load. Run with `xmlui-desktop /path/to/project` or cd into the project before launching."
+            "[bram] WARNING: no index.html at project root; the right pane will fail to load. Run with `bram /path/to/project` or cd into the project before launching."
         );
     }
     tauri::Builder::default()
@@ -6349,14 +6372,14 @@ pub fn run() {
                 .ok_or("right-pane server bound to non-ip address")?;
             let _ = LOOPBACK_PORT.set(port);
             let internal_origin = format!("http://127.0.0.1:{}", port);
-            eprintln!("[xmlui-desktop] internal HTTP server: {}", internal_origin);
+            eprintln!("[bram] internal HTTP server: {}", internal_origin);
             // Tools pane lives at xd's app/tools/index.html, served via
             // the scheme handler's Tier 2 (shell asset) directly. Same
             // origin as the shell. SHELL_ORIGIN picks the right URL form
             // per platform — see the const definition above.
             let tools_url = format!("{}/tools/index.html", SHELL_ORIGIN);
 
-            // .xmlui-desktop.json may declare an external server for the
+            // .bram.json may declare an external server for the
             // right pane. The tools-pane URL always points at the internal
             // loopback (so the drawer keeps working regardless).
             let project_cfg = project_root(Some(app.handle()))
@@ -6396,7 +6419,7 @@ pub fn run() {
                             cfg.port, reason
                         );
                         eprintln!(
-                            "[server] HINT: a previous server is likely wedged. Run `lsof -i :{}` to find the pid, then kill it and restart xmlui-desktop.",
+                            "[server] HINT: a previous server is likely wedged. Run `lsof -i :{}` to find the pid, then kill it and restart Bram.",
                             cfg.port
                         );
                         // Surface the problem in the iframe via /__error
@@ -6406,7 +6429,7 @@ pub fn run() {
                         let error_path = format!(
                             "__project/__error?reason={}",
                             percent_encode(&format!(
-                                "Port {} is in use but unresponsive ({}). The previous xmlui-desktop session likely left an orphan process. Run `lsof -i :{}` and kill the listed pid, then restart xmlui-desktop.",
+                                "Port {} is in use but unresponsive ({}). The previous Bram session likely left an orphan process. Run `lsof -i :{}` and kill the listed pid, then restart Bram.",
                                 cfg.port, reason, cfg.port
                             ))
                         );
@@ -6447,9 +6470,9 @@ pub fn run() {
                     internal_base.clone(),
                 )
             };
-            eprintln!("[xmlui-desktop] right pane URL: {}", right_pane_url);
-            eprintln!("[xmlui-desktop] right pane upstream: {}", right_pane_upstream);
-            eprintln!("[xmlui-desktop] tools pane URL: {}", tools_url);
+            eprintln!("[bram] right pane URL: {}", right_pane_url);
+            eprintln!("[bram] right pane upstream: {}", right_pane_upstream);
+            eprintln!("[bram] tools pane URL: {}", tools_url);
             *app.state::<PaneUrlsState>().0.lock().unwrap() = PaneUrls {
                 right_pane: right_pane_url,
                 tools: tools_url,
@@ -6671,13 +6694,13 @@ pub fn run() {
                         let _ = app_handle.emit("git-status-changed", ());
                     }
 
-                    // .xmlui-desktop.json gets its own dispatch: we have to
+                    // .bram.json gets its own dispatch: we have to
                     // process it on any event kind (editors atomic-save via
                     // rename, which arrives as Create or Remove rather than
                     // Modify), and its handler may need to respawn the
                     // project server before reloading the iframe.
                     let is_config_event = event.paths.iter().any(|p| {
-                        p.file_name().map_or(false, |n| n == ".xmlui-desktop.json")
+                        is_project_config_path(&p)
                     });
                     if is_config_event {
                         if last_config_emit.elapsed() < Duration::from_millis(300) {

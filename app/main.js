@@ -6,7 +6,8 @@ invoke("log_from_right_pane", {
   payload: { kind: "main.js-loaded", at: new Date().toISOString() },
 }).catch(() => {});
 
-const TERM_FONT_KEY = "xmlui-desktop.terminal.fontSize";
+const TERM_FONT_KEY = "bram.terminal.fontSize";
+const LEGACY_TERM_FONT_KEY = "xmlui-desktop.terminal.fontSize";
 const TERM_FONT_MIN = 8;
 const TERM_FONT_MAX = 32;
 const TERM_FONT_DEFAULT = 13;
@@ -16,7 +17,12 @@ const clampFontSize = (n) =>
 
 const readSavedFontSize = () => {
   try {
-    const raw = parseInt(localStorage.getItem(TERM_FONT_KEY) ?? "", 10);
+    const raw = parseInt(
+      localStorage.getItem(TERM_FONT_KEY) ??
+        localStorage.getItem(LEGACY_TERM_FONT_KEY) ??
+        "",
+      10,
+    );
     return Number.isFinite(raw) ? clampFontSize(raw) : TERM_FONT_DEFAULT;
   } catch {
     return TERM_FONT_DEFAULT;
@@ -215,7 +221,8 @@ document
   ?.addEventListener("click", () => setTerminalFontSize(term.options.fontSize + 1));
 
 (() => {
-  const TERMINAL_HIDDEN_KEY = "xmlui-desktop.terminal.hidden";
+  const TERMINAL_HIDDEN_KEY = "bram.terminal.hidden";
+  const LEGACY_TERMINAL_HIDDEN_KEY = "xmlui-desktop.terminal.hidden";
   const btn = document.getElementById("toggle-terminal");
   if (!btn) return;
 
@@ -229,7 +236,9 @@ document
 
   let initial = false;
   try {
-    initial = localStorage.getItem(TERMINAL_HIDDEN_KEY) === "1";
+    initial =
+      (localStorage.getItem(TERMINAL_HIDDEN_KEY) ??
+        localStorage.getItem(LEGACY_TERMINAL_HIDDEN_KEY)) === "1";
   } catch {}
   apply(initial);
 
@@ -444,7 +453,7 @@ const { listen } = window.__TAURI__.event;
   const tools = document.getElementById("tools-pane");
   // Cache-bust by appending t=<now>. RIGHT_PANE_SRC may already contain
   // a path (e.g. http://localhost:8080/) but no query string — we
-  // document `path` in .xmlui-desktop.json as path-only, so `?` is safe.
+  // document `path` in .bram.json as path-only, so `?` is safe.
   const bust = (u) => u + (u.includes("?") ? "&" : "?") + "t=" + Date.now();
   // Double-buffer swap for the tools iframe so reloads don't flash a
   // blank frame. Create a new iframe off-screen, wait for `load`, then
@@ -503,7 +512,7 @@ const { listen } = window.__TAURI__.event;
   }
   // reloadRightPaneOnly: reload only the right pane. Used by the
   // "right-pane-reload" watcher event for user-project file changes AND
-  // for .xmlui-desktop.json hot-reload (path/query updates). We re-fetch
+  // for .bram.json hot-reload (path/query updates). We re-fetch
   // the URL each time instead of reusing the captured one so config edits
   // are picked up. The drawer is poll-driven so it does NOT need to reload
   // here, and keeping it stable avoids postMessage-vs-iframe-rebuild races
@@ -517,7 +526,7 @@ const { listen } = window.__TAURI__.event;
     iframe.src = bust(RIGHT_PANE_SRC);
   }
   // Single-shot retry: if the right-pane iframe hasn't fired `load`
-  // within 1.5s, the project-managed server (from .xmlui-desktop.json)
+  // within 1.5s, the project-managed server (from .bram.json)
   // is probably still starting up — connection is stuck. Bust and try
   // once more. Iframes fire `load` even for error pages, so this
   // specifically catches the "still connecting" state. `error` is not

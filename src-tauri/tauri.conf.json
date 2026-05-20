@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "xmlui-desktop",
+  "productName": "Bram",
   "version": "0.1.19",
-  "identifier": "org.xmlui.xmlui-desktop",
+  "identifier": "org.xmlui.bram",
   "build": {
     "frontendDist": "../app"
   },
@@ -10,7 +10,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "xmlui-desktop",
+        "title": "Bram",
         "width": 1400,
         "height": 900,
         "resizable": true

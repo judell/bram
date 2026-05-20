@@ -7,22 +7,24 @@ param(
 $ErrorActionPreference = "Stop"
 
 if (-not $Version) {
-  $Version = if ($env:XMLUI_DESKTOP_VERSION) { $env:XMLUI_DESKTOP_VERSION } else { "latest" }
+  $Version = if ($env:BRAM_VERSION) { $env:BRAM_VERSION } elseif ($env:XMLUI_DESKTOP_VERSION) { $env:XMLUI_DESKTOP_VERSION } else { "latest" }
 }
-if (-not $BaseUrl -and $env:XMLUI_DESKTOP_BASE_URL) {
+if (-not $BaseUrl -and $env:BRAM_BASE_URL) {
+  $BaseUrl = $env:BRAM_BASE_URL
+} elseif (-not $BaseUrl -and $env:XMLUI_DESKTOP_BASE_URL) {
   $BaseUrl = $env:XMLUI_DESKTOP_BASE_URL
 }
 
-$Repo = "judell/xmlui-desktop"
+$Repo = "judell/bram"
 
 if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
-  throw "xmlui-desktop install: install.ps1 is only supported on Windows."
+  throw "Bram install: install.ps1 is only supported on Windows."
 }
 
 switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
-  "X64" { $Artifact = "xmlui-desktop-windows-amd64.zip" }
+  "X64" { $Artifact = "bram-windows-amd64.zip" }
   default {
-    throw "xmlui-desktop install: unsupported Windows architecture $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)."
+    throw "Bram install: unsupported Windows architecture $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)."
   }
 }
 
@@ -52,7 +54,7 @@ function Download-File {
   }
 }
 
-$TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("xmlui-desktop-install-" + [System.Guid]::NewGuid().ToString("n"))
+$TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("bram-install-" + [System.Guid]::NewGuid().ToString("n"))
 New-Item -ItemType Directory -Path $TempDir | Out-Null
 
 try {
@@ -73,27 +75,27 @@ try {
     }
   }
   if (-not $Expected) {
-    throw "xmlui-desktop install: $Artifact not found in SHA256SUMS."
+    throw "Bram install: $Artifact not found in SHA256SUMS."
   }
 
   $Actual = (Get-FileHash -Algorithm SHA256 -Path $ArtifactPath).Hash.ToLowerInvariant()
   if ($Actual -ne $Expected) {
-    throw "xmlui-desktop install: SHA256 mismatch for $Artifact. Expected $Expected, got $Actual."
+    throw "Bram install: SHA256 mismatch for $Artifact. Expected $Expected, got $Actual."
   }
   Write-Host "SHA256 verified."
 
   Write-Host "Extracting..."
   Expand-Archive -LiteralPath $ArtifactPath -DestinationPath $TempDir -Force
 
-  $Binary = Get-ChildItem -Path $TempDir -Filter "xmlui-desktop.exe" -File -Recurse | Select-Object -First 1
+  $Binary = Get-ChildItem -Path $TempDir -Include "bram.exe","xmlui-desktop.exe" -File -Recurse | Select-Object -First 1
   if (-not $Binary) {
-    throw "xmlui-desktop install: xmlui-desktop.exe not found in archive."
+    throw "Bram install: bram.exe not found in archive."
   }
 
   if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir | Out-Null
   }
-  $Target = Join-Path $InstallDir "xmlui-desktop.exe"
+  $Target = Join-Path $InstallDir "bram.exe"
   Write-Host "Installing to $Target..."
   Copy-Item -LiteralPath $Binary.FullName -Destination $Target -Force
 

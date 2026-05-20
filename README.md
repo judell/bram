@@ -53,16 +53,16 @@ rules.
    `gh auth login` once. Without it, the Issues tab shows an empty
    state.
 
-4. **XMLUI CLI - optional.** If you are developing an XMLUI app, or if you are developing`xmlui-desktop` itself (the agent-tools UI is an embedded XMLUI app) you will want the XMLUI MCP server. Follow the steps [here](https://xmlui.org/get-started) to get it.
+4. **XMLUI CLI - optional.** If you are developing an XMLUI app, or if you are developing `Bram` itself (the agent-tools UI is an embedded XMLUI app) you will want the XMLUI MCP server. Follow the steps [here](https://xmlui.org/get-started) to get it.
 
-## [Download the latest release →](https://github.com/judell/xmlui-desktop/releases/latest)
+## [Download the latest release →](https://github.com/judell/bram/releases/latest)
 
 ## Install
 
 ### macOS / Linux
 
 ```bash
-curl -fsSL https://github.com/judell/xmlui-desktop/releases/latest/download/install.sh | bash
+curl -fsSL https://github.com/judell/bram/releases/latest/download/install.sh | bash
 ```
 
 The script detects your platform, verifies the archive's SHA256 against the published `SHA256SUMS`, extracts the binary, and copies it to `/usr/local/bin` (if writable) or `~/.local/bin`. On macOS it also clears the `com.apple.quarantine` xattr. No `sudo` required.
@@ -70,10 +70,10 @@ The script detects your platform, verifies the archive's SHA256 against the publ
 ### Windows
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/judell/xmlui-desktop/releases/latest/download/install.ps1 | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/judell/bram/releases/latest/download/install.ps1 | iex"
 ```
 
-Downloads `xmlui-desktop-windows-amd64.zip`, verifies its SHA256, extracts `xmlui-desktop.exe` to `~/bin`, and adds `~/bin` to your user `PATH`.
+Downloads `bram-windows-amd64.zip`, verifies its SHA256, extracts `bram.exe` to `~/bin`, and adds `~/bin` to your user `PATH`.
 
 #### Smart App Control
 
@@ -83,7 +83,7 @@ On some Windows 11 setups, Smart App Control may block the unsigned binary — m
 
 - **Transcript** — the current active-session transcript for Claude or Codex. It follows the current session and renders turns plus inline tool activity for both providers, but it is intentionally a reader, not a full realtime control surface. Use Sessions to browse/search older transcripts.
 
-- **Worklist** — the `proposed → applied → committed` approval surface that coordinates multi-step agent work. Each item is a small, independently approvable diff with a `before → after` summary. Select one item at a time (radio); three ghost actions act on it — **Approve** (TO APPLY → on-disk edits, transitions to TO COMMIT; TO COMMIT → git commit), **Iterate** (refine in place — agent revises the proposed text or edits the on-disk files per your feedback, item keeps its state), **Drop** (remove the item; for TO COMMIT, disk edits stay until you ask the agent to revert). Each row's `+ feedback` link expands a per-item message-to-agent textarea that travels with whichever action you click. The agent never advances state unilaterally. xmlui-desktop always writes local `resources/worklist-history/` snapshots for auditability, while committing that directory is an opt-in repo policy.
+- **Worklist** — the `proposed → applied → committed` approval surface that coordinates multi-step agent work. Each item is a small, independently approvable diff with a `before → after` summary. Select one item at a time (radio); three ghost actions act on it — **Approve** (TO APPLY → on-disk edits, transitions to TO COMMIT; TO COMMIT → git commit), **Iterate** (refine in place — agent revises the proposed text or edits the on-disk files per your feedback, item keeps its state), **Drop** (remove the item; for TO COMMIT, disk edits stay until you ask the agent to revert). Each row's `+ feedback` link expands a per-item message-to-agent textarea that travels with whichever action you click. The agent never advances state unilaterally. Bram always writes local `resources/worklist-history/` snapshots for auditability, while committing that directory is an opt-in repo policy.
 
 - **Commits** — HSplitter list of recent commits on the left, selected commit on the right. Full-history search via `git log --grep` across subject, body, and author; matched commits expand to clickable hit-row snippets, and the right pane stacks `snippetAroundLine` previews for every hit. The right-pane header is an `ExpandableItem` revealing the full commit message body. Unpushed commits surface a "Push" button that runs `git push origin`.
 
@@ -122,9 +122,9 @@ Current behavior:
 - **Codex in a fresh repo** — prompt once. Setup installs the provider-neutral core, the codex hook adapter, and the codex `developer_instructions`, and it also refreshes the shared Claude-side artifacts that live in the repo.
 - **Codex in a repo where setup has already run** — no prompt. The repo and user-global Codex setup artifacts are already in place.
 
-When the prompt runs, xmlui-desktop installs two layers:
+When the prompt runs, Bram installs two layers:
 
-- A provider-neutral core: xmlui-desktop records the latest structured `approved:` / `drop:` payload in `resources/.worklist-authorization.json` and uses that local record when validating worklist removals. The desktop watcher can revert an invalid prune as a defense-in-depth fallback if a hook ever fails to fire.
+- A provider-neutral core: Bram records the latest structured `approved:` / `drop:` payload in `resources/.worklist-authorization.json` and uses that local record when validating worklist removals. The desktop watcher can revert an invalid prune as a defense-in-depth fallback if a hook ever fails to fire.
 - A Claude adapter: `.claude/hooks/worklist-guard.py`, registered in `.claude/settings.json` to fire on `Write|Edit`. The hook denies edits to project files not covered by a proposed/applied worklist item (with explicit opt-out phrases in the last user message as the escape hatch), and validates worklist-prune authorization for changes to `resources/worklist.json` itself.
 - A codex adapter: `~/.xmlui-desktop/codex-worklist-guard.py`, registered in `~/.codex/config.toml` as a `PreToolUse` hook with matcher `^(apply_patch|Bash|Write|Edit|mcp__.*)$`. Same coverage logic as the Claude hook, broadened to catch codex's `apply_patch` tool, mutation-shaped Bash commands, and MCP filesystem write/edit/create/move calls. Setup also writes `developer_instructions` into the codex config so the gate prose lands in the developer-role context part of every session, not just the user-role `AGENTS.md`.
 
@@ -166,7 +166,7 @@ From `src-tauri/`:
 
 Tauri docs: <https://tauri.app/develop/>, <https://tauri.app/distribute/>.
 
-### Calling xmlui-desktop from project code
+### Calling Bram from project code
 
 Because the right pane is same-origin with the parent shell
 (`tauri://localhost`), project code can reach the Tauri command bridge
@@ -178,7 +178,7 @@ const url = await invoke("get_right_pane_url");
 ```
 
 Use this when an XMLUI app embedded in the right pane needs to read
-filesystem state, hit one of xmlui-desktop's `__`-prefixed loopback
+filesystem state, hit one of Bram's `__`-prefixed loopback
 endpoints, or invoke any of the Rust IPC commands. The `helpers.js`
 script loaded by the embedded XMLUI surfaces (`toShell`, `toTurn`,
 `openExternal`, `logToHost`) is built on top of this bridge — opt
@@ -213,7 +213,7 @@ or a PowerShell snippet on Windows), please open an issue.
 
 ## Configuration
 
-`.xmlui-desktop.json` at project root is the config file.
+`.bram.json` at project root is the primary config file. Legacy `.xmlui-desktop.json` is still accepted.
 
 ### Startup
 
@@ -229,7 +229,7 @@ You can specify how to launch the agent in the terminal pane.
 
 ### Working with a real backend
 
-`xmlui-desktop` binds the right-pane HTTP server to
+`Bram` binds the right-pane HTTP server to
 `127.0.0.1:<random-port>` (it uses port `0` and lets the OS pick).
 That's fine for projects that talk only to public APIs or static
 files. It breaks when your project needs a **fixed origin** — OAuth
@@ -246,7 +246,7 @@ callbacks, CORS allowlists, hardcoded API base URLs.
 
 #### Declare a project server
 
-Add `.xmlui-desktop.json` at the project root:
+Add `.bram.json` at the project root:
 
 ```json
 {
@@ -263,26 +263,27 @@ Add `.xmlui-desktop.json` at the project root:
 |---|---|
 | `command` | shell command to bring up the project's server. Run via `sh -c` (Unix) or `cmd /C` (Windows). |
 | `cwd` | working directory for the command, relative to the project root. Optional; defaults to the project root. |
-| `port` | TCP port the iframe should target. xmlui-desktop probes this port at startup. |
+| `port` | TCP port the iframe should target. Bram probes this port at startup. |
 | `path` | URL path appended to `http://localhost:<port>` for the iframe. Optional; defaults to `/`. |
 
-At startup, xmlui-desktop:
+At startup, Bram:
 
 - probes `127.0.0.1:<port>`. If it's already listening, it logs a notice
   and reuses the running server (useful when you start the server
   manually for log visibility);
 - otherwise spawns `command` in `cwd`, with stdout/stderr forwarded to
-  xmlui-desktop's own stderr (prefixed `[server]`);
+  Bram's own stderr (prefixed `[server]`);
 - waits up to 5s for the port to come up, then points the right-pane
   iframe at `http://localhost:<port><path>`. The iframe retries once on
   load error to absorb the case where the server takes a moment to bind;
 - on app exit, kills the spawned child.
 
-The agent-tools drawer continues to load from xmlui-desktop's internal
+The agent-tools drawer continues to load from Bram's internal
 loopback server regardless of this setting.
 
-The app-under-test does not need to be an XMLUI app — `.xmlui-desktop.json`
-is xmlui-desktop's own config file, separate from XMLUI's `config.json`.
+The app-under-test does not need to be an XMLUI app — `.bram.json`
+is Bram's own config file, separate from XMLUI's `config.json`. Legacy
+`.xmlui-desktop.json` remains supported.
 
 ### URL parameters
 
@@ -294,7 +295,7 @@ to your server's command or bake them into `path` (e.g.
 ### Working example
 
 [community-calendar](https://github.com/judell/community-calendar) uses
-`.xmlui-desktop.json` for GitHub-OAuth-via-Supabase development. See
+`.bram.json` for GitHub-OAuth-via-Supabase development. See
 [`docs/app-architecture.md`](https://github.com/judell/community-calendar/blob/main/docs/app-architecture.md)
 for the Supabase URL-Configuration setup that requires the fixed
 `localhost:8080/**` origin.
@@ -315,9 +316,9 @@ self-redirect at the top of the project's `index.html`:
 ```
 
 Run your frontend on a known port in a separate terminal
-(`python3 -m http.server 8080`) and launch xmlui-desktop from the
+(`python3 -m http.server 8080`) and launch Bram from the
 project root. Its iframe loads the random-port URL once, your script
-bounces it to `localhost:8080`. `.xmlui-desktop.json` is the preferred
+bounces it to `localhost:8080`. `.bram.json` is the preferred
 mechanism — it auto-spawns the server, surfaces logs, and doesn't
 pollute the project's HTML.
 
@@ -329,14 +330,14 @@ custom-scheme origins as secure contexts. Service-worker registration
 silently fails there, so project features that depend on a service
 worker — Mock Service Worker (MSW), XMLUI's in-page
 `apiInterceptor`, custom offline caches — won't activate inside
-xmlui-desktop on those platforms. Windows uses WebView2 (Chromium)
+Bram on those platforms. Windows uses WebView2 (Chromium)
 with the `http://tauri.localhost` form, which *is* a secure context,
 so service workers register normally there.
 
 Apps that hit a real HTTP backend are unaffected; the constraint only
 applies to in-page request interception. If you're developing against
 MSW or `apiInterceptor`, run your project in a regular browser tab at
-`localhost:8080` while keeping xmlui-desktop pointed at the same
+`localhost:8080` while keeping Bram pointed at the same
 server for the agent loop.
 
 #### Auth callbacks won't reach the right pane
@@ -360,7 +361,7 @@ different store from `localhost:8080` storage in Safari or Chrome.
 your backend supports OTP codes (Supabase, Auth0, Clerk, Cognito all
 do), have the user paste the code from the email into a field in
 your dialog. No callback URL, no cross-context handoff. Works
-identically in the browser and inside xmlui-desktop.
+identically in the browser and inside Bram.
 
 For Supabase specifically:
 

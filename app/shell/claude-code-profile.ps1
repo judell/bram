@@ -2,12 +2,13 @@ Write-Host "You can launch claude or codex here."
 
 function _xmlui_mark_agent {
     param([string]$Provider)
-    if (-not $env:XMLUI_DESKTOP_AGENT_HINT) { return }
-    $parent = Split-Path -Parent $env:XMLUI_DESKTOP_AGENT_HINT
+    $hint = if ($env:BRAM_AGENT_HINT) { $env:BRAM_AGENT_HINT } else { $env:XMLUI_DESKTOP_AGENT_HINT }
+    if (-not $hint) { return }
+    $parent = Split-Path -Parent $hint
     if ($parent) {
         try { New-Item -ItemType Directory -Force -Path $parent | Out-Null } catch { return }
     }
-    Set-Content -Path $env:XMLUI_DESKTOP_AGENT_HINT -Value ('{"provider":"' + $Provider + '"}')
+    Set-Content -Path $hint -Value ('{"provider":"' + $Provider + '"}')
 }
 
 function _xmlui_has_repo_setup {

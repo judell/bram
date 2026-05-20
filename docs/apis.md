@@ -1,9 +1,9 @@
 # Backend APIs
 
 Inventory of the backend surfaces produced by `src-tauri/src/lib.rs`.
-xmlui-desktop hosts two iframes inside the parent shell — the **right
+Bram hosts two iframes inside the parent shell — the **right
 pane** (the project under development; any web app served by the
-project's HTTP server) and the **agent-tools drawer** (xmlui-desktop's
+project's HTTP server) and the **agent-tools drawer** (Bram's
 own XMLUI control surface at `app/tools/`, providing Transcript,
 Worklist, Commits, Issues, Sessions, Context, README tabs). Two
 transport channels carry traffic between the Rust host and everything
@@ -92,7 +92,7 @@ authorization record to `resources/.worklist-authorization.json`.
 The per-repo installer that lays down the shared worklist-enforcement core
 plus per-agent adapters (Claude `CLAUDE.md` @-import + `.claude/hooks/`,
 Codex `AGENTS.md` block + `~/.codex/config.toml` PreToolUse hook). Skipped
-when running in the xmlui-desktop source repo itself (detected via
+when running in the Bram source repo itself (detected via
 `ENHANCE_SOURCE_BUNDLE_REL`).
 
 | Surface | Kind | Query / params | Response | Consumer |
@@ -198,7 +198,7 @@ The HTTP routes shell out to `git`; the IPC command shells out to
 
 GitHub issue passthrough via the local `gh` CLI. Read-only — issue
 edits / comments / state changes are user-driven via the agent's own
-shell, not through xmlui-desktop.
+shell, not through Bram.
 
 | Surface | Kind | Query / params | Response | Consumer |
 | --- | --- | --- | --- | --- |

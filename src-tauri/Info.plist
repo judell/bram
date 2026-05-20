@@ -3,6 +3,6 @@
 <plist version="1.0">
 <dict>
   <key>NSMicrophoneUsageDescription</key>
-  <string>xmlui-desktop uses the microphone for local Whisper transcription.</string>
+  <string>Bram uses the microphone for local Whisper transcription.</string>
 </dict>
 </plist>

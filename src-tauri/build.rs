@@ -1,8 +1,7 @@
 use std::path::PathBuf;
 
 fn main() {
-    let manifest_dir =
-        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let canonical: PathBuf = [&manifest_dir, "..", ".claude", "hooks", "worklist-guard.py"]
         .iter()
         .collect();

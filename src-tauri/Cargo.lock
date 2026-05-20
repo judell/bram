@@ -293,6 +293,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "bram"
+version = "0.1.19"
+dependencies = [
+ "include_dir",
+ "libc",
+ "notify",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-opener",
+ "tiny_http",
+ "ureq",
+]
+
+[[package]]
 name = "brotli"
 version = "8.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5328,23 +5345,6 @@ dependencies = [
  "libc",
  "once_cell",
  "pkg-config",
-]
-
-[[package]]
-name = "xmlui-desktop"
-version = "0.1.19"
-dependencies = [
- "include_dir",
- "libc",
- "notify",
- "portable-pty",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-opener",
- "tiny_http",
- "ureq",
 ]
 
 [[package]]

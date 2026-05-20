@@ -1,29 +1,33 @@
 #!/usr/bin/env bash
 #
-# install.sh — bootstrap installer for xmlui-desktop.
+# install.sh — bootstrap installer for Bram.
 #
 # Usage:
-#   curl -fsSL https://github.com/judell/xmlui-desktop/releases/latest/download/install.sh | sh
+#   curl -fsSL https://github.com/judell/bram/releases/latest/download/install.sh | sh
 #
 # What it does:
 #   1. Detects platform (uname -s/-m).
 #   2. Downloads the matching release artifact and SHA256SUMS.
 #   3. Verifies SHA256.
 #   4. Extracts the binary.
-#   5. Copies xmlui-desktop to /usr/local/bin (if writable) or ~/.local/bin.
+#   5. Copies bram to /usr/local/bin (if writable) or ~/.local/bin.
 #   6. On macOS, removes the com.apple.quarantine xattr.
 #   7. Prints PATH advice if the install dir isn't on PATH.
 #
-# Override the release tag with XMLUI_DESKTOP_VERSION=v1.2.3 (default: latest).
-# Override the download base URL with XMLUI_DESKTOP_BASE_URL=https://example.com
+# Override the release tag with BRAM_VERSION=v1.2.3 (default: latest).
+# Legacy XMLUI_DESKTOP_VERSION is also accepted.
+# Override the download base URL with BRAM_BASE_URL=https://example.com
+# Legacy XMLUI_DESKTOP_BASE_URL is also accepted.
 # (useful for local dry-runs against a python -m http.server).
 
 set -euo pipefail
 
-VERSION="${XMLUI_DESKTOP_VERSION:-latest}"
-REPO="judell/xmlui-desktop"
+VERSION="${BRAM_VERSION:-${XMLUI_DESKTOP_VERSION:-latest}}"
+REPO="judell/bram"
 
-if [[ -n "${XMLUI_DESKTOP_BASE_URL:-}" ]]; then
+if [[ -n "${BRAM_BASE_URL:-}" ]]; then
+  BASE_URL="${BRAM_BASE_URL}"
+elif [[ -n "${XMLUI_DESKTOP_BASE_URL:-}" ]]; then
   BASE_URL="${XMLUI_DESKTOP_BASE_URL}"
 elif [[ "${VERSION}" == "latest" ]]; then
   BASE_URL="https://github.com/${REPO}/releases/latest/download"
@@ -35,11 +39,11 @@ OS="$(uname -s)"
 ARCH="$(uname -m)"
 
 case "${OS}_${ARCH}" in
-  Darwin_arm64)             ARTIFACT="xmlui-desktop-macos-arm64.tar.gz" ;;
-  Darwin_x86_64)            ARTIFACT="xmlui-desktop-macos-intel.tar.gz" ;;
-  Linux_x86_64|Linux_amd64) ARTIFACT="xmlui-desktop-linux-amd64.tar.gz" ;;
+  Darwin_arm64)             ARTIFACT="bram-macos-arm64.tar.gz" ;;
+  Darwin_x86_64)            ARTIFACT="bram-macos-intel.tar.gz" ;;
+  Linux_x86_64|Linux_amd64) ARTIFACT="bram-linux-amd64.tar.gz" ;;
   *)
-    echo "xmlui-desktop install: unsupported platform ${OS}/${ARCH}" >&2
+    echo "Bram install: unsupported platform ${OS}/${ARCH}" >&2
     echo "Supported: macOS arm64/x86_64, Linux x86_64." >&2
     exit 1
     ;;
@@ -47,7 +51,7 @@ esac
 
 require() {
   command -v "$1" >/dev/null 2>&1 || {
-    echo "xmlui-desktop install: missing required tool: $1" >&2
+    echo "Bram install: missing required tool: $1" >&2
     exit 1
   }
 }
@@ -60,7 +64,7 @@ sha256_of() {
   elif command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$1" | awk '{print $1}'
   else
-    echo "xmlui-desktop install: neither shasum nor sha256sum is available" >&2
+    echo "Bram install: neither shasum nor sha256sum is available" >&2
     exit 1
   fi
 }
@@ -80,12 +84,12 @@ curl -fsSL "${BASE_URL}/SHA256SUMS" -o "${SUMS_PATH}"
 
 EXPECTED="$(awk -v f="${ARTIFACT}" '$2 == f { print $1; exit }' "${SUMS_PATH}")"
 if [[ -z "${EXPECTED}" ]]; then
-  echo "xmlui-desktop install: ${ARTIFACT} not found in SHA256SUMS — refusing to install." >&2
+  echo "Bram install: ${ARTIFACT} not found in SHA256SUMS — refusing to install." >&2
   exit 1
 fi
 ACTUAL="$(sha256_of "${ARTIFACT_PATH}")"
 if [[ "${ACTUAL}" != "${EXPECTED}" ]]; then
-  echo "xmlui-desktop install: SHA256 mismatch for ${ARTIFACT}." >&2
+  echo "Bram install: SHA256 mismatch for ${ARTIFACT}." >&2
   echo "  expected: ${EXPECTED}" >&2
   echo "  actual:   ${ACTUAL}" >&2
   echo "Aborting." >&2
@@ -96,9 +100,9 @@ echo "SHA256 verified."
 echo "Extracting…"
 tar -xzf "${ARTIFACT_PATH}" -C "${TMP}"
 
-BIN="$(find "${TMP}" -type f -name xmlui-desktop | head -n 1)"
+BIN="$(find "${TMP}" -type f \( -name bram -o -name xmlui-desktop \) | head -n 1)"
 if [[ -z "${BIN}" ]]; then
-  echo "xmlui-desktop install: xmlui-desktop binary not found in archive" >&2
+  echo "Bram install: bram binary not found in archive" >&2
   exit 1
 fi
 chmod +x "${BIN}"
@@ -112,7 +116,7 @@ else
   mkdir -p "${INSTALL_DIR}"
 fi
 
-TARGET="${INSTALL_DIR}/xmlui-desktop"
+TARGET="${INSTALL_DIR}/bram"
 echo "Installing to ${TARGET}…"
 cp "${BIN}" "${TARGET}"
 chmod +x "${TARGET}"
@@ -138,7 +142,7 @@ esac
 # Linux: note runtime deps required by Tauri's WebView.
 if [[ "${OS}" == "Linux" ]]; then
   echo
-  echo "Note: xmlui-desktop dynamically links libwebkit2gtk-4.1 and friends."
+  echo "Note: Bram dynamically links libwebkit2gtk-4.1 and friends."
   echo "On Ubuntu/Debian 24.04+, install runtime deps with:"
   echo "  sudo apt install -y libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 librsvg2-2"
   echo "(On Ubuntu 22.04, the 4.1 package isn't in the repos — upgrade to 24.04.)"

@@ -1,6 +1,6 @@
 <App layout="vertical">
   <AppHeader>
-    <Text fontWeight="bold">xmlui-desktop</Text>
+    <Text fontWeight="bold">Bram</Text>
     <Theme paddingHorizontal-Button-sm="$space-1">
       <HStack gap="$space-0_5">
         <Button
@@ -20,8 +20,8 @@
   <VStack padding="$space-6" gap="$space-4" maxWidth="640px">
     <Markdown content="# Welcome
 
-This is the xmlui-desktop project. Unless you are developing this
-project, you probably want to launch `xmlui-desktop` in a directory
+This is the Bram project. Unless you are developing this
+project, you probably want to launch `bram` in a directory
 that contains your own app, which might be an XMLUI app or any web
 app. Then use the top-toolbar `agent tools` button to open the
 drawer with seven views:

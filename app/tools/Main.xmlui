@@ -60,17 +60,17 @@
       </VStack>
 
       <VStack gap="$space-1" marginTop="$space-2">
-        <Text fontWeight="bold">About xmlui-desktop</Text>
+        <Text fontWeight="bold">About Bram</Text>
         <HStack gap="$space-2">
           <Button
             label="README on GitHub"
             size="sm"
-            onClick="openExternal('https://github.com/judell/xmlui-desktop/blob/main/README.md')" />
+            onClick="openExternal('https://github.com/judell/bram/blob/main/README.md')" />
         </HStack>
       </VStack>
 
       <VStack when="{rpInfo.value &amp;&amp; rpInfo.value.spawned}" gap="$space-1" marginTop="$space-2">
-        <Text fontWeight="bold">Project server (.xmlui-desktop.json)</Text>
+        <Text fontWeight="bold">Project server (.bram.json)</Text>
         <HStack gap="$space-2">
           <Text>command:</Text>
           <Text fontFamily="$fontFamily-monospace">{rpInfo.value.spawned.command}</Text>
@@ -100,7 +100,7 @@
         gap="$space-1"
         marginTop="$space-2">
         <Text fontSize="$fontSize-sm" color="$textColor-secondary">
-          No .xmlui-desktop.json declared — using the internal loopback default.
+          No `.bram.json` declared — using the internal loopback default. Legacy `.xmlui-desktop.json` is also supported.
         </Text>
       </VStack>
     </VStack>

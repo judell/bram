@@ -1,13 +1,14 @@
 echo "You can launch claude or codex here."
-# To auto-launch one on shell start, add to .xmlui-desktop.json:
+# To auto-launch one on shell start, add to .bram.json:
 #   { "shell": { "agent": "claude --continue" } }
 
 _XMLUI_SHELL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 _xmlui_mark_agent() {
-  [ -n "$XMLUI_DESKTOP_AGENT_HINT" ] || return 0
-  mkdir -p "$(dirname "$XMLUI_DESKTOP_AGENT_HINT")" 2>/dev/null || return 0
-  printf '{"provider":"%s"}\n' "$1" >"$XMLUI_DESKTOP_AGENT_HINT"
+  local hint="${BRAM_AGENT_HINT:-$XMLUI_DESKTOP_AGENT_HINT}"
+  [ -n "$hint" ] || return 0
+  mkdir -p "$(dirname "$hint")" 2>/dev/null || return 0
+  printf '{"provider":"%s"}\n' "$1" >"$hint"
 }
 
 _xmlui_has_repo_setup() {
@@ -58,13 +59,13 @@ codex() {
   fi
   if ! _xmlui_codex_hook_installed; then
     printf '%s\n' \
-      "Codex requires the xmlui-desktop worklist guard, but it is not installed." \
+      "Codex requires the Bram worklist guard, but it is not installed." \
       "" \
       "Expected:" \
       "  - script:  ~/.xmlui-desktop/codex-worklist-guard.py (executable)" \
       "  - config:  ~/.codex/config.toml containing the xmlui-desktop:start marker" \
       "" \
-      "Run Setup in xmlui-desktop to install the guard, then retry." >&2
+      "Run Setup in Bram to install the guard, then retry." >&2
     return 1
   fi
   local seed_text

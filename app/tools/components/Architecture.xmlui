@@ -1,7 +1,7 @@
 <Component name="Architecture">
   <VStack padding="$space-4" gap="$space-4">
 
-    <Card title="xmlui-desktop"
+    <Card title="Bram"
           subtitle="A Tauri shell with a real PTY on the left and two iframes on the right: the project under development plus an agent-tools drawer">
       <Text>
         The Rust backend owns the PTY, a custom tauri:// URI scheme
@@ -14,7 +14,7 @@
         Two iframes load same-origin with the parent at tauri://localhost:
         the **right pane** (the project under development — any web app:
         a React/Vue/Svelte SPA, a static site, an XMLUI app, etc.) and
-        the **agent-tools drawer** (xmlui-desktop's own control surface,
+        the **agent-tools drawer** (Bram's own control surface,
         an XMLUI app built into the binary at app/tools/, providing the
         Transcript, Worklist, Commits, Issues, Sessions, Context, and
         README tabs). Because both share an origin with the parent,
@@ -105,12 +105,13 @@
             <Text>
               Whatever's at the project root: a React/Vue/Svelte SPA, a
               static site, a server-rendered app, an XMLUI app — anything
-              the project's HTTP server (declared in .xmlui-desktop.json
+              the project's HTTP server (declared in `.bram.json`
+              with legacy `.xmlui-desktop.json` fallback
               or auto-detected) returns. The scheme handler proxies
               /__project/* to that server, so the iframe's
               location.origin is tauri://localhost while the bytes come
               from 127.0.0.1:&lt;random-port&gt;. Project code that wants
-              to talk back to xmlui-desktop opts in by including
+              to talk back to Bram opts in by including
               app/__shell/helpers.js, which exposes window.toShell,
               window.toTurn, window.sendKeys, window.logToHost,
               window.openExternal, window.captureScreenshot,
@@ -118,7 +119,7 @@
               getTauriInvoke() wrappers that call IPC commands directly.
             </Text>
           </Card>
-          <Card title="4. Agent-tools drawer — xmlui-desktop's own control surface"
+          <Card title="4. Agent-tools drawer — Bram's own control surface"
                 subtitle="app/tools/Main.xmlui + components, built into the binary">
             <Text>
               The second iframe (toggled from the toolbar) and the only

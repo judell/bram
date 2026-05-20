@@ -563,6 +563,16 @@ whose existence is structural (expected entry points, conventional
 configs: empty them out and leave the file in place). When in doubt,
 ask.
 
+## Don't quote unpushed-commit counts in chat
+
+After a commit lands, don't say "N unpushed commits now" or list the
+unpushed SHAs in prose. `git log --oneline -3` only shows the top three
+entries — there's no count in that output, and any number you state is
+guesswork that goes wrong as soon as there are 4+ commits ahead of the
+remote. The Commits tab already shows the exact count and list; let it
+do the bookkeeping. Confirm the commit with its short SHA and subject,
+then stop.
+
 ## Push button auto-rebases on non-fast-forward
 
 The Commits-tab Push button (Rust `git_push`) does `git push`, and if

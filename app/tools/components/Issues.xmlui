@@ -119,9 +119,7 @@
           label="+ New issue"
           size="xs"
           onClick="showNewIssueHint = true" />
-      </HStack>
-
-      <HStack gap="$space-2" verticalAlignment="center">
+        <SpaceFiller />
         <Button
           label="✕"
           variant="ghost"
@@ -132,6 +130,7 @@
           id="searchBox"
           placeholder="Search title and body…"
           width="*"
+          maxWidth="20rem"
           initialValue="{queryDraft}"
           onDidChange="(v) => queryDraft = v" />
         <Text

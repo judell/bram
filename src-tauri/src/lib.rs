@@ -1263,6 +1263,35 @@ fn gh_issue_cross_references<R: tauri::Runtime>(
     }
 }
 
+// Post a comment to a GitHub issue via `gh issue comment <n> --body "..."`.
+// Returns `{"ok":true}` on success; on failure returns the gh stderr as the
+// error body so the frontend can surface it. Empty/whitespace bodies are
+// rejected up front since gh would reject them anyway.
+fn gh_issue_comment<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    number: u64,
+    body: &str,
+) -> Result<Vec<u8>, String> {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return Err("empty comment body".to_string());
+    }
+    let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
+    let n = number.to_string();
+    let out = std::process::Command::new("gh")
+        .current_dir(&root)
+        .args(&["issue", "comment", &n, "--body", trimmed])
+        .output()
+        .map_err(|e| format!("failed to spawn gh: {}", e))?;
+    if out.status.success() {
+        Ok(b"{\"ok\":true}".to_vec())
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        eprintln!("[gh issue comment {}] non-zero exit: {}", n, stderr);
+        Err(stderr)
+    }
+}
+
 // Close a GitHub issue via `gh issue close <n>`, optionally with a comment.
 // Returns `{"ok":true}` on success; on failure returns the gh stderr as the
 // error body so the frontend can surface it.
@@ -5507,6 +5536,28 @@ fn route_request<R: tauri::Runtime>(
             Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
             Err(e) => {
                 eprintln!("[http /__issue number={}] {}", number, e);
+                (500, "text/plain; charset=utf-8", e.into_bytes())
+            }
+        };
+    }
+
+    if path == "__issue/comment" {
+        let mut number: u64 = 0;
+        let mut body = String::new();
+        for pair in query.split('&') {
+            if let Some(v) = pair.strip_prefix("number=") {
+                number = percent_decode(v).parse().unwrap_or(0);
+            } else if let Some(v) = pair.strip_prefix("body=") {
+                body = percent_decode(v);
+            }
+        }
+        if number == 0 {
+            return (400, "text/plain; charset=utf-8", b"missing number".to_vec());
+        }
+        return match gh_issue_comment(app, number, &body) {
+            Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
+            Err(e) => {
+                eprintln!("[http /__issue/comment number={}] {}", number, e);
                 (500, "text/plain; charset=utf-8", e.into_bytes())
             }
         };

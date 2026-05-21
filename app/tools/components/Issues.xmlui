@@ -47,6 +47,14 @@
     completedNotificationMessage="Issue closed."
     onSuccess="closeComment = ''; issueDetail.refetch(); issues.refetch()" />
 
+  <APICall
+    id="commentIssueCall"
+    url="/__issue/comment"
+    method="get"
+    queryParams="{{ number: $param.number, body: $param.body }}"
+    completedNotificationMessage="Comment posted."
+    onSuccess="closeComment = ''; issueDetail.refetch(); issues.refetch()" />
+
   <ChangeListener
     listenTo="{queryDraft}"
     debounceWaitInMs="250"
@@ -394,19 +402,26 @@
         </Items>
       </VStack>
       <VStack
-        when="{selectedIssue &amp;&amp; selectedIssue.state === 'OPEN'}"
+        when="{selectedIssue}"
         gap="$space-2"
         paddingTop="$space-3"
         borderTop="1px solid $borderColor">
         <TextArea
           id="closeCommentBox"
-          placeholder="Optional comment to add when closing this issue"
+          placeholder="Optional comment"
           rows="2"
           width="*"
           initialValue="{closeComment}"
           onDidChange="(v) => closeComment = v" />
         <HStack gap="$space-2">
           <Button
+            label="Comment"
+            variant="outlined"
+            size="sm"
+            enabled="{closeComment &amp;&amp; closeComment.trim().length > 0}"
+            onClick="commentIssueCall.execute({ number: selectedIssue.number, body: closeComment })" />
+          <Button
+            when="{selectedIssue.state === 'OPEN'}"
             label="Close issue"
             variant="outlined"
             size="sm"

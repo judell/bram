@@ -307,6 +307,12 @@
             value="#{selectedIssue.number} {selectedIssue.title}"
             maxLines="2" />
         </Link>
+        <Button
+          label="✕"
+          variant="ghost"
+          size="xs"
+          tooltip="Close detail pane"
+          onClick="expandedNumber = null; selectedHitLine = null" />
       </HStack>
       <VStack when="{selectedIssue}" gap="0">
         <Text

@@ -44,9 +44,7 @@
           size="sm"
           tooltip="About Context"
           onClick="contextInfoDialog.open()" />
-      </HStack>
-
-      <HStack gap="$space-2" verticalAlignment="center">
+        <SpaceFiller />
         <Button
           label="✕"
           variant="ghost"
@@ -57,6 +55,7 @@
           id="searchBox"
           placeholder="Search..."
           width="*"
+          maxWidth="20rem"
           initialValue="{searchDraft}"
           onDidChange="(v) => { searchDraft = v }" />
       </HStack>

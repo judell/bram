@@ -112,14 +112,9 @@
     onInit="(() => { const tauri = (window.parent &amp;&amp; window.parent.__TAURI__) || window.__TAURI__; if (tauri &amp;&amp; tauri.event &amp;&amp; tauri.event.listen) { tauri.event.listen('sessions-list-changed', () => { sessionsMeta.refetch(); sessionsList.refetch(); if (expandedId &amp;&amp; expandedProvider) sessionContent.refetch(); }); } })()">
 
     <VStack padding="$space-4" gap="$space-3" overflowY="auto">
-      <Heading level="h2">Sessions</Heading>
-      <Text
-        when="{sessionsMeta.value}"
-        fontSize="$fontSize-sm"
-        color="$textColor-secondary"
-        value="{sessionsMeta.value.count > 0 ? ('Auto-detected provider: ' + sessionsMeta.value.provider + ' (' + sessionsMeta.value.count + ' session' + (sessionsMeta.value.count === 1 ? '' : 's') + ')') : ('Auto-detected provider: ' + sessionsMeta.value.provider + ' (no sessions yet)')}" />
-
-      <HStack gap="$space-2" verticalAlignment="center">
+      <HStack gap="$space-3" verticalAlignment="center">
+        <Heading level="h2">Sessions</Heading>
+        <SpaceFiller />
         <Button
           label="✕"
           variant="ghost"
@@ -130,9 +125,15 @@
           id="searchBox"
           placeholder="Search user/assistant text…"
           width="*"
+          maxWidth="20rem"
           initialValue="{queryDraft}"
           onDidChange="(v) => queryDraft = v" />
       </HStack>
+      <Text
+        when="{sessionsMeta.value}"
+        fontSize="$fontSize-sm"
+        color="$textColor-secondary"
+        value="{sessionsMeta.value.count > 0 ? ('Auto-detected provider: ' + sessionsMeta.value.provider + ' (' + sessionsMeta.value.count + ' session' + (sessionsMeta.value.count === 1 ? '' : 's') + ')') : ('Auto-detected provider: ' + sessionsMeta.value.provider + ' (no sessions yet)')}" />
 
       <HStack gap="$space-3" verticalAlignment="center">
         <RadioGroup

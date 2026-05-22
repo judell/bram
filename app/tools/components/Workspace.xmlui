@@ -161,7 +161,7 @@
           (none)
         </Text>
         <Text
-          when="{worklist.value.items && worklist.value.items.length > 0}"
+          when="{worklist.value.items && worklist.value.items.length > 0 && !selected}"
           color="$textColor-secondary"
           value="Select an item" />
         <Items data="{worklist.value.items}">
@@ -205,7 +205,10 @@
                     <Spinner when="{submitting && submittedItemId === $item.id}" />
                   </Theme>
                 </HStack>
-                <Text value="{$item.file}" variant="code" />
+                <Text
+                  when="{expandedItemId === $item.id}"
+                  value="{$item.file}"
+                  variant="code" />
                 <HStack
                   when="{selected === $item.id && !feedbackExpanded}"
                   gap="$space-1"

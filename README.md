@@ -31,7 +31,7 @@ Bram encourages an issue-first workflow as the foundation for a worklist item. I
 
 You can do that from the modal in two ways: `+ New issue` lets you send Bram a message asking to file the issue, and `+ New item` lets you ask Bram to create a worklist item. That modal includes a picklist of open issues so you can choose one for Bram to respond to with a proposal. You can also skip the issue linkage and ask Bram directly in the modal to propose an item.
 
-There are three phases for an item on the worklist: **proposed** → **applied** → **committed**. The arrows between the phases are approval gates where you converse with the agent as it works on the proposed item: researching and writing code; creating or closing issues; organizing commits as an orderly and well-defined audit trail.
+There are three phases for an item on the worklist: **proposed** → **applied** → **committed**. The arrows between the phases are approval gates where you can dwell and iterate with your agent to: research and write code, create, refines, and close issues; organize commits as an orderly audit trail.
 
 ### Agent conventions
 

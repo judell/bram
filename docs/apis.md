@@ -99,6 +99,7 @@ when running in the Bram source repo itself (detected via
 | --- | --- | --- | --- | --- |
 | `/__enhance/status` | HTTP GET | — | `{ enhanced, claudeMd, sidecarExists, hookScriptExists, hookRegistered, … }` | agent-tools iframe |
 | `/__enhance/run` | HTTP GET | — | `{ enhanced: true, wrote: [<path>, …] }` | agent-tools iframe |
+| `/__enhance/codex-trust-ack` | HTTP GET | — | `{ ok: true }` (emits `enhance-status-changed` Tauri event) | agent-tools iframe |
 
 ## 3. Worklist & authorization
 
@@ -113,20 +114,38 @@ without re-shipping content.
 | --- | --- | --- | --- | --- |
 | `/__worklist` | HTTP GET | — | `{ description, items: [{ id, status, file(s), before, after, hash, diff? }], exists, resourcesExists, path }` | agent-tools iframe |
 | `/__worklist/init` | HTTP GET | — | same shape as `/__worklist` (file created if missing) | agent-tools iframe |
-| `/__worklist/resolve` | HTTP GET | `ids=foo,bar` | `{ kind, ids, items, mismatchedIds, issuedAtMs, source, consumedAtMs }` | agent (curl) |
+| `/__worklist/resolve` | HTTP GET | `ids=foo,bar` | active: `{ kind, ids, items, mismatchedIds, issuedAtMs, source, consumedAtMs }` · consumed: `{ kind: "no_active_authorization", consumedAtMs }` | agent (curl) |
+| `/__worklist/mutate` | HTTP POST | body `{ op: "prune" \| "advance", ids: [...], status?: "applied" }` | `{ ok: true, pruned: [...] }` / `{ ok: true, advanced: [...] }`, or 400 `{ error: "…" }` on auth-kind mismatch | agent (curl) |
 
 - `/__worklist` injects a `diff` field on each `applied` item (the output
   of `git diff -- <file>`) so the TO COMMIT rows can preview their pending
   change inline.
 - `/__worklist/resolve` returns the most recent verified authorization
-  record. `kind` is one of `approved`, `drop`, `rejected_stale`, `none`.
+  record. Active-record `kind` is one of `approved`, `drop`, `rejected_stale`.
   When `rejected_stale`, the supplied hashes did not match the on-disk
   file at receive time — the agent must surface staleness and refuse to
   edit. The optional `ids=` query filters `items[]` and `ids[]` to the
   named subset.
+- **Consume-on-read for `approved`.** A successful resolve of an `approved`
+  record consumes it (sets `consumedAtMs` on the file). Subsequent reads
+  return `{ kind: "no_active_authorization", consumedAtMs }` — agents
+  must NOT treat that as authorization. This is the architectural
+  backstop for the `iterate:` / `talk:` / any-non-authorization turn that
+  reflexively curls the resolver: it gets an unambiguous "nothing here"
+  instead of stale approval data. `drop` records are **not** consumed by
+  the resolver — `maybe_enforce_worklist_policy` (in `lib.rs`) consumes
+  drop after observing the prune so authorized prunes survive the
+  watcher round-trip.
 - Authorization payloads the agent sees in chat carry only `{id, hash}`
   pairs. To fetch the full verified content the agent calls
   `/__worklist/resolve` rather than parsing the `approved:` line.
+- `/__worklist/mutate` is the symmetric mechanical-mutations counterpart
+  to `/__worklist/resolve`. `prune` requires `kind: "drop"` (or
+  `kind: "approved"` for the post-commit prune case) covering every
+  requested id; `advance` requires `kind: "approved"`. Agents prefer it
+  over a direct `Edit` on `resources/worklist.json` for mechanical
+  status flips and prunes — the chat doesn't render a diff and the
+  server-side auth check is uniform.
 
 ## 4. Worklist history
 
@@ -196,15 +215,19 @@ The HTTP routes shell out to `git`; the IPC command shells out to
 
 ## 7. Issues
 
-GitHub issue passthrough via the local `gh` CLI. Read-only — issue
-edits / comments / state changes are user-driven via the agent's own
-shell, not through Bram.
+GitHub issue passthrough via the local `gh` CLI. Read endpoints fetch
+JSON; write endpoints (`/__issue/comment`, `/__issue/close`) shell out
+to `gh issue comment` / `gh issue close` on the host. Issue *creation*
+is still user-driven via the agent's own shell — there's no
+`/__issue/create` endpoint.
 
 | Surface | Kind | Query / params | Response | Consumer |
 | --- | --- | --- | --- | --- |
 | `/__issues` | HTTP GET | — | `[{ number, title, state, … }, …]` | agent-tools iframe |
 | `/__issues/search` | HTTP GET | `q=` | filtered issue list | agent-tools iframe |
 | `/__issue` | HTTP GET | `n=<number>` | `{ number, title, body, state, comments: [...] }` | agent-tools iframe |
+| `/__issue/comment` | HTTP GET | `number=<n>&body=<urlencoded>` | `gh issue comment` JSON on success, 400 if `number` missing | agent-tools iframe |
+| `/__issue/close` | HTTP GET | `number=<n>&comment=<urlencoded>` | `gh issue close` JSON on success, 400 if `number` missing | agent-tools iframe |
 
 ## 8. Context
 

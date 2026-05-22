@@ -8,7 +8,7 @@ A desktop app that helps you make best use of git and GitHub for AI-assisted sof
 
 Anyone who wants to use AI coding agents in a safe and accountable way.
 
-This app has opinions. It thinks versioning and collaboration are well-handled by git and GitHub, so it guides agents to make best use of them on your behalf, in conversation with you. And it thinks GitHub is great for accountability, so it also guides agents to join you in orderly and well-documented collaboration that leaves an auditable trail. 
+Bram has opinions. It thinks versioning and collaboration are well-handled by git and GitHub, so it guides agents to make best use of them on your behalf, in conversation with you. And it thinks GitHub is great for accountability, so it also guides agents to join you in orderly and well-documented collaboration that leaves an auditable trail.
 
 <img width="1384" height="878" alt="image" src="https://github.com/user-attachments/assets/81fdac93-783e-489a-82b4-e0062950b83a" />
 
@@ -27,11 +27,15 @@ As files in the project change, the right pane reloads automatically
 
 ### Workflow
 
+Bram encourages an issue-first workflow as the foundation for a worklist item. It is optional, not required. If you want to use it, ask an agent to file an issue first, then use that issue as the basis for a proposed worklist item.
+
+You can do that from the modal in two ways: `+ New issue` lets you send Bram a message asking to file the issue, and `+ New item` lets you ask Bram to create a worklist item. That modal includes a picklist of open issues so you can choose one for Bram to respond to with a proposal. You can also skip the issue linkage and ask Bram directly in the modal to propose an item.
+
 There are three phases for an item on the worklist: **proposed** → **applied** → **committed**. The arrows between the phases are approval gates where you converse with the agent as it works on the proposed item: researching and writing code; creating or closing issues; organizing commits as an orderly and well-defined audit trail.
 
 ### Agent conventions
 
-Project conventions are authored in
+Conventions are written in
 [`app/__shell/conventions.md`](./app/__shell/conventions.md). Claude is
 bound to that file directly through `CLAUDE.md` and the installed
 `.claude` hook/config path. Codex is bound through a repo-local
@@ -44,7 +48,9 @@ rules.
 
 ## Prerequisites
 
-1. **`git`** — usually preinstalled on macOS and Linux; install via
+1. A local git repo in which your develop your app
+
+2. **`git`** — usually preinstalled on macOS and Linux; install via
    your package manager if missing.
 
 3. **GitHub CLI (`gh`)**  - Powers the Issues tab in the

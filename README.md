@@ -33,6 +33,8 @@ You can do that from the modal in two ways: `+ New issue` lets you send Bram a m
 
 There are three phases for an item on the worklist: **proposed** → **applied** → **committed**. The arrows between the phases are approval gates where you can dwell and iterate with your agent to: research and write code, create, refine, and close issues; organize commits as an orderly audit trail.
 
+For small changes you can skip the ceremony by saying *Just do it* or *Skip the workflow*.
+
 ### Agent conventions
 
 Conventions are written in

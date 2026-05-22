@@ -222,6 +222,24 @@
 </HStack>
   </VStack>
 
+  <VStack
+    when="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider === 'codex' &amp;&amp; enhanceStatus.value.codexHookCurrent &amp;&amp; !enhanceStatus.value.codexTrustAck}"
+    padding="$space-4"
+    gap="$space-3"
+    backgroundColor="$color-info-50"
+    borderBottom="1px solid $color-info-200">
+    <Heading level="h3">Codex will ask you to trust a hook</Heading>
+    <Markdown content="- Codex prompts you to **trust** `codex-worklist-guard.py` the first time it runs after the script is installed.
+- Trust it — that's the local hook that enforces the worklist gate on Codex's side.
+- Dismissed without trusting? Worklist enforcement falls back to the watcher-revert path: commits that bypass the gate are caught after the fact, but not blocked at write time.
+- This is a **first-install primer**, not an ongoing safety net. The notice returns automatically if the hook is reinstalled or its contents change, but Bram can't see when you revoke Codex's trust directly. If you do that, restart Codex — and delete `~/.bram/codex-trust-ack` if you want this notice back." />
+    <HStack>
+      <Button
+        label="Got it"
+        onClick="window.fetch('/__enhance/codex-trust-ack').then(() => enhanceStatus.refetch())" />
+    </HStack>
+  </VStack>
+
   <Pages fallbackPath="/">
     <Page url="/"><Transcript activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}" /></Page>
     <Page url="/worklist"><Workspace activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}" /></Page>

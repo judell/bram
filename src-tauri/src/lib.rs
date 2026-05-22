@@ -3473,6 +3473,7 @@ const ENHANCE_HOOK_BUNDLE_REL: &str = "__shell/worklist-guard.py";
 // xmlui-desktop-managed (presence of resources/.worklist-authorization.json).
 const ENHANCE_CODEX_HOOK_BUNDLE_REL: &str = "shell/worklist-guard-codex.py";
 const ENHANCE_CODEX_HOOK_INSTALL_REL: &str = ".xmlui-desktop/codex-worklist-guard.py";
+const ENHANCE_CODEX_TRUST_ACK_REL: &str = ".bram/codex-trust-ack";
 const ENHANCE_CODEX_CONFIG_REL: &str = ".codex/config.toml";
 // TOML-comment markers delimit the xmlui-desktop block inside codex's
 // config.toml so re-runs can replace it without disturbing surrounding entries.
@@ -4108,6 +4109,13 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         .as_ref()
         .map(|p| hook_matches_bundle(app, p, ENHANCE_CODEX_HOOK_BUNDLE_REL))
         .unwrap_or(false);
+    let codex_trust_ack = home_dir()
+        .and_then(|h| {
+            let stored = std::fs::read_to_string(h.join(ENHANCE_CODEX_TRUST_ACK_REL)).ok()?;
+            let current = hook_fingerprint(&h.join(ENHANCE_CODEX_HOOK_INSTALL_REL))?;
+            Some(stored.trim() == current)
+        })
+        .unwrap_or(false);
     let core_installed = worklist_auth.exists();
     let claude_installed =
         claude_md_has_marker && sidecar_exists && hook_script_current && hook_registered;
@@ -4139,6 +4147,7 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         "hookScript": hook_script_exists,
         "hookScriptCurrent": hook_script_current,
         "codexHookCurrent": codex_hook_current,
+        "codexTrustAck": codex_trust_ack,
         "hookRegistered": hook_registered,
         "fallbackMode": "watcher-revert",
         "claudeMdPath": claude_md.display().to_string(),
@@ -4327,6 +4336,29 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String>
         "codexHookNeedsTrust": codex_hook_install.installed,
     });
     serde_json::to_vec(&body).map_err(|e| e.to_string())
+}
+
+fn hook_fingerprint(path: &Path) -> Option<String> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let bytes = std::fs::read(path).ok()?;
+    let mut h = DefaultHasher::new();
+    bytes.hash(&mut h);
+    Some(format!("{:016x}", h.finish()))
+}
+
+fn write_codex_trust_ack() -> Result<(), String> {
+    let home = home_dir().ok_or("no HOME or USERPROFILE")?;
+    let hook = home.join(ENHANCE_CODEX_HOOK_INSTALL_REL);
+    let fp = hook_fingerprint(&hook)
+        .ok_or_else(|| format!("read {}: hook not installed", hook.display()))?;
+    let marker = home.join(ENHANCE_CODEX_TRUST_ACK_REL);
+    if let Some(parent) = marker.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {}", parent.display(), e))?;
+    }
+    std::fs::write(&marker, fp.as_bytes())
+        .map_err(|e| format!("write {}: {}", marker.display(), e))?;
+    Ok(())
 }
 
 struct CodexHookInstall {
@@ -5762,6 +5794,22 @@ fn route_request<R: tauri::Runtime>(
             }
         };
     }
+    if path == "__enhance/codex-trust-ack" {
+        return match write_codex_trust_ack() {
+            Ok(()) => {
+                let _ = app.emit("enhance-status-changed", ());
+                (
+                    200,
+                    "application/json; charset=utf-8",
+                    br#"{"ok":true}"#.to_vec(),
+                )
+            }
+            Err(e) => {
+                eprintln!("[http /__enhance/codex-trust-ack] {}", e);
+                (500, "text/plain; charset=utf-8", e.into_bytes())
+            }
+        };
+    }
 
     // PTY rolling-buffer hex dump — for debugging menu detection.
     // Returns the last 2KB of PTY_TAIL as a hexdump (offsets, hex bytes,
@@ -6861,6 +6909,14 @@ pub fn run() {
             let agent_hints_dir = active_agent_hint_path(&app.handle())
                 .ok()
                 .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+            // ~/.bram/ holds the codex-trust-ack marker. Ensure it exists at
+            // startup so the watcher can attach to it — without this, deleting
+            // the marker (the documented "force the banner back" gesture) would
+            // not trigger a refetch and the iframe would keep the stale state.
+            let bram_dir = home_dir().map(|h| h.join(".bram"));
+            if let Some(ref bd) = bram_dir {
+                let _ = std::fs::create_dir_all(bd);
+            }
             let mut watch_paths: Vec<std::path::PathBuf> = vec![proj_root_path.clone()];
             watch_paths.extend(tools_pane_paths.iter().cloned());
             if let Some(ref sd) = claude_sessions_dir {
@@ -6871,6 +6927,11 @@ pub fn run() {
             if let Some(ref sd) = codex_sessions_dir {
                 if sd.exists() {
                     watch_paths.push(sd.clone());
+                }
+            }
+            if let Some(ref bd) = bram_dir {
+                if bd.exists() {
+                    watch_paths.push(bd.clone());
                 }
             }
             if let Some(ref ah) = agent_hints_dir {
@@ -6963,6 +7024,7 @@ pub fn run() {
                         let in_agent_hints = agent_hints_dir
                             .as_ref()
                             .map_or(false, |ah| p.starts_with(ah));
+                        let in_bram_dir = bram_dir.as_ref().map_or(false, |bd| p.starts_with(bd));
                         name == "CLAUDE.md"
                             || name == "AGENTS.md"
                             || (in_claude_dir
@@ -6970,6 +7032,7 @@ pub fn run() {
                                     || name == "settings.local.json"
                                     || name == "worklist-guard.py"))
                             || in_agent_hints
+                            || in_bram_dir
                     });
                     if is_enhance_event {
                         let _ = app_handle.emit("enhance-status-changed", ());

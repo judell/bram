@@ -18,9 +18,12 @@ use tauri_plugin_opener::OpenerExt;
 // duplication costs ~6MB; the reliability is worth it.
 static EMBEDDED_APP: Dir = include_dir!("$CARGO_MANIFEST_DIR/../app");
 
-// Resolve a path within `app/` to (bytes, mime). When on-disk app/
-// exists, that is ground truth — a missing file is genuinely missing.
-// Only fall back to the embedded tree when there is no on-disk app/.
+// Resolve a path within Bram's own `app/` bundle to (bytes, mime). When
+// an on-disk Bram app/ exists, that is ground truth — a missing file is
+// genuinely missing. Deliberately do NOT fall back to project-relative
+// `cwd/app`: user projects are allowed to have their own app/ folder, and
+// letting that shadow Bram's shell assets breaks routing/watchers (#58).
+// Only fall back to the embedded tree when there is no on-disk Bram app/.
 fn serve_app_file<R: tauri::Runtime>(
     app: Option<&AppHandle<R>>,
     rel: &str,
@@ -1584,31 +1587,37 @@ fn git_commit_detail<R: tauri::Runtime>(app: &AppHandle<R>, sha: &str) -> Result
     serde_json::to_vec(&detail).map_err(|e| e.to_string())
 }
 
-fn resolve_app_root<R: tauri::Runtime>(app: Option<&AppHandle<R>>) -> Option<PathBuf> {
+fn bram_app_root_candidates(
+    resource_dir: Option<PathBuf>,
+    executable_dir: Option<PathBuf>,
+    current_exe: Option<PathBuf>,
+) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
-    if let Some(app) = app {
-        if let Ok(resource_dir) = app.path().resource_dir() {
-            candidates.push(resource_dir.join("app"));
-        }
-        if let Ok(executable_dir) = app.path().executable_dir() {
-            candidates.push(executable_dir.join("app"));
-        }
+    if let Some(resource_dir) = resource_dir {
+        candidates.push(resource_dir.join("app"));
     }
-
-    if let Ok(exe) = std::env::current_exe() {
+    if let Some(executable_dir) = executable_dir {
+        candidates.push(executable_dir.join("app"));
+    }
+    if let Some(exe) = current_exe {
         if let Some(dir) = exe.parent() {
             candidates.push(dir.join("app"));
             candidates.push(dir.join("../Resources/app"));
         }
     }
 
-    if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("app"));
-        candidates.push(cwd.join("..").join("app"));
-    }
+    candidates
+}
 
-    candidates.into_iter().find(|path| path.exists())
+fn resolve_app_root<R: tauri::Runtime>(app: Option<&AppHandle<R>>) -> Option<PathBuf> {
+    let resource_dir = app.and_then(|app| app.path().resource_dir().ok());
+    let executable_dir = app.and_then(|app| app.path().executable_dir().ok());
+    let current_exe = std::env::current_exe().ok();
+
+    bram_app_root_candidates(resource_dir, executable_dir, current_exe)
+        .into_iter()
+        .find(|path| path.exists())
 }
 
 #[tauri::command]
@@ -4713,6 +4722,36 @@ mod worklist_doc_tests {
                 .and_then(|v| v.as_array())
                 .map(|v| v.len()),
             Some(0)
+        );
+    }
+}
+
+#[cfg(test)]
+mod app_root_resolution_tests {
+    use super::bram_app_root_candidates;
+    use std::path::PathBuf;
+
+    #[test]
+    fn candidates_include_only_bram_owned_locations() {
+        let candidates = bram_app_root_candidates(
+            Some(PathBuf::from("/bundle/resources")),
+            Some(PathBuf::from("/bundle/bin")),
+            Some(PathBuf::from("/bundle/bin/bram")),
+        );
+
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from("/bundle/resources/app"),
+                PathBuf::from("/bundle/bin/app"),
+                PathBuf::from("/bundle/bin/app"),
+                PathBuf::from("/bundle/bin/../Resources/app"),
+            ]
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|p| !p.to_string_lossy().contains("/project/app"))
         );
     }
 }

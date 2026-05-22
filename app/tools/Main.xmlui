@@ -1,6 +1,6 @@
 <Theme width-navPanel-App="$space-28">
-<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissed="{false}" var.recording="{false}"
-  onInit="subscribeRightPaneSize((s) => rightPaneSize = s.width + ' × ' + s.height); (() => { const tauri = (window.parent &amp;&amp; window.parent.__TAURI__) || window.__TAURI__; if (tauri &amp;&amp; tauri.event &amp;&amp; tauri.event.listen) { tauri.event.listen('enhance-status-changed', () => enhanceStatus.refetch()); } })()">
+<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{''}" var.recording="{false}"
+  onInit="subscribeRightPaneSize((s) => rightPaneSize = s.width + ' × ' + s.height); (() => { try { updateBannerDismissedVersion = (window.localStorage &amp;&amp; window.localStorage.getItem('bram.updateBannerDismissedVersion')) || ''; } catch (e) {} })(); (() => { const tauri = (window.parent &amp;&amp; window.parent.__TAURI__) || window.__TAURI__; if (tauri &amp;&amp; tauri.event &amp;&amp; tauri.event.listen) { tauri.event.listen('enhance-status-changed', () => enhanceStatus.refetch()); } })()">
   <DataSource id="enhanceStatus" url="/__enhance/status" />
   <DataSource id="rpInfo" url="/__right-pane-info" />
   <DataSource id="appInfo" url="/__app-info" />
@@ -107,7 +107,7 @@
   </ModalDialog>
 
   <HStack
-    when="{appInfo.value &amp;&amp; appInfo.value.has_update &amp;&amp; !updateBannerDismissed}"
+    when="{appInfo.value &amp;&amp; appInfo.value.has_update &amp;&amp; appInfo.value.latest !== updateBannerDismissedVersion}"
     backgroundColor="$color-warn-100"
     padding="$space-2"
     gap="$space-3"
@@ -124,8 +124,8 @@
       label="✕"
       variant="ghost"
       size="xs"
-      tooltip="Dismiss for this session"
-      onClick="updateBannerDismissed = true" />
+      tooltip="Dismiss — banner returns when a newer version is released"
+      onClick="updateBannerDismissedVersion = appInfo.value.latest; try { window.localStorage &amp;&amp; window.localStorage.setItem('bram.updateBannerDismissedVersion', appInfo.value.latest); } catch (e) {}" />
   </HStack>
 
   <AppHeader>

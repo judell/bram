@@ -84,33 +84,6 @@ def last_user_text(transcript_path):
     return last
 
 
-def read_authorization_record(project_root):
-    """Return (kind, ids) from resources/.worklist-authorization.json.
-    kind is 'approved' / 'drop' / None; ids is the set of authorized item ids.
-    Direct-edit records and missing/malformed files return (None, set())."""
-    try:
-        with open(os.path.join(project_root, AUTH_REL)) as f:
-            rec = json.load(f)
-    except Exception:
-        return None, set()
-    if not isinstance(rec, dict):
-        return None, set()
-    kind = rec.get("kind")
-    if kind not in ("approved", "drop"):
-        return None, set()
-    ids = set()
-    items = rec.get("items")
-    if isinstance(items, list):
-        for it in items:
-            if isinstance(it, dict) and isinstance(it.get("id"), str):
-                ids.add(it["id"])
-    if not ids:
-        raw_ids = rec.get("ids")
-        if isinstance(raw_ids, list):
-            ids = {x for x in raw_ids if isinstance(x, str)}
-    return kind, ids
-
-
 def has_opt_out(msg):
     if not isinstance(msg, str):
         return False
@@ -205,6 +178,48 @@ def deny_coverage(target_rel, opt_out_attempted):
     sys.exit(2)
 
 
+def worklist_state_changes(old_items, new_items):
+    removed = []
+    status_changed = []
+    for item_id, old_item in old_items.items():
+        if item_id not in new_items:
+            removed.append((item_id, old_item.get("status", "proposed")))
+            continue
+        old_status = old_item.get("status", "proposed")
+        new_status = new_items[item_id].get("status", "proposed")
+        if old_status != new_status:
+            status_changed.append((item_id, old_status, new_status))
+    return removed, status_changed
+
+
+def deny_mechanical_worklist_change(removed, status_changed):
+    lines = [
+        "Blocked: mechanical worklist state changes must go through "
+        "`POST /__worklist/mutate`, not a direct edit to "
+        "`resources/worklist.json`.",
+        "  - Direct worklist edits are for proposing items or refining "
+        "their prose during iterate.",
+        "  - Use mutate for `prune` and `advance` after a verified "
+        "`drop:` / `approved:` turn.",
+    ]
+    if removed:
+        detail = ", ".join(f'"{item_id}" (status={status})' for item_id, status in removed)
+        lines.append(f"  - Removed item ids: {detail}")
+    if status_changed:
+        detail = ", ".join(
+            f'"{item_id}" ({old_status}->{new_status})'
+            for item_id, old_status, new_status in status_changed
+        )
+        lines.append(f"  - Status changes: {detail}")
+    lines.append(
+        "  - Example: "
+        "curl -X POST -d '{\"op\":\"prune\",\"ids\":[\"item-id\"]}' "
+        "http://localhost:${BRAM_PORT:-$XMLUI_DESKTOP_PORT}/__worklist/mutate"
+    )
+    print("\n".join(lines), file=sys.stderr)
+    sys.exit(2)
+
+
 def main():
     payload = json.load(sys.stdin)
     if payload.get("tool_name") not in ("Write", "Edit"):
@@ -242,33 +257,10 @@ def main():
             new = old.replace(o, n) if ti.get("replace_all") else old.replace(o, n, 1)
         old_items = items_by_id(old)
         new_items = items_by_id(new)
-        removed = set(old_items) - set(new_items)
-        if not removed:
+        removed, status_changed = worklist_state_changes(old_items, new_items)
+        if not removed and not status_changed:
             sys.exit(0)
-        kind, ids = read_authorization_record(project_root)
-        violations = []
-        for rid in removed:
-            st = old_items[rid].get("status", "proposed")
-            if st == "applied":
-                continue
-            if kind == "drop" and rid in ids:
-                continue
-            violations.append((rid, st))
-        if violations:
-            bad = ", ".join(f'"{r}" (status={s})' for r, s in violations)
-            print(
-                f"Blocked: removing {bad} from resources/worklist.json without "
-                f"going through the two-stage flow.\n"
-                f"  - 'proposed' must transition to 'applied' (re-add the item) "
-                f"before pruning.\n"
-                f"  - Direct removal is allowed only when resources/.worklist-authorization.json "
-                f"holds a `drop:` record covering this id (issued by the user via the "
-                f"Worklist tab or a typed `drop: {{\"items\":[{{\"id\":\"...\"}}]}}` turn).\n"
-                f"Last recorded authorization kind: {kind or 'none'}.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        sys.exit(0)
+        deny_mechanical_worklist_change(removed, status_changed)
 
     # Branch 2: writes to any other project file — require worklist coverage,
     # fresh bypass, or explicit opt-out language in the last user message.

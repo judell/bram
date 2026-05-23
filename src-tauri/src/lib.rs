@@ -6411,9 +6411,12 @@ fn route_request<R: tauri::Runtime>(
 }
 
 // POST /__worklist/mutate — server-side mechanical mutations (prune,
-// advance status) symmetric to /__worklist/resolve. The agent issues a
-// one-line curl instead of an Edit on resources/worklist.json, so the
-// chat doesn't render a diff. Authorization is checked against
+// advance status) symmetric to /__worklist/resolve. This is the
+// canonical state-machine path for approval-driven worklist transitions;
+// direct edits to resources/worklist.json remain for authoring/refining
+// items, not for mechanical prune/advance. The agent issues a one-line
+// curl instead of an Edit on resources/worklist.json, so the chat
+// doesn't render a diff. Authorization is checked against
 // resources/.worklist-authorization.json before the write: prune
 // requires `kind: "drop"`, advance requires `kind: "approved"`, and
 // every requested id must appear in the auth record's ids.
@@ -6460,7 +6463,10 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
         }
     };
 
-    // Auth check.
+    // Auth check. Deliberately ignores consumedAtMs: same-turn
+    // resolve -> edit files -> mutate is valid, and resolve's
+    // consume-on-read is only meant to block future resolver reads
+    // from replaying stale approval.
     let auth_path = match worklist_auth_file(app) {
         Some(p) => p,
         None => {

@@ -171,6 +171,9 @@ Lifecycle:
        approved. Approved records are **consumed on the first read** —
        a second GET for the same turn returns `no_active_authorization`
        (see below), so capture what you need on the first call.
+       After you edit the approved project files, mechanically advance
+       those ids with `POST /__worklist/mutate` instead of rewriting
+       `"status": "applied"` directly in `resources/worklist.json`.
      - `{"kind":"rejected_stale", "mismatched_ids":[...]}` — the
        worklist file changed between the user's click and the watcher
        reading it. Do not edit files; surface the staleness to the
@@ -191,10 +194,11 @@ Lifecycle:
    - *Drop selected (N)* — only enabled when ≥1 item is checked.
      You receive `drop: {"items":[{"id":"...","hash":"...","feedback":"..."}, ...]}`.
      Same shape, same `/__worklist/resolve` flow:
-     `{"kind":"drop"}` → remove those ids from `worklist.json`
-     without acting on them; `{"kind":"rejected_stale"}` → surface
-     the staleness, do not edit. Respond to any per-item feedback
-     (often the user's reason for dropping that specific item).
+     `{"kind":"drop"}` → prune those ids via
+     `POST /__worklist/mutate` without acting on them;
+     `{"kind":"rejected_stale"}` → surface the staleness, do not
+     edit. Respond to any per-item feedback (often the user's reason
+     for dropping that specific item).
    - *Iterate (N)* — enabled when an item is selected AND its
      per-item feedback box has non-empty content (no-direction
      Iterate is meaningless and the button reflects that). You
@@ -222,9 +226,15 @@ Lifecycle:
      stale-timeout backstop for cases where that chain breaks. End
      your turn cleanly with a text response so the user's spinner
      clears promptly.
-3. **Prune** — after either action, rewrite `resources/worklist.json`
-   with only the still-pending items. The worklist is *pending* work,
-   not history; completed items belong in commit messages.
+3. **Mechanical transitions** — use `POST /__worklist/mutate` for
+   approval-driven state changes:
+   - `{"op":"advance","ids":[...],"status":"applied"}` after an
+     approved apply
+   - `{"op":"prune","ids":[...]}` after a drop, or after a commit of
+     already-`applied` items
+   Direct edits to `resources/worklist.json` are for proposal
+   authoring and iterate-time prose refinement, not mechanical
+   prune/advance.
 4. **Empty state is fine** — leave it as `{ "description": "", "items": [] }`.
 
 If you ever do receive `approved: {"items":[]}`, `drop: {"items":[]}`,
@@ -467,16 +477,17 @@ back if the prune was not authorized or if a hook failed to launch. If
 you hit either path, read the error or revert message; it is the
 convention's enforcement mechanism, not a bug to work around.
 
-**Don't ask before editing the worklist.** The write channel is already
-approved and guarded. Claude's allow-listed `Write(./resources/worklist.json)`
-and `Edit(./resources/worklist.json)` calls are validated by its hook,
-and Codex mutations are validated by its matching PreToolUse hook. The
-shared authorization record plus watcher fallback remain behind both.
-Either way, there is no need to verbally confirm with the user before
-adding, advancing, or pruning worklist items — unsafe removals will be
-rejected or reverted.
+**Don't ask before editing the worklist or calling mutate.** The
+proposal-authoring write channel is already approved and guarded, and
+the mechanical transition channel is the shared server endpoint.
+Claude's allow-listed `Write(./resources/worklist.json)` /
+`Edit(./resources/worklist.json)` calls are validated by its hook, and
+Codex mutations are validated by its matching PreToolUse hook. Either
+way, there is no need to verbally confirm with the user before adding
+items, refining their prose, or calling `/__worklist/mutate` for an
+already-approved advance/prune.
 Save the verbal back-and-forth for design decisions (which items to
-propose, what choices to bake in), not for the mechanical write.
+propose, what choices to bake in), not for the mechanical transition.
 
 **Minimize the bytes of each worklist edit.** Worklist items often have
 multi-paragraph `before` / `after` prose. A naive `Edit` with the
@@ -485,15 +496,16 @@ whole item as `old_string` and the slightly-changed item as
 transcript with redundant text. Prefer:
 
 - Narrow `Edit` targets for the smallest possible string that uniquely
-  identifies the change. Flipping `"status": "proposed"` → `"status":
-  "applied"` only needs those two strings, not the whole item.
+  identifies the change. Appending a paragraph to an item's `after`
+  only needs the tail paragraph as the anchor, not the whole item.
 - When you're appending to an item's `after` (e.g., adding a new
   sub-section after an iterate), `old_string` is the last paragraph
   you want to preserve and `new_string` is that same paragraph plus
   the appended content — not the entire `after`.
 - Full-item rewrites (`Write` over `worklist.json` from scratch) are
-  fine for batch operations like pruning multiple items at once, but
-  avoid them for single-status flips or one-paragraph tweaks.
+  fine for batch proposal authoring or broad prose reshaping, but
+  avoid them for one-paragraph tweaks. Mechanical prune / advance
+  transitions go through `/__worklist/mutate`, not a direct rewrite.
 
 The hook validates the resulting file regardless of edit shape, so the
 choice is purely about token economy and transcript noise.
@@ -512,20 +524,26 @@ materially expands (new file added to `files`, or the change's
 intent shifts). Otherwise leave it; the iteration history doesn't
 need to live in the item.
 
-**Prefer `POST /__worklist/mutate` for mechanical prunes + status
-advances** — it's the symmetric counterpart to `/__worklist/resolve`
+**Use `POST /__worklist/mutate` for mechanical prunes + status
+advances** — it's the canonical counterpart to `/__worklist/resolve`
 and renders no diff in the chat. Two ops:
 
 ```
 curl -X POST -d '{"op":"prune","ids":["item-a"]}' \
-  http://localhost:$XMLUI_DESKTOP_PORT/__worklist/mutate
+  http://localhost:${BRAM_PORT:-$XMLUI_DESKTOP_PORT}/__worklist/mutate
 curl -X POST -d '{"op":"advance","ids":["item-a"],"status":"applied"}' \
-  http://localhost:$XMLUI_DESKTOP_PORT/__worklist/mutate
+  http://localhost:${BRAM_PORT:-$XMLUI_DESKTOP_PORT}/__worklist/mutate
 ```
 
 Server-side auth check: `prune` requires `kind: "drop"` for those ids
 in `.worklist-authorization.json`; `advance` requires `kind: "approved"`.
-Mismatch returns 400 with `{"error": "..."}` and no file change. Use
+Mismatch returns 400 with `{"error": "..."}` and no file change.
+Direct edits to `resources/worklist.json` that remove items or change
+their `status` are the wrong tool for this job and may be blocked by
+the provider hook even when the auth record is otherwise valid. A
+same-turn `resolve → edit files → mutate` sequence is valid: the
+approved record is consumed for *future resolve reads*, but mutate
+still uses the stored auth record from the current turn. Use
 this instead of `jq` + Bash for prunes, and instead of an `Edit` for
 proposed→applied status flips. Item content edits (new proposals,
 prose revisions on iterate) still go through `Write` / `Edit` — the

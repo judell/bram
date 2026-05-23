@@ -142,10 +142,15 @@ without re-shipping content.
 - `/__worklist/mutate` is the symmetric mechanical-mutations counterpart
   to `/__worklist/resolve`. `prune` requires `kind: "drop"` (or
   `kind: "approved"` for the post-commit prune case) covering every
-  requested id; `advance` requires `kind: "approved"`. Agents prefer it
-  over a direct `Edit` on `resources/worklist.json` for mechanical
-  status flips and prunes — the chat doesn't render a diff and the
-  server-side auth check is uniform.
+  requested id; `advance` requires `kind: "approved"`. This is the
+  canonical path for mechanical worklist state changes; direct edits to
+  `resources/worklist.json` are for proposal authoring and iterate-time
+  prose refinement. The chat doesn't render a diff and the server-side
+  auth check is uniform.
+- A same-turn `resolve → edit files → mutate` flow is supported. An
+  `approved` record becomes `no_active_authorization` for subsequent
+  `/__worklist/resolve` reads after the first GET, but `/__worklist/mutate`
+  still uses the stored auth record from that turn.
 
 ## 4. Worklist history
 

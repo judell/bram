@@ -65,6 +65,34 @@ def worklist_items(cwd):
     return items if isinstance(items, list) else []
 
 
+def items_by_id_from_content(content):
+    try:
+        doc = json.loads(content)
+    except Exception:
+        return {}
+    if not isinstance(doc, dict):
+        return {}
+    items = doc.get("items")
+    if not isinstance(items, list):
+        return {}
+    out = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_id = item.get("id")
+        if isinstance(item_id, str) and item_id.strip():
+            out[item_id] = item
+    return out
+
+
+def current_worklist_text(cwd):
+    try:
+        with open(os.path.join(cwd, WORKLIST_REL)) as f:
+            return f.read()
+    except Exception:
+        return ""
+
+
 def covered_files(items):
     """Return set of project-relative paths covered by any proposed/applied item."""
     covered = set()
@@ -145,6 +173,18 @@ def patch_targets(tool_input):
     return targets
 
 
+def patch_text(tool_input):
+    text = ""
+    if isinstance(tool_input, dict):
+        for key in ("input", "patch", "content", "command"):
+            v = tool_input.get(key)
+            if isinstance(v, str):
+                text += "\n" + v
+    elif isinstance(tool_input, str):
+        text = tool_input
+    return text
+
+
 # Bash commands we deny without worklist coverage. The list is intentionally
 # narrow: codex needs to run plenty of read-only shell during investigation,
 # so we don't gate ls/grep/cat/curl/find/git-status. We only catch the
@@ -217,6 +257,14 @@ def _added_block_text(patch_text):
     out = []
     for line in patch_text.split("\n"):
         if line.startswith("+") and not line.startswith("+++"):
+            out.append(line[1:])
+    return "\n".join(out)
+
+
+def _removed_block_text(patch_text):
+    out = []
+    for line in patch_text.split("\n"):
+        if line.startswith("-") and not line.startswith("---"):
             out.append(line[1:])
     return "\n".join(out)
 
@@ -310,6 +358,77 @@ def _patch_adds_have_empty_bodies(patch_text):
     return []
 
 
+def worklist_state_changes(old_content, new_content):
+    old_items = items_by_id_from_content(old_content)
+    new_items = items_by_id_from_content(new_content)
+    removed = []
+    status_changed = []
+    for item_id, old_item in old_items.items():
+        if item_id not in new_items:
+            removed.append((item_id, old_item.get("status", "proposed")))
+            continue
+        old_status = old_item.get("status", "proposed")
+        new_status = new_items[item_id].get("status", "proposed")
+        if old_status != new_status:
+            status_changed.append((item_id, old_status, new_status))
+    return removed, status_changed
+
+
+def _patch_removes_worklist_items(cwd, patch_text):
+    old_items = {
+        item["id"]: item
+        for item in worklist_items(cwd)
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    removed_ids = {item_id for item_id in _ID_RE.findall(_removed_block_text(patch_text)) if item_id}
+    readded_ids = {item_id for item_id in _ID_RE.findall(_added_block_text(patch_text)) if item_id}
+    out = []
+    for item_id in sorted(removed_ids - readded_ids):
+        item = old_items.get(item_id)
+        if item is None:
+            continue
+        out.append((item_id, item.get("status", "proposed")))
+    return out
+
+
+_STATUS_RE = re.compile(r'"status"\s*:\s*"([^"]+)"')
+
+
+def _patch_changes_worklist_status(patch_text):
+    removed = set(_STATUS_RE.findall(_removed_block_text(patch_text)))
+    added = set(_STATUS_RE.findall(_added_block_text(patch_text)))
+    if not removed and not added:
+        return False
+    return removed != added
+
+
+def _worklist_new_content_from_tool_input(cwd, tool_input):
+    old_content = current_worklist_text(cwd)
+    if not isinstance(tool_input, dict):
+        return None
+    for key in ("content", "text"):
+        value = tool_input.get(key)
+        if isinstance(value, str):
+            return value
+    edits = tool_input.get("edits")
+    if isinstance(edits, list):
+        new_content = old_content
+        for edit in edits:
+            if not isinstance(edit, dict):
+                return None
+            old_text = edit.get("oldText")
+            new_text = edit.get("newText")
+            if not isinstance(old_text, str) or not isinstance(new_text, str):
+                return None
+            new_content = new_content.replace(old_text, new_text, 1)
+        return new_content
+    old_text = tool_input.get("old_string")
+    new_text = tool_input.get("new_string")
+    if isinstance(old_text, str) and isinstance(new_text, str):
+        return old_content.replace(old_text, new_text, 1)
+    return None
+
+
 def _worklist_validation_error(bad, tool_name):
     if not bad:
         return f"{tool_name} blocked: worklist validation failed."
@@ -327,6 +446,30 @@ def _worklist_validation_error(bad, tool_name):
         f"are not acceptable. Rewrite the worklist with complete items and try "
         f"again."
     )
+
+
+def _mechanical_worklist_change_error(removed, status_changed, tool_name):
+    lines = [
+        f"{tool_name} blocked: mechanical worklist state changes must go through "
+        f"`POST /__worklist/mutate`, not a direct edit to `resources/worklist.json`.",
+        "Direct worklist edits are for proposing items or refining prose during iterate.",
+        "Use mutate for `prune` and `advance` after a verified `drop:` / `approved:` turn.",
+    ]
+    if removed:
+        detail = ", ".join(f'"{item_id}" (status={status})' for item_id, status in removed)
+        lines.append(f"Removed item ids: {detail}")
+    if status_changed:
+        detail = ", ".join(
+            f'"{item_id}" ({old_status}->{new_status})'
+            for item_id, old_status, new_status in status_changed
+        )
+        lines.append(f"Status changes: {detail}")
+    lines.append(
+        "Example: "
+        "curl -X POST -d '{\"op\":\"advance\",\"ids\":[\"item-id\"],\"status\":\"applied\"}' "
+        "http://localhost:${BRAM_PORT:-$XMLUI_DESKTOP_PORT}/__worklist/mutate"
+    )
+    return "\n".join(lines)
 
 
 def mcp_paths(tool_input):
@@ -443,13 +586,11 @@ def main():
             normalize_target(cwd, t) == WORKLIST_REL for t in raw_targets
         )
         if touches_worklist:
-            patch_text = ""
-            if isinstance(tool_input, dict):
-                for key in ("input", "patch", "content", "command"):
-                    v = tool_input.get(key)
-                    if isinstance(v, str):
-                        patch_text += "\n" + v
-            bad_ids = _patch_adds_have_empty_bodies(patch_text)
+            patch_body = patch_text(tool_input)
+            removed = _patch_removes_worklist_items(cwd, patch_body)
+            if removed or _patch_changes_worklist_status(patch_body):
+                deny(_mechanical_worklist_change_error(removed, [], "apply_patch"))
+            bad_ids = _patch_adds_have_empty_bodies(patch_body)
             if bad_ids:
                 deny(_worklist_validation_error(bad_ids, "apply_patch"))
         violations = []
@@ -514,11 +655,23 @@ def main():
             normalize_target(cwd, t) == WORKLIST_REL for t in candidate_paths
         )
         if touches_worklist and isinstance(tool_input, dict):
-            new_content = tool_input.get("content") or tool_input.get("text") or ""
+            new_content = _worklist_new_content_from_tool_input(cwd, tool_input)
+            if new_content is None:
+                deny(
+                    f"{tool_name} blocked: worklist edits that advance status or prune items "
+                    f"must use `/__worklist/mutate`. For direct authoring/refinement edits, "
+                    f"use a write/edit shape whose resulting content the guard can inspect."
+                )
             if isinstance(new_content, str) and new_content.strip():
                 bad_ids = _worklist_items_with_empty_body(new_content)
                 if bad_ids:
                     deny(_worklist_validation_error(bad_ids, tool_name))
+                removed, status_changed = worklist_state_changes(
+                    current_worklist_text(cwd),
+                    new_content,
+                )
+                if removed or status_changed:
+                    deny(_mechanical_worklist_change_error(removed, status_changed, tool_name))
         violations = []
         for t in candidate_paths:
             rel = normalize_target(cwd, t)

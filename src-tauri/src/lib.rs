@@ -444,6 +444,40 @@ fn is_structured_intent_prefix(data: &str) -> bool {
         || s.starts_with("talk:")
 }
 
+// Trace a host → iframe Tauri emit with no payload. Spec fields:
+// kind=<event name>, payload_size=0, correlation_id=<empty for now>.
+// Place a call immediately above each unit-payload `emit` site.
+fn trace_emit_signal<R: tauri::Runtime>(app: &AppHandle<R>, kind: &str) {
+    if !bram_trace_enabled() {
+        return;
+    }
+    append_bram_trace_line(
+        app,
+        "emit",
+        &format!("kind={} payload_size=0 correlation_id=", kind),
+    );
+}
+
+// Trace a host → iframe Tauri emit with a payload. Serializes the
+// payload to JSON to count bytes; matches what Tauri itself does on the
+// wire, modulo MessagePack vs JSON depending on Tauri version (the
+// byte count here is the JSON form, used as a proxy for payload scale).
+fn trace_emit_payload<R: tauri::Runtime, S: serde::Serialize>(
+    app: &AppHandle<R>,
+    kind: &str,
+    payload: &S,
+) {
+    if !bram_trace_enabled() {
+        return;
+    }
+    let size = serde_json::to_vec(payload).map(|v| v.len()).unwrap_or(0);
+    append_bram_trace_line(
+        app,
+        "emit",
+        &format!("kind={} payload_size={} correlation_id=", kind, size),
+    );
+}
+
 // --- End comms-path trace foundation -------------------------------------
 
 fn project_root<R: tauri::Runtime>(app: Option<&AppHandle<R>>) -> Option<PathBuf> {
@@ -614,6 +648,7 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
     }
 
     if let Some(payload) = emit_payload {
+        trace_emit_payload(app, "pty-menu-changed", &payload);
         let _ = app.emit("pty-menu-changed", &payload);
     }
 }
@@ -796,6 +831,7 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>) {
         // Tell subscribers the menu went away. Emit AFTER releasing all
         // pty_menu_* locks for the same anti-deadlock reason as in
         // pty_menu_update.
+        trace_emit_signal(app, "pty-menu-changed");
         let _ = app.emit::<Option<PtyMenu>>("pty-menu-changed", None);
     }
 }
@@ -2202,6 +2238,7 @@ fn handle_project_config_reload<R: tauri::Runtime>(app_handle: &AppHandle<R>, pr
         "[project-config] reloaded; right-pane url -> {} upstream -> {}",
         new_right_pane_url, new_right_pane_upstream
     );
+    trace_emit_signal(&app_handle, "right-pane-reload");
     let _ = app_handle.emit("right-pane-reload", ());
 }
 
@@ -5847,6 +5884,7 @@ fn route_request<R: tauri::Runtime>(
         } else {
             eprintln!("[server] restarted pid={}; port {} is up", pid, cfg.port);
         }
+        trace_emit_signal(app, "right-pane-reload");
         let _ = app.emit("right-pane-reload", ());
         let body = serde_json::json!({
             "ok": true,
@@ -6183,6 +6221,7 @@ fn route_request<R: tauri::Runtime>(
     if path == "__enhance/codex-trust-ack" {
         return match write_codex_trust_ack() {
             Ok(()) => {
+                trace_emit_signal(app, "enhance-status-changed");
                 let _ = app.emit("enhance-status-changed", ());
                 (
                     200,
@@ -7401,6 +7440,7 @@ pub fn run() {
                     if let Some(since) = pending_tools_since {
                         if since.elapsed() >= tools_debounce {
                             eprintln!("[watcher] change detected, emitting tools-pane-reload (debounced)");
+                            trace_emit_signal(&app_handle, "tools-pane-reload");
                             let _ = app_handle.emit("tools-pane-reload", ());
                             pending_tools_since = None;
                         }
@@ -7430,6 +7470,7 @@ pub fn run() {
                         // next user activity. XMLUI dedupes refetches
                         // via structural sharing, so burst-emitting per
                         // event is fine.
+                        trace_emit_signal(&app_handle, "talk-session-changed");
                         let _ = app_handle.emit("talk-session-changed", ());
                         continue;
                     }
@@ -7458,6 +7499,7 @@ pub fn run() {
                             || in_bram_dir
                     });
                     if is_enhance_event {
+                        trace_emit_signal(&app_handle, "enhance-status-changed");
                         let _ = app_handle.emit("enhance-status-changed", ());
                     }
 
@@ -7475,6 +7517,7 @@ pub fn run() {
                                 .map_or(false, |sd| p.starts_with(sd))
                     });
                     if is_sessions_list_event {
+                        trace_emit_signal(&app_handle, "sessions-list-changed");
                         let _ = app_handle.emit("sessions-list-changed", ());
                     }
 
@@ -7490,6 +7533,7 @@ pub fn run() {
                         in_resources && (file == "worklist.json" || in_history)
                     });
                     if is_worklist_change {
+                        trace_emit_signal(&app_handle, "worklist-changed");
                         let _ = app_handle.emit("worklist-changed", ());
                     }
 
@@ -7523,6 +7567,7 @@ pub fn run() {
                         p.starts_with(&proj_root_path) && !in_ignored_dir(p)
                     });
                     if is_git_status_event {
+                        trace_emit_signal(&app_handle, "git-status-changed");
                         let _ = app_handle.emit("git-status-changed", ());
                     }
 
@@ -7593,6 +7638,7 @@ pub fn run() {
                         pending_tools_since = Some(Instant::now());
                     } else {
                         eprintln!("[watcher] change detected, emitting right-pane-reload");
+                        trace_emit_signal(&app_handle, "right-pane-reload");
                         let _ = app_handle.emit("right-pane-reload", ());
                     }
                 }

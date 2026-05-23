@@ -7679,6 +7679,13 @@ pub fn run() {
                     // paths; absolute / outside-project paths fall back
                     // to file_name only so no host filesystem layout
                     // leaks into the log.
+                    //
+                    // Skip resources/bram-trace.log to avoid a
+                    // self-feeding loop: append_bram_trace_line writes
+                    // to that file, which triggers a notify event,
+                    // which would emit another [watcher] record, which
+                    // appends again, ad infinitum. See
+                    // fix-watcher-trace-self-feeding-loop.
                     if bram_trace_enabled() {
                         let change = notify_event_kind_label(&event.kind);
                         for p in &event.paths {
@@ -7692,6 +7699,9 @@ pub fn run() {
                                         .unwrap_or("")
                                         .to_string()
                                 });
+                            if rel == "resources/bram-trace.log" {
+                                continue;
+                            }
                             append_bram_trace_line(
                                 &app_handle,
                                 "watcher",

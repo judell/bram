@@ -325,7 +325,6 @@ static BRAM_TRACE_ENABLED: std::sync::atomic::AtomicBool =
 // First successful `set(())` wins; remaining writers append.
 static BRAM_TRACE_FIRST_WRITE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
-#[allow(dead_code)]
 fn bram_trace_enabled() -> bool {
     BRAM_TRACE_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -362,7 +361,6 @@ fn bram_trace_log_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf>
 // `watcher`, `emit`, `route`, `hook`, `iframe`). The function does not
 // validate — the caller is expected to use a token from the spec, and
 // `category` is checked in code review, not at runtime.
-#[allow(dead_code)]
 fn append_bram_trace_line<R: tauri::Runtime>(app: &AppHandle<R>, category: &str, body: &str) {
     if !bram_trace_enabled() {
         return;
@@ -399,6 +397,51 @@ fn append_bram_trace_line<R: tauri::Runtime>(app: &AppHandle<R>, category: &str,
         category,
         body
     );
+}
+
+// Render a short, single-line, escape-aware preview of `data` capped at
+// `max` chars. Shared by every trace category that surfaces raw bytes
+// (currently `[pty-out]`; future: `[pty-in]`, `[route]` request body).
+// Control characters render as `\xNN`, common whitespace gets the usual
+// escapes, and the output is double-quoted so a trailing space or
+// trailing escape doesn't get visually merged with adjacent text.
+fn bram_trace_preview(data: &str, max: usize) -> String {
+    let mut out = String::with_capacity(max + 8);
+    out.push('"');
+    let mut count = 0usize;
+    for ch in data.chars() {
+        if count >= max {
+            out.push_str("...");
+            break;
+        }
+        match ch {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\x1b' => out.push_str("\\x1b"),
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c => out.push(c),
+        }
+        count += 1;
+    }
+    out.push('"');
+    out
+}
+
+// True when the normalized turn submission begins with one of the
+// structured-intent prefixes recognized by `parse_worklist_authorization_message`
+// (`approved:`, `drop:`) or by chat-side convention (`iterate:`, `talk:`).
+// Used by `[pty-out]` to flag candidate authorization writes; the
+// authoritative parse still happens in `record_worklist_authorization_from_input`.
+fn is_structured_intent_prefix(data: &str) -> bool {
+    let n = normalize_turn_submission(data);
+    let s = n.as_str();
+    s.starts_with("approved:")
+        || s.starts_with("drop:")
+        || s.starts_with("iterate:")
+        || s.starts_with("talk:")
 }
 
 // --- End comms-path trace foundation -------------------------------------
@@ -1837,6 +1880,22 @@ fn pty_spawn(
 
 #[tauri::command]
 fn pty_write(app: AppHandle, data: String, state: State<'_, AppState>) -> Result<(), String> {
+    // Comms-path trace, category [pty-out]. Logs even when the write
+    // ultimately fails (e.g. PTY not started) so the trace records the
+    // intent to send. Gate at the call site to skip the preview
+    // allocation entirely when tracing is off.
+    if bram_trace_enabled() && !data.is_empty() {
+        append_bram_trace_line(
+            &app,
+            "pty-out",
+            &format!(
+                "bytes={} preview={} is_structured={} caller_hint=unknown",
+                data.len(),
+                bram_trace_preview(&data, 80),
+                is_structured_intent_prefix(&data),
+            ),
+        );
+    }
     // User input dismisses any visible permission menu. Clear before
     // writing so the agent-pane menu disappears immediately on click.
     if !data.is_empty() {

@@ -2304,7 +2304,43 @@ fn whisper_status(state: State<'_, WhisperState>) -> WhisperStatusReport {
 }
 
 #[tauri::command]
-fn log_from_right_pane(payload: serde_json::Value) {
+fn log_from_right_pane(app: AppHandle, payload: serde_json::Value) {
+    // Iframe-side trace records arrive with `kind: "iframe-trace"` and a
+    // `subkind` field; route them to the [iframe] category in the trace
+    // log. Other payloads keep the existing stderr behavior so unrelated
+    // iframe logging (e.g. git-push status from helpers.js) still shows
+    // up at the command line.
+    if payload.get("kind").and_then(|v| v.as_str()) == Some("iframe-trace") {
+        if bram_trace_enabled() {
+            let subkind = payload
+                .get("subkind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            // Render remaining fields (anything other than kind/subkind/at)
+            // as a compact JSON object so the line stays scannable. `at`
+            // is already captured by the outer [<ISO timestamp>]; the
+            // iframe-side `at` is preserved inside the JSON for cases
+            // where event-loop scheduling pushes the host's receive
+            // moment well after the iframe's send moment.
+            let mut rest = serde_json::Map::new();
+            if let Some(obj) = payload.as_object() {
+                for (k, v) in obj {
+                    if k == "kind" || k == "subkind" {
+                        continue;
+                    }
+                    rest.insert(k.clone(), v.clone());
+                }
+            }
+            let rest_str = serde_json::to_string(&serde_json::Value::Object(rest))
+                .unwrap_or_else(|_| "{}".to_string());
+            append_bram_trace_line(
+                &app,
+                "iframe",
+                &format!("subkind={} {}", subkind, rest_str),
+            );
+        }
+        return;
+    }
     eprintln!("[right-pane] {}", payload);
 }
 

@@ -161,6 +161,25 @@ function isAgentIdle(jsonlText) {
   return lastState === 'idle';
 }
 
+// Iframe-side trace helper for the [iframe] category of the comms-path
+// trace log (issue #49). Forwards a structured record to the host's
+// `log_from_right_pane` Tauri command, which routes records whose
+// `kind` is `"iframe-trace"` into resources/bram-trace.log when
+// BRAM_TRACE=1 is set on the host. No-op when logToHost isn't wired up.
+// subkind is a token from the spec's maintained vocabulary (click,
+// inflight-set, inflight-clear, listener-fired, ...); fields are
+// arbitrary per-event metadata (target, item, reason, paths, etc.).
+function iframeTrace(subkind, fields) {
+  try {
+    if (typeof logToHost !== 'function') return;
+    const payload = { kind: 'iframe-trace', subkind: subkind, at: new Date().toISOString() };
+    if (fields && typeof fields === 'object') {
+      Object.assign(payload, fields);
+    }
+    logToHost(payload);
+  } catch (e) {}
+}
+
 // Clean a user turn for transcript display: strip protocol prefixes
 // (`voice: `, `talk: `) so spoken / typed content reads as plain text;
 // summarize structured `approved:` / `drop:` payloads to a one-line

@@ -43,6 +43,7 @@
       const elapsed = Date.now() - (stored.ts || 0);
       if (elapsed < 750) return;
       if (!isAgentIdle(c.newValue)) return;
+      iframeTrace('inflight-clear', {reason: 'agent-idle', elapsed_ms: elapsed, item: submittedItemId || ''});
       clearInflight();
       submitting = false;
       selected = null;
@@ -65,6 +66,7 @@
           .sort()
           .join(',');
         if (sig !== (stored.ids || '')) {
+          iframeTrace('inflight-clear', {reason: 'sig-mismatch', sig: sig, stored_ids: stored.ids || '', item: submittedItemId || ''});
           clearInflight();
           submitting = false;
           if (selected && !items.some(i => i.id === selected)) selected = null;
@@ -81,6 +83,7 @@
         // mid-response, and the previous 180s was way too long to
         // wait when the chain genuinely breaks.
         if (Date.now() - (stored.ts || 0) > 60000) {
+          iframeTrace('inflight-clear', {reason: 'stale-timeout', elapsed_ms: Date.now() - (stored.ts || 0), item: submittedItemId || ''});
           clearInflight();
           submitting = false;
           selected = null;
@@ -116,7 +119,23 @@
         if (submitting) sessionTick = sessionTick + 1;
       });
     });
-    (() => { const tauri = (window.parent &amp;&amp; window.parent.__TAURI__) || window.__TAURI__; if (tauri &amp;&amp; tauri.event &amp;&amp; tauri.event.listen) { tauri.event.listen('worklist-changed', () => { debounce(200, () => { worklist.refetch(); history.refetch(); }); }); } })()">
+    (() => {
+      // Iframe-side trace records for the [iframe] category of the
+      // comms-path trace (issue #49). Calls route through iframeTrace()
+      // in Globals.xs, which checks logToHost availability and forwards
+      // to the host.
+      const tauri = (window.parent &amp;&amp; window.parent.__TAURI__) || window.__TAURI__;
+      if (tauri &amp;&amp; tauri.event &amp;&amp; tauri.event.listen) {
+        tauri.event.listen('worklist-changed', (e) => {
+          const payload = (e &amp;&amp; e.payload) || {};
+          iframeTrace('listener-fired', {
+            paths: payload.paths || [],
+            correlation_id: payload.id || '',
+          });
+          debounce(200, () => { worklist.refetch(); history.refetch(); });
+        });
+      }
+    })()">
     <VStack gap="$space-3" when="{worklist.value}">
       <VStack gap="$space-3">
         <HStack gap="$space-3" verticalAlignment="center">
@@ -253,7 +272,7 @@
                       label="Approve"
                       size="xs"
                       enabled="{!submitting && !!selected}"
-                      onClick="(() => { const item = (worklist.value.items || []).find(i => i.id === selected); if (item && item.status === 'applied' && item.closesIssues && item.closesIssues.length > 0) { closeIssuesItemRef = item; closeIssuesState = initCloseIssueState(item.closesIssues); closeIssuesDialog = item.id; return; } submittedItemId = selected; markInflight(worklist.value && worklist.value.items); submitting = true; toTurn('approved: ' + JSON.stringify({ items: (worklist.value.items || []).filter(i => i.id === selected).map(i => ({id: i.id, hash: i.hash, feedback: selectedFeedback})) })); })()" />
+                      onClick="(() => { iframeTrace('click', {target: 'approve', item: selected}); const item = (worklist.value.items || []).find(i => i.id === selected); if (item && item.status === 'applied' && item.closesIssues && item.closesIssues.length > 0) { closeIssuesItemRef = item; closeIssuesState = initCloseIssueState(item.closesIssues); closeIssuesDialog = item.id; return; } submittedItemId = selected; markInflight(worklist.value && worklist.value.items); submitting = true; iframeTrace('inflight-set', {item: selected, via: 'click', target: 'approve'}); toTurn('approved: ' + JSON.stringify({ items: (worklist.value.items || []).filter(i => i.id === selected).map(i => ({id: i.id, hash: i.hash, feedback: selectedFeedback})) })); })()" />
                     <Theme paddingHorizontal-Button-xs="$space-0_5">
                       <Button
                         label="ⓘ"
@@ -268,7 +287,7 @@
                       label="Iterate"
                       size="xs"
                       enabled="{!submitting && !!selected && selectedFeedback.trim().length > 0}"
-                      onClick="submittedItemId = selected; markInflight(worklist.value && worklist.value.items); submitting = true; toTurn('iterate: ' + JSON.stringify({ items: worklist.value.items.filter(i => i.id === selected).map(i => ({id: i.id, hash: i.hash, feedback: selectedFeedback})) }))" />
+                      onClick="iframeTrace('click', {target: 'iterate', item: selected}); submittedItemId = selected; markInflight(worklist.value && worklist.value.items); submitting = true; iframeTrace('inflight-set', {item: selected, via: 'click', target: 'iterate'}); toTurn('iterate: ' + JSON.stringify({ items: worklist.value.items.filter(i => i.id === selected).map(i => ({id: i.id, hash: i.hash, feedback: selectedFeedback})) }))" />
                     <Theme paddingHorizontal-Button-xs="$space-0_5">
                       <Button
                         label="ⓘ"
@@ -283,7 +302,7 @@
                       label="Drop"
                       size="xs"
                       enabled="{!submitting && !!selected}"
-                      onClick="submittedItemId = selected; markInflight(worklist.value && worklist.value.items); submitting = true; toTurn('drop: ' + JSON.stringify({ items: worklist.value.items.filter(i => i.id === selected).map(i => ({id: i.id, hash: i.hash, feedback: selectedFeedback})) }))" />
+                      onClick="iframeTrace('click', {target: 'drop', item: selected}); submittedItemId = selected; markInflight(worklist.value && worklist.value.items); submitting = true; iframeTrace('inflight-set', {item: selected, via: 'click', target: 'drop'}); toTurn('drop: ' + JSON.stringify({ items: worklist.value.items.filter(i => i.id === selected).map(i => ({id: i.id, hash: i.hash, feedback: selectedFeedback})) }))" />
                     <Theme paddingHorizontal-Button-xs="$space-0_5">
                       <Button
                         label="ⓘ"

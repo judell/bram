@@ -142,11 +142,16 @@
             paths: payload.paths || [],
             correlation_id: payload.id || '',
           });
-          debounce(200, () => {
-            iframeTrace('debounce-fired', {context: 'worklist-changed'});
-            worklist.refetch();
-            history.refetch();
-          });
+          // Direct refetch (no debounce). XMLUI's `debounce(ms, fn)`
+          // silently never invoked `fn` when listener-fired calls
+          // arrived ≤300ms apart — see fix-iframe-drop-broken-debounce
+          // for the trace data. The watcher's 6× notify fanout per
+          // logical write produces 6 refetches; DataSource structural
+          // sharing keeps re-renders to one when the response is
+          // identical. Cheap enough to accept.
+          iframeTrace('refetch-called', {context: 'worklist-changed'});
+          worklist.refetch();
+          history.refetch();
         }).then((unlisten) => { window.__bramWorklistUnlisten = unlisten; }).catch(() => {});
       }
     })()">

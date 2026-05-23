@@ -710,6 +710,28 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
             _ => {}
         }
 
+        if state_changed && bram_trace_enabled() {
+            // Structured [pty-menu] trace, distinct from the operator
+            // -facing eprintln! above. `reason=byte-pattern` for shows,
+            // `reason=buffer-evicted` when the detector lost the
+            // pattern out of PTY_TAIL without the user dismissing it.
+            // Explicit user dismissals get their own trace from
+            // pty_menu_clear with reason=user-input.
+            match (&detected, &prev_tool) {
+                (Some(nm), _) => append_bram_trace_line(
+                    app,
+                    "pty-menu",
+                    &format!("state=shown tool={} reason=byte-pattern", nm.tool),
+                ),
+                (None, Some(prev)) => append_bram_trace_line(
+                    app,
+                    "pty-menu",
+                    &format!("state=dismissed tool={} reason=buffer-evicted", prev),
+                ),
+                _ => {}
+            }
+        }
+
         *menu = detected;
 
         if state_changed {
@@ -899,6 +921,13 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>) {
             "[pty-menu] cleared by user input (tool={}, suppressing for 2s)",
             tool
         );
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "pty-menu",
+                &format!("state=dismissed tool={} reason=user-input", tool),
+            );
+        }
         if let Ok(mut s) = pty_menu_suppressed_cell().lock() {
             *s = Some((tool, std::time::Instant::now()));
         }

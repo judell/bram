@@ -32,7 +32,7 @@
     value="{!selectedSha ? null : ((((searchResults.value &amp;&amp; searchResults.value.results) || []).find(c => c.sha === selectedSha)) || ((commits.value || []).find(c => c.sha === selectedSha)))}" />
 
   <HSplitter height="100%" initialPrimarySize="50%"
-    onInit="(() => { const tauri = (window.parent &amp;&amp; window.parent.__TAURI__) || window.__TAURI__; if (tauri &amp;&amp; tauri.event &amp;&amp; tauri.event.listen) { tauri.event.listen('git-status-changed', () => commits.refetch()); } })()">
+    onInit="(() => { const tauri = (window.parent &amp;&amp; window.parent.__TAURI__) || window.__TAURI__; if (!(tauri &amp;&amp; tauri.event &amp;&amp; tauri.event.listen)) return; if (typeof window.__bramCommitsUnlisten === 'function') { try { window.__bramCommitsUnlisten(); } catch (err) {} window.__bramCommitsUnlisten = null; } tauri.event.listen('git-status-changed', () => commits.refetch()).then((unlisten) => { window.__bramCommitsUnlisten = unlisten; }).catch(() => {}); })()">
 
     <VStack padding="$space-4" gap="$space-4" overflowY="auto">
       <HStack gap="$space-3" verticalAlignment="center">

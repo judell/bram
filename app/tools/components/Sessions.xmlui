@@ -109,7 +109,7 @@
   </ModalDialog>
 
   <HSplitter height="100%" initialPrimarySize="50%"
-    onInit="(() => { const tauri = (window.parent &amp;&amp; window.parent.__TAURI__) || window.__TAURI__; if (tauri &amp;&amp; tauri.event &amp;&amp; tauri.event.listen) { tauri.event.listen('sessions-list-changed', () => { sessionsMeta.refetch(); sessionsList.refetch(); if (expandedId &amp;&amp; expandedProvider) sessionContent.refetch(); }); } })()">
+    onInit="(() => { const tauri = (window.parent &amp;&amp; window.parent.__TAURI__) || window.__TAURI__; if (!(tauri &amp;&amp; tauri.event &amp;&amp; tauri.event.listen)) return; if (typeof window.__bramSessionsUnlisten === 'function') { try { window.__bramSessionsUnlisten(); } catch (err) {} window.__bramSessionsUnlisten = null; } tauri.event.listen('sessions-list-changed', () => { sessionsMeta.refetch(); sessionsList.refetch(); if (expandedId &amp;&amp; expandedProvider) sessionContent.refetch(); }).then((unlisten) => { window.__bramSessionsUnlisten = unlisten; }).catch(() => {}); })()">
 
     <VStack padding="$space-4" gap="$space-3" overflowY="auto">
       <HStack gap="$space-3" verticalAlignment="center">

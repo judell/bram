@@ -7925,6 +7925,11 @@ pub fn run() {
                         Err(RecvTimeoutError::Timeout) => continue,
                         Err(RecvTimeoutError::Disconnected) => break,
                     };
+                    let in_ignored_dir = |p: &std::path::Path| {
+                        let igs = [".git", "target", "node_modules", "resources"];
+                        p.components()
+                            .any(|c| igs.iter().any(|ig| c.as_os_str() == *ig))
+                    };
 
                     // [watcher] trace: one record per path per notify
                     // event, before any dispatch. Logs project-relative
@@ -7942,6 +7947,9 @@ pub fn run() {
                     if bram_trace_enabled() {
                         let change = notify_event_kind_label(&event.kind);
                         for p in &event.paths {
+                            if p.starts_with(&proj_root_path) && in_ignored_dir(p) {
+                                continue;
+                            }
                             let rel = p
                                 .strip_prefix(&proj_root_path)
                                 .ok()
@@ -8071,11 +8079,6 @@ pub fn run() {
                     // not in the standard ignored directories. Commits
                     // refetches its log. Noisier than the others but
                     // bounded by the watcher's existing 100ms debounce.
-                    let in_ignored_dir = |p: &std::path::Path| {
-                        let igs = [".git", "target", "node_modules", "resources"];
-                        p.components()
-                            .any(|c| igs.iter().any(|ig| c.as_os_str() == *ig))
-                    };
                     let is_git_status_event = event.paths.iter().any(|p| {
                         p.starts_with(&proj_root_path) && !in_ignored_dir(p)
                     });
@@ -8123,11 +8126,8 @@ pub fn run() {
                     // Skip events whose paths are entirely inside noisy or
                     // data-only directories. resources/ is data the DataSource
                     // polls; target/, .git/, node_modules/ are build/VCS noise.
-                    let ignored = ["resources", "target", ".git", "node_modules"];
                     if event.paths.iter().all(|p| {
-                        p.components().any(|c| {
-                            ignored.iter().any(|ig| c.as_os_str() == *ig)
-                        })
+                        p.starts_with(&proj_root_path) && in_ignored_dir(p)
                     }) {
                         continue;
                     }

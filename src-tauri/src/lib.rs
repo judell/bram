@@ -754,7 +754,7 @@ static PTY_MENU_SUPPRESSED: OnceLock<Mutex<Option<(String, std::time::Instant)>>
 // the random port each turn.
 static LOOPBACK_PORT: OnceLock<u16> = OnceLock::new();
 
-#[derive(serde::Serialize, Clone)]
+#[derive(serde::Serialize, Clone, PartialEq, Eq)]
 struct PtyMenu {
     tool: String,
     text: String,
@@ -906,16 +906,15 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
     let mut emit_payload: Option<Option<PtyMenu>> = None;
 
     if let Ok(mut menu) = pty_menu_cell().lock() {
-        let prev_tool = menu.as_ref().map(|m| m.tool.clone());
-        let next_tool = detected.as_ref().map(|m| m.tool.clone());
-        let state_changed = prev_tool != next_tool;
+        let prev_menu = menu.as_ref().cloned();
+        let state_changed = prev_menu.as_ref() != detected.as_ref();
 
-        match (&detected, menu.as_ref()) {
-            (Some(nm), None) => eprintln!("[pty-menu] None -> Some(tool={})", nm.tool),
-            (Some(nm), Some(o)) if o.tool != nm.tool => {
+        match (&prev_menu, &detected) {
+            (None, Some(nm)) => eprintln!("[pty-menu] None -> Some(tool={})", nm.tool),
+            (Some(o), Some(nm)) if o != nm => {
                 eprintln!("[pty-menu] Some(tool={}) -> Some(tool={})", o.tool, nm.tool)
             }
-            (None, Some(o)) => {
+            (Some(o), None) => {
                 eprintln!("[pty-menu] Some(tool={}) -> None (buffer evicted)", o.tool)
             }
             _ => {}
@@ -928,7 +927,7 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
             // pattern out of PTY_TAIL without the user dismissing it.
             // Explicit user dismissals get their own trace from
             // pty_menu_clear with reason=user-input.
-            match (&detected, &prev_tool) {
+            match (&detected, &prev_menu) {
                 (Some(nm), _) => append_bram_trace_line(
                     app,
                     "pty-menu",
@@ -937,7 +936,7 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                 (None, Some(prev)) => append_bram_trace_line(
                     app,
                     "pty-menu",
-                    &format!("state=dismissed tool={} reason=buffer-evicted", prev),
+                    &format!("state=dismissed tool={} reason=buffer-evicted", prev.tool),
                 ),
                 _ => {}
             }
@@ -946,10 +945,10 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
         *menu = detected;
 
         if state_changed {
-            // The bottom line of the demo: emit only when the *visible*
-            // state flips (presence, or tool identity). Skip the every-
-            // chunk "same tool, refreshed text" case — subscribers don't
-            // need a re-render for a stable menu.
+            // Emit only when the menu payload actually changes. This
+            // suppresses identical repeated detections for a stable menu
+            // while still allowing meaningful same-tool payload changes
+            // to propagate to subscribers.
             emit_payload = Some(menu.clone());
         }
     }

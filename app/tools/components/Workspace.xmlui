@@ -18,7 +18,8 @@
   var.actionHelpFor="{null}"
   var.newItemHelp="{false}"
   var.newItemIssue="{null}"
-  var.newItemText="{''}">
+  var.newItemText="{''}"
+  var.pendingMenu="{null}">
   <DataSource
     id="sessionTail"
     url="/__sessions/latest-tail?lines=200&amp;t={sessionTick}"
@@ -198,6 +199,19 @@
           feedbackExpanded = false; expandedItemId = null;
           history.refetch();
         }).then((unlisten) => { window.__bramAgentTurnEndUnlisten = unlisten; }).catch(() => {});
+
+        // Issue #75 step 1: mirror the Transcript tab's pty-menu-changed
+        // listener so the menu render below this onInit responds to the
+        // same host signal both tabs already subscribe to. Same hot
+        // -reload unlisten dance as the two listeners above.
+        if (typeof window.__bramPtyMenuUnlisten === 'function') {
+          try { window.__bramPtyMenuUnlisten(); } catch (err) {}
+          window.__bramPtyMenuUnlisten = null;
+        }
+        tauri.event.listen('pty-menu-changed', (e) => {
+          pendingMenu = e &amp;&amp; e.payload ? e.payload : null;
+          iframeTrace('listener-fired', {context: 'pty-menu-changed', tool: (pendingMenu &amp;&amp; pendingMenu.tool) || ''});
+        }).then((unlisten) => { window.__bramPtyMenuUnlisten = unlisten; }).catch(() => {});
       }
     })()">
     <VStack gap="$space-3" when="{worklist.value}">
@@ -209,6 +223,22 @@
             size="xs"
             onClick="newItemHelp = true" />
         </HStack>
+        <VStack
+          when="{pendingMenu}"
+          gap="$space-2"
+          padding="$space-3"
+          borderRadius="$borderRadius"
+          border="1px solid $color-warn-200"
+          backgroundColor="$color-warn-50">
+          <Text fontSize="$fontSize-sm" color="$color-warn-800">
+            Agent wants to use <Text fontFamily="$fontFamily-monospace" inline="true">{pendingMenu.tool}</Text>
+          </Text>
+          <HStack gap="$space-2" wrapContent="true">
+            <Button label="1. Yes" variant="outlined" size="sm" onClick="sendKeys('1\r')" />
+            <Button label="2. Yes, allow and don't ask again" variant="outlined" size="sm" onClick="sendKeys('2\r')" />
+            <Button label="3. No, and tell agent what to do" variant="outlined" size="sm" onClick="sendKeys('3\r')" />
+          </HStack>
+        </VStack>
         <VStack
           when="{worklist.value.exists && worklist.value.schemaError}"
           gap="$space-2"

@@ -747,6 +747,15 @@ static LIVE_CODEX_SESSION: OnceLock<Mutex<Option<(PathBuf, std::time::SystemTime
 static PTY_TAIL: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
 static PTY_MENU: OnceLock<Mutex<Option<PtyMenu>>> = OnceLock::new();
 static PTY_MENU_SUPPRESSED: OnceLock<Mutex<Option<(String, std::time::Instant)>>> = OnceLock::new();
+// Grace window for the "buffer briefly evicted a still-live menu" case.
+// When `pty_menu_detect` returns None but `PTY_MENU` is currently Some,
+// we defer the dismiss emit for MENU_EVICTION_GRACE_MS and re-check on
+// the next pty_menu_update cycle. Re-detection within the window
+// suppresses both the dismiss and the re-show; grace expiry without
+// re-detection emits the dismiss normally. Refs #77 menu-detector
+// stabilization.
+static PTY_MENU_EVICTION_GRACE: OnceLock<Mutex<Option<std::time::Instant>>> = OnceLock::new();
+const MENU_EVICTION_GRACE_MS: u128 = 350;
 
 // The loopback HTTP server's port, captured at setup. Used to inject
 // XMLUI_DESKTOP_PORT into the PTY child's environment so the agent can
@@ -861,6 +870,10 @@ fn pty_menu_suppressed_cell() -> &'static Mutex<Option<(String, std::time::Insta
     PTY_MENU_SUPPRESSED.get_or_init(|| Mutex::new(None))
 }
 
+fn pty_menu_eviction_grace_cell() -> &'static Mutex<Option<std::time::Instant>> {
+    PTY_MENU_EVICTION_GRACE.get_or_init(|| Mutex::new(None))
+}
+
 // Update the menu detection state with a fresh chunk of PTY output.
 // Maintains a rolling 8KB tail buffer; checks for claude's menu signature
 // ("1. Yes" + "2. Yes" within proximity); transitions PTY_MENU accordingly.
@@ -907,6 +920,49 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
 
     if let Ok(mut menu) = pty_menu_cell().lock() {
         let prev_menu = menu.as_ref().cloned();
+
+        // Sticky-against-eviction guard. If detection returned None but
+        // a menu was previously shown, defer the dismiss emit for up
+        // to MENU_EVICTION_GRACE_MS. Re-detection within the window
+        // suppresses both the dismiss and the re-show — the menu was
+        // just briefly hidden in the rolling buffer behind intervening
+        // TUI noise. The user-input dismissal path (`pty_menu_clear`)
+        // is independent and unaffected. Refs #77 menu-detector
+        // stabilization.
+        if detected.is_none() && prev_menu.is_some() {
+            if let Ok(mut grace) = pty_menu_eviction_grace_cell().lock() {
+                match *grace {
+                    None => {
+                        *grace = Some(std::time::Instant::now());
+                        eprintln!(
+                            "[pty-menu] eviction grace started for tool={}",
+                            prev_menu.as_ref().map(|p| p.tool.as_str()).unwrap_or("?")
+                        );
+                        return;
+                    }
+                    Some(started)
+                        if started.elapsed().as_millis() < MENU_EVICTION_GRACE_MS =>
+                    {
+                        return;
+                    }
+                    Some(started) => {
+                        *grace = None;
+                        eprintln!(
+                            "[pty-menu] eviction grace expired ({}ms); proceeding with dismiss",
+                            started.elapsed().as_millis()
+                        );
+                    }
+                }
+            }
+        } else if detected.is_some() {
+            if let Ok(mut grace) = pty_menu_eviction_grace_cell().lock() {
+                if grace.is_some() {
+                    eprintln!("[pty-menu] eviction grace cleared by re-detection");
+                    *grace = None;
+                }
+            }
+        }
+
         let state_changed = prev_menu.as_ref() != detected.as_ref();
 
         match (&prev_menu, &detected) {
@@ -1044,7 +1100,18 @@ fn pty_menu_detect(tail: &[u8]) -> Option<PtyMenu> {
         let start = pos1.saturating_sub(200);
         let end = (pos2 + 200).min(tail.len());
         let text = String::from_utf8_lossy(&tail[start..end]).into_owned();
-        let tool = pty_menu_guess_tool(&tail[..pos1]);
+        // Prefer parsing the tool name from the menu's own
+        // "Do you want to use X?" header (which lives inside `text`).
+        // Falls back to the pre-menu context grep when the header is
+        // missing or unparseable. The header-parse moves with the menu
+        // through the rolling buffer, so the reported tool name stays
+        // stable across short eviction cycles instead of flipping to
+        // whatever earlier prompt's tool name happens to still be in
+        // the 200-byte pre-context window. Refs #77 menu-detector
+        // stabilization (the 18:52:51Z 31-events-in-one-second burst
+        // with Bash <-> Tool <-> Read flapping).
+        let tool = pty_menu_tool_from_header(&text)
+            .unwrap_or_else(|| pty_menu_guess_tool(&tail[..pos1]));
         Some(PtyMenu { tool, text })
     })();
 
@@ -1086,6 +1153,28 @@ fn pty_menu_detect(tail: &[u8]) -> Option<PtyMenu> {
     result
 }
 
+// Extract the tool name from a "Do you want to use X?" prompt header
+// inside the captured menu text. Returns None when the header is absent
+// or unparseable so the caller can fall back to pre-menu context grep.
+// The token after "use " is read up to the first non-name character;
+// covers `Bash`, `Edit`, `Write`, `MultiEdit`, `Read`, `mcp__foo__bar`,
+// `WebFetch`, etc. Trailing punctuation (`?`, `,`, whitespace) is not
+// captured. Refs #77 menu-detector stabilization.
+fn pty_menu_tool_from_header(text: &str) -> Option<String> {
+    let needle = "Do you want to use ";
+    let start = text.find(needle)? + needle.len();
+    let rest = &text[start..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '.' && c != '-')
+        .unwrap_or(rest.len());
+    let tok = &rest[..end];
+    if tok.is_empty() {
+        None
+    } else {
+        Some(tok.to_string())
+    }
+}
+
 fn pty_menu_guess_tool(context: &[u8]) -> String {
     let s = String::from_utf8_lossy(context);
     for tool in &[
@@ -1125,6 +1214,10 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>) {
     // PTY output can re-fire the detector after this point.
     if let Ok(mut tail) = pty_tail_cell().lock() {
         tail.clear();
+    }
+    // User dismissal supersedes any pending eviction-grace deferral.
+    if let Ok(mut grace) = pty_menu_eviction_grace_cell().lock() {
+        *grace = None;
     }
     if let Some(tool) = dismissed_tool {
         eprintln!(

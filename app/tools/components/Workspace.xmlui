@@ -172,6 +172,23 @@
           // Same 750ms grace as the agent-idle path: skip stale
           // inflight records from the very first ticks after a click.
           if (elapsed < 750) return;
+          // PTY silence alone is unreliable: Claude pauses its spinner
+          // while a permission prompt is up, and Codex pauses spinner
+          // activity between tool calls. The PTY detector emits
+          // `agent-turn-end` in both of those mid-turn pauses. Treat
+          // the PTY signal as a fast trigger to recheck JSONL —
+          // corroborate against the stop_reason / task_complete signal
+          // before clearing. The cross-check is in-memory (~1 ms); when
+          // it fails, the forced sessionTick increment below skips the
+          // watcher's debounce so the recheck happens within ~50 ms.
+          if (!isAgentIdle(lastJsonl)) {
+            iframeTrace('inflight-clear-suppressed', {reason: 'jsonl-not-idle', elapsed_ms: elapsed, item: submittedItemId || ''});
+            // Force a JSONL refetch in case the watcher event hasn't
+            // fired yet — the resulting ChangeListener invocation will
+            // clear if JSONL is now idle, or stay quiet otherwise.
+            sessionTick = sessionTick + 1;
+            return;
+          }
           iframeTrace('inflight-clear', {reason: 'turn-end-pty', elapsed_ms: elapsed, item: submittedItemId || ''});
           clearInflight();
           submitting = false;

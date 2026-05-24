@@ -135,7 +135,7 @@
   </ModalDialog>
 
   <VStack padding="$space-6" gap="$space-3"
-    onInit="(() => { const tauri = (window.parent &amp;&amp; window.parent.__TAURI__) || window.__TAURI__; if (tauri &amp;&amp; tauri.event &amp;&amp; tauri.event.listen) { tauri.event.listen('talk-session-changed', () => { sessionTick = sessionTick + 1; }); tauri.event.listen('pty-menu-changed', (e) => { pendingMenu = e &amp;&amp; e.payload ? e.payload : null; }); } })(); try { logToHost({ kind: 'transcript-mount', at: new Date().toISOString() }) } catch (e) {}">
+    onInit="(() => { const tauri = (window.parent &amp;&amp; window.parent.__TAURI__) || window.__TAURI__; if (tauri &amp;&amp; tauri.event &amp;&amp; tauri.event.listen) { if (typeof window.__bramTranscriptSessionUnlisten === 'function') { try { window.__bramTranscriptSessionUnlisten(); } catch (err) {} window.__bramTranscriptSessionUnlisten = null; } tauri.event.listen('talk-session-changed', () => { sessionTick = sessionTick + 1; }).then((unlisten) => { window.__bramTranscriptSessionUnlisten = unlisten; }).catch(() => {}); if (typeof window.__bramTranscriptPtyMenuUnlisten === 'function') { try { window.__bramTranscriptPtyMenuUnlisten(); } catch (err) {} window.__bramTranscriptPtyMenuUnlisten = null; } tauri.event.listen('pty-menu-changed', (e) => { pendingMenu = e &amp;&amp; e.payload ? e.payload : null; }).then((unlisten) => { window.__bramTranscriptPtyMenuUnlisten = unlisten; }).catch(() => {}); } })(); try { logToHost({ kind: 'transcript-mount', at: new Date().toISOString() }) } catch (e) {}">
     <StickyBox to="top">
       <HStack gap="$space-3" verticalAlignment="center" paddingVertical="$space-2">
         <Heading level="h2">Transcript</Heading>

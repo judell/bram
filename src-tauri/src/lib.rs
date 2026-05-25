@@ -8426,6 +8426,15 @@ pub fn run() {
                 // instead of N). Other channels stay immediate.
                 let tools_debounce = Duration::from_millis(500);
                 let mut pending_tools_since: Option<Instant> = None;
+                // Debounce worklist-changed emits: notify-rs produces ~6
+                // events per atomic rename + modify of worklist.json
+                // (and worklist-history snapshots), and the iframe's
+                // worklist-changed listener triggers /__worklist and
+                // /__worklist-history/list refetches per event. A 200ms
+                // debounce coalesces the cascade into one emit per
+                // logical change. Refs #85.
+                let worklist_debounce = Duration::from_millis(200);
+                let mut pending_worklist_since: Option<Instant> = None;
                 use std::sync::mpsc::RecvTimeoutError;
                 loop {
                     let res = rx.recv_timeout(Duration::from_millis(100));
@@ -8438,6 +8447,14 @@ pub fn run() {
                             trace_emit_signal(&app_handle, "tools-pane-reload");
                             let _ = app_handle.emit("tools-pane-reload", ());
                             pending_tools_since = None;
+                        }
+                    }
+                    if let Some(since) = pending_worklist_since {
+                        if since.elapsed() >= worklist_debounce {
+                            eprintln!("[watcher] change detected, emitting worklist-changed (debounced)");
+                            trace_emit_signal(&app_handle, "worklist-changed");
+                            let _ = app_handle.emit("worklist-changed", ());
+                            pending_worklist_since = None;
                         }
                     }
                     let event = match res {
@@ -8601,8 +8618,12 @@ pub fn run() {
                         in_resources && (file == "worklist.json" || in_history)
                     });
                     if is_worklist_change {
-                        trace_emit_signal(&app_handle, "worklist-changed");
-                        let _ = app_handle.emit("worklist-changed", ());
+                        // Defer the emit; pending_worklist_since either
+                        // starts a fresh 200 ms window or rolls forward
+                        // on a continuing burst. The loop's wake check
+                        // above drains it when the window elapses. Refs
+                        // #85 worklist-watcher-debounce.
+                        pending_worklist_since = Some(Instant::now());
                     }
 
                     // Auto-advance proposed→applied when an authorized write

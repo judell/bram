@@ -522,7 +522,7 @@ fn append_bram_trace_line<R: tauri::Runtime>(app: &AppHandle<R>, category: &str,
         let _ = writeln!(
             file,
             "[{}] [bram-trace] event=session-start pid={}",
-            format_iso_utc(unix_now_ms()),
+            format_iso_utc_ms(unix_now_ms()),
             std::process::id()
         );
         *guard = Some(file);
@@ -531,7 +531,7 @@ fn append_bram_trace_line<R: tauri::Runtime>(app: &AppHandle<R>, category: &str,
         let _ = writeln!(
             file,
             "[{}] [{}] {}",
-            format_iso_utc(unix_now_ms()),
+            format_iso_utc_ms(unix_now_ms()),
             category,
             body
         );
@@ -5830,6 +5830,20 @@ fn format_iso_utc(ms: i64) -> String {
     let s = secs_of_day % 60;
     let (y, mo, d) = civil_from_days(days);
     format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo, d, h, m, s)
+}
+
+// Millisecond-precision variant for bram-trace lines, where sub-second
+// alignment with inspector trace `ts` fields matters.
+fn format_iso_utc_ms(ms: i64) -> String {
+    let secs = ms / 1000;
+    let sub = ms.rem_euclid(1000);
+    let days = secs.div_euclid(86400);
+    let secs_of_day = secs.rem_euclid(86400);
+    let h = secs_of_day / 3600;
+    let m = secs_of_day % 3600 / 60;
+    let s = secs_of_day % 60;
+    let (y, mo, d) = civil_from_days(days);
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z", y, mo, d, h, m, s, sub)
 }
 
 fn worklist_item_id(item: &serde_json::Value) -> Option<String> {

@@ -373,6 +373,32 @@ commit truly resolves an issue, and a regex over `before` / `after`
 has false positives on cross-references. Set `closesIssues`
 explicitly when warranted; leave it off otherwise.
 
+### Choosing an id
+
+When an item is clearly derived from a single GitHub issue, prefix
+the id with `issue-<N>-` where `<N>` is the issue number, followed
+by a short descriptive slug. Examples:
+
+- `issue-86-pty-intent-relay`
+- `issue-91-defer-sentinel-clear`
+- `issue-92-feedback-panel`
+
+Skip the prefix when there's no clean 1:1 issue mapping —
+exploratory items, cross-cutting refactors, or items that touch
+multiple issues. Use a bare descriptive slug as today
+(`worklist-drafts-separate-prose-from-metadata`,
+`issues-search-include-comments`).
+
+The prefix complements `closesIssues: [{number: <N>, title: "..."}]`
+rather than replacing it: the id signal is for human scanning of
+the Worklist tab list / `git log` / chat references, the
+`closesIssues` field is for the close-on-commit dialog and the
+structured authorization payload. Pair them when both apply.
+
+Existing items keep their names — not retroactive. Renaming would
+break commit-message back-references and chat history for marginal
+benefit.
+
 ### Refer to items by id, not by ordinal
 
 When you mention worklist items in chat, name them by their `id`

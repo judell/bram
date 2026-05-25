@@ -563,6 +563,152 @@ proposed→applied status flips. Item content edits (new proposals,
 prose revisions on iterate) still go through `Write` / `Edit` — the
 endpoint is only for the mechanical mutations enumerated above.
 
+## Host-managed inflight sentinel
+
+The Worklist tab's spinner state derives from a single on-disk
+file, `resources/.inflight-claim.json`, written and cleared by
+host-side HTTP handlers. This replaces the earlier iframe-side
+heuristic chain (agent-turn-end listener + debounce Timer + JSONL
+ChangeListener + 60 s stale-timeout + item-gone path), which
+accumulated false-clears, premature-clears, and silent
+inconsistencies as the system grew. The sentinel is authoritative:
+spinner is up while the file claims the targeted item, off when it
+doesn't.
+
+### The sentinel file
+
+Path: `resources/.inflight-claim.json`. Shape:
+
+```json
+{
+  "ids": ["item-id-1", "item-id-2"],
+  "claimedAt": 1779660000000,
+  "kind": "approved"
+}
+```
+
+`kind` is one of `"approved"`, `"drop"`, `"iterate"`. `claimedAt`
+is Unix milliseconds at write time. `ids` are the targeted
+worklist item ids for this cycle.
+
+Invariants: the file is either absent or contains valid JSON with
+all three fields. Writes are atomic via `.tmp` + rename. Writes
+are serialized at the host (single-process; no concurrent writes
+in practice).
+
+### Lifecycle by kind
+
+- **`approved`**: written when `GET /__worklist/resolve` serves a
+  record with `kind: "approved"`. Cleared when `POST /__worklist
+  /mutate` succeeds for `op:"advance"` or `op:"prune"` covering
+  all claimed ids.
+- **`drop`**: written when `GET /__worklist/resolve` serves a
+  record with `kind: "drop"`. Cleared by the matching `/__worklist
+  /mutate prune`.
+- **`iterate`**: written when the agent calls `POST /__iterate
+  /begin`. Cleared when the agent calls `POST /__iterate/end` with
+  the same ids.
+
+The `clear` step is a no-op if the supplied ids don't fully cover
+what's currently claimed. Partial coverage leaves the sentinel in
+place — a deliberate diagnostic signal.
+
+### Stale-claim handling
+
+The sentinel does NOT time out during a live session. A long-lived
+claim is the convention enforcement mechanism: stuck spinner =
+stuck claim = something to investigate (most commonly an agent
+contract violation, see the failure-modes section below).
+
+On Bram startup, any sentinel left over from a prior session is
+deleted by `cleanup_stale_inflight_claim`. A Bram restart is the
+only automatic stale-cleanup path.
+
+### HTTP routes
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/__inflight` | GET | Returns the sentinel content or `{}`. Iframe's `inflightClaim` DataSource consumes this. |
+| `/__iterate/begin` | POST | Body `{"ids":["..."]}`. Writes sentinel with `kind:"iterate"`. Returns `{"ok":true}`. |
+| `/__iterate/end` | POST | Body `{"ids":["..."]}`. Clears sentinel if it fully covers the ids. Returns `{"ok":true}`. |
+
+Side-effect writes from existing routes:
+
+- `GET /__worklist/resolve` writes the sentinel as a side effect
+  of consuming a `kind: "approved"` or `"drop"` auth record.
+- `POST /__worklist/mutate` clears the sentinel as a side effect
+  of a successful advance or prune.
+
+### Tauri event
+
+`inflight-claim-changed` — emitted from inside each of the three
+host helpers (`write_inflight_claim_sentinel`,
+`clear_inflight_claim_sentinel`, `cleanup_stale_inflight_claim`)
+after the file write or delete completes. Payload is empty;
+subscribers refetch `/__inflight` to get the new state.
+
+The iframe's `Workspace.xmlui` listens for this and bumps a tick
+var that forces the `inflightClaim` DataSource to refetch. The
+DataSource's `onLoaded` clears localStorage when the sentinel no
+longer claims the targeted item.
+
+### Iterate-begin / iterate-end agent convention
+
+Cross-link: see the **Iterate (N)** subsection in the worklist
+conventions above (search for "Iterate cycles must bracket"). The
+short version: when receiving an `iterate: {...}` payload, the
+agent's first action MUST be a curl to `/__iterate/begin`, and the
+last action before ending the turn MUST be the matching
+`/__iterate/end`. The host's resolve/mutate handlers cover
+approved/drop cycles automatically; only iterate requires explicit
+agent action.
+
+### Trace categories
+
+A complete cycle produces this sequence in `resources/bram-trace.log`:
+
+```
+[inflight-sentinel] op=write kind=<approved|drop|iterate> ids=[...]
+[emit] kind=inflight-claim-changed payload_size=0
+[iframe] subkind=listener-fired context=inflight-claim-changed
+... (agent does work) ...
+[inflight-sentinel] op=clear ids=[...]
+[emit] kind=inflight-claim-changed payload_size=0
+[iframe] subkind=listener-fired context=inflight-claim-changed
+[iframe] subkind=inflight-clear reason=sentinel-cleared
+```
+
+Other trace lines specific to this mechanism:
+
+- `[inflight-sentinel] op=stale-startup-clear` — startup found a
+  leftover sentinel and deleted it.
+
+### Failure modes
+
+**Spinner stuck for an approved/drop item.** Means `/__worklist
+/mutate` was never called for the targeted ids. The agent either
+finished without calling mutate (forgot, errored out, or a
+provider-specific contract violation — see #60), or mutate
+returned an error and the agent didn't retry. Recovery: agent
+calls mutate manually for those ids, or restart Bram (the startup
+cleanup deletes the stale claim).
+
+**Spinner stuck for an iterate cycle.** Means `/__iterate/end`
+was never called. The convention requires it as the agent's last
+action of the response; missing the call is a convention
+violation. Same recovery as above. If you (a future agent) see
+this in your own past trace, the lesson is to bracket every
+iterate response religiously — `begin` first, `end` last,
+regardless of how trivial the iterate body is.
+
+**Spinner clears prematurely.** Should be structurally impossible
+post-#84 — no iframe-side heuristic infers "agent done" from
+indirect signals anymore. If observed: grep `[inflight-sentinel]`
+in the trace for the cycle. The clear came from a host-side
+trigger (mutate, end, or stale-cleanup). Most likely a coverage
+bug in `clear_inflight_claim_sentinel` (full-coverage check is
+wrong) or the agent called end/mutate prematurely.
+
 ## Right-pane helpers (opt-in, only needed for project-side hooks)
 
 The Worklist and Sessions tabs in the agent tools drawer already use

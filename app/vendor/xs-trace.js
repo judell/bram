@@ -23,6 +23,13 @@
  *
  * Entries appear in the xs-diff.html inspector timeline alongside
  * engine-generated handler:start/complete and api:start/complete entries.
+ *
+ * Every entry carries both `perfTs` (performance.now milliseconds since
+ * iframe load) and `ts` (Date.now Unix milliseconds wall-clock). The
+ * wall-clock timestamp matches the `ts` field engine-emitted records
+ * already carry, so app:trace records can be merged with engine traces
+ * AND with external host-side logs (Tauri logs, server-side traces,
+ * etc.) without computing a per-iframe-lifetime perfTs→wall offset.
  */
 (function () {
   function getTraceId() {
@@ -34,6 +41,7 @@
     var logs = window._xsLogs;
     if (!logs) return fn();
     var start = performance.now();
+    var ts = Date.now();
     var result = fn();
     var duration = performance.now() - start;
     logs.push({
@@ -41,6 +49,7 @@
       label: label,
       traceId: getTraceId(),
       perfTs: start,
+      ts: ts,
       duration: duration,
     });
     return result;
@@ -55,6 +64,7 @@
       data: data,
       traceId: getTraceId(),
       perfTs: performance.now(),
+      ts: Date.now(),
     });
   };
 
@@ -62,6 +72,7 @@
     var logs = window._xsLogs;
     if (!logs) return fn();
     var start = performance.now();
+    var ts = Date.now();
     var result = fn();
     var duration = performance.now() - start;
     var data = typeof extractData === "function" ? extractData(result) : undefined;
@@ -71,6 +82,7 @@
       data: data,
       traceId: getTraceId(),
       perfTs: start,
+      ts: ts,
       duration: duration,
     });
     return result;

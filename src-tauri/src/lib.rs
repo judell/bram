@@ -5533,6 +5533,8 @@ fn write_inflight_claim_sentinel<R: tauri::Runtime>(
             ),
         );
     }
+    trace_emit_signal(app, "inflight-claim-changed");
+    let _ = app.emit("inflight-claim-changed", ());
 }
 
 // Clear the inflight sentinel (#84). Conditions: a sentinel exists,
@@ -5583,6 +5585,8 @@ fn clear_inflight_claim_sentinel<R: tauri::Runtime>(
             ),
         );
     }
+    trace_emit_signal(app, "inflight-claim-changed");
+    let _ = app.emit("inflight-claim-changed", ());
 }
 
 // Startup cleanup. Removes any stale inflight sentinel from a prior
@@ -5599,6 +5603,8 @@ fn cleanup_stale_inflight_claim<R: tauri::Runtime>(app: &AppHandle<R>) {
     if bram_trace_enabled() {
         append_bram_trace_line(app, "inflight-sentinel", "op=stale-startup-clear");
     }
+    trace_emit_signal(app, "inflight-claim-changed");
+    let _ = app.emit("inflight-claim-changed", ());
 }
 
 fn empty_worklist_json() -> &'static str {
@@ -7302,6 +7308,19 @@ fn route_request<R: tauri::Runtime>(
             consume_worklist_authorization(app);
         }
         return (200, "application/json; charset=utf-8", body);
+    }
+
+    // /__inflight — host-managed inflight sentinel (#84). Returns the
+    // contents of resources/.inflight-claim.json or `{}` if no claim is
+    // active. The iframe refetches this on receipt of the
+    // `inflight-claim-changed` Tauri event and derives spinner state
+    // from the response (`ids` array, `kind`, `claimedAt`).
+    if path == "__inflight" {
+        let body = match inflight_claim_file(app) {
+            Some(p) => std::fs::read_to_string(&p).unwrap_or_else(|_| "{}".to_string()),
+            None => "{}".to_string(),
+        };
+        return (200, "application/json; charset=utf-8", body.into_bytes());
     }
 
     // /__git-diff?path=<file> — plain text `git diff -- <path>` output.

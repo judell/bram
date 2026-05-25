@@ -20,7 +20,7 @@
   var.newItemIssue="{null}"
   var.newItemText="{''}"
   var.pendingMenu="{null}"
-  var.pendingClearAt="{0}">
+  var.inflightTick="{0}">
   <DataSource
     id="sessionTail"
     url="/__sessions/latest-tail?lines=200&amp;t={sessionTick}"
@@ -28,39 +28,11 @@
   <ChangeListener
     listenTo="{sessionTail.value}"
     onDidChange="(c) => {
+      // Update lastJsonl for the lastAssistantText rendering below.
+      // Inflight-clear logic moved to inflightClaim's onLoaded (#84
+      // item 3) — the host-managed sentinel is now the authoritative
+      // spinner signal.
       if (c.newValue) lastJsonl = c.newValue;
-      // Cancel any pending deferred inflight-clear: a JSONL write
-      // arrived inside the quiet window, so the prior agent-turn-end
-      // was either premature or the agent is still working. Setting
-      // pendingClearAt to 0 flips the quietDebounce Timer's `enabled`
-      // binding off, and the onTick guard exits if it does fire.
-      // Refs #80 inflight-clear-jsonl-quiet-debounce.
-      if (pendingClearAt > 0) {
-        iframeTrace('inflight-clear-deferred-cancelled', {reason: 'jsonl-write', remaining_ms: pendingClearAt - Date.now()});
-        pendingClearAt = 0;
-      }
-      // Reactive turn-done fallback: every time the session JSONL changes,
-      // clear the dim once the agent's turn has actually ended. The signal
-      // is isAgentIdle (looks for end_turn on Claude or task_complete on
-      // Codex) rather than isWaitingForAssistant (which flips false the
-      // moment the assistant emits any text and would undim mid-turn
-      // during narration). The PTY-driven agent-turn-end path is the fast
-      // clear; this JSONL path remains the correctness backstop when PTY
-      // heuristics miss or session delivery wins the race.
-      const stored = getInflight();
-      if (!stored) return;
-      const elapsed = Date.now() - (stored.ts || 0);
-      if (elapsed < 750) return;
-      if (!isAgentIdle(c.newValue)) return;
-      iframeTrace('inflight-clear', {reason: 'agent-idle', elapsed_ms: elapsed, item: submittedItemId || ''});
-      clearInflight();
-      submitting = false;
-      selected = null;
-      submittedItemId = null;
-      selectedFeedback = '';
-      feedbackExpanded = false; expandedItemId = null;
-      worklist.refetch();
-      history.refetch();
     }" />
   <DataSource
     id="worklist"
@@ -74,40 +46,10 @@
         .sort()
         .join(',');
       iframeTrace('onLoaded-entered', {sig: sigForTrace, items: items.length, has_inflight: !!stored, stored_ids: (stored && stored.ids) || '', targeted: (stored && stored.targeted) || ''});
-      if (stored) {
-        // Primary clear path: the targeted item is no longer in the
-        // list (pruned after drop, or pruned after commit). Does NOT
-        // fire on proposed→applied advance — the item is still in the
-        // list with a new status, and the user still owes a TO COMMIT
-        // click. See #68 / fix-premature-inflight-clear-68.
-        if (stored.targeted && !items.some(i => i.id === stored.targeted)) {
-          iframeTrace('inflight-clear', {reason: 'item-gone', item: stored.targeted, sig: sigForTrace, stored_ids: stored.ids || ''});
-          clearInflight();
-          submitting = false;
-          if (selected && !items.some(i => i.id === selected)) selected = null;
-          submittedItemId = null;
-          selectedFeedback = '';
-          feedbackExpanded = false; expandedItemId = null;
-          return;
-        }
-        // 60s stale-timeout safety net for cases where the agent-idle
-        // ChangeListener never fires (chain breakage, no-op iterates
-        // that don't end with a clean `stop_reason: end_turn`, or
-        // agent crashes). Long enough to outlast any reasonable
-        // agent response — a previous attempt at 10s false-cleared
-        // mid-response, and the previous 180s was way too long to
-        // wait when the chain genuinely breaks.
-        if (Date.now() - (stored.ts || 0) > 60000) {
-          iframeTrace('inflight-clear', {reason: 'stale-timeout', elapsed_ms: Date.now() - (stored.ts || 0), item: submittedItemId || ''});
-          clearInflight();
-          submitting = false;
-          selected = null;
-          submittedItemId = null;
-          selectedFeedback = '';
-          feedbackExpanded = false; expandedItemId = null;
-          return;
-        }
-      }
+      // Inflight-clear paths previously living here (item-gone,
+      // stale-timeout) moved to inflightClaim's onLoaded (#84 item 3).
+      // The host-managed sentinel is the authoritative spinner signal
+      // now; this onLoaded just tracks selection state.
       if (selected && !items.some(i => i.id === selected)) selected = null;
       const currentSig = items.filter(i => i && i.id).map(i => i.id + ':' + (i.status || 'proposed')).sort().join(',');
       if (lastWorklistSig && currentSig !== lastWorklistSig) {
@@ -124,37 +66,41 @@
     id="openIssues"
     url="/__issues"
     when="{newItemHelp}" />
-  <!-- Quiet-debounce Timer for the agent-turn-end → inflight clear path.
-       The agent-turn-end listener sets pendingClearAt to (now + 1500 ms)
-       when JSONL doesn't yet show end_turn. The Timer polls every 200 ms
-       while pendingClearAt > 0; once Date.now() reaches pendingClearAt,
-       it fires the clear. A JSONL write inside the window resets
-       pendingClearAt to 0, which both disables the Timer and short
-       -circuits the onTick guard. Refs #80
-       inflight-clear-jsonl-quiet-debounce. -->
-  <Timer
-    id="quietDebounce"
-    initialDelay="0"
-    interval="200"
-    enabled="{pendingClearAt > 0}"
-    onTick="
-      if (pendingClearAt === 0) return;
-      if (Date.now() < pendingClearAt) return;
+  <!-- Sentinel-derived inflight consumer (#84 item 3). The host writes
+       resources/.inflight-claim.json on /__worklist/resolve (approved
+       / drop) and /__iterate/begin; it clears the file on
+       /__worklist/mutate and /__iterate/end. Each write/clear emits
+       the `inflight-claim-changed` Tauri event, which bumps
+       inflightTick below and forces this DataSource to refetch. When
+       the sentinel no longer claims the targeted item, the onLoaded
+       handler clears localStorage and resets per-cycle state.
+       Replaces the prior heuristic clear paths (agent-turn-end
+       listener, quietDebounce Timer, JSONL agent-idle, item-gone,
+       60 s stale-timeout). -->
+  <DataSource
+    id="inflightClaim"
+    url="/__inflight?t={inflightTick}"
+    onLoaded="(data) => {
+      const claimIds = (data &amp;&amp; data.ids) || [];
       const stored = getInflight();
-      if (!stored) {
-        pendingClearAt = 0;
-        return;
+      if (!stored) return;
+      // 750 ms post-click grace: covers the window between markInflight
+      // (immediate, on click) and the host writing the sentinel (after
+      // the resolve or begin call lands). Without this, the initial
+      // empty sentinel response would clear localStorage prematurely.
+      const elapsed = Date.now() - (stored.ts || 0);
+      if (elapsed < 750) return;
+      if (claimIds.length === 0 || !claimIds.includes(stored.targeted)) {
+        iframeTrace('inflight-clear', {reason: 'sentinel-cleared', elapsed_ms: elapsed, item: submittedItemId || ''});
+        clearInflight();
+        submitting = false;
+        selected = null;
+        submittedItemId = null;
+        selectedFeedback = '';
+        feedbackExpanded = false; expandedItemId = null;
+        history.refetch();
       }
-      iframeTrace('inflight-clear', {reason: 'turn-end-pty-quiet', elapsed_ms: Date.now() - (stored.ts || 0), item: submittedItemId || ''});
-      clearInflight();
-      pendingClearAt = 0;
-      submitting = false;
-      selected = null;
-      submittedItemId = null;
-      selectedFeedback = '';
-      feedbackExpanded = false; expandedItemId = null;
-      history.refetch();
-    " />
+    }" />
 
   <VStack
     padding="$space-6"
@@ -198,56 +144,21 @@
           history.refetch();
         }).then((unlisten) => { window.__bramWorklistUnlisten = unlisten; }).catch(() => {});
 
-        // Issue #70 / #74: fast end-of-turn detection from PTY bytes,
-        // bypassing the multi-second JSONL flush chain. Host emits
-        // agent-turn-end when PTY turn activity stops for ~800ms;
-        // iframe clears inflight on receipt. Same hot-reload unlisten
-        // dance as worklist-changed above.
-        if (typeof window.__bramAgentTurnEndUnlisten === 'function') {
-          try { window.__bramAgentTurnEndUnlisten(); } catch (err) {}
-          window.__bramAgentTurnEndUnlisten = null;
+        // #84 item 3: subscribe to `inflight-claim-changed` from the
+        // host. Each event bumps inflightTick, which forces the
+        // inflightClaim DataSource to refetch /__inflight. The
+        // DataSource's onLoaded handler observes the sentinel and
+        // clears localStorage when the targeted item is no longer
+        // claimed. Replaces the prior agent-turn-end listener and
+        // its heuristic chain.
+        if (typeof window.__bramInflightClaimUnlisten === 'function') {
+          try { window.__bramInflightClaimUnlisten(); } catch (err) {}
+          window.__bramInflightClaimUnlisten = null;
         }
-        tauri.event.listen('agent-turn-end', () => {
-          iframeTrace('listener-fired', {context: 'agent-turn-end'});
-          const stored = getInflight();
-          if (!stored) return;
-          const elapsed = Date.now() - (stored.ts || 0);
-          // Same 750ms grace as the agent-idle path: skip stale
-          // inflight records from the very first ticks after a click.
-          if (elapsed < 750) return;
-          // Fast path: JSONL already shows stop_reason=end_turn (or
-          // task_complete on Codex). The agent is confirmed idle —
-          // clear immediately.
-          if (isAgentIdle(lastJsonl)) {
-            iframeTrace('inflight-clear', {reason: 'turn-end-pty', elapsed_ms: elapsed, item: submittedItemId || ''});
-            clearInflight();
-            submitting = false;
-            selected = null;
-            submittedItemId = null;
-            selectedFeedback = '';
-            feedbackExpanded = false; expandedItemId = null;
-            history.refetch();
-            return;
-          }
-          // JSONL doesn't yet show end_turn. Two possibilities:
-          //
-          //   (a) PTY spinner stopped before Claude's end_turn record
-          //       flushed — the clear is right, we just need to wait.
-          //   (b) PTY spinner stopped during a mid-turn pause (#78
-          //       premature fire) — the clear would be wrong, agent
-          //       will resume and JSONL will keep growing.
-          //
-          // Defer the clear by setting pendingClearAt; the quietDebounce
-          // Timer below polls and fires the clear once Date.now() reaches
-          // pendingClearAt. If a JSONL write arrives inside the quiet
-          // window, the sessionTail ChangeListener resets pendingClearAt
-          // to 0, which both disables the Timer and short-circuits the
-          // onTick guard. Refs #80 inflight-clear-jsonl-quiet-debounce,
-          // supersedes the prior synchronous `jsonl-not-idle` suppression.
-          const JSONL_QUIET_DEBOUNCE_MS = 1500;
-          pendingClearAt = Date.now() + JSONL_QUIET_DEBOUNCE_MS;
-          iframeTrace('inflight-clear-deferred', {ms: JSONL_QUIET_DEBOUNCE_MS, elapsed_ms: elapsed});
-        }).then((unlisten) => { window.__bramAgentTurnEndUnlisten = unlisten; }).catch(() => {});
+        tauri.event.listen('inflight-claim-changed', () => {
+          iframeTrace('listener-fired', {context: 'inflight-claim-changed'});
+          inflightTick = inflightTick + 1;
+        }).then((unlisten) => { window.__bramInflightClaimUnlisten = unlisten; }).catch(() => {});
 
         // Issue #75 step 1: mirror the Transcript tab's pty-menu-changed
         // listener so the menu render below this onInit responds to the

@@ -902,3 +902,64 @@ function combineFeedbackWithCloseLines(base, lines) {
   if (!baseTrim) return lines.join('\n');
   return baseTrim + '\n\n' + lines.join('\n');
 }
+
+// xsTrace instrumentation helpers for the Worklist hotspots
+// (`Workspace.xmlui` per-item Approve / Iterate / Drop + closeIssues
+// dialog). Each helper wraps its body in `window.xsTrace` so the
+// inspector trace carries explicit per-call timings keyed by label.
+// The `window.xsTrace ? ... : ...` shape keeps these functions correct
+// in any deploy where the trace library isn't loaded.
+function traceIterateEnabled(submitting, selected, selectedFeedback) {
+  return window.xsTrace
+    ? window.xsTrace('iterate-enabled', function () {
+        return !submitting && !!selected && (selectedFeedback || '').trim().length > 0;
+      })
+    : (!submitting && !!selected && (selectedFeedback || '').trim().length > 0);
+}
+
+function traceApproveDropEnabled(submitting, selected) {
+  return window.xsTrace
+    ? window.xsTrace('approve-drop-enabled', function () {
+        return !submitting && !!selected;
+      })
+    : (!submitting && !!selected);
+}
+
+function buildApprovePayload(items, selectedId, feedback) {
+  const build = function () {
+    return JSON.stringify({
+      items: (items || []).filter(function (i) { return i.id === selectedId; })
+        .map(function (i) { return { id: i.id, hash: i.hash, feedback: feedback }; })
+    });
+  };
+  return window.xsTrace ? window.xsTrace('build-approve-payload', build) : build();
+}
+
+function buildIteratePayload(items, selectedId, feedback) {
+  const build = function () {
+    return JSON.stringify({
+      items: (items || []).filter(function (i) { return i.id === selectedId; })
+        .map(function (i) { return { id: i.id, hash: i.hash, feedback: feedback }; })
+    });
+  };
+  return window.xsTrace ? window.xsTrace('build-iterate-payload', build) : build();
+}
+
+function buildDropPayload(items, selectedId, feedback) {
+  const build = function () {
+    return JSON.stringify({
+      items: (items || []).filter(function (i) { return i.id === selectedId; })
+        .map(function (i) { return { id: i.id, hash: i.hash, feedback: feedback }; })
+    });
+  };
+  return window.xsTrace ? window.xsTrace('build-drop-payload', build) : build();
+}
+
+function buildSingleItemApprovePayload(itemRef, feedback) {
+  const build = function () {
+    return JSON.stringify({
+      items: [{ id: itemRef.id, hash: itemRef.hash, feedback: feedback }]
+    });
+  };
+  return window.xsTrace ? window.xsTrace('build-single-item-approve-payload', build) : build();
+}

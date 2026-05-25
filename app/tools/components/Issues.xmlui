@@ -420,7 +420,7 @@
           rows="2"
           width="*"
           initialValue="{closeComment}"
-          onDidChange="(v) => closeComment = v" />
+          onDidChange="(v) => { debounce(200, (text) => { closeComment = text; }, v); }" />
         <HStack gap="$space-2">
           <Button
             label="Comment"

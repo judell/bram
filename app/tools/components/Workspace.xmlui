@@ -618,7 +618,7 @@ Before you `Approve` a `TO-APPLY` item you can `Iterate` to refine the proposal.
             placeholder="Describe what the item should change"
             rows="4"
             width="*"
-            onDidChange="(v) => newItemText = v" />
+            onDidChange="(v) => { debounce(200, (text) => { newItemText = text; }, v); }" />
           <HStack gap="$space-2">
             <Button
               label="Send"

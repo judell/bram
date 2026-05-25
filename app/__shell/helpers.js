@@ -61,6 +61,37 @@ window._xsLogs = window._xsLogs || [];
   } catch (e) {}
 })();
 
+// Main-thread heartbeat for the drawer iframe. setInterval scheduled
+// every 200ms; if the actual gap exceeds the threshold the main thread
+// was blocked (typically by heavy Markdown re-renders during JSONL
+// cascade — the same condition that delays the inflightClaim
+// DataSource's onLoaded handler). Emits one record per blockage with
+// drift_ms, so a swallowed click can be correlated with main-thread
+// busyness in bram-trace.log. Scoped to the drawer because that's
+// where worklist clicks live; the right pane is a separate iframe with
+// its own load profile.
+(function heartbeat() {
+  if (window.location.pathname.indexOf("/__tools/") === -1) return;
+  var TICK_MS = 200;
+  var DRIFT_THRESHOLD_MS = 500;
+  var last = performance.now();
+  setInterval(function () {
+    var now = performance.now();
+    var drift = now - last - TICK_MS;
+    last = now;
+    if (drift >= DRIFT_THRESHOLD_MS) {
+      try {
+        window.logToHost({
+          kind: "iframe-trace",
+          subkind: "heartbeat-drift",
+          drift_ms: Math.round(drift),
+          at: new Date().toISOString(),
+        });
+      } catch (e) {}
+    }
+  }, TICK_MS);
+})();
+
 window.toShell = function (text) {
   var s = String(text);
   // Trace the entry so #86's "click swallowed" diagnostic flow can

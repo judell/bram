@@ -37,7 +37,7 @@
     }" />
   <ChangeListener
     listenTo="{selectedFeedback}"
-    onDidChange="window.xsTraceEvent &amp;&amp; window.xsTraceEvent('selectedFeedback-written', { len: (selectedFeedback || '').length })" />
+    onDidChange="App.mark('selectedFeedback-written')" />
   <DataSource
     id="worklist"
     url="/__worklist"

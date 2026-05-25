@@ -903,63 +903,53 @@ function combineFeedbackWithCloseLines(base, lines) {
   return baseTrim + '\n\n' + lines.join('\n');
 }
 
-// xsTrace instrumentation helpers for the Worklist hotspots
-// (`Workspace.xmlui` per-item Approve / Iterate / Drop + closeIssues
-// dialog). Each helper wraps its body in `window.xsTrace` so the
-// inspector trace carries explicit per-call timings keyed by label.
-// The `window.xsTrace ? ... : ...` shape keeps these functions correct
-// in any deploy where the trace library isn't loaded.
+// Worklist-hotspot instrumentation helpers (`Workspace.xmlui` per-item
+// Approve / Iterate / Drop + closeIssues dialog). Each helper calls
+// `App.mark(label)` — the xmlui-native, sandbox-safe replacement for
+// the soon-to-be-banned `performance.*` family (see plan #17 step 2.5
+// in the xmlui repo). `App` is spread into xs-script expression scope
+// the same way `formatDate` / `navigate` / etc. are, so these helpers
+// can live alongside the other Globals.xs functions — no separate
+// window-global script needed. App.mark pushes a `kind: "app:mark"`
+// record with `ts` (Unix ms) and `perfTs` to the inspector buffer,
+// directly mergeable with bram-trace.log on the same Unix-ms clock.
 function traceIterateEnabled(submitting, selected, selectedFeedback) {
-  return window.xsTrace
-    ? window.xsTrace('iterate-enabled', function () {
-        return !submitting && !!selected && (selectedFeedback || '').trim().length > 0;
-      })
-    : (!submitting && !!selected && (selectedFeedback || '').trim().length > 0);
+  App.mark('iterate-enabled');
+  return !submitting && !!selected && (selectedFeedback || '').trim().length > 0;
 }
 
 function traceApproveDropEnabled(submitting, selected) {
-  return window.xsTrace
-    ? window.xsTrace('approve-drop-enabled', function () {
-        return !submitting && !!selected;
-      })
-    : (!submitting && !!selected);
+  App.mark('approve-drop-enabled');
+  return !submitting && !!selected;
 }
 
 function buildApprovePayload(items, selectedId, feedback) {
-  const build = function () {
-    return JSON.stringify({
-      items: (items || []).filter(function (i) { return i.id === selectedId; })
-        .map(function (i) { return { id: i.id, hash: i.hash, feedback: feedback }; })
-    });
-  };
-  return window.xsTrace ? window.xsTrace('build-approve-payload', build) : build();
+  App.mark('build-approve-payload');
+  return JSON.stringify({
+    items: (items || []).filter(function (i) { return i.id === selectedId; })
+      .map(function (i) { return { id: i.id, hash: i.hash, feedback: feedback }; })
+  });
 }
 
 function buildIteratePayload(items, selectedId, feedback) {
-  const build = function () {
-    return JSON.stringify({
-      items: (items || []).filter(function (i) { return i.id === selectedId; })
-        .map(function (i) { return { id: i.id, hash: i.hash, feedback: feedback }; })
-    });
-  };
-  return window.xsTrace ? window.xsTrace('build-iterate-payload', build) : build();
+  App.mark('build-iterate-payload');
+  return JSON.stringify({
+    items: (items || []).filter(function (i) { return i.id === selectedId; })
+      .map(function (i) { return { id: i.id, hash: i.hash, feedback: feedback }; })
+  });
 }
 
 function buildDropPayload(items, selectedId, feedback) {
-  const build = function () {
-    return JSON.stringify({
-      items: (items || []).filter(function (i) { return i.id === selectedId; })
-        .map(function (i) { return { id: i.id, hash: i.hash, feedback: feedback }; })
-    });
-  };
-  return window.xsTrace ? window.xsTrace('build-drop-payload', build) : build();
+  App.mark('build-drop-payload');
+  return JSON.stringify({
+    items: (items || []).filter(function (i) { return i.id === selectedId; })
+      .map(function (i) { return { id: i.id, hash: i.hash, feedback: feedback }; })
+  });
 }
 
 function buildSingleItemApprovePayload(itemRef, feedback) {
-  const build = function () {
-    return JSON.stringify({
-      items: [{ id: itemRef.id, hash: itemRef.hash, feedback: feedback }]
-    });
-  };
-  return window.xsTrace ? window.xsTrace('build-single-item-approve-payload', build) : build();
+  App.mark('build-single-item-approve-payload');
+  return JSON.stringify({
+    items: [{ id: itemRef.id, hash: itemRef.hash, feedback: feedback }]
+  });
 }

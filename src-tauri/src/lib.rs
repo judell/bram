@@ -4404,6 +4404,14 @@ prefaced \"I don't yet have enough context to propose\". Mutations \
 outside approved items are blocked at runtime by a PreToolUse hook. \
 Full convention: .claude/xmlui-desktop-conventions.md";
 const WORKLIST_AUTH_REL: &str = "resources/.worklist-authorization.json";
+// Host-managed inflight sentinel (#84). Written when /__worklist/resolve
+// serves an approved or drop record, OR when /__iterate/begin is
+// called. Cleared by /__worklist/mutate (advance/prune covering the
+// claimed ids) or /__iterate/end. The iframe will derive its spinner
+// state from this file once item 3 of the #84 sequence lands; for now
+// the sentinel is informational and verifiable via the
+// [inflight-sentinel] trace.
+const INFLIGHT_CLAIM_REL: &str = "resources/.inflight-claim.json";
 // On Unix, the bare path runs via the script's `#!/usr/bin/env python3`
 // shebang (set executable by run_enhance under #[cfg(unix)]). On Windows
 // there's no shebang resolution and no chmod, so we invoke through the
@@ -5480,6 +5488,117 @@ fn worklist_auth_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> 
 
 fn worklist_history_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
     project_root(Some(app)).map(|p| p.join("resources").join("worklist-history"))
+}
+
+fn inflight_claim_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    project_root(Some(app)).map(|p| p.join(INFLIGHT_CLAIM_REL))
+}
+
+// Write the inflight sentinel (#84). Atomic via .tmp + rename so the
+// file is either absent or contains valid JSON. Caller has verified
+// `ids` is non-empty. `kind` is one of "approved", "drop", "iterate".
+fn write_inflight_claim_sentinel<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    ids: &[String],
+    kind: &str,
+) {
+    let Some(path) = inflight_claim_file(app) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let payload = serde_json::json!({
+        "ids": ids,
+        "claimedAt": unix_now_ms(),
+        "kind": kind,
+    });
+    let body = match serde_json::to_string_pretty(&payload) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, format!("{}\n", body)).is_err() {
+        return;
+    }
+    let _ = std::fs::rename(&tmp, &path);
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "inflight-sentinel",
+            &format!(
+                "op=write kind={} ids={}",
+                kind,
+                serde_json::to_string(ids).unwrap_or_else(|_| "[]".to_string())
+            ),
+        );
+    }
+}
+
+// Clear the inflight sentinel (#84). Conditions: a sentinel exists,
+// AND every id currently claimed is in `mutated_ids`. Partial coverage
+// leaves the sentinel alone — partial completion is a diagnostic
+// signal worth surfacing (stuck spinner = stuck claim once item 3
+// lands).
+fn clear_inflight_claim_sentinel<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    mutated_ids: &[String],
+) {
+    let Some(path) = inflight_claim_file(app) else {
+        return;
+    };
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let claim: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let claimed_ids: Vec<String> = claim
+        .get("ids")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    if claimed_ids.is_empty() {
+        return;
+    }
+    let fully_covered = claimed_ids
+        .iter()
+        .all(|cid| mutated_ids.iter().any(|mid| mid == cid));
+    if !fully_covered {
+        return;
+    }
+    let _ = std::fs::remove_file(&path);
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "inflight-sentinel",
+            &format!(
+                "op=clear ids={}",
+                serde_json::to_string(&claimed_ids).unwrap_or_else(|_| "[]".to_string())
+            ),
+        );
+    }
+}
+
+// Startup cleanup. Removes any stale inflight sentinel from a prior
+// session that didn't complete (Bram killed mid-cycle, agent crashed
+// before mutate, etc.).
+fn cleanup_stale_inflight_claim<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let Some(path) = inflight_claim_file(app) else {
+        return;
+    };
+    if !path.exists() {
+        return;
+    }
+    let _ = std::fs::remove_file(&path);
+    if bram_trace_enabled() {
+        append_bram_trace_line(app, "inflight-sentinel", "op=stale-startup-clear");
+    }
 }
 
 fn empty_worklist_json() -> &'static str {
@@ -7155,6 +7274,29 @@ fn route_request<R: tauri::Runtime>(
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        // Write the inflight sentinel for approved/drop (#84). Pulled
+        // from the (possibly filter-narrowed) items array so the
+        // sentinel's ids match what the agent has just been authorized
+        // to act on. Cleared by /__worklist/mutate when the agent
+        // completes the state transition.
+        if kind == "approved" || kind == "drop" {
+            let sentinel_ids: Vec<String> = record_value
+                .get("items")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|it| {
+                            it.get("id")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !sentinel_ids.is_empty() {
+                write_inflight_claim_sentinel(app, &sentinel_ids, &kind);
+            }
+        }
         let body = record_value.to_string().into_bytes();
         if kind == "approved" {
             consume_worklist_authorization(app);
@@ -7364,6 +7506,88 @@ fn route_request<R: tauri::Runtime>(
 // resources/.worklist-authorization.json before the write: prune
 // requires `kind: "drop"`, advance requires `kind: "approved"`, and
 // every requested id must appear in the auth record's ids.
+// POST /__iterate/begin — the agent calls this at the start of any
+// iterate cycle. Writes the inflight sentinel with kind="iterate" and
+// the ids from the iterate payload. Refs #84.
+fn handle_iterate_begin<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    body: &[u8],
+) -> (u16, &'static str, Vec<u8>) {
+    let req_json: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                400,
+                "application/json; charset=utf-8",
+                format!("{{\"error\":\"invalid JSON: {}\"}}", e).into_bytes(),
+            );
+        }
+    };
+    let ids: Vec<String> = req_json
+        .get("ids")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    if ids.is_empty() {
+        return (
+            400,
+            "application/json; charset=utf-8",
+            br#"{"error":"ids[] required"}"#.to_vec(),
+        );
+    }
+    write_inflight_claim_sentinel(app, &ids, "iterate");
+    (
+        200,
+        "application/json; charset=utf-8",
+        br#"{"ok":true}"#.to_vec(),
+    )
+}
+
+// POST /__iterate/end — the agent calls this at the end of any
+// iterate cycle. Clears the sentinel if it fully covers the supplied
+// ids (same coverage rule as /__worklist/mutate). Refs #84.
+fn handle_iterate_end<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    body: &[u8],
+) -> (u16, &'static str, Vec<u8>) {
+    let req_json: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                400,
+                "application/json; charset=utf-8",
+                format!("{{\"error\":\"invalid JSON: {}\"}}", e).into_bytes(),
+            );
+        }
+    };
+    let ids: Vec<String> = req_json
+        .get("ids")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    if ids.is_empty() {
+        return (
+            400,
+            "application/json; charset=utf-8",
+            br#"{"error":"ids[] required"}"#.to_vec(),
+        );
+    }
+    clear_inflight_claim_sentinel(app, &ids);
+    (
+        200,
+        "application/json; charset=utf-8",
+        br#"{"ok":true}"#.to_vec(),
+    )
+}
+
 fn handle_worklist_mutate<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
@@ -7558,6 +7782,11 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
         );
     }
 
+    // Clear the inflight sentinel (#84) when mutate succeeds for the
+    // ids currently claimed. No-op if the sentinel doesn't fully cover
+    // `affected` — partial-coverage is intentionally left visible.
+    clear_inflight_claim_sentinel(app, &affected);
+
     let result_key = if op == "prune" { "pruned" } else { "advanced" };
     let response = format!(
         "{{\"ok\":true,\"{}\":{}}}",
@@ -7592,6 +7821,22 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             let mut buf = Vec::new();
             let _ = request.as_reader().read_to_end(&mut buf);
             handle_worklist_mutate(app, &buf)
+        }
+    } else if path == "__iterate/begin" {
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            let mut buf = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut buf);
+            handle_iterate_begin(app, &buf)
+        }
+    } else if path == "__iterate/end" {
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            let mut buf = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut buf);
+            handle_iterate_end(app, &buf)
         }
     } else {
         route_request(app, path, query)
@@ -7938,6 +8183,9 @@ pub fn run() {
                 .ok_or("right-pane server bound to non-ip address")?;
             let _ = LOOPBACK_PORT.set(port);
             prepare_bram_trace_log(app.handle());
+            // Remove any stale inflight sentinel from a prior session
+            // that didn't complete cleanly. Refs #84.
+            cleanup_stale_inflight_claim(app.handle());
             let internal_origin = format!("http://127.0.0.1:{}", port);
             eprintln!("[bram] internal HTTP server: {}", internal_origin);
             // Tools pane lives at xd's app/tools/index.html, served via

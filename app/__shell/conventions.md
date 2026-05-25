@@ -220,12 +220,26 @@ Lifecycle:
      After iterating, the items are ready for the user to re-triage
      on the next click.
 
-     The Worklist tab's spinner clears when your turn ends with
-     `stop_reason: end_turn` — the agent-idle ChangeListener on the
-     session JSONL is the primary clear path. There's also a 60s
-     stale-timeout backstop for cases where that chain breaks. End
-     your turn cleanly with a text response so the user's spinner
-     clears promptly.
+     **Iterate cycles must bracket with `/__iterate/begin` and
+     `/__iterate/end`.** When you receive `iterate: {...}`, the
+     first action in your response MUST be:
+
+     ```
+     curl -s -X POST -d '{"ids":["<id1>","<id2>"]}' \
+       "http://localhost:${BRAM_PORT}/__iterate/begin"
+     ```
+
+     ...with the ids from the iterate payload. The last action
+     before ending your turn MUST be the matching `/__iterate/end`
+     with the same ids. The host writes
+     `resources/.inflight-claim.json` on begin and clears it on
+     end; the iframe derives its inflight-spinner state from this
+     file (refs #84). Failure to call `end` leaves the spinner up
+     indefinitely — the stuck claim file surfaces unfinished
+     cycles. Approved/drop cycles do NOT need begin/end calls;
+     their lifecycle is bracketed automatically by the host's
+     `/__worklist/resolve` (write) and `/__worklist/mutate`
+     (clear) handlers.
 3. **Mechanical transitions** — use `POST /__worklist/mutate` for
    approval-driven state changes:
    - `{"op":"advance","ids":[...],"status":"applied"}` after an

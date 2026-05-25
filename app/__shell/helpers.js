@@ -62,17 +62,40 @@ window._xsLogs = window._xsLogs || [];
 })();
 
 window.toShell = function (text) {
+  var s = String(text);
+  // Trace the entry so #86's "click swallowed" diagnostic flow can
+  // distinguish between "helper never invoked" (no trace line) and
+  // "helper invoked but pty_write lost" (trace line present but no
+  // [pty-out] follows). kind: "iframe-trace" routes through
+  // log_from_right_pane's iframe-trace branch into the [iframe]
+  // category of resources/bram-trace.log. Refs #86
+  // instrument-toshell-toturn.
+  try {
+    window.logToHost({
+      kind: "iframe-trace",
+      subkind: "to-shell",
+      stage: "source",
+      textLength: s.length,
+      textPreview: s.slice(0, 80),
+      at: new Date().toISOString(),
+    });
+  } catch (e) {}
   var invoke = getTauriInvoke();
   if (!invoke) return;
-  invoke("pty_write", { data: String(text) + "\n" }).catch(function (e) {
+  invoke("pty_write", { data: s + "\n" }).catch(function (e) {
     console.error("toShell pty_write", e);
   });
 };
 window.toTurn = function (text) {
   var s = String(text);
+  // kind: "iframe-trace" routes through log_from_right_pane's
+  // iframe-trace branch into [iframe] in bram-trace.log. Pre-#86 the
+  // payloads here used kind: "to-turn" which fell through to stderr-
+  // only logging — present in dev logs but missing from the trace.
   try {
     window.logToHost({
-      kind: "to-turn",
+      kind: "iframe-trace",
+      subkind: "to-turn",
       stage: "source",
       textLength: s.length,
       textPreview: s.slice(0, 80),
@@ -84,7 +107,8 @@ window.toTurn = function (text) {
   if (!invoke) return;
   invoke("log_from_right_pane", {
     payload: {
-      kind: "to-turn",
+      kind: "iframe-trace",
+      subkind: "to-turn",
       stage: "sink",
       textLength: normalized.length,
       textPreview: normalized.slice(0, 80),

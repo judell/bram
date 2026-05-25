@@ -8,6 +8,7 @@
       "Bash(curl -s \"http://127.0.0.1*__worklist*)",
       "Bash(curl -s -X POST -d * \"http://127.0.0.1*__worklist*)",
       "Bash(curl -s \"http://localhost*__issues*)",
+      "Bash(curl -s -X POST -d * \"http://localhost*__iterate*)",
       "Bash(curl -s \"http://localhost*__enhance*)",
       "mcp__xmlui"
     ]

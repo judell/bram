@@ -38,11 +38,25 @@ AUTH_REL = "resources/.worklist-authorization.json"
 BYPASS_TTL_SECONDS = 60 * 60  # an authorization record is fresh for 1h
 
 
-# Issue #49 [hook] trace, identical shape to the Claude hook helper.
-# Writes one structured line to resources/bram-trace.log when
-# BRAM_TRACE=1 is set on the host and propagated into the agent's PTY
-# child env. Silent no-op otherwise.
-def _trace_hook(event, tool, target, decision, reason):
+# Issue #49 [hook] trace + issue #95 phantom-write diagnostic.
+# - Always emits one `[worklist-guard]` line to stderr, including cwd,
+#   so the hook's decision is visible to the agent / user without
+#   BRAM_TRACE being enabled. Refs #95.
+# - Additionally appends to resources/bram-trace.log when BRAM_TRACE=1
+#   and BRAM_TRACE_LOG is set on the agent's PTY child env (existing
+#   issue #49 behavior).
+def _trace_hook(event, tool, target, decision, reason, cwd=None):
+    if cwd is None:
+        cwd = _HOOK_CTX.get("cwd", "")
+    diagnostic = (
+        f"[worklist-guard] tool={tool} target={target} cwd={cwd} "
+        f"decision={decision} reason={reason}"
+    )
+    try:
+        sys.stderr.write(diagnostic + "\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
     try:
         if os.environ.get("BRAM_TRACE") != "1":
             return
@@ -53,7 +67,8 @@ def _trace_hook(event, tool, target, decision, reason):
         ts = now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
         line = (
             f"[{ts}] [hook] script=worklist-guard-codex.py event={event} "
-            f"tool={tool} target={target} decision={decision} reason={reason}\n"
+            f"tool={tool} target={target} cwd={cwd} "
+            f"decision={decision} reason={reason}\n"
         )
         with open(log_path, "a") as f:
             f.write(line)
@@ -63,7 +78,7 @@ def _trace_hook(event, tool, target, decision, reason):
 
 # Module-level context for [hook] trace records. main() populates these
 # once the inbound payload is parsed; allow() / deny() read them on exit.
-_HOOK_CTX = {"event": "", "tool": "", "target": ""}
+_HOOK_CTX = {"event": "", "tool": "", "target": "", "cwd": ""}
 
 
 def allow(reason="passed-checks"):
@@ -608,6 +623,7 @@ def main():
     cwd = payload.get("cwd") or os.getcwd()
     event_name = payload.get("hook_event_name") or ""
     _HOOK_CTX["event"] = event_name or "PreToolUse"
+    _HOOK_CTX["cwd"] = cwd
 
     if event_name == "UserPromptSubmit":
         handle_user_prompt_submit(payload, cwd)

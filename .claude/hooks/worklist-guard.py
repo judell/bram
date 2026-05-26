@@ -34,11 +34,32 @@ AUTH_REL = "resources/.worklist-authorization.json"
 BYPASS_TTL_SECONDS = 60 * 60  # direct-edit auth records are fresh for 1h
 
 
-def _trace_hook(event, tool, target, decision, reason):
-    """Issue #49 [hook] trace. Appends one structured line to the
-    resources/bram-trace.log file the host writes to, when BRAM_TRACE=1
-    was set on the host and propagated into the agent's PTY child env.
-    Silent no-op otherwise."""
+def _trace_hook(event, tool, target, decision, reason, cwd=None):
+    """Issue #49 [hook] trace + issue #95 phantom-write diagnostic.
+
+    - Always emits one `[worklist-guard]` line to stderr, including cwd,
+      so the hook's decision is visible to the agent / user without
+      BRAM_TRACE being enabled. Refs #95 — phantom worklist writes need
+      this signal to distinguish hook-block from cwd-mismatch from
+      watcher-revert.
+    - Additionally appends to resources/bram-trace.log when BRAM_TRACE=1
+      and BRAM_TRACE_LOG is set on the agent's PTY child env (existing
+      issue #49 behavior).
+    """
+    if cwd is None:
+        try:
+            cwd = os.getcwd()
+        except Exception:
+            cwd = ""
+    diagnostic = (
+        f"[worklist-guard] tool={tool} target={target} cwd={cwd} "
+        f"decision={decision} reason={reason}"
+    )
+    try:
+        sys.stderr.write(diagnostic + "\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
     try:
         if os.environ.get("BRAM_TRACE") != "1":
             return
@@ -49,7 +70,8 @@ def _trace_hook(event, tool, target, decision, reason):
         ts = now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
         line = (
             f"[{ts}] [hook] script=worklist-guard.py event={event} "
-            f"tool={tool} target={target} decision={decision} reason={reason}\n"
+            f"tool={tool} target={target} cwd={cwd} "
+            f"decision={decision} reason={reason}\n"
         )
         with open(log_path, "a") as f:
             f.write(line)

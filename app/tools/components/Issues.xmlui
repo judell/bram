@@ -131,7 +131,7 @@
           onClick="searchBox.setValue(''); queryDraft = ''; query = ''; expandedNumber = null; selectedHitLine = null" />
         <TextBox
           id="searchBox"
-          placeholder="Search title and body…"
+          placeholder="Search title, body, comments, authors…"
           width="*"
           maxWidth="20rem"
           initialValue="{queryDraft}"

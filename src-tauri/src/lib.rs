@@ -1827,13 +1827,14 @@ fn gh_issues_search<R: tauri::Runtime>(app: &AppHandle<R>, query: &str) -> Resul
 
     let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
     let repo_slug = repo_owner_name(app);
+    // Fetch the same 50-issue window as gh_issues_list (no --search flag);
+    // local grep over title + body + comment bodies. One gh call, ~1.7s,
+    // gains comment-text search for free without doubling latency.
     let out = std::process::Command::new("gh")
         .current_dir(&root)
         .args(&[
             "issue",
             "list",
-            "--search",
-            q,
             "--json",
             "number,title,state,author,createdAt,updatedAt,labels,url,body,comments",
             "--limit",
@@ -1846,20 +1847,20 @@ fn gh_issues_search<R: tauri::Runtime>(app: &AppHandle<R>, query: &str) -> Resul
         Ok(out) if out.status.success() => out.stdout,
         Ok(out) => {
             eprintln!(
-                "[gh issue list --search] non-zero exit: {}",
+                "[gh issue list] non-zero exit: {}",
                 String::from_utf8_lossy(&out.stderr)
             );
             return Ok(b"{\"results\":[],\"truncated\":false}".to_vec());
         }
         Err(e) => {
-            eprintln!("[gh issue list --search] failed to spawn: {}", e);
+            eprintln!("[gh issue list] failed to spawn: {}", e);
             return Ok(b"{\"results\":[],\"truncated\":false}".to_vec());
         }
     };
     let issues: Vec<serde_json::Value> = match serde_json::from_slice(&stdout) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("[gh issue list --search] parse: {}", e);
+            eprintln!("[gh issue list] parse: {}", e);
             return Ok(b"{\"results\":[],\"truncated\":false}".to_vec());
         }
     };
@@ -1876,6 +1877,11 @@ fn gh_issues_search<R: tauri::Runtime>(app: &AppHandle<R>, query: &str) -> Resul
         }
         let title = issue.get("title").and_then(|v| v.as_str()).unwrap_or("");
         let body = issue.get("body").and_then(|v| v.as_str()).unwrap_or("");
+        let issue_author = issue
+            .get("author")
+            .and_then(|v| v.get("login"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
 
         let mut hits: Vec<serde_json::Value> = Vec::new();
         if title.to_lowercase().contains(&needle) {
@@ -1884,6 +1890,14 @@ fn gh_issues_search<R: tauri::Runtime>(app: &AppHandle<R>, query: &str) -> Resul
                 "line": 0,
                 "snippet": snippet,
                 "field": "title",
+            }));
+            total_hits += 1;
+        }
+        if total_hits < MAX_HITS && issue_author.to_lowercase().contains(&needle) {
+            hits.push(json!({
+                "line": 0,
+                "snippet": issue_author,
+                "field": "author",
             }));
             total_hits += 1;
         }
@@ -1900,6 +1914,51 @@ fn gh_issues_search<R: tauri::Runtime>(app: &AppHandle<R>, query: &str) -> Resul
                     "field": "body",
                 }));
                 total_hits += 1;
+            }
+        }
+        // Grep each comment's body, per-line. `comments` is an array of
+        // {body, author: {login}, ...} from the JSON fields list.
+        if total_hits < MAX_HITS {
+            if let Some(comments) = issue.get("comments").and_then(|v| v.as_array()) {
+                'comments: for (ci, comment) in comments.iter().enumerate() {
+                    let cbody = comment.get("body").and_then(|v| v.as_str()).unwrap_or("");
+                    let cauthor = comment
+                        .get("author")
+                        .and_then(|v| v.get("login"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if cauthor.to_lowercase().contains(&needle) {
+                        if total_hits >= MAX_HITS {
+                            truncated = true;
+                            break 'comments;
+                        }
+                        hits.push(json!({
+                            "line": 0,
+                            "snippet": cauthor,
+                            "field": "author",
+                            "commentIndex": ci,
+                            "commentAuthor": cauthor,
+                        }));
+                        total_hits += 1;
+                    }
+                    for (i, line) in cbody.lines().enumerate() {
+                        if total_hits >= MAX_HITS {
+                            truncated = true;
+                            break 'comments;
+                        }
+                        if line.to_lowercase().contains(&needle) {
+                            let snippet: String = line.trim().chars().take(200).collect();
+                            hits.push(json!({
+                                "line": i + 1,
+                                "snippet": snippet,
+                                "field": "comment",
+                                "commentIndex": ci,
+                                "commentAuthor": cauthor,
+                            }));
+                            total_hits += 1;
+                        }
+                    }
+                }
             }
         }
         if hits.is_empty() {

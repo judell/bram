@@ -94,29 +94,21 @@ approves both the edit and the commit. Skip the `applied` stage only
 if the user says "apply and commit" (or similar) up front. Dropped
 items are pruned directly with no `applied` stage.
 
-**The user is the only one who commits features.** A TO COMMIT item
+**Don't nudge the user toward commit approval.** A TO COMMIT item
 sits in the working tree indefinitely until an `approved:` payload
-covering it arrives — there is no "I should go ahead and commit
-this" path short of explicit user authorization. Avoid framing in
-chat that makes a feature-level commit sound like a unilateral next
-step: don't write "Let me commit X first", "I'll commit X then
-propose Y", or "going to land this now". Frame the proposal
-instead — "Approve X to commit" or "Once you approve, I'll commit
-X" — and leave the trigger to the user. The danger of "Let me
-commit X" phrasing is that it nudges the user toward approving a
-commit they hadn't yet thought through, defeating the purpose of
-the two-stage flow.
+covering it arrives. Both unilateral framing and chat solicitation
+push the authorization onto something other than the deliberate
+Approve click and cheapen it:
 
-**Don't solicit commit approval in chat either.** "Want me to commit
-it now?" / "Should I commit?" / "Ready to commit?" all push the
-authorization onto a casual chat "yes" instead of the deliberate
-Approve click. The structured Approve button IS the channel; chat
-solicitation bypasses the deliberation the two-stage flow exists to
-preserve. Describe the TO COMMIT state factually ("relay is TO
-COMMIT — confidence high on happy path, untested edges noted
-above") and stop there. The user reads it and clicks Approve when
-ready, or doesn't. Same reasoning as the framing rule above:
-nudging the user toward approval cheapens the approval.
+- Unilateral framing: "Let me commit X", "I'll commit X then propose
+  Y", "going to land this now". Frame the proposal instead — "Approve
+  X to commit" or "Once you approve, I'll commit X".
+- Chat solicitation: "Want me to commit it now?", "Should I commit?",
+  "Ready to commit?". The structured Approve button IS the channel.
+
+Describe the TO COMMIT state factually ("relay is TO COMMIT —
+confidence high on happy path, untested edges noted above") and stop
+there. The user reads it and clicks Approve when ready, or doesn't.
 
 The exception is a *minor* change the user explicitly asks you to
 commit directly — a typo fix, a one-line doc tweak, a small
@@ -178,16 +170,10 @@ Lifecycle:
      `Bash(curl -s "http://localhost*__worklist*)` allowlist pattern
      in `.claude/settings.json` and runs without a prompt.
 
-     Do **not** embed `$BRAM_PORT` or `${BRAM_PORT:-$XMLUI_DESKTOP_PORT}`
-     directly in the curl command — Claude Code's Bash permission
-     matcher does not expand variables before matching, and any `$` in
-     the command makes the allowlist match fail (the "shell-expansion
-     permission guard"; see
-     https://code.claude.com/docs/en/permissions.md). The `BRAM_PORT`
-     and legacy `XMLUI_DESKTOP_PORT` env vars are still set on the PTY
-     child for callers (scripts, etc.) that resolve them in their own
-     shell before invoking curl. They are deprecated only as inline
-     expansion in permission-gated Bash tool calls.
+     Use the literal port number — `$BRAM_PORT` won't work because
+     Claude Code's permission matcher doesn't expand variables before
+     matching, so any `$` makes the allowlist fail (see
+     https://code.claude.com/docs/en/permissions.md).
 
      If `resources/.bram-port` is missing (the rare case where the
      agent was launched outside the wrapped PTY shell), fall back to
@@ -248,38 +234,13 @@ Lifecycle:
      After iterating, the items are ready for the user to re-triage
      on the next click.
 
-     **Iterate cycles must bracket with `/__iterate/begin` and
-     `/__iterate/end`.** When you receive `iterate: {...}`, the
-     first action in your response MUST be:
-
-     ```
-     curl -s -X POST -d '{"ids":["<id1>","<id2>"]}' \
-       "http://localhost:61455/__iterate/begin"
-     ```
-
-     (substitute the literal port from `resources/.bram-port`; see the
-     port-discovery paragraph above for the rationale).
-
-     ...with the ids from the iterate payload. The last action
-     before ending your turn MUST be the matching `/__iterate/end`
-     with the same ids. The host writes
-     `resources/.inflight-claim.json` on begin and clears it on
-     end; the iframe derives its inflight-spinner state from this
-     file (refs #84). Failure to call `end` leaves the spinner up
-     indefinitely until the agent's turn ends — at which point the
-     host clears the sentinel via the `agent-turn-end` event hook,
-     regardless of whether the agent called an explicit end route.
-     Agents MAY call `POST /__worklist/end` (alias of
-     `/__iterate/end`) for a fast clear before turn-end, but this
-     is optional and is **not** load-bearing for spinner correctness.
-     Iterate cycles still need `POST /__iterate/begin` as the
-     agent's first action (writes the sentinel — no equivalent
-     side-effect path for iterate, unlike resolve for approved/drop);
-     the matching `/__iterate/end` is symmetric but, like
-     `/__worklist/end`, now optional. Closes #91 — the mutate call
-     no longer touches the sentinel, and the agent's
-     end-call discipline is no longer load-bearing because the
-     host clears at agent-turn-end as a safety net.
+     **Iterate cycles must bracket with `POST /__iterate/begin`
+     (first action of your response) and `POST /__iterate/end` (last
+     action before your turn ends), both with body `{"ids":[...]}`
+     carrying the iterate ids. The host also clears the sentinel at
+     turn-end as a safety net, so a missed `end` won't strand the
+     spinner. See *Host-managed inflight sentinel* below for the
+     mechanism (refs #84, #91).
 3. **Mechanical transitions** — use `POST /__worklist/mutate` for
    approval-driven state changes:
    - `{"op":"advance","ids":[...],"status":"applied"}` after an
@@ -793,36 +754,12 @@ var that forces the `inflightClaim` DataSource to refetch. The
 DataSource's `onLoaded` clears localStorage when the sentinel no
 longer claims the targeted item.
 
-### Iterate-begin / iterate-end agent convention
-
-Cross-link: see the **Iterate (N)** subsection in the worklist
-conventions above (search for "Iterate cycles must bracket"). The
-short version: when receiving an `iterate: {...}` payload, the
-agent's first action MUST be a curl to `/__iterate/begin`, and the
-last action before ending the turn MUST be the matching
-`/__iterate/end`. The host's resolve/mutate handlers cover
-approved/drop cycles automatically; only iterate requires explicit
-agent action.
-
 ### Trace categories
 
-A complete cycle produces this sequence in `resources/bram-trace.log`:
-
-```
-[inflight-sentinel] op=write kind=<approved|drop|iterate> ids=[...]
-[emit] kind=inflight-claim-changed payload_size=0
-[iframe] subkind=listener-fired context=inflight-claim-changed
-... (agent does work) ...
-[inflight-sentinel] op=clear ids=[...]
-[emit] kind=inflight-claim-changed payload_size=0
-[iframe] subkind=listener-fired context=inflight-claim-changed
-[iframe] subkind=inflight-clear reason=sentinel-cleared
-```
-
-Other trace lines specific to this mechanism:
-
-- `[inflight-sentinel] op=stale-startup-clear` — startup found a
-  leftover sentinel and deleted it.
+A complete cycle logs `[inflight-sentinel] op=write kind=<approved|drop|iterate>`
+then `op=clear` in `resources/bram-trace.log`, each paired with
+`[emit] kind=inflight-claim-changed` and `[iframe] subkind=listener-fired`.
+Startup cleanup logs `op=stale-startup-clear`.
 
 ### Failure modes
 
@@ -899,41 +836,28 @@ ask.
 
 ## Don't quote unpushed-commit counts in chat
 
-After a commit lands, don't say "N unpushed commits now" or list the
-unpushed SHAs in prose. `git log --oneline -3` only shows the top three
-entries — there's no count in that output, and any number you state is
-guesswork that goes wrong as soon as there are 4+ commits ahead of the
-remote. The Commits tab already shows the exact count and list; let it
-do the bookkeeping. Confirm the commit with its short SHA and subject,
-then stop.
+After a commit lands, confirm with its short SHA and subject and stop.
+Don't say "N unpushed commits now" or list unpushed SHAs in prose — the
+Commits tab has the exact count and list; any number you'd state is
+guesswork.
 
 ## Push button auto-rebases on non-fast-forward
 
-The Commits-tab Push button (Rust `git_push`) does `git push`, and if
-that's rejected as non-fast-forward, fetches `origin` and rebases the
-current branch on `origin/<branch>` before retrying the push. Merge
-commits intentionally not used — linear history preferred.
-
-If the rebase has conflicts, the button reports `non-fast-forward;
-rebase conflicts (aborted, working tree clean — re-run the rebase
-manually or ask the agent, then push)` and leaves the working tree
-clean (the rebase is aborted). **Don't manually `git pull --rebase`
-on the user's behalf for the common case** — that's what the button
-does now. Only intervene on conflicts, where the next step is to
-start a manual rebase, resolve it, then push.
+The Commits-tab Push button does `git push`; if rejected as
+non-fast-forward, it fetches `origin` and rebases on `origin/<branch>`
+before retrying (linear history, no merge commits). Don't manually
+`git pull --rebase` — that's the button's job. Only intervene when
+the button reports rebase conflicts (working tree left clean); then
+start a manual rebase, resolve, and push.
 
 ## Updating GitHub issues via gh
 
-For changes to an existing issue, use the `gh` CLI directly — no
-need to explore `gh issue --help`:
+Use `gh` directly — the Issues tab polls every 30s, so updates surface
+without a restart:
 
-- Edit title/body: `gh issue edit <n> --title "…" --body "…"`
-- Add a comment: `gh issue comment <n> --body "…"`
-- Change state: `gh issue close <n>` / `gh issue reopen <n>`
-
-The Issues tab polls every 30s and refetches the expanded issue's
-body + comments, so updates surface in xmlui-desktop without a
-restart.
+- `gh issue edit <n> --title "…" --body "…"`
+- `gh issue comment <n> --body "…"`
+- `gh issue close <n>` / `gh issue reopen <n>`
 
 ## Citing XMLUI docs
 
@@ -983,30 +907,23 @@ multiline. Reference the driving issue if there is on.
 
 ## Debugging xmlui apps with traces
 
-When something in the right pane misbehaves — a button doesn't fire,
-a DataSource shows wrong data, a state change doesn't propagate, a
-component renders the wrong way — don't guess from the markup. Ask
-the user to reproduce the problem with the Inspector open, then
-click its **Export** button. The button writes a JSON trace to
-`~/Downloads/xs-trace-<timestamp>.json` (the button briefly flashes
-green on success).
+Two forensics sources, picked by symptom:
 
-Once the export lands, use the xmlui MCP tools to analyze it:
+**`resources/bram-trace.log`** — host-side rolling log of HTTP
+routes, iframe events, and inflight-sentinel writes / clears.
+Always on; grep it directly. Best for plumbing issues: stuck
+spinner, sentinel anomalies, route errors, agent-turn-end
+detection, heartbeat drift.
 
-- **`xmlui_find_trace`** — locate the export file by timestamp or
-  by content (component name, event kind, etc.).
-- **`xmlui_distill_trace`** — reduce a raw trace to the relevant
-  interactions, state changes, API calls, and handler boundaries
-  for a specific question. Don't try to read the raw JSON yourself;
-  it's huge and noisy.
+**Inspector Export** — XMLUI runtime trace (events, state changes,
+handler invocations), captured on demand. Best for in-pane
+misbehavior: a button doesn't fire, a DataSource shows wrong data,
+a state change doesn't propagate, a component renders wrong. Ask
+the user to open the Inspector (magnifying-glass icon), reproduce,
+and click **Export** — writes `~/Downloads/xs-trace-<timestamp>.json`.
+Analyze with the xmlui MCP tools (don't read the raw JSON, it's
+huge):
 
-A typical loop:
-
-1. User reports the problem.
-2. You: "Open the Inspector (magnifying-glass icon), reproduce the
-   problem, then click Export."
-3. User clicks Export → file appears in Downloads, button flashes.
-4. You: `xmlui_find_trace` to get the path, `xmlui_distill_trace`
-   with a question framed around the symptom.
-5. Read the distilled output, propose a fix (via the worklist if
-   it's multi-step).
+- **`xmlui_find_trace`** — locate the export by timestamp or content.
+- **`xmlui_distill_trace`** — reduce to interactions / state changes
+  / handler boundaries relevant to a specific question.

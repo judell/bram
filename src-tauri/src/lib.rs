@@ -2641,7 +2641,35 @@ fn pty_write_internal<R: tauri::Runtime>(
         );
     }
     if !data.is_empty() {
-        pty_menu_clear(app);
+        // \x1b[O (focus-out) and \x1b[I (focus-in) are pure focus-tracking
+        // escape sequences that xterm.js emits as side effects of its
+        // iframe gaining/losing focus — not user keystrokes. Dismissing
+        // a permission menu on these dismisses it prematurely when the
+        // user clicks a drawer menu button (which moves focus away from
+        // the terminal). Skip the menu-clear for these specific 3-byte
+        // sequences; still write them to the PTY (Claude Code may use
+        // the focus signal). Closes #94.
+        let is_focus_track = data == "\x1b[O" || data == "\x1b[I";
+        if !is_focus_track {
+            pty_menu_clear(app);
+        } else if bram_trace_enabled() {
+            let tool = pty_menu_cell()
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().map(|m| m.tool.clone()))
+                .unwrap_or_default();
+            if !tool.is_empty() {
+                append_bram_trace_line(
+                    app,
+                    "pty-menu",
+                    &format!(
+                        "state=preserved tool={} reason=focus-track preview={}",
+                        tool,
+                        bram_trace_preview(data, 16),
+                    ),
+                );
+            }
+        }
         record_worklist_authorization_from_input(app, data);
     }
     let mut guard = state.0.lock().unwrap();

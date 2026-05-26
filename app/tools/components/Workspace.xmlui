@@ -299,6 +299,33 @@
                     <Spinner when="{submitting && submittedItemId === $item.id}" />
                   </Theme>
                 </HStack>
+                <!-- In-flight feedback panel: shows files touched in the
+                     agent's current turn while a cycle targets this
+                     item. Driven by currentTurnEdits(lastJsonl) — the
+                     same helper Transcript uses, so both surfaces stay
+                     in lockstep. Closes #92. -->
+                <VStack
+                  when="{submitting && submittedItemId === $item.id}"
+                  gap="$space-0_5"
+                  paddingLeft="$space-3"
+                  var.turnEdits="{currentTurnEdits(lastJsonl)}">
+                  <Text
+                    when="{turnEdits.length > 0}"
+                    fontSize="$fontSize-xs"
+                    color="$textColor-secondary"
+                    value="Editing" />
+                  <Items data="{turnEdits.slice(0, 5)}">
+                    <Text
+                      fontSize="$fontSize-xs"
+                      variant="code"
+                      value="{$item.filePath}" />
+                  </Items>
+                  <Text
+                    when="{turnEdits.length > 5}"
+                    fontSize="$fontSize-xs"
+                    color="$textColor-secondary"
+                    value="{'+ ' + (turnEdits.length - 5) + ' more'}" />
+                </VStack>
                 <Text
                   when="{expandedItemId === $item.id}"
                   value="{$item.file}"

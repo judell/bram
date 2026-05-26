@@ -2796,14 +2796,16 @@ fn drain_pty_intents<R: tauri::Runtime>(
         };
         let kind = intent.get("kind").and_then(|v| v.as_str()).unwrap_or("");
         let data = intent.get("data").and_then(|v| v.as_str()).unwrap_or("");
-        let wrapped: String = match kind {
-            "toShell" => format!("{}\n", data),
-            "toTurn" => format!("\x15\x1b[200~{}\x1b[201~\r", data),
-            "sendKeys" => data.to_string(),
+        let write_result = match kind {
+            "toShell" => {
+                let wrapped = format!("{}\n", data);
+                pty_write_internal(app, state, &wrapped, "pty-intent-toShell")
+            }
+            "toTurn" => write_pty_turn_intent(app, state, data),
+            "sendKeys" => pty_write_internal(app, state, data, "pty-intent-sendKeys"),
             _ => continue,
         };
-        let hint = format!("pty-intent-{}", kind);
-        match pty_write_internal(app, state, &wrapped, &hint) {
+        match write_result {
             Ok(()) => {
                 wrote += 1;
             }
@@ -2838,6 +2840,22 @@ fn drain_pty_intents<R: tauri::Runtime>(
     match drain_error {
         Some(e) => Err(e),
         None => Ok(()),
+    }
+}
+
+fn write_pty_turn_intent<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &State<'_, AppState>,
+    data: &str,
+) -> Result<(), String> {
+    if cfg!(windows) {
+        pty_write_internal(app, state, "\x15", "pty-intent-toTurn-windows-clear")?;
+        pty_write_internal(app, state, data, "pty-intent-toTurn-windows-payload")?;
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        pty_write_internal(app, state, "\r", "pty-intent-toTurn-windows-submit")
+    } else {
+        let wrapped = format!("\x15\x1b[200~{}\x1b[201~\r", data);
+        pty_write_internal(app, state, &wrapped, "pty-intent-toTurn")
     }
 }
 

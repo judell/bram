@@ -432,6 +432,64 @@ try {
   }
 } catch (e) {}
 
+// Shared cache for the latest session-tail JSONL. A single App-level
+// DataSource in Main.xmlui fetches /__sessions/latest-tail and calls
+// setLatestJsonl() on each new value; both the Worklist tab
+// (Workspace.xmlui) and the Transcript tab subscribe via
+// onLatestJsonlChange() so they share one fetch and survive tab
+// switches without losing the cached value. Multi-subscriber (unlike
+// onTalkSessionChange) because both tabs need to consume.
+//
+// Why a window-level cache and not global.lastJsonl on the App: XMLUI
+// 0.12.27's global-write path runs the assigned value through its
+// expression parser, and a JSONL string (starts with `{`) parses as
+// the start of an unclosed XMLUI expression. Keeping the value in
+// plain JS sidesteps the parser entirely.
+var __latestJsonlValue = null;
+var __latestJsonlSubscribers = [];
+window.getLatestJsonl = function () { return __latestJsonlValue; };
+window.setLatestJsonl = function (value) {
+  __latestJsonlValue = value;
+  var n = __latestJsonlSubscribers.length;
+  for (var i = 0; i < n; i++) {
+    try { __latestJsonlSubscribers[i](value); } catch (e) {}
+  }
+  // Trace the broadcast so #100-style perf observation can see how many
+  // subscribers were notified per fetch. With <Pages> only mounting one
+  // route at a time, n is typically 1 after a single tab visit, 2 after
+  // both tabs have been visited in this iframe session.
+  try {
+    if (window.logToHost) {
+      window.logToHost({
+        kind: "iframe-trace",
+        subkind: "jsonl-broadcast",
+        at: new Date().toISOString(),
+        subscribers: n,
+        len: (value && value.length) || 0,
+      });
+    }
+  } catch (e) {}
+};
+window.onLatestJsonlChange = function (fn) {
+  if (typeof fn !== "function") return function () {};
+  __latestJsonlSubscribers.push(fn);
+  return function () {
+    var idx = __latestJsonlSubscribers.indexOf(fn);
+    if (idx >= 0) __latestJsonlSubscribers.splice(idx, 1);
+  };
+};
+// Convenience: subscribe + remember the unsubscriber on window under the
+// caller-supplied key. Avoids `window.X = ...` left-value expressions in
+// XMLUI source, which XMLUI's evaluator rejects with "Left value variable
+// (X) not found in the scope." The property assignment happens entirely in
+// plain JS here; the XMLUI handler just calls this function.
+window.subscribeLatestJsonl = function (key, fn) {
+  if (typeof window[key] === "function") {
+    try { window[key](); } catch (e) {}
+  }
+  window[key] = window.onLatestJsonlChange(fn);
+};
+
 // Continuous variant: register a callback that fires on every resize
 // (window.resize event inside the iframe) plus once with the current
 // size at registration time. Use this when you want a readout that

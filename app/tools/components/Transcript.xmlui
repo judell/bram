@@ -4,23 +4,11 @@
   var.fullscreenImage="{null}"
   var.openToolId="{null}"
   var.turnLimit="{50}"
-  var.sessionTick="{0}"
-  var.lastTickAt="{0}"
   var.showAll="{false}"
   var.pendingMenu="{null}">
-  <DataSource
-    id="latestSession"
-    url="/__sessions/latest-tail?provider={activeProvider || ''}&amp;lines={showAll ? 'all' : '200'}&amp;t={sessionTick}"
-    dataType="text"
-  />
-
   <ChangeListener
     listenTo="{turns.length}"
     onDidChange="if (window.wasPinnedToBottom()) window.scrollAllToBottom()" />
-
-  <ChangeListener
-    listenTo="{latestSession.value}"
-    onDidChange="(c) => { if (c.newValue) { iframeTrace('jsonl-fanout', { tab: 'Transcript', len: c.newValue.length }); lastJsonl = c.newValue; } }" />
 
 
   <ModalDialog
@@ -136,7 +124,7 @@
   </ModalDialog>
 
   <VStack padding="$space-6" gap="$space-3"
-    onInit="(() => { const tauri = (window.parent &amp;&amp; window.parent.__TAURI__) || window.__TAURI__; if (tauri &amp;&amp; tauri.event &amp;&amp; tauri.event.listen) { if (typeof window.__bramTranscriptSessionUnlisten === 'function') { try { window.__bramTranscriptSessionUnlisten(); } catch (err) {} window.__bramTranscriptSessionUnlisten = null; } tauri.event.listen('talk-session-changed', () => { const now = Date.now(); if (now - lastTickAt < 2000) return; lastTickAt = now; sessionTick = sessionTick + 1; }).then((unlisten) => { window.__bramTranscriptSessionUnlisten = unlisten; }).catch(() => {}); if (typeof window.__bramTranscriptPtyMenuUnlisten === 'function') { try { window.__bramTranscriptPtyMenuUnlisten(); } catch (err) {} window.__bramTranscriptPtyMenuUnlisten = null; } tauri.event.listen('pty-menu-changed', (e) => { pendingMenu = e &amp;&amp; e.payload ? e.payload : null; }).then((unlisten) => { window.__bramTranscriptPtyMenuUnlisten = unlisten; }).catch(() => {}); } })(); try { logToHost({ kind: 'transcript-mount', at: new Date().toISOString() }) } catch (e) {}">
+    onInit="lastJsonl = window.getLatestJsonl(); subscribeLatestJsonl('__bramTranscriptJsonlUnsub', (v) => { lastJsonl = v; }); (() => { const tauri = (window.parent &amp;&amp; window.parent.__TAURI__) || window.__TAURI__; if (tauri &amp;&amp; tauri.event &amp;&amp; tauri.event.listen) { if (typeof window.__bramTranscriptPtyMenuUnlisten === 'function') { try { window.__bramTranscriptPtyMenuUnlisten(); } catch (err) {} window.__bramTranscriptPtyMenuUnlisten = null; } tauri.event.listen('pty-menu-changed', (e) => { pendingMenu = e &amp;&amp; e.payload ? e.payload : null; }).then((unlisten) => { window.__bramTranscriptPtyMenuUnlisten = unlisten; }).catch(() => {}); } })(); try { logToHost({ kind: 'transcript-mount', at: new Date().toISOString() }) } catch (e) {}">
     <StickyBox to="top">
       <HStack gap="$space-3" verticalAlignment="center" paddingVertical="$space-2">
         <Heading level="h2">Transcript</Heading>
@@ -152,7 +140,7 @@
 
     <Link
       when="{!showAll || turns.length > turnLimit}"
-      onClick="if (!showAll) { showAll = true; sessionTick = sessionTick + 1; } else { turnLimit = turns.length; }"
+      onClick="if (!showAll) { showAll = true; window.fetch('/__sessions/latest-tail?provider=' + encodeURIComponent(activeProvider || '') + '&amp;lines=all').then((r) => r.text()).then((t) => { window.setLatestJsonl(t); }); } else { turnLimit = turns.length; }"
       noIndicator="true">
       <Text fontSize="$fontSize-sm" color="$textColor-secondary"
         value="{showAll ? ('Show all (' + (turns.length - turnLimit) + ' earlier)') : 'Show earlier turns'}" />

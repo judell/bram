@@ -1,8 +1,15 @@
-<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{''}" var.recording="{false}" var.setupCompleteProvider="{''}"
-  onInit="subscribeRightPaneSize((s) => rightPaneSize = s.width + ' × ' + s.height); updateBannerDismissedVersion = readLocalStorage('bram.updateBannerDismissedVersion', ''); (() => { const tauri = (window.parent &amp;&amp; window.parent.__TAURI__) || window.__TAURI__; if (tauri &amp;&amp; tauri.event &amp;&amp; tauri.event.listen) { if (typeof window.__bramEnhanceStatusUnlisten === 'function') { try { window.__bramEnhanceStatusUnlisten(); } catch (err) {} window.__bramEnhanceStatusUnlisten = null; } tauri.event.listen('enhance-status-changed', () => enhanceStatus.refetch()).then((unlisten) => { window.__bramEnhanceStatusUnlisten = unlisten; }).catch(() => {}); } })()">
+<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{''}" var.recording="{false}" var.setupCompleteProvider="{''}" var.sessionTick="{0}" var.lastTickAt="{0}"
+  onInit="subscribeRightPaneSize((s) => rightPaneSize = s.width + ' × ' + s.height); updateBannerDismissedVersion = readLocalStorage('bram.updateBannerDismissedVersion', ''); (() => { const tauri = (window.parent &amp;&amp; window.parent.__TAURI__) || window.__TAURI__; if (tauri &amp;&amp; tauri.event &amp;&amp; tauri.event.listen) { if (typeof window.__bramEnhanceStatusUnlisten === 'function') { try { window.__bramEnhanceStatusUnlisten(); } catch (err) {} window.__bramEnhanceStatusUnlisten = null; } tauri.event.listen('enhance-status-changed', () => enhanceStatus.refetch()).then((unlisten) => { window.__bramEnhanceStatusUnlisten = unlisten; }).catch(() => {}); } })(); onTalkSessionChange(() => { const now = Date.now(); if (now - lastTickAt &lt; 2000) return; lastTickAt = now; sessionTick = sessionTick + 1; })">
   <DataSource id="enhanceStatus" url="/__enhance/status" />
   <DataSource id="rpInfo" url="/__right-pane-info" />
   <DataSource id="appInfo" url="/__app-info" />
+  <DataSource
+    id="latestJsonlShared"
+    url="/__sessions/latest-tail?provider={enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider || ''}&amp;lines=200&amp;t={sessionTick}"
+    dataType="text" />
+  <ChangeListener
+    listenTo="{latestJsonlShared.value}"
+    onDidChange="(c) => { if (c.newValue) { iframeTrace('jsonl-fanout', { source: 'shared', len: c.newValue.length }); window.setLatestJsonl(c.newValue); } }" />
   <ChangeListener
     listenTo="{enhanceStatus.value &amp;&amp; enhanceStatus.value.providerNeedsSetup}"
     onDidChange="(c) => { if (c.newValue) { if ($pathname !== '/') navigate('/'); window.scrollAllToTop(); } }" />

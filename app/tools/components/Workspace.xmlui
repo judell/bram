@@ -2,7 +2,7 @@
   name="Workspace"
   var.selected="{null}"
   var.submittedItemId="{null}"
-  var.submitting="{!!getInflight()}"
+  var.submitting="{false}"
   var.expandedItemId="{null}"
   var.activeSnapshot="{null}"
   var.lastJsonl="{null}"
@@ -43,17 +43,17 @@
     url="/__worklist"
     onLoaded="(data) => {
       const items = (data && data.items) || [];
-      const stored = getInflight();
       const sigForTrace = items
         .filter(i => i && i.id)
         .map(i => i.id + ':' + (i.status || 'proposed'))
         .sort()
         .join(',');
-      iframeTrace('onLoaded-entered', {sig: sigForTrace, items: items.length, has_inflight: !!stored, stored_ids: (stored && stored.ids) || '', targeted: (stored && stored.targeted) || ''});
+      iframeTrace('onLoaded-entered', {sig: sigForTrace, items: items.length});
       // Inflight-clear paths previously living here (item-gone,
-      // stale-timeout) moved to inflightClaim's onLoaded (#84 item 3).
+      // stale-timeout) moved to inflightClaim's onLoaded.
       // The host-managed sentinel is the authoritative spinner signal
-      // now; this onLoaded just tracks selection state.
+      // (no localStorage involvement); this onLoaded just tracks
+      // selection state.
       if (selected && !items.some(i => i.id === selected)) selected = null;
       const currentSig = items.filter(i => i && i.id).map(i => i.id + ':' + (i.status || 'proposed')).sort().join(',');
       if (lastWorklistSig && currentSig !== lastWorklistSig) {
@@ -85,18 +85,21 @@
     id="inflightClaim"
     url="/__inflight?t={inflightTick}"
     onLoaded="(data) => {
+      // Sentinel is the single source of truth for spinner state.
+      // No localStorage involvement — every reload re-derives from
+      // the host's .inflight-claim.json. If the sentinel claims any
+      // ids, we're submitting; otherwise we're not. The first id
+      // populates submittedItemId so the per-item spinner renders
+      // under the right row after an iframe reload mid-cycle.
       const claimIds = (data &amp;&amp; data.ids) || [];
-      const stored = getInflight();
-      if (!stored) return;
-      // 750 ms post-click grace: covers the window between markInflight
-      // (immediate, on click) and the host writing the sentinel (after
-      // the resolve or begin call lands). Without this, the initial
-      // empty sentinel response would clear localStorage prematurely.
-      const elapsed = Date.now() - (stored.ts || 0);
-      if (elapsed < 750) return;
-      if (claimIds.length === 0 || !claimIds.includes(stored.targeted)) {
-        iframeTrace('inflight-clear', {reason: 'sentinel-cleared', elapsed_ms: elapsed, item: submittedItemId || ''});
-        clearInflight();
+      if (claimIds.length > 0) {
+        const targeted = claimIds[0];
+        if (!submitting || submittedItemId !== targeted) {
+          submitting = true;
+          submittedItemId = targeted;
+        }
+      } else if (submitting) {
+        iframeTrace('inflight-clear', {reason: 'sentinel-cleared', item: submittedItemId || ''});
         submitting = false;
         selected = null;
         submittedItemId = null;
@@ -344,7 +347,7 @@
                       label="Approve"
                       size="xs"
                       enabled="{traceApproveDropEnabled(submitting, selected)}"
-                      onClick="(() => { iframeTrace('click', {target: 'approve', item: selected}); const item = (worklist.value.items || []).find(i => i.id === selected); if (item && item.status === 'applied' && item.closesIssues && item.closesIssues.length > 0) { closeIssuesItemRef = item; closeIssuesState = initCloseIssueState(item.closesIssues); closeIssuesDialog = item.id; return; } submittedItemId = selected; markInflight(worklist.value && worklist.value.items, selected); submitting = true; iframeTrace('inflight-set', {item: selected, via: 'click', target: 'approve'}); toTurn('approved: ' + buildApprovePayload(worklist.value.items, selected, selectedFeedback)); })()" />
+                      onClick="(() => { iframeTrace('click', {target: 'approve', item: selected}); const item = (worklist.value.items || []).find(i => i.id === selected); if (item && item.status === 'applied' && item.closesIssues && item.closesIssues.length > 0) { closeIssuesItemRef = item; closeIssuesState = initCloseIssueState(item.closesIssues); closeIssuesDialog = item.id; return; } submittedItemId = selected; submitting = true; iframeTrace('inflight-set', {item: selected, via: 'click', target: 'approve'}); toTurn('approved: ' + buildApprovePayload(worklist.value.items, selected, selectedFeedback)); })()" />
                     <Theme paddingHorizontal-Button-xs="$space-0_5">
                       <Button
                         label="ⓘ"
@@ -359,7 +362,7 @@
                       label="Iterate"
                       size="xs"
                       enabled="{traceIterateEnabled(submitting, selected, selectedFeedback)}"
-                      onClick="iframeTrace('click', {target: 'iterate', item: selected}); submittedItemId = selected; markInflight(worklist.value && worklist.value.items, selected); submitting = true; iframeTrace('inflight-set', {item: selected, via: 'click', target: 'iterate'}); toTurn('iterate: ' + buildIteratePayload(worklist.value.items, selected, selectedFeedback))" />
+                      onClick="iframeTrace('click', {target: 'iterate', item: selected}); submittedItemId = selected; submitting = true; iframeTrace('inflight-set', {item: selected, via: 'click', target: 'iterate'}); toTurn('iterate: ' + buildIteratePayload(worklist.value.items, selected, selectedFeedback))" />
                     <Theme paddingHorizontal-Button-xs="$space-0_5">
                       <Button
                         label="ⓘ"
@@ -374,7 +377,7 @@
                       label="Drop"
                       size="xs"
                       enabled="{traceApproveDropEnabled(submitting, selected)}"
-                      onClick="iframeTrace('click', {target: 'drop', item: selected}); submittedItemId = selected; markInflight(worklist.value && worklist.value.items, selected); submitting = true; iframeTrace('inflight-set', {item: selected, via: 'click', target: 'drop'}); toTurn('drop: ' + buildDropPayload(worklist.value.items, selected, selectedFeedback))" />
+                      onClick="iframeTrace('click', {target: 'drop', item: selected}); submittedItemId = selected; submitting = true; iframeTrace('inflight-set', {item: selected, via: 'click', target: 'drop'}); toTurn('drop: ' + buildDropPayload(worklist.value.items, selected, selectedFeedback))" />
                     <Theme paddingHorizontal-Button-xs="$space-0_5">
                       <Button
                         label="ⓘ"
@@ -388,7 +391,7 @@
                     when="{submitting}"
                     label="Cancel"
                     variant="ghost"
-                    onClick="clearInflight(); submitting = false; submittedItemId = null; selectedFeedback = ''; feedbackExpanded = false; expandedItemId = null; selected = null" />
+                    onClick="submitting = false; submittedItemId = null; selectedFeedback = ''; feedbackExpanded = false; expandedItemId = null; selected = null" />
                 </HStack>
                 <VStack
                   when="{expandedItemId === $item.id}"
@@ -517,11 +520,11 @@
         <HStack gap="$space-2" paddingTop="$space-2">
           <Button
             label="Confirm"
-            onClick="submittedItemId = closeIssuesItemRef.id; markInflight(worklist.value && worklist.value.items, closeIssuesItemRef.id); submitting = true; toTurn('approved: ' + buildSingleItemApprovePayload(closeIssuesItemRef, combineFeedbackWithCloseLines(selectedFeedback, buildCloseIssueLines(closeIssuesState)))); closeIssuesDialog = null; closeIssuesItemRef = null; closeIssuesState = null" />
+            onClick="submittedItemId = closeIssuesItemRef.id; submitting = true; toTurn('approved: ' + buildSingleItemApprovePayload(closeIssuesItemRef, combineFeedbackWithCloseLines(selectedFeedback, buildCloseIssueLines(closeIssuesState)))); closeIssuesDialog = null; closeIssuesItemRef = null; closeIssuesState = null" />
           <Button
             label="Approve without closing"
             variant="outlined"
-            onClick="submittedItemId = closeIssuesItemRef.id; markInflight(worklist.value && worklist.value.items, closeIssuesItemRef.id); submitting = true; toTurn('approved: ' + buildSingleItemApprovePayload(closeIssuesItemRef, selectedFeedback)); closeIssuesDialog = null; closeIssuesItemRef = null; closeIssuesState = null" />
+            onClick="submittedItemId = closeIssuesItemRef.id; submitting = true; toTurn('approved: ' + buildSingleItemApprovePayload(closeIssuesItemRef, selectedFeedback)); closeIssuesDialog = null; closeIssuesItemRef = null; closeIssuesState = null" />
           <Button
             label="Cancel"
             variant="ghost"

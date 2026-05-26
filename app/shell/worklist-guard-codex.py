@@ -639,9 +639,10 @@ def main():
     # first patch target; Bash gets the command preview; anything else
     # leaves target empty.
     if tool_name == "apply_patch":
-        targets = patch_targets(tool_input) if isinstance(tool_input, dict) else []
+        targets = patch_targets(tool_input) if isinstance(tool_input, dict) else set()
         if targets:
-            t0 = normalize_target(cwd, targets[0]) or targets[0]
+            first = next(iter(targets))
+            t0 = normalize_target(cwd, first) or first
             _HOOK_CTX["target"] = t0
     elif tool_name == "Bash" and isinstance(tool_input, dict):
         cmd = tool_input.get("command") or ""

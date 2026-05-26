@@ -1,4 +1,4 @@
-This repo is driven through Bram. The canonical worklist gate is carried by codex's `developer_instructions` (top-level in `~/.codex/config.toml`, installed by Bram Setup) and enforced at runtime by a `PreToolUse` hook. Read `app/__shell/conventions.md` for the full conventions, including the two-stage proposed → applied → committed flow, approval payload shape, and edge cases.
+This repo is driven through Bram. The canonical worklist gate is carried by codex's `developer_instructions` (top-level in `~/.codex/config.toml`, installed by Bram Setup) and enforced at runtime by a `PreToolUse` hook. Read `.claude/xmlui-desktop-conventions.md` for the full conventions, including the two-stage proposed → applied → committed flow, approval payload shape, and edge cases.
 
 Quick summary so you can act in this turn:
 

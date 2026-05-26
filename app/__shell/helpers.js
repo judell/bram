@@ -458,7 +458,7 @@ window.subscribeRightPaneSize = function (callback) {
 // Push local commits to origin and refetch a DataSource (typically
 // the commits list) when the push completes, so the pushed flags
 // refresh without a manual reload.
-window.gitPush = function (commitsDs) {
+window.gitPush = function (commitsDs, onError) {
   var invoke = getTauriInvoke();
   if (!invoke) return;
   invoke("git_push", {})
@@ -469,6 +469,7 @@ window.gitPush = function (commitsDs) {
     })
     .catch(function (e) {
       window.logToHost({ kind: "git-push", phase: "err", error: String(e) });
+      if (typeof onError === "function") onError(String(e));
     });
 };
 // In-flight marker that persists across iframe reloads. At click

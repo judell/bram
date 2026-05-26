@@ -1,4 +1,4 @@
-<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{''}" var.recording="{false}"
+<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{''}" var.recording="{false}" var.setupCompleteProvider="{''}"
   onInit="subscribeRightPaneSize((s) => rightPaneSize = s.width + ' × ' + s.height); updateBannerDismissedVersion = readLocalStorage('bram.updateBannerDismissedVersion', ''); (() => { const tauri = (window.parent &amp;&amp; window.parent.__TAURI__) || window.__TAURI__; if (tauri &amp;&amp; tauri.event &amp;&amp; tauri.event.listen) { if (typeof window.__bramEnhanceStatusUnlisten === 'function') { try { window.__bramEnhanceStatusUnlisten(); } catch (err) {} window.__bramEnhanceStatusUnlisten = null; } tauri.event.listen('enhance-status-changed', () => enhanceStatus.refetch()).then((unlisten) => { window.__bramEnhanceStatusUnlisten = unlisten; }).catch(() => {}); } })()">
   <DataSource id="enhanceStatus" url="/__enhance/status" />
   <DataSource id="rpInfo" url="/__right-pane-info" />
@@ -218,9 +218,29 @@
 <HStack>
   <Button
     label="Run Setup"
-    onClick="window.fetch('/__enhance/run').then(() => enhanceStatus.refetch())" />
+    onClick="setupCompleteProvider = enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider; window.fetch('/__enhance/run').then(() => enhanceStatus.refetch()).catch(() => { setupCompleteProvider = ''; enhanceStatus.refetch(); })" />
 </HStack>
   </VStack>
+
+  <HStack
+    when="{setupCompleteProvider}"
+    backgroundColor="$color-info-100"
+    padding="$space-2"
+    gap="$space-3"
+    verticalAlignment="center">
+    <Text fontSize="$fontSize-sm">
+      {setupCompleteProvider === 'claude'
+        ? 'Setup complete. Restart Claude to pick up the new hook.'
+        : 'Setup complete. Codex picks up the new config on its next turn — no restart needed.'}
+    </Text>
+    <SpaceFiller />
+    <Button
+      label="✕"
+      variant="ghost"
+      size="xs"
+      tooltip="Dismiss"
+      onClick="setupCompleteProvider = ''" />
+  </HStack>
 
   <VStack
     when="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider === 'codex' &amp;&amp; enhanceStatus.value.codexHookCurrent &amp;&amp; !enhanceStatus.value.codexTrustAck}"

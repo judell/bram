@@ -4,7 +4,8 @@
   var.selectedLine="{null}"
   var.commitsExpanded="{false}"
   var.queryDraft=""
-  var.query="">
+  var.query=""
+  var.pushError="{null}">
 
   <DataSource
     id="commits"
@@ -41,7 +42,7 @@
           when="{(commits.value || []).filter(c => !c.pushed).length > 0}"
           label="Push {(commits.value || []).filter(c => !c.pushed).length}"
           size="xs"
-          onClick="gitPush(commits)" />
+          onClick="pushError = null; gitPush(commits, (e) => pushError = e)" />
         <SpaceFiller />
         <Button
           label="✕"
@@ -56,6 +57,23 @@
           maxWidth="20rem"
           initialValue="{queryDraft}"
           onDidChange="(v) => queryDraft = v" />
+      </HStack>
+
+      <HStack
+        when="{pushError}"
+        backgroundColor="$color-danger-100"
+        padding="$space-2"
+        gap="$space-2"
+        verticalAlignment="start">
+        <Text fontSize="$fontSize-sm" color="$color-danger-700" width="*">
+          Push failed: {pushError}
+        </Text>
+        <Button
+          label="✕"
+          variant="ghost"
+          size="xs"
+          tooltip="Dismiss"
+          onClick="pushError = null" />
       </HStack>
 
       <VStack

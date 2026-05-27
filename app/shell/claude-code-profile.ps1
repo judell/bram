@@ -12,7 +12,7 @@ function _xmlui_mark_agent {
 }
 
 function _xmlui_has_repo_setup {
-    return (Test-Path "resources/.worklist-authorization.json") -or (Test-Path ".claude/xmlui-desktop-conventions.md")
+    return (Test-Path "resources/.worklist-authorization.json") -or (Test-Path ".claude/bram-conventions.md") -or (Test-Path ".claude/xmlui-desktop-conventions.md")
 }
 
 function _xmlui_codex_seed_text {

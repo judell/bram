@@ -12,7 +12,7 @@ _xmlui_mark_agent() {
 }
 
 _xmlui_has_repo_setup() {
-  [ -f "resources/.worklist-authorization.json" ] || [ -f ".claude/xmlui-desktop-conventions.md" ]
+  [ -f "resources/.worklist-authorization.json" ] || [ -f ".claude/bram-conventions.md" ] || [ -f ".claude/xmlui-desktop-conventions.md" ]
 }
 
 _xmlui_codex_seed_text() {

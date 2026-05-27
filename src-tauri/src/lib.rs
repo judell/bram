@@ -5928,7 +5928,12 @@ fn mime_for(path: &std::path::Path) -> &'static str {
 // what's between the markers without disturbing surrounding content.
 const ENHANCE_MARKER_START: &str = "<!-- xmlui-desktop:start -->";
 const ENHANCE_MARKER_END: &str = "<!-- xmlui-desktop:end -->";
-const ENHANCE_SIDECAR_REL: &str = ".claude/xmlui-desktop-conventions.md";
+const ENHANCE_SIDECAR_REL: &str = ".claude/bram-conventions.md";
+// Pre-bram rename. Setup migrates legacy path to ENHANCE_SIDECAR_REL on
+// next run; status / shellrc / profile / codex guard all accept either
+// filename so projects that haven't re-run Setup still register as
+// Bram-managed during the transition.
+const ENHANCE_SIDECAR_LEGACY_REL: &str = ".claude/xmlui-desktop-conventions.md";
 const ENHANCE_CODEX_AGENTS_REL: &str = "AGENTS.md";
 const ENHANCE_CODEX_BUNDLE_REL: &str = "shell/codex-startup-instructions.md";
 const ENHANCE_HOOK_SCRIPT_REL: &str = ".claude/hooks/worklist-guard.py";
@@ -5983,7 +5988,8 @@ that keeps the Worklist tab UI in sync. \
 Use curl --retry-connrefused --retry 3 --retry-delay 1 for these \
 loopback calls — Bram restarts briefly drop the port and a fresh \
 connection can land in that window. \
-Full convention: .claude/xmlui-desktop-conventions.md";
+Full convention: .claude/bram-conventions.md \
+(legacy: .claude/xmlui-desktop-conventions.md)";
 const WORKLIST_AUTH_REL: &str = "resources/.worklist-authorization.json";
 // Host-managed inflight sentinel (#84). Written when /__worklist/resolve
 // serves an approved or drop record, OR when /__iterate/begin is
@@ -6596,7 +6602,11 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         .map(|s| s.contains(ENHANCE_MARKER_START))
         .unwrap_or(false);
     // Source repo treats the bundle itself as the canonical sidecar.
-    let sidecar_exists = sidecar.exists() || proj.join(ENHANCE_SOURCE_BUNDLE_REL).exists();
+    // Legacy .claude/xmlui-desktop-conventions.md also counts as installed
+    // until Setup migrates it to the new path.
+    let sidecar_exists = sidecar.exists()
+        || proj.join(ENHANCE_SIDECAR_LEGACY_REL).exists()
+        || proj.join(ENHANCE_SOURCE_BUNDLE_REL).exists();
     let hook_script_exists = hook_script.exists();
     let hook_script_current =
         hook_script_exists && hook_matches_bundle(app, &hook_script, ENHANCE_HOOK_BUNDLE_REL);
@@ -6722,6 +6732,11 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String>
         }
         std::fs::write(&sidecar_path, &conventions).map_err(|e| format!("write sidecar: {}", e))?;
         wrote.push(sidecar_path.display().to_string());
+        // Migration: remove the legacy sidecar so the project doesn't end
+        // up with two convention files. NotFound is fine (legacy install
+        // wasn't there, or already migrated).
+        let legacy_sidecar = proj.join(ENHANCE_SIDECAR_LEGACY_REL);
+        let _ = std::fs::remove_file(&legacy_sidecar);
     }
 
     let codex_agents_path = proj.join(ENHANCE_CODEX_AGENTS_REL);

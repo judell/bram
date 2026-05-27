@@ -590,9 +590,10 @@ def emit_additional_context(text):
 # Compact reminder injected only on prompts that look like change requests in
 # managed repos. The PreToolUse hook is the runtime backstop; this is the
 # pre-emptive nudge that aims to head off codex's inspect-narrate-edit reflex.
-# The full conventions live in .claude/xmlui-desktop-conventions.md, which
-# codex reads on first prompt; this stays short to avoid drowning the model
-# in repeated boilerplate.
+# The full conventions live in .claude/bram-conventions.md (or the
+# legacy .claude/xmlui-desktop-conventions.md if Setup has not yet
+# migrated this project), which codex reads on first prompt; this stays
+# short to avoid drowning the model in repeated boilerplate.
 GATE_REMINDER = (
     "bram worklist gate. First response to a change request must be "
     "(a) clarify, (b) propose items via resources/worklist-drafts/<id>.md "
@@ -600,7 +601,7 @@ GATE_REMINDER = (
     "(c) read-only investigation prefaced "
     "\"I don't yet have enough context to propose\". Mutations outside approved "
     "items are blocked at runtime. Full convention: "
-    ".claude/xmlui-desktop-conventions.md"
+    ".claude/bram-conventions.md (legacy: .claude/xmlui-desktop-conventions.md)"
 )
 
 # Heuristic for "this prompt is asking for a change." Keep permissive (better

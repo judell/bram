@@ -162,10 +162,12 @@ saved local state may already depend on them.
   `# bram:start` / `# bram-instructions:start` blocks in
   `~/.codex/config.toml`, while accepting legacy
   `~/.xmlui-desktop/codex-worklist-guard.py` and `# xmlui-desktop:start`
-  blocks during migration. Repo-local Claude convention files still use
-  `.claude/xmlui-desktop-conventions.md` and
-  `<!-- xmlui-desktop:start -->`; `xmlui-desktop-auto-rebase` also remains
-  legacy-named.
+  blocks during migration. Repo-local Claude convention files now use
+  `.claude/bram-conventions.md`; Setup migrates the legacy
+  `.claude/xmlui-desktop-conventions.md` path on next run, and the
+  shellrc / profile / codex-guard accept either filename during the
+  transition. `<!-- xmlui-desktop:start -->` markers and
+  `xmlui-desktop-auto-rebase` remain legacy-named.
 
 Operational impact:
 

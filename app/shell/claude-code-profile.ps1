@@ -49,6 +49,13 @@ function _xmlui_codex_is_subcommand {
     }
 }
 
+function _xmlui_pick_agent {
+    $provider = if ($env:BRAM_STARTUP_AGENT) { $env:BRAM_STARTUP_AGENT } elseif ($env:XMLUI_DESKTOP_STARTUP_AGENT) { $env:XMLUI_DESKTOP_STARTUP_AGENT } else { $null }
+    if ($provider) { return $provider }
+    if (Get-Command -Name codex -CommandType Application -ErrorAction SilentlyContinue) { return "codex" }
+    return "claude"
+}
+
 function _xmlui_run_real {
     param([string]$Name, [object[]]$ForwardArgs)
     $real = Get-Command -Name $Name -CommandType Application -ErrorAction SilentlyContinue |
@@ -58,6 +65,29 @@ function _xmlui_run_real {
         return
     }
     & $real.Source @ForwardArgs
+}
+
+function agent {
+    param([Parameter(ValueFromRemainingArguments = $true)][object[]]$Args)
+    $provider = _xmlui_pick_agent
+    switch ($provider) {
+        "codex" {
+            if ($Args.Count -gt 0 -and [string]$Args[0] -eq "--continue") {
+                $remaining = @()
+                if ($Args.Count -gt 1) {
+                    $remaining = $Args[1..($Args.Count - 1)]
+                }
+                codex resume @remaining
+                return
+            }
+            codex @Args
+            return
+        }
+        default {
+            claude @Args
+            return
+        }
+    }
 }
 
 function claude {

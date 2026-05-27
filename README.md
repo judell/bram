@@ -226,10 +226,12 @@ You can specify how to launch the agent in the terminal pane.
 ```
 {
   "shell": {
-    "agent": "claude --continue"
+    "agent": "agent --continue"
   }
 }
 ```
+
+`agent` dispatches to `claude` or `codex` at shell startup. Set `BRAM_STARTUP_AGENT=claude` or `BRAM_STARTUP_AGENT=codex` to pin the default; if unset, the shell falls back to `codex` when available and otherwise `claude`.
 
 ### Working with a real backend
 

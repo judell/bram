@@ -1,6 +1,6 @@
 echo "You can launch claude or codex here."
 # To auto-launch one on shell start, add to .bram.json:
-#   { "shell": { "agent": "claude --continue" } }
+#   { "shell": { "agent": "agent --continue" } }
 
 _XMLUI_SHELL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -29,6 +29,37 @@ _xmlui_codex_is_subcommand() {
       ;;
     *)
       return 1
+      ;;
+  esac
+}
+
+_xmlui_pick_agent() {
+  local provider="${BRAM_STARTUP_AGENT:-$XMLUI_DESKTOP_STARTUP_AGENT}"
+  if [ -n "$provider" ]; then
+    printf '%s' "$provider"
+    return 0
+  fi
+  if type -P codex >/dev/null 2>&1; then
+    printf '%s' "codex"
+    return 0
+  fi
+  printf '%s' "claude"
+}
+
+agent() {
+  local provider
+  provider="$(_xmlui_pick_agent)"
+  case "$provider" in
+    codex)
+      if [ "${1:-}" = "--continue" ]; then
+        shift
+        codex resume "$@"
+      else
+        codex "$@"
+      fi
+      ;;
+    *)
+      claude "$@"
       ;;
   esac
 }

@@ -4585,6 +4585,84 @@ fn read_latest_session_pending<R: tauri::Runtime>(
     result
 }
 
+// Host-side last-assistant-text extraction. Architectural experiment
+// for the "derive-at-the-boundary, not in the iframe" thread: the
+// JSONL helper `lastAssistantText` was costing 250-300ms per fanout
+// on the iframe main thread. This route does the same walk in Rust
+// once per request and returns just the text, so the iframe binds to
+// a small value instead of re-walking 100 KB+ every broadcast.
+//
+// Reads the trailing 32 KB of the current Claude session JSONL (same
+// budget as `read_latest_session_pending`), walks lines in reverse,
+// and returns the most recent assistant text turn. Returns empty
+// string when no assistant text is found in the tail window.
+fn read_last_assistant_text<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    _preferred: Option<SessionProvider>,
+) -> Result<Vec<u8>, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let Some(path) = latest_claude_session_path(app)? else {
+        return Ok(br#"{"text":""}"#.to_vec());
+    };
+    let mut file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+    let file_size = file.metadata().map_err(|e| e.to_string())?.len();
+    let want: u64 = 32 * 1024;
+    let read_from = file_size.saturating_sub(want);
+    file.seek(SeekFrom::Start(read_from))
+        .map_err(|e| e.to_string())?;
+    let mut tail = Vec::with_capacity((file_size - read_from) as usize);
+    file.read_to_end(&mut tail).map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&tail);
+    let mut found = String::new();
+    for line in text.lines().rev() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(r) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let typ = r.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if typ != "assistant" {
+            continue;
+        }
+        let content = match r.get("message").and_then(|m| m.get("content")) {
+            Some(c) => c,
+            None => continue,
+        };
+        // content can be a string OR an array of content blocks. The
+        // iframe helper handles both shapes; we mirror that.
+        if let Some(s) = content.as_str() {
+            if !s.is_empty() {
+                found = s.to_string();
+                break;
+            }
+        }
+        if let Some(arr) = content.as_array() {
+            let mut texts: Vec<String> = Vec::new();
+            for c in arr {
+                if c.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    if let Some(t) = c.get("text").and_then(|v| v.as_str()) {
+                        if !t.is_empty() {
+                            texts.push(t.to_string());
+                        }
+                    }
+                }
+            }
+            if !texts.is_empty() {
+                found = texts.join("\n\n");
+                break;
+            }
+        }
+    }
+    // Note: we deliberately skip the iframe's stripImagePaths /
+    // rewriteXmluiDocUrls transforms here. They're cheap on a 2 KB
+    // string and can stay iframe-side if needed; the responsiveness
+    // win comes from not walking the buffer, not from those passes.
+    let body = serde_json::json!({ "text": found });
+    serde_json::to_vec(&body).map_err(|e| e.to_string())
+}
+
 // Cheap variant for polling: just the file size + mtime. Lets Transcript
 // detect changes without re-fetching the full (multi-MB) JSONL each
 // tick. The frontend then bumps a cache-busting param to trigger a
@@ -7521,6 +7599,21 @@ fn route_request<R: tauri::Runtime>(
             Err(e) => {
                 eprintln!("[http /__file path={}] {}", file_path, e);
                 (404, "text/plain; charset=utf-8", Vec::new())
+            }
+        };
+    }
+
+    // Architectural experiment: derive-at-the-boundary for the
+    // "last assistant text" panel. Iframe binds to this route's
+    // {text} field instead of calling lastAssistantText(lastJsonl) and
+    // walking the buffer per fanout. Refetch is event-driven via
+    // talk-session-changed.
+    if path == "__last-assistant-text" {
+        return match read_last_assistant_text(app, None) {
+            Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
+            Err(e) => {
+                eprintln!("[http /__last-assistant-text] {}", e);
+                (500, "text/plain; charset=utf-8", e.into_bytes())
             }
         };
     }

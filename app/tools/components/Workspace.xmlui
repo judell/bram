@@ -18,7 +18,9 @@
   var.newItemIssue="{null}"
   var.newItemText="{''}"
   var.pendingMenu="{null}"
-  var.inflightTick="{0}">
+  var.inflightTick="{0}"
+  var.lastAssistantTick="{0}"
+  var.lastAssistantTickAt="{0}">
   <ChangeListener
     listenTo="{selectedFeedback}"
     onDidChange="App.mark('selectedFeedback-written')" />
@@ -88,12 +90,21 @@
         feedbackExpanded = false; expandedItemId = null;
       }
     }" />
+  <!-- Architectural experiment: derive-at-the-boundary. Instead of
+       calling lastAssistantText(lastJsonl) on the iframe main thread
+       (which walks ~100 KB of JSONL suffix and costs ~250 ms per
+       fanout), bind to a host-computed value via a small DataSource.
+       Refetch is driven by `sessionTick` (App-level var bumped on
+       talk-session-changed, 2s-throttled). -->
+  <DataSource
+    id="lastAssistantTextDS"
+    url="/__last-assistant-text?t={lastAssistantTick}" />
 
   <VStack
     padding="$space-6"
     gap="$space-6"
     onInit="lastJsonl = window.getLatestJsonl();
-    subscribeLatestJsonl('__bramWorkspaceJsonlUnsub', (v) => { lastJsonl = v; });
+    subscribeLatestJsonl('__bramWorkspaceJsonlUnsub', (v) => { lastJsonl = v; const now = Date.now(); if (now - lastAssistantTickAt >= 2000) { lastAssistantTickAt = now; lastAssistantTick = lastAssistantTick + 1; } });
     (() => {
       // Iframe-side trace records for the [iframe] category of the
       // comms-path trace (issue #49). Calls route through iframeTrace()
@@ -423,9 +434,9 @@
 
     </VStack>
 
-      <VStack gap="$space-1" when="{worklist.value && worklist.value.items && worklist.value.items.length > 0 && lastAssistantText(lastJsonl)}">
+      <VStack gap="$space-1" when="{worklist.value && worklist.value.items && worklist.value.items.length > 0 && lastAssistantTextDS.value && lastAssistantTextDS.value.text}">
         <Heading level="h4">Last agent response</Heading>
-        <Markdown content="{lastAssistantText(lastJsonl)}" />
+        <Markdown content="{lastAssistantTextDS.value.text}" />
       </VStack>
 
     <ModalDialog

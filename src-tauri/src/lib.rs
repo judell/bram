@@ -6648,6 +6648,8 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
     let claude_installed =
         claude_md_has_marker && sidecar_exists && hook_script_current && hook_registered;
     let codex_installed = core_installed && codex_agents_has_marker && codex_hook_current;
+    let codex_hook_stale_only =
+        core_installed && codex_agents_has_marker && !codex_hook_current;
     let claude_needs_setup = !core_installed || !claude_installed;
     let codex_needs_setup = !core_installed || !codex_installed;
     let provider_needs_setup = match active_provider {
@@ -6669,6 +6671,12 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         "claudeNeedsSetup": claude_needs_setup,
         "codexNeedsSetup": codex_needs_setup,
         "providerNeedsSetup": provider_needs_setup,
+        "codexHookStaleOnly": codex_hook_stale_only,
+        "providerSetupKind": if matches!(active_provider, Some(SessionProvider::Codex)) && codex_hook_stale_only {
+            "codex-hook-refresh"
+        } else {
+            "repo-setup"
+        },
         "claudeMd": claude_md_has_marker,
         "codexAgents": codex_agents_has_marker,
         "sidecar": sidecar_exists,

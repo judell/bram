@@ -226,17 +226,26 @@
     backgroundColor="$color-info-50"
     borderBottom="1px solid $color-info-200">
 <HStack verticalAlignment="center" gap="$space-2">
-  <Heading level="h3">Set Up This Repo For Agent Coordination</Heading>
+  <Heading level="h3">
+    {enhanceStatus.value && enhanceStatus.value.providerSetupKind === 'codex-hook-refresh'
+      ? 'Refresh Codex Agent Adapter'
+      : 'Set Up This Repo For Agent Coordination'}
+  </Heading>
   <Button
     label="ⓘ"
     variant="ghost"
     size="sm"
-    tooltip="About repo setup"
+    tooltip="{enhanceStatus.value && enhanceStatus.value.providerSetupKind === 'codex-hook-refresh' ? 'About Codex adapter refresh' : 'About repo setup'}"
     onClick="setupInfoDialog.open()" />
 </HStack>
+<Text
+  when="{enhanceStatus.value && enhanceStatus.value.providerSetupKind === 'codex-hook-refresh'}"
+  fontSize="$fontSize-sm">
+  Bram's repo setup is current. The user-global Codex hook adapter needs a refresh.
+</Text>
 <HStack>
   <Button
-    label="Run Setup"
+    label="{enhanceStatus.value && enhanceStatus.value.providerSetupKind === 'codex-hook-refresh' ? 'Refresh Adapter' : 'Run Setup'}"
     onClick="setupCompleteProvider = enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider; window.fetch('/__enhance/run').then(() => enhanceStatus.refetch()).catch(() => { setupCompleteProvider = ''; enhanceStatus.refetch(); })" />
 </HStack>
   </VStack>

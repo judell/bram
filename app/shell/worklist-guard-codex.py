@@ -29,8 +29,10 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 
 WORKLIST_REL = "resources/worklist.json"
@@ -482,12 +484,129 @@ def _patch_removes_worklist_items(cwd, patch_text):
 _STATUS_RE = re.compile(r'"status"\s*:\s*"([^"]+)"')
 
 
-def _patch_changes_worklist_status(patch_text):
-    removed = set(_STATUS_RE.findall(_removed_block_text(patch_text)))
-    added = set(_STATUS_RE.findall(_added_block_text(patch_text)))
-    if not removed and not added:
-        return False
-    return removed != added
+def _worklist_content_after_apply_patch(cwd, patch_text):
+    """Best-effort apply_patch interpreter for resources/worklist.json.
+
+    Codex patches carry enough context to reconstruct the post-edit file for
+    ordinary Update File hunks. Do that so worklist state validation can use
+    item-id-aware old/new JSON comparison instead of textual status heuristics.
+    Return None when the patch shape is too unusual to apply confidently.
+    """
+    old_content = current_worklist_text(cwd)
+    if not old_content:
+        return None
+
+    lines = patch_text.splitlines()
+    i = 0
+    content = old_content
+    saw_worklist_update = False
+    while i < len(lines):
+        line = lines[i]
+        if line != f"*** Update File: {WORKLIST_REL}":
+            i += 1
+            continue
+        saw_worklist_update = True
+        i += 1
+        while i < len(lines):
+            line = lines[i]
+            if line.startswith("*** ") and line != "*** End of File":
+                break
+            if not line.startswith("@@"):
+                i += 1
+                continue
+            i += 1
+            old_parts = []
+            new_parts = []
+            while i < len(lines):
+                hline = lines[i]
+                if hline.startswith("@@") or hline.startswith("*** "):
+                    break
+                if hline.startswith(" "):
+                    old_parts.append(hline[1:])
+                    new_parts.append(hline[1:])
+                elif hline.startswith("-"):
+                    old_parts.append(hline[1:])
+                elif hline.startswith("+"):
+                    new_parts.append(hline[1:])
+                else:
+                    return None
+                i += 1
+            old_text = "\n".join(old_parts)
+            new_text = "\n".join(new_parts)
+            if old_text:
+                if old_text not in content:
+                    return None
+                content = content.replace(old_text, new_text, 1)
+            elif new_text:
+                return None
+        continue
+
+    return content if saw_worklist_update else None
+
+
+def _self_test_replacement_patch(old_content, new_content):
+    return (
+        "*** Begin Patch\n"
+        f"*** Update File: {WORKLIST_REL}\n"
+        "@@\n"
+        + "".join("-" + line for line in old_content.splitlines(True))
+        + "".join("+" + line for line in new_content.splitlines(True))
+        + "*** End Patch\n"
+    )
+
+
+def self_test():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "resources").mkdir()
+        old_doc = {
+            "description": "",
+            "items": [
+                {
+                    "id": "existing",
+                    "status": "proposed",
+                    "file": "a.txt",
+                    "before": "old",
+                    "after": "new",
+                }
+            ],
+        }
+        old_content = json.dumps(old_doc, indent=2) + "\n"
+        (root / WORKLIST_REL).write_text(old_content)
+
+        new_item_doc = {
+            "description": "",
+            "items": old_doc["items"]
+            + [
+                {
+                    "id": "new-item",
+                    "status": "proposed",
+                    "file": "b.txt",
+                    "before": "old",
+                    "after": "new",
+                }
+            ],
+        }
+        new_item_content = json.dumps(new_item_doc, indent=2) + "\n"
+        applied = _worklist_content_after_apply_patch(
+            str(root),
+            _self_test_replacement_patch(old_content, new_item_content),
+        )
+        assert applied == new_item_content
+        assert _worklist_items_with_empty_body(applied, str(root)) == []
+        assert worklist_state_changes(old_content, applied) == ([], [])
+
+        transitioned = old_content.replace('"status": "proposed"', '"status": "applied"')
+        assert worklist_state_changes(old_content, transitioned) == (
+            [],
+            [("existing", "proposed", "applied")],
+        )
+
+        removed = json.dumps({"description": "", "items": []}, indent=2) + "\n"
+        assert worklist_state_changes(old_content, removed) == (
+            [("existing", "proposed")],
+            [],
+        )
 
 
 def _worklist_new_content_from_tool_input(cwd, tool_input):
@@ -692,12 +811,24 @@ def main():
         )
         if touches_worklist:
             patch_body = patch_text(tool_input)
-            removed = _patch_removes_worklist_items(cwd, patch_body)
-            if removed or _patch_changes_worklist_status(patch_body):
-                deny(_mechanical_worklist_change_error(removed, [], "apply_patch"))
-            bad_ids = _patch_adds_have_empty_bodies(patch_body, cwd)
-            if bad_ids:
-                deny(_worklist_validation_error(bad_ids, "apply_patch"))
+            new_content = _worklist_content_after_apply_patch(cwd, patch_body)
+            if new_content is not None:
+                bad_ids = _worklist_items_with_empty_body(new_content, cwd)
+                if bad_ids:
+                    deny(_worklist_validation_error(bad_ids, "apply_patch"))
+                removed, status_changed = worklist_state_changes(
+                    current_worklist_text(cwd),
+                    new_content,
+                )
+                if removed or status_changed:
+                    deny(_mechanical_worklist_change_error(removed, status_changed, "apply_patch"))
+            else:
+                removed = _patch_removes_worklist_items(cwd, patch_body)
+                if removed:
+                    deny(_mechanical_worklist_change_error(removed, [], "apply_patch"))
+                bad_ids = _patch_adds_have_empty_bodies(patch_body, cwd)
+                if bad_ids:
+                    deny(_worklist_validation_error(bad_ids, "apply_patch"))
         violations = []
         for t in raw_targets:
             rel = normalize_target(cwd, t)
@@ -810,4 +941,8 @@ def main():
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--self-test":
+        self_test()
+        print("worklist-guard-codex self-test passed")
+        sys.exit(0)
     main()

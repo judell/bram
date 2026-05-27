@@ -206,13 +206,18 @@ Lifecycle:
      your curl calls:
 
      ```
-     curl -s "http://localhost:61455/__worklist/resolve"
+     curl -sS "http://localhost:61455/__worklist/resolve"
      ```
 
      (replace `61455` with whatever `Read resources/.bram-port`
      returned). The literal port matches the
-     `Bash(curl -s "http://localhost*__worklist*)` allowlist pattern
-     in `.claude/settings.json` and runs without a prompt.
+     `Bash(curl -sS "http://localhost*__worklist*)` allowlist pattern
+     in `.claude/settings.json` and runs without a prompt. Use `-sS`
+     (silence progress, KEEP errors) rather than bare `-s` — `-s`
+     swallows `Failed to connect` and other curl errors, so a
+     restart-race against a stale port shows up as `(no output)`
+     instead of `curl: (7)` and makes the next failure
+     mode hard to diagnose.
 
      Use the literal port number — `$BRAM_PORT` won't work because
      Claude Code's permission matcher doesn't expand variables before

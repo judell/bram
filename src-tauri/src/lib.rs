@@ -5985,9 +5985,11 @@ On iterate: turns, POST /__iterate/begin as your first action and \
 /__iterate/end as your last. Don't edit resources/worklist.json \
 directly for state changes — the routes drive the inflight sentinel \
 that keeps the Worklist tab UI in sync. \
-Use curl --retry-connrefused --retry 3 --retry-delay 1 for these \
+Use curl -sS --retry-connrefused --retry 3 --retry-delay 1 for these \
 loopback calls — Bram restarts briefly drop the port and a fresh \
-connection can land in that window. \
+connection can land in that window. Use -sS (silence progress, KEEP \
+errors), not bare -s, so connection failures surface as curl: (7) \
+instead of (no output). \
 Full convention: .claude/bram-conventions.md \
 (legacy: .claude/xmlui-desktop-conventions.md)";
 const WORKLIST_AUTH_REL: &str = "resources/.worklist-authorization.json";

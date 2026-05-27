@@ -7681,6 +7681,437 @@ fn worklist_doc<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
     }
 }
 
+fn coordination_ago(ms: i64, now: i64) -> String {
+    if ms <= 0 {
+        return "unknown".to_string();
+    }
+    let diff = (now - ms).max(0);
+    if diff < 1000 {
+        return "now".to_string();
+    }
+    let sec = (diff + 500) / 1000;
+    if sec < 60 {
+        return format!("{}s ago", sec);
+    }
+    let min = (sec + 30) / 60;
+    if min < 60 {
+        return format!("{}m ago", min);
+    }
+    let hr = (min + 30) / 60;
+    if hr < 48 {
+        return format!("{}h ago", hr);
+    }
+    format!("{}d ago", (hr + 12) / 24)
+}
+
+fn coordination_trace_line_iso(line: &str) -> String {
+    line.strip_prefix('[')
+        .and_then(|rest| rest.split_once(']').map(|(ts, _)| ts.to_string()))
+        .unwrap_or_default()
+}
+
+fn trace_field_i64(line: &str, name: &str) -> Option<i64> {
+    let token = format!("{}=", name);
+    let start = line.find(&token)? + token.len();
+    let rest = &line[start..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse::<i64>().ok()
+}
+
+fn trace_json_field_i64(line: &str, name: &str) -> Option<i64> {
+    let token = format!("\"{}\":", name);
+    let start = line.find(&token)? + token.len();
+    let rest = &line[start..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse::<i64>().ok()
+}
+
+fn coordination_trace_summary(trace_text: &str) -> serde_json::Value {
+    let lines: Vec<&str> = trace_text.lines().rev().take(5000).collect();
+    let mut latest_tail_fresh = 0;
+    let mut latest_tail_diff = 0;
+    let mut latest_tail_bytes = 0;
+    let mut fanout_events = 0;
+    let mut fanout_resets = 0;
+    let mut fanout_subscribers: Option<i64> = None;
+    let mut cap_trims = 0;
+    let mut inflight_writes = 0;
+    let mut inflight_clears = 0;
+    let mut stale_rejects = 0;
+    let mut guard_blocks = 0;
+    let mut interrupts = 0;
+    let mut last_latest_tail = String::new();
+    let mut last_fanout = String::new();
+    let mut last_inflight = String::new();
+    let mut last_guard = String::new();
+    let mut last_interrupt = String::new();
+
+    for line in lines.into_iter().rev() {
+        if line.contains("[latest-tail]") {
+            if line.contains("mode=fresh") {
+                latest_tail_fresh += 1;
+            }
+            if line.contains("mode=diff") {
+                latest_tail_diff += 1;
+            }
+            if let Some(bytes) = trace_field_i64(line, "bytes") {
+                latest_tail_bytes += bytes;
+            }
+            last_latest_tail = coordination_trace_line_iso(line);
+        }
+        if line.contains("jsonl-fanout") {
+            fanout_events += 1;
+            if line.contains("\"reset\":true") || line.contains("reset=true") {
+                fanout_resets += 1;
+            }
+            last_fanout = coordination_trace_line_iso(line);
+        }
+        if line.contains("jsonl-broadcast") {
+            fanout_subscribers = trace_json_field_i64(line, "subscribers")
+                .or_else(|| trace_field_i64(line, "subscribers"));
+            last_fanout = coordination_trace_line_iso(line);
+        }
+        if line.contains("jsonl-cap-trim") {
+            cap_trims += 1;
+        }
+        if line.contains("[inflight-sentinel]") {
+            if line.contains("op=write") {
+                inflight_writes += 1;
+            }
+            if line.contains("op=clear") || line.contains("op=stale-startup-clear") {
+                inflight_clears += 1;
+            }
+            last_inflight = coordination_trace_line_iso(line);
+        }
+        if line.contains("rejected_stale") {
+            stale_rejects += 1;
+        }
+        if line.contains("worklist-guard") || line.contains("[guard]") {
+            let lower = line.to_ascii_lowercase();
+            if lower.contains("block") || lower.contains("deny") {
+                guard_blocks += 1;
+            }
+            last_guard = coordination_trace_line_iso(line);
+        }
+        if line.contains("interrupt")
+            || line.contains("silence-clear")
+            || line.contains("agent-turn-end")
+            || line.contains("Esc")
+        {
+            interrupts += 1;
+            last_interrupt = coordination_trace_line_iso(line);
+        }
+    }
+
+    serde_json::json!({
+        "latestTailFresh": latest_tail_fresh,
+        "latestTailDiff": latest_tail_diff,
+        "latestTailBytes": latest_tail_bytes,
+        "fanoutEvents": fanout_events,
+        "fanoutResets": fanout_resets,
+        "fanoutSubscribers": fanout_subscribers,
+        "capTrims": cap_trims,
+        "inflightWrites": inflight_writes,
+        "inflightClears": inflight_clears,
+        "staleRejects": stale_rejects,
+        "guardBlocks": guard_blocks,
+        "interrupts": interrupts,
+        "lastLatestTail": last_latest_tail,
+        "lastFanout": last_fanout,
+        "lastInflight": last_inflight,
+        "lastGuard": last_guard,
+        "lastInterrupt": last_interrupt,
+    })
+}
+
+fn recent_worklist_history<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_json::Value> {
+    let Some(dir) = worklist_history_dir(app) else {
+        return Vec::new();
+    };
+    let mut json_files: Vec<(i64, PathBuf)> = Vec::new();
+    if let Ok(read_dir) = std::fs::read_dir(&dir) {
+        for entry in read_dir.flatten() {
+            let p = entry.path();
+            if p.extension().map_or(false, |e| e == "json") {
+                if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                    if let Ok(ts) = stem.parse::<i64>() {
+                        json_files.push((ts, p));
+                    }
+                }
+            }
+        }
+    }
+    json_files.sort_by(|a, b| b.0.cmp(&a.0));
+    json_files
+        .into_iter()
+        .take(5)
+        .map(|(ts, json_path)| {
+            let md_path = json_path.with_extension("md");
+            let changelog = std::fs::read_to_string(&md_path).unwrap_or_default();
+            let summary = changelog
+                .lines()
+                .find(|l| l.starts_with("**Summary:**"))
+                .map(|l| l.trim_start_matches("**Summary:**").trim().to_string())
+                .unwrap_or_else(|| {
+                    if changelog.contains("## Description changed") {
+                        "description changed".to_string()
+                    } else {
+                        "change".to_string()
+                    }
+                });
+            serde_json::json!({
+                "ts": ts,
+                "iso": format_iso_utc_ms(ts),
+                "summary": summary,
+            })
+        })
+        .collect()
+}
+
+fn latest_xs_trace_export() -> Option<serde_json::Value> {
+    let downloads = home_dir()?.join("Downloads");
+    let mut newest: Option<(i64, PathBuf)> = None;
+    let read_dir = std::fs::read_dir(downloads).ok()?;
+    for entry in read_dir.flatten() {
+        let p = entry.path();
+        let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("xs-trace-") || !name.ends_with(".json") {
+            continue;
+        }
+        let modified_ms = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        if newest.as_ref().map_or(true, |(ts, _)| modified_ms > *ts) {
+            newest = Some((modified_ms, p));
+        }
+    }
+    newest.map(|(modified_ms, p)| {
+        serde_json::json!({
+            "path": p.to_string_lossy().to_string(),
+            "modifiedAt": modified_ms,
+            "modifiedIso": format_iso_utc_ms(modified_ms),
+        })
+    })
+}
+
+fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String> {
+    let now = unix_now_ms();
+    let worklist = worklist_doc(app);
+    let items: Vec<serde_json::Value> = worklist
+        .get("items")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for item in &items {
+        let status = item
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("proposed")
+            .to_string();
+        *counts.entry(status).or_insert(0) += 1;
+    }
+    let applied_count = *counts.get("applied").unwrap_or(&0);
+    let proposed_count = *counts.get("proposed").unwrap_or(&0);
+    let committed_count = *counts.get("committed").unwrap_or(&0);
+    let pruned_count = *counts.get("pruned").unwrap_or(&0);
+
+    let inflight: serde_json::Value = inflight_claim_file(app)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let claim_ids: Vec<String> = inflight
+        .get("ids")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let claimed_at = inflight
+        .get("claimedAt")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let claim_age_ms = if claimed_at > 0 { now - claimed_at } else { 0 };
+    let claim_level = if claim_ids.is_empty() {
+        "ok"
+    } else if claim_age_ms > 120000 {
+        "warn"
+    } else {
+        "info"
+    };
+
+    let trace_text = project_root(Some(app))
+        .map(|p| p.join("resources/bram-trace.log"))
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default();
+    let trace = coordination_trace_summary(&trace_text);
+    let history = recent_worklist_history(app);
+    let last_history = history
+        .first()
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let latest_total = trace["latestTailFresh"].as_i64().unwrap_or(0)
+        + trace["latestTailDiff"].as_i64().unwrap_or(0);
+    let fresh_heavy = latest_total >= 5
+        && trace["latestTailFresh"].as_i64().unwrap_or(0)
+            > trace["latestTailDiff"].as_i64().unwrap_or(0);
+    let fanout_level = if trace["fanoutEvents"].as_i64().unwrap_or(0) == 0 {
+        "neutral"
+    } else if trace["fanoutResets"].as_i64().unwrap_or(0) > 3
+        || trace["capTrims"].as_i64().unwrap_or(0) > 2
+    {
+        "warn"
+    } else {
+        "ok"
+    };
+    let trace_export = latest_xs_trace_export();
+    let trace_export_state = if trace_export.is_some() {
+        "found"
+    } else {
+        "none"
+    };
+    let trace_export_detail = trace_export
+        .as_ref()
+        .and_then(|v| v.get("path").and_then(|p| p.as_str()))
+        .unwrap_or("No xs-trace export found in ~/Downloads");
+    let trace_export_seen = trace_export
+        .as_ref()
+        .and_then(|v| v.get("modifiedIso").and_then(|p| p.as_str()))
+        .unwrap_or("");
+
+    let rows = serde_json::json!({
+        "generatedAt": format_iso_utc_ms(now),
+        "raw": {
+            "worklist": worklist,
+            "inflight": inflight,
+            "history": history.clone(),
+            "trace": trace.clone(),
+            "traceExport": trace_export.clone(),
+        },
+        "sections": [
+            {
+                "title": "Worklist",
+                "rows": [
+                    {
+                        "signal": "Current items",
+                        "level": if applied_count > 0 { "warn" } else { "ok" },
+                        "state": format!("{} active", items.len()),
+                        "detail": format!("proposed {}, applied {}, committed {}, pruned {}", proposed_count, applied_count, committed_count, pruned_count),
+                        "seen": last_history.get("iso").and_then(|v| v.as_str()).unwrap_or(""),
+                    },
+                    {
+                        "signal": "Recent transitions",
+                        "level": if history.is_empty() { "neutral" } else { "ok" },
+                        "state": format!("{} snapshots", history.len()),
+                        "detail": history.iter().filter_map(|h| h.get("summary").and_then(|v| v.as_str())).collect::<Vec<&str>>().join(" | ").if_empty("No worklist history yet"),
+                        "seen": last_history.get("iso").and_then(|v| v.as_str()).unwrap_or(""),
+                    }
+                ]
+            },
+            {
+                "title": "Inflight Sentinel",
+                "rows": [
+                    {
+                        "signal": "Current claim",
+                        "level": claim_level,
+                        "state": if claim_ids.is_empty() { "idle".to_string() } else { format!("{} {}", inflight.get("kind").and_then(|v| v.as_str()).unwrap_or("claim"), coordination_ago(claimed_at, now)) },
+                        "detail": if claim_ids.is_empty() { "No active spinner sentinel".to_string() } else { claim_ids.join(", ") },
+                        "seen": if claimed_at > 0 { format_iso_utc_ms(claimed_at) } else { String::new() },
+                    },
+                    {
+                        "signal": "Trace pairs",
+                        "level": if trace["inflightWrites"].as_i64().unwrap_or(0) > trace["inflightClears"].as_i64().unwrap_or(0) + 1 { "warn" } else { "ok" },
+                        "state": format!("{} writes / {} clears", trace["inflightWrites"].as_i64().unwrap_or(0), trace["inflightClears"].as_i64().unwrap_or(0)),
+                        "detail": "Recent [inflight-sentinel] records from bram-trace.log",
+                        "seen": trace["lastInflight"].as_str().unwrap_or(""),
+                    }
+                ]
+            },
+            {
+                "title": "Latest Tail And Fanout",
+                "rows": [
+                    {
+                        "signal": "latest-tail",
+                        "level": if fresh_heavy { "warn" } else if latest_total > 0 { "ok" } else { "neutral" },
+                        "state": format!("{} diff / {} fresh", trace["latestTailDiff"].as_i64().unwrap_or(0), trace["latestTailFresh"].as_i64().unwrap_or(0)),
+                        "detail": if trace["latestTailBytes"].as_i64().unwrap_or(0) > 0 { format!("{} KB observed in recent trace window", (trace["latestTailBytes"].as_i64().unwrap_or(0) + 1023) / 1024) } else { "No latest-tail trace records in recent window".to_string() },
+                        "seen": trace["lastLatestTail"].as_str().unwrap_or(""),
+                    },
+                    {
+                        "signal": "JSONL fanout",
+                        "level": fanout_level,
+                        "state": format!("{} fanout events", trace["fanoutEvents"].as_i64().unwrap_or(0)),
+                        "detail": format!(
+                            "resets {}, cap trims {}{}",
+                            trace["fanoutResets"].as_i64().unwrap_or(0),
+                            trace["capTrims"].as_i64().unwrap_or(0),
+                            trace["fanoutSubscribers"].as_i64().map(|n| format!(", subscribers {}", n)).unwrap_or_default()
+                        ),
+                        "seen": trace["lastFanout"].as_str().unwrap_or(""),
+                    }
+                ]
+            },
+            {
+                "title": "Guards, Staleness, Interrupts, Traces",
+                "rows": [
+                    {
+                        "signal": "Guard decisions",
+                        "level": if trace["guardBlocks"].as_i64().unwrap_or(0) > 0 { "warn" } else { "ok" },
+                        "state": format!("{} recent blocks", trace["guardBlocks"].as_i64().unwrap_or(0)),
+                        "detail": if trace["guardBlocks"].as_i64().unwrap_or(0) > 0 { "Recent hook block records found in trace" } else { "No recent hook blocks found in trace" },
+                        "seen": trace["lastGuard"].as_str().unwrap_or(""),
+                    },
+                    {
+                        "signal": "Stale approvals",
+                        "level": if trace["staleRejects"].as_i64().unwrap_or(0) > 0 { "warn" } else { "ok" },
+                        "state": format!("{} rejected stale", trace["staleRejects"].as_i64().unwrap_or(0)),
+                        "detail": if trace["staleRejects"].as_i64().unwrap_or(0) > 0 { "Resolve staleness appeared in recent trace" } else { "No rejected_stale resolve records in recent trace" },
+                        "seen": "",
+                    },
+                    {
+                        "signal": "Interrupts",
+                        "level": if trace["interrupts"].as_i64().unwrap_or(0) > 0 { "warn" } else { "ok" },
+                        "state": format!("{} related records", trace["interrupts"].as_i64().unwrap_or(0)),
+                        "detail": if trace["interrupts"].as_i64().unwrap_or(0) > 0 { "Interrupt/silence-clear records appeared recently" } else { "No interrupt-related records in recent trace" },
+                        "seen": trace["lastInterrupt"].as_str().unwrap_or(""),
+                    },
+                    {
+                        "signal": "Inspector exports",
+                        "level": if trace_export.is_some() { "ok" } else { "neutral" },
+                        "state": trace_export_state,
+                        "detail": trace_export_detail,
+                        "seen": trace_export_seen,
+                    }
+                ]
+            }
+        ]
+    });
+
+    serde_json::to_vec(&rows).map_err(|e| e.to_string())
+}
+
+trait IfEmpty {
+    fn if_empty(self, fallback: &str) -> String;
+}
+
+impl IfEmpty for String {
+    fn if_empty(self, fallback: &str) -> String {
+        if self.is_empty() {
+            fallback.to_string()
+        } else {
+            self
+        }
+    }
+}
+
 #[cfg(test)]
 mod worklist_doc_tests {
     use super::{
@@ -9564,6 +9995,19 @@ fn route_request<R: tauri::Runtime>(
             None => "{}".to_string(),
         };
         return (200, "application/json; charset=utf-8", body.into_bytes());
+    }
+
+    // /__coordination-status — compact host-side summary for the Status tab.
+    // Keeps filesystem and trace mining in Rust so the XMLUI surface renders
+    // one structured payload instead of fetching and parsing several files.
+    if path == "__coordination-status" {
+        return match coordination_status(app) {
+            Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
+            Err(e) => {
+                eprintln!("[http /__coordination-status] {}", e);
+                (500, "text/plain; charset=utf-8", e.into_bytes())
+            }
+        };
     }
 
     // /__pty-intent — diagnostic readout of the right-pane intent queue

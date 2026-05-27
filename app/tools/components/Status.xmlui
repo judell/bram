@@ -1,0 +1,64 @@
+<Component
+  name="Status"
+  var.refreshTick="{0}">
+
+  <DataSource id="status" url="/__coordination-status?t={refreshTick}" />
+
+  <VStack padding="$space-6" gap="$space-4">
+    <HStack gap="$space-3" verticalAlignment="center">
+      <Heading level="h2">Status</Heading>
+      <SpaceFiller />
+      <Text
+        when="{status.value}"
+        fontSize="$fontSize-sm"
+        color="$textColor-secondary"
+        value="{'Updated ' + ((status.value.generatedAt || '').slice(11, 19))}" />
+      <Button
+        label="Refresh"
+        size="sm"
+        onClick="refreshTick = refreshTick + 1; status.refetch();" />
+    </HStack>
+
+    <Text
+      when="{status.inProgress}"
+      color="$textColor-secondary"
+      fontSize="$fontSize-sm"
+      value="Loading coordination signals..." />
+
+    <Text
+      when="{status.error}"
+      color="$color-danger-700"
+      fontSize="$fontSize-sm"
+      value="Status signals failed to load." />
+
+    <Text
+      when="{!status.inProgress &amp;&amp; !status.error &amp;&amp; !(status.value &amp;&amp; status.value.sections &amp;&amp; status.value.sections.length)}"
+      color="$textColor-secondary"
+      fontSize="$fontSize-sm"
+      value="No coordination signals found." />
+
+    <Items data="{status.value &amp;&amp; status.value.sections || []}">
+      <VStack gap="$space-2">
+        <Heading level="h3" value="{$item.title}" />
+        <Table data="{$item.rows}">
+          <Column header="signal" bindTo="signal" width="170px" />
+          <Column header="state" width="150px">
+            <Text
+              fontWeight="$fontWeight-bold"
+              color="{$item.level === 'warn' ? '$color-warn-700' : ($item.level === 'ok' ? '$color-success-700' : '$textColor-secondary')}"
+              value="{$item.state}" />
+          </Column>
+          <Column header="detail">
+            <Text value="{$item.detail}" overflowMode="flow" breakMode="word" />
+          </Column>
+          <Column header="last seen" width="175px">
+            <Text
+              fontSize="$fontSize-sm"
+              color="$textColor-secondary"
+              value="{$item.seen || 'n/a'}" />
+          </Column>
+        </Table>
+      </VStack>
+    </Items>
+  </VStack>
+</Component>

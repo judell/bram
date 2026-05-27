@@ -216,6 +216,7 @@
     <NavLink label="Sessions" to="/sessions" />
     <NavLink label="History" to="/history" />
     <NavLink label="Context" to="/context" />
+    <NavLink label="Status" to="/status" />
   </NavPanel>
 
   <VStack
@@ -281,6 +282,7 @@
   <Pages fallbackPath="/">
     <Page url="/"><Transcript activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}" /></Page>
     <Page url="/worklist"><Workspace activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}" /></Page>
+    <Page url="/status"><Status /></Page>
     <Page url="/sessions"><Sessions /></Page>
     <Page url="/history"><History /></Page>
     <Page url="/context"><Context activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}" /></Page>

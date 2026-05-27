@@ -1,5 +1,5 @@
 {
   "shell": {
-    "agent": "claude --continue"
+    "agent": "agent --continue"
   }
 }

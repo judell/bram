@@ -4598,10 +4598,13 @@ fn read_latest_session_pending<R: tauri::Runtime>(
 // string when no assistant text is found in the tail window.
 fn read_last_assistant_text<R: tauri::Runtime>(
     app: &AppHandle<R>,
-    _preferred: Option<SessionProvider>,
+    preferred: Option<SessionProvider>,
 ) -> Result<Vec<u8>, String> {
     use std::io::{Read, Seek, SeekFrom};
-    let Some(path) = latest_claude_session_path(app)? else {
+    // latest_session_path falls back to hinted_session_provider when
+    // preferred is None, so the same route serves whichever agent
+    // (Claude or Codex) most recently spoke.
+    let Some(path) = latest_session_path(app, preferred)? else {
         return Ok(br#"{"text":""}"#.to_vec());
     };
     let mut file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
@@ -4623,36 +4626,51 @@ fn read_last_assistant_text<R: tauri::Runtime>(
             continue;
         };
         let typ = r.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        if typ != "assistant" {
+        // Claude shape: type="assistant", message.content is string or
+        // array-of-content-blocks (text blocks have type="text" + text).
+        if typ == "assistant" {
+            let content = match r.get("message").and_then(|m| m.get("content")) {
+                Some(c) => c,
+                None => continue,
+            };
+            if let Some(s) = content.as_str() {
+                if !s.is_empty() {
+                    found = s.to_string();
+                    break;
+                }
+            }
+            if let Some(arr) = content.as_array() {
+                let mut texts: Vec<String> = Vec::new();
+                for c in arr {
+                    if c.get("type").and_then(|t| t.as_str()) == Some("text") {
+                        if let Some(t) = c.get("text").and_then(|v| v.as_str()) {
+                            if !t.is_empty() {
+                                texts.push(t.to_string());
+                            }
+                        }
+                    }
+                }
+                if !texts.is_empty() {
+                    found = texts.join("\n\n");
+                    break;
+                }
+            }
             continue;
         }
-        let content = match r.get("message").and_then(|m| m.get("content")) {
-            Some(c) => c,
-            None => continue,
-        };
-        // content can be a string OR an array of content blocks. The
-        // iframe helper handles both shapes; we mirror that.
-        if let Some(s) = content.as_str() {
-            if !s.is_empty() {
-                found = s.to_string();
-                break;
-            }
-        }
-        if let Some(arr) = content.as_array() {
-            let mut texts: Vec<String> = Vec::new();
-            for c in arr {
-                if c.get("type").and_then(|t| t.as_str()) == Some("text") {
-                    if let Some(t) = c.get("text").and_then(|v| v.as_str()) {
-                        if !t.is_empty() {
-                            texts.push(t.to_string());
+        // Codex shape: type="event_msg" with payload.type="agent_message"
+        // and payload.message carrying the text.
+        if typ == "event_msg" {
+            if let Some(payload) = r.get("payload") {
+                if payload.get("type").and_then(|v| v.as_str()) == Some("agent_message") {
+                    if let Some(msg) = payload.get("message").and_then(|v| v.as_str()) {
+                        if !msg.is_empty() {
+                            found = msg.to_string();
+                            break;
                         }
                     }
                 }
             }
-            if !texts.is_empty() {
-                found = texts.join("\n\n");
-                break;
-            }
+            continue;
         }
     }
     // Note: we deliberately skip the iframe's stripImagePaths /
@@ -4661,6 +4679,300 @@ fn read_last_assistant_text<R: tauri::Runtime>(
     // win comes from not walking the buffer, not from those passes.
     let body = serde_json::json!({ "text": found });
     serde_json::to_vec(&body).map_err(|e| e.to_string())
+}
+
+// Host-side current-turn edits extraction. Mirrors the iframe helper
+// `currentTurnEdits(jsonlText)` in Globals.xs: walks backward to find
+// the most recent user-message boundary, then collects per-file
+// aggregates (kind, added/removed line counts, lastToolId) from
+// Claude tool_use blocks and Codex apply_patch payloads after that
+// boundary.
+//
+// Returns a JSON array of {filePath, kind, added, removed, lastToolId}
+// in first-touch order. Empty array when there are no edits in the
+// current turn or no session.
+fn read_current_turn_edits<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    preferred: Option<SessionProvider>,
+) -> Result<Vec<u8>, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let Some(path) = latest_session_path(app, preferred)? else {
+        return Ok(b"[]".to_vec());
+    };
+    let mut file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+    let file_size = file.metadata().map_err(|e| e.to_string())?.len();
+    // 64 KB tail covers ~100 records comfortably even with Codex's
+    // verbose apply_patch payloads. Bigger than read_last_assistant_text's
+    // 32 KB because patch records can be heavy.
+    let want: u64 = 64 * 1024;
+    let read_from = file_size.saturating_sub(want);
+    file.seek(SeekFrom::Start(read_from))
+        .map_err(|e| e.to_string())?;
+    let mut tail = Vec::with_capacity((file_size - read_from) as usize);
+    file.read_to_end(&mut tail).map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&tail);
+    let lines: Vec<&str> = text.lines().collect();
+
+    // Walk backward to the most recent user-message boundary.
+    // tool_result-only Claude user records don't count as the boundary
+    // (they're tool outputs, not actual user messages).
+    let mut last_user_idx: Option<usize> = None;
+    for i in (0..lines.len()).rev() {
+        let line = lines[i].trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(r) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let typ = r.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if typ == "user" {
+            if let Some(arr) = r
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array())
+            {
+                let all_tool_result = !arr.is_empty()
+                    && arr.iter().all(|c| {
+                        c.get("type").and_then(|t| t.as_str()) == Some("tool_result")
+                    });
+                if all_tool_result {
+                    continue;
+                }
+            }
+            last_user_idx = Some(i);
+            break;
+        }
+        if typ == "event_msg" {
+            if let Some(p) = r.get("payload") {
+                if p.get("type").and_then(|v| v.as_str()) == Some("user_message") {
+                    last_user_idx = Some(i);
+                    break;
+                }
+            }
+        }
+    }
+
+    struct Bucket {
+        kind: Option<&'static str>,
+        added: u64,
+        removed: u64,
+        last_tool_id: Option<String>,
+    }
+    let mut by_file: std::collections::HashMap<String, Bucket> =
+        std::collections::HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+
+    fn merge_kind(prev: Option<&'static str>, new_kind: &'static str) -> &'static str {
+        match prev {
+            None => new_kind,
+            Some(p) if p == new_kind => p,
+            _ => "mixed",
+        }
+    }
+
+    fn ensure<'a>(
+        by_file: &'a mut std::collections::HashMap<String, Bucket>,
+        order: &mut Vec<String>,
+        path: &str,
+    ) -> &'a mut Bucket {
+        if !by_file.contains_key(path) {
+            by_file.insert(
+                path.to_string(),
+                Bucket {
+                    kind: None,
+                    added: 0,
+                    removed: 0,
+                    last_tool_id: None,
+                },
+            );
+            order.push(path.to_string());
+        }
+        by_file.get_mut(path).unwrap()
+    }
+
+    let start = last_user_idx.map(|i| i + 1).unwrap_or(0);
+    for i in start..lines.len() {
+        let line = lines[i].trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(r) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let typ = r.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+        // Codex: response_item with function_call/custom_tool_call,
+        // name == apply_patch, arguments carrying a patch text.
+        if typ == "response_item" {
+            let Some(p) = r.get("payload") else { continue };
+            let ptype = p.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if ptype != "function_call" && ptype != "custom_tool_call" {
+                continue;
+            }
+            if p.get("name").and_then(|v| v.as_str()) != Some("apply_patch") {
+                continue;
+            }
+            // arguments is typically a JSON string {"input": "<patch text>"}.
+            // Fall back to direct field access if the shape differs.
+            let patch_text: String = match p.get("arguments") {
+                Some(serde_json::Value::String(s)) => serde_json::from_str::<serde_json::Value>(s)
+                    .ok()
+                    .and_then(|v| v.get("input").and_then(|i| i.as_str()).map(String::from))
+                    .unwrap_or_default(),
+                Some(v) => v
+                    .get("input")
+                    .and_then(|i| i.as_str())
+                    .map(String::from)
+                    .unwrap_or_default(),
+                None => String::new(),
+            };
+            if patch_text.is_empty() {
+                continue;
+            }
+            let call_id = p.get("call_id").and_then(|v| v.as_str()).map(String::from);
+            let mut current_path: Option<String> = None;
+            for pl in patch_text.lines() {
+                if let Some(rest) = pl.strip_prefix("*** ") {
+                    let mut new_kind: Option<&'static str> = None;
+                    let mut new_path: Option<String> = None;
+                    if let Some(p) = rest.strip_prefix("Add File: ") {
+                        new_kind = Some("added");
+                        new_path = Some(p.trim().to_string());
+                    } else if let Some(p) = rest.strip_prefix("Update File: ") {
+                        new_kind = Some("updated");
+                        new_path = Some(p.trim().to_string());
+                    } else if let Some(p) = rest.strip_prefix("Delete File: ") {
+                        new_kind = Some("deleted");
+                        new_path = Some(p.trim().to_string());
+                    }
+                    if let (Some(kind), Some(path)) = (new_kind, new_path) {
+                        let bucket = ensure(&mut by_file, &mut order, &path);
+                        bucket.kind = Some(merge_kind(bucket.kind, kind));
+                        if let Some(id) = &call_id {
+                            bucket.last_tool_id = Some(id.clone());
+                        }
+                        current_path = Some(path);
+                    } else {
+                        current_path = None;
+                    }
+                    continue;
+                }
+                let Some(path) = current_path.as_ref() else {
+                    continue;
+                };
+                if pl.starts_with("+++") || pl.starts_with("---") {
+                    continue;
+                }
+                if let Some(bucket) = by_file.get_mut(path) {
+                    if pl.starts_with('+') {
+                        bucket.added += 1;
+                    } else if pl.starts_with('-') {
+                        bucket.removed += 1;
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Claude: assistant.message.content[*] with type=tool_use,
+        // name in {Edit, MultiEdit, Write}.
+        if typ != "assistant" {
+            continue;
+        }
+        let Some(content_arr) = r
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+        else {
+            continue;
+        };
+        for c in content_arr {
+            if c.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
+                continue;
+            }
+            let name = c.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            if name != "Edit" && name != "MultiEdit" && name != "Write" {
+                continue;
+            }
+            let Some(input) = c.get("input") else {
+                continue;
+            };
+            let file_path = match input.get("file_path").and_then(|p| p.as_str()) {
+                Some(p) if !p.is_empty() => p.to_string(),
+                _ => continue,
+            };
+            let call_id = c.get("id").and_then(|v| v.as_str()).map(String::from);
+            let bucket = ensure(&mut by_file, &mut order, &file_path);
+            if let Some(id) = &call_id {
+                bucket.last_tool_id = Some(id.clone());
+            }
+            match name {
+                "Edit" => {
+                    let before = input
+                        .get("old_string")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let after = input
+                        .get("new_string")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if !before.is_empty() {
+                        bucket.removed += before.lines().count() as u64;
+                    }
+                    if !after.is_empty() {
+                        bucket.added += after.lines().count() as u64;
+                    }
+                    bucket.kind = Some(merge_kind(bucket.kind, "edited"));
+                }
+                "MultiEdit" => {
+                    if let Some(edits) = input.get("edits").and_then(|v| v.as_array()) {
+                        for e in edits {
+                            let before = e
+                                .get("old_string")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let after = e
+                                .get("new_string")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            if !before.is_empty() {
+                                bucket.removed += before.lines().count() as u64;
+                            }
+                            if !after.is_empty() {
+                                bucket.added += after.lines().count() as u64;
+                            }
+                        }
+                    }
+                    bucket.kind = Some(merge_kind(bucket.kind, "multi-edited"));
+                }
+                "Write" => {
+                    let after = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                    if !after.is_empty() {
+                        bucket.added += after.lines().count() as u64;
+                    }
+                    bucket.kind = Some(merge_kind(bucket.kind, "written"));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let result: Vec<serde_json::Value> = order
+        .iter()
+        .filter_map(|fp| {
+            by_file.remove(fp).map(|b| {
+                serde_json::json!({
+                    "filePath": fp,
+                    "kind": b.kind,
+                    "added": b.added,
+                    "removed": b.removed,
+                    "lastToolId": b.last_tool_id,
+                })
+            })
+        })
+        .collect();
+    serde_json::to_vec(&result).map_err(|e| e.to_string())
 }
 
 // Cheap variant for polling: just the file size + mtime. Lets Transcript
@@ -4806,6 +5118,9 @@ On iterate: turns, POST /__iterate/begin as your first action and \
 /__iterate/end as your last. Don't edit resources/worklist.json \
 directly for state changes — the routes drive the inflight sentinel \
 that keeps the Worklist tab UI in sync. \
+Use curl --retry-connrefused --retry 3 --retry-delay 1 for these \
+loopback calls — Bram restarts briefly drop the port and a fresh \
+connection can land in that window. \
 Full convention: .claude/xmlui-desktop-conventions.md";
 const WORKLIST_AUTH_REL: &str = "resources/.worklist-authorization.json";
 // Host-managed inflight sentinel (#84). Written when /__worklist/resolve
@@ -7641,6 +7956,21 @@ fn route_request<R: tauri::Runtime>(
             Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
             Err(e) => {
                 eprintln!("[http /__last-assistant-text] {}", e);
+                (500, "text/plain; charset=utf-8", e.into_bytes())
+            }
+        };
+    }
+
+    // Companion to /__last-assistant-text: per-file edit aggregates for
+    // the current turn. Same architecture (host parses 64 KB tail once
+    // per request, iframe binds via DataSource), replaces the iframe's
+    // currentTurnEdits(lastJsonl) helper which had started exceeding
+    // XMLUI's 1000 ms sync-evaluation limit on busy turns.
+    if path == "__current-turn-edits" {
+        return match read_current_turn_edits(app, None) {
+            Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
+            Err(e) => {
+                eprintln!("[http /__current-turn-edits] {}", e);
                 (500, "text/plain; charset=utf-8", e.into_bytes())
             }
         };

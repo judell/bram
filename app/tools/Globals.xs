@@ -377,23 +377,6 @@ function isErrorResult(block) {
   return text.startsWith('Error:') || text.startsWith('<tool_use_error>');
 }
 
-// First N lines of a tool_result, plus the leftover count. Returns null
-// if the result has no text content.
-function extractToolResult(block, maxLines) {
-  const cap = maxLines || 20;
-  const text = toolResultText(block && block.content);
-  if (!text) return null;
-  const all = text.split('\n');
-  return { lines: all.slice(0, cap), remaining: Math.max(0, all.length - cap) };
-}
-
-function extractTextResult(text, maxLines) {
-  const cap = maxLines || 20;
-  if (!text) return null;
-  const all = text.split('\n');
-  return { lines: all.slice(0, cap), remaining: Math.max(0, all.length - cap) };
-}
-
 function codexToolOutput(payload) {
   if (!payload || (payload.type !== 'function_call_output' && payload.type !== 'custom_tool_call_output')) {
     return null;
@@ -429,41 +412,6 @@ function findToolInTurns(turns, toolId) {
     }
   }
   return null;
-}
-
-// Scan the JSONL once to recover the full input + result for a single
-// tool by id. sessionTurns no longer carries this data — fetching it on
-// expand keeps polling cheap and avoids ballooning the in-memory turn
-// list with full Write/Read contents.
-function getToolDetail(jsonlText, toolId) {
-  if (!jsonlText || !toolId) return null;
-  let input = null;
-  let result = null;
-  for (const line of jsonlText.split('\n')) {
-    if (!line) continue;
-    let r;
-    try { r = JSON.parse(line); } catch (e) { continue; }
-    if (r.message && r.message.content && Array.isArray(r.message.content)) {
-      for (const c of r.message.content) {
-        if (!c) continue;
-        if (c.type === 'tool_use' && c.id === toolId) {
-          input = c.input || {};
-        } else if (c.type === 'tool_result' && c.tool_use_id === toolId) {
-          result = extractToolResult(c, 20);
-        }
-      }
-    } else if (r.type === 'response_item' && r.payload) {
-      const p = r.payload;
-      if ((p.type === 'function_call' || p.type === 'custom_tool_call') && p.call_id === toolId) {
-        input = codexToolInput(p);
-      } else if ((p.type === 'function_call_output' || p.type === 'custom_tool_call_output') && p.call_id === toolId) {
-        const output = codexToolOutput(p);
-        result = extractTextResult(output && output.text, 20);
-      }
-    }
-    if (input !== null && result !== null) break;
-  }
-  return { input: input || {}, result };
 }
 
 // Shallow turn equality: enough to tell "unchanged turn" from

@@ -2214,7 +2214,7 @@ fn gh_issue_closed_event_actor<R: tauri::Runtime>(
 }
 
 fn enrich_issue_activity<R: tauri::Runtime>(
-    app: &AppHandle<R>,
+    _app: &AppHandle<R>,
     issue: &mut serde_json::Value,
     repo_slug: Option<&str>,
 ) {
@@ -5071,6 +5071,769 @@ fn read_current_turn_edits<R: tauri::Runtime>(
         })
         .collect();
     serde_json::to_vec(&result).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------
+// Session-turns port: replaces the iframe sessionTurns / getToolDetail
+// helper chain (~400 LOC of JSONL walking and shape-massaging) with a
+// host-side derivation that emits the same structured array Transcript
+// renders against today. Pure functions first, then the route entry
+// points read_session_turns / read_tool_detail.
+//
+// Output shape (must match the iframe so Transcript.xmlui doesn't
+// need to change other than its DataSource binding):
+//   [{
+//     role: "user" | "assistant",
+//     text: <joined string of text entries>,
+//     entries: [
+//       { kind: "text", text },
+//       { kind: "tool", id, name, summary, errored?, errorText? }
+//     ],
+//     images: [<inline base64 data: URLs OR extracted image paths>]
+//   }, ...]
+// ---------------------------------------------------------------------
+
+fn st_strip_image_paths(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        let Some(start) = rest.find("[Image: source: /") else {
+            out.push_str(rest);
+            break;
+        };
+        // Find the end of the bracketed marker (next ']').
+        let after_start = &rest[start..];
+        let Some(close) = after_start.find(']') else {
+            out.push_str(rest);
+            break;
+        };
+        // The iframe's regex matches `[Image: source: /<path>.(png|jpg|jpeg|gif|webp)]`
+        // plus the leading `\n*`. We try the bracket-only match and
+        // verify it's an image extension; if not, treat as literal text.
+        let marker = &after_start[..=close];
+        let dot = marker.rfind('.');
+        let ext_ok = dot
+            .map(|d| {
+                let ext = &marker[d + 1..marker.len() - 1].to_ascii_lowercase();
+                matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp")
+            })
+            .unwrap_or(false);
+        if !ext_ok {
+            // Not an image marker — emit through start+1 to skip past
+            // the `[` and continue scanning.
+            out.push_str(&rest[..start + 1]);
+            rest = &rest[start + 1..];
+            continue;
+        }
+        // Strip preceding newlines (any number).
+        let mut prefix_end = start;
+        while prefix_end > 0 && rest.as_bytes()[prefix_end - 1] == b'\n' {
+            prefix_end -= 1;
+        }
+        out.push_str(&rest[..prefix_end]);
+        rest = &rest[start + close + 1..];
+    }
+    out
+}
+
+fn st_extract_image_paths(text: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("[Image: source: /") {
+        let after = &rest[start..];
+        let Some(close) = after.find(']') else { break };
+        let marker = &after[..=close];
+        // Strip prefix "[Image: source: " and suffix "]" to get the path.
+        let path = &marker["[Image: source: ".len()..marker.len() - 1];
+        let lower_path = path.to_ascii_lowercase();
+        if lower_path.ends_with(".png")
+            || lower_path.ends_with(".jpg")
+            || lower_path.ends_with(".jpeg")
+            || lower_path.ends_with(".gif")
+            || lower_path.ends_with(".webp")
+        {
+            paths.push(path.to_string());
+        }
+        rest = &rest[start + close + 1..];
+    }
+    paths
+}
+
+fn st_rewrite_xmlui_doc_urls(text: &str) -> String {
+    text.replace(
+        "https://docs.xmlui.org/components/",
+        "https://www.xmlui.org/docs/reference/components/",
+    )
+    .replace("https://docs.xmlui.org/", "https://www.xmlui.org/docs/")
+}
+
+fn st_tool_result_text(content: &serde_json::Value) -> String {
+    if let Some(s) = content.as_str() {
+        return s.to_string();
+    }
+    if let Some(arr) = content.as_array() {
+        let mut parts: Vec<String> = Vec::new();
+        for c in arr {
+            if c.get("type").and_then(|t| t.as_str()) == Some("text") {
+                if let Some(t) = c.get("text").and_then(|t| t.as_str()) {
+                    parts.push(t.to_string());
+                }
+            }
+        }
+        return parts.join("\n");
+    }
+    String::new()
+}
+
+fn st_is_error_result(block: &serde_json::Value) -> bool {
+    if block.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return true;
+    }
+    let content = block
+        .get("content")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let text = st_tool_result_text(&content);
+    text.starts_with("Error:") || text.starts_with("<tool_use_error>")
+}
+
+fn st_extract_lines(text: &str, cap: usize) -> Option<serde_json::Value> {
+    if text.is_empty() {
+        return None;
+    }
+    let all: Vec<&str> = text.split('\n').collect();
+    let lines: Vec<&str> = all.iter().take(cap).copied().collect();
+    let remaining = all.len().saturating_sub(cap);
+    Some(serde_json::json!({
+        "lines": lines,
+        "remaining": remaining,
+    }))
+}
+
+fn st_extract_tool_result(block: &serde_json::Value, cap: usize) -> serde_json::Value {
+    let content = block
+        .get("content")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let text = st_tool_result_text(&content);
+    st_extract_lines(&text, cap).unwrap_or(serde_json::Value::Null)
+}
+
+fn st_tool_summary(name: &str, input: &serde_json::Value) -> String {
+    let obj = match input.as_object() {
+        Some(o) => o,
+        None => return name.to_string(),
+    };
+    let get_str = |k: &str| -> &str {
+        obj.get(k).and_then(|v| v.as_str()).unwrap_or("")
+    };
+    match name {
+        "Edit" | "MultiEdit" => format!("{} edited", get_str("file_path")),
+        "Write" => {
+            let content = get_str("content");
+            let lines = if content.is_empty() {
+                1
+            } else {
+                content.split('\n').count()
+            };
+            format!(
+                "{} — wrote {} line{}",
+                get_str("file_path"),
+                lines,
+                if lines == 1 { "" } else { "s" }
+            )
+        }
+        "Bash" => {
+            let cmd = get_str("command");
+            if cmd.chars().count() > 80 {
+                let truncated: String = cmd.chars().take(80).collect();
+                format!("{}…", truncated)
+            } else {
+                cmd.to_string()
+            }
+        }
+        "Read" => {
+            let mut s = get_str("file_path").to_string();
+            let offset = obj.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
+            let limit = obj.get("limit").and_then(|v| v.as_u64()).unwrap_or(0);
+            if offset > 0 || limit > 0 {
+                let start = if offset > 0 { offset } else { 1 };
+                s.push(':');
+                s.push_str(&start.to_string());
+                if limit > 0 {
+                    s.push('-');
+                    s.push_str(&(start + limit - 1).to_string());
+                }
+            }
+            s
+        }
+        "Grep" | "Glob" => {
+            let pattern = get_str("pattern");
+            let path = get_str("path");
+            if path.is_empty() {
+                pattern.to_string()
+            } else {
+                format!("{} in {}", pattern, path)
+            }
+        }
+        "Task" | "Agent" => {
+            let typ = get_str("subagent_type");
+            let desc = get_str("description");
+            if desc.is_empty() {
+                typ.to_string()
+            } else {
+                format!("{} — {}", typ, desc)
+            }
+        }
+        _ => name.to_string(),
+    }
+}
+
+fn st_codex_tool_name(payload: &serde_json::Value) -> String {
+    let name = payload
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if let Some(ns) = payload.get("namespace").and_then(|v| v.as_str()) {
+        let stripped = ns.strip_prefix("mcp__").unwrap_or(ns);
+        format!("{}.{}", stripped, name)
+    } else {
+        name.to_string()
+    }
+}
+
+fn st_parse_json_string(s: &str) -> Option<serde_json::Value> {
+    serde_json::from_str(s).ok()
+}
+
+fn st_codex_tool_input(payload: &serde_json::Value) -> serde_json::Value {
+    let typ = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if typ == "function_call" {
+        if let Some(args) = payload.get("arguments") {
+            if let Some(s) = args.as_str() {
+                return st_parse_json_string(s).unwrap_or_else(|| serde_json::Value::String(s.to_string()));
+            }
+            return args.clone();
+        }
+        return serde_json::json!({});
+    }
+    if typ == "custom_tool_call" {
+        if let Some(inp) = payload.get("input") {
+            if let Some(s) = inp.as_str() {
+                return st_parse_json_string(s).unwrap_or_else(|| serde_json::Value::String(s.to_string()));
+            }
+            return inp.clone();
+        }
+        return serde_json::Value::String(String::new());
+    }
+    serde_json::json!({})
+}
+
+fn st_codex_tool_summary(payload: &serde_json::Value) -> String {
+    let raw_name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let full_name = st_codex_tool_name(payload);
+    let input = st_codex_tool_input(payload);
+    if raw_name == "exec_command" {
+        if let Some(cmd) = input.get("cmd").and_then(|v| v.as_str()) {
+            if cmd.chars().count() > 80 {
+                let truncated: String = cmd.chars().take(80).collect();
+                return format!("{}…", truncated);
+            }
+            return cmd.to_string();
+        }
+    }
+    if raw_name == "write_stdin" {
+        let session = input
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .map(|s| format!("session {}", s))
+            .unwrap_or_else(|| "stdin".to_string());
+        let chars = input.get("chars").and_then(|v| v.as_str()).unwrap_or("");
+        if chars.is_empty() {
+            return session;
+        }
+        let label = if chars == "\u{001b}" {
+            "Esc".to_string()
+        } else {
+            chars.replace('\r', "\\r").replace('\n', "\\n")
+        };
+        let label_clipped = if label.chars().count() > 40 {
+            let t: String = label.chars().take(40).collect();
+            format!("{}…", t)
+        } else {
+            label
+        };
+        return format!("{} ← {}", session, label_clipped);
+    }
+    if raw_name == "apply_patch" {
+        if let Some(s) = input.as_str() {
+            for line in s.lines() {
+                if let Some(rest) = line.strip_prefix("*** Add File: ") {
+                    return format!("{} patch", rest);
+                }
+                if let Some(rest) = line.strip_prefix("*** Update File: ") {
+                    return format!("{} patch", rest);
+                }
+                if let Some(rest) = line.strip_prefix("*** Delete File: ") {
+                    return format!("{} patch", rest);
+                }
+            }
+            return "patch".to_string();
+        }
+    }
+    if full_name.starts_with("filesystem.") {
+        if let Some(p) = input.get("path").and_then(|v| v.as_str()) {
+            return p.to_string();
+        }
+    }
+    if full_name.starts_with("xmlui.") {
+        for k in &["path", "component", "query"] {
+            if let Some(v) = input.get(*k).and_then(|v| v.as_str()) {
+                return v.to_string();
+            }
+        }
+        return full_name;
+    }
+    if input.is_object() {
+        return st_tool_summary(raw_name, &input);
+    }
+    full_name
+}
+
+fn st_codex_tool_output(payload: &serde_json::Value) -> Option<(String, bool)> {
+    let typ = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if typ != "function_call_output" && typ != "custom_tool_call_output" {
+        return None;
+    }
+    let raw = match payload.get("output").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return Some((String::new(), false)),
+    };
+    if let Some(parsed) = st_parse_json_string(raw) {
+        if parsed.is_object() {
+            let text = parsed
+                .get("output")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .or_else(|| parsed.get("stderr").and_then(|v| v.as_str()).map(String::from))
+                .unwrap_or_else(|| raw.to_string());
+            let exit_code = parsed
+                .get("metadata")
+                .and_then(|m| m.get("exit_code"))
+                .and_then(|v| v.as_i64());
+            let errored = matches!(exit_code, Some(n) if n != 0);
+            return Some((text, errored));
+        }
+    }
+    // Fallback: look for the "Process exited with code N" pattern.
+    let errored = raw
+        .lines()
+        .find_map(|l| l.strip_prefix("Process exited with code "))
+        .and_then(|s| s.split_whitespace().next())
+        .and_then(|s| s.parse::<i64>().ok())
+        .map(|n| n != 0)
+        .unwrap_or(false);
+    Some((raw.to_string(), errored))
+}
+
+// Walk JSONL lines and build the structured turn array. Mirrors
+// `_parseLinesToTurns` in Globals.xs.
+fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
+    let mut turns: Vec<serde_json::Value> = Vec::new();
+    // tool_entry_locations maps tool_use_id → (turn_idx, entry_idx) so
+    // tool_result records can backfill errored/errorText on the
+    // originating entry.
+    let mut tool_entry_locations: std::collections::HashMap<String, (usize, usize)> =
+        std::collections::HashMap::new();
+    for line in jsonl_text.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(r) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let typ = r.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let mut role: Option<&str> = None;
+        let mut entries: Vec<serde_json::Value> = Vec::new();
+        let mut inline_images: Vec<String> = Vec::new();
+
+        if typ == "user" || typ == "assistant" {
+            let Some(content) = r.get("message").and_then(|m| m.get("content")) else {
+                continue;
+            };
+            role = Some(typ);
+            if let Some(s) = content.as_str() {
+                if !s.is_empty() {
+                    entries.push(serde_json::json!({ "kind": "text", "text": s }));
+                }
+            } else if let Some(arr) = content.as_array() {
+                for c in arr {
+                    let Some(c_obj) = c.as_object() else { continue };
+                    let c_typ = c_obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    if c_typ == "text" {
+                        if let Some(t) = c_obj.get("text").and_then(|v| v.as_str()) {
+                            if !t.is_empty() {
+                                entries.push(serde_json::json!({ "kind": "text", "text": t }));
+                            }
+                        }
+                    } else if c_typ == "tool_use" {
+                        let id = c_obj.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                        let name = c_obj.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        let empty = serde_json::json!({});
+                        let input = c_obj.get("input").unwrap_or(&empty);
+                        let summary = st_tool_summary(name, input);
+                        let entry = serde_json::json!({
+                            "kind": "tool",
+                            "id": id,
+                            "name": name,
+                            "summary": summary,
+                        });
+                        let entry_idx = entries.len();
+                        entries.push(entry);
+                        if !id.is_empty() {
+                            // Will fix the turn index after we push the turn.
+                            tool_entry_locations.insert(id.to_string(), (turns.len(), entry_idx));
+                        }
+                    } else if c_typ == "tool_result" {
+                        let tool_use_id = c_obj
+                            .get("tool_use_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if let Some((turn_idx, entry_idx)) = tool_entry_locations
+                            .get(tool_use_id)
+                            .copied()
+                        {
+                            if st_is_error_result(c) {
+                                let txt = st_tool_result_text(
+                                    c.get("content").unwrap_or(&serde_json::Value::Null),
+                                );
+                                let first_line = txt
+                                    .split('\n')
+                                    .next()
+                                    .unwrap_or("")
+                                    .chars()
+                                    .take(200)
+                                    .collect::<String>();
+                                if let Some(turn_obj) =
+                                    turns.get_mut(turn_idx).and_then(|t| t.as_object_mut())
+                                {
+                                    if let Some(entries_arr) =
+                                        turn_obj.get_mut("entries").and_then(|e| e.as_array_mut())
+                                    {
+                                        if let Some(entry_obj) = entries_arr
+                                            .get_mut(entry_idx)
+                                            .and_then(|e| e.as_object_mut())
+                                        {
+                                            entry_obj.insert(
+                                                "errored".to_string(),
+                                                serde_json::Value::Bool(true),
+                                            );
+                                            entry_obj.insert(
+                                                "errorText".to_string(),
+                                                serde_json::Value::String(first_line),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else if c_typ == "image" {
+                        if let Some(source) = c_obj.get("source").and_then(|v| v.as_object()) {
+                            if source.get("type").and_then(|v| v.as_str()) == Some("base64") {
+                                if let Some(data) =
+                                    source.get("data").and_then(|v| v.as_str())
+                                {
+                                    let mt = source
+                                        .get("media_type")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("image/png");
+                                    inline_images.push(format!("data:{};base64,{}", mt, data));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else if typ == "event_msg" {
+            if let Some(p) = r.get("payload") {
+                let p_typ = p.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                if p_typ == "user_message" {
+                    role = Some("user");
+                } else if p_typ == "agent_message" {
+                    role = Some("assistant");
+                }
+                if let Some(msg) = p.get("message").and_then(|v| v.as_str()) {
+                    if !msg.is_empty() {
+                        entries.push(serde_json::json!({ "kind": "text", "text": msg }));
+                    }
+                }
+            }
+        } else if typ == "response_item" {
+            if let Some(p) = r.get("payload") {
+                let p_typ = p.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                if p_typ == "function_call" || p_typ == "custom_tool_call" {
+                    role = Some("assistant");
+                    let id = p.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
+                    let name = st_codex_tool_name(p);
+                    let summary = st_codex_tool_summary(p);
+                    let entry = serde_json::json!({
+                        "kind": "tool",
+                        "id": id,
+                        "name": name,
+                        "summary": summary,
+                    });
+                    let entry_idx = entries.len();
+                    entries.push(entry);
+                    if !id.is_empty() {
+                        tool_entry_locations
+                            .insert(id.to_string(), (turns.len(), entry_idx));
+                    }
+                } else if p_typ == "function_call_output"
+                    || p_typ == "custom_tool_call_output"
+                {
+                    let id = p.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
+                    if let Some((turn_idx, entry_idx)) =
+                        tool_entry_locations.get(id).copied()
+                    {
+                        if let Some((text, errored)) = st_codex_tool_output(p) {
+                            if errored {
+                                let first_line = text
+                                    .split('\n')
+                                    .next()
+                                    .unwrap_or("")
+                                    .chars()
+                                    .take(200)
+                                    .collect::<String>();
+                                if let Some(turn_obj) =
+                                    turns.get_mut(turn_idx).and_then(|t| t.as_object_mut())
+                                {
+                                    if let Some(entries_arr) =
+                                        turn_obj.get_mut("entries").and_then(|e| e.as_array_mut())
+                                    {
+                                        if let Some(entry_obj) = entries_arr
+                                            .get_mut(entry_idx)
+                                            .and_then(|e| e.as_object_mut())
+                                        {
+                                            entry_obj.insert(
+                                                "errored".to_string(),
+                                                serde_json::Value::Bool(true),
+                                            );
+                                            entry_obj.insert(
+                                                "errorText".to_string(),
+                                                serde_json::Value::String(first_line),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let Some(role) = role else { continue };
+        if entries.is_empty() && inline_images.is_empty() {
+            continue;
+        }
+
+        // Capture image paths from the ORIGINAL text BEFORE stripping.
+        let original_joined = entries
+            .iter()
+            .filter_map(|e| {
+                if e.get("kind").and_then(|k| k.as_str()) == Some("text") {
+                    e.get("text").and_then(|v| v.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let paths_from_text = st_extract_image_paths(&original_joined);
+
+        // Apply text rewrites + strip image-path footers.
+        for e in entries.iter_mut() {
+            if e.get("kind").and_then(|k| k.as_str()) == Some("text") {
+                if let Some(t) = e.get("text").and_then(|v| v.as_str()) {
+                    let rewritten = st_rewrite_xmlui_doc_urls(t);
+                    let stripped = st_strip_image_paths(&rewritten);
+                    if let Some(obj) = e.as_object_mut() {
+                        obj.insert(
+                            "text".to_string(),
+                            serde_json::Value::String(stripped),
+                        );
+                    }
+                }
+            }
+        }
+
+        // Skip user turns that are pure image-path bookkeeping.
+        if role == "user" && inline_images.is_empty() {
+            let all_text = entries.iter().all(|e| {
+                e.get("kind").and_then(|k| k.as_str()) == Some("text")
+            });
+            let original_trimmed = original_joined.trim();
+            let mut is_image_only = !original_trimmed.is_empty();
+            for chunk in original_trimmed.split_whitespace() {
+                if !(chunk.starts_with("[Image:") && chunk.ends_with("]")) {
+                    is_image_only = false;
+                    break;
+                }
+            }
+            // The iframe's regex is more permissive about whitespace; replicate by
+            // checking that what remains after stripping image markers is empty.
+            let stripped_check = st_strip_image_paths(original_trimmed);
+            if all_text && (is_image_only || stripped_check.trim().is_empty())
+                && !paths_from_text.is_empty()
+            {
+                continue;
+            }
+        }
+
+        // After tool_result filtering, may be empty.
+        if entries.is_empty() && inline_images.is_empty() {
+            continue;
+        }
+
+        let text_joined = entries
+            .iter()
+            .filter_map(|e| {
+                if e.get("kind").and_then(|k| k.as_str()) == Some("text") {
+                    e.get("text").and_then(|v| v.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        let images: Vec<String> = if !inline_images.is_empty() {
+            inline_images
+        } else {
+            paths_from_text
+        };
+
+        turns.push(serde_json::json!({
+            "role": role,
+            "text": text_joined,
+            "entries": entries,
+            "images": images,
+        }));
+    }
+    turns
+}
+
+// Single-entry mtime cache for read_session_turns. The parse runs
+// ~300 ms on a 600+ turn session; in steady-state polling (every ~2 s
+// from `currentTurnEditsTick`) the JSONL mtime is unchanged across
+// most fetches, so the cache hit drops the route to a stat() call.
+// When the agent appends, mtime advances and we re-parse once.
+// Path is part of the key so a provider flip (Claude ↔ Codex) misses
+// the cache cleanly and reparses against the new file.
+static SESSION_TURNS_CACHE: std::sync::Mutex<
+    Option<(std::path::PathBuf, std::time::SystemTime, Vec<u8>)>,
+> = std::sync::Mutex::new(None);
+
+// Read the freshest session JSONL and produce the structured turn array.
+fn read_session_turns<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Vec<u8>, String> {
+    let Some(path) = freshest_session_path(app)? else {
+        return Ok(b"[]".to_vec());
+    };
+    let mtime = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .map_err(|e| e.to_string())?;
+    // Cache hit: same path + same mtime as last serve.
+    if let Ok(guard) = SESSION_TURNS_CACHE.lock() {
+        if let Some((cached_path, cached_mtime, cached_bytes)) = guard.as_ref() {
+            if cached_path == &path && cached_mtime == &mtime {
+                return Ok(cached_bytes.clone());
+            }
+        }
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let turns = st_parse_lines_to_turns(&text);
+    let bytes = serde_json::to_vec(&turns).map_err(|e| e.to_string())?;
+    if let Ok(mut guard) = SESSION_TURNS_CACHE.lock() {
+        *guard = Some((path, mtime, bytes.clone()));
+    }
+    Ok(bytes)
+}
+
+// Single-tool lookup: scan all JSONL records for the tool_use (or codex
+// function_call) by id, plus its matching tool_result, return
+// { input, result }. result is { lines, remaining } or null.
+fn read_tool_detail<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    tool_id: &str,
+) -> Result<Vec<u8>, String> {
+    if tool_id.is_empty() {
+        return Ok(b"null".to_vec());
+    }
+    let Some(path) = freshest_session_path(app)? else {
+        return Ok(b"null".to_vec());
+    };
+    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut input: Option<serde_json::Value> = None;
+    let mut result: Option<serde_json::Value> = None;
+    for line in text.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(r) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if let Some(arr) = r
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+        {
+            for c in arr {
+                let c_typ = c.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                if c_typ == "tool_use"
+                    && c.get("id").and_then(|v| v.as_str()) == Some(tool_id)
+                {
+                    input = Some(
+                        c.get("input")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!({})),
+                    );
+                } else if c_typ == "tool_result"
+                    && c.get("tool_use_id").and_then(|v| v.as_str()) == Some(tool_id)
+                {
+                    result = Some(st_extract_tool_result(c, 20));
+                }
+            }
+        } else if r.get("type").and_then(|v| v.as_str()) == Some("response_item") {
+            if let Some(p) = r.get("payload") {
+                let p_typ = p.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                let call_id = p.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
+                if (p_typ == "function_call" || p_typ == "custom_tool_call")
+                    && call_id == tool_id
+                {
+                    input = Some(st_codex_tool_input(p));
+                } else if (p_typ == "function_call_output"
+                    || p_typ == "custom_tool_call_output")
+                    && call_id == tool_id
+                {
+                    if let Some((text, _errored)) = st_codex_tool_output(p) {
+                        result = Some(
+                            st_extract_lines(&text, 20).unwrap_or(serde_json::Value::Null),
+                        );
+                    }
+                }
+            }
+        }
+        if input.is_some() && result.is_some() {
+            break;
+        }
+    }
+    let body = serde_json::json!({
+        "input": input.unwrap_or_else(|| serde_json::json!({})),
+        "result": result.unwrap_or(serde_json::Value::Null),
+    });
+    serde_json::to_vec(&body).map_err(|e| e.to_string())
 }
 
 // Cheap variant for polling: just the file size + mtime. Lets Transcript
@@ -8083,6 +8846,39 @@ fn route_request<R: tauri::Runtime>(
             Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
             Err(e) => {
                 eprintln!("[http /__waiting-for-assistant] {}", e);
+                (500, "text/plain; charset=utf-8", e.into_bytes())
+            }
+        };
+    }
+
+    // Host-derived turn timeline. Mirrors the iframe sessionTurns(jsonlText)
+    // helper that walked the full JSONL on every fanout. Returns the same
+    // [{role, text, entries[], images[]}] shape Transcript renders against.
+    if path == "__session-turns" {
+        return match read_session_turns(app) {
+            Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
+            Err(e) => {
+                eprintln!("[http /__session-turns] {}", e);
+                (500, "text/plain; charset=utf-8", e.into_bytes())
+            }
+        };
+    }
+
+    // Companion to /__session-turns: full input + result for a single
+    // tool by id. Mirrors getToolDetail(jsonlText, toolId). Returns
+    // {input, result} or null.
+    if path == "__tool-detail" {
+        let mut tool_id = String::new();
+        for pair in query.split('&') {
+            if let Some(v) = pair.strip_prefix("id=") {
+                tool_id = percent_decode(v);
+                break;
+            }
+        }
+        return match read_tool_detail(app, &tool_id) {
+            Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
+            Err(e) => {
+                eprintln!("[http /__tool-detail] {}", e);
                 (500, "text/plain; charset=utf-8", e.into_bytes())
             }
         };

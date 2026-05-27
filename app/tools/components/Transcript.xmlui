@@ -1,27 +1,38 @@
 <Component name="Transcript"
-  var.lastJsonl="{null}"
-  var.turns="{sessionTurns(lastJsonl)}"
   var.fullscreenImage="{null}"
   var.openToolId="{null}"
   var.turnLimit="{50}"
   var.showAll="{false}"
   var.pendingMenu="{null}"
   var.currentTurnEditsTick="{0}"
-  var.currentTurnEditsTickAt="{0}">
+  var.currentTurnEditsTickAt="{0}"
+  var.turns="{sessionTurnsDS.value || []}">
   <!-- Host-derived current-turn edits (replaces iframe-side
        currentTurnEdits(lastJsonl) walk). Refetch driven by a tick
-       bumped from the same subscribeLatestJsonl callback that
-       updates lastJsonl, 2 s throttled. -->
+       bumped from the iframe's subscribeLatestJsonl callback, 2 s
+       throttled. Same tick drives all three Transcript DataSources. -->
   <DataSource
     id="currentTurnEditsDS"
     url="/__current-turn-edits?t={currentTurnEditsTick}" />
   <!-- Host-derived "agent is waiting for assistant" boolean. Replaces
        the iframe isWaitingForAssistant suffix-walk that fired
        on every keystroke (TextArea `enabled` binding) AND every JSONL
-       fanout. Reuses currentTurnEditsTick — same refetch cadence. -->
+       fanout. -->
   <DataSource
     id="waitingDS"
     url="/__waiting-for-assistant?t={currentTurnEditsTick}" />
+  <!-- Host-derived turn timeline. Replaces the iframe sessionTurns
+       (~95 LOC) + _parseLinesToTurns (~106 LOC) chain that walked
+       the full session JSONL on every fanout. -->
+  <DataSource
+    id="sessionTurnsDS"
+    url="/__session-turns?t={currentTurnEditsTick}" />
+  <!-- Host-derived full input + result for one tool, keyed on the
+       currently-open tool's id. Replaces getToolDetail iframe walk. -->
+  <DataSource
+    id="toolDetailDS"
+    url="/__tool-detail?id={openToolId || ''}"
+    when="{!!openToolId}" />
   <ChangeListener
     listenTo="{turns.length}"
     onDidChange="if (window.wasPinnedToBottom()) window.scrollAllToBottom()" />
@@ -43,7 +54,7 @@
     onClose="openToolId = null"
     title="{(findToolInTurns(turns, openToolId) || {}).name || 'Tool'}"
     var.openTool="{findToolInTurns(turns, openToolId)}"
-    var.openDetail="{getToolDetail(lastJsonl, openToolId)}"
+    var.openDetail="{toolDetailDS.value}"
     var.modalInput="{openDetail &amp;&amp; openDetail.input}"
     var.modalResult="{openDetail &amp;&amp; openDetail.result}">
     <VStack gap="$space-2">
@@ -140,7 +151,7 @@
   </ModalDialog>
 
   <VStack padding="$space-6" gap="$space-3"
-    onInit="lastJsonl = window.getLatestJsonl(); subscribeLatestJsonl('__bramTranscriptJsonlUnsub', (v) => { lastJsonl = v; const now = Date.now(); if (now - currentTurnEditsTickAt >= 2000) { currentTurnEditsTickAt = now; currentTurnEditsTick = currentTurnEditsTick + 1; } }); (() => { const tauri = (window.parent &amp;&amp; window.parent.__TAURI__) || window.__TAURI__; if (tauri &amp;&amp; tauri.event &amp;&amp; tauri.event.listen) { if (typeof window.__bramTranscriptPtyMenuUnlisten === 'function') { try { window.__bramTranscriptPtyMenuUnlisten(); } catch (err) {} window.__bramTranscriptPtyMenuUnlisten = null; } tauri.event.listen('pty-menu-changed', (e) => { pendingMenu = e &amp;&amp; e.payload ? e.payload : null; }).then((unlisten) => { window.__bramTranscriptPtyMenuUnlisten = unlisten; }).catch(() => {}); } })(); try { logToHost({ kind: 'transcript-mount', at: new Date().toISOString() }) } catch (e) {}">
+    onInit="subscribeLatestJsonl('__bramTranscriptJsonlUnsub', () => { const now = Date.now(); if (now - currentTurnEditsTickAt >= 2000) { currentTurnEditsTickAt = now; currentTurnEditsTick = currentTurnEditsTick + 1; } }); (() => { const tauri = (window.parent &amp;&amp; window.parent.__TAURI__) || window.__TAURI__; if (tauri &amp;&amp; tauri.event &amp;&amp; tauri.event.listen) { if (typeof window.__bramTranscriptPtyMenuUnlisten === 'function') { try { window.__bramTranscriptPtyMenuUnlisten(); } catch (err) {} window.__bramTranscriptPtyMenuUnlisten = null; } tauri.event.listen('pty-menu-changed', (e) => { pendingMenu = e &amp;&amp; e.payload ? e.payload : null; }).then((unlisten) => { window.__bramTranscriptPtyMenuUnlisten = unlisten; }).catch(() => {}); } })(); try { logToHost({ kind: 'transcript-mount', at: new Date().toISOString() }) } catch (e) {}">
     <StickyBox to="top">
       <HStack gap="$space-3" verticalAlignment="center" paddingVertical="$space-2">
         <Heading level="h2">Transcript</Heading>

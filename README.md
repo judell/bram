@@ -147,7 +147,7 @@ That means first-run setup is provider-aware in when it prompts but provider-sym
 It governs Claude and Codex in different ways:
 
 - **Claude: direct prompt binding plus enforcement.** Setup copies that file to `.claude/bram-conventions.md`, adds an `@`-import block to `CLAUDE.md`, and installs the `worklist-guard.py` PreToolUse hook. A new Claude session therefore reads the conventions file directly and is also mechanically blocked from unsafe worklist edits. Existing projects with the legacy `.claude/xmlui-desktop-conventions.md` path are migrated to the new name on the next Setup run.
-- **Codex: repo-local AGENTS.md plus native hook enforcement.** Setup writes a marked xmlui-desktop block into repo-root `AGENTS.md`, installs top-level `developer_instructions` in `~/.codex/config.toml`, and registers the codex worklist guard as a native `PreToolUse` hook. Wrapped `codex` launches also receive the same concise worklist guidance as a startup seed. The app reinforces that with the shared local authorization record in `resources/.worklist-authorization.json` and the watcher-revert fallback as defense in depth.
+- **Codex: repo-local AGENTS.md plus native hook enforcement.** Setup writes a marked Bram block into repo-root `AGENTS.md`, installs top-level `developer_instructions` in `~/.codex/config.toml`, and registers the codex worklist guard as a native `PreToolUse` hook. Wrapped `codex` launches also receive the same concise worklist guidance as a startup seed. The app reinforces that with the shared local authorization record in `resources/.worklist-authorization.json` and the watcher-revert fallback as defense in depth.
 
 So the practical rule is: both agents are governed by the same worklist
 conventions, with Claude reading the imported conventions file directly
@@ -434,4 +434,4 @@ your project in a regular browser tab pointed at its `localhost:8080`
 origin — but remember that the tab's `localStorage` is a separate
 store from the right pane's (the right pane is at `tauri://localhost`,
 a different origin), so a session created there won't carry into
-xmlui-desktop.
+Bram.

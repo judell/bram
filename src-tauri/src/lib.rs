@@ -123,13 +123,13 @@ fn expand_tilde(p: &str) -> String {
 }
 
 // Active project root — resolved once at startup from a CLI arg
-// (xmlui-desktop /path/to/project) or std::env::current_dir(). Read by
+// (bram /path/to/project) or std::env::current_dir(). Read by
 // the HTTP server, watcher, git/sessions/PTY commands.
 struct ActiveProjectState(Mutex<PathBuf>);
 
 // URLs for the two iframes.
 //
-// `tools` is always the internal loopback (xmlui-desktop's own server,
+// `tools` is always the internal loopback (Bram's own server,
 // serving /__tools/index.html, /__shell/*, embedded assets, git/issues
 // endpoints, etc.).
 //
@@ -137,7 +137,7 @@ struct ActiveProjectState(Mutex<PathBuf>);
 // regardless of project configuration. The tauri:// scheme handler in
 // `handle_tauri_scheme` intercepts paths under `/__project/*` and
 // proxies them to `right_pane_upstream` (loopback default, or external
-// dev server when `.xmlui-desktop.json` declares one). Net effect: the
+// dev server when `.bram.json` (or legacy `.xmlui-desktop.json`) declares one). Net effect: the
 // right-pane iframe is same-origin with the shell, while the actual
 // bytes still come from the upstream.
 //
@@ -159,24 +159,25 @@ struct PaneUrls {
     // the agent-tools drawer's right-pane-info display (so the user sees
     // the actual upstream URL, not the tauri:// proxy URL) and as the
     // fallback upstream after the server block is removed from
-    // .xmlui-desktop.json at runtime.
+    // project config at runtime.
     default_right_pane: String,
     // Base URL the tauri:// scheme handler proxies right-pane requests to.
     // Always ends with `/`. Switches between the loopback default and an
-    // external server based on .xmlui-desktop.json at startup and on
+    // external server based on project config at startup and on
     // config reload.
     right_pane_upstream: String,
     // Always the internal-loopback base URL (ends with `/`), regardless of
-    // any external dev-server declared in .xmlui-desktop.json. Used by the
+    // any external dev-server declared in project config. Used by the
     // scheme handler to route xd-internal `/__*` requests (sessions,
     // worklist, app-info, etc.) — these never live on the project's dev
     // server even when one is declared.
     loopback_origin: String,
 }
 
-// Project-level config read from .xmlui-desktop.json at the project
-// root. Distinct from XMLUI's own config.json (the app-under-test
-// isn't necessarily an XMLUI app). All fields optional.
+// Project-level config read from .bram.json at the project root, with
+// legacy .xmlui-desktop.json accepted as a migration alias. Distinct
+// from XMLUI's own config.json (the app-under-test isn't necessarily
+// an XMLUI app). All fields optional.
 #[derive(Default, Clone, serde::Deserialize)]
 struct ProjectConfig {
     #[serde(default)]
@@ -209,7 +210,7 @@ fn default_server_path() -> String {
 }
 
 // Lifecycle owner for an optional project-server child spawned per
-// .xmlui-desktop.json. Killed on ExitRequested, or on hot-reload when the
+// project config. Killed on ExitRequested, or on hot-reload when the
 // declared command/cwd/port changes. Carries the spawn-time config so the
 // reload path can diff against the new file and decide whether to respawn.
 struct SpawnedServer {
@@ -2976,9 +2977,9 @@ fn is_port_listening(port: u16) -> bool {
 
 // Distinguishes a healthy reuse candidate from a wedged orphan. A bare TCP
 // connect is not enough — a python -m http.server that was reparented to
-// launchd after its xmlui-desktop parent died accepts connects but never
-// returns a response. Setup uses this to decide whether to reuse, log a
-// loud warning, or spawn fresh.
+// launchd after its Bram parent died accepts connects but never returns a
+// response. Setup uses this to decide whether to reuse, log a loud warning,
+// or spawn fresh.
 enum PortStatus {
     Live,
     Unresponsive(String),
@@ -3026,7 +3027,7 @@ fn probe_port_http(port: u16, path: &str) -> PortStatus {
 }
 
 // Spawn the project's server per ServerConfig. Returns the Child on
-// success. stdout/stderr are piped and forwarded to xmlui-desktop's
+// success. stdout/stderr are piped and forwarded to Bram's
 // stderr with a `[server]` prefix. Caller is responsible for waiting
 // on the port and storing the Child in state.
 fn spawn_project_server(
@@ -3105,13 +3106,14 @@ fn wait_for_port(port: u16, total_ms: u64) -> bool {
     false
 }
 
-// Reconcile xmlui-desktop's runtime state with .xmlui-desktop.json after the
-// file changes on disk. Kills the prior project-server child only when its
-// command/cwd/port no longer match the file; otherwise we keep the running
-// process and just refresh path/query. Always updates PaneUrlsState and emits
-// right-pane-reload so main.js re-fetches the URL. Port changes do respawn,
-// but the iframe origin shifts — service workers (XMLUI's apiInterceptor,
-// MSW) won't rebind cleanly, so we log a warning telling the user to restart.
+// Reconcile Bram's runtime state with .bram.json, or the legacy
+// .xmlui-desktop.json alias, after the file changes on disk. Kills the prior
+// project-server child only when its command/cwd/port no longer match the
+// file; otherwise we keep the running process and just refresh path/query.
+// Always updates PaneUrlsState and emits right-pane-reload so main.js
+// re-fetches the URL. Port changes do respawn, but the iframe origin shifts —
+// service workers (XMLUI's apiInterceptor, MSW) won't rebind cleanly, so we
+// log a warning telling the user to restart.
 fn handle_project_config_reload<R: tauri::Runtime>(app_handle: &AppHandle<R>, proj_root: &Path) {
     use tauri::Emitter;
 
@@ -4113,7 +4115,7 @@ fn delete_session<R: tauri::Runtime>(
 
 // Format `SystemTime::now()` as an RFC3339 string in UTC (seconds precision,
 // no subseconds). Used for the `updated_at` field codex writes into
-// session_index.jsonl entries. xmlui-desktop has no date-formatting crate
+// session_index.jsonl entries. Bram has no date-formatting crate
 // dependency; this inline implementation uses Howard Hinnant's gregorian
 // algorithm to avoid adding one. Codex does not parse `updated_at` back
 // (only `id` + `thread_name` are read), but writing a real RFC3339 keeps the
@@ -4148,7 +4150,7 @@ fn rfc3339_now() -> String {
 // to the session JSONL so claude_session_title at lib.rs:1893 picks it up on
 // next read. For codex: append `{id, thread_name, updated_at}` to
 // ~/.codex/session_index.jsonl (append-only, last entry wins) so both
-// codex_session_index in xmlui-desktop and codex's own session listing see the
+// codex_session_index in Bram and codex's own session listing see the
 // new title. Codex contract verified against codex-rs/rollout/src/session_index.rs.
 fn rename_session<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -5922,12 +5924,15 @@ fn mime_for(path: &std::path::Path) -> &'static str {
     }
 }
 
-// Markers used to identify the xmlui-desktop block inside a project's
-// CLAUDE.md. The block contains a Claude Code @-import that pulls in
-// the full conventions sidecar; future runs of run_enhance replace
-// what's between the markers without disturbing surrounding content.
-const ENHANCE_MARKER_START: &str = "<!-- xmlui-desktop:start -->";
-const ENHANCE_MARKER_END: &str = "<!-- xmlui-desktop:end -->";
+// Markers used to identify the Bram block inside a project's CLAUDE.md and
+// AGENTS.md. The block contains the imported/embedded worklist guidance;
+// future runs of run_enhance replace what's between the markers without
+// disturbing surrounding content. Legacy xmlui-desktop markers are still
+// recognized and migrated to the Bram marker pair on the next Setup run.
+const ENHANCE_MARKER_START: &str = "<!-- bram:start -->";
+const ENHANCE_MARKER_END: &str = "<!-- bram:end -->";
+const ENHANCE_LEGACY_MARKER_START: &str = "<!-- xmlui-desktop:start -->";
+const ENHANCE_LEGACY_MARKER_END: &str = "<!-- xmlui-desktop:end -->";
 const ENHANCE_SIDECAR_REL: &str = ".claude/bram-conventions.md";
 // Pre-bram rename. Setup migrates legacy path to ENHANCE_SIDECAR_REL on
 // next run; status / shellrc / profile / codex guard all accept either
@@ -6015,10 +6020,10 @@ const PTY_INTENT_REL: &str = "resources/.pty-intent.jsonl";
 const ENHANCE_HOOK_COMMAND: &str = "py -3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/worklist-guard.py\"";
 #[cfg(not(windows))]
 const ENHANCE_HOOK_COMMAND: &str = "$CLAUDE_PROJECT_DIR/.claude/hooks/worklist-guard.py";
-// Presence of this file in the project root means the project IS the
-// xmlui-desktop source repo (it bundles the conventions). enhance_status
-// treats it as a valid sidecar location; run_enhance skips the parts
-// that would otherwise self-overwrite the source.
+// Presence of this file in the project root means the project IS the Bram
+// source repo (it bundles the conventions). enhance_status treats it as a
+// valid sidecar location; run_enhance skips the parts that would otherwise
+// self-overwrite the source.
 const ENHANCE_SOURCE_BUNDLE_REL: &str = "app/__shell/conventions.md";
 
 fn settings_has_worklist_guard_hook(settings_path: &Path) -> bool {
@@ -6600,21 +6605,32 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
     let worklist_auth = proj.join(WORKLIST_AUTH_REL);
     let codex_hook_script = home_dir().map(|h| h.join(ENHANCE_CODEX_HOOK_INSTALL_REL));
     let active_provider = hinted_session_provider(app);
+    let is_source_repo = proj.join(ENHANCE_SOURCE_BUNDLE_REL).exists();
     let claude_md_has_marker = std::fs::read_to_string(&claude_md)
-        .map(|s| s.contains(ENHANCE_MARKER_START))
+        .map(|s| {
+            s.contains(ENHANCE_MARKER_START)
+                || s.contains(ENHANCE_LEGACY_MARKER_START)
+                || (is_source_repo && s.contains("@app/__shell/conventions.md"))
+        })
         .unwrap_or(false);
     // Source repo treats the bundle itself as the canonical sidecar.
     // Legacy .claude/xmlui-desktop-conventions.md also counts as installed
     // until Setup migrates it to the new path.
     let sidecar_exists = sidecar.exists()
         || proj.join(ENHANCE_SIDECAR_LEGACY_REL).exists()
-        || proj.join(ENHANCE_SOURCE_BUNDLE_REL).exists();
+        || is_source_repo;
     let hook_script_exists = hook_script.exists();
     let hook_script_current =
         hook_script_exists && hook_matches_bundle(app, &hook_script, ENHANCE_HOOK_BUNDLE_REL);
     let hook_registered = settings_has_worklist_guard_hook(&settings);
     let codex_agents_has_marker = std::fs::read_to_string(&codex_agents)
-        .map(|s| s.contains(ENHANCE_MARKER_START))
+        .map(|s| {
+            s.contains(ENHANCE_MARKER_START)
+                || s.contains(ENHANCE_LEGACY_MARKER_START)
+                || (is_source_repo
+                    && s.contains("This repo is driven through Bram")
+                    && s.contains("resources/worklist.json"))
+        })
         .unwrap_or(false);
     let codex_hook_current = codex_hook_script
         .as_ref()
@@ -6681,7 +6697,7 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String>
 
     let mut wrote: Vec<String> = Vec::new();
 
-    // Provider-neutral worklist authorization cache. xmlui-desktop records the
+    // Provider-neutral worklist authorization cache. Bram records the
     // latest structured `approved:` / `drop:` payload here so the desktop-side
     // watcher can enforce the two-stage worklist policy even when the active
     // provider has no native pre-tool hook support.
@@ -6753,20 +6769,7 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String>
         ENHANCE_MARKER_END
     );
     let existing_agents = std::fs::read_to_string(&codex_agents_path).unwrap_or_default();
-    let new_agents = if let Some(start_idx) = existing_agents.find(ENHANCE_MARKER_START) {
-        let tail = &existing_agents[start_idx..];
-        let end_offset = tail
-            .find(ENHANCE_MARKER_END)
-            .map(|i| start_idx + i + ENHANCE_MARKER_END.len())
-            .unwrap_or(existing_agents.len());
-        let mut s = existing_agents.clone();
-        s.replace_range(start_idx..end_offset, &codex_block);
-        s
-    } else if existing_agents.is_empty() {
-        format!("{}\n", codex_block)
-    } else {
-        format!("{}\n\n{}\n", existing_agents.trim_end(), codex_block)
-    };
+    let new_agents = replace_or_append_managed_block(&existing_agents, &codex_block);
     std::fs::write(&codex_agents_path, &new_agents)
         .map_err(|e| format!("write AGENTS.md: {}", e))?;
     wrote.push(codex_agents_path.display().to_string());
@@ -6811,21 +6814,7 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String>
             "{}\n@{}\n{}",
             ENHANCE_MARKER_START, ENHANCE_SIDECAR_REL, ENHANCE_MARKER_END
         );
-        let new_content = if let Some(start_idx) = existing.find(ENHANCE_MARKER_START) {
-            // Replace existing block in-place.
-            let tail = &existing[start_idx..];
-            let end_offset = tail
-                .find(ENHANCE_MARKER_END)
-                .map(|i| start_idx + i + ENHANCE_MARKER_END.len())
-                .unwrap_or(existing.len());
-            let mut s = existing.clone();
-            s.replace_range(start_idx..end_offset, &block);
-            s
-        } else if existing.is_empty() {
-            format!("{}\n", block)
-        } else {
-            format!("{}\n\n{}\n", existing.trim_end(), block)
-        };
+        let new_content = replace_or_append_managed_block(&existing, &block);
         std::fs::write(&claude_md_path, &new_content)
             .map_err(|e| format!("write CLAUDE.md: {}", e))?;
         wrote.push(claude_md_path.display().to_string());
@@ -7061,6 +7050,29 @@ fn strip_marker_block(content: &str, start: &str, end: &str) -> String {
         result.replace_range(start_idx..cut_to, "");
     }
     result
+}
+
+fn replace_or_append_managed_block(existing: &str, block: &str) -> String {
+    for (start, end) in [
+        (ENHANCE_MARKER_START, ENHANCE_MARKER_END),
+        (ENHANCE_LEGACY_MARKER_START, ENHANCE_LEGACY_MARKER_END),
+    ] {
+        if let Some(start_idx) = existing.find(start) {
+            let tail = &existing[start_idx..];
+            let end_offset = tail
+                .find(end)
+                .map(|i| start_idx + i + end.len())
+                .unwrap_or(existing.len());
+            let mut s = existing.to_string();
+            s.replace_range(start_idx..end_offset, block);
+            return s;
+        }
+    }
+    if existing.is_empty() {
+        format!("{}\n", block)
+    } else {
+        format!("{}\n\n{}\n", existing.trim_end(), block)
+    }
 }
 
 // Quote a string as a TOML basic string literal — wraps in double quotes and
@@ -10631,7 +10643,7 @@ const SHELL_ORIGIN: &str = "tauri://localhost";
 //
 //   - `tauri://localhost/__project/*` is proxied to the upstream URL in
 //     PaneUrlsState.right_pane_upstream (the loopback HTTP server by
-//     default, or an external project dev server when .xmlui-desktop.json
+//     default, or an external project dev server when project config
 //     declares one). The iframe's origin stays `tauri://localhost`, same
 //     as the shell — same-origin policy then permits direct cross-frame
 //     JS access. This is the whole point: shell and target can share

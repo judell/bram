@@ -17,7 +17,7 @@ Two responsibilities:
    hook (app/shell/worklist-guard-codex.py) does for apply_patch.
 
 If the project lacks resources/.worklist-authorization.json (the managed-repo
-marker xmlui-desktop's Setup writes), the hook exits 0 (allow) — Claude
+marker Bram Setup writes), the hook exits 0 (allow) — Claude
 sessions in unmanaged repos run as if no hook were installed.
 """
 
@@ -305,7 +305,7 @@ def main():
         sys.exit(0)
 
     # Locate the project root via the managed-repo marker. If the file isn't
-    # inside an xmlui-desktop-managed project at all, exit cleanly — this
+    # inside a Bram-managed project at all, exit cleanly — this
     # hook is a no-op for Claude sessions in unmanaged repos.
     project_root = find_project_root(os.path.dirname(fp) or ".")
     if project_root is None:

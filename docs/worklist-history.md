@@ -1,6 +1,6 @@
 # Worklist history
 
-xmlui-desktop snapshots `resources/worklist.json` on every meaningful
+Bram snapshots `resources/worklist.json` on every meaningful
 change, so the prose of past items survives after they've been
 committed or dropped. This document sketches how the pieces fit.
 
@@ -122,7 +122,7 @@ the prose of each item that moved through the transition.
 
 ## Per-project applicability
 
-xmlui-desktop is launched against an arbitrary project, so the
+Bram is launched against an arbitrary project, so the
 history directory is created inside that project's `resources/`.
 Local snapshots are always written. Whether those files become part of
 the repo's committed history is a separate, opt-in decision made by

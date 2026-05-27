@@ -165,7 +165,7 @@ When you first add items, default to omitting the status (or setting
 is genuinely already on disk.
 
 You do not need to create `resources/worklist.json` in advance — when
-the file is missing, xmlui-desktop serves an empty default. The
+the file is missing, Bram serves an empty default. The
 Worklist tab can create `resources/worklist.json` (and the enclosing
 `resources/` folder if needed) the first time you opt into the
 worklist flow.

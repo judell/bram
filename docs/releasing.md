@@ -65,10 +65,11 @@ and restart to re-test with a different fake value.
 
 ## Bram rename audit
 
-The repo slug is already `judell/bram`, but the codebase is still a
-mixed-name system: `README.md` is titled `Bram`, while most runtime,
-installer, metadata, and guard surfaces still say `xmlui-desktop`.
-This note inventories the remaining rename surface before any sweep.
+The repo slug is already `judell/bram`. Earlier rename passes left a
+mixed-name system where some runtime, installer, metadata, and guard
+surfaces still used `xmlui-desktop`; this historical audit inventories
+the remaining compatibility names that should not be mass-replaced
+without a migration plan.
 
 ### Cosmetic and user-facing surfaces
 
@@ -147,9 +148,8 @@ These are the highest-risk identifiers because other tools, repos, or
 saved local state may already depend on them.
 
 - Config filename:
-  `README.md`, `app/tools/Main.xmlui`, `app/tools/components/Architecture.xmlui`,
-  `app/main.js`, `src-tauri/src/lib.rs`, `app/shell/claude-code-shellrc`
-  all refer to `.xmlui-desktop.json`.
+  `.bram.json` is the canonical filename. The legacy
+  `.xmlui-desktop.json` alias remains accepted for existing projects.
 - Environment variables:
   `XMLUI_DESKTOP_PORT`, `XMLUI_DESKTOP_FAKE_CURRENT`,
   `XMLUI_DESKTOP_VERSION`, `XMLUI_DESKTOP_BASE_URL`,

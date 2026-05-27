@@ -4798,6 +4798,14 @@ First response to a change request must be (a) clarify, \
 id, file or files, before, and after), or (c) read-only investigation \
 prefaced \"I don't yet have enough context to propose\". Mutations \
 outside approved items are blocked at runtime by a PreToolUse hook. \
+On approved:/drop: turns, GET \
+http://localhost:$(cat resources/.bram-port)/__worklist/resolve \
+to read verified item content, then POST /__worklist/mutate with \
+op:advance (after applying) or op:prune (after a drop or commit). \
+On iterate: turns, POST /__iterate/begin as your first action and \
+/__iterate/end as your last. Don't edit resources/worklist.json \
+directly for state changes — the routes drive the inflight sentinel \
+that keeps the Worklist tab UI in sync. \
 Full convention: .claude/xmlui-desktop-conventions.md";
 const WORKLIST_AUTH_REL: &str = "resources/.worklist-authorization.json";
 // Host-managed inflight sentinel (#84). Written when /__worklist/resolve
@@ -6912,7 +6920,7 @@ fn maybe_enforce_worklist_policy<R: tauri::Runtime>(
         .as_ref()
         .map(|record| record.ids.iter().cloned().collect())
         .unwrap_or_default();
-    let mut used_drop_auth = false;
+    let mut dropped_via_auth: Vec<String> = Vec::new();
     let mut violations: Vec<(String, String)> = Vec::new();
 
     for item in &prior_items {
@@ -6927,14 +6935,34 @@ fn maybe_enforce_worklist_policy<R: tauri::Runtime>(
             continue;
         }
         if auth.as_ref().map(|a| a.kind.as_str()) == Some("drop") && auth_ids.contains(&id) {
-            used_drop_auth = true;
+            dropped_via_auth.push(id);
             continue;
         }
         violations.push((id, status));
     }
 
     if violations.is_empty() {
-        if used_drop_auth {
+        if !dropped_via_auth.is_empty() {
+            // Agent-path-symmetry fix: when an agent (Codex) edits
+            // worklist.json directly to prune a drop-authorized item
+            // instead of going through /__worklist/resolve +
+            // /__worklist/mutate, no inflight sentinel write/clear
+            // fires and the iframe's `submitting=true` (set on click)
+            // never gets cleared — the Worklist tab becomes
+            // unselectable. Mirror what /resolve + /mutate would have
+            // emitted: write the sentinel, then immediately clear it.
+            // The two inflight-claim-changed events drive the iframe's
+            // DataSource to refetch /__inflight, find no claim, and
+            // clear local submitting state. Same outcome as the
+            // Claude path; symmetric across agents.
+            //
+            // Harmless when invoked via the Claude path too — by the
+            // time the policy validator runs after /mutate, the
+            // sentinel has already been cleared, so write+clear here
+            // is a small redundant pair of events. No state
+            // divergence.
+            write_inflight_claim_sentinel(app, &dropped_via_auth, "drop");
+            clear_inflight_claim_sentinel(app, &dropped_via_auth);
             consume_worklist_authorization(app);
         }
         return true;

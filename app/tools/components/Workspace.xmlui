@@ -392,40 +392,50 @@
                   when="{expandedItemId === $item.id}"
                   gap="$space-2"
                   paddingTop="$space-2">
-                  <VStack gap="$space-1" when="{$item.before}">
-                    <Text fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" value="Before" />
+                  <ExpandableItem
+                    when="{$item.before}"
+                    summary="Before"
+                    initiallyExpanded="false"
+                    fullWidthSummary="true">
                     <Markdown content="{$item.before}" />
-                  </VStack>
-                  <VStack gap="$space-1" when="{$item.after}">
-                    <Text fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" value="After" />
+                  </ExpandableItem>
+                  <ExpandableItem
+                    when="{$item.after}"
+                    summary="After"
+                    initiallyExpanded="false"
+                    fullWidthSummary="true">
                     <Markdown content="{$item.after}" />
-                  </VStack>
+                  </ExpandableItem>
+                  <ExpandableItem
+                    when="{$item.diff}"
+                    summary="Diff"
+                    initiallyExpanded="false"
+                    fullWidthSummary="true">
+                    <VStack
+                      gap="0"
+                      padding="$space-2"
+                      backgroundColor="$color-surface-50"
+                      borderRadius="$borderRadius"
+                      overflowX="auto">
+                      <Items data="{$item.diff.split('\n')}">
+                        <Text
+                          fontFamily="$fontFamily-monospace"
+                          fontSize="$fontSize-sm"
+                          paddingHorizontal="$space-2"
+                          whiteSpace="pre"
+                          backgroundColor="{
+                            $item.startsWith('@@') ? '#e0f2fe' :
+                            ($item.startsWith('+') && !$item.startsWith('+++')) ? '#dcfce7' :
+                            ($item.startsWith('-') && !$item.startsWith('---')) ? '#fee2e2' :
+                            'transparent'
+                          }"
+                          value="{$item || ' '}" />
+                      </Items>
+                    </VStack>
+                  </ExpandableItem>
                 </VStack>
               </VStack>
             </HStack>
-            <VStack
-              when="{expandedItemId === $item.id && $item.diff}"
-              gap="0"
-              marginLeft="$space-8"
-              padding="$space-2"
-              backgroundColor="$color-surface-50"
-              borderRadius="$borderRadius"
-              overflowX="auto">
-              <Items data="{$item.diff.split('\n')}">
-                <Text
-                  fontFamily="$fontFamily-monospace"
-                  fontSize="$fontSize-sm"
-                  paddingHorizontal="$space-2"
-                  whiteSpace="pre"
-                  backgroundColor="{
-                    $item.startsWith('@@') ? '#e0f2fe' :
-                    ($item.startsWith('+') && !$item.startsWith('+++')) ? '#dcfce7' :
-                    ($item.startsWith('-') && !$item.startsWith('---')) ? '#fee2e2' :
-                    'transparent'
-                  }"
-                  value="{$item || ' '}" />
-              </Items>
-            </VStack>
           </VStack>
         </Items>
       </VStack>

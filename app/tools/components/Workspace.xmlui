@@ -341,7 +341,7 @@
                     <Button
                       label="Approve"
                       size="xs"
-                      enabled="{traceApproveDropEnabled(submitting, selected)}"
+                      enabled="{!submitting && !!selected}"
                       onClick="(() => { iframeTrace('click', {target: 'approve', item: selected}); const item = (worklist.value.items || []).find(i => i.id === selected); if (item && item.status === 'applied' && item.closesIssues && item.closesIssues.length > 0) { closeIssuesItemRef = item; closeIssuesState = initCloseIssueState(item.closesIssues); closeIssuesDialog = item.id; return; } submittedItemId = selected; submitting = true; iframeTrace('inflight-set', {item: selected, via: 'click', target: 'approve'}); toTurn('approved: ' + buildApprovePayload(worklist.value.items, selected, (feedbackBox &amp;&amp; feedbackBox.value) || '')); })()" />
                     <Theme paddingHorizontal-Button-xs="$space-0_5">
                       <Button
@@ -356,7 +356,7 @@
                     <Button
                       label="Iterate"
                       size="xs"
-                      enabled="{traceIterateEnabled(submitting, selected, (feedbackBox &amp;&amp; feedbackBox.value) || '')}"
+                      enabled="{!submitting && !!selected && ((feedbackBox &amp;&amp; feedbackBox.value) || '').trim().length > 0}"
                       onClick="iframeTrace('click', {target: 'iterate', item: selected}); submittedItemId = selected; submitting = true; iframeTrace('inflight-set', {item: selected, via: 'click', target: 'iterate'}); toTurn('iterate: ' + buildIteratePayload(worklist.value.items, selected, (feedbackBox &amp;&amp; feedbackBox.value) || ''))" />
                     <Theme paddingHorizontal-Button-xs="$space-0_5">
                       <Button
@@ -371,7 +371,7 @@
                     <Button
                       label="Drop"
                       size="xs"
-                      enabled="{traceApproveDropEnabled(submitting, selected)}"
+                      enabled="{!submitting && !!selected}"
                       onClick="iframeTrace('click', {target: 'drop', item: selected}); submittedItemId = selected; submitting = true; iframeTrace('inflight-set', {item: selected, via: 'click', target: 'drop'}); toTurn('drop: ' + buildDropPayload(worklist.value.items, selected, (feedbackBox &amp;&amp; feedbackBox.value) || ''))" />
                     <Theme paddingHorizontal-Button-xs="$space-0_5">
                       <Button

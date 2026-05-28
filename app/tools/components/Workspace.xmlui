@@ -20,7 +20,8 @@
   var.pendingMenu="{null}"
   var.inflightTick="{0}"
   var.lastAssistantTick="{0}"
-  var.lastAssistantTickAt="{0}">
+  var.lastAssistantTickAt="{0}"
+  var.lastAssistantStableText="{''}">
   <DataSource
     id="worklist"
     url="/__worklist"
@@ -94,7 +95,13 @@
        lag behind the terminal between throttled fanout ticks. -->
   <DataSource
     id="lastAssistantTextDS"
-    url="/__last-assistant-text?t={lastAssistantTick}" />
+    url="/__last-assistant-text?t={lastAssistantTick}"
+    onLoaded="(data) => {
+      const text = data && data.text;
+      if (text && text !== lastAssistantStableText) {
+        lastAssistantStableText = text;
+      }
+    }" />
   <!-- Same derive-at-the-boundary shape as lastAssistantTextDS: replaces
        the iframe's currentTurnEdits(lastJsonl) walk which had started
        exceeding XMLUI's 1000 ms sync-evaluation timeout on busy turns
@@ -440,9 +447,9 @@
 
     </VStack>
 
-      <VStack gap="$space-1" when="{worklist.value && worklist.value.items && worklist.value.items.length > 0 && lastAssistantTextDS.value && lastAssistantTextDS.value.text}">
+      <VStack gap="$space-1" when="{worklist.value && worklist.value.items && worklist.value.items.length > 0 && lastAssistantStableText}">
         <Heading level="h4">Last agent response</Heading>
-        <Markdown content="{lastAssistantTextDS.value.text}" />
+        <Markdown content="{lastAssistantStableText}" />
       </VStack>
 
     <ModalDialog

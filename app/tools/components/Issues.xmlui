@@ -94,7 +94,10 @@
         <TextArea
           initialValue="{newIssueText}"
           placeholder="Describe what the issue should cover"
-          rows="4"
+          autoFocus="true"
+          resize="vertical"
+          minRows="4"
+          maxRows="16"
           width="*"
           onDidChange="(v) => newIssueText = v" />
         <HStack gap="$space-2">
@@ -416,7 +419,10 @@
         <TextArea
           id="closeCommentBox"
           placeholder="Optional comment"
-          rows="2"
+          autoFocus="true"
+          resize="vertical"
+          minRows="2"
+          maxRows="12"
           width="*" />
         <HStack gap="$space-2">
           <Button

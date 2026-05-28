@@ -319,7 +319,10 @@
                     id="feedbackBox"
                     initialValue="{selectedFeedback}"
                     placeholder="Message to agent"
-                    rows="2"
+                    autoFocus="true"
+                    resize="vertical"
+                    minRows="2"
+                    maxRows="16"
                     width="*"
                     fontSize="$fontSize-sm"
                     enabled="{!submitting}" />
@@ -504,8 +507,11 @@
               labelPosition="end"
               initialValue="{true}"
               onDidChange="(v) => closeIssuesState = setCloseIssueClose(closeIssuesState, $item.number, v)" />
-            <TextBox
+            <TextArea
               placeholder="Optional close comment for #{$item.number}"
+              resize="vertical"
+              minRows="1"
+              maxRows="8"
               width="100%"
               onDidChange="(v) => closeIssuesState = setCloseIssueComment(closeIssuesState, $item.number, v)" />
           </VStack>
@@ -615,7 +621,10 @@ Before you `Approve` a `TO-APPLY` item you can `Iterate` to refine the proposal.
           <TextArea
             id="newItemBox"
             placeholder="Describe what the item should change"
-            rows="4"
+            autoFocus="true"
+            resize="vertical"
+            minRows="4"
+            maxRows="16"
             width="*" />
           <HStack gap="$space-2">
             <Button

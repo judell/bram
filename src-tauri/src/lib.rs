@@ -3487,6 +3487,30 @@ fn git_push(app: AppHandle) -> Result<(), String> {
     auto_rebase_and_push(&app).map_err(|e| format!("non-fast-forward; {}", e))
 }
 
+fn git_status_summary<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String> {
+    // Refresh the remote-tracking ref first; otherwise "behind" only
+    // reflects the last fetch and the Pull button can be dimmed while
+    // origin has new commits.
+    git_run(app, &["fetch", "origin"])?;
+    let ahead = git_run(app, &["rev-list", "--count", "@{u}..HEAD"])
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    let behind = git_run(app, &["rev-list", "--count", "HEAD..@{u}"])
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    let dirty = git_run(app, &["status", "--porcelain"])
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    serde_json::to_vec(&serde_json::json!({
+        "ahead": ahead,
+        "behind": behind,
+        "dirty": dirty,
+    }))
+    .map_err(|e| e.to_string())
+}
+
 // Rebase local commits on top of origin and retry push. Stashes any
 // uncommitted working-tree changes first (rebase requires a clean
 // tree) and pops the stash after, regardless of whether the rebase /
@@ -3545,6 +3569,63 @@ fn auto_rebase_and_push<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), Str
     }
 
     result
+}
+
+fn pull_rebase_with_autostash<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let dirty = git_run(app, &["status", "--porcelain"])
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    let mut stashed = false;
+    if dirty {
+        git_run(
+            app,
+            &[
+                "stash",
+                "push",
+                "--include-untracked",
+                "-m",
+                "bram-pull-rebase",
+            ],
+        )
+        .map_err(|e| format!("auto-stash failed: {}", e))?;
+        stashed = true;
+    }
+
+    let result = git_run(app, &["pull", "--rebase"]).map(|_| ());
+    if result.is_err() {
+        let _ = git_run(app, &["rebase", "--abort"]);
+    }
+
+    if stashed {
+        if let Err(pop_err) = git_run(app, &["stash", "pop"]) {
+            let prefix = result
+                .as_ref()
+                .err()
+                .cloned()
+                .unwrap_or_else(|| "pull succeeded".to_string());
+            return Err(format!(
+                "{}; stash pop failed: {} (stash retained — recover with `git stash list` / `git stash apply`)",
+                prefix,
+                pop_err.trim()
+            ));
+        }
+    }
+
+    result
+}
+
+fn handle_git_pull_rebase<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str, Vec<u8>) {
+    match pull_rebase_with_autostash(app) {
+        Ok(_) => (
+            200,
+            "application/json; charset=utf-8",
+            br#"{"ok":true}"#.to_vec(),
+        ),
+        Err(e) => {
+            eprintln!("[http /__git/pull-rebase] {}", e);
+            (500, "text/plain; charset=utf-8", e.into_bytes())
+        }
+    }
 }
 
 #[tauri::command]
@@ -9817,10 +9898,20 @@ fn route_request<R: tauri::Runtime>(
     }
 
     if path == "__commits" {
-        return match git_log_recent(app, 30) {
+        return match git_log_recent(app, 100) {
             Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
             Err(e) => {
                 eprintln!("[http /__commits] {}", e);
+                (500, "text/plain; charset=utf-8", e.into_bytes())
+            }
+        };
+    }
+
+    if path == "__git/status" {
+        return match git_status_summary(app) {
+            Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
+            Err(e) => {
+                eprintln!("[http /__git/status] {}", e);
                 (500, "text/plain; charset=utf-8", e.into_bytes())
             }
         };
@@ -11266,6 +11357,12 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             let _ = request.as_reader().read_to_end(&mut buf);
             handle_iterate_end(app, &buf)
         }
+    } else if path == "__git/pull-rebase" {
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            handle_git_pull_rebase(app)
+        }
     } else {
         route_request(app, path, query)
     };
@@ -11448,6 +11545,7 @@ fn proxy_to_upstream(url: String, request: http::Request<Vec<u8>>) -> http::Resp
 
     let response = match result {
         Ok(r) => r,
+        Err(ureq::Error::Status(_, r)) => r,
         Err(e) => {
             eprintln!("[scheme-proxy] {} {} -> {}", method, url, e);
             return http::Response::builder()

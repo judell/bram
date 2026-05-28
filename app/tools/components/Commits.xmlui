@@ -5,11 +5,23 @@
   var.commitsExpanded="{false}"
   var.queryDraft=""
   var.query=""
+  var.pullError="{null}"
   var.pushError="{null}">
 
   <DataSource
     id="commits"
     url="/__commits" />
+
+  <DataSource
+    id="gitStatus"
+    url="/__git/status" />
+
+  <APICall
+    id="pullRebase"
+    method="post"
+    url="/__git/pull-rebase"
+    onSuccess="pullError = null; commits.refetch(); gitStatus.refetch()"
+    onError="(e) => pullError = (e &amp;&amp; e.message) ? e.message : String(e)" />
 
   <DataSource
     id="commitDetail"
@@ -43,6 +55,11 @@
           label="Push {(commits.value || []).filter(c => !c.pushed).length}"
           size="xs"
           onClick="pushError = null; gitPush(commits, (e) => pushError = e)" />
+        <Button
+          label="{gitStatus.value &amp;&amp; gitStatus.value.behind > 0 ? 'Pull ' + gitStatus.value.behind : 'Pull'}"
+          size="xs"
+          enabled="{!pullRebase.inProgress &amp;&amp; gitStatus.value &amp;&amp; gitStatus.value.behind > 0}"
+          onClick="pullError = null; pullRebase.execute()" />
         <SpaceFiller />
         <Button
           label="✕"
@@ -57,6 +74,23 @@
           maxWidth="20rem"
           initialValue="{queryDraft}"
           onDidChange="(v) => queryDraft = v" />
+      </HStack>
+
+      <HStack
+        when="{pullError}"
+        backgroundColor="$color-danger-100"
+        padding="$space-2"
+        gap="$space-2"
+        verticalAlignment="start">
+        <Text fontSize="$fontSize-sm" color="$color-danger-700" width="*">
+          Pull failed: {pullError}
+        </Text>
+        <Button
+          label="✕"
+          variant="ghost"
+          size="xs"
+          tooltip="Dismiss"
+          onClick="pullError = null" />
       </HStack>
 
       <HStack
@@ -157,14 +191,15 @@
                 width="64px" />
               <Text
                 when="{!selectedSha}"
-                value="{formatDateTime($item.commit.author.date, 'yyyy-MM-dd HH:mm')}"
-                fontSize="$fontSize-sm"
+                value="{formatDateTime($item.commit.author.date, 'MM-dd HH:mm')}"
+                fontSize="$fontSize-xs"
                 color="$textColor-secondary"
-                width="130px" />
+                overflowMode="none"
+                width="74px" />
               <HStack
                 when="{!selectedSha}"
-                width="140px"
-                gap="$space-2"
+                width="196px"
+                gap="$space-1"
                 verticalAlignment="center">
                 <Text
                   value="{$item.commit.author.login || $item.commit.author.name}"
@@ -322,7 +357,7 @@
           when="{selectedCommit}"
           fontSize="$fontSize-sm"
           color="$textColor-secondary"
-          value="{selectedCommit.commit.author.name} · {formatDateTime(selectedCommit.commit.author.date, 'yyyy-MM-dd HH:mm')}" />
+          value="{selectedCommit.commit.author.name} · {formatDateTime(selectedCommit.commit.author.date, 'MM-dd HH:mm')}" />
 
         <Text when="{commitDetail.inProgress}">Loading…</Text>
         <VStack gap="$space-4" when="{commitDetail.value}">

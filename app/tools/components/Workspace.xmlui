@@ -497,23 +497,26 @@
       <VStack gap="$space-3" padding="$space-2">
         <Text>
           This commit is flagged as resolving the GitHub issue(s) below.
-          Uncheck any you don't want to close, and optionally add a closing
-          comment per issue.
+          Confirm to close them, or approve without closing.
         </Text>
         <Items data="{closeIssuesItemRef ? closeIssuesItemRef.closesIssues : []}">
-          <VStack gap="$space-1" paddingTop="$space-2" borderTop="1px solid $borderColor">
-            <Checkbox
-              label="Close #{$item.number} — {$item.title}"
-              labelPosition="end"
-              initialValue="{true}"
-              onDidChange="(v) => closeIssuesState = setCloseIssueClose(closeIssuesState, $item.number, v)" />
+          <VStack
+            gap="$space-2"
+            paddingTop="$space-3"
+            borderTop="1px solid $borderColor"
+            var.issue="{normalizeCloseIssue($item)}">
+            <HStack gap="$space-2" verticalAlignment="start">
+              <Text fontWeight="$fontWeight-bold" width="*" overflowMode="wrap">
+                Closes #{issue.number}{issue.title ? ' — ' + issue.title : ''}
+              </Text>
+            </HStack>
             <TextArea
-              placeholder="Optional close comment for #{$item.number}"
+              placeholder="Optional close comment for #{issue.number}"
               resize="vertical"
               minRows="1"
               maxRows="8"
               width="100%"
-              onDidChange="(v) => closeIssuesState = setCloseIssueComment(closeIssuesState, $item.number, v)" />
+              onDidChange="(v) => closeIssuesState = setCloseIssueComment(closeIssuesState, issue.number, v)" />
           </VStack>
         </Items>
         <HStack gap="$space-2" paddingTop="$space-2">

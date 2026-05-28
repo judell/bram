@@ -685,6 +685,18 @@ function initCloseIssueState(closesIssues) {
   }
   return state;
 }
+function normalizeCloseIssue(entry) {
+  if (entry && typeof entry === 'object') {
+    return {
+      number: entry.number,
+      title: (entry.title || '').trim(),
+    };
+  }
+  return {
+    number: entry,
+    title: '',
+  };
+}
 function setCloseIssueClose(state, n, close) {
   const prev = (state && state[n]) || { close: true, comment: '' };
   return Object.assign({}, state || {}, { [n]: Object.assign({}, prev, { close: !!close }) });

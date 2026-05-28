@@ -1924,11 +1924,11 @@ fn gh_issues_search<R: tauri::Runtime>(app: &AppHandle<R>, query: &str) -> Resul
         }
     };
 
-    let mut results: Vec<serde_json::Value> = Vec::new();
+    let mut results: Vec<(usize, serde_json::Value)> = Vec::new();
     let mut total_hits = 0usize;
     let mut truncated = false;
 
-    for mut issue in issues {
+    for (issue_index, mut issue) in issues.into_iter().enumerate() {
         enrich_issue_activity(app, &mut issue, repo_slug.as_deref());
         if total_hits >= MAX_HITS {
             truncated = true;
@@ -2027,11 +2027,87 @@ fn gh_issues_search<R: tauri::Runtime>(app: &AppHandle<R>, query: &str) -> Resul
         if let Some(obj) = out_issue.as_object_mut() {
             obj.insert("hits".into(), serde_json::Value::Array(hits));
         }
-        results.push(out_issue);
+        results.push((issue_index, out_issue));
     }
+    sort_issue_search_results_by_title_hits(&mut results);
+    let results: Vec<serde_json::Value> = results.into_iter().map(|(_, issue)| issue).collect();
 
     serde_json::to_vec(&json!({ "results": results, "truncated": truncated }))
         .map_err(|e| e.to_string())
+}
+
+fn issue_search_result_rank(issue: &serde_json::Value) -> usize {
+    let has_title_hit = issue
+        .get("hits")
+        .and_then(|v| v.as_array())
+        .map(|hits| {
+            hits.iter()
+                .any(|hit| hit.get("field").and_then(|field| field.as_str()) == Some("title"))
+        })
+        .unwrap_or(false);
+
+    if has_title_hit {
+        0
+    } else {
+        1
+    }
+}
+
+fn sort_issue_search_results_by_title_hits(results: &mut Vec<(usize, serde_json::Value)>) {
+    results.sort_by_key(|(issue_index, issue)| (issue_search_result_rank(issue), *issue_index));
+}
+
+#[cfg(test)]
+mod issue_search_tests {
+    use super::sort_issue_search_results_by_title_hits;
+    use serde_json::{json, Value};
+
+    fn issue(number: u64, field: &str) -> Value {
+        json!({
+            "number": number,
+            "hits": [
+                {
+                    "field": field,
+                    "line": 0,
+                    "snippet": field
+                }
+            ]
+        })
+    }
+
+    fn numbers(results: &[(usize, Value)]) -> Vec<u64> {
+        results
+            .iter()
+            .map(|(_, issue)| issue.get("number").and_then(|v| v.as_u64()).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn title_hits_sort_before_body_and_comment_hits() {
+        let mut results = vec![
+            (0, issue(1, "body")),
+            (1, issue(2, "comment")),
+            (2, issue(3, "title")),
+        ];
+
+        sort_issue_search_results_by_title_hits(&mut results);
+
+        assert_eq!(numbers(&results), vec![3, 1, 2]);
+    }
+
+    #[test]
+    fn issue_search_rank_preserves_order_inside_each_tier() {
+        let mut results = vec![
+            (0, issue(1, "comment")),
+            (1, issue(2, "title")),
+            (2, issue(3, "body")),
+            (3, issue(4, "title")),
+        ];
+
+        sort_issue_search_results_by_title_hits(&mut results);
+
+        assert_eq!(numbers(&results), vec![2, 4, 1, 3]);
+    }
 }
 
 // Shell out to `gh issue view <number> --json ...` and return the raw JSON

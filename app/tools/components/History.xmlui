@@ -15,28 +15,75 @@
       No worklist history yet.
     </Text>
 
-    <ModalDialog id="historySnapshotDialog" title="{activeSnapshot &amp;&amp; activeSnapshot.iso}">
-      <Markdown content="{activeSnapshot &amp;&amp; activeSnapshot.changelog}" />
+    <ModalDialog id="historySnapshotDialog" title="{activeSnapshot &amp;&amp; activeSnapshot.summaryLabel}">
+      <Markdown content="{activeSnapshot &amp;&amp; (activeSnapshot.fullChangelog || activeSnapshot.changelog || activeSnapshot.diff)}" />
     </ModalDialog>
 
-    <Table when="{history.value && history.value.length > 0}" data="{history.value}">
-      <Column header="details" width="80px">
-        <Link
-          onClick="activeSnapshot = $item; historySnapshotDialog.open()"
-          noIndicator>
-          <Text value="show" fontSize="$fontSize-xs" />
-        </Link>
-      </Column>
-      <Column bindTo="summary" header="action" width="140px" />
-      <Column header="items">
-        <Text
-          value="{$item.ids &amp;&amp; $item.ids.join(', ')}"
-          overflowMode="flow"
-          breakMode="word" />
-      </Column>
-      <Column header="when" width="160px">
-        <Text value="{$item.iso &amp;&amp; $item.iso.slice(0, 16)}" fontSize="$fontSize-sm" />
-      </Column>
-    </Table>
+    <VStack
+      when="{history.value && history.value.length > 0}"
+      gap="$space-3">
+      <Items data="{history.value}">
+        <VStack
+          gap="$space-2"
+          padding="$space-3"
+          border="1px solid $color-surface-200"
+          borderRadius="$borderRadius"
+          backgroundColor="$color-surface-50">
+          <HStack gap="$space-3" verticalAlignment="center">
+            <VStack gap="$space-0_5" width="*">
+              <Text value="{$item.title}" fontWeight="bold" overflowMode="flow" breakMode="word" />
+              <Text value="{$item.subtitle}" color="$textColor-secondary" fontSize="$fontSize-sm" />
+            </VStack>
+            <Text
+              value="{$item.phaseCount + ($item.phaseCount === 1 ? ' phase' : ' phases')}"
+              color="$textColor-secondary"
+              fontSize="$fontSize-xs" />
+          </HStack>
+
+          <ExpandableItem
+            summary="Phase diffs"
+            initiallyExpanded="false"
+            fullWidthSummary="true">
+            <VStack gap="$space-2">
+              <Items data="{$item.phases}">
+                <ExpandableItem
+                  summary="{$item.summaryLabel}"
+                  initiallyExpanded="false"
+                  fullWidthSummary="true">
+                  <VStack gap="$space-2">
+                    <VStack
+                      gap="0"
+                      padding="$space-2"
+                      backgroundColor="$color-surface-50"
+                      borderRadius="$borderRadius"
+                      overflowX="auto">
+                      <Items data="{($item.diff || '').split('\n')}">
+                        <Text
+                          fontFamily="$fontFamily-monospace"
+                          fontSize="$fontSize-sm"
+                          paddingHorizontal="$space-2"
+                          whiteSpace="pre"
+                          backgroundColor="{
+                            $item.startsWith('@@') ? '#e0f2fe' :
+                            ($item.startsWith('+') && !$item.startsWith('+++')) ? '#dcfce7' :
+                            ($item.startsWith('-') && !$item.startsWith('---')) ? '#fee2e2' :
+                            'transparent'
+                          }"
+                          value="{$item || ' '}" />
+                      </Items>
+                    </VStack>
+                    <Link
+                      onClick="activeSnapshot = $item; historySnapshotDialog.open()"
+                      noIndicator>
+                      <Text value="open phase diff" fontSize="$fontSize-xs" />
+                    </Link>
+                  </VStack>
+                </ExpandableItem>
+              </Items>
+            </VStack>
+          </ExpandableItem>
+        </VStack>
+      </Items>
+    </VStack>
   </VStack>
 </Component>

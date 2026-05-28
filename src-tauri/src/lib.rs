@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -7464,6 +7464,9 @@ fn toml_basic_string(s: &str) -> String {
 // ============================================================================
 
 static LAST_WORKLIST: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+const HISTORY_DIFF_MAX_LINES: usize = 80;
+const HISTORY_DIFF_MAX_BYTES: usize = 4 * 1024;
+const WORKLIST_HISTORY_DEFAULT_LIMIT: usize = 120;
 
 fn last_worklist_cell() -> &'static Mutex<Option<String>> {
     LAST_WORKLIST.get_or_init(|| Mutex::new(None))
@@ -9880,6 +9883,373 @@ fn init_worklist_cache<R: tauri::Runtime>(app: &AppHandle<R>) {
     }
 }
 
+fn cap_history_diff(diff: &str) -> String {
+    cap_diff(diff, HISTORY_DIFF_MAX_LINES, HISTORY_DIFF_MAX_BYTES)
+}
+
+fn cap_diff(diff: &str, max_lines: usize, max_bytes: usize) -> String {
+    if diff.len() <= max_bytes && diff.lines().count() <= max_lines {
+        return diff.to_string();
+    }
+    let mut out = String::new();
+    let mut bytes = 0usize;
+    let mut emitted = 0usize;
+    let mut total_lines = 0usize;
+    for line in diff.lines() {
+        total_lines += 1;
+        if emitted >= max_lines || bytes + line.len() + 1 > max_bytes {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+            bytes += 1;
+        }
+        out.push_str(line);
+        bytes += line.len();
+        emitted += 1;
+    }
+    let omitted_lines = total_lines.saturating_sub(emitted);
+    let omitted_bytes = diff.len().saturating_sub(bytes);
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(&format!(
+        "... diff truncated: {} lines / {} bytes omitted",
+        omitted_lines, omitted_bytes
+    ));
+    out
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorklistHistoryPhase {
+    ts: i64,
+    iso: String,
+    summary: String,
+    summary_label: String,
+    full_changelog: String,
+    changelog: String,
+    diff: String,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorklistHistoryGroup {
+    id: String,
+    title: String,
+    ids: Vec<String>,
+    phases: Vec<WorklistHistoryPhase>,
+    latest_ts: i64,
+    latest_iso: String,
+    phase_count: usize,
+    subtitle: String,
+    kind: String,
+}
+
+fn worklist_history_summary(changelog: &str) -> String {
+    changelog
+        .lines()
+        .find(|l| l.starts_with("**Summary:**"))
+        .map(|l| l.trim_start_matches("**Summary:**").trim().to_string())
+        .unwrap_or_else(|| {
+            if changelog.contains("## Description changed") {
+                String::from("description changed")
+            } else {
+                String::from("change")
+            }
+        })
+}
+
+fn worklist_history_ids(changelog: &str, doc: &serde_json::Value) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    for line in changelog.lines() {
+        if !line.starts_with("- `") {
+            continue;
+        }
+        let rest = &line[3..];
+        if let Some(end) = rest.find('`') {
+            let after = &rest[end + 1..];
+            let looks_like_item = after.starts_with(" (was ")
+                || after.starts_with(" (proposed")
+                || after.starts_with(" (applied")
+                || after.starts_with(" (committed")
+                || after.starts_with(" (dropped")
+                || after.starts_with(": proposed")
+                || after.starts_with(": applied")
+                || after.starts_with(": committed")
+                || after.starts_with(": dropped");
+            if looks_like_item {
+                ids.push(rest[..end].to_string());
+            }
+        }
+    }
+    if ids.is_empty() {
+        if let Some(items) = doc.get("items").and_then(|v| v.as_array()) {
+            for item in items {
+                if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                    ids.push(id.to_string());
+                }
+            }
+        }
+    }
+    ids
+}
+
+fn worklist_history_item_state(doc: &serde_json::Value, id: &str) -> Option<serde_json::Value> {
+    doc.get("items")
+        .and_then(|v| v.as_array())
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.get("id").and_then(|v| v.as_str()) == Some(id))
+                .cloned()
+        })
+}
+
+fn worklist_history_json_line(value: &serde_json::Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| String::from("null"))
+}
+
+fn worklist_history_item_diff(
+    before: Option<&serde_json::Value>,
+    after: Option<&serde_json::Value>,
+) -> String {
+    match (before, after) {
+        (None, None) => String::new(),
+        (None, Some(item)) => serde_json::to_string_pretty(item)
+            .unwrap_or_else(|_| worklist_history_json_line(item))
+            .lines()
+            .map(|line| format!("+ {}", line))
+            .collect::<Vec<String>>()
+            .join("\n"),
+        (Some(item), None) => serde_json::to_string_pretty(item)
+            .unwrap_or_else(|_| worklist_history_json_line(item))
+            .lines()
+            .map(|line| format!("- {}", line))
+            .collect::<Vec<String>>()
+            .join("\n"),
+        (Some(prev), Some(next)) => {
+            if prev == next {
+                return String::from("No item data changed.");
+            }
+            let Some(prev_obj) = prev.as_object() else {
+                return format!(
+                    "- {}\n+ {}",
+                    worklist_history_json_line(prev),
+                    worklist_history_json_line(next)
+                );
+            };
+            let Some(next_obj) = next.as_object() else {
+                return format!(
+                    "- {}\n+ {}",
+                    worklist_history_json_line(prev),
+                    worklist_history_json_line(next)
+                );
+            };
+            let mut keys: BTreeSet<String> = BTreeSet::new();
+            for key in prev_obj.keys() {
+                keys.insert(key.to_string());
+            }
+            for key in next_obj.keys() {
+                keys.insert(key.to_string());
+            }
+            let mut lines: Vec<String> = Vec::new();
+            for key in keys {
+                let old = prev_obj.get(&key);
+                let new = next_obj.get(&key);
+                if old == new {
+                    continue;
+                }
+                if let Some(v) = old {
+                    lines.push(format!("- \"{}\": {}", key, worklist_history_json_line(v)));
+                }
+                if let Some(v) = new {
+                    lines.push(format!("+ \"{}\": {}", key, worklist_history_json_line(v)));
+                }
+            }
+            if lines.is_empty() {
+                String::from("No item data changed.")
+            } else {
+                lines.join("\n")
+            }
+        }
+    }
+}
+
+fn recent_worklist_history_groups<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    limit: usize,
+) -> Vec<WorklistHistoryGroup> {
+    let Some(dir) = worklist_history_dir(app) else {
+        return Vec::new();
+    };
+    let mut json_files: Vec<(i64, PathBuf)> = Vec::new();
+    if let Ok(read_dir) = std::fs::read_dir(&dir) {
+        for entry in read_dir.flatten() {
+            let p = entry.path();
+            if p.extension().map_or(false, |e| e == "json") {
+                if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                    if let Ok(ts) = stem.parse::<i64>() {
+                        json_files.push((ts, p));
+                    }
+                }
+            }
+        }
+    }
+    json_files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut groups: Vec<WorklistHistoryGroup> = Vec::new();
+    let mut by_id: HashMap<String, usize> = HashMap::new();
+    let mut last_state: HashMap<String, serde_json::Value> = HashMap::new();
+
+    for (ts, json_path) in json_files {
+        let raw = std::fs::read_to_string(&json_path).unwrap_or_default();
+        let doc = serde_json::from_str::<serde_json::Value>(&raw).unwrap_or_default();
+        let md_path = json_path.with_extension("md");
+        let changelog = std::fs::read_to_string(&md_path).unwrap_or_default();
+        let summary = worklist_history_summary(&changelog);
+        let ids = worklist_history_ids(&changelog, &doc);
+        let iso = format_iso_utc(ts);
+
+        if ids.len() == 1 {
+            let id = ids[0].clone();
+            let current = worklist_history_item_state(&doc, &id);
+            let previous = last_state.get(&id);
+            let diff = worklist_history_item_diff(previous, current.as_ref());
+            match current {
+                Some(item) => {
+                    last_state.insert(id.clone(), item);
+                }
+                None => {
+                    last_state.remove(&id);
+                }
+            }
+            let phase = WorklistHistoryPhase {
+                ts,
+                iso: iso.clone(),
+                summary: summary.clone(),
+                summary_label: format!(
+                    "{} · {}",
+                    iso.chars().take(16).collect::<String>(),
+                    summary
+                ),
+                full_changelog: String::new(),
+                changelog: String::new(),
+                diff: cap_history_diff(&diff),
+            };
+            let group_idx = match by_id.get(&id).copied() {
+                Some(idx) => idx,
+                None => {
+                    let idx = groups.len();
+                    by_id.insert(id.clone(), idx);
+                    groups.push(WorklistHistoryGroup {
+                        id: id.clone(),
+                        title: id.clone(),
+                        ids: vec![id.clone()],
+                        phases: Vec::new(),
+                        latest_ts: 0,
+                        latest_iso: String::new(),
+                        phase_count: 0,
+                        subtitle: String::new(),
+                        kind: String::from("item"),
+                    });
+                    idx
+                }
+            };
+            if let Some(group) = groups.get_mut(group_idx) {
+                group.latest_ts = ts;
+                group.latest_iso = iso;
+                group.phases.push(phase);
+            }
+        } else {
+            let phase = WorklistHistoryPhase {
+                ts,
+                iso: iso.clone(),
+                summary: summary.clone(),
+                summary_label: format!(
+                    "{} · {}",
+                    iso.chars().take(16).collect::<String>(),
+                    summary
+                ),
+                full_changelog: String::new(),
+                changelog: String::new(),
+                diff: String::from("No single item diff is available for this snapshot."),
+            };
+            groups.push(WorklistHistoryGroup {
+                id: format!("snapshot-{}", ts),
+                title: if ids.is_empty() {
+                    String::from("description changed")
+                } else {
+                    ids.join(", ")
+                },
+                ids,
+                phases: vec![phase],
+                latest_ts: ts,
+                latest_iso: iso,
+                phase_count: 0,
+                subtitle: String::new(),
+                kind: String::from("snapshot"),
+            });
+        }
+    }
+
+    for group in &mut groups {
+        group.phase_count = group.phases.len();
+        if group.phase_count > 1 {
+            let first = group
+                .phases
+                .first()
+                .map(|p| p.iso.chars().take(16).collect::<String>())
+                .unwrap_or_default();
+            let last = group
+                .phases
+                .last()
+                .map(|p| p.iso.chars().take(16).collect::<String>())
+                .unwrap_or_default();
+            group.subtitle = format!("{} phases · {} → {}", group.phase_count, first, last);
+        } else if let Some(phase) = group.phases.last() {
+            group.subtitle = format!(
+                "{} · {}",
+                phase.iso.chars().take(16).collect::<String>(),
+                phase.summary
+            );
+        }
+    }
+    groups.sort_by(|a, b| b.latest_ts.cmp(&a.latest_ts));
+    if limit > 0 && groups.len() > limit {
+        groups.truncate(limit);
+    }
+    groups
+}
+
+#[cfg(test)]
+mod worklist_history_tests {
+    use super::worklist_history_item_diff;
+    use serde_json::json;
+
+    #[test]
+    fn item_diff_shows_status_transition() {
+        let before = json!({"id": "x", "status": "proposed", "files": ["a"]});
+        let after = json!({"id": "x", "status": "applied", "files": ["a"]});
+
+        let diff = worklist_history_item_diff(Some(&before), Some(&after));
+
+        assert!(diff.contains("- \"status\": \"proposed\""));
+        assert!(diff.contains("+ \"status\": \"applied\""));
+        assert!(!diff.contains("\"files\""));
+    }
+
+    #[test]
+    fn item_diff_shows_removal() {
+        let before = json!({"id": "x", "status": "applied"});
+
+        let diff = worklist_history_item_diff(Some(&before), None);
+
+        assert!(diff.contains("- {"));
+        assert!(diff.contains("-   \"id\": \"x\""));
+    }
+}
+
 // Routing for the right-pane HTTP server. Returns (status, content-type, body).
 fn route_request<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -10818,100 +11188,17 @@ fn route_request<R: tauri::Runtime>(
     }
 
     // /__worklist-history/list — reverse-chronological list of snapshots
-    // from resources/worklist-history/, each with a one-line summary
-    // parsed from the .md changelog.
+    // grouped by logical worklist item, with per-phase item-state diffs.
     if path == "__worklist-history/list" {
-        let Some(dir) = worklist_history_dir(app) else {
-            return (200, "application/json; charset=utf-8", b"[]".to_vec());
-        };
-        let mut json_files: Vec<(i64, PathBuf)> = Vec::new();
-        if let Ok(read_dir) = std::fs::read_dir(&dir) {
-            for entry in read_dir.flatten() {
-                let p = entry.path();
-                if p.extension().map_or(false, |e| e == "json") {
-                    if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                        if let Ok(ts) = stem.parse::<i64>() {
-                            json_files.push((ts, p));
-                        }
-                    }
-                }
+        let mut limit = WORKLIST_HISTORY_DEFAULT_LIMIT;
+        for pair in query.split('&') {
+            if let Some(v) = pair.strip_prefix("limit=") {
+                limit = percent_decode(v)
+                    .parse::<usize>()
+                    .unwrap_or(WORKLIST_HISTORY_DEFAULT_LIMIT);
             }
         }
-        json_files.sort_by(|a, b| b.0.cmp(&a.0));
-        let mut entries: Vec<serde_json::Value> = Vec::new();
-        for (ts, json_path) in json_files {
-            let md_path = json_path.with_extension("md");
-            let changelog = std::fs::read_to_string(&md_path).unwrap_or_default();
-            let summary = changelog
-                .lines()
-                .find(|l| l.starts_with("**Summary:**"))
-                .map(|l| l.trim_start_matches("**Summary:**").trim().to_string())
-                .unwrap_or_else(|| {
-                    // No item transitions in this snapshot. If the changelog
-                    // recorded a description edit, label it explicitly rather
-                    // than the generic fallback "change".
-                    if changelog.contains("## Description changed") {
-                        String::from("description changed")
-                    } else {
-                        String::from("change")
-                    }
-                });
-            // Item ids are the leading-backtick tokens on changelog bullets.
-            // Three shapes exist across the lifecycle:
-            //   - `<id>` (was applied, `<path>`)        ← committed
-            //   - `<id>` (proposed, `<path>`)           ← newly proposed
-            //   - `<id>`: proposed → applied            ← applied (status change)
-            // The discriminator after the closing backtick is either ` (` or
-            // `: ` followed by one of the lifecycle status keywords, which
-            // doesn't collide with backtick-bearing nested bullets in
-            // before/after prose.
-            let mut ids: Vec<String> = Vec::new();
-            for line in changelog.lines() {
-                if !line.starts_with("- `") {
-                    continue;
-                }
-                let rest = &line[3..];
-                if let Some(end) = rest.find('`') {
-                    let after = &rest[end + 1..];
-                    let looks_like_item = after.starts_with(" (was ")
-                        || after.starts_with(" (proposed")
-                        || after.starts_with(" (applied")
-                        || after.starts_with(" (committed")
-                        || after.starts_with(" (dropped")
-                        || after.starts_with(": proposed")
-                        || after.starts_with(": applied")
-                        || after.starts_with(": committed")
-                        || after.starts_with(": dropped");
-                    if looks_like_item {
-                        ids.push(rest[..end].to_string());
-                    }
-                }
-            }
-            // Fallback for snapshots with no item transitions (e.g.
-            // description-only edits): read the sibling `.json` worklist
-            // snapshot and surface the ids that were present at that moment,
-            // so the row carries context instead of an empty "items" cell.
-            if ids.is_empty() {
-                if let Ok(raw) = std::fs::read_to_string(&json_path) {
-                    if let Ok(doc) = serde_json::from_str::<serde_json::Value>(&raw) {
-                        if let Some(items) = doc.get("items").and_then(|v| v.as_array()) {
-                            for item in items {
-                                if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-                                    ids.push(id.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            entries.push(serde_json::json!({
-                "ts": ts,
-                "iso": format_iso_utc(ts),
-                "summary": summary,
-                "ids": ids,
-                "changelog": changelog,
-            }));
-        }
+        let entries = recent_worklist_history_groups(app, limit);
         let body = serde_json::to_vec(&entries).unwrap_or_default();
         return (200, "application/json; charset=utf-8", body);
     }

@@ -4589,23 +4589,11 @@ fn read_latest_session_pending<R: tauri::Runtime>(
     result
 }
 
-// Host-side last-assistant-text extraction. Architectural experiment
-// for the "derive-at-the-boundary, not in the iframe" thread: the
-// JSONL helper `lastAssistantText` was costing 250-300ms per fanout
-// on the iframe main thread. This route does the same walk in Rust
-// once per request and returns just the text, so the iframe binds to
-// a small value instead of re-walking 100 KB+ every broadcast.
-//
-// Reads the trailing 32 KB of the current Claude session JSONL (same
-// budget as `read_latest_session_pending`), walks lines in reverse,
-// and returns the most recent assistant text turn. Returns empty
-// string when no assistant text is found in the tail window.
 // Pick whichever provider's latest session file has the most recent
 // mtime. Bypasses `latest_session_path`'s active-agent-hint check —
 // the hint is sticky and lags when activity flips between providers,
-// causing the route to walk the wrong (often empty) session for
-// several refetch cycles. Most-recent-mtime auto-flips the moment
-// the other provider writes a record.
+// causing routes that need live terminal-adjacent state to walk the
+// wrong (often empty) session for several refetch cycles.
 fn freshest_session_path<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> Result<Option<std::path::PathBuf>, String> {
@@ -4629,81 +4617,35 @@ fn read_last_assistant_text<R: tauri::Runtime>(
     app: &AppHandle<R>,
     _preferred: Option<SessionProvider>,
 ) -> Result<Vec<u8>, String> {
-    use std::io::{Read, Seek, SeekFrom};
     let Some(path) = freshest_session_path(app)? else {
-        return Ok(br#"{"text":""}"#.to_vec());
+        return Ok(br#"{"text":"","source":"session-turns"}"#.to_vec());
     };
-    let mut file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
-    let file_size = file.metadata().map_err(|e| e.to_string())?.len();
-    let want: u64 = 32 * 1024;
-    let read_from = file_size.saturating_sub(want);
-    file.seek(SeekFrom::Start(read_from))
-        .map_err(|e| e.to_string())?;
-    let mut tail = Vec::with_capacity((file_size - read_from) as usize);
-    file.read_to_end(&mut tail).map_err(|e| e.to_string())?;
-    let text = String::from_utf8_lossy(&tail);
+    let metadata = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+    let modified_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let turns = st_parse_lines_to_turns(&text);
     let mut found = String::new();
-    for line in text.lines().rev() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(r) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        let typ = r.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        // Claude shape: type="assistant", message.content is string or
-        // array-of-content-blocks (text blocks have type="text" + text).
-        if typ == "assistant" {
-            let content = match r.get("message").and_then(|m| m.get("content")) {
-                Some(c) => c,
-                None => continue,
-            };
-            if let Some(s) = content.as_str() {
-                if !s.is_empty() {
-                    found = s.to_string();
+    for turn in turns.iter().rev() {
+        if turn.get("role").and_then(|v| v.as_str()) == Some("assistant") {
+            if let Some(text) = turn.get("text").and_then(|v| v.as_str()) {
+                if !text.trim().is_empty() {
+                    found = text.to_string();
                     break;
                 }
             }
-            if let Some(arr) = content.as_array() {
-                let mut texts: Vec<String> = Vec::new();
-                for c in arr {
-                    if c.get("type").and_then(|t| t.as_str()) == Some("text") {
-                        if let Some(t) = c.get("text").and_then(|v| v.as_str()) {
-                            if !t.is_empty() {
-                                texts.push(t.to_string());
-                            }
-                        }
-                    }
-                }
-                if !texts.is_empty() {
-                    found = texts.join("\n\n");
-                    break;
-                }
-            }
-            continue;
-        }
-        // Codex shape: type="event_msg" with payload.type="agent_message"
-        // and payload.message carrying the text.
-        if typ == "event_msg" {
-            if let Some(payload) = r.get("payload") {
-                if payload.get("type").and_then(|v| v.as_str()) == Some("agent_message") {
-                    if let Some(msg) = payload.get("message").and_then(|v| v.as_str()) {
-                        if !msg.is_empty() {
-                            found = msg.to_string();
-                            break;
-                        }
-                    }
-                }
-            }
-            continue;
         }
     }
-    // Note: we deliberately skip the iframe's stripImagePaths /
-    // rewriteXmluiDocUrls transforms here. They're cheap on a 2 KB
-    // string and can stay iframe-side if needed; the responsiveness
-    // win comes from not walking the buffer, not from those passes.
-    let body = serde_json::json!({ "text": found });
+    let body = serde_json::json!({
+        "text": found,
+        "source": "session-turns",
+        "path": path.to_string_lossy().to_string(),
+        "mtime": modified_ms,
+    });
     serde_json::to_vec(&body).map_err(|e| e.to_string())
 }
 
@@ -4772,6 +4714,36 @@ fn read_waiting_for_assistant<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<V
                     Some("user_message") => last_role = Some("user"),
                     Some("agent_message") => last_role = Some("assistant"),
                     _ => {}
+                }
+            }
+        } else if typ == "response_item" {
+            if let Some(payload) = r.get("payload") {
+                if payload.get("type").and_then(|v| v.as_str()) == Some("message") {
+                    let has_text = payload
+                        .get("content")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter().any(|c| {
+                                let c_typ = c.get("type").and_then(|v| v.as_str());
+                                let has_text = c
+                                    .get("text")
+                                    .and_then(|v| v.as_str())
+                                    .map(|t| !t.is_empty())
+                                    .unwrap_or(false);
+                                matches!(
+                                    c_typ,
+                                    Some("input_text") | Some("output_text") | Some("text")
+                                ) && has_text
+                            })
+                        })
+                        .unwrap_or(false);
+                    if has_text {
+                        match payload.get("role").and_then(|v| v.as_str()) {
+                            Some("user") => last_role = Some("user"),
+                            Some("assistant") => last_role = Some("assistant"),
+                            _ => {}
+                        }
+                    }
                 }
             }
         }
@@ -5569,7 +5541,26 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
         } else if typ == "response_item" {
             if let Some(p) = r.get("payload") {
                 let p_typ = p.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                if p_typ == "function_call" || p_typ == "custom_tool_call" {
+                if p_typ == "message" {
+                    match p.get("role").and_then(|v| v.as_str()) {
+                        Some("user") => role = Some("user"),
+                        Some("assistant") => role = Some("assistant"),
+                        _ => {}
+                    }
+                    if let Some(arr) = p.get("content").and_then(|v| v.as_array()) {
+                        for c in arr {
+                            let c_typ = c.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                            if c_typ == "input_text" || c_typ == "output_text" || c_typ == "text" {
+                                if let Some(t) = c.get("text").and_then(|v| v.as_str()) {
+                                    if !t.is_empty() {
+                                        entries
+                                            .push(serde_json::json!({ "kind": "text", "text": t }));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if p_typ == "function_call" || p_typ == "custom_tool_call" {
                     role = Some("assistant");
                     let id = p.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
                     let name = st_codex_tool_name(p);

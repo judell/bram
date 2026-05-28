@@ -388,13 +388,36 @@ window.getRightPaneSize = function (callback) {
 
 // Subscribe to session-JSONL change events. The parent shell receives
 // `talk-session-changed` Tauri events from the file watcher; same-origin
-// iframes can listen for that event directly via window.parent.__TAURI__.
-// Used by Transcript / Workspace to refetch immediately on provider
-// session-file writes — eliminates the poll-window lag where short-lived
-// menu or turn-boundary state could come and go between ticks.
-var __talkSessionSubscriber = null;
+// iframes consume them through this bridge. Used by Transcript / Workspace
+// to refetch immediately on provider session-file writes — eliminates the
+// poll-window lag where short-lived menu or turn-boundary state could come
+// and go between ticks.
+var __talkSessionSubscribers = [];
+var __talkSessionMainUnsub = null;
 window.onTalkSessionChange = function (fn) {
-  __talkSessionSubscriber = typeof fn === "function" ? fn : null;
+  if (typeof __talkSessionMainUnsub === "function") {
+    try { __talkSessionMainUnsub(); } catch (e) {}
+    __talkSessionMainUnsub = null;
+  }
+  if (typeof fn !== "function") return function () {};
+  __talkSessionMainUnsub = window.subscribeTalkSessionChange("__bramMainTalkSessionUnsub", fn);
+  return __talkSessionMainUnsub;
+};
+window.subscribeTalkSessionChange = function (key, fn) {
+  if (typeof window[key] === "function") {
+    try { window[key](); } catch (e) {}
+  }
+  if (typeof fn !== "function") {
+    window[key] = null;
+    return function () {};
+  }
+  __talkSessionSubscribers.push(fn);
+  window[key] = function () {
+    var idx = __talkSessionSubscribers.indexOf(fn);
+    if (idx >= 0) __talkSessionSubscribers.splice(idx, 1);
+    window[key] = null;
+  };
+  return window[key];
 };
 // Cascade-diagnosis instrumentation (refs #93). Counts every
 // talk-session-changed delivery and emits a rolling batch record
@@ -423,8 +446,9 @@ try {
   if (window.parent && window.parent.__TAURI__ && window.parent.__TAURI__.event) {
     window.parent.__TAURI__.event.listen("talk-session-changed", function () {
       var t0 = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
-      if (typeof __talkSessionSubscriber === "function") {
-        __talkSessionSubscriber();
+      var n = __talkSessionSubscribers.length;
+      for (var i = 0; i < n; i++) {
+        try { __talkSessionSubscribers[i](); } catch (e) {}
       }
       var t1 = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
       __tscBatchTick(t1 - t0);

@@ -88,12 +88,10 @@
         feedbackExpanded = false; expandedItemId = null;
       }
     }" />
-  <!-- Architectural experiment: derive-at-the-boundary. Instead of
-       calling lastAssistantText(lastJsonl) on the iframe main thread
-       (which walks ~100 KB of JSONL suffix and costs ~250 ms per
-       fanout), bind to a host-computed value via a small DataSource.
-       Refetch is driven by `sessionTick` (App-level var bumped on
-       talk-session-changed, 2s-throttled). -->
+  <!-- Transcript-aligned last response. Host derives this from the same
+       parsed turn stream Transcript uses. Refetch is driven by JSONL
+       fanout plus the shell's talk-session bridge so Workspace does not
+       lag behind the terminal between throttled fanout ticks. -->
   <DataSource
     id="lastAssistantTextDS"
     url="/__last-assistant-text?t={lastAssistantTick}" />
@@ -101,8 +99,8 @@
        the iframe's currentTurnEdits(lastJsonl) walk which had started
        exceeding XMLUI's 1000 ms sync-evaluation timeout on busy turns
        (the in-flight feedback panel under each item triggers it during
-       a submitting cycle). Reuses lastAssistantTick — same JSONL-fanout
-       refetch trigger; coalesces with lastAssistantTextDS's polling. -->
+       a submitting cycle). Reuses lastAssistantTick so the Workspace
+       response and edit panels refetch together. -->
   <DataSource
     id="currentTurnEditsDS"
     url="/__current-turn-edits?t={lastAssistantTick}" />
@@ -112,6 +110,7 @@
     gap="$space-6"
     onInit="lastJsonl = window.getLatestJsonl();
     subscribeLatestJsonl('__bramWorkspaceJsonlUnsub', (v) => { lastJsonl = v; const now = Date.now(); if (now - lastAssistantTickAt >= 2000) { lastAssistantTickAt = now; lastAssistantTick = lastAssistantTick + 1; } });
+    subscribeTalkSessionChange('__bramWorkspaceTalkSessionUnsub', () => { iframeTrace('listener-fired', {context: 'talk-session-changed'}); lastAssistantTickAt = Date.now(); lastAssistantTick = lastAssistantTick + 1; });
     (() => {
       // Iframe-side trace records for the [iframe] category of the
       // comms-path trace (issue #49). Calls route through iframeTrace()

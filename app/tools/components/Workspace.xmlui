@@ -110,7 +110,7 @@
     gap="$space-6"
     onInit="lastJsonl = window.getLatestJsonl();
     subscribeLatestJsonl('__bramWorkspaceJsonlUnsub', (v) => { lastJsonl = v; const now = Date.now(); if (now - lastAssistantTickAt >= 2000) { lastAssistantTickAt = now; lastAssistantTick = lastAssistantTick + 1; } });
-    subscribeTalkSessionChange('__bramWorkspaceTalkSessionUnsub', () => { iframeTrace('listener-fired', {context: 'talk-session-changed'}); lastAssistantTickAt = Date.now(); lastAssistantTick = lastAssistantTick + 1; });
+    subscribeTalkSessionChange('__bramWorkspaceTalkSessionUnsub', () => { iframeTrace('listener-fired', {context: 'talk-session-changed'}); lastAssistantTickAt = Date.now(); lastAssistantTick = lastAssistantTick + 1; lastAssistantTextDS.refetch(); currentTurnEditsDS.refetch(); });
     (() => {
       // Iframe-side trace records for the [iframe] category of the
       // comms-path trace (issue #49). Calls route through iframeTrace()

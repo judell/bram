@@ -4402,6 +4402,50 @@ fn latest_session_path<R: tauri::Runtime>(
     Ok(Some(path))
 }
 
+fn system_time_ms(t: std::time::SystemTime) -> Option<i64> {
+    t.duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_millis() as i64)
+}
+
+fn start_codex_session_poll_fallback<R: tauri::Runtime>(app_handle: AppHandle<R>) {
+    std::thread::spawn(move || {
+        let mut last_seen: Option<(PathBuf, std::time::SystemTime)> = None;
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let path = match latest_session_path(&app_handle, Some(SessionProvider::Codex)) {
+                Ok(Some(path)) => path,
+                Ok(None) => {
+                    last_seen = None;
+                    continue;
+                }
+                Err(_) => continue,
+            };
+            let mtime = match std::fs::metadata(&path).and_then(|md| md.modified()) {
+                Ok(mtime) => mtime,
+                Err(_) => continue,
+            };
+            let advanced = match last_seen.as_ref() {
+                Some((prev_path, prev_mtime)) if prev_path == &path => mtime > *prev_mtime,
+                Some(_) | None => false,
+            };
+            last_seen = Some((path.clone(), mtime));
+            if !advanced {
+                continue;
+            }
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let mtime_ms = system_time_ms(mtime).unwrap_or(0);
+            append_bram_trace_line(
+                &app_handle,
+                "jsonl-poll",
+                &format!("provider=codex file={} mtime={}", name, mtime_ms),
+            );
+            trace_emit_signal(&app_handle, "talk-session-changed");
+            let _ = app_handle.emit("talk-session-changed", ());
+        }
+    });
+}
+
 // Tail variant: return only the last N records of the JSONL. Lets Transcript
 // poll aggressively without round-tripping the entire (multi-MB) file.
 // Uses a seek-from-EOF, read-backward-in-chunks loop so server cost is
@@ -11384,6 +11428,7 @@ pub fn run() {
                 }
             }
             let app_handle = app.handle().clone();
+            start_codex_session_poll_fallback(app_handle.clone());
             std::thread::spawn(move || {
                 use notify::{recommended_watcher, Event, EventKind, RecursiveMode, Watcher};
                 use std::sync::mpsc::channel;

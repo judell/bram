@@ -768,3 +768,26 @@ function buildSingleItemApprovePayload(itemRef, feedback) {
     items: [{ id: itemRef.id, hash: itemRef.hash, feedback: feedback }]
   });
 }
+
+// Batch actions (issue #97): one approved:/drop: payload over every
+// item in a status group. Scoped to 'applied' (TO COMMIT) — see the
+// Approve all / Drop all bar in Workspace.xmlui.
+function countByStatus(items, status) {
+  return (items || []).filter(function (i) { return (i.status || 'proposed') === status; }).length;
+}
+
+function buildBatchApprovePayload(items, feedback) {
+  App.mark('build-batch-approve-payload');
+  return JSON.stringify({
+    items: (items || []).filter(function (i) { return (i.status || 'proposed') === 'applied'; })
+      .map(function (i) { return { id: i.id, hash: i.hash, feedback: feedback || '' }; })
+  });
+}
+
+function buildBatchDropPayload(items, feedback) {
+  App.mark('build-batch-drop-payload');
+  return JSON.stringify({
+    items: (items || []).filter(function (i) { return (i.status || 'proposed') === 'applied'; })
+      .map(function (i) { return { id: i.id, hash: i.hash, feedback: feedback || '' }; })
+  });
+}

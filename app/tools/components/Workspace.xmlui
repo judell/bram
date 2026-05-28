@@ -240,6 +240,35 @@
           when="{worklist.value.items && worklist.value.items.length > 0 && !selected}"
           color="$textColor-secondary"
           value="Select an item" />
+        <HStack
+          when="{worklist.value.items && countByStatus(worklist.value.items, 'applied') >= 2}"
+          gap="$space-2"
+          verticalAlignment="center"
+          padding="$space-2"
+          borderRadius="$borderRadius"
+          backgroundColor="$color-surface-50">
+          <Text
+            fontSize="$fontSize-sm"
+            color="$textColor-secondary"
+            value="{countByStatus(worklist.value.items, 'applied') + ' items ready to commit'}" />
+          <Button
+            label="{'Approve all (' + countByStatus(worklist.value.items, 'applied') + ')'}"
+            size="xs"
+            enabled="{!submitting}"
+            onClick="(() => { const ids = (worklist.value.items || []).filter(i => (i.status || 'proposed') === 'applied'); iframeTrace('click', {target: 'approve-all', count: ids.length}); selected = null; feedbackExpanded = false; selectedFeedback = ''; expandedItemId = null; submitting = true; submittedItemId = ids.length > 0 ? ids[0].id : null; iframeTrace('inflight-set', {item: submittedItemId, via: 'click', target: 'approve-all'}); toTurn('approved: ' + buildBatchApprovePayload(worklist.value.items, '')); })()" />
+          <Button
+            label="{'Drop all (' + countByStatus(worklist.value.items, 'applied') + ')'}"
+            size="xs"
+            variant="outlined"
+            enabled="{!submitting}"
+            onClick="(() => { const ids = (worklist.value.items || []).filter(i => (i.status || 'proposed') === 'applied'); iframeTrace('click', {target: 'drop-all', count: ids.length}); selected = null; feedbackExpanded = false; selectedFeedback = ''; expandedItemId = null; submitting = true; submittedItemId = ids.length > 0 ? ids[0].id : null; iframeTrace('inflight-set', {item: submittedItemId, via: 'click', target: 'drop-all'}); toTurn('drop: ' + buildBatchDropPayload(worklist.value.items, '')); })()" />
+          <Button
+            label="ⓘ"
+            variant="ghost"
+            size="xs"
+            tooltip="What do these batch actions do?"
+            onClick="actionHelpFor = 'batch'" />
+        </HStack>
         <Items data="{worklist.value.items}">
           <VStack gap="$space-1">
             <HStack gap="$space-3" verticalAlignment="start">
@@ -670,6 +699,27 @@ Before you `Approve` a `TO-APPLY` item you can `Iterate` to refine the proposal.
 - **TO COMMIT** → the item is removed, but the file edits the agent already made on your behalf **stay on disk**. If you want them gone, ask the agent to discard them — it knows how to use `git checkout -- &lt;file&gt;` or `git restore &lt;file&gt;`.
 
 Drop is the clean rejection path; Iterate is what you want if the item just needs to change shape." />
+        <HStack>
+          <Button label="Got it" onClick="actionHelpFor = null" />
+        </HStack>
+      </VStack>
+    </ModalDialog>
+
+    <ModalDialog
+      when="{actionHelpFor === 'batch'}"
+      title="Approve all / Drop all"
+      onClose="actionHelpFor = null">
+      <VStack gap="$space-3" padding="$space-2">
+        <Text>
+          Batch actions for TO COMMIT items — they act on every TO COMMIT
+          (applied) item at once, so a coordinated bundle doesn't cost N
+          separate clicks. The bar appears only when there are 2 or more
+          TO COMMIT items.
+        </Text>
+        <Markdown content="- **Approve all** — authorizes the agent to commit every TO COMMIT item in one turn. The agent decides commit granularity (typically one bundled commit for a coordinated change).
+- **Drop all** — removes every TO COMMIT item from the worklist. The on-disk file edits **stay** (same as a single Drop); ask the agent to discard them if you want them gone.
+
+TO APPLY items are unaffected — approve, iterate, or drop those individually. **Issues flagged via `closesIssues` are not auto-closed in a batch** — close them through a single-item Approve, or ask the agent in chat." />
         <HStack>
           <Button label="Got it" onClick="actionHelpFor = null" />
         </HStack>

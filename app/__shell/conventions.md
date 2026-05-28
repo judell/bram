@@ -227,6 +227,25 @@ Lifecycle:
      instead of `curl: (7)` and makes the next failure mode hard to
      diagnose.
 
+     Bram publishes `resources/.bram-port` only after the loopback
+     accept loop answers an HTTP readiness probe, and also writes
+     `resources/.bram-port.json` with the same port plus pid, project
+     root, and startup timestamp. If the port keeps refusing after
+     repeated fresh reads of `.bram-port`, treat it as a stale-port or
+     restarting-server diagnostic, not as a reason to continue without
+     the lifecycle call. Check the Status tab's **Port file** row; it
+     compares the running process, the plain port file, and the metadata
+     sidecar.
+
+     Codex has one extra failure mode: its sandboxed `curl` can report
+     `curl: (7)` even when Bram is live. Before calling the port stale,
+     confirm that `resources/.bram-port` and `resources/.bram-port.json`
+     agree and that `lsof -nP -c bram -a -iTCP -sTCP:LISTEN` shows Bram
+     listening on that exact IPv4 port. If those checks agree, retry the
+     identical loopback `curl` with Codex tool escalation. If escalated
+     curl succeeds, the problem was Codex sandbox loopback access, not a
+     Bram readiness or stale-port failure.
+
      Use the literal port number — `$BRAM_PORT` won't work because
      Claude Code's permission matcher doesn't expand variables before
      matching, so any `$` makes the allowlist fail (see

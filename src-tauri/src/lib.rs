@@ -791,6 +791,7 @@ const MENU_EVICTION_GRACE_MS: u128 = 350;
 // reach /__worklist/resolve and other /__* routes without rediscovering
 // the random port each turn.
 static LOOPBACK_PORT: OnceLock<u16> = OnceLock::new();
+static LOOPBACK_STARTED_MS: OnceLock<i64> = OnceLock::new();
 
 #[derive(serde::Serialize, Clone)]
 struct PtyMenu {
@@ -3060,6 +3061,61 @@ fn probe_port_http(port: u16, path: &str) -> PortStatus {
         }
         Err(e) => PortStatus::Unresponsive(format!("read failed: {}", e)),
     }
+}
+
+fn atomic_write_text(path: &Path, content: &str) -> Result<(), String> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, content).map_err(|e| format!("write {}: {}", tmp.display(), e))?;
+    std::fs::rename(&tmp, path)
+        .map_err(|e| format!("rename {} -> {}: {}", tmp.display(), path.display(), e))
+}
+
+fn bram_port_metadata_path(port_path: &Path) -> PathBuf {
+    port_path
+        .parent()
+        .map(|p| p.join(".bram-port.json"))
+        .unwrap_or_else(|| PathBuf::from(".bram-port.json"))
+}
+
+fn write_bram_port_files(proj: &Path, port: u16, started_at_ms: i64) -> Result<(), String> {
+    let port_path = proj.join("resources/.bram-port");
+    if let Some(parent) = port_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create {}: {}", parent.display(), e))?;
+    }
+    atomic_write_text(&port_path, &port.to_string())?;
+    let meta_path = bram_port_metadata_path(&port_path);
+    let metadata = serde_json::json!({
+        "schema": 1,
+        "port": port,
+        "pid": std::process::id(),
+        "projectRoot": proj.to_string_lossy().to_string(),
+        "startedAtMs": started_at_ms,
+        "startedAt": format_iso_utc_ms(started_at_ms),
+    });
+    let metadata_text = serde_json::to_string_pretty(&metadata)
+        .map_err(|e| format!("serialize port metadata: {}", e))?;
+    atomic_write_text(&meta_path, &format!("{}\n", metadata_text))?;
+    Ok(())
+}
+
+fn remove_bram_port_files(proj: &Path) {
+    let port_path = proj.join("resources/.bram-port");
+    let meta_path = bram_port_metadata_path(&port_path);
+    let _ = std::fs::remove_file(port_path);
+    let _ = std::fs::remove_file(meta_path);
+}
+
+fn wait_for_loopback_http(port: u16, total_ms: u64) -> bool {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_millis(total_ms);
+    while Instant::now() < deadline {
+        if matches!(probe_port_http(port, "/__app-info"), PortStatus::Live) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
 }
 
 // Spawn the project's server per ServerConfig. Returns the Child on
@@ -6027,36 +6083,19 @@ const CLAUDE_CURL_ALLOW_PATTERNS: &[&str] = &[
     "Bash(curl -4 -sS --retry-connrefused --retry 3 --retry-delay 1 -X POST * \"http://127.0.0.1*__iterate*)",
     "Bash(curl -4 -sS --retry-connrefused --retry 3 --retry-delay 1 \"http://127.0.0.1*__enhance*)",
 ];
-// Single-source-of-truth gate prose embedded in the Bram binary. Mirrors
-// what the original UserPromptSubmit injection emitted, kept in sync with
-// the convention in app/__shell/conventions.md.
+// Compact high-priority gate prose embedded in the Bram binary. Keep detailed
+// lifecycle rules in app/__shell/conventions.md to avoid drift.
 const ENHANCE_CODEX_GATE_PROSE: &str = "bram worklist gate. \
-First response to a change request must be (a) clarify, \
-(b) propose items via resources/worklist-drafts/<id>.md plus \
-resources/worklist.json metadata (or inline before/after in \
-worklist.json), or (c) read-only investigation \
-prefaced \"I don't yet have enough context to propose\". Mutations \
-outside approved items are blocked at runtime by a PreToolUse hook. \
-On approved:/drop: turns, GET \
-http://127.0.0.1:$(cat resources/.bram-port)/__worklist/resolve \
-to read verified item content, then POST /__worklist/mutate with \
-op:advance (after applying) or op:prune (after a drop or commit). \
-On iterate: turns, POST /__iterate/begin as your first action and \
-/__iterate/end as your last. Don't edit resources/worklist.json \
-directly for state changes — the routes drive the inflight sentinel \
-that keeps the Worklist tab UI in sync. After proposing, tell the user \
-to click Approve or Drop in the Worklist tab; do NOT show or instruct on \
-raw approved:/drop:/iterate: payloads. The tab buttons generate the \
-verified {id, hash, feedback} shape; hand-typed payloads are easy to get \
-wrong and may fail hash verification. \
-Use curl -4 -sS --retry-connrefused --retry 3 --retry-delay 1 for these \
-loopback calls to 127.0.0.1, not localhost — Bram binds IPv4 and \
-localhost may try IPv6 ::1 first. Bram restarts briefly drop the port \
-and a fresh connection can land in that window. Use -sS (silence \
-progress, KEEP errors), not bare -s, so connection failures surface as curl: (7) \
-instead of (no output). \
-Full convention: .claude/bram-conventions.md \
-(legacy: .claude/xmlui-desktop-conventions.md)";
+Use the worklist for material file/code changes unless the user explicitly \
+opts out in a way the runtime guard allows. Mutations outside approved items \
+are blocked by a PreToolUse hook installed under ~/.bram. On approved:, drop:, \
+or iterate: turns, use the Bram loopback lifecycle routes and do not silently \
+continue after a refused connection, empty response, or nonzero lifecycle \
+call. If sandboxed loopback curl refuses while port metadata and lsof agree \
+Bram is listening, retry the same curl with Codex tool escalation. The exact \
+lifecycle, opt-out, curl, retry, literal-port, sandbox, and transition rules \
+are canonical in app/__shell/conventions.md. Do not duplicate or guess those \
+details from this abbreviated instruction.";
 const WORKLIST_AUTH_REL: &str = "resources/.worklist-authorization.json";
 // Host-managed inflight sentinel (#84). Written when /__worklist/resolve
 // serves an approved or drop record, OR when /__iterate/begin is
@@ -8432,20 +8471,93 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
     let port_file = project_root_path
         .as_ref()
         .map(|p| p.join("resources/.bram-port"));
+    let port_meta_file = port_file.as_ref().map(|p| bram_port_metadata_path(p));
     let bound_port = LOOPBACK_PORT.get().copied();
     let file_port = port_file
         .as_ref()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| s.trim().parse::<u16>().ok());
     let port_file_exists = port_file.as_ref().map_or(false, |p| p.exists());
-    let port_stale = bound_port.is_some() && file_port.is_some() && bound_port != file_port;
+    let port_meta: serde_json::Value = port_meta_file
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let meta_port = port_meta
+        .get("port")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u16::try_from(v).ok());
+    let meta_pid = port_meta.get("pid").and_then(|v| v.as_u64());
+    let meta_root = port_meta
+        .get("projectRoot")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let current_root = project_root_path
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let meta_started_at = port_meta
+        .get("startedAt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let current_pid = std::process::id() as u64;
+    let port_mismatch = bound_port.is_some() && file_port.is_some() && bound_port != file_port;
+    let meta_mismatch = !port_meta.is_null()
+        && (!matches!((file_port, meta_port), (Some(file), Some(meta)) if file == meta)
+            || meta_pid.map_or(false, |pid| pid != current_pid)
+            || (!meta_root.is_empty() && !current_root.is_empty() && meta_root != current_root));
+    let file_port_probe = match (bound_port, file_port) {
+        (Some(bound), Some(file)) if bound == file => Some(PortStatus::Live),
+        (_, Some(file)) => Some(probe_port_http(file, "/__app-info")),
+        _ => None,
+    };
+    let probe_problem = matches!(
+        file_port_probe,
+        Some(PortStatus::NotListening) | Some(PortStatus::Unresponsive(_))
+    );
+    let port_level = if port_mismatch || meta_mismatch || probe_problem {
+        "warn"
+    } else if bound_port.is_some() && file_port.is_some() {
+        "ok"
+    } else {
+        "neutral"
+    };
+    let port_state = if port_mismatch || meta_mismatch {
+        "stale"
+    } else {
+        match file_port_probe {
+            Some(PortStatus::Live) if bound_port.is_some() && file_port.is_some() => "fresh",
+            Some(PortStatus::NotListening) => "not listening",
+            Some(PortStatus::Unresponsive(_)) => "unresponsive",
+            None if port_file_exists => "unreadable",
+            None => "missing",
+            _ => "unknown",
+        }
+    };
+    let probe_detail = match &file_port_probe {
+        Some(PortStatus::Live) => "HTTP responsive".to_string(),
+        Some(PortStatus::NotListening) => "port refuses connections".to_string(),
+        Some(PortStatus::Unresponsive(reason)) => {
+            format!("port accepts TCP but is unresponsive: {}", reason)
+        }
+        None => "not probed".to_string(),
+    };
     let port_row = serde_json::json!({
         "signal": "Port file",
-        "level": if port_stale { "warn" } else if bound_port.is_some() && file_port.is_some() { "ok" } else { "neutral" },
-        "state": if port_stale { "stale" } else if bound_port.is_some() && file_port.is_some() { "fresh" } else if port_file_exists { "unreadable" } else { "missing" },
+        "level": port_level,
+        "state": port_state,
         "detail": match (bound_port, file_port) {
-            (Some(bound), Some(file)) => format!("Bound on {}; file reads {}", bound, file),
-            (Some(bound), None) => format!("Bound on {}; no readable port file", bound),
+            (Some(bound), Some(file)) => format!(
+                "Bound on {}; file reads {}; {}; metadata pid={} port={} root={} started={}",
+                bound,
+                file,
+                probe_detail,
+                meta_pid.map(|v| v.to_string()).unwrap_or_else(|| "missing".to_string()),
+                meta_port.map(|v| v.to_string()).unwrap_or_else(|| "missing".to_string()),
+                if meta_root.is_empty() { "missing" } else { meta_root },
+                if meta_started_at.is_empty() { "missing" } else { meta_started_at }
+            ),
+            (Some(bound), None) => format!("Bound on {}; no readable port file; metadata pid={} started={}", bound, meta_pid.map(|v| v.to_string()).unwrap_or_else(|| "missing".to_string()), if meta_started_at.is_empty() { "missing" } else { meta_started_at }),
             _ => "No bound port available".to_string(),
         },
         "seen": port_file.as_ref().map(|p| file_modified_iso(p)).unwrap_or_default(),
@@ -11499,27 +11611,11 @@ pub fn run() {
                 .map(|sa| sa.port())
                 .ok_or("right-pane server bound to non-ip address")?;
             let _ = LOOPBACK_PORT.set(port);
-            // Write the bound port as a plain decimal to a known file
-            // so PTY-child agents can read the literal port via their
-            // Read tool and substitute it into curl URLs — `${BRAM_PORT}`
-            // expansion trips Claude Code's Bash permission matcher
-            // (variable expansion is fragile per the permissions spec).
-            // No cleanup on shutdown: overwritten on next startup;
-            // staleness manifests as connection-refused, a clearer
-            // signal than a misleading-but-valid path.
-            if let Some(proj) = project_root(Some(app.handle())) {
-                let port_path = proj.join("resources/.bram-port");
-                if let Some(parent) = port_path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                match std::fs::write(&port_path, port.to_string()) {
-                    Ok(()) => eprintln!("[bram] wrote port file: {}", port_path.display()),
-                    Err(e) => eprintln!(
-                        "[bram] failed to write port file {}: {}",
-                        port_path.display(),
-                        e
-                    ),
-                }
+            let started_at_ms = unix_now_ms();
+            let _ = LOOPBACK_STARTED_MS.set(started_at_ms);
+            let startup_project_root = project_root(Some(app.handle()));
+            if let Some(proj) = startup_project_root.as_ref() {
+                remove_bram_port_files(proj);
             }
             prepare_bram_trace_log(app.handle());
             // Remove any stale inflight sentinel from a prior session
@@ -11645,6 +11741,32 @@ pub fn run() {
                     std::thread::spawn(move || handle_http(&app, request));
                 }
             });
+            // Publish the loopback port only after the accept loop is
+            // actually serving HTTP. Otherwise agents can race startup:
+            // lsof shows a listener, but curl still gets connection refused.
+            if let Some(proj) = startup_project_root.as_ref() {
+                let port_path = proj.join("resources/.bram-port");
+                if wait_for_loopback_http(port, 5000) {
+                    match write_bram_port_files(proj, port, started_at_ms) {
+                        Ok(()) => eprintln!(
+                            "[bram] wrote ready port files: {}, {}",
+                            port_path.display(),
+                            bram_port_metadata_path(&port_path).display()
+                        ),
+                        Err(e) => eprintln!(
+                            "[bram] failed to write ready port files for {}: {}",
+                            port_path.display(),
+                            e
+                        ),
+                    }
+                } else {
+                    eprintln!(
+                        "[bram] loopback port {} did not become HTTP-ready; leaving {} unpublished",
+                        port,
+                        port_path.display()
+                    );
+                }
+            }
 
             let Some(proj_root) = project_root(Some(app.handle())) else {
                 eprintln!("[watcher] could not resolve project root");

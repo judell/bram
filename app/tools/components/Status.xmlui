@@ -42,6 +42,12 @@
         <Heading level="h3" value="{$item.title}" />
         <Table data="{$item.rows}">
           <Column header="signal" bindTo="signal" width="170px" />
+          <Column header="level" width="80px">
+            <Text
+              fontWeight="$fontWeight-bold"
+              color="{$item.level === 'warn' ? '$color-warn-700' : ($item.level === 'ok' ? '$color-success-700' : '$textColor-secondary')}"
+              value="{$item.level || 'n/a'}" />
+          </Column>
           <Column header="state" width="150px">
             <Text
               fontWeight="$fontWeight-bold"

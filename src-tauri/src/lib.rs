@@ -8985,102 +8985,6 @@ fn consume_worklist_authorization<R: tauri::Runtime>(app: &AppHandle<R>) {
     let _ = std::fs::write(&path, format!("{}\n", body));
 }
 
-// Auto-advance any still-`proposed` item whose `file` / `files` are touched
-// by an authorized write. Closes the convention-vs-enforcement gap in the
-// state-machine gate that lets agents apply edits without flipping the
-// worklist status (issue #60). Provider-neutral — same trigger fires
-// regardless of which agent landed the writes.
-fn try_auto_advance_proposed_items<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    project_rel_paths: &[String],
-) -> Vec<String> {
-    if project_rel_paths.is_empty() {
-        return Vec::new();
-    }
-    let Some(wl_path) = worklist_file(app) else {
-        return Vec::new();
-    };
-    let Some(auth_path) = worklist_auth_file(app) else {
-        return Vec::new();
-    };
-    let Ok(auth_text) = std::fs::read_to_string(&auth_path) else {
-        return Vec::new();
-    };
-    let auth: serde_json::Value = match serde_json::from_str(&auth_text) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-    if auth.get("kind").and_then(|v| v.as_str()) != Some("approved") {
-        return Vec::new();
-    }
-    let auth_ids: std::collections::HashSet<String> = auth
-        .get("ids")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    if auth_ids.is_empty() {
-        return Vec::new();
-    }
-    let Ok(wl_text) = std::fs::read_to_string(&wl_path) else {
-        return Vec::new();
-    };
-    let mut wl: serde_json::Value = match serde_json::from_str(&wl_text) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-    let touched: std::collections::HashSet<&str> =
-        project_rel_paths.iter().map(|s| s.as_str()).collect();
-    let mut advanced: Vec<String> = Vec::new();
-    let Some(items) = wl.get_mut("items").and_then(|v| v.as_array_mut()) else {
-        return Vec::new();
-    };
-    for item in items.iter_mut() {
-        let Some(id) = item.get("id").and_then(|v| v.as_str()).map(String::from) else {
-            continue;
-        };
-        if !auth_ids.contains(&id) {
-            continue;
-        }
-        if worklist_item_status(item) != "proposed" {
-            continue;
-        }
-        let item_files: Vec<String> =
-            if let Some(arr) = item.get("files").and_then(|v| v.as_array()) {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            } else if let Some(s) = item.get("file").and_then(|v| v.as_str()) {
-                vec![s.to_string()]
-            } else {
-                Vec::new()
-            };
-        if item_files.iter().any(|f| touched.contains(f.as_str())) {
-            if let Some(obj) = item.as_object_mut() {
-                obj.insert(
-                    "status".to_string(),
-                    serde_json::Value::String("applied".to_string()),
-                );
-                advanced.push(id);
-            }
-        }
-    }
-    if advanced.is_empty() {
-        return Vec::new();
-    }
-    let new_text = serde_json::to_string_pretty(&wl).unwrap_or_default();
-    let payload = format!("{}\n", new_text);
-    if let Err(e) = std::fs::write(&wl_path, &payload) {
-        eprintln!("[auto-advance] write failed: {}", e);
-        return Vec::new();
-    }
-    eprintln!("[auto-advance] flipped proposed→applied: {:?}", advanced);
-    advanced
-}
-
 fn maybe_enforce_worklist_policy<R: tauri::Runtime>(
     app: &AppHandle<R>,
     prior_str: &str,
@@ -11734,23 +11638,6 @@ pub fn run() {
                         // above drains it when the window elapses. Refs
                         // #85 worklist-watcher-debounce.
                         pending_worklist_since = Some(Instant::now());
-                    }
-
-                    // Auto-advance proposed→applied when an authorized write
-                    // covers a still-proposed item. Closes the state-machine
-                    // gate that the convention alone can't enforce (#60). The
-                    // resulting worklist.json write surfaces via the
-                    // is_worklist_change branch on the next event cycle, which
-                    // emits worklist-changed and snapshots the transition.
-                    let project_rel_paths: Vec<String> = event
-                        .paths
-                        .iter()
-                        .filter_map(|p| p.strip_prefix(&proj_root_path).ok())
-                        .map(|p| p.to_string_lossy().replace('\\', "/"))
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    if !project_rel_paths.is_empty() {
-                        let _ = try_auto_advance_proposed_items(&app_handle, &project_rel_paths);
                     }
 
                     // git-status-changed: any project file change that's

@@ -1205,6 +1205,36 @@ fn strip_ansi(input: &[u8]) -> Vec<u8> {
     out
 }
 
+// Find the newest cursor-anchored first option: ❯ (U+276F) followed by
+// an optional run of spaces / NBSP, then "1.". Claude Code's TUI once
+// rendered the gap as cursor-positioning escapes (collapsing to "❯1."
+// after strip_ansi); newer builds emit a literal space and/or NBSP
+// (U+00A0 = c2 a0), giving "❯ 1." / "❯\u{a0} 1.". Tolerate all three so
+// the anchor survives the format drift. Walk back to older arrows when
+// the newest one is a redraw artifact rather than the option-1 row.
+// Refs #36.
+fn pty_menu_anchor_pos(tail: &[u8]) -> Option<usize> {
+    let arrow: &[u8] = b"\xe2\x9d\xaf";
+    let mut end = tail.len();
+    while let Some(rel) = tail[..end].windows(arrow.len()).rposition(|w| w == arrow) {
+        let mut k = rel + arrow.len();
+        loop {
+            if tail.get(k) == Some(&0x20) {
+                k += 1;
+            } else if tail.get(k) == Some(&0xc2) && tail.get(k + 1) == Some(&0xa0) {
+                k += 2;
+            } else {
+                break;
+            }
+        }
+        if tail[k..].starts_with(b"1.") {
+            return Some(rel);
+        }
+        end = rel;
+    }
+    None
+}
+
 // Look for claude's permission menu in the rolling tail. Pattern:
 // "1. Yes" appears, followed by "2. " within ~512 bytes (the menu's
 // options are tightly grouped). Tool name is best-effort guessed
@@ -1214,17 +1244,17 @@ fn strip_ansi(input: &[u8]) -> Vec<u8> {
 fn pty_menu_detect(tail: &[u8]) -> Option<PtyMenu> {
     let stripped = strip_ansi(tail);
     let tail = stripped.as_slice();
-    // Anchor on the menu's selection-cursor (❯, U+276F) directly
-    // followed by "1." — appears only on the first option of a live
-    // permission menu. Looking for "1. Yes" or "1.Yes" alone doesn't
-    // work because inter-word spacing on option lines is rendered via
-    // cursor-positioning escapes (not literal spaces), so strip_ansi
-    // can leave "1.Yes" with no separator. See diagnostic captures
-    // in /tmp/pty-menu-snapshot.txt.
-    let needle1: &[u8] = b"\xe2\x9d\xaf1.";
+    // Anchor on the menu's selection-cursor (❯, U+276F) followed by an
+    // optional run of spaces / NBSP, then "1." — appears only on the
+    // first option of a live permission menu. The gap between cursor
+    // and option number has been rendered both as cursor-positioning
+    // escapes (collapsing to "❯1." after strip_ansi) and, in newer
+    // Claude Code builds, as a literal space and/or NBSP ("❯ 1.").
+    // pty_menu_anchor_pos tolerates all three. See diagnostic captures
+    // in /tmp/pty-menu-snapshot.txt. Refs #36.
     let needle2: &[u8] = b"2.";
     let header: &[u8] = b"Do you want";
-    let pos1_opt = tail.windows(needle1.len()).rposition(|w| w == needle1);
+    let pos1_opt = pty_menu_anchor_pos(tail);
     let pos_header = tail.windows(header.len()).rposition(|w| w == header);
 
     let result = (|| -> Option<PtyMenu> {

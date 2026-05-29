@@ -7730,16 +7730,34 @@ fn write_inflight_claim_sentinel<R: tauri::Runtime>(
 // leaves the sentinel alone — partial completion is a diagnostic
 // signal worth surfacing (stuck spinner = stuck claim once item 3
 // lands).
-fn clear_inflight_claim_sentinel<R: tauri::Runtime>(app: &AppHandle<R>, mutated_ids: &[String]) {
+// Pure: is a sentinel claim (its claimed ids) fully covered by the mutated
+// ids? Empty/absent claims count as not covered. Split out so the clear/emit
+// decision is unit-testable without an AppHandle (refs #133).
+fn inflight_claim_fully_covered(claimed_ids: &[String], mutated_ids: &[String]) -> bool {
+    !claimed_ids.is_empty()
+        && claimed_ids
+            .iter()
+            .all(|cid| mutated_ids.iter().any(|mid| mid == cid))
+}
+
+// Returns true iff a covering sentinel was found, removed, and the
+// inflight-claim-changed signal emitted; false on every early return (no file,
+// parse failure, empty/uncovered claim). A caller that reaches a completion
+// point without a prior sentinel (refs #133) uses the false return to emit its
+// own reconcile signal so the iframe still clears optimistic `submitting`.
+fn clear_inflight_claim_sentinel<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    mutated_ids: &[String],
+) -> bool {
     let Some(path) = inflight_claim_file(app) else {
-        return;
+        return false;
     };
     let Ok(content) = std::fs::read_to_string(&path) else {
-        return;
+        return false;
     };
     let claim: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
-        Err(_) => return,
+        Err(_) => return false,
     };
     let claimed_ids: Vec<String> = claim
         .get("ids")
@@ -7750,14 +7768,8 @@ fn clear_inflight_claim_sentinel<R: tauri::Runtime>(app: &AppHandle<R>, mutated_
                 .collect()
         })
         .unwrap_or_default();
-    if claimed_ids.is_empty() {
-        return;
-    }
-    let fully_covered = claimed_ids
-        .iter()
-        .all(|cid| mutated_ids.iter().any(|mid| mid == cid));
-    if !fully_covered {
-        return;
+    if !inflight_claim_fully_covered(&claimed_ids, mutated_ids) {
+        return false;
     }
     let _ = std::fs::remove_file(&path);
     if bram_trace_enabled() {
@@ -7783,6 +7795,7 @@ fn clear_inflight_claim_sentinel<R: tauri::Runtime>(app: &AppHandle<R>, mutated_
         trace_emit_signal(app, "tools-pane-reload");
         let _ = app.emit("tools-pane-reload", ());
     }
+    true
 }
 
 // True iff resources/.inflight-claim.json exists, parses, and lists at
@@ -9905,6 +9918,41 @@ fn consume_worklist_authorization<R: tauri::Runtime>(app: &AppHandle<R>) {
     let _ = std::fs::write(&path, format!("{}\n", body));
 }
 
+// Pure classification of proposed-item removals between two worklist
+// snapshots: which are authorized drops vs. unauthorized removals the watcher
+// must revert. Extracted from maybe_enforce_worklist_policy so the revert
+// decision is unit-testable without an AppHandle. Returns
+// (dropped_via_auth, violations), violations as (id, status).
+fn classify_worklist_removals(
+    prior_items: &[serde_json::Value],
+    current_items: &[serde_json::Value],
+    auth_kind: Option<&str>,
+    auth_ids: &std::collections::HashSet<String>,
+) -> (Vec<String>, Vec<(String, String)>) {
+    let current_ids: std::collections::HashSet<String> =
+        current_items.iter().filter_map(worklist_item_id).collect();
+    let mut dropped_via_auth: Vec<String> = Vec::new();
+    let mut violations: Vec<(String, String)> = Vec::new();
+    for item in prior_items {
+        let Some(id) = worklist_item_id(item) else {
+            continue;
+        };
+        if current_ids.contains(&id) {
+            continue;
+        }
+        let status = worklist_item_status(item).to_string();
+        if status == "applied" {
+            continue;
+        }
+        if auth_kind == Some("drop") && auth_ids.contains(&id) {
+            dropped_via_auth.push(id);
+            continue;
+        }
+        violations.push((id, status));
+    }
+    (dropped_via_auth, violations)
+}
+
 fn maybe_enforce_worklist_policy<R: tauri::Runtime>(
     app: &AppHandle<R>,
     prior_str: &str,
@@ -9914,35 +9962,17 @@ fn maybe_enforce_worklist_policy<R: tauri::Runtime>(
     let current_doc: serde_json::Value = serde_json::from_str(current_str).unwrap_or_default();
     let prior_items = worklist_items(&prior_doc);
     let current_items = worklist_items(&current_doc);
-    let current_by_id: HashMap<String, &serde_json::Value> = current_items
-        .iter()
-        .filter_map(|item| worklist_item_id(item).map(|id| (id, item)))
-        .collect();
     let auth = read_active_worklist_authorization(app);
     let auth_ids: std::collections::HashSet<String> = auth
         .as_ref()
         .map(|record| record.ids.iter().cloned().collect())
         .unwrap_or_default();
-    let mut dropped_via_auth: Vec<String> = Vec::new();
-    let mut violations: Vec<(String, String)> = Vec::new();
-
-    for item in &prior_items {
-        let Some(id) = worklist_item_id(item) else {
-            continue;
-        };
-        if current_by_id.contains_key(&id) {
-            continue;
-        }
-        let status = worklist_item_status(item).to_string();
-        if status == "applied" {
-            continue;
-        }
-        if auth.as_ref().map(|a| a.kind.as_str()) == Some("drop") && auth_ids.contains(&id) {
-            dropped_via_auth.push(id);
-            continue;
-        }
-        violations.push((id, status));
-    }
+    let (dropped_via_auth, violations) = classify_worklist_removals(
+        &prior_items,
+        &current_items,
+        auth.as_ref().map(|a| a.kind.as_str()),
+        &auth_ids,
+    );
 
     if violations.is_empty() {
         if !dropped_via_auth.is_empty() {
@@ -12134,7 +12164,25 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
     let affected = apply_worklist_mutation(items, op, &ids, new_status);
 
     let new_text = serde_json::to_string_pretty(&wl).unwrap_or_default();
-    if let Err(e) = std::fs::write(&wl_path, format!("{}\n", new_text)) {
+    let on_disk = format!("{}\n", new_text);
+    // Claim this write BEFORE it lands so the worklist watcher recognizes
+    // it as self-originated: handle_worklist_change short-circuits when
+    // prior_str == current_str, so it never reaches maybe_enforce_worklist_policy.
+    // Setting the cache after the write would leave a window where the watcher
+    // fires first, reads the pruned content as an unauthorized removal (the drop
+    // auth was just consumed, so read_active_worklist_authorization returns None),
+    // and reverts it — the false-success-drop race. Matches the claim that
+    // init_worklist_file / run_enhance already perform after their writes.
+    let prior_cache = match last_worklist_cell().lock() {
+        Ok(mut guard) => guard.replace(on_disk.clone()),
+        Err(_) => None,
+    };
+    if let Err(e) = std::fs::write(&wl_path, &on_disk) {
+        // The failed write never reached disk; restore the prior snapshot so
+        // the watcher doesn't diff against content that was never written.
+        if let Ok(mut guard) = last_worklist_cell().lock() {
+            *guard = prior_cache;
+        }
         return (
             500,
             "application/json; charset=utf-8",
@@ -12155,7 +12203,27 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
         &affected
     };
     if !completion_ids.is_empty() {
-        clear_inflight_claim_sentinel(app, completion_ids);
+        let cleared = clear_inflight_claim_sentinel(app, completion_ids);
+        if !cleared {
+            // No sentinel existed to clear — the agent reached mutate without a
+            // prior /__worklist/resolve (the Codex filesystem path skips resolve;
+            // refs #133). Emit the reconcile signal anyway so the Worklist iframe
+            // refetches /__inflight and clears its click-time optimistic
+            // `submitting`, instead of orphaning the spinner.
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "inflight-sentinel",
+                    &format!(
+                        "op=reconcile-no-claim ids={}",
+                        serde_json::to_string(completion_ids)
+                            .unwrap_or_else(|_| "[]".to_string())
+                    ),
+                );
+            }
+            trace_emit_signal(app, "inflight-claim-changed");
+            let _ = app.emit("inflight-claim-changed", ());
+        }
     }
     if op == "prune" && auth_kind == "drop" {
         consume_worklist_authorization(app);
@@ -12178,6 +12246,7 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
 mod worklist_authorization_tests {
     use super::{
         apply_worklist_mutation, build_worklist_authorization_record, canonical_item_hash,
+        classify_worklist_removals, inflight_claim_fully_covered,
         parse_worklist_authorization_message, validate_post_commit_prune_status,
         validate_worklist_mutate_authorization,
     };
@@ -12311,6 +12380,50 @@ mod worklist_authorization_tests {
         assert_eq!(pruned, ids(&["a"]));
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].get("id").and_then(|v| v.as_str()), Some("b"));
+    }
+
+    #[test]
+    fn classify_worklist_removals_separates_authorized_drop_from_revert() {
+        use std::collections::HashSet;
+        let prior = vec![
+            json!({"id": "a", "status": "proposed"}),
+            json!({"id": "b", "status": "proposed"}),
+            json!({"id": "c", "status": "applied"}),
+        ];
+        // 'a' and 'c' removed; 'b' retained.
+        let current = vec![json!({"id": "b", "status": "proposed"})];
+
+        // Live drop auth covering 'a': authorized drop, no violation. 'c' was
+        // applied, so its removal is allowed unconditionally (post-commit prune).
+        let drop_ids: HashSet<String> = ["a".to_string()].into_iter().collect();
+        let (dropped, violations) =
+            classify_worklist_removals(&prior, &current, Some("drop"), &drop_ids);
+        assert_eq!(dropped, ids(&["a"]));
+        assert!(violations.is_empty(), "applied removals are never violations");
+
+        // No live auth — the consumed-auth state the false-success-drop race
+        // produces. The same proposed 'a' removal is now an unauthorized
+        // removal the watcher would revert. The last_worklist_cell claim in
+        // handle_worklist_mutate prevents the watcher from ever reaching this
+        // classification for an authorized drop.
+        let empty: HashSet<String> = HashSet::new();
+        let (dropped, violations) =
+            classify_worklist_removals(&prior, &current, None, &empty);
+        assert!(dropped.is_empty());
+        assert_eq!(violations, vec![("a".to_string(), "proposed".to_string())]);
+    }
+
+    #[test]
+    fn inflight_claim_fully_covered_requires_nonempty_and_all_covered() {
+        let claimed = ids(&["a", "b"]);
+        // Every claimed id present in mutated -> covered (clear + emit).
+        assert!(inflight_claim_fully_covered(&claimed, &ids(&["a", "b", "c"])));
+        // Partial coverage -> not covered (don't clear the sentinel).
+        assert!(!inflight_claim_fully_covered(&claimed, &ids(&["a"])));
+        // Empty/absent claim -> not covered. This is the #133 skipped-resolve
+        // case: no sentinel was written, so the mutate caller must emit its own
+        // reconcile signal rather than relying on the clear.
+        assert!(!inflight_claim_fully_covered(&ids(&[]), &ids(&["a"])));
     }
 }
 

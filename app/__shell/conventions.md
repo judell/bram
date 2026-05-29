@@ -436,6 +436,15 @@ the host watches and drains:
    on a missing result or `ok: false` — that's the same rule as a refused
    curl on the Claude path.
 
+**Always `worklist-resolve` before `worklist-mutate`, including for drops.**
+Resolve delivers the hash-verified item bodies you act on, consumes `approved`
+auth, *and* writes the inflight sentinel the Worklist spinner is keyed to.
+Reading `.worklist-authorization.json` directly and jumping straight to
+`worklist-mutate` skips that sentinel write and orphans the spinner until a tab
+switch (refs #133). The host now emits a reconcile signal on mutate as a
+backstop, but resolve-first is the contract — stay symmetric with the loopback
+(Claude) flow.
+
 The host dispatches each intent through the *same* internal functions that
 back the HTTP routes, so consume-on-read, the inflight sentinel, the
 `kind`-match auth check, and the post-commit-prune safeguard are all

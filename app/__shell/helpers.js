@@ -505,13 +505,13 @@ window.subscribeTauriEvent = function (key, eventName, fn) {
   return window[key];
 };
 
-// Shared cache for the latest session-tail JSONL. A single App-level
-// DataSource in Main.xmlui fetches /__sessions/latest-tail and calls
-// setLatestJsonl() on each new value; both the Worklist tab
-// (Workspace.xmlui) and the Transcript tab subscribe via
-// onLatestJsonlChange() so they share one fetch and survive tab
-// switches without losing the cached value. Multi-subscriber (unlike
-// onTalkSessionChange) because both tabs need to consume.
+// Shared cache for the latest session-tail JSONL. A helper-side poller
+// fetches /__sessions/latest-tail and calls setLatestJsonl() on each
+// new value; both the Worklist tab (Workspace.xmlui) and the Transcript
+// tab subscribe via onLatestJsonlChange() so they share one fetch and
+// survive tab switches without losing the cached value. Keeping the
+// fetch in helpers.js avoids routing large JSONL response bodies through
+// XMLUI DataSource tracing / Inspector retention.
 //
 // Why a window-level cache and not global.lastJsonl on the App: XMLUI
 // 0.12.27's global-write path runs the assigned value through its
@@ -520,6 +520,7 @@ window.subscribeTauriEvent = function (key, eventName, fn) {
 // plain JS sidesteps the parser entirely.
 var __latestJsonlValue = null;
 var __latestJsonlSubscribers = [];
+var __latestJsonlPollers = {};
 window.getLatestJsonl = function () { return __latestJsonlValue; };
 window.setLatestJsonl = function (value) {
   __latestJsonlValue = value;
@@ -550,6 +551,88 @@ window.onLatestJsonlChange = function (fn) {
     var idx = __latestJsonlSubscribers.indexOf(fn);
     if (idx >= 0) __latestJsonlSubscribers.splice(idx, 1);
   };
+};
+window.startLatestJsonlPolling = function (key, getProvider) {
+  key = key || "__bramLatestJsonlPoller";
+  if (__latestJsonlPollers[key] && typeof __latestJsonlPollers[key].stop === "function") {
+    try { __latestJsonlPollers[key].stop(); } catch (e) {}
+  }
+  var sinceOffset = 0;
+  var sessionSid = "";
+  var lastProvider = null;
+  var lastTickAt = 0;
+  var inFlight = false;
+  var stopped = false;
+  function providerValue() {
+    try {
+      return typeof getProvider === "function" ? String(getProvider() || "") : "";
+    } catch (e) {
+      return "";
+    }
+  }
+  function fetchLatest(force) {
+    if (stopped || inFlight) return;
+    var now = Date.now();
+    if (!force && now - lastTickAt < 2000) return;
+    lastTickAt = now;
+    var provider = providerValue();
+    if (provider !== lastProvider) {
+      lastProvider = provider;
+      sinceOffset = 0;
+      sessionSid = "";
+    }
+    var url = "/__sessions/latest-tail?provider=" + encodeURIComponent(provider) +
+      "&since=" + encodeURIComponent(String(sinceOffset || 0)) +
+      "&sid=" + encodeURIComponent(sessionSid || "") +
+      "&t=" + encodeURIComponent(String(now));
+    inFlight = true;
+    window.fetch(url)
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (env) {
+        if (!env || stopped) return;
+        var content = env.content || "";
+        try {
+          iframeTrace("jsonl-fanout", {
+            source: "helper",
+            len: content.length,
+            reset: !!env.reset,
+            truncated: !!env.truncated,
+          });
+        } catch (e) {}
+        if (env.reset) {
+          window.setLatestJsonl(content);
+        } else if (content) {
+          window.appendLatestJsonl(content);
+        }
+        sessionSid = env.sid || "";
+        sinceOffset = env.offset || 0;
+      })
+      .catch(function () {})
+      .finally(function () { inFlight = false; });
+  }
+  var unsubscribe = window.subscribeTalkSessionChange(key + "TalkSessionUnsub", function () {
+    fetchLatest(false);
+  });
+  __latestJsonlPollers[key] = {
+    stop: function () {
+      stopped = true;
+      if (typeof unsubscribe === "function") {
+        try { unsubscribe(); } catch (e) {}
+      }
+      delete __latestJsonlPollers[key];
+    },
+  };
+  fetchLatest(true);
+  return __latestJsonlPollers[key].stop;
+};
+window.startBramLatestJsonlPolling = function (getProvider) {
+  if (typeof window.__bramLatestJsonlPollerStop === "function") {
+    try { window.__bramLatestJsonlPollerStop(); } catch (e) {}
+  }
+  window.__bramLatestJsonlPollerStop = window.startLatestJsonlPolling(
+    "__bramLatestJsonlPoller",
+    getProvider
+  );
 };
 // Convenience: subscribe + remember the unsubscriber on window under the
 // caller-supplied key. Avoids `window.X = ...` left-value expressions in

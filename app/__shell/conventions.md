@@ -237,14 +237,15 @@ Lifecycle:
      compares the running process, the plain port file, and the metadata
      sidecar.
 
-     Codex has one extra failure mode: its sandboxed `curl` can report
-     `curl: (7)` even when Bram is live. Before calling the port stale,
-     confirm that `resources/.bram-port` and `resources/.bram-port.json`
-     agree and that `lsof -nP -c bram -a -iTCP -sTCP:LISTEN` shows Bram
-     listening on that exact IPv4 port. If those checks agree, retry the
-     identical loopback `curl` with Codex tool escalation. If escalated
-     curl succeeds, the problem was Codex sandbox loopback access, not a
-     Bram readiness or stale-port failure.
+     **Codex uses the filesystem channel, not loopback curl.** Codex's
+     sandbox refuses loopback connections (`curl: (7)` even when Bram is
+     listening on the exact IPv4 port — issue #130), so all the curl
+     guidance above is the **Claude** path. Codex drives the identical
+     lifecycle by writing `resources/.worklist-intent.json` and reading
+     `resources/.worklist-result.json` — see *Codex filesystem lifecycle
+     channel* below. Both transports dispatch through the same host-side
+     handlers, so response kinds, consume-on-read, the inflight sentinel,
+     and the auth checks are identical regardless of which an agent uses.
 
      Use the literal port number — `$BRAM_PORT` won't work because
      Claude Code's permission matcher doesn't expand variables before
@@ -391,6 +392,62 @@ soft-reset approach is only safe on unpushed history.
 
 When *not* to use this: one-or-two-item decisions, free-text input, or
 anything where typing in chat is faster than rendering UI.
+
+### Codex filesystem lifecycle channel
+
+Codex's `workspace-write` sandbox refuses loopback connections — its
+`curl` to `http://127.0.0.1:<port>/...` returns `curl: (7)` even when Bram
+is listening on that exact IPv4 port (issue #130). Codex has no
+loopback-only network allowance, and the only sandbox knob that would fix
+it (`network_access = true`) grants *all* outbound network, which we
+consider too permissive. So Codex does **not** use the loopback HTTP routes.
+
+Instead Codex drives the lifecycle through two coordination dot-files that
+the host watches and drains:
+
+1. **Write** `resources/.worklist-intent.json`:
+
+   ```json
+   { "nonce": "<unique-per-request>", "route": "<route>", "body": { ... } }
+   ```
+
+   `route` is one of `worklist-resolve`, `worklist-mutate`,
+   `iterate-begin`, `iterate-end` (alias `worklist-end`). `body` is the
+   exact JSON the matching HTTP route took:
+   - `worklist-resolve` — no `body` needed (optional `{ "ids": [...] }` to
+     filter, mirroring the `?ids=` query).
+   - `worklist-mutate` — `{ "op": "advance", "ids": [...], "status": "applied" }`
+     or `{ "op": "prune", "ids": [...] }`.
+   - `iterate-begin` / `iterate-end` — `{ "ids": [...] }`.
+
+2. **Read** `resources/.worklist-result.json` and act on the record whose
+   `nonce` matches the one you just wrote (ignore any stale result from a
+   prior request):
+
+   ```json
+   { "nonce": "<echoed>", "ok": true,  "status": 200, "result": { ... }, "completedAtMs": 0 }
+   { "nonce": "<echoed>", "ok": false, "status": 400, "error":  { ... }, "completedAtMs": 0 }
+   ```
+
+   `result` is byte-for-byte what the HTTP route would have returned (e.g.
+   `{ "kind": "approved", "items": [...] }` for resolve). The host writes
+   the result within watcher latency (a few ms) and then deletes the intent
+   file, so a brief read-retry covers the race. **Do not continue silently**
+   on a missing result or `ok: false` — that's the same rule as a refused
+   curl on the Claude path.
+
+The host dispatches each intent through the *same* internal functions that
+back the HTTP routes, so consume-on-read, the inflight sentinel, the
+`kind`-match auth check, and the post-commit-prune safeguard are all
+identical. The intent file is only a request envelope — it grants Codex no
+authority beyond what the hash-verified `.worklist-authorization.json`
+already encodes. The Codex PreToolUse guard exempts
+`resources/.worklist-intent.json` from worklist coverage (it's a
+coordination file, like the loopback curl was). Trace each drain by
+grepping `[worklist-intent]` in `resources/bram-trace.log`.
+
+Claude continues to use the loopback HTTP routes — it has no sandbox
+restriction, and the curl allowlist runs without a prompt.
 
 ### Close-on-commit confirm dialog
 

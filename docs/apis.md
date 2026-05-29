@@ -172,6 +172,29 @@ without re-shipping content.
   Tauri event so iframe subscribers re-fetch `/__inflight`. See
   section 11 for the full mechanism.
 
+### 3a. Codex filesystem lifecycle channel (#130)
+
+Codex's sandbox refuses loopback connections (`curl: (7)` even when Bram
+listens), so Codex drives the lifecycle through files instead of the HTTP
+routes above. The host watches the intent file and dispatches it through the
+*same* handlers (`handle_worklist_resolve`, `handle_worklist_mutate`,
+`handle_iterate_begin`, `handle_iterate_end`), so all side effects and auth
+checks are identical.
+
+| Surface | Type | Shape |
+|---|---|---|
+| `resources/.worklist-intent.json` | file (agent writes) | `{ nonce, route, body? }` — `route` ∈ `worklist-resolve` \| `worklist-mutate` \| `iterate-begin` \| `iterate-end` \| `worklist-end`; `body` is the matching HTTP route's request body |
+| `resources/.worklist-result.json` | file (host writes) | `{ nonce, ok, status, result? , error?, completedAtMs }` — `result` is the HTTP route's response body verbatim; `error` present when `ok:false` |
+
+- The watcher drain reads-then-deletes the intent file (so duplicate notify
+  events in one burst no-op), writes the result atomically (`.tmp` + rename),
+  and traces `[worklist-intent] route=… nonce=… ok=… status=…`.
+- Startup deletes any stale intent/result files
+  (`cleanup_stale_worklist_intent`) so a leftover result can't be misread as a
+  reply to a fresh intent — the agent must match `nonce`.
+- The Codex PreToolUse guard exempts `resources/.worklist-intent.json` from
+  worklist coverage. Claude is unaffected and keeps using the HTTP routes.
+
 ## 4. Worklist history
 
 Reverse-chronological archive of every worklist transition. Snapshots

@@ -38,6 +38,12 @@ from pathlib import Path
 WORKLIST_REL = "resources/worklist.json"
 WORKLIST_DRAFTS_PREFIX = "resources/worklist-drafts/"
 AUTH_REL = "resources/.worklist-authorization.json"
+# Codex filesystem lifecycle channel (#130). Writing the intent file is how
+# Codex drives the worklist lifecycle (the loopback-curl equivalent), so it is
+# never an uncovered repo mutation. The result file is host-written, exempted
+# for symmetry.
+WORKLIST_INTENT_REL = "resources/.worklist-intent.json"
+WORKLIST_RESULT_REL = "resources/.worklist-result.json"
 BYPASS_TTL_SECONDS = 60 * 60  # an authorization record is fresh for 1h
 
 
@@ -158,6 +164,12 @@ def current_worklist_text(cwd):
             return f.read()
     except Exception:
         return ""
+
+
+def is_coordination_file(rel):
+    """Codex lifecycle channel files (#130) — always allowed, like a curl to
+    the loopback lifecycle routes was. Not a tracked repo mutation."""
+    return rel in (WORKLIST_INTENT_REL, WORKLIST_RESULT_REL)
 
 
 def covered_files(items):
@@ -840,6 +852,8 @@ def main():
                 continue  # writing to the worklist itself is how proposing works
             if is_worklist_draft(rel):
                 continue  # draft prose files are proposal-authoring inputs
+            if is_coordination_file(rel):
+                continue  # Codex lifecycle channel (#130)
             if rel in covered:
                 continue
             if fresh_bypass(cwd, rel):
@@ -862,6 +876,8 @@ def main():
             allow()
         if "resources/worklist-drafts/" in (cmd or ""):
             allow()
+        if ".worklist-intent.json" in (cmd or ""):
+            allow()  # Codex lifecycle channel (#130)
         # Mutating shell command — require any worklist coverage OR a "*"
         # bypass. We don't try to map shell commands to specific paths
         # (too fragile); presence of any pending/applied work is the gate.
@@ -921,6 +937,8 @@ def main():
                 continue
             if is_worklist_draft(rel):
                 continue
+            if is_coordination_file(rel):
+                continue  # Codex lifecycle channel (#130)
             if rel in covered:
                 continue
             if fresh_bypass(cwd, rel):

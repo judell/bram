@@ -6288,14 +6288,19 @@ const ENHANCE_CODEX_GATE_PROSE: &str = "bram worklist gate. \
 Use the worklist for material file/code changes unless the user explicitly \
 opts out in a way the runtime guard allows. Mutations outside approved items \
 are blocked by a PreToolUse hook installed under ~/.bram. On approved:, drop:, \
-or iterate: turns, use the Bram loopback lifecycle routes and do not silently \
-continue after a refused connection, empty response, or nonzero lifecycle \
-call. If sandboxed loopback curl refuses while port metadata and lsof agree \
-Bram is listening, retry the same curl with Codex tool escalation. The exact \
-lifecycle, opt-out, curl, retry, literal-port, sandbox, and transition rules \
-are canonical in app/__shell/conventions.md. Do not duplicate or guess those \
-details from this abbreviated instruction.";
+or iterate: turns, drive the Bram lifecycle through the filesystem channel: \
+write resources/.worklist-intent.json ({nonce, route, body}) and read the \
+host's reply from resources/.worklist-result.json, matching your nonce. Do \
+not silently continue after a missing result or an ok:false reply. The exact \
+routes, intent/result shapes, opt-out, and transition rules are canonical in \
+app/__shell/conventions.md. Do not duplicate or guess those details from this \
+abbreviated instruction.";
 const WORKLIST_AUTH_REL: &str = "resources/.worklist-authorization.json";
+// Codex filesystem lifecycle channel (#130). Codex writes the intent file;
+// the host watcher drains it and writes the result file. Coordination
+// dot-files, polled/written like the others above — not tracked changes.
+const WORKLIST_INTENT_REL: &str = "resources/.worklist-intent.json";
+const WORKLIST_RESULT_REL: &str = "resources/.worklist-result.json";
 // Host-managed inflight sentinel (#84). Written when /__worklist/resolve
 // serves an approved or drop record, OR when /__iterate/begin is
 // called. Approved/drop sentinels clear at host silence-detected
@@ -7507,6 +7512,14 @@ fn inflight_claim_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf>
     project_root(Some(app)).map(|p| p.join(INFLIGHT_CLAIM_REL))
 }
 
+fn worklist_intent_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    project_root(Some(app)).map(|p| p.join(WORKLIST_INTENT_REL))
+}
+
+fn worklist_result_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    project_root(Some(app)).map(|p| p.join(WORKLIST_RESULT_REL))
+}
+
 // Write the inflight sentinel (#84). Atomic via .tmp + rename so the
 // file is either absent or contains valid JSON. Caller has verified
 // `ids` is non-empty. `kind` is one of "approved", "drop", "iterate".
@@ -7843,6 +7856,31 @@ fn cleanup_stale_inflight_claim<R: tauri::Runtime>(app: &AppHandle<R>) {
     }
     trace_emit_signal(app, "inflight-claim-changed");
     let _ = app.emit("inflight-claim-changed", ());
+}
+
+// Delete any leftover Codex lifecycle intent/result files from a prior
+// session (#130), so a stale result can't be misread as a reply to a fresh
+// intent. Mirrors cleanup_stale_inflight_claim.
+fn cleanup_stale_worklist_intent<R: tauri::Runtime>(app: &AppHandle<R>) {
+    for path in [worklist_intent_file(app), worklist_result_file(app)]
+        .into_iter()
+        .flatten()
+    {
+        if path.exists() {
+            let _ = std::fs::remove_file(&path);
+            if bram_trace_enabled() {
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
+                append_bram_trace_line(
+                    app,
+                    "worklist-intent",
+                    &format!("op=stale-startup-clear file={}", name),
+                );
+            }
+        }
+    }
 }
 
 fn pty_intent_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
@@ -11242,85 +11280,7 @@ fn route_request<R: tauri::Runtime>(
                 break;
             }
         }
-        let Some(auth_path) = worklist_auth_file(app) else {
-            return (
-                404,
-                "text/plain; charset=utf-8",
-                b"no project root".to_vec(),
-            );
-        };
-        let Ok(raw) = std::fs::read_to_string(&auth_path) else {
-            return (
-                404,
-                "text/plain; charset=utf-8",
-                b"no authorization record".to_vec(),
-            );
-        };
-        let mut record_value: serde_json::Value = match serde_json::from_str(&raw) {
-            Ok(v) => v,
-            Err(_) => {
-                return (
-                    500,
-                    "text/plain; charset=utf-8",
-                    b"malformed authorization record".to_vec(),
-                );
-            }
-        };
-        let consumed_at = record_value.get("consumedAtMs").and_then(|v| v.as_i64());
-        if let Some(ts) = consumed_at {
-            let body = serde_json::json!({
-                "kind": "no_active_authorization",
-                "consumedAtMs": ts,
-            })
-            .to_string()
-            .into_bytes();
-            return (200, "application/json; charset=utf-8", body);
-        }
-        if let Some(filter) = id_filter {
-            if let Some(items) = record_value.get_mut("items").and_then(|v| v.as_array_mut()) {
-                items.retain(|it| {
-                    it.get("id")
-                        .and_then(|v| v.as_str())
-                        .map_or(false, |id| filter.iter().any(|f| f == id))
-                });
-            }
-            if let Some(ids_v) = record_value.get_mut("ids").and_then(|v| v.as_array_mut()) {
-                ids_v.retain(|v| {
-                    v.as_str()
-                        .map_or(false, |id| filter.iter().any(|f| f == id))
-                });
-            }
-        }
-        resolve_worklist_record_items(app, &mut record_value);
-        let kind = record_value
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        // Write the inflight sentinel for approved/drop (#84). Pulled
-        // from the (possibly filter-narrowed) items array so the
-        // sentinel's ids match what the agent has just been authorized
-        // to act on. Cleared by /__worklist/mutate when the agent
-        // completes the state transition.
-        if kind == "approved" || kind == "drop" {
-            let sentinel_ids: Vec<String> = record_value
-                .get("items")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|it| it.get("id").and_then(|v| v.as_str()).map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            if !sentinel_ids.is_empty() {
-                write_inflight_claim_sentinel(app, &sentinel_ids, &kind);
-            }
-        }
-        let body = record_value.to_string().into_bytes();
-        if kind == "approved" {
-            consume_worklist_authorization(app);
-        }
-        return (200, "application/json; charset=utf-8", body);
+        return handle_worklist_resolve(app, id_filter);
     }
 
     // /__inflight — host-managed inflight sentinel (#84). Returns the
@@ -11472,6 +11432,203 @@ fn route_request<R: tauri::Runtime>(
     match std::fs::read(&full) {
         Ok(bytes) => (200, mime_for(&full), bytes),
         Err(_) => (404, "text/plain; charset=utf-8", Vec::new()),
+    }
+}
+
+// Shared resolver for the worklist authorization record. Backs both the HTTP
+// route GET /__worklist/resolve and the Codex filesystem intent drain (#130),
+// so both transports apply the identical consume-on-read + inflight-sentinel
+// side effects. Response kinds are documented at the route's call site.
+fn handle_worklist_resolve<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id_filter: Option<Vec<String>>,
+) -> (u16, &'static str, Vec<u8>) {
+    let Some(auth_path) = worklist_auth_file(app) else {
+        return (
+            404,
+            "text/plain; charset=utf-8",
+            b"no project root".to_vec(),
+        );
+    };
+    let Ok(raw) = std::fs::read_to_string(&auth_path) else {
+        return (
+            404,
+            "text/plain; charset=utf-8",
+            b"no authorization record".to_vec(),
+        );
+    };
+    let mut record_value: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                500,
+                "text/plain; charset=utf-8",
+                b"malformed authorization record".to_vec(),
+            );
+        }
+    };
+    let consumed_at = record_value.get("consumedAtMs").and_then(|v| v.as_i64());
+    if let Some(ts) = consumed_at {
+        let body = serde_json::json!({
+            "kind": "no_active_authorization",
+            "consumedAtMs": ts,
+        })
+        .to_string()
+        .into_bytes();
+        return (200, "application/json; charset=utf-8", body);
+    }
+    if let Some(filter) = id_filter {
+        if let Some(items) = record_value.get_mut("items").and_then(|v| v.as_array_mut()) {
+            items.retain(|it| {
+                it.get("id")
+                    .and_then(|v| v.as_str())
+                    .map_or(false, |id| filter.iter().any(|f| f == id))
+            });
+        }
+        if let Some(ids_v) = record_value.get_mut("ids").and_then(|v| v.as_array_mut()) {
+            ids_v.retain(|v| {
+                v.as_str()
+                    .map_or(false, |id| filter.iter().any(|f| f == id))
+            });
+        }
+    }
+    resolve_worklist_record_items(app, &mut record_value);
+    let kind = record_value
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    // Write the inflight sentinel for approved/drop (#84). Pulled
+    // from the (possibly filter-narrowed) items array so the
+    // sentinel's ids match what the agent has just been authorized
+    // to act on. Cleared by /__worklist/mutate when the agent
+    // completes the state transition.
+    if kind == "approved" || kind == "drop" {
+        let sentinel_ids: Vec<String> = record_value
+            .get("items")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|it| it.get("id").and_then(|v| v.as_str()).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !sentinel_ids.is_empty() {
+            write_inflight_claim_sentinel(app, &sentinel_ids, &kind);
+        }
+    }
+    let body = record_value.to_string().into_bytes();
+    if kind == "approved" {
+        consume_worklist_authorization(app);
+    }
+    (200, "application/json; charset=utf-8", body)
+}
+
+// Codex filesystem lifecycle channel (#130). Codex's sandboxed curl can't
+// reach Bram's loopback HTTP server, so instead of curling the lifecycle
+// routes it writes resources/.worklist-intent.json; this drain (invoked from
+// the filesystem watcher) dispatches the request through the SAME handlers the
+// HTTP routes use and writes the reply to resources/.worklist-result.json,
+// then deletes the intent file. The intent file is only a request envelope —
+// the authority (hash-verified .worklist-authorization.json, the mutate auth
+// check) is unchanged, so this transport grants Codex no power it lacked.
+//
+// Intent shape:  {"nonce": "...", "route": "<r>", "body": { ... }}
+//   routes: worklist-resolve | worklist-mutate | iterate-begin |
+//           iterate-end | worklist-end
+// Result shape:  {"nonce": "...", "ok": <bool>, "status": <u16>,
+//                 "result"|"error": <json>, "completedAtMs": <ms>}
+fn drain_worklist_intent<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let Some(intent_path) = worklist_intent_file(app) else {
+        return;
+    };
+    // File may already be gone (a prior event in the same notify burst drained
+    // it) — that's the natural dedup, not an error.
+    let Ok(raw) = std::fs::read_to_string(&intent_path) else {
+        return;
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+    let nonce = parsed
+        .get("nonce")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let route = parsed.get("route").and_then(|v| v.as_str()).unwrap_or("");
+    let body_val = parsed
+        .get("body")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let body_bytes = serde_json::to_vec(&body_val).unwrap_or_default();
+
+    let (status, resp_bytes): (u16, Vec<u8>) = if parsed.is_null() {
+        (
+            400,
+            br#"{"error":"malformed intent JSON"}"#.to_vec(),
+        )
+    } else {
+        match route {
+            "worklist-resolve" => {
+                let id_filter = body_val
+                    .get("ids")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|x| x.as_str().map(String::from))
+                            .collect::<Vec<String>>()
+                    })
+                    .filter(|v| !v.is_empty());
+                let (s, _m, b) = handle_worklist_resolve(app, id_filter);
+                (s, b)
+            }
+            "worklist-mutate" => {
+                let (s, _m, b) = handle_worklist_mutate(app, &body_bytes);
+                (s, b)
+            }
+            "iterate-begin" => {
+                let (s, _m, b) = handle_iterate_begin(app, &body_bytes);
+                (s, b)
+            }
+            "iterate-end" | "worklist-end" => {
+                let (s, _m, b) = handle_iterate_end(app, &body_bytes);
+                (s, b)
+            }
+            other => (
+                400,
+                format!("{{\"error\":\"unknown route: {}\"}}", other).into_bytes(),
+            ),
+        }
+    };
+
+    let ok = (200..300).contains(&status);
+    let payload: serde_json::Value =
+        serde_json::from_slice(&resp_bytes).unwrap_or_else(|_| {
+            serde_json::json!({ "raw": String::from_utf8_lossy(&resp_bytes) })
+        });
+    let mut envelope = serde_json::json!({
+        "nonce": nonce,
+        "ok": ok,
+        "status": status,
+        "completedAtMs": unix_now_ms(),
+    });
+    if let Some(obj) = envelope.as_object_mut() {
+        obj.insert(if ok { "result" } else { "error" }.to_string(), payload);
+    }
+    if let Some(result_path) = worklist_result_file(app) {
+        if let Some(parent) = result_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let tmp = result_path.with_extension("json.tmp");
+        if std::fs::write(&tmp, format!("{}\n", envelope)).is_ok() {
+            let _ = std::fs::rename(&tmp, &result_path);
+        }
+    }
+    let _ = std::fs::remove_file(&intent_path);
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "worklist-intent",
+            &format!("route={} nonce={} ok={} status={}", route, nonce, ok, status),
+        );
     }
 }
 
@@ -12374,6 +12531,9 @@ pub fn run() {
             // Remove any stale inflight sentinel from a prior session
             // that didn't complete cleanly. Refs #84.
             cleanup_stale_inflight_claim(app.handle());
+            // Remove any stale Codex lifecycle intent/result files from a
+            // prior session. Refs #130.
+            cleanup_stale_worklist_intent(app.handle());
             // Remove any stale pty-intent queue from a prior session so
             // its intents don't replay into the fresh PTY. Refs #86.
             cleanup_stale_pty_intents(app.handle());
@@ -12841,6 +13001,22 @@ pub fn run() {
                         // above drains it when the window elapses. Refs
                         // #85 worklist-watcher-debounce.
                         pending_worklist_since = Some(Instant::now());
+                    }
+
+                    // Codex filesystem lifecycle drain (#130). When Codex
+                    // writes resources/.worklist-intent.json, dispatch it
+                    // through the same handlers the loopback routes use and
+                    // write resources/.worklist-result.json. Fires on
+                    // create/modify; the drain reads-then-deletes the intent
+                    // file, so duplicate events in one notify burst no-op.
+                    let is_intent_event = event.paths.iter().any(|p| {
+                        p.file_name().and_then(|n| n.to_str()) == Some(".worklist-intent.json")
+                            && p.components().any(|c| c.as_os_str() == "resources")
+                    });
+                    if is_intent_event
+                        && matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_))
+                    {
+                        drain_worklist_intent(&app_handle);
                     }
 
                     // git-status-changed: any project file change that's

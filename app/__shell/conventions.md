@@ -457,8 +457,10 @@ would resolve a GitHub issue, set
 title comes from `gh issue view N --json title` (or from the issue's
 data in the Issues tab); keep it current if you iterate. When the user clicks **Approve** on a TO COMMIT item that
 carries a non-empty `closesIssues`, the Worklist tab opens a confirm
-dialog — one row per issue with a checkbox (default checked) and an
-optional close-comment textbox.
+dialog — one row per issue plus an optional close-comment textbox.
+**Confirm** means close the listed issue(s) after verifying the commit is
+already visible on GitHub; **Push then close** means push the commit first,
+then verify and close; **Approve without closing** means commit only.
 
 For issue-derived items — for example "Propose a worklist item to
 address #N (...)" from chat or the Issues tab — default to pairing the
@@ -477,25 +479,67 @@ after any free-text feedback the user typed. Two shapes:
 ```
 close-issue: 52
 close-issue: 50 comment: "shipped, see commit message"
+push-before-close: true
 ```
 
 Per item, after resolving `/__worklist/resolve` and committing as
 usual:
 
-1. Split the verified `feedback` on `\n` and pick out lines that
-   start with `close-issue: `.
-2. For each, run `gh issue close <N>` — with `-c "<comment>"` when
-   a `comment: "..."` clause follows the number. The comment string
-   is JSON-encoded by the dialog, so `JSON.parse` on the substring
-   between the matching quotes gives the literal text.
-3. The user's choice is authoritative — if they unchecked an issue
-   the agent listed in `closesIssues`, that issue will not appear
-   as a `close-issue:` line. Do **not** close issues the user
-   didn't confirm, even if `closesIssues` originally listed them.
-4. If the user clicks **Approve without closing** instead of
-   **Confirm**, the payload arrives with the user's free-text
-   feedback only (no `close-issue:` lines). Commit; do not close
-   anything.
+1. Split the verified `feedback` on `\n`, check whether any line is
+   exactly `push-before-close: true`, and pick out lines that start
+   with `close-issue: `.
+2. Resolve the just-created commit's full SHA.
+3. For each `close-issue: N` line **without** a user-supplied
+   comment, call Bram's backend route instead of `gh issue close`
+   directly:
+
+   ```sh
+   curl -4 -sS --retry-connrefused --retry 3 --retry-delay 1 \
+     "http://127.0.0.1:<bram-port>/__issue/close?number=N&commit=<full-sha>"
+   ```
+
+   If `push-before-close: true` was present, append `&push=true` to
+   that route. The backend will push the current branch first, then
+   verify the commit is visible before closing:
+
+   ```sh
+   curl -4 -sS --retry-connrefused --retry 3 --retry-delay 1 \
+     "http://127.0.0.1:<bram-port>/__issue/close?number=N&commit=<full-sha>&push=true"
+   ```
+
+   The backend verifies that GitHub can already see the commit before
+   closing. On success it generates the close comment as a full commit
+   URL with no trailing punctuation:
+
+   ```text
+   Closed by https://github.com/<owner>/<repo>/commit/<full-sha>
+   ```
+
+4. If the backend returns structured refusal JSON such as
+   `{"ok":false,"code":"commit-not-visible",...}`, do **not** run a
+   fallback `gh issue close`. Report the message plainly, e.g.:
+
+   ```text
+   Committed <short-sha>, but did not close #N because GitHub cannot
+   see the commit yet. Push the commit, then close #N with the
+   generated commit URL.
+   ```
+
+   The worklist item may still be pruned if the commit itself
+   succeeded; issue closing is a post-commit side effect. Do not claim
+   the issue was closed.
+   A `{"ok":false,"code":"push-failed",...}` refusal means the
+   push-before-close path failed before issue closing; report the
+   backend message and do not close directly.
+5. For a `close-issue: N comment: "..."` line, the user explicitly
+   supplied the close comment. You may close through the existing
+   `/__issue/close?number=N&comment=<encoded-comment>` route. Do not
+   rewrite arbitrary user comments into generated `Closed by ...`
+   comments.
+6. The user's choice is authoritative — if the user clicks
+   **Approve without closing**, the payload arrives with the user's
+   free-text feedback only (no `close-issue:` lines). Commit; do not
+   close anything.
 
 Detection by regex on `#N` in item prose is **not** part of this
 flow — the agent has the conversational context to judge whether a

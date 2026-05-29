@@ -43,6 +43,17 @@ resources/worklist-history/
 
 # Worklist proposals are per-developer scratch; keep them out of the repo.
 resources/worklist.json
+resources/worklist-drafts/
 resources/.bram-port
+resources/.bram-port.json
 resources/.inflight-claim.json
 resources/.worklist-authorization.json
+resources/.worklist-intent.json
+resources/.worklist-result.json
+
+# Local startup forensics dumps; per-restart, not shared.
+resources/startup-traces/
+
+# Python bytecode (Codex worklist-guard hook etc.)
+__pycache__/
+*.pyc

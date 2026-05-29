@@ -65,6 +65,11 @@ rules.
 
 4. **XMLUI CLI - optional.** If you are developing an XMLUI app, or if you are developing `Bram` itself (the agent-tools UI is an embedded XMLUI app) you will want the XMLUI MCP server. Follow the steps [here](https://xmlui.org/get-started) to get it.
 
+5. **`whisper-server` — optional.** Powers the 🎤 voice button in the
+   parent-shell toolbar and the agent-tools drawer. Tested on macOS for
+   now; see [Voice input](#voice-input) below for install and per-platform
+   status.
+
 ## [Download the latest release →](https://github.com/judell/bram/releases/latest)
 
 ## Install
@@ -116,6 +121,7 @@ The toolbar's `ⓘ` (top-right of the drawer's AppHeader) opens a right-pane inf
 - **🛠 agent tools** — toggle the agent-tools drawer above.
 - **▢ terminal** — toggle the terminal pane (hide it to give the web app full width). Window and splitter resizes preserve the terminal viewport instead of snapping scrollback to the top.
 - **A− / A+** — decrease / increase the terminal font size (Cmd+− / Cmd+=).
+- **🎤 voice** — toggle local-Whisper voice dictation into the terminal (Cmd+Shift+D). See [Voice input](#voice-input).
 
 Pinned across the top of the agent-tools drawer (stays reachable from any tab):
 
@@ -124,6 +130,7 @@ Pinned across the top of the agent-tools drawer (stays reachable from any tab):
 - **1 / 2 / 3** — send numeric keystrokes to the active agent's terminal session.
 - **Yes / No** — send "yes" or "no" as a complete user turn (handy for the agent's conversational prompts).
 - **Esc** — send `Esc` to interrupt the agent mid-response.
+- **🎤 voice** — local-Whisper dictation; click to start, click again to send the transcript as a fresh user turn. Same engine as the shell toolbar's voice button.
 - **🔍 Inspector** — open the XMLUI Inspector to reproduce a UI issue and export a trace JSON for analysis.
 ### Provider-aware setup
 
@@ -212,6 +219,30 @@ the running agent.
   URI scheme handler that proxies the right-pane iframe to the project's
   HTTP server, filesystem watcher, IPC handlers).
 - `scripts/` — auxiliary scripts.
+
+## Voice input
+
+Bram supports two ways to dictate instead of type:
+
+- **🎤 Whisper buttons (recommended).** Local, low-latency dictation via [`whisper-server`](https://github.com/ggml-org/whisper.cpp/tree/master/examples/server). Click the 🎤 button in the parent-shell toolbar (or the agent-tools drawer) to start recording, click again to send; the transcript arrives in the terminal as a `voice: ...` line so it's distinguishable from typed input. This is the better experience — lower latency, your choice of model, good transcription quality — but it needs local setup and is **tested on macOS for now**, not yet proven on Linux or Windows.
+- **The agent's native `/voice` command.** No local setup, but support varies by agent and platform. It's the zero-install fallback, and the working path where the Whisper button isn't proven yet.
+
+Bram spawns the local `whisper-server` on the first record click and kills it on app exit — you don't manage the process; you just need the binary, `ffmpeg`, and a model file installed.
+
+### macOS — verified
+
+```bash
+brew install whisper-cpp ffmpeg
+mkdir -p ~/.local/share/whisper-models
+curl -L -o ~/.local/share/whisper-models/ggml-small.en.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin
+```
+
+`small.en` is ~466 MB, English-only, real-time on Apple Silicon. Swap in a different model from the same Hugging Face repo for other size/accuracy/language tradeoffs. The bundled `Info.plist` declares `NSMicrophoneUsageDescription`, so first use triggers the standard macOS mic-permission prompt. The model path the app loads is `~/.local/share/whisper-models/ggml-small.en.bin`.
+
+### Linux / Windows — not yet proven
+
+The same `whisper-server` + `ffmpeg` + model setup is expected to work on non-WSL Linux but is untested, and the button flow isn't proven on Windows yet. Install pointers live in git history and at <https://github.com/ggml-org/whisper.cpp>; meanwhile use the agent's `/voice` command. If you get the 🎤 path working on either, please open an issue.
 
 ## Screen capture
 

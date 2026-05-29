@@ -366,29 +366,28 @@ both. This avoids landing intermediate "kinda-works" commits where
 the feature is split from its companion fix — those make git history
 hard to read and bisect against.
 
-**Notice when sibling commits should be squashed (post-hoc).** The
-"hold the commit" rule above prevents the split proactively. When it
-*doesn't* fire — usually because the user said "commit directly" on
-one half before approving the other through the worklist — you end up
-with two consecutive unpushed commits that together form one feature.
-Watch for this signal: the most recent two unpushed commits are a
-mechanism + the config that exercises it (or a backend route + the
-frontend that calls it, or a struct + the only code that constructs
-it). Either commit alone is dead weight; together they're the feature.
+**Suggest a branch when isolation helps.** Bram should guide users
+toward good git practice, not force ceremony. Before broad, risky,
+exploratory, multi-commit, review-before-main, or issue-close-sensitive
+work — especially when the current branch/worktree already contains
+unrelated changes — suggest creating or switching to a branch and
+explain the benefit briefly. Do not branch for small direct fixes or
+straightforward docs tweaks, and do not change branches without clear
+user consent.
 
-When you spot this, flag it to the user before they push: "`<sha1>`
-and `<sha2>` are two halves of the same feature — want to squash them
-into one commit?" If they say yes, and **both commits are unpushed**:
+**Notice when sibling commits should be squashed.** If two consecutive
+unpushed commits are really one feature (mechanism + config, backend
+route + frontend caller, struct + only constructor), flag it before
+push: "`<sha1>` and `<sha2>` are two halves of the same feature — want
+to squash them?" If yes, and **both commits are unpushed**:
 
 ```
 git reset --soft HEAD~2     # keeps both diffs staged
 git commit -F <new-msg>     # one combined commit
 ```
 
-Verify with `git log --oneline -3` and `git log --oneline @{u}..HEAD`
-that the combined commit is unpushed and replaces the prior two. Never
-squash already-pushed commits without explicit force-push consent — the
-soft-reset approach is only safe on unpushed history.
+Verify with `git log --oneline -3` and `git log --oneline @{u}..HEAD`.
+Never squash already-pushed commits without explicit force-push consent.
 
 When *not* to use this: one-or-two-item decisions, free-text input, or
 anything where typing in chat is faster than rendering UI.

@@ -37,6 +37,32 @@ function currentSourceFile(pathname) {
   return 'Main.xmlui';
 }
 
+function statusSectionSubhead(title) {
+  const descriptions = {
+    'Startup Run': 'first-minute load',
+    'Worklist': 'item lifecycle health',
+    'Inflight Sentinel': 'agent action claims',
+    'Hooks': 'agent guard setup',
+    'Authorization': 'approval record flow',
+    'Latest Tail And Fanout': 'session stream pressure',
+    'Guards, Staleness, Interrupts, Traces': 'safety signal trail',
+  };
+  return descriptions[title] || '';
+}
+
+function statusSectionDescription(title) {
+  const descriptions = {
+    'Startup Run': 'Signals captured during the first minute after Bram startup, including latest-tail payload size, PTY output volume, renderer drift, and Inspector export size.',
+    'Worklist': 'Current worklist item counts, recent lifecycle transitions, and whether applied items still match the working tree.',
+    'Inflight Sentinel': 'The host-managed claim that keeps Worklist spinners aligned with active approve, drop, or iterate work.',
+    'Hooks': 'Whether Bram setup installed and registered the Claude and Codex worklist guard hooks for this repo.',
+    'Authorization': 'The most recent structured approve, drop, or iterate record and whether Bram has consumed it.',
+    'Latest Tail And Fanout': 'Session-tail polling, shared JSONL cache fanout, subscriber count, reset activity, and cap trimming pressure.',
+    'Guards, Staleness, Interrupts, Traces': 'Recent guard blocks, stale approval rejections, interrupt handling, and exported Inspector trace availability.',
+  };
+  return descriptions[title] || '';
+}
+
 // Past transcripts often contain broken docs.xmlui.org/... URLs (the form the
 // xmlui-mcp server reports as Source). The live docs are hosted at
 // www.xmlui.org/docs/... with a `reference/` segment for component pages.

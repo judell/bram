@@ -1,6 +1,8 @@
 <Component
   name="Status"
-  var.refreshTick="{0}">
+  var.refreshTick="{0}"
+  var.sectionInfoTitle="{''}"
+  var.sectionInfoDescription="{''}">
 
   <DataSource id="status" url="/__coordination-status?t={refreshTick}" />
 
@@ -39,7 +41,21 @@
 
     <Items data="{status.value &amp;&amp; status.value.sections || []}">
       <VStack gap="$space-2">
-        <Heading level="h3" value="{$item.title}" />
+        <HStack gap="$space-2" verticalAlignment="baseline">
+          <Heading level="h3" value="{$item.title}" />
+          <Text
+            when="{statusSectionSubhead($item.title)}"
+            fontSize="$fontSize-sm"
+            color="$textColor-secondary"
+            value="{'— ' + statusSectionSubhead($item.title)}" />
+          <Button
+            when="{statusSectionDescription($item.title)}"
+            icon="info"
+            size="xs"
+            variant="ghost"
+            tooltip="About this section"
+            onClick="sectionInfoTitle = $item.title; sectionInfoDescription = statusSectionDescription($item.title); sectionInfoDialog.open()" />
+        </HStack>
         <Table data="{$item.rows}">
           <Column header="signal" bindTo="signal" width="170px" />
           <Column header="level" width="80px">
@@ -65,5 +81,16 @@
         </Table>
       </VStack>
     </Items>
+
+    <ModalDialog
+      id="sectionInfoDialog"
+      title="{sectionInfoTitle}">
+      <VStack gap="$space-3" padding="$space-2">
+        <Text value="{sectionInfoDescription}" />
+        <HStack>
+          <Button label="Got it" onClick="sectionInfoDialog.close()" />
+        </HStack>
+      </VStack>
+    </ModalDialog>
   </VStack>
 </Component>

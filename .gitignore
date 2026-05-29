@@ -57,3 +57,7 @@ resources/startup-traces/
 # Python bytecode (Codex worklist-guard hook etc.)
 __pycache__/
 *.pyc
+
+# Per-developer dev shortcuts.
+/build.sh
+/tb.sh

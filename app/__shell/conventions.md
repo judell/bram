@@ -724,7 +724,11 @@ streams; the third is a dashboard that derives signals from them.
 routes, iframe events, and inflight-sentinel writes / clears.
 Always on; grep it directly. Best for plumbing: stuck spinner,
 sentinel anomalies, route errors, agent-turn-end detection,
-heartbeat drift.
+heartbeat drift, close-cycle verification (`grep
+"path=__issue/close" resources/bram-trace.log` — absence around a
+known close timestamp means the agent bypassed
+`gh_issue_close_with_commit` and shelled out to `gh issue close`
+directly).
 
 **Inspector Export** — XMLUI runtime trace (events, state changes,
 handler invocations) for Bram's own XMLUI UI, captured on demand.

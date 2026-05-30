@@ -3,7 +3,12 @@
   var.expandedNumber="{null}"
   var.fullscreenImage="{null}"
   var.showNewIssueHint="{false}"
+  var.newIssueSubmitting="{false}"
+  var.newIssueStartSig="{''}"
+  var.newIssueTurnEnded="{false}"
+  var.newIssuePolls="{0}"
   var.newIssueText="{''}"
+  var.lastIssuesSig="{''}"
   var.queryDraft=""
   var.query=""
   var.selectedHitLine="{null}"
@@ -20,7 +25,22 @@
   <DataSource
     id="issues"
     url="/__issues"
-    pollIntervalInSeconds="30" />
+    pollIntervalInSeconds="30"
+    onLoaded="(data) => {
+      const currentSig = ((data || []).map(i => i && i.number).filter(Boolean).sort()).join(',');
+      if (newIssueSubmitting && newIssueStartSig && currentSig !== newIssueStartSig) {
+        newIssueSubmitting = false;
+        newIssueStartSig = '';
+        newIssueTurnEnded = false;
+        newIssuePolls = 0;
+      } else if (newIssueSubmitting && newIssueTurnEnded) {
+        newIssueSubmitting = false;
+        newIssueStartSig = '';
+        newIssueTurnEnded = false;
+        newIssuePolls = 0;
+      }
+      lastIssuesSig = currentSig;
+    }" />
 
   <DataSource
     id="repoOrigin"
@@ -103,8 +123,8 @@
         <HStack gap="$space-2">
           <Button
             label="Send"
-            enabled="{newIssueText &amp;&amp; newIssueText.trim().length > 0}"
-            onClick="toTurn('File a GitHub issue: ' + (newIssueText || '').trim()); showNewIssueHint = false; newIssueText = ''" />
+            enabled="{!newIssueSubmitting &amp;&amp; newIssueText &amp;&amp; newIssueText.trim().length > 0}"
+            onClick="newIssueStartSig = lastIssuesSig; newIssueTurnEnded = false; newIssuePolls = 0; newIssueSubmitting = true; toTurn('File a GitHub issue: ' + (newIssueText || '').trim()); showNewIssueHint = false; newIssueText = ''" />
           <Button
             label="Cancel"
             variant="ghost"
@@ -114,7 +134,15 @@
     </VStack>
   </ModalDialog>
 
-  <HSplitter height="100%" initialPrimarySize="40%">
+  <HSplitter
+    height="100%"
+    initialPrimarySize="40%"
+    onInit="subscribeTauriEvent('__bramIssuesAgentTurnEndUnsub', 'agent-turn-end', () => { if (newIssueSubmitting) { newIssueTurnEnded = true; issues.refetch(); } });">
+
+    <Timer
+      when="{newIssueSubmitting}"
+      interval="1000"
+      onTick="newIssuePolls = newIssuePolls + 1; issues.refetch(); if (newIssueTurnEnded &amp;&amp; newIssuePolls >= 3) { newIssueSubmitting = false; newIssueStartSig = ''; newIssueTurnEnded = false; newIssuePolls = 0; }" />
 
     <VStack padding="$space-4" gap="$space-4" overflowY="auto">
       <HStack gap="$space-3" verticalAlignment="center">
@@ -123,7 +151,11 @@
           when="{repoOrigin.value &amp;&amp; repoOrigin.value.issuesNewUrl}"
           label="+ New issue"
           size="xs"
+          enabled="{!newIssueSubmitting}"
           onClick="showNewIssueHint = true" />
+        <Theme size-Spinner="1em">
+          <Spinner when="{newIssueSubmitting}" />
+        </Theme>
         <SpaceFiller />
         <HStack gap="$space-1" verticalAlignment="center" width="*" maxWidth="20rem">
           <TextBox

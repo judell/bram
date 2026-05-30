@@ -1,8 +1,58 @@
-<Component name="History">
+<Component
+  name="History"
+  var.selectedHistoryGroup="{null}">
 
   <DataSource
     id="history"
     url="/__worklist-history/list" />
+
+  <ModalDialog
+    when="{!!selectedHistoryGroup}"
+    title="{selectedHistoryGroup ? selectedHistoryGroup.title : 'History item'}"
+    onClose="selectedHistoryGroup = null">
+    <VStack
+      gap="$space-4"
+      padding="$space-2"
+      var.historyGroup="{selectedHistoryGroup}">
+      <VStack gap="$space-1">
+        <Text
+          value="{historyDateRangeLine(historyGroup)}"
+          color="$textColor-secondary"
+          fontSize="$fontSize-sm" />
+        <Text
+          value="{historyPhasePath(historyGroup)}"
+          fontWeight="$fontWeight-bold" />
+        <Text
+          when="{historyItemFilesLine(historyGroup)}"
+          value="{historyItemFilesLine(historyGroup)}"
+          variant="code"
+          fontSize="$fontSize-sm" />
+      </VStack>
+
+      <VStack gap="$space-2" when="{historyItemFieldMarkdown(historyGroup, 'before')}">
+        <Text value="Before" fontWeight="$fontWeight-bold" />
+        <Markdown content="{historyItemFieldMarkdown(historyGroup, 'before')}" />
+      </VStack>
+
+      <VStack gap="$space-2" when="{historyItemFieldMarkdown(historyGroup, 'after')}">
+        <Text value="After" fontWeight="$fontWeight-bold" />
+        <Markdown content="{historyItemFieldMarkdown(historyGroup, 'after')}" />
+      </VStack>
+
+      <VStack gap="$space-2">
+        <Text value="Phases" fontWeight="$fontWeight-bold" />
+        <Items data="{historyGroup.phases || []}">
+          <VStack
+            gap="$space-1"
+            paddingVertical="$space-1"
+            borderTop="1px solid $borderColor">
+            <Text value="{historyPhaseLabel($item) + ' · ' + (($item.iso || '').slice(0, 16))}" fontSize="$fontSize-sm" />
+            <Text value="{$item.summary}" color="$textColor-secondary" fontSize="$fontSize-xs" />
+          </VStack>
+        </Items>
+      </VStack>
+    </VStack>
+  </ModalDialog>
 
   <VStack padding="$space-6" gap="$space-3">
     <Heading level="h2">History</Heading>
@@ -29,57 +79,36 @@
           borderRadius="$borderRadius"
           backgroundColor="$color-surface-50"
           var.historyGroup="{$item}">
-          <HStack gap="$space-3" verticalAlignment="center">
-            <VStack gap="$space-0_5" width="*">
-              <Text value="{$item.title}" fontWeight="bold" overflowMode="flow" breakMode="word" />
-              <Text value="{$item.subtitle}" color="$textColor-secondary" fontSize="$fontSize-xs" />
-            </VStack>
+          <VStack gap="$space-1">
+            <Text value="{$item.title}" fontWeight="bold" overflowMode="flow" breakMode="word" />
             <Text
-              value="{$item.phaseCount + ($item.phaseCount === 1 ? ' phase' : ' phases')}"
+              value="{historyDateRangeLine(historyGroup)}"
               color="$textColor-secondary"
               fontSize="$fontSize-xs" />
-          </HStack>
+            <Text
+              value="{historyPhasePath(historyGroup)}"
+              color="$textColor-secondary"
+              fontWeight="$fontWeight-bold"
+              fontSize="$fontSize-xs" />
+          </VStack>
 
           <VStack gap="$space-2">
             <Text
-              when="{historyCurrentProsePreview(historyGroup)}"
-              fontFamily="$fontFamily-monospace"
+              when="{historyCardProsePreview(historyGroup)}"
               fontSize="$fontSize-sm"
-              whiteSpace="pre-wrap"
-              value="{historyCurrentProsePreview(historyGroup)}" />
+              value="{historyCardProsePreview(historyGroup)}" />
             <Text
-              when="{!historyCurrentProsePreview(historyGroup)}"
+              when="{!historyCardProsePreview(historyGroup)}"
               color="$textColor-secondary"
               fontSize="$fontSize-sm"
               value="No prose preview available." />
-            <Text
-              color="$textColor-secondary"
-              fontSize="$fontSize-xs"
-              value="{historyProseProvenance(historyGroup) + ' ' + historyItemFate(historyGroup)}" />
           </VStack>
 
-          <ExpandableItem
-            summary="show item"
-            initiallyExpanded="false"
-            fullWidthSummary="true">
-            <VStack
-              gap="$space-1"
-              padding="$space-2"
-              backgroundColor="$color-surface-50"
-              borderRadius="$borderRadius"
-              overflowX="auto">
-              <Text
-                fontFamily="$fontFamily-monospace"
-                fontSize="$fontSize-sm"
-                whiteSpace="pre-wrap"
-                value="{historyItemJson(historyGroup).slice(0, 30000)}" />
-              <Text
-                when="{historyItemJson(historyGroup).length > 30000}"
-                fontSize="$fontSize-xs"
-                color="$textColor-secondary"
-                value="Item preview truncated at 30 KB for responsiveness." />
-            </VStack>
-          </ExpandableItem>
+          <Link
+            noIndicator
+            onClick="selectedHistoryGroup = historyGroup">
+            <Text value="view item" fontSize="$fontSize-sm" />
+          </Link>
         </VStack>
       </Items>
     </VStack>

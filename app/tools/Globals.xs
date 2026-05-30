@@ -145,6 +145,71 @@ function historyCurrentProsePreview(group) {
   return preview.slice(0, 700).trimEnd() + '\n...';
 }
 
+function historyCardProsePreview(group) {
+  const current = historyCurrentProsePhase(group).prose || '';
+  const normalized = current.replace(/\s+/g, ' ').trim();
+  if (!normalized) return '';
+  if (normalized.length <= 240) return normalized;
+  return normalized.slice(0, 237).trimEnd() + '...';
+}
+
+function historyDateParts(iso) {
+  if (!iso) return { date: '', time: '' };
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) {
+    return { date: iso.slice(0, 10), time: iso.slice(11, 16) };
+  }
+  const pad = (n) => String(n).padStart(2, '0');
+  return {
+    date: d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()),
+    time: pad(d.getHours()) + ':' + pad(d.getMinutes())
+  };
+}
+
+function historyDateRangeLine(group) {
+  const phases = (group && group.phases) || [];
+  if (!phases.length) return '';
+  const first = historyDateParts((phases[0] || {}).iso || '');
+  const last = historyDateParts((phases[phases.length - 1] || {}).iso || '');
+  if (first.date && first.date === last.date) {
+    return 'On ' + first.date + ' from ' + first.time + ' to ' + last.time;
+  }
+  return 'From ' + first.date + ' ' + first.time + ' to ' + last.date + ' ' + last.time;
+}
+
+function historyPhaseLabel(phase) {
+  const summary = ((phase && phase.summary) || '').toLowerCase();
+  if (summary.indexOf('committed') >= 0) return 'Committed';
+  if (summary.indexOf('applied') >= 0) return 'Applied';
+  if (summary.indexOf('proposed') >= 0) return 'Proposed';
+  if (summary.indexOf('dropped') >= 0 || summary.indexOf('pruned') >= 0) return 'Dropped';
+  return (phase && phase.summary) || 'Changed';
+}
+
+function historyPhasePath(group) {
+  const phases = (group && group.phases) || [];
+  const labels = [];
+  for (let i = 0; i < phases.length; i++) {
+    const label = historyPhaseLabel(phases[i]);
+    if (labels[labels.length - 1] !== label) labels.push(label);
+  }
+  return labels.join(' -> ');
+}
+
+function historyItemFieldMarkdown(group, field) {
+  const item = historyCurrentItem(group);
+  const value = item && typeof item[field] === 'string' ? item[field].trim() : '';
+  return value || '';
+}
+
+function historyItemFilesLine(group) {
+  const item = historyCurrentItem(group);
+  if (!item) return '';
+  if (Array.isArray(item.files)) return item.files.join(', ');
+  if (typeof item.file === 'string') return item.file;
+  return '';
+}
+
 function historyProseProvenance(group) {
   const current = historyCurrentProsePhase(group);
   const kind = historyPhaseKind(current.phase) || historyPhaseKind({ summary: group && group.prosePhaseSummary });

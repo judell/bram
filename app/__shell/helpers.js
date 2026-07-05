@@ -1150,15 +1150,14 @@ window.settingsInfoBodies = {
     "`/resume` to open the interactive picker. Empty by default (send nothing).",
   batchCommitActions:
     "## Batch commit actions\n\n" +
-    "Adds Approve all / Drop all controls to the Worklist tab, shown only " +
-    "when 2 or more TO COMMIT (applied) items are present. Approve all " +
-    "authorizes the agent to commit every TO COMMIT item in one turn; the " +
-    "agent picks commit granularity (typically one bundled commit for a " +
-    "coordinated change). Drop all removes every TO COMMIT item from the " +
-    "worklist, but the on-disk file edits stay (same as a single Drop) — " +
-    "ask the agent to discard them if you want them gone. TO APPLY items " +
-    "are unaffected. Issues flagged via closesIssues are not auto-closed " +
-    "in a batch; close them via a single-item Approve or ask the agent.",
+    "Shows Approve all / Drop all when two or more TO COMMIT items are " +
+    "present. Approve all lets the agent commit those items in one turn. " +
+    "Drop all removes them from the worklist; on-disk edits stay unless " +
+    "you ask the agent to discard them.\n\n" +
+    "## Mirroring to GitHub issues\n\n" +
+    "When enabled, issue-linked worklist items post lifecycle comments to " +
+    "GitHub. Bram uses `closesIssues` first, then falls back to an " +
+    "`issue-<number>-...` item id. Batch commits do not auto-close issues.",
   ui:
     "## Show or Hide Target App\n\n" +
     "Usually off. Most people run their app in their own browser, so the " +

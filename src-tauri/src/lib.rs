@@ -268,6 +268,8 @@ struct PaneUrls {
 // an XMLUI app). All fields optional.
 #[derive(Default, Clone, serde::Deserialize)]
 struct ProjectConfig {
+    #[serde(default, rename = "mirrorWorklistLifecycleToIssue")]
+    mirror_worklist_lifecycle_to_issue: Option<bool>,
     #[serde(default)]
     server: Option<ServerConfig>,
     #[serde(default)]
@@ -7082,8 +7084,12 @@ fn gh_issue_close_with_commit<R: tauri::Runtime>(
         }
     }
 
-    let subject = git_commit_subject(app, &full_sha).unwrap_or_default();
-    let comment = close_issue_commit_comment(&repo_slug, &full_sha, &subject);
+    let comment = if worklist_lifecycle_mirror_enabled(app) {
+        String::new()
+    } else {
+        let subject = git_commit_subject(app, &full_sha).unwrap_or_default();
+        close_issue_commit_comment(&repo_slug, &full_sha, &subject)
+    };
     match gh_issue_close(app, number, &comment) {
         Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
         Err(e) => {
@@ -8078,6 +8084,14 @@ fn queue_feedback_draft<R: tauri::Runtime>(
             &format!("op=write feedback_id={} bytes={}", feedback_id, bytes),
         );
     }
+    if worklist_lifecycle_mirror_enabled(&app) {
+        let app_handle = app.clone();
+        let feedback_id = feedback_id.clone();
+        let text = text.clone();
+        std::thread::spawn(move || {
+            mirror_worklist_iteration_feedback_to_issues(&app_handle, &feedback_id, &text);
+        });
+    }
     Ok(())
 }
 
@@ -8802,6 +8816,12 @@ fn project_config_batch_commit_actions(config: Option<ProjectConfig>) -> bool {
         .unwrap_or(false)
 }
 
+fn project_config_mirror_worklist_lifecycle_to_issue(config: Option<ProjectConfig>) -> bool {
+    config
+        .and_then(|c| c.mirror_worklist_lifecycle_to_issue)
+        .unwrap_or(false)
+}
+
 fn agent_provider_from_command(command: Option<&str>) -> &'static str {
     let lower = command.unwrap_or("").to_ascii_lowercase();
     if lower.contains("codex") {
@@ -9000,12 +9020,15 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
         tracing_enabled,
         inspector_tap,
         menus_parse,
+        mirror_worklist_lifecycle_to_issue,
     ) = match config {
         Some(c) => {
             let traces = c.traces;
             let ui = c.ui;
             let menus = c.menus;
             let shell = c.shell;
+            let mirror_worklist_lifecycle_to_issue =
+                c.mirror_worklist_lifecycle_to_issue.unwrap_or(false);
             (
                 // Normalize to the launched provider (`claude` / `codex`) so the
                 // box always shows what actually starts, mapping legacy/blank
@@ -9034,6 +9057,8 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
                 traces.and_then(|t| t.inspector_tap).unwrap_or(false),
                 // Default OFF — menu parsing is opt-in.
                 menus.and_then(|m| m.parse_and_display).unwrap_or(false),
+                // Default OFF — external issue mirroring is opt-in.
+                mirror_worklist_lifecycle_to_issue,
             )
         }
         None => (
@@ -9047,9 +9072,11 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
             false,
             false,
             false,
+            false,
         ),
     };
     serde_json::json!({
+        "mirrorWorklistLifecycleToIssue": mirror_worklist_lifecycle_to_issue,
         "shell": { "agent": agent, "args": args, "firstCommand": first_command, "continueLast": continue_last },
         "worklist": { "batchCommitActions": batch },
         "ui": { "showTargetApp": show_target_app, "toolsPaneHotReload": tools_pane_hot_reload },
@@ -23314,9 +23341,10 @@ fn maybe_snapshot_worklist<R: tauri::Runtime>(app: &AppHandle<R>) {
         eprintln!("[worklist-history] write snapshot failed: {}", e);
     }
     let changelog_path = history_dir.join(format!("{}.md", ts));
-    if let Err(e) = std::fs::write(&changelog_path, changelog) {
+    if let Err(e) = std::fs::write(&changelog_path, &changelog) {
         eprintln!("[worklist-history] write changelog failed: {}", e);
     }
+    mirror_worklist_lifecycle_to_issues(app, &prior_doc, &current_doc, &changelog);
     eprintln!(
         "[worklist-history] snapshot @ {} ({} bytes)",
         ts,
@@ -23615,6 +23643,195 @@ fn worklist_history_item_state(doc: &serde_json::Value, id: &str) -> Option<serd
                 .find(|item| item.get("id").and_then(|v| v.as_str()) == Some(id))
                 .cloned()
         })
+}
+
+fn worklist_lifecycle_item_issue_numbers(item: &serde_json::Value) -> Vec<u64> {
+    let mut out: Vec<u64> = Vec::new();
+    if let Some(nums) = item.get("closesIssues").and_then(|v| v.as_array()) {
+        for n in nums {
+            if let Some(value) = n.as_u64() {
+                if value > 0 && !out.contains(&value) {
+                    out.push(value);
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+            if let Some(rest) = id.strip_prefix("issue-") {
+                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if !digits.is_empty() {
+                    if let Ok(value) = digits.parse::<u64>() {
+                        if value > 0 {
+                            out.push(value);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn worklist_lifecycle_mirror_enabled<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
+    let config = project_root(Some(app)).and_then(|root| load_project_config(&root));
+    project_config_mirror_worklist_lifecycle_to_issue(config)
+}
+
+fn worklist_lifecycle_comment_body(
+    item_id: &str,
+    lifecycle: &str,
+    changelog: &str,
+    commit_sha: Option<&str>,
+) -> String {
+    let mut body = String::new();
+    body.push_str(&format!("bram-lifecycle: {}\n", lifecycle));
+    if let Some(sha) = commit_sha {
+        if !sha.trim().is_empty() {
+            body.push_str(&format!("bram-commit: {}\n", sha.trim()));
+        }
+    }
+    body.push('\n');
+    body.push_str(&format!(
+        "Bram worklist item `{}` moved to `{}`.\n\n",
+        item_id, lifecycle
+    ));
+    body.push_str(changelog.trim());
+    body.push('\n');
+    body
+}
+
+fn worklist_feedback_ref_item_id(feedback_ref: &str) -> Option<String> {
+    if feedback_ref.is_empty()
+        || feedback_ref.contains('/')
+        || feedback_ref.contains('\\')
+        || feedback_ref.contains("..")
+    {
+        return None;
+    }
+    let (ts, item_id) = feedback_ref.split_once('-')?;
+    if ts.is_empty() || !ts.chars().all(|c| c.is_ascii_digit()) || item_id.is_empty() {
+        return None;
+    }
+    Some(item_id.to_string())
+}
+
+fn worklist_iteration_comment_body(item_id: &str, feedback_ref: &str, feedback: &str) -> String {
+    let images = st_extract_image_paths(feedback);
+    let clean_feedback = st_strip_image_paths(feedback);
+    let compact_feedback = clean_feedback
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut body = String::new();
+    body.push_str("bram-lifecycle: iterated\n");
+    body.push_str(&format!("bram-feedback-ref: {}\n\n", feedback_ref));
+    if compact_feedback.is_empty() {
+        body.push_str(&format!("iterate: {}", item_id));
+    } else {
+        body.push_str(&format!("iterate: {} — {}", item_id, compact_feedback));
+    }
+    if !images.is_empty() {
+        body.push_str("\n\nScreenshots:\n");
+        for image in images {
+            body.push_str(&format!("- `{}`\n", image));
+        }
+    } else {
+        body.push('\n');
+    }
+    body.push('\n');
+    body
+}
+
+fn mirror_worklist_iteration_feedback_to_issues<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    feedback_ref: &str,
+    feedback: &str,
+) {
+    if feedback.trim().is_empty() {
+        return;
+    }
+    let Some(item_id) = worklist_feedback_ref_item_id(feedback_ref) else {
+        return;
+    };
+    let doc = worklist_doc(app);
+    let Some(item) = worklist_history_item_state(&doc, &item_id) else {
+        return;
+    };
+    let issues = worklist_lifecycle_item_issue_numbers(&item);
+    if issues.is_empty() {
+        return;
+    }
+    let body = worklist_iteration_comment_body(&item_id, feedback_ref, feedback);
+    for issue in issues {
+        if let Err(e) = gh_issue_comment(app, issue, &body) {
+            eprintln!(
+                "[worklist-lifecycle-mirror] issue #{} item={} state=iterated failed: {}",
+                issue, item_id, e
+            );
+        }
+    }
+}
+
+fn mirror_worklist_lifecycle_to_issues<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    prior_doc: &serde_json::Value,
+    current_doc: &serde_json::Value,
+    changelog: &str,
+) {
+    if !worklist_lifecycle_mirror_enabled(app) {
+        return;
+    }
+    let changes = worklist_history_changelog_items(changelog, current_doc);
+    if changes.is_empty() {
+        return;
+    }
+    let commit_sha = if changes.iter().any(|c| c.kind == "committed") {
+        git_run(app, &["rev-parse", "HEAD"])
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    } else {
+        None
+    };
+    for change in changes {
+        if !matches!(
+            change.kind.as_str(),
+            "proposed" | "applied" | "committed" | "dropped"
+        ) {
+            continue;
+        }
+        let item = if change.kind == "committed" || change.kind == "dropped" {
+            worklist_history_item_state(prior_doc, &change.id)
+        } else {
+            worklist_history_item_state(current_doc, &change.id)
+        };
+        let Some(item) = item else {
+            continue;
+        };
+        let issues = worklist_lifecycle_item_issue_numbers(&item);
+        if issues.is_empty() {
+            continue;
+        }
+        let body = worklist_lifecycle_comment_body(
+            &change.id,
+            &change.kind,
+            changelog,
+            if change.kind == "committed" {
+                commit_sha.as_deref()
+            } else {
+                None
+            },
+        );
+        for issue in issues {
+            if let Err(e) = gh_issue_comment(app, issue, &body) {
+                eprintln!(
+                    "[worklist-lifecycle-mirror] issue #{} item={} state={} failed: {}",
+                    issue, change.id, change.kind, e
+                );
+            }
+        }
+    }
 }
 
 fn worklist_history_json_line(value: &serde_json::Value) -> String {
@@ -26473,7 +26690,9 @@ mod worklist_authorization_tests {
         resource_relative_path, turn_text_has_direct_edit_opt_out,
         validate_post_commit_prune_status, validate_worklist_advance_status,
         validate_worklist_mutate_authorization, worklist_commit_add_args,
-        worklist_commit_files_for_ids, worklist_draft_path,
+        worklist_commit_files_for_ids, worklist_draft_path, worklist_feedback_ref_item_id,
+        worklist_iteration_comment_body, worklist_lifecycle_comment_body,
+        worklist_lifecycle_item_issue_numbers,
     };
     use serde_json::json;
     use std::path::Path;
@@ -26802,11 +27021,63 @@ mod worklist_authorization_tests {
         assert_eq!(draft_markdown_path(dir, "nested/item"), None);
         assert_eq!(draft_markdown_path(dir, "nested\\item"), None);
     }
+
+    #[test]
+    fn lifecycle_issue_numbers_prefer_closes_issues_then_id_prefix() {
+        let with_closes = json!({"id":"issue-209-mirror", "closesIssues":[209, 210, 209]});
+        assert_eq!(
+            worklist_lifecycle_item_issue_numbers(&with_closes),
+            vec![209, 210]
+        );
+        let from_id = json!({"id":"issue-211-parser-cleanup"});
+        assert_eq!(worklist_lifecycle_item_issue_numbers(&from_id), vec![211]);
+        let none = json!({"id":"parser-cleanup"});
+        assert!(worklist_lifecycle_item_issue_numbers(&none).is_empty());
+    }
+
+    #[test]
+    fn lifecycle_comment_body_has_parseable_trailers() {
+        let body = worklist_lifecycle_comment_body(
+            "issue-209-mirror",
+            "committed",
+            "**Summary:** 1 committed",
+            Some("abcdef123456"),
+        );
+        assert!(body.starts_with("bram-lifecycle: committed\nbram-commit: abcdef123456\n"));
+        assert!(body.contains("Bram worklist item `issue-209-mirror` moved to `committed`."));
+        assert!(body.contains("**Summary:** 1 committed"));
+    }
+
+    #[test]
+    fn lifecycle_iteration_feedback_uses_parseable_trailers() {
+        assert_eq!(
+            worklist_feedback_ref_item_id("1783133550173-issue-209-mirror"),
+            Some("issue-209-mirror".to_string())
+        );
+        assert_eq!(worklist_feedback_ref_item_id("issue-209-mirror"), None);
+        assert_eq!(worklist_feedback_ref_item_id("../issue-209"), None);
+
+        let body = worklist_iteration_comment_body(
+            "issue-209-mirror",
+            "1783133550173-issue-209-mirror",
+            "Read this screenshot: @/tmp/shot.png\n[Image: source: /tmp/shot.png]\n\nPlease mirror iterations too.",
+        );
+        assert!(body.starts_with(
+            "bram-lifecycle: iterated\nbram-feedback-ref: 1783133550173-issue-209-mirror\n"
+        ));
+        assert!(body.contains("iterate: issue-209-mirror — Please mirror iterations too."));
+        assert!(body.contains("Screenshots:\n- `/tmp/shot.png`"));
+        assert!(!body.contains("Read this screenshot"));
+        assert!(!body.contains("[Image: source:"));
+    }
 }
 
 #[cfg(test)]
 mod project_config_tests {
-    use super::{project_config_batch_commit_actions, ProjectConfig};
+    use super::{
+        project_config_batch_commit_actions, project_config_mirror_worklist_lifecycle_to_issue,
+        ProjectConfig,
+    };
 
     fn flag(json: &str) -> bool {
         let config = serde_json::from_str::<ProjectConfig>(json).ok();
@@ -26821,6 +27092,22 @@ mod project_config_tests {
         assert!(!flag(r#"{}"#));
         assert!(!flag(r#"{ "worklist": "#));
         assert!(!project_config_batch_commit_actions(None));
+    }
+
+    #[test]
+    fn lifecycle_issue_mirror_defaults_to_false() {
+        let on =
+            serde_json::from_str::<ProjectConfig>(r#"{ "mirrorWorklistLifecycleToIssue": true }"#)
+                .ok();
+        let off =
+            serde_json::from_str::<ProjectConfig>(r#"{ "mirrorWorklistLifecycleToIssue": false }"#)
+                .ok();
+        assert!(project_config_mirror_worklist_lifecycle_to_issue(on));
+        assert!(!project_config_mirror_worklist_lifecycle_to_issue(off));
+        assert!(!project_config_mirror_worklist_lifecycle_to_issue(
+            serde_json::from_str::<ProjectConfig>(r#"{}"#).ok()
+        ));
+        assert!(!project_config_mirror_worklist_lifecycle_to_issue(None));
     }
 }
 

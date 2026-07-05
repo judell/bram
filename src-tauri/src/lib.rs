@@ -678,6 +678,15 @@ fn clear_hook_permission_menu<R: tauri::Runtime>(
             ),
         );
     }
+    // A hook permission-clear is an authoritative outcome — the guarded
+    // tool has resolved (first instrumented capture 2026-07-05 showed
+    // pending=no-unmatched-tool-use) — so it must VOID the held menu
+    // rather than race it (hook-clear-voids-held-menu). Route through the
+    // shared outcome-clear so the shown + HELD menu are cleared and no
+    // phantom survives in PTY_MENU_HELD to re-surface via later redetect.
+    // The unconditional blank below stays as the guaranteed floor for
+    // hook-driven menus that never populated pty_menu_cell.
+    pty_menu_clear_for_outcome(app, "hook-clear");
     turn_state_set_menu(app, None, "hook-permission", "dismissed");
     emit_pty_menu_with_prose(app, &None);
 }

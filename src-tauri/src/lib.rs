@@ -641,12 +641,40 @@ fn clear_hook_permission_menu<R: tauri::Runtime>(
     reason: &str,
 ) {
     if bram_trace_enabled() {
+        // Disambiguation instrumentation (instrument-hook-clear-vs-held-menu):
+        // this hook-clear emits pty-menu-changed=null and can blank the pane
+        // while the outcome-anchored held-menu logic still believes a menu is
+        // pending (2026-07-05 "apparent miss"). Capture, at the moment of the
+        // clear, whether a menu was genuinely pending — so the NEXT recurrence
+        // picks the fix direction without relying on memory:
+        //   pending=no-unmatched-tool-use  -> tool already resolved in JSONL,
+        //     hook-clear was correct and the hold retained a phantom;
+        //   pending=<signature matching menu_tool> -> a real menu was still
+        //     pending, hook-clear was premature.
+        // clear_tool_matches=false (the observed miss cleared with tool=?) is
+        // itself a tell: a generic clear not matched to the shown menu.
+        let held_ms: i64 = pty_menu_held_cell()
+            .lock()
+            .ok()
+            .and_then(|g| g.map(|i| i.elapsed().as_millis() as i64))
+            .unwrap_or(-1);
+        let (menu_tool, menu_sig_present) = pty_menu_cell()
+            .lock()
+            .ok()
+            .and_then(|m| {
+                m.as_ref().map(|menu| {
+                    (menu.tool.clone(), menu.tool_call_signature.is_some())
+                })
+            })
+            .unwrap_or_else(|| ("(none)".to_string(), false));
+        let clear_tool_matches = menu_tool != "(none)" && menu_tool == tool;
+        let pending = lookup_pending_tool_call(app).reason;
         append_bram_trace_line(
             app,
             "hook-menu",
             &format!(
-                "op=clear provider={} tool={} reason={}",
-                provider, tool, reason
+                "op=clear provider={} tool={} reason={} held_ms={} menu_tool={} menu_sig_present={} clear_tool_matches={} pending={}",
+                provider, tool, reason, held_ms, menu_tool, menu_sig_present, clear_tool_matches, pending
             ),
         );
     }

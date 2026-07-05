@@ -521,6 +521,11 @@ static PENDING_TOOLS_RELOAD_FORCED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static STARTUP_RUN_TRACE_EMITTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+// Guards schedule_held_menu_poll so overlapping hold episodes don't stack
+// multiple concurrent pollers. Set to true when a poller thread is live;
+// the thread clears it before exiting.
+static HELD_MENU_POLLER_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 // Cached open handle for the live trace file. Lazy-init on first
 // write: truncate-open, emit the session-start line, store the handle.
@@ -1425,6 +1430,13 @@ struct DismissedMenu {
     when: std::time::Instant,
 }
 static PTY_MENU_SUPPRESSED: OnceLock<Mutex<Option<DismissedMenu>>> = OnceLock::new();
+// Menu HOLD state (menu-pending-outcome-anchored): grid/pattern loss no
+// longer dismisses a shown menu — mid-repaint grid snapshots report a
+// waiting menu absent (72 zero-ms "grace-expired" dismissals in the
+// 2026-07-02..05 traces, with pane-blank gaps up to 53 s while the
+// terminal menu waited). Some(instant) = held since; cleared on
+// re-detection or any real dismissal outcome.
+static PTY_MENU_HELD: OnceLock<Mutex<Option<std::time::Instant>>> = OnceLock::new();
 
 // Instrumentation for the records-stacked-behind-menu bug
 // (`menu-stack-pty-inflight-prose`): correlate when the turn's assistant
@@ -2801,6 +2813,7 @@ fn kill_current_codex_turn_from_pty_cancel<R: tauri::Runtime>(app: &AppHandle<R>
         );
     }
     if agent_status_emit_finished(app, "codex", None, None, "pty-output-user-cancel") {
+        pty_menu_clear_for_outcome(app, "turn-end");
         trace_emit_signal(app, "agent-turn-killed");
         let _ = app.emit("agent-turn-killed", ());
     }
@@ -2949,6 +2962,7 @@ fn schedule_pty_turn_finished<R: tauri::Runtime>(
             // `agent-turn-end` event which fires on any 800 ms silence. The
             // worklist's awaitingResponse gate keys on this; agent-turn-end
             // would clear it on every inter-burst pause.
+            pty_menu_clear_for_outcome(&app_handle, "turn-end");
             trace_emit_signal(&app_handle, "agent-turn-killed");
             let _ = app_handle.emit("agent-turn-killed", ());
         }
@@ -4214,6 +4228,10 @@ fn pty_menu_suppressed_cell() -> &'static Mutex<Option<DismissedMenu>> {
     PTY_MENU_SUPPRESSED.get_or_init(|| Mutex::new(None))
 }
 
+fn pty_menu_held_cell() -> &'static Mutex<Option<std::time::Instant>> {
+    PTY_MENU_HELD.get_or_init(|| Mutex::new(None))
+}
+
 // Sampled timestamp for `[pty-menu-scan]` instrumentation. Throttles
 // scan-trace emission to ~5 Hz so spinner-driven PTY chatter (10+
 // chunks/s during a working turn) doesn't flood bram-trace.log.
@@ -5237,7 +5255,6 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
     // call back into pty_menu_cell (they don't today, but cheap to avoid).
     let mut emit_payload: Option<Option<PtyMenu>> = None;
     let mut recheck_target: Option<String> = None;
-    let expired_grace_elapsed_ms: Option<u128> = None;
 
     if let Ok(mut menu) = pty_menu_cell().lock() {
         let prev_menu = menu.as_ref().cloned();
@@ -5263,9 +5280,12 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
             }
         }
 
-        // Eviction grace removed: the grid reads the screen, so a visible menu is
-        // never lost to byte-window eviction — present:false is an authoritative
-        // dismiss with no grace needed.
+        // NOTE: present:false is NOT authoritative — mid-repaint grid
+        // snapshots report a waiting menu absent (72 false dismissals in
+        // the 2026-07-02..05 traces). Pattern/grid loss therefore HOLDS
+        // the menu (PTY_MENU_HELD) instead of dismissing; only outcomes
+        // dismiss (user input, turn end, JSONL resolution). See
+        // menu-pending-outcome-anchored.
 
         // Don't downgrade a known menu to pending. If detection returned
         // a pending menu but the previous cycle had a definitive tool
@@ -5317,19 +5337,40 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
             }
         }
 
+        // Hold: grid/pattern loss no longer dismisses a live menu
+        // (menu-pending-outcome-anchored). Arm on None-detection with a
+        // real prev menu; release when the menu is re-detected.
+        let hold_for_grid_loss = detected.is_none()
+            && prev_menu
+                .as_ref()
+                .map(|p| p.tool != PENDING_TOOL)
+                .unwrap_or(false);
+        // When re-detecting a menu while hold is armed, release and
+        // record elapsed hold time for the trace.
+        let mut held_released_ms: Option<u128> = None;
+        if detected.is_some() {
+            if let Ok(mut held) = pty_menu_held_cell().lock() {
+                if let Some(instant) = held.take() {
+                    held_released_ms = Some(instant.elapsed().as_millis());
+                }
+            }
+        }
+
         let state_changed = prev_menu.as_ref() != detected.as_ref();
         // First-cycle pending: store the state so the next detect cycle
         // can see we've already waited one, but suppress the `shown`
         // emit and trace until the tool name resolves. Refs #77.
         let detected_is_pending = matches!(detected.as_ref(), Some(d) if d.tool == PENDING_TOOL);
-        let should_emit_change = state_changed && !detected_is_pending;
+        // Suppress change-emit during grid-loss hold: the menu is still live.
+        let should_emit_change = state_changed && !detected_is_pending && !hold_for_grid_loss;
 
         match (&prev_menu, &detected) {
             (None, Some(nm)) => eprintln!("[pty-menu] None -> Some(tool={})", nm.tool),
             (Some(o), Some(nm)) if o != nm => {
                 eprintln!("[pty-menu] Some(tool={}) -> Some(tool={})", o.tool, nm.tool)
             }
-            (Some(o), None) => {
+            // Suppress the buffer-evicted message during a hold; the menu is still live.
+            (Some(o), None) if !hold_for_grid_loss => {
                 eprintln!("[pty-menu] Some(tool={}) -> None (buffer evicted)", o.tool)
             }
             _ => {}
@@ -5337,11 +5378,12 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
 
         if should_emit_change && bram_trace_enabled() {
             // Structured [pty-menu] trace, distinct from the operator
-            // -facing eprintln! above. `reason=byte-pattern` for shows,
-            // `reason=buffer-evicted` when the detector lost the
-            // pattern out of PTY_TAIL without the user dismissing it.
+            // -facing eprintln! above. `reason=byte-pattern` for shows.
             // Explicit user dismissals get their own trace from
-            // pty_menu_clear with reason=user-input.
+            // pty_menu_clear with reason=user-input. The
+            // (None, Some(prev)) arm is dead here: hold_for_grid_loss is
+            // always true when detected is None and prev.tool != PENDING,
+            // so should_emit_change is always false for that case.
             match (&detected, &prev_menu) {
                 (Some(nm), _) => append_bram_trace_line(
                     app,
@@ -5362,50 +5404,80 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                         signature_trace.map(|t| t.3).unwrap_or(0)
                     ),
                 ),
-                (None, Some(prev)) if prev.tool != PENDING_TOOL => {
-                    append_bram_trace_line(
-                        app,
-                        "pty-menu",
-                        &format!(
-                            "state=dismissed tool={} reason=grace-expired elapsed_ms={}",
-                            prev.tool,
-                            expired_grace_elapsed_ms.unwrap_or(0)
-                        ),
-                    );
-                    menu_prose_probe_record_dismiss(app, &prev.tool, "grid-lost");
-                }
                 _ => {}
             }
         }
 
-        *menu = detected;
+        if hold_for_grid_loss {
+            // Arm hold if not already armed; trace only on the first arm
+            // of each hold episode (subsequent None-detects while held
+            // are silent — the menu is still showing and the hold stays).
+            if let Ok(mut held) = pty_menu_held_cell().lock() {
+                if held.is_none() {
+                    *held = Some(std::time::Instant::now());
+                    if bram_trace_enabled() {
+                        let tool = prev_menu.as_ref().map(|p| p.tool.as_str()).unwrap_or("?");
+                        append_bram_trace_line(
+                            app,
+                            "pty-menu",
+                            &format!("state=held tool={} reason=grid-lost", tool),
+                        );
+                    }
+                    // Arm a timer-driven poller so a held menu clears within
+                    // ~2 s even when no JSONL writes arrive (quiet stretch).
+                    // The guard makes a redundant call when the hold was already
+                    // live (the `held.is_none()` check above gates this arm).
+                    schedule_held_menu_poll(app);
+                }
+            }
+            // Leave *menu unchanged; skip cell write and emit.
+        } else {
+            // Trace hold release when menu was re-detected while hold armed.
+            if let Some(held_ms) = held_released_ms {
+                if bram_trace_enabled() {
+                    let tool = detected.as_ref().map(|d| d.tool.as_str()).unwrap_or("?");
+                    append_bram_trace_line(
+                        app,
+                        "pty-menu",
+                        &format!(
+                            "state=released tool={} reason=redetect held_ms={}",
+                            tool, held_ms
+                        ),
+                    );
+                }
+            }
 
-        if should_emit_change {
-            // Emit only when the user-visible menu state changes.
-            // PtyMenu's PartialEq compares `tool` only — text/cursor
-            // drift no longer flaps the emit cadence. Refs #77.
-            emit_payload = Some(menu.clone());
-            // If we're emitting a menu without a signature, schedule a
-            // deferred re-check. JSONL flush typically completes within
-            // sub-100ms after the assistant emits the tool_use, but it
-            // can lag if the user dismisses the menu quickly OR if no
-            // further PTY activity arrives to re-trigger detection.
-            // Without a deferred re-check the PartialEq race-window fix
-            // can't help — there's no cycle to compare against. The
-            // recheck thread polls lookup_pending_tool_call twice
-            // (200ms, 800ms) and emits an updated payload when the
-            // signature arrives. Refs #170.
-            if let Some(m) = menu.as_ref() {
-                menu_prose_probe_record_open(app, &m.tool, m.tool_call_signature.as_deref());
-                let needs_signature = m.tool != PENDING_TOOL && m.tool_call_signature.is_none();
-                // Write produces a `Write(<path>)` signature via PTY-scrape,
-                // so the signature-missing branch above does not fire — but
-                // the markdown content lives only in JSONL `input.content`,
-                // which the same race can delay. Trigger the recheck loop
-                // so `tool_call_content` gets filled in on the next pass.
-                let needs_write_content = m.tool == "Write" && m.tool_call_content.is_none();
-                if needs_signature || needs_write_content {
-                    recheck_target = Some(m.tool.clone());
+            *menu = detected;
+
+            if should_emit_change {
+                // Emit only when the user-visible menu state changes.
+                // PtyMenu's PartialEq compares `tool` only — text/cursor
+                // drift no longer flaps the emit cadence. Refs #77.
+                emit_payload = Some(menu.clone());
+                // If we're emitting a menu without a signature, schedule a
+                // deferred re-check. JSONL flush typically completes within
+                // sub-100ms after the assistant emits the tool_use, but it
+                // can lag if the user dismisses the menu quickly OR if no
+                // further PTY activity arrives to re-trigger detection.
+                // Without a deferred re-check the PartialEq race-window fix
+                // can't help — there's no cycle to compare against. The
+                // recheck thread polls lookup_pending_tool_call twice
+                // (200ms, 800ms) and emits an updated payload when the
+                // signature arrives. Refs #170.
+                if let Some(m) = menu.as_ref() {
+                    menu_prose_probe_record_open(app, &m.tool, m.tool_call_signature.as_deref());
+                    let needs_signature =
+                        m.tool != PENDING_TOOL && m.tool_call_signature.is_none();
+                    // Write produces a `Write(<path>)` signature via PTY-scrape,
+                    // so the signature-missing branch above does not fire — but
+                    // the markdown content lives only in JSONL `input.content`,
+                    // which the same race can delay. Trigger the recheck loop
+                    // so `tool_call_content` gets filled in on the next pass.
+                    let needs_write_content =
+                        m.tool == "Write" && m.tool_call_content.is_none();
+                    if needs_signature || needs_write_content {
+                        recheck_target = Some(m.tool.clone());
+                    }
                 }
             }
         }
@@ -5435,6 +5507,43 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
 // Refs #170.
 // Synchronous one-shot signature recheck driven by a JSONL watcher event.
 // Pairs with `schedule_signature_recheck` (timer-based) for the case
+// Clear a menu that has been HELD (grid-lost) for > 5 s once its guarded
+// tool call resolves or is superseded in the session JSONL. Shared by the
+// JSONL-change watcher and the held-menu poller (a held menu during a
+// quiet stretch produces no watcher ticks — 2026-07-05 soak: an 18.4 s
+// hold whose tool had resolved never cleared). Returns true if a menu is
+// still held afterward (poller uses this to decide whether to re-arm).
+fn maybe_resolved_clear_held_menu<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
+    let held_old_enough = pty_menu_held_cell()
+        .lock()
+        .map(|g| matches!(*g, Some(i) if i.elapsed() > std::time::Duration::from_secs(5)))
+        .unwrap_or(false);
+    if held_old_enough {
+        let held_menu_sig: Option<String> = pty_menu_cell().lock().ok().and_then(|menu| {
+            menu.as_ref().and_then(|m| {
+                if m.tool != PENDING_TOOL {
+                    m.tool_call_signature.clone()
+                } else {
+                    None
+                }
+            })
+        });
+        if let Some(menu_sig) = held_menu_sig {
+            let lookup = lookup_pending_tool_call(app);
+            if let Some(ref lookup_sig) = lookup.signature {
+                if lookup_sig != &menu_sig {
+                    pty_menu_clear_for_outcome(app, "superseded");
+                }
+            } else if lookup.reason == "no-unmatched-tool-use" {
+                pty_menu_clear_for_outcome(app, "jsonl-resolved");
+            }
+            // Other lookup failure reasons (no-session-path, open-failed,
+            // seek-failed, read-failed, metadata-failed) → do nothing.
+        }
+    }
+    pty_menu_held_cell().lock().map(|g| g.is_some()).unwrap_or(false)
+}
+
 // where the timer cadence (5.2 s cumulative) is too tight for very
 // large `tool_use` payloads — Claude flushes a multi-KB issue body
 // only when it's done writing, which can exceed the timer window. The
@@ -5451,63 +5560,63 @@ fn try_signature_recheck_on_jsonl_change<R: tauri::Runtime>(app: &AppHandle<R>) 
             false
         }
     };
-    if !needs_lookup {
-        return;
-    }
-    let lookup = lookup_pending_tool_call(app);
-    if lookup.signature.is_none() {
-        return;
-    }
-    let mut emit_payload: Option<Option<PtyMenu>> = None;
-    let mut updated_tool: Option<String> = None;
-    let mut updated_chars: usize = 0;
-    if let Ok(mut menu) = pty_menu_cell().lock() {
-        if let Some(m) = menu.as_mut() {
-            if m.tool != PENDING_TOOL && m.tool_call_signature.is_none() {
-                updated_tool = Some(m.tool.clone());
-                updated_chars = lookup
-                    .signature
-                    .as_ref()
-                    .map(|s| s.chars().count())
-                    .unwrap_or(0);
-                m.tool_call_signature = lookup.signature.clone();
-                m.tool_call_diff = lookup.diff.clone();
-                m.tool_call_content = lookup.content.clone();
-                m.signature_source = Some("jsonl");
-                emit_payload = Some(menu.clone());
+    // Existing path: fill in a missing signature when JSONL flushes.
+    if needs_lookup {
+        let lookup = lookup_pending_tool_call(app);
+        if lookup.signature.is_some() {
+            let mut emit_payload: Option<Option<PtyMenu>> = None;
+            let mut updated_tool: Option<String> = None;
+            let mut updated_chars: usize = 0;
+            if let Ok(mut menu) = pty_menu_cell().lock() {
+                if let Some(m) = menu.as_mut() {
+                    if m.tool != PENDING_TOOL && m.tool_call_signature.is_none() {
+                        updated_tool = Some(m.tool.clone());
+                        updated_chars = lookup
+                            .signature
+                            .as_ref()
+                            .map(|s| s.chars().count())
+                            .unwrap_or(0);
+                        m.tool_call_signature = lookup.signature.clone();
+                        m.tool_call_diff = lookup.diff.clone();
+                        m.tool_call_content = lookup.content.clone();
+                        m.signature_source = Some("jsonl");
+                        emit_payload = Some(menu.clone());
+                    }
+                }
+            }
+            if let (Some(payload), Some(tool)) = (emit_payload, updated_tool) {
+                let payload = stamp_pty_menu_payload(payload, "setAgentMenuFromTurnState");
+                if bram_trace_enabled() {
+                    let text_source = payload
+                        .as_ref()
+                        .map(pty_menu_preview_source)
+                        .unwrap_or("raw");
+                    let text_chars = payload.as_ref().map(pty_menu_preview_chars).unwrap_or(0);
+                    append_bram_trace_line(
+                        app,
+                        "pty-menu",
+                        &format!(
+                            "state=updated tool={} reason=signature-watcher-recheck signature_source=jsonl signature_chars={} text_source={} text_chars={}",
+                            tool,
+                            updated_chars,
+                            text_source,
+                            text_chars
+                        ),
+                    );
+                }
+                turn_state_set_menu(
+                    app,
+                    payload.clone(),
+                    "pty-menu",
+                    "signature-watcher-recheck",
+                );
+                emit_pty_menu_with_prose(app, &payload);
+                trace_pty_menu_options(app, &payload);
             }
         }
     }
-    if let (Some(payload), Some(tool)) = (emit_payload, updated_tool) {
-        let payload = stamp_pty_menu_payload(payload, "setAgentMenuFromTurnState");
-        if bram_trace_enabled() {
-            let text_source = payload
-                .as_ref()
-                .map(pty_menu_preview_source)
-                .unwrap_or("raw");
-            let text_chars = payload.as_ref().map(pty_menu_preview_chars).unwrap_or(0);
-            append_bram_trace_line(
-                app,
-                "pty-menu",
-                &format!(
-                    "state=updated tool={} reason=signature-watcher-recheck signature_source=jsonl signature_chars={} text_source={} text_chars={} grace_elapsed_ms={}",
-                    tool,
-                    updated_chars,
-                    text_source,
-                    text_chars,
-                    0
-                ),
-            );
-        }
-        turn_state_set_menu(
-            app,
-            payload.clone(),
-            "pty-menu",
-            "signature-watcher-recheck",
-        );
-        emit_pty_menu_with_prose(app, &payload);
-        trace_pty_menu_options(app, &payload);
-    }
+
+    let _ = maybe_resolved_clear_held_menu(app);
 }
 
 fn schedule_signature_recheck<R: tauri::Runtime>(app_handle: AppHandle<R>, target_tool: String) {
@@ -5617,13 +5726,12 @@ fn schedule_signature_recheck<R: tauri::Runtime>(app_handle: AppHandle<R>, targe
                         &app_handle,
                         "pty-menu",
                         &format!(
-                            "state=updated tool={} reason=signature-deferred-recheck signature_source=jsonl delay_ms={} signature_chars={} text_source={} text_chars={} grace_elapsed_ms={}",
+                            "state=updated tool={} reason=signature-deferred-recheck signature_source=jsonl delay_ms={} signature_chars={} text_source={} text_chars={}",
                             target_tool,
                             delay_ms,
                             signature_chars,
                             text_source,
-                            text_chars,
-                            0
+                            text_chars
                         ),
                     );
                 }
@@ -5638,6 +5746,32 @@ fn schedule_signature_recheck<R: tauri::Runtime>(app_handle: AppHandle<R>, targe
                 trace_pty_menu_options(&app_handle, &payload);
             }
             return;
+        }
+    });
+}
+
+// While a menu stays HELD, poll for JSONL resolution independent of the
+// change-watcher so a menu held during silence still clears within ~2 s.
+// Self-re-arming: each tick calls maybe_resolved_clear_held_menu and
+// respawns only while a menu remains held; exits when the held cell
+// clears (redetect release, user input, turn-end, or the resolved-clear
+// itself). Spawn-guarded by HELD_MENU_POLLER_ACTIVE so overlapping holds
+// don't stack multiple pollers.
+fn schedule_held_menu_poll<R: tauri::Runtime>(app: &AppHandle<R>) {
+    use std::sync::atomic::Ordering;
+    if HELD_MENU_POLLER_ACTIVE.swap(true, Ordering::AcqRel) {
+        // A poller is already running; the guard keeps duplicates out.
+        return;
+    }
+    let app_handle = app.clone();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let still_held = maybe_resolved_clear_held_menu(&app_handle);
+            if !still_held {
+                HELD_MENU_POLLER_ACTIVE.store(false, Ordering::Release);
+                return;
+            }
         }
     });
 }
@@ -5921,6 +6055,10 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
     if let Ok(mut tail) = pty_tail_cell().lock() {
         tail.clear();
     }
+    // Clear any grid-loss hold: user input is a definitive outcome.
+    if let Ok(mut held) = pty_menu_held_cell().lock() {
+        *held = None;
+    }
     if let Some((tool, option_labels, signature)) = dismissed {
         let clears_inflight = pty_menu_input_clears_inflight(input);
         // Pending menus never emitted `state=shown` to subscribers
@@ -5945,8 +6083,8 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
                 app,
                 "pty-menu",
                 &format!(
-                    "state=dismissed tool={} reason=user-input grace_elapsed_ms={}",
-                    tool, 0
+                    "state=dismissed tool={} reason=user-input",
+                    tool
                 ),
             );
         }
@@ -5996,6 +6134,48 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
             schedule_send_ledger_escape_sweep(app, now);
         }
     }
+}
+
+// Dismiss the current menu because a definitive outcome was observed —
+// turn end, tool-call superseded, or JSONL-resolved. Unlike user-input
+// dismissal (pty_menu_clear), this path does NOT arm the post-dismiss-
+// redetect suppressor: the menu is gone for a structural reason, not
+// because the user pressed a key while the text was still on screen.
+// Also clears the grid-loss hold so it does not re-open on the next
+// detect cycle.
+fn pty_menu_clear_for_outcome<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str) {
+    let cleared_tool: Option<String> = match pty_menu_cell().lock() {
+        Ok(mut menu) => {
+            let tool = menu.as_ref().and_then(|m| {
+                if m.tool != PENDING_TOOL {
+                    Some(m.tool.clone())
+                } else {
+                    None
+                }
+            });
+            if tool.is_some() {
+                *menu = None;
+            }
+            tool
+        }
+        Err(_) => None,
+    };
+    if let Ok(mut held) = pty_menu_held_cell().lock() {
+        *held = None;
+    }
+    let Some(tool) = cleared_tool else {
+        return;
+    };
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "pty-menu",
+            &format!("state=dismissed tool={} reason={}", tool, reason),
+        );
+    }
+    menu_prose_probe_record_dismiss(app, &tool, reason);
+    turn_state_set_menu(app, None, "pty-menu", "dismissed");
+    emit_replayable_payload(app, "pty-menu-changed", Option::<PtyMenu>::None);
 }
 
 // True when a single-Esc-then-idle soft turn-end should fire: the live JSONL

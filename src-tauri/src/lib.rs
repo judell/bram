@@ -5214,14 +5214,29 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                                     app,
                                     "pty-menu",
                                     &format!(
-                                        "state={} tool={} reason=hook-owns-slot elapsed_ms={} new_options=[{}]{}",
-                                        if stranded { "stranded-reclaim" } else { "suppress-skipped" },
+                                        "state={} tool={} reason={} elapsed_ms={} new_options=[{}]{}",
+                                        if stranded { "stranded-reclaim" } else { "suppressed" },
                                         new_menu.tool,
+                                        if stranded {
+                                            "hook-owns-slot"
+                                        } else {
+                                            "post-dismiss-redetect-hook-owned"
+                                        },
                                         d.when.elapsed().as_millis(),
                                         option_summary,
                                         signature_summary,
                                     ),
                                 );
+                            }
+                            if !stranded {
+                                // Inside the stale-reread window, hook ownership is
+                                // no reason to skip suppression: this is the same
+                                // menu the user just answered, re-read from the
+                                // not-yet-repainted grid. Letting it through
+                                // re-surfaced a ghost the user answered again,
+                                // sending a stray "1" turn to a menu-less PTY
+                                // (2026-07-05, ghost-menu-hook-owned-post-dismiss).
+                                detected = None;
                             }
                         } else if d.when.elapsed() > std::time::Duration::from_millis(600) {
                             // Sustained presence: the grid has re-detected this

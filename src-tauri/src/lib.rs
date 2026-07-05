@@ -1784,6 +1784,46 @@ fn grid_menu_is_bash_command_box(
     is_title(grid_header) || grid_above.iter().any(|l| is_title(l))
 }
 
+// Edit/Write counterpart of grid_menu_is_bash_command_box: positively
+// identify a signature-less Edit or Write approval box from the same
+// capture-robust signals (header first, allow-all option label second).
+// Without this, a slow JSONL flush (#170: multi-KB tool_use payloads)
+// left a REAL Edit menu held by the nosig path for tens of seconds with
+// the pane blank — 2026-07-05: a 33 s helpers.js miss traced via
+// `hold-nosig reason=no-bash-box` lines whose header read "Do you want
+// to make this edit to helpers.js?" the whole time. Returns the tool to
+// build, or None to keep holding (phantom prose / tool-bullet frames
+// match neither this nor the Bash box, preserving the
+// build-claude-nosig-misclassifies-edit-menu guard).
+fn grid_menu_edit_write_tool(
+    grid_opts: &[MenuOption],
+    grid_above: &[String],
+    grid_header: &str,
+) -> Option<&'static str> {
+    let has = |needle: &str| {
+        grid_header.to_lowercase().contains(needle)
+            || grid_above
+                .iter()
+                .any(|l| l.to_lowercase().contains(needle))
+    };
+    if has("do you want to make this edit") {
+        return Some("Edit");
+    }
+    if has("do you want to create") {
+        return Some("Write");
+    }
+    // Secondary, mirrors the Bash "ask again" fallback: Edit/Write menus'
+    // allow-all option reads "Yes, allow all edits during this session…"
+    // and is always captured just above the footer.
+    if grid_opts
+        .iter()
+        .any(|o| o.label.to_lowercase().contains("allow all edits"))
+    {
+        return Some("Edit");
+    }
+    None
+}
+
 // True when a Codex grid snapshot is positively a live approval prompt. Codex
 // is hook-primary, so this only gates the fallback build when the hook did not
 // own the slot. The grid reader can report ordinary transcript prose that
@@ -5077,23 +5117,57 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                                 at_host_ms: None,
                                 signature_source: Some("grid"),
                             });
-                        } else {
-                            // Signature-less AND not a recognizable Bash command box:
-                            // an Edit/Write diff box whose JSONL tool_use hasn't
-                            // flushed yet, or a phantom frame built from assistant
-                            // prose / tool-call bullets. Defaulting to a Bash menu
-                            // here misclassified real Edit menus (Bash/empty/Edit
-                            // flicker, pane never settled) and invented phantom menus
-                            // from non-menu content. Hold the frame — leave
-                            // `detected` as None — so the next poll's signature lookup
-                            // classifies the real tool via the op=build path. See
-                            // worklist build-claude-nosig-misclassifies-edit-menu.
+                        } else if let Some(ew_tool) =
+                            grid_menu_edit_write_tool(&grid_opts, &grid_above, &grid_header)
+                        {
+                            // Signature-less but positively an Edit/Write approval
+                            // box (header / allow-all label). Build from the grid so
+                            // the pane does not depend on Claude's JSONL write timing
+                            // — a multi-KB tool_use can flush 30+ s late (#170), and
+                            // holding for the signature path left the menu invisible
+                            // that whole time (grid-nosig-edit-menu-header-classify).
+                            // The deferred signature recheck enriches signature/diff
+                            // when the record lands, as for nosig Bash menus.
                             if bram_trace_enabled() {
                                 append_bram_trace_line(
                                     app,
                                     "grid-menu",
                                     &format!(
-                                        "op=hold-nosig reason=no-bash-box grid_count={} header={:?} grid=[{}]",
+                                        "op=build-claude-nosig tool={} grid_count={} header={:?} grid=[{}]",
+                                        ew_tool,
+                                        grid_opts.len(),
+                                        grid_header,
+                                        grid_labels()
+                                    ),
+                                );
+                            }
+                            detected = Some(PtyMenu {
+                                tool: ew_tool.to_string(),
+                                text: grid_header.trim().to_string(),
+                                options: grid_opts,
+                                tool_call_signature: None,
+                                tool_call_diff: None,
+                                tool_call_content: None,
+                                cache_source: None,
+                                at_host_ms: None,
+                                signature_source: Some("grid"),
+                            });
+                        } else {
+                            // Signature-less and not a recognizable Bash, Edit, or
+                            // Write box: a phantom frame built from assistant prose /
+                            // tool-call bullets. Defaulting to a Bash menu here
+                            // misclassified real Edit menus (Bash/empty/Edit flicker,
+                            // pane never settled) and invented phantom menus from
+                            // non-menu content. Hold the frame — leave `detected` as
+                            // None — so the next poll's signature lookup classifies
+                            // the real tool via the op=build path. See worklist
+                            // build-claude-nosig-misclassifies-edit-menu.
+                            if bram_trace_enabled() {
+                                append_bram_trace_line(
+                                    app,
+                                    "grid-menu",
+                                    &format!(
+                                        "op=hold-nosig reason=no-tool-box grid_count={} header={:?} grid=[{}]",
                                         grid_opts.len(),
                                         grid_header,
                                         grid_labels()

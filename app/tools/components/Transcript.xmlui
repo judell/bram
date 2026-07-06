@@ -21,10 +21,10 @@
     id="turnsEvt"
     initial="{null}"
     subscribe="{window.bramSubscribeProjectedTurns()}" />
-  <PushSource
-    id="agentMenuEvt"
-    initial="{null}"
-    subscribe="{window.bramSubscribeAgentMenu()}" />
+  <!-- Pending menus no longer interleave here: the footer in Main.xmlui is
+       the single canonical menu surface (same place on every tab, always
+       visible). The menu-prose provisional block went with it; the real
+       assistant record renders when it lands. -->
   <!-- Session metadata for the header: /__sessions/list flags the live
        session with current:true and carries title/mtime/size. Auto-detects
        the provider when none is passed (see list_sessions). Refetched on
@@ -33,6 +33,23 @@
     id="transcriptSessions"
     url="/__sessions/list"
     queryParams="{{ limit: 20 }}" />
+  <!-- Subagent stream for the chip-selected view (agentId prop from the
+       footer chips strip). Refreshed by the dedicated subagents-changed
+       signal (subagent JSONL appends never reach sessions-list-changed —
+       see the watcher's subagents-changed emit). With no agentId the
+       fetch degenerates to the main projection and is ignored by the
+       viewport switch. -->
+  <DataSource
+    id="subagentTurns"
+    url="/__turns"
+    queryParams="{{ agent: $props.agentId || '' }}" />
+  <PushSource
+    id="transcriptSubagentsChangedEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('subagents-changed')}" />
+  <ChangeListener
+    listenTo="{transcriptSubagentsChangedEvt.value &amp;&amp; transcriptSubagentsChangedEvt.value.tick}"
+    onDidChange="() => subagentTurns.refetch()" />
   <PushSource
     id="transcriptSessionsChangedEvt"
     initial="{null}"
@@ -59,9 +76,10 @@
     gap="$space-2"
     onInit="window.__bramSetTranscriptMounted(true)"
     onCleanup="window.__bramSetTranscriptMounted(false)"
-    var.events="{window.__bramTranscriptEventsFromTurns(turnsEvt.value, agentMenuEvt.value)}"
+    var.events="{window.__bramTranscriptEventsFromTurns($props.agentId ? subagentTurns.value : turnsEvt.value, null)}"
     var.expanded="{[]}"
     var.atBottom="{true}"
+    var.repinArmed="{false}"
     var.currentSession="{((transcriptSessions.value || []).find(s => s.current)) || ((transcriptSessions.value || [])[0])}">
     <HStack verticalAlignment="center" gap="$space-2">
       <Heading level="h2">Transcript</Heading>
@@ -72,6 +90,14 @@
       fontSize="$fontSize-sm"
       maxLines="1"
       value="{window.__bramSessionMetaLine(currentSession)}" />
+    <!-- Subagent-view banner: which agent's stream is showing and whether
+         it is still running. The footer's Main chip swaps back. -->
+    <Text
+      when="{$props.agentId}"
+      fontSize="$fontSize-sm"
+      fontWeight="bold"
+      color="$color-primary-600"
+      value="{window.__bramSubagentHeaderLine(subagentTurns.value)}" />
     <Text
       when="{events.length === 0}"
       color="$textColor-secondary"
@@ -80,7 +106,7 @@
       id="transcriptList"
       height="*"
       data="{events}"
-      onScroll="(ev) => atBottom = ev.atEnd">
+      onScroll="(ev) => { if (atBottom !== ev.atEnd) window.__bramIframeTrace('transcript-follow', {atBottom: ev.atEnd, agentId: $props.agentId || 'main'}); atBottom = ev.atEnd }">
       <property name="emptyListTemplate"><Fragment/></property>
       <VStack gap="$space-1" paddingVertical="$space-1">
         <!-- user message -->
@@ -99,6 +125,14 @@
         <Markdown
           when="{$item.kind === 'text'}"
           content="{$item.text}" />
+        <!-- task notification: quiet system-note row (host-reclassified
+             subagent completion report — never rendered as "You") -->
+        <Text
+          when="{$item.kind === 'notification'}"
+          fontSize="$fontSize-sm"
+          fontStyle="italic"
+          color="$textColor-secondary"
+          value="{'🔔 ' + $item.text}" />
         <!-- image strip -->
         <VStack
           when="{$item.kind === 'images'}"
@@ -162,18 +196,13 @@
               fontSize="$fontSize-xs"
               color="{$item.isError ? '$color-danger-600' : '$textColor-secondary'}"
               value="{$item.result}" />
+            <!-- Agent dispatches: in-place peek at the subagent's own
+                 transcript (host-tagged agentId via meta.json sidecar) -->
+            <SubagentPeek
+              when="{$item.agentId}"
+              agentId="{$item.agentId}" />
           </VStack>
         </VStack>
-        <!-- provisional in-flight prose (grid-sourced), shown above the pending
-             menu until the real assistant record lands in the JSONL. Rendered
-             identically to a settled assistant message so the swap is seamless;
-             the content-presence guard in __bramAppendMenuEvents drops
-             it once the real record renders. -->
-        <Markdown
-          when="{$item.kind === 'menu-prose'}"
-          content="{window.__bramStripImagePaths($item.text)}" />
-        <!-- pending agent menu, interleaved at its natural (latest) position -->
-        <AgentMenuView when="{$item.kind === 'menu'}" menu="{$item.menu}" surface="transcript" />
       </VStack>
     </List>
     <!-- Explicit follow-bottom (replaces scrollAnchor="bottom" and its
@@ -184,6 +213,26 @@
          RO-driven re-stick to loop or yank the viewport. -->
     <ChangeListener
       listenTo="{events.length}"
-      onDidChange="atBottom ? transcriptList.scrollToBottom() : null" />
+      onDidChange="() => { if (atBottom) { transcriptList.scrollToBottom(); window.__bramIframeTrace('transcript-repin', {events: events.length, agentId: $props.agentId || 'main'}); } }" />
+    <!-- Viewport switch (chip click: Main ↔ subagent) always lands at the
+         bottom: re-arm follow mode so the async refetch's events swap
+         re-pins via the listener above, and pin immediately for the
+         already-cached data. The 400ms delayed second pin covers the
+         virtualized List's late layout of variable-height rows — the
+         suspected cause of unreliable landings; the subagent-switch /
+         subagent-switch-repin / transcript-repin / transcript-follow
+         traces in bram-trace.log make the next miss self-diagnosing.
+         The re-pin rides an armed one-shot Timer, NOT delay(): a
+         delay()-suspended handler outliving a remount trips the
+         engine's async-unmount lifecycle violation (observed 9× in
+         5 min of chip-switching, 2026-07-06); the Timer is
+         component-owned and disposes cleanly. -->
+    <ChangeListener
+      listenTo="{$props.agentId}"
+      onDidChange="() => { atBottom = true; repinArmed = true; window.__bramIframeTrace('subagent-switch', {agentId: $props.agentId || 'main', events: events.length}); transcriptList.scrollToBottom(); }" />
+    <Timer
+      interval="400"
+      enabled="{repinArmed}"
+      onTick="() => { repinArmed = false; transcriptList.scrollToBottom(); window.__bramIframeTrace('subagent-switch-repin', {agentId: $props.agentId || 'main', events: events.length}); }" />
   </VStack>
 </Component>

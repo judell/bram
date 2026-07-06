@@ -1,4 +1,4 @@
-<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{''}" var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.footerVoiceRecording="{false}" var.headerInflightTick="{0}" var.agentSwitcherSelected="{'claude'}" var.agentSwitching="{false}" var.composerFocused="{false}"
+<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{''}" var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.footerVoiceRecording="{false}" var.headerInflightTick="{0}" var.agentSwitcherSelected="{'claude'}" var.agentSwitching="{false}" var.composerFocused="{false}" var.transcriptAgentId="{''}"
   onInit="updateBannerDismissedVersion = readLocalStorage('bram.updateBannerDismissedVersion', ''); startBramLatestJsonlPush(() => (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || '')">
   <PushSource
     id="mainAgentStatus"
@@ -81,6 +81,29 @@
   <ChangeListener
     listenTo="{footerSessionsChangedEvt.value &amp;&amp; footerSessionsChangedEvt.value.tick}"
     onDidChange="() => footerSessions.refetch()" />
+  <!-- Subagent roster for the footer chips strip. Refreshed by the
+       dedicated subagents-changed signal: subagent JSONL appends are
+       swallowed by the watcher's session-JSONL branch and never reach
+       sessions-list-changed, which left chips stale until the main
+       conversation next moved. -->
+  <DataSource
+    id="footerAgents"
+    url="/__agents"
+    onError="() => null" />
+  <PushSource
+    id="subagentsChangedEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('subagents-changed')}" />
+  <ChangeListener
+    listenTo="{subagentsChangedEvt.value &amp;&amp; subagentsChangedEvt.value.tick}"
+    onDidChange="() => footerAgents.refetch()" />
+  <!-- Pending permission menu for the footer mount — the single canonical
+       menu surface: same place on every tab, always visible. Replaces the
+       Transcript inline interleave and the Worklist-dock mount. -->
+  <PushSource
+    id="footerAgentMenuEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeAgentMenu()}" />
   <!-- Send-ledger affordance (esc/resend redesign phase 3): the host's
        outbound-send ledger drives a PASSIVE status note (no buttons) and
        a composer restore for user-caused strands. The old message-bounced
@@ -399,7 +422,7 @@
     <Pages fallbackPath="/worklist">
       <Page url="/"><Workspace activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}" /></Page>
       <Page url="/worklist"><Workspace activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}" /></Page>
-      <Page url="/transcript"><Transcript /></Page>
+      <Page url="/transcript"><Transcript agentId="{transcriptAgentId}" /></Page>
       <Page url="/status"><Status /></Page>
       <Page url="/settings"><Settings /></Page>
       <Page url="/sessions"><Sessions /></Page>
@@ -423,6 +446,12 @@
              footer-churn / heartbeat-batch instrument. -->
         <FooterAgentStatus enhanceStatus="{enhanceStatus.value}" />
       </HStack>
+      <!-- Canonical pending-menu surface: menus render HERE — below the
+           status verb, above the message box — the same place on every tab,
+           always visible. Replaces the Transcript inline interleave and the
+           Worklist-dock mount (AgentMenuView is self-gating on menu and
+           owns its preview modal, so the footer mount is drop-in). -->
+      <AgentMenuView menu="{footerAgentMenuEvt.value}" surface="footer" />
       <!-- Form exists only for Enter-to-send: TextArea enterSubmits prompts
            the parent Form to submit, and TextArea exposes no standalone Enter
            event. See https://docs.xmlui.org/components/TextArea#entersubmits .
@@ -473,13 +502,61 @@
         </HStack>
       </Form>
       <PastedImageStrip target="message-agent" />
+      <!-- Subagent chips strip (surface-subagent-activity-in-pane):
+           shown only when the active session has subagents. Clicking a
+           chip swaps the Transcript viewport to that agent's stream;
+           Main swaps back. Placement per approval feedback: footer,
+           below the message box, above the session-info line. Capped at
+           the 3 most recently started agents; older ones collapse into
+           the rightmost "+N more" dropdown so a subagent-heavy session
+           can't crowd the footer. Tooltips carry type, description, and
+           the model the subagent ran on. -->
+      <HStack
+        when="{((footerAgents.value || {}).agents || []).length > 0}"
+        gap="$space-1"
+        paddingHorizontal="$space-1"
+        verticalAlignment="center">
+        <Button
+          label="Main"
+          size="xs"
+          variant="outlined"
+          tooltip="Show the main conversation in the Transcript tab"
+          onClick="transcriptAgentId = ''; navigate('/transcript')" />
+        <!-- One continuous reverse-chron read: newest chip leftmost (after
+             Main), then the dropdown continues newest→oldest top-down. -->
+        <Items data="{((footerAgents.value || {}).agents || []).slice(-3).reverse()}">
+          <Button
+            label="{window.__bramAgentChipLabel($item)}"
+            size="xs"
+            variant="outlined"
+            tooltip="{(window.__bramAgentChipTooltip || window.__bramAgentChipLabel)($item)}"
+            onClick="transcriptAgentId = $item.agentId; navigate('/transcript')" />
+        </Items>
+        <DropdownMenu
+          when="{((footerAgents.value || {}).agents || []).length > 3}"
+          label="{'+' + (((footerAgents.value || {}).agents || []).length - 3) + ' more'}"
+          alignment="end"
+          triggerButtonVariant="outlined">
+          <Items data="{((footerAgents.value || {}).agents || []).slice(0, -3).reverse()}">
+            <MenuItem
+              label="{window.__bramAgentChipLabel($item)}"
+              tooltip="{(window.__bramAgentChipTooltip || window.__bramAgentChipLabel)($item)}"
+              onClick="transcriptAgentId = $item.agentId; navigate('/transcript')" />
+          </Items>
+        </DropdownMenu>
+      </HStack>
+      <!-- Session info with the transcript viewport (Main / subagent)
+           reported after the provider token — selection lives here, not
+           in chip styling, so dropdown-overflow agents indicate the same
+           way. Falls back to the plain meta line until a rebuilt
+           helpers.js provides __bramFooterSessionLine. -->
       <Text
         when="{window.__bramSessionMetaLine(window.__bramCurrentSessionOf(footerSessions.value))}"
         fontSize="$fontSize-sm"
         color="$textColor-secondary"
         maxLines="1"
         paddingHorizontal="$space-1"
-        value="{window.__bramSessionMetaLine(window.__bramCurrentSessionOf(footerSessions.value))}" />
+        value="{(window.__bramFooterSessionLine || window.__bramSessionMetaLine)(window.__bramCurrentSessionOf(footerSessions.value), transcriptAgentId, footerAgents.value)}" />
       <!-- Passive send-ledger note — in the sticky footer so it's always
            visible. Text comes from the host ledger's resolved outcomes;
            recovery is automatic, so there are no action buttons. -->

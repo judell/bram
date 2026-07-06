@@ -1,0 +1,50 @@
+<Component name="SubagentPeek">
+  <!-- In-place peek at one subagent's transcript, mounted inside an
+       expanded Agent/Task tool entry (surface-subagent-activity-in-pane).
+       Pure consumer of /__turns?agent= — same projection, same flatten
+       adapter; rows here are a compact subset (full-fidelity view is the
+       footer chip's viewport swap). Mounts only while the tool entry is
+       expanded, so the DataSource fetches on demand; the dedicated
+       subagents-changed signal covers live appends while the dispatch
+       runs. -->
+  <DataSource
+    id="peekTurns"
+    url="/__turns"
+    queryParams="{{ agent: $props.agentId }}" />
+  <PushSource
+    id="peekChangedEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('subagents-changed')}" />
+  <ChangeListener
+    listenTo="{peekChangedEvt.value &amp;&amp; peekChangedEvt.value.tick}"
+    onDidChange="() => peekTurns.refetch()" />
+  <VStack
+    gap="$space-1"
+    backgroundColor="$color-surface-100"
+    padding="$space-2"
+    borderRadius="$borderRadius">
+    <Text
+      fontSize="$fontSize-xs"
+      fontWeight="bold"
+      color="$textColor-secondary"
+      value="{window.__bramSubagentHeaderLine(peekTurns.value)}" />
+    <Items data="{window.__bramTranscriptEventsFromTurns(peekTurns.value, null)}">
+      <VStack gap="$space-0_5">
+        <Text
+          when="{$item.kind === 'user'}"
+          fontSize="$fontSize-xs"
+          color="$textColor-secondary"
+          maxLines="6"
+          value="{$item.text}" />
+        <Markdown
+          when="{$item.kind === 'text'}"
+          content="{$item.text}" />
+        <Text
+          when="{$item.kind === 'tool'}"
+          fontSize="$fontSize-xs"
+          color="$textColor-secondary"
+          value="{'🔧 ' + $item.name + '  ' + $item.summary}" />
+      </VStack>
+    </Items>
+  </VStack>
+</Component>

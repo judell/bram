@@ -204,12 +204,9 @@
         agentDockLaunchResponseText = t;
       }
     }" />
-  <!-- Pending permission menu, same push the Transcript and NavPanel use, so
-       the Worklist-page dock can answer a menu without switching tabs. -->
-  <PushSource
-    id="agentMenuEvt"
-    initial="{null}"
-    subscribe="{window.bramSubscribeAgentMenu()}" />
+  <!-- Pending menus render in the app footer (Main.xmlui) — the single
+       canonical menu surface, visible from every tab — so the dock no
+       longer mounts its own AgentMenuView. -->
   <!-- Send-ledger restore (esc/resend redesign phase 3): a user-caused
        strand puts the user's words back into this page's message box. -->
   <PushSource
@@ -258,7 +255,18 @@
     paddingHorizontal="$space-6"
     paddingBottom="$space-10"
     gap="$space-6"
-    onInit="">
+    var.worklistLandArmed="{true}"
+    onInit="window.scrollAllToBottom()">
+    <!-- Land at the bottom on every visit to this tab (the dock — the
+         conversation's continuation — lives there). The immediate pass in
+         onInit fires before the DataSources populate, so the page grows
+         under it and strands mid-scroll ("doesn't scroll all the way",
+         2026-07-06); the armed one-shot Timer re-pins after content
+         settles — same pattern as the Transcript viewport switch. -->
+    <Timer
+      interval="450"
+      enabled="{worklistLandArmed}"
+      onTick="() => { worklistLandArmed = false; window.scrollAllToBottom(); window.__bramIframeTrace('worklist-land', {}); }" />
     <Theme
       maxWidth-ModalDialog="50vw"
       backgroundColor-ModalDialog="$color-surface-50"
@@ -1222,19 +1230,16 @@ Drop is the clean rejection path; Iterate is what you want if the item just need
         }
       }" />
 
-    <!-- Agent dock: pending permission menu + the agent's last response, so
-         you can read output and answer a menu without leaving the Worklist
-         page for the Transcript tab. Menu = the shared bramSubscribeAgentMenu
-         push (AgentMenuView is self-gating on $props.menu and sends the
-         option keys). Last response = conversationStateDS.value
-         .lastAssistantText.text, bounded with an internal scroller so a long
-         response doesn't lengthen the page. -->
+    <!-- Agent dock: the last exchange, so you can read output without
+         leaving the Worklist page for the Transcript tab. Last response =
+         conversationStateDS.value.lastAssistantText.text, bounded with an
+         internal scroller so a long response doesn't lengthen the page.
+         (Pending menus render in the app footer — Main.xmlui.) -->
     <VStack
-      when="{agentMenuEvt.value || (conversationStateDS.value &amp;&amp; conversationStateDS.value.lastExchange &amp;&amp; conversationStateDS.value.lastExchange.userText) || (conversationStateDS.value &amp;&amp; conversationStateDS.value.lastExchange &amp;&amp; conversationStateDS.value.lastExchange.userImages &amp;&amp; conversationStateDS.value.lastExchange.userImages.length > 0) || (conversationStateDS.value &amp;&amp; conversationStateDS.value.lastAssistantText &amp;&amp; conversationStateDS.value.lastAssistantText.text)}"
+      when="{(conversationStateDS.value &amp;&amp; conversationStateDS.value.lastExchange &amp;&amp; conversationStateDS.value.lastExchange.userText) || (conversationStateDS.value &amp;&amp; conversationStateDS.value.lastExchange &amp;&amp; conversationStateDS.value.lastExchange.userImages &amp;&amp; conversationStateDS.value.lastExchange.userImages.length > 0) || (conversationStateDS.value &amp;&amp; conversationStateDS.value.lastAssistantText &amp;&amp; conversationStateDS.value.lastAssistantText.text)}"
       gap="$space-2"
       width="100%"
       paddingTop="$space-4">
-      <AgentMenuView menu="{agentMenuEvt.value}" surface="worklist" />
       <VStack
         when="{conversationStateDS.value &amp;&amp; conversationStateDS.value.lastExchange &amp;&amp; (conversationStateDS.value.lastExchange.userText || (conversationStateDS.value.lastExchange.userImages &amp;&amp; conversationStateDS.value.lastExchange.userImages.length > 0))}"
         gap="$space-1"

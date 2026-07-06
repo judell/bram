@@ -14392,6 +14392,51 @@ fn st_is_synthetic_codex_message(text: &str) -> bool {
     hits >= 2 || (hits >= 1 && compact.chars().count() > 700)
 }
 
+// Extract the inner text of the first <tag>…</tag> pair in a
+// task-notification envelope. Empty when the tag is absent.
+fn st_tag_value(text: &str, tag: &str) -> String {
+    let open = format!("<{}>", tag);
+    let close = format!("</{}>", tag);
+    let Some(start) = text.find(&open) else {
+        return String::new();
+    };
+    let after = &text[start + open.len()..];
+    let Some(end) = after.find(&close) else {
+        return String::new();
+    };
+    after[..end].trim().to_string()
+}
+
+// Task notifications (subagent completion reports) arrive in the session
+// JSONL as user-role records whose text is a <task-notification> envelope
+// (task-id = the subagent's agentId, tool-use-id = the dispatching
+// Agent/Task tool call). They are agent output, not user turns — a
+// completion report must never wear the "You" badge. Detected here so
+// every consumer of the parse (Transcript, dock lastExchange, Sessions)
+// sees a system-role notification turn instead.
+fn st_notification_turn(text_joined: &str) -> Option<serde_json::Value> {
+    let tn = text_joined.trim_start();
+    if !tn.starts_with("<task-notification>") && !tn.starts_with("[SYSTEM NOTIFICATION") {
+        return None;
+    }
+    let summary = st_tag_value(tn, "summary");
+    let display = if summary.is_empty() {
+        st_cap_chars(tn, 300)
+    } else {
+        summary.clone()
+    };
+    Some(serde_json::json!({
+        "role": "system",
+        "notification": true,
+        "taskId": st_tag_value(tn, "task-id"),
+        "toolUseId": st_tag_value(tn, "tool-use-id"),
+        "status": st_tag_value(tn, "status"),
+        "text": display,
+        "entries": [ { "kind": "text", "text": display } ],
+        "images": [],
+    }))
+}
+
 // Walk JSONL lines and build the structured turn array. Mirrors
 // `_parseLinesToTurns` in Globals.xs.
 fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
@@ -14728,6 +14773,15 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
             .collect::<Vec<_>>()
             .join("\n\n");
 
+        // Task notifications ride user records (and queued_command
+        // attachments); reclassify before any user-turn handling.
+        if role == "user" {
+            if let Some(nturn) = st_notification_turn(&text_joined) {
+                turns.push(nturn);
+                continue;
+            }
+        }
+
         let images: Vec<String> = if !inline_images.is_empty() {
             inline_images
         } else {
@@ -14780,6 +14834,289 @@ fn st_is_duplicate_adjacent_turn(
         .map(|arr| arr.iter().all(text_only))
         .unwrap_or(false);
     prev_text_only && entries.iter().all(text_only)
+}
+
+// =====================================================================
+// Subagent transcripts (worklist item surface-subagent-activity-in-pane).
+// A Claude subagent's transcript is first-class session JSONL at
+// <sessions-dir>/<sid>/subagents/agent-<agentId>.jsonl, with a sidecar
+// agent-<agentId>.meta.json carrying { agentType, description, toolUseId }.
+// The same st_parse_lines_to_turns pass projects them; these helpers
+// resolve paths, read sidecars, and detect the terminal record.
+// =====================================================================
+
+fn st_session_subagents_dir(session_path: &Path) -> Option<PathBuf> {
+    let stem = session_path.file_stem()?.to_str()?;
+    Some(session_path.parent()?.join(stem).join("subagents"))
+}
+
+fn st_valid_agent_id(agent_id: &str) -> bool {
+    !agent_id.is_empty()
+        && agent_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+fn st_read_subagent_meta(subagents_dir: &Path, agent_id: &str) -> Option<serde_json::Value> {
+    let path = subagents_dir.join(format!("agent-{}.meta.json", agent_id));
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+}
+
+// Tail text of a JSONL file, reading at most `max_bytes` — the roster
+// polls every subagent file, so whole-file reads are avoided. The first
+// line of the window may be a mid-record cut; callers skip parse
+// failures.
+fn st_read_tail(path: &Path, max_bytes: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let start = len.saturating_sub(max_bytes);
+    f.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = Vec::with_capacity((len - start) as usize);
+    f.read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+// A subagent transcript does NOT reliably end with a stop_reason
+// "end_turn" record: observed 2026-07-05, a finished agent whose 7
+// assistant records were 5×null + 2×tool_use — no end_turn anywhere —
+// left its chip stuck on "running". Classify from the LAST assistant
+// record in the tail instead:
+//   - stop_reason "end_turn"           → finished
+//   - content carries a tool_use block → running (awaiting the result)
+//   - content carries a text block     → finished (final answer; a
+//     text-then-tool_use turn misreports finished for the sub-second
+//     gap until the tool_use record lands, then flips back)
+//   - otherwise, or no assistant found → running
+// A resumed subagent appends past the terminal records, flipping this
+// back to running naturally.
+fn st_subagent_finished(jsonl_path: &Path) -> bool {
+    let Some(tail) = st_read_tail(jsonl_path, 64 * 1024) else {
+        return false;
+    };
+    for line in tail.lines().rev() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(r) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if r.get("type").and_then(|v| v.as_str()) != Some("assistant") {
+            continue;
+        }
+        let msg = r.get("message");
+        if msg
+            .and_then(|m| m.get("stop_reason"))
+            .and_then(|v| v.as_str())
+            == Some("end_turn")
+        {
+            return true;
+        }
+        if let Some(blocks) = msg.and_then(|m| m.get("content")).and_then(|c| c.as_array()) {
+            if blocks
+                .iter()
+                .any(|b| b.get("type").and_then(|v| v.as_str()) == Some("tool_use"))
+            {
+                return false;
+            }
+            if blocks
+                .iter()
+                .any(|b| b.get("type").and_then(|v| v.as_str()) == Some("text"))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+    false
+}
+
+// Model a subagent ran on: the first assistant record's message.model in
+// its transcript. Head-bounded read — the dispatch prompt (first user
+// record) is KBs, so 128 KB comfortably reaches the first assistant line.
+fn st_subagent_model(jsonl_path: &Path) -> String {
+    use std::io::Read;
+    let Ok(f) = std::fs::File::open(jsonl_path) else {
+        return String::new();
+    };
+    let mut buf = Vec::new();
+    let _ = f.take(128 * 1024).read_to_end(&mut buf);
+    let text = String::from_utf8_lossy(&buf);
+    for line in text.lines() {
+        // The last line may be truncated by the byte cap; parse failures
+        // just skip.
+        let Ok(r) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if r.get("type").and_then(|v| v.as_str()) == Some("assistant") {
+            if let Some(m) = r
+                .get("message")
+                .and_then(|m| m.get("model"))
+                .and_then(|v| v.as_str())
+            {
+                return m.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+// Tag Agent/Task tool entries in the MAIN projection with the agentId of
+// the subagent they dispatched, joined via the meta.json sidecars'
+// toolUseId. Tool entries with an agentId gain the pane's subagent
+// affordances (inline peek, footer chip focus).
+fn st_tag_agent_tool_entries(session_path: &Path, turns: &mut [serde_json::Value]) {
+    let Some(dir) = st_session_subagents_dir(session_path) else {
+        return;
+    };
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let mut by_tool_use: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for entry in rd.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(agent_id) = name
+            .strip_prefix("agent-")
+            .and_then(|s| s.strip_suffix(".meta.json"))
+        else {
+            continue;
+        };
+        if let Some(meta) = st_read_subagent_meta(&dir, agent_id) {
+            if let Some(tid) = meta.get("toolUseId").and_then(|v| v.as_str()) {
+                by_tool_use.insert(tid.to_string(), agent_id.to_string());
+            }
+        }
+    }
+    if by_tool_use.is_empty() {
+        return;
+    }
+    for turn in turns.iter_mut() {
+        let Some(entries) = turn.get_mut("entries").and_then(|e| e.as_array_mut()) else {
+            continue;
+        };
+        for e in entries.iter_mut() {
+            if e.get("kind").and_then(|v| v.as_str()) != Some("tool") {
+                continue;
+            }
+            let Some(id) = e.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if let Some(agent_id) = by_tool_use.get(id) {
+                if let Some(obj) = e.as_object_mut() {
+                    obj.insert(
+                        "agentId".to_string(),
+                        serde_json::Value::String(agent_id.clone()),
+                    );
+                }
+            }
+        }
+    }
+}
+
+// /__turns?agent=<agentId> — project one subagent's transcript under the
+// ACTIVE session. Same parse + projection pass as the main route; the
+// response adds the meta.json label fields and a `finished` flag. No
+// mtime cache: subagent files are small and fetched only while a peek or
+// chip view is open.
+fn read_subagent_turns<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    agent_id: &str,
+) -> Result<Vec<u8>, String> {
+    if !st_valid_agent_id(agent_id) {
+        return Err("invalid agent id".to_string());
+    }
+    let empty = || {
+        serde_json::to_vec(&serde_json::json!({
+            "sid": "", "agentId": agent_id, "turns": [], "finished": false,
+        }))
+        .map_err(|e| e.to_string())
+    };
+    let Some(session_path) = active_session_path(app)? else {
+        return empty();
+    };
+    let Some(dir) = st_session_subagents_dir(&session_path) else {
+        return empty();
+    };
+    let jsonl_path = dir.join(format!("agent-{}.jsonl", agent_id));
+    let Ok(text) = std::fs::read_to_string(&jsonl_path) else {
+        return empty();
+    };
+    let mut turns = st_parse_lines_to_turns(&text);
+    project_user_turns(app, &mut turns);
+    let sid = session_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let meta = st_read_subagent_meta(&dir, agent_id).unwrap_or(serde_json::Value::Null);
+    let body = serde_json::json!({
+        "sid": sid,
+        "agentId": agent_id,
+        "agentType": meta.get("agentType").and_then(|v| v.as_str()).unwrap_or(""),
+        "description": meta.get("description").and_then(|v| v.as_str()).unwrap_or(""),
+        "toolUseId": meta.get("toolUseId").and_then(|v| v.as_str()).unwrap_or(""),
+        "model": st_subagent_model(&jsonl_path),
+        "turns": turns,
+        "finished": st_subagent_finished(&jsonl_path),
+    });
+    serde_json::to_vec(&body).map_err(|e| e.to_string())
+}
+
+// /__agents — roster of the active session's subagents: label fields from
+// each meta.json sidecar, running/finished from the transcript tail,
+// started/updated from file times. Drives the footer chips strip.
+fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String> {
+    let empty = || {
+        serde_json::to_vec(&serde_json::json!({ "sid": "", "agents": [] }))
+            .map_err(|e| e.to_string())
+    };
+    let Some(session_path) = active_session_path(app)? else {
+        return empty();
+    };
+    let Some(dir) = st_session_subagents_dir(&session_path) else {
+        return empty();
+    };
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return empty();
+    };
+    let to_ms = |t: std::time::SystemTime| -> i64 {
+        t.duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0)
+    };
+    let mut agents: Vec<serde_json::Value> = Vec::new();
+    for entry in rd.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(agent_id) = name
+            .strip_prefix("agent-")
+            .and_then(|s| s.strip_suffix(".jsonl"))
+        else {
+            continue;
+        };
+        let path = entry.path();
+        let Ok(md) = entry.metadata() else { continue };
+        let updated_at_ms = md.modified().map(to_ms).unwrap_or(0);
+        let started_at_ms = md.created().map(to_ms).unwrap_or(updated_at_ms);
+        let meta = st_read_subagent_meta(&dir, agent_id).unwrap_or(serde_json::Value::Null);
+        agents.push(serde_json::json!({
+            "agentId": agent_id,
+            "agentType": meta.get("agentType").and_then(|v| v.as_str()).unwrap_or(""),
+            "description": meta.get("description").and_then(|v| v.as_str()).unwrap_or(""),
+            "toolUseId": meta.get("toolUseId").and_then(|v| v.as_str()).unwrap_or(""),
+            "model": st_subagent_model(&path),
+            "finished": st_subagent_finished(&path),
+            "startedAtMs": started_at_ms,
+            "updatedAtMs": updated_at_ms,
+        }));
+    }
+    agents.sort_by_key(|a| a.get("startedAtMs").and_then(|v| v.as_i64()).unwrap_or(0));
+    let sid = session_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let body = serde_json::json!({ "sid": sid, "agents": agents });
+    serde_json::to_vec(&body).map_err(|e| e.to_string())
 }
 
 // Single-entry mtime cache for read_session_turns. The parse runs
@@ -16035,6 +16372,7 @@ fn read_projected_turns<R: tauri::Runtime>(
     }
     let mut turns = st_parse_lines_to_turns(&text);
     project_user_turns(app, &mut turns);
+    st_tag_agent_tool_entries(&path, &mut turns);
     let turn_count = turns.len();
     let sid = path
         .file_stem()
@@ -25379,17 +25717,42 @@ fn route_request<R: tauri::Runtime>(
     if path == "__turns" {
         let mut provider: Option<SessionProvider> = None;
         let mut session_id = String::new();
+        let mut agent_id = String::new();
         for pair in query.split('&') {
             if let Some(v) = pair.strip_prefix("provider=") {
                 provider = SessionProvider::from_str(&percent_decode(v));
             } else if let Some(v) = pair.strip_prefix("id=") {
                 session_id = percent_decode(v);
+            } else if let Some(v) = pair.strip_prefix("agent=") {
+                agent_id = percent_decode(v);
             }
+        }
+        // agent=<agentId>: project that subagent's transcript under the
+        // active session instead of the main conversation.
+        if !agent_id.is_empty() {
+            return match read_subagent_turns(app, &agent_id) {
+                Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
+                Err(e) => {
+                    eprintln!("[http /__turns agent] {}", e);
+                    (500, "text/plain; charset=utf-8", e.into_bytes())
+                }
+            };
         }
         return match read_projected_turns(app, &session_id, provider) {
             Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
             Err(e) => {
                 eprintln!("[http /__turns] {}", e);
+                (500, "text/plain; charset=utf-8", e.into_bytes())
+            }
+        };
+    }
+
+    // Roster of the active session's subagents (footer chips strip).
+    if path == "__agents" {
+        return match read_subagent_roster(app) {
+            Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
+            Err(e) => {
+                eprintln!("[http /__agents] {}", e);
                 (500, "text/plain; charset=utf-8", e.into_bytes())
             }
         };
@@ -28510,6 +28873,25 @@ pub fn run() {
                                 ),
                             );
                         }
+                    }
+
+                    // subagents-changed: any artifact under a session's
+                    // subagents/ dir (agent-*.jsonl appends, meta.json
+                    // writes). Emitted BEFORE the session-JSONL branch below
+                    // because that branch `continue`s — subagent .jsonl
+                    // appends would be swallowed there and never reach the
+                    // sessions-list-changed emit, leaving the footer chips
+                    // and subagent views stale until the MAIN conversation
+                    // next moved (2026-07-05: second chip missing until the
+                    // user's next turn). The footer roster, Transcript
+                    // subagent viewport, and SubagentPeek refetch on this.
+                    let is_subagent_event = event
+                        .paths
+                        .iter()
+                        .any(|p| p.components().any(|c| c.as_os_str() == "subagents"));
+                    if is_subagent_event {
+                        trace_dispatch("subagents", &[]);
+                        emit_replayable_signal(&app_handle, "subagents-changed");
                     }
 
                     // Session JSONL changes get their own dispatch. The

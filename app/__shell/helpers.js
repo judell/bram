@@ -4271,6 +4271,7 @@ window.__bramProjectedTurnEqual = function (a, b) {
     if (x.kind === "tool") {
       if (x.id !== y.id || !!x.isError !== !!y.isError) return false;
       if (((x.result || "").length) !== ((y.result || "").length)) return false;
+      if ((x.agentId || "") !== (y.agentId || "")) return false;
     } else if (x.text !== y.text) {
       return false;
     }
@@ -4484,7 +4485,17 @@ window.__bramTranscriptEventsFromTurns = function (payload, menu) {
     if (!slice) {
       slice = [];
       var baseId = "pt" + ti;
-      if (t.role === "user") {
+      if (t.notification) {
+        // Host-reclassified task notification (subagent completion
+        // report): a quiet system-note row, never a "You" turn.
+        slice.push({
+          id: baseId + "-n",
+          kind: "notification",
+          text: t.text || "",
+          taskId: t.taskId || "",
+          toolUseId: t.toolUseId || "",
+        });
+      } else if (t.role === "user") {
         if (t.text && String(t.text).trim()) {
           slice.push({ id: baseId + "-u", kind: "user", text: t.text });
         }
@@ -4509,6 +4520,7 @@ window.__bramTranscriptEventsFromTurns = function (payload, menu) {
               commandDisplay: e.commandDisplay || "",
               result: e.result || "",
               isError: !!e.isError,
+              agentId: e.agentId || "",
             });
           }
         }
@@ -4526,6 +4538,60 @@ window.__bramTranscriptEventsFromTurns = function (payload, menu) {
 // Pure consumer shim for the Sessions tab: unwrap the /__turns envelope.
 window.__bramProjectedSessionTurns = function (payload) {
   return (payload && payload.turns) || [];
+};
+
+// ---- Subagent visibility (surface-subagent-activity-in-pane) ----
+// The Transcript viewport switch is an inline ternary in Transcript.xmlui
+// (not a helper here) so the hot-reloaded markup keeps working against a
+// running binary that predates this file.
+
+// Footer chip label: description (fallback agentType), truncated, with a
+// running/finished glyph.
+window.__bramAgentChipLabel = function (agent) {
+  if (!agent) return "";
+  var label = agent.description || agent.agentType || agent.agentId || "";
+  if (label.length > 28) label = label.slice(0, 27) + "…";
+  return label + (agent.finished ? " ✓" : " ●");
+};
+
+// Chip / overflow-item tooltip: type, description, and the model the
+// subagent ran on (host-extracted from the transcript head).
+window.__bramAgentChipTooltip = function (agent) {
+  if (!agent) return "";
+  var s = (agent.agentType || "agent") + ": " + (agent.description || agent.agentId || "");
+  if (agent.model) s += " — " + agent.model;
+  return s;
+};
+
+// Footer session-info line with the transcript viewport spliced in after
+// the provider token: "CLAUDE · Main · july5 · id …" or
+// "CLAUDE · subagent: <description> · july5 · id …". The viewport lives
+// HERE rather than in chip styling so dropdown-overflow agents get the
+// same selection indicator as chip agents.
+window.__bramFooterSessionLine = function (session, agentId, roster) {
+  var meta = window.__bramSessionMetaLine(session) || "";
+  var view = "Main";
+  if (agentId) {
+    var agents = (roster && roster.agents) || [];
+    var match = null;
+    for (var i = 0; i < agents.length; i++) {
+      if (agents[i].agentId === agentId) { match = agents[i]; break; }
+    }
+    view = "subagent: " + ((match && (match.description || match.agentType)) || agentId);
+  }
+  if (!meta) return view;
+  var sp = meta.indexOf(" ");
+  if (sp < 0) return meta + " · " + view;
+  return meta.slice(0, sp) + " · " + view + " ·" + meta.slice(sp);
+};
+
+// One-line header for a subagent view (Transcript header + inline peek),
+// from the /__turns?agent= envelope.
+window.__bramSubagentHeaderLine = function (payload) {
+  if (!payload || !payload.agentId) return "";
+  var label = payload.description || payload.agentId;
+  var type = payload.agentType ? " (" + payload.agentType + ")" : "";
+  return "Subagent" + type + ": " + label + " — " + (payload.finished ? "finished" : "running…");
 };
 
 // Passive send-ledger notice (esc/resend redesign phase 3). Returns the

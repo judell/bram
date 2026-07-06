@@ -101,3 +101,13 @@ The soak criteria for the pieces shipped this cycle, all trace-checkable:
   workout (no strand/restore surprises).
 
 When these are quiet, execute the table top-down.
+
+## 6. Execution log
+
+- **2026-07-06 — tranche 1 executed** (`8dea22f`, −192 net): table
+  candidates #1–2 plus the doc-drift fixes. Caller checks re-verified
+  at apply time; the `/__worklist/end` alias was kept (out of scope).
+  The commit gate itself surfaced a staging gap on nothing-matching
+  paths — fixed as `worklist-commit-stage-deletions` so tranches 2+
+  can delete real files through the gate. Candidates #3–6 remain,
+  gated as tabled.

@@ -1488,6 +1488,162 @@ struct DismissedMenu {
 // reader thread; each channel frame is prefixed with the post-chunk
 // value so the parent can stamp grid reports with exact provenance.
 static PTY_OUT_OFFSET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+// The post-dismiss fence decision, pure so `cargo test` exercises it
+// against the live specimens before a commit (causal-menu-staleness +
+// flicker-robust-absence-fence). Inputs: whether the grid has reported
+// the dismissed menu absent since the answer, the dismissal record's
+// tool/signature fingerprint, and the oldest unresolved tool_use's
+// signature from the session JSONL (lookup_pending_tool_call).
+#[derive(Debug, PartialEq, Eq)]
+enum FenceDecision {
+    // Menu never observed absent since the answer: stale pixels.
+    SuppressPreAbsence,
+    // Observed absent once, but the answered call is still unresolved:
+    // a mid-repaint flicker set the fence early. Stale pixels.
+    SuppressPreResult,
+    // Absent and resolved, but the frame is not provably painted from
+    // post-dismissal output (unstamped, or stamped at/before the
+    // dismissal offset). The fast-command hole: a sub-second command
+    // RESOLVES before the flicker redetect arrives, disarming the
+    // result gate while the pixels are still stale (2026-07-06
+    // 02:23:55 — the repro's own verification grep ghosted, admitted
+    // with frame_off=none, and lingered unjanitored).
+    SuppressUnprovenFrame,
+    // Observed absent AND the answered call resolved AND the frame is
+    // provably post-dismissal: a genuinely new menu.
+    Admit,
+}
+
+fn fence_decision(
+    seen_absent: bool,
+    dismissed_tool: &str,
+    dismissed_sig: Option<&str>,
+    pending_sig: Option<&str>,
+    frame_offset: Option<u64>,
+    dismissed_at_offset: u64,
+) -> FenceDecision {
+    if !seen_absent {
+        return FenceDecision::SuppressPreAbsence;
+    }
+    let answered_still_pending = match (pending_sig, dismissed_sig) {
+        (Some(ls), Some(ds)) => ls == ds,
+        // Signature-less dismissal record: compare by tool. Execution is
+        // sequential, so a same-tool unresolved call is the answered one.
+        (Some(ls), None) => ls.starts_with(&format!("{}(", dismissed_tool)),
+        (None, _) => false,
+    };
+    if answered_still_pending {
+        return FenceDecision::SuppressPreResult;
+    }
+    // Third corroborator: frame provenance. Offsets were unsafe as the
+    // SOLE gate (pre-keystroke output can be read post-keystroke and
+    // stamp fresh), but behind the absence gate they are safe — those
+    // racy frames arrive before any absence and are suppressed by gate
+    // one. Unstamped frames stay suppressed: a genuinely new menu keeps
+    // producing reports and the next stamped one admits it, and most
+    // real next-menus differ in fingerprint and never reach this gate.
+    match frame_offset {
+        Some(off) if off > dismissed_at_offset => FenceDecision::Admit,
+        _ => FenceDecision::SuppressUnprovenFrame,
+    }
+}
+
+#[cfg(test)]
+mod fence_decision_tests {
+    use super::{fence_decision, FenceDecision};
+
+    // A frame provably painted after the dismissal offset.
+    const FRESH: Option<u64> = Some(2000);
+    const DISMISS_OFF: u64 = 1000;
+
+    // 2026-07-06 02:07 live specimen: fence set by a flicker frame at
+    // 329ms while the answered command was still executing; the ghost
+    // was admitted and clicked. With the guard: suppressed.
+    #[test]
+    fn flicker_admit_while_answered_call_executes_is_suppressed() {
+        let sig = "Bash(cd /Users/jonudell/bram/src-tauri && cargo build)";
+        assert_eq!(
+            fence_decision(true, "Bash", Some(sig), Some(sig), FRESH, DISMISS_OFF),
+            FenceDecision::SuppressPreResult
+        );
+    }
+
+    // 2026-07-06 02:23:55 live specimen (the fast-command hole): a
+    // ~100ms awk resolved BEFORE the flicker redetect arrived, so
+    // absence and resolution both held while the pixels were stale.
+    // The frame carried no provenance stamp — gate three suppresses.
+    #[test]
+    fn fast_command_stale_frame_is_suppressed() {
+        let sig = "Bash(awk ... bram-trace.log)";
+        assert_eq!(
+            fence_decision(true, "Bash", Some(sig), None, None, DISMISS_OFF),
+            FenceDecision::SuppressUnprovenFrame
+        );
+        // Same but the frame is stamped from PRE-dismissal output.
+        assert_eq!(
+            fence_decision(true, "Bash", Some(sig), None, Some(999), DISMISS_OFF),
+            FenceDecision::SuppressUnprovenFrame
+        );
+    }
+
+    // Signature-less dismissal record (grid-built menu answered before
+    // the JSONL enriched it): same-tool unresolved call keeps the fence.
+    #[test]
+    fn signatureless_dismissal_suppresses_on_same_tool_pending() {
+        assert_eq!(
+            fence_decision(true, "Bash", None, Some("Bash(cargo test)"), FRESH, DISMISS_OFF),
+            FenceDecision::SuppressPreResult
+        );
+        assert_eq!(
+            fence_decision(true, "Edit", None, Some("Bash(cargo test)"), FRESH, DISMISS_OFF),
+            FenceDecision::Admit
+        );
+    }
+
+    // Real re-prompt: the answered call resolved, a matching menu
+    // reappears in a provably post-dismissal frame — admit.
+    #[test]
+    fn resolved_answer_with_fresh_frame_admits() {
+        assert_eq!(
+            fence_decision(true, "Bash", Some("Bash(cargo build)"), None, FRESH, DISMISS_OFF),
+            FenceDecision::Admit
+        );
+    }
+
+    // Next prompt for a DIFFERENT call of the same tool (its tool_use
+    // already flushed): different signature, fresh frame — admit.
+    #[test]
+    fn different_pending_signature_admits() {
+        assert_eq!(
+            fence_decision(
+                true,
+                "Edit",
+                Some("Edit(/a/b.rs)"),
+                Some("Edit(/c/d.rs)"),
+                FRESH,
+                DISMISS_OFF
+            ),
+            FenceDecision::Admit
+        );
+    }
+
+    // No absence observed yet: suppressed regardless of JSONL state or
+    // frame provenance — the 01:25 674ms ghost and every pre-fence
+    // redetect, including the spinner-race frames that stamp fresh
+    // while Claude is still processing the answer.
+    #[test]
+    fn no_absence_always_suppresses() {
+        assert_eq!(
+            fence_decision(false, "Bash", Some("Bash(x)"), None, FRESH, DISMISS_OFF),
+            FenceDecision::SuppressPreAbsence
+        );
+        assert_eq!(
+            fence_decision(false, "Bash", None, Some("Bash(x)"), None, DISMISS_OFF),
+            FenceDecision::SuppressPreAbsence
+        );
+    }
+}
 static PTY_MENU_SUPPRESSED: OnceLock<Mutex<Option<DismissedMenu>>> = OnceLock::new();
 // Menu HOLD state (menu-pending-outcome-anchored): grid/pattern loss no
 // longer dismisses a shown menu — mid-repaint grid snapshots report a
@@ -5338,9 +5494,34 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                         d.at_offset,
                     );
                     if sig_match || labels_match {
-                        if d.seen_absent {
+                        // Flicker guard (flicker-robust-absence-fence): a
+                        // mid-repaint frame can set the absence fence while
+                        // the answered menu's pixels are still coming back —
+                        // two live admits on 2026-07-06, one clicked (stray
+                        // "1"), one lingering ~2 min as a "delayed
+                        // dismissal" until the jsonl-resolved janitor fired.
+                        // A real re-prompt can only follow the answered
+                        // call's RESOLUTION. Decision logic lives in the
+                        // pure fence_decision() (unit-tested against the
+                        // live specimens); the JSONL lookup is only paid
+                        // once the fence is set.
+                        let decision = if d.seen_absent {
+                            let lookup = lookup_pending_tool_call(app);
+                            fence_decision(
+                                true,
+                                &d.tool,
+                                d.signature.as_deref(),
+                                lookup.signature.as_deref(),
+                                detected_frame_offset,
+                                d.at_offset,
+                            )
+                        } else {
+                            FenceDecision::SuppressPreAbsence
+                        };
+                        if decision == FenceDecision::Admit {
                             // The grid saw this menu leave the screen after the
-                            // dismissal; its reappearance is real.
+                            // dismissal AND the answered call has resolved; its
+                            // reappearance is real.
                             if menu_hook_owns_slot() {
                                 // A hook claimed/cleared the slot but the menu is
                                 // demonstrably live on screen — release the stale
@@ -5363,16 +5544,27 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                                 );
                             }
                         } else {
-                            // Menu has not been observed absent since the
-                            // answer: stale pixels, regardless of hook
-                            // ownership or how much time has passed.
+                            // Either the menu has not been observed absent
+                            // since the answer, or it has but the answered
+                            // call is still unresolved (flicker guard):
+                            // stale pixels, regardless of hook ownership or
+                            // how much time has passed.
                             if bram_trace_enabled() {
                                 append_bram_trace_line(
                                     app,
                                     "pty-menu",
                                     &format!(
-                                        "state=suppressed tool={} reason=pre-absence-redetect elapsed_ms={} new_options=[{}]{}{}",
+                                        "state=suppressed tool={} reason={} elapsed_ms={} new_options=[{}]{}{}",
                                         new_menu.tool,
+                                        match decision {
+                                            FenceDecision::SuppressPreResult => {
+                                                "pre-result-redetect"
+                                            }
+                                            FenceDecision::SuppressUnprovenFrame => {
+                                                "unproven-frame-redetect"
+                                            }
+                                            _ => "pre-absence-redetect",
+                                        },
                                         d.when.elapsed().as_millis(),
                                         option_summary,
                                         signature_summary,

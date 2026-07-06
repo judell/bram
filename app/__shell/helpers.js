@@ -4570,14 +4570,19 @@ window.__bramAgentChipTooltip = function (agent) {
 // same selection indicator as chip agents.
 window.__bramFooterSessionLine = function (session, agentId, roster) {
   var meta = window.__bramSessionMetaLine(session) || "";
+  var agents = (roster && roster.agents) || [];
+  // Zero-subagent sessions get the plain meta line: a viewport
+  // indicator that can only ever say "Main" is footer noise, and
+  // footer vertical space is contended (2026-07-06 feedback).
+  if (!agentId && agents.length === 0) return meta;
   var view = "Main";
   if (agentId) {
-    var agents = (roster && roster.agents) || [];
     var match = null;
     for (var i = 0; i < agents.length; i++) {
       if (agents[i].agentId === agentId) { match = agents[i]; break; }
     }
     view = "subagent: " + ((match && (match.description || match.agentType)) || agentId);
+    if (match && match.model) view += " (" + match.model + ")";
   }
   if (!meta) return view;
   var sp = meta.indexOf(" ");
@@ -4590,7 +4595,10 @@ window.__bramFooterSessionLine = function (session, agentId, roster) {
 window.__bramSubagentHeaderLine = function (payload) {
   if (!payload || !payload.agentId) return "";
   var label = payload.description || payload.agentId;
-  var type = payload.agentType ? " (" + payload.agentType + ")" : "";
+  var qual = [];
+  if (payload.agentType) qual.push(payload.agentType);
+  if (payload.model) qual.push(payload.model);
+  var type = qual.length ? " (" + qual.join(" · ") + ")" : "";
   return "Subagent" + type + ": " + label + " — " + (payload.finished ? "finished" : "running…");
 };
 

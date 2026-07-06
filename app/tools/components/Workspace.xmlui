@@ -255,18 +255,7 @@
     paddingHorizontal="$space-6"
     paddingBottom="$space-10"
     gap="$space-6"
-    var.worklistLandArmed="{true}"
-    onInit="window.scrollAllToBottom()">
-    <!-- Land at the bottom on every visit to this tab (the dock — the
-         conversation's continuation — lives there). The immediate pass in
-         onInit fires before the DataSources populate, so the page grows
-         under it and strands mid-scroll ("doesn't scroll all the way",
-         2026-07-06); the armed one-shot Timer re-pins after content
-         settles — same pattern as the Transcript viewport switch. -->
-    <Timer
-      interval="450"
-      enabled="{worklistLandArmed}"
-      onTick="() => { worklistLandArmed = false; window.scrollAllToBottom(); window.__bramIframeTrace('worklist-land', {}); }" />
+    onInit="">
     <Theme
       maxWidth-ModalDialog="50vw"
       backgroundColor-ModalDialog="$color-surface-50"

@@ -15821,15 +15821,28 @@ fn update_send_ledger<R: tauri::Runtime>(
                             "op=transition id={} state=landed cause={} esc_ms={}",
                             entry.id, entry.cause, esc_ms,
                         ));
-                        actions.push(SendLedgerAction::Restore {
-                            id: entry.id.clone(),
-                            text: send_ledger_restore_text(app, entry),
+                        if retracted {
                             // Retracted content must always be preserved
                             // (the agent never took it): strand-style
-                            // restore that merges below an existing draft
-                            // instead of the aborted draft-skip.
-                            aborted: !retracted,
-                        });
+                            // restore that merges below an existing draft.
+                            actions.push(SendLedgerAction::Restore {
+                                id: entry.id.clone(),
+                                text: send_ledger_restore_text(app, entry),
+                                aborted: false,
+                            });
+                        } else {
+                            // esc-aborted-no-composer-restore: the send
+                            // LANDED and the agent's turn began — Esc
+                            // interrupted the RESPONSE, not the send.
+                            // Restoring a delivered message conflates "I
+                            // interrupted the answer" with "my question was
+                            // lost" (live specimen 2026-07-06 20:33). Keep
+                            // the ledger record; leave the composer alone.
+                            transitions.push(format!(
+                                "op=aborted-no-restore id={}",
+                                entry.id,
+                            ));
+                        }
                     }
                 } else {
                     transitions.push(format!(

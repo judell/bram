@@ -4643,7 +4643,11 @@ window.__bramSendLedgerNotice = function (payload) {
     return "Your message" + label + " was interrupted before the agent took it — it's back in the composer.";
   }
   if (latest.state === "landed" && latest.cause === "aborted") {
-    return "Response interrupted — your message" + label + " was delivered.";
+    // Truthful semantics (2026-07-06 esc drill): the send landed as a
+    // transport record but Esc made Claude Code retract and re-stage it
+    // in the TERMINAL input, unanswered — and the copy there prepends
+    // onto the next terminal-submitted send if not cleared.
+    return "Response interrupted — your message" + label + " is back in the terminal input, unanswered. Press Enter there to resend it, or clear it before sending anything new.";
   }
   if (latest.state === "landed" && latest.retried) {
     return "A lost send" + label + " was redelivered automatically.";

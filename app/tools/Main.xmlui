@@ -107,8 +107,8 @@
   <!-- Send-ledger affordance (esc/resend redesign phase 3): the host's
        outbound-send ledger drives a PASSIVE status note (no buttons) and
        a composer restore for user-caused strands. The old message-bounced
-       event still fires host-side but nothing listens; it is deleted in
-       plan step 4. -->
+       emit was deleted with the rest of the bounce heuristics in
+       delete-phase tranche 3a (#214). -->
   <PushSource
     id="sendLedgerEvt"
     initial="{null}"

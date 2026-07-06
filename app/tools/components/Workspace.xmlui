@@ -37,7 +37,6 @@
   var.stagingPastedImageCount="{window.__bramPasteStateSnapshot ? window.__bramPasteStateSnapshot().staging : 0}"
   var.submittedWorklistMessage="{window.__bramRestoreWorklistSubmittedMessage()}"
   var.sessionSubmittedWorklistMessage="{window.__bramRestoreWorklistSessionSubmittedMessage ? window.__bramRestoreWorklistSessionSubmittedMessage() : ''}"
-  var.submittedTurnsBaseline="{window.__bramRestoreWorklistSubmittedBaseline()}"
   var.submittedKind="{window.__bramRestoreWorklistSubmittedKind()}"
   var.agentDockLaunchResponseDim="{window.__bramShouldDimAgentDockOnMount ? window.__bramShouldDimAgentDockOnMount() : true}"
   var.agentDockLaunchResponseText="{''}"
@@ -233,10 +232,10 @@
     onDidChange="(c) => { if (c.newValue &amp;&amp; !c.prevValue) { agentTurnEndedSinceSubmit = false; } }" />
   <ChangeListener
     listenTo="{messageSubmitResult &amp;&amp; messageSubmitResult.seq}"
-    onDidChange="() => { const r = messageSubmitResult || {}; if (!r.submitted) return; pendingPastedImageCount = r.pendingPastedImageCount; pendingPastedImagePaths = r.pendingPastedImagePaths; stagingPastedImageCount = r.stagingPastedImageCount; submittedWorklistImages = r.submittedWorklistImages; submittedWorklistMessage = r.submittedWorklistMessage; submittedTurnsBaseline = r.submittedTurnsBaseline; messageSentAtText = r.messageSentAtText; submittedKind = r.submittedKind; awaitingResponse = r.awaitingResponse; awaitingResponseSetAt = r.awaitingResponseSetAt; }" />
+    onDidChange="() => { const r = messageSubmitResult || {}; if (!r.submitted) return; pendingPastedImageCount = r.pendingPastedImageCount; pendingPastedImagePaths = r.pendingPastedImagePaths; stagingPastedImageCount = r.stagingPastedImageCount; submittedWorklistImages = r.submittedWorklistImages; submittedWorklistMessage = r.submittedWorklistMessage; messageSentAtText = r.messageSentAtText; submittedKind = r.submittedKind; awaitingResponse = r.awaitingResponse; awaitingResponseSetAt = r.awaitingResponseSetAt; }" />
   <ChangeListener
     listenTo="{worklistActionResult &amp;&amp; worklistActionResult.seq}"
-    onDidChange="() => { const r = worklistActionResult || {}; if (!r.submittedKind) return; submittedWorklistImages = r.submittedWorklistImages; submittedWorklistMessage = r.submittedWorklistMessage; submittedTurnsBaseline = r.submittedTurnsBaseline; messageSentAtText = r.messageSentAtText; awaitingResponse = r.awaitingResponse; awaitingResponseSetAt = r.awaitingResponseSetAt; pendingPastedImageCount = r.pendingPastedImageCount; pendingPastedImagePaths = r.pendingPastedImagePaths; stagingPastedImageCount = r.stagingPastedImageCount; submittedItemId = r.submittedItemId; submittedKind = r.submittedKind; submitting = r.submitting; actionProgressScope = r.actionProgressScope || 'item'; actionProgressKind = r.actionProgressKind; actionProgressTick = r.actionProgressTick; const nextDrafts = Object.assign({}, r.feedbackDraftsById || {}); feedbackDraftsById = nextDrafts; window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds || [], feedbackDraftsById: feedbackDraftsById}); }" />
+    onDidChange="() => { const r = worklistActionResult || {}; if (!r.submittedKind) return; submittedWorklistImages = r.submittedWorklistImages; submittedWorklistMessage = r.submittedWorklistMessage; messageSentAtText = r.messageSentAtText; awaitingResponse = r.awaitingResponse; awaitingResponseSetAt = r.awaitingResponseSetAt; pendingPastedImageCount = r.pendingPastedImageCount; pendingPastedImagePaths = r.pendingPastedImagePaths; stagingPastedImageCount = r.stagingPastedImageCount; submittedItemId = r.submittedItemId; submittedKind = r.submittedKind; submitting = r.submitting; actionProgressScope = r.actionProgressScope || 'item'; actionProgressKind = r.actionProgressKind; actionProgressTick = r.actionProgressTick; const nextDrafts = Object.assign({}, r.feedbackDraftsById || {}); feedbackDraftsById = nextDrafts; window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds || [], feedbackDraftsById: feedbackDraftsById}); }" />
   <DataSource
     id="worklistToolDetailDS"
     url="/__tool-detail?id={openToolId || ''}"

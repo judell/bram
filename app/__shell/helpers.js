@@ -1085,12 +1085,6 @@ window.__bramSetWorklistSubmittedKind = function (kind) {
   return kind || null;
 };
 
-window.__bramRestoreWorklistSubmittedBaseline = function () {
-  var raw = __bramReadLS("bram.worklistSubmittedBaseline", "");
-  var n = parseInt(raw, 10);
-  return isNaN(n) ? 0 : n;
-};
-
 window.__bramClearWorklistAwaiting = function (clearDraft) {
   __bramWriteLS("bram.awaitingResponse", "");
   __bramWriteLS("bram.awaitingResponseSetAt", "");
@@ -1328,7 +1322,6 @@ window.__bramSubmitWorklistMessageFast = function (text, voiceTarget) {
   __bramWriteLS("bram.worklistMessageDraft", "");
   __bramWriteLS("bram.worklistSubmittedMessage", userTyped);
   __bramWriteSS("bram.worklistSessionSubmittedMessage", userTyped);
-  __bramWriteLS("bram.worklistSubmittedBaseline", String(baseline || 0));
   window.__bramSetWorklistSubmittedKind("message");
   return { message: userTyped, images: __bramExtractImagePaths(toSend), baseline: baseline, sentAtText: new Date().toLocaleTimeString() };
 };
@@ -1395,13 +1388,6 @@ window.__bramInflightBannerLabel = function (claim) {
 
 window.__bramStripImageMarkerPrefix = function (text) {
   return (text || "").replace(/^(\s*Read this screenshot: @\S+\s*)+/, "").trim();
-};
-
-window.__bramWorklistSubmittedMatches = function (exchangeUserText, submitted) {
-  if (!submitted) return false;
-  var a = window.__bramStripImageMarkerPrefix(exchangeUserText || "").replace(/\s+/g, " ").trim();
-  var b = window.__bramStripImageMarkerPrefix(submitted || "").replace(/\s+/g, " ").trim();
-  return a === b;
 };
 
 // Canonical turn-end observer. Returns true iff the caller should clear
@@ -1861,7 +1847,6 @@ window.__bramRecordWorklistFeedbackConversation = function (text) {
   var baseline = 0;
   __bramWriteLS("bram.worklistSubmittedMessage", message);
   __bramWriteSS("bram.worklistSessionSubmittedMessage", message);
-  __bramWriteLS("bram.worklistSubmittedBaseline", String(baseline));
   window.__bramSetWorklistSubmittedKind("action");
   return { message: message, images: __bramExtractImagePaths(message), baseline: baseline, sentAtText: new Date().toLocaleTimeString() };
 };
@@ -1905,7 +1890,6 @@ window.__bramPrepareWorklistMessageSubmission = function (opts) {
     stagingPastedImageCount: pasteState.staging,
     submittedWorklistImages: submittedImages,
     submittedWorklistMessage: sent.message,
-    submittedTurnsBaseline: sent.baseline,
     messageSentAtText: sent.sentAtText,
     submittedKind: window.__bramSetWorklistSubmittedKind("message"),
     awaitingResponse: true,
@@ -1980,7 +1964,6 @@ window.__bramPrepareWorklistActionSubmission = function (opts) {
     stagingPastedImageCount: pasteState.staging,
     submittedWorklistImages: submittedImages,
     submittedWorklistMessage: sent ? sent.message : "",
-    submittedTurnsBaseline: sent ? sent.baseline : 0,
     messageSentAtText: sent ? sent.sentAtText : "",
     awaitingResponse: awaitingResponse,
     awaitingResponseSetAt: awaitingResponseSetAt,

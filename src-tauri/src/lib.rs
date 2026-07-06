@@ -7896,33 +7896,11 @@ fn pty_spawn(
     Ok(())
 }
 
-// #210 bounce-back detection. The parent shell (main.js) pushes the grid-derived
-// firstOutputSeen here on each transition via `report_first_output_seen`;
-// pty_write_internal reads it (paired with the last toTurn-submit time) to
-// recognize when an agent-pane Esc interrupts a just-sent message before the
-// agent committed it — which strands the message. Esc is NEVER held; on detection
-// the host emits `message-bounced` so the agent pane can offer a resend. None =
-// unknown → no detection (fail-safe quiet).
-fn first_output_seen_cell() -> &'static Mutex<Option<(bool, std::time::Instant)>> {
-    static CELL: OnceLock<Mutex<Option<(bool, std::time::Instant)>>> = OnceLock::new();
-    CELL.get_or_init(|| Mutex::new(None))
-}
-
-fn last_toturn_submit_cell() -> &'static Mutex<Option<std::time::Instant>> {
-    static CELL: OnceLock<Mutex<Option<std::time::Instant>>> = OnceLock::new();
-    CELL.get_or_init(|| Mutex::new(None))
-}
-
-// A send older than this is no longer "recent" — guards against a stale
-// firstOutputSeen=false firing a bounce long after any send.
-const BOUNCE_RECENCY_MS: u128 = 120_000;
-
-#[tauri::command]
-fn report_first_output_seen(value: bool) {
-    if let Ok(mut cell) = first_output_seen_cell().lock() {
-        *cell = Some((value, std::time::Instant::now()));
-    }
-}
+// The #210 bounce-back detection (first_output_seen / last_toturn_submit
+// cells, BOUNCE_RECENCY_MS, the report_first_output_seen command, and the
+// orphaned message-bounced emit) was deleted in delete-phase tranche 3a
+// (#214): the send ledger is the outcome-anchored replacement, and the
+// message-bounced listener died with the Resend button in phase 3.
 
 #[tauri::command]
 fn pty_write(app: AppHandle, data: String, state: State<'_, AppState>) -> Result<(), String> {
@@ -7940,30 +7918,6 @@ fn pty_write_internal<R: tauri::Runtime>(
     data: &str,
     caller_hint: &str,
 ) -> Result<(), String> {
-    // #210 bounce-back detection (NON-BLOCKING — never holds Esc). When the
-    // agent-pane Esc button interrupts before the agent has produced output for a
-    // recent send, Claude Code restores the just-sent message to the input
-    // (strand). Detect that and emit `message-bounced` so the pane can offer a
-    // resend; the Esc still writes normally below.
-    if data == "\x1b" && caller_hint == "pty-intent-sendKeys" {
-        let fos = first_output_seen_cell().lock().ok().and_then(|c| *c);
-        let recent_submit = last_toturn_submit_cell()
-            .lock()
-            .ok()
-            .and_then(|c| *c)
-            .map(|t| t.elapsed().as_millis() < BOUNCE_RECENCY_MS)
-            .unwrap_or(false);
-        if matches!(fos, Some((false, _))) && recent_submit {
-            let _ = app.emit("message-bounced", ());
-            if bram_trace_enabled() {
-                append_bram_trace_line(
-                    app,
-                    "bounce",
-                    "detected=true reason=first-output-false recent-send=true",
-                );
-            }
-        }
-    }
     if bram_trace_enabled() && !data.is_empty() {
         append_bram_trace_line(
             app,
@@ -8025,10 +7979,6 @@ fn pty_write_internal<R: tauri::Runtime>(
         // so this fires once per send on both platforms.
         if caller_hint.starts_with("pty-intent-toTurn") && data.contains('\r') {
             let _ = app.emit("pty-send-sent", serde_json::json!({ "source": caller_hint }));
-            // #210 bounce-back recency anchor: an agent-pane send just landed.
-            if let Ok(mut c) = last_toturn_submit_cell().lock() {
-                *c = Some(std::time::Instant::now());
-            }
         }
     }
     let mut guard = state.0.lock().unwrap();
@@ -28096,7 +28046,6 @@ pub fn run() {
             report_grid_menu,
             report_grid_status,
             report_grid_banner,
-            report_first_output_seen,
             open_devtools,
             open_url,
             save_trace_export,

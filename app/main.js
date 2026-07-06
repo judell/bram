@@ -1086,13 +1086,8 @@ function __gridTraceFirstOutputTransition() {
     const fos = __gridFirstOutputSeen();
     if (fos === __gridLastFOS) return;
     __gridLastFOS = fos;
-    // #210 bounce-back: push the signal to the host, which uses it to recognize a
-    // strand on the agent-pane Esc (non-blocking — it never holds Esc). Only push
-    // a real boolean; null (unknown) leaves the host's last value, and the host
-    // fail-safes to "no detection" on unknown.
-    if (typeof fos === "boolean") {
-      invoke("report_first_output_seen", { value: fos }).catch(() => {});
-    }
+    // (The #210 bounce-heuristic push to the host was deleted in delete-phase
+    // tranche 3a; the FOS transition trace below stays as diagnostics.)
     logShellEvent({
       kind: "iframe-trace",
       subkind: "first-output-seen",

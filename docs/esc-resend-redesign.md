@@ -121,12 +121,22 @@ status note ("your message was restored to the composer" /
 
 ## What gets deleted when the rebuild completes
 
-- Bounce heuristics (first-output + recency pairing) as the decision maker.
-- Iframe landing state: `submittedWorklistMessage`, baseline,
-  `__bramWorklistSubmittedMatches`, and the localStorage awaiting keys.
-- The `\r` Resend.
-- Capture scrapers demoted to diagnostics or removed if the ledger traces
-  supersede them.
+Phase-4 execution ledger (delete-phase tranche 3a, #214, 2026-07-06):
+
+- **DONE** Bounce heuristics (first-output + recency pairing) — host
+  cells/command/detection block and the parent-shell push deleted; the
+  orphaned `message-bounced` emit went with them.
+- **PARTIAL** Iframe landing state: `__bramWorklistSubmittedMatches`
+  (zero callers) and the `submittedTurnsBaseline` plumbing (write-only)
+  deleted. `submittedWorklistMessage` KEPT (read to seed state on
+  mount). `awaitingResponse` + the localStorage awaiting keys KEPT —
+  they are the live submit-button gate; their removal is tranche 3b, a
+  ledger-driven rewire needing its own design.
+- **DONE (phase 3)** The `\r` Resend.
+- **KEPT with evidence** Capture scrapers: demoted to diagnostics as
+  planned, and their send-capture traces did real forensic work on
+  2026-07-06 (both queued-send diagnoses). Revisit after a release in
+  which they go unconsulted.
 
 The redo must end net-simpler, as the transport redesign did.
 

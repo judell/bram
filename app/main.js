@@ -791,8 +791,21 @@ function __escBeginCapture(kind, source) {
   }, ESC_CAPTURE_MS);
 }
 
+// Frame provenance (causal-menu-staleness): the host prefixes every PTY
+// channel frame with the cumulative output offset after the chunk (8
+// bytes LE). __ptyParsedOffset advances only when xterm has PARSED that
+// chunk (term.write completion callback), so a grid report stamped with
+// it states exactly which output its frame was painted from. Host and
+// parent ship in the same binary — no version skew on the framing.
+let __ptyParsedOffset = 0;
 ptyChannel.onmessage = (chunk) => {
-  const bytes = new Uint8Array(chunk);
+  let bytes = new Uint8Array(chunk);
+  let frameEndOffset = 0;
+  if (bytes.length >= 8) {
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, 8);
+    frameEndOffset = dv.getUint32(0, true) + dv.getUint32(4, true) * 4294967296;
+    bytes = bytes.subarray(8);
+  }
   if (
     __escCapture &&
     Date.now() < __escCapture.until &&
@@ -804,7 +817,9 @@ ptyChannel.onmessage = (chunk) => {
       text: __escBytesPreview(bytes, 400),
     });
   }
-  term.write(bytes);
+  term.write(bytes, () => {
+    if (frameEndOffset > __ptyParsedOffset) __ptyParsedOffset = frameEndOffset;
+  });
   if (!startupFitDone) {
     startupFitDone = true;
     // First PTY output means the shell has started and the WebView2 window
@@ -1165,6 +1180,9 @@ function __gridShadowCheck() {
         options: menu.options,
         above: menu.above,
         prose: inflightProse,
+        // Provenance stamp: the PTY output offset this frame was parsed
+        // from (causal-menu-staleness).
+        parsedOffset: __ptyParsedOffset,
       },
     }).catch(() => {});
     // Light shadow trace for comparison against the host's parse.

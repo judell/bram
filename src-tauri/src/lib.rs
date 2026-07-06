@@ -1464,8 +1464,30 @@ struct DismissedMenu {
     tool: String,
     option_labels: Vec<String>,
     signature: Option<String>,
+    // Retained for trace display (elapsed_ms fields); no longer gates
+    // suppression — the absence fence does (causal-menu-staleness).
     when: std::time::Instant,
+    // Cumulative PTY output offset at the dismissal keystroke — trace
+    // provenance only (paired with the grid snapshot's parsed_offset
+    // stamp in suppression traces). Not a decision input: output
+    // generated before the keystroke can be READ after it (spinner
+    // chunks buffered in the kernel), so offset comparison alone would
+    // misclassify a pre-processing frame as fresh.
+    at_offset: u64,
+    // The causal fence: set when the grid reports the menu ABSENT
+    // (present:false) after this dismissal. Until then, any
+    // fingerprint-matched redetect is the same pixels the user already
+    // answered — suppressed, however long the repaint lags. After it,
+    // a fingerprint match is a genuinely new (or never-actually-
+    // answered) menu and shows. No clocks anywhere.
+    seen_absent: bool,
 }
+
+// Cumulative bytes of PTY output ever sent to the parent terminal —
+// the causal meter for menu-staleness decisions. Incremented by the
+// reader thread; each channel frame is prefixed with the post-chunk
+// value so the parent can stamp grid reports with exact provenance.
+static PTY_OUT_OFFSET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static PTY_MENU_SUPPRESSED: OnceLock<Mutex<Option<DismissedMenu>>> = OnceLock::new();
 // Menu HOLD state (menu-pending-outcome-anchored): grid/pattern loss no
 // longer dismisses a shown menu — mid-repaint grid snapshots report a
@@ -4117,6 +4139,15 @@ struct GridMenuSnapshot {
     // Injected into the pty-menu-changed payload at emit time.
     prose: Option<String>,
     ts_ms: u128,
+    // Frame provenance (causal-menu-staleness): the cumulative PTY output
+    // offset the parent's xterm had PARSED when this snapshot was read —
+    // stamped by main.js from the 8-byte offset prefix on every PTY channel
+    // frame. Comparing this against the offset recorded at a user-input
+    // dismissal replaces the clock-based stale-reread windows: a frame
+    // stamped at or before the dismissal offset was painted from
+    // pre-keystroke bytes and cannot be a live menu. None = unstamped
+    // (report raced startup) — treated as stale while a dismissal is armed.
+    parsed_offset: Option<u64>,
 }
 fn latest_grid_menu_cell() -> &'static Mutex<Option<GridMenuSnapshot>> {
     static LATEST_GRID_MENU: OnceLock<Mutex<Option<GridMenuSnapshot>>> = OnceLock::new();
@@ -4215,6 +4246,29 @@ fn report_grid_menu(app: AppHandle, payload: serde_json::Value) {
         };
         if !present {
             *cell = None;
+            // Absence fence (causal-menu-staleness): the grid observed the
+            // menu leave the screen. If a user-input dismissal is armed,
+            // this is the causal proof the answer was processed — from now
+            // on a fingerprint-matched reappearance is a real menu, not a
+            // stale re-read.
+            if let Ok(mut s) = pty_menu_suppressed_cell().lock() {
+                if let Some(d) = s.as_mut() {
+                    if !d.seen_absent {
+                        d.seen_absent = true;
+                        if bram_trace_enabled() {
+                            append_bram_trace_line(
+                                &app,
+                                "pty-menu",
+                                &format!(
+                                    "state=absence-fence tool={} elapsed_ms={}",
+                                    d.tool,
+                                    d.when.elapsed().as_millis(),
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
         } else {
             let options: Vec<MenuOption> = payload
                 .get("options")
@@ -4277,9 +4331,14 @@ fn report_grid_menu(app: AppHandle, payload: serde_json::Value) {
                     &app,
                     "grid-menu",
                     &format!(
-                        "op=report provider={} count={} [{}]",
+                        "op=report provider={} count={} parsed_offset={} [{}]",
                         provider,
                         options.len(),
+                        payload
+                            .get("parsedOffset")
+                            .and_then(|v| v.as_u64())
+                            .map(|o| o.to_string())
+                            .unwrap_or_else(|| "none".to_string()),
                         labels
                     ),
                 );
@@ -4290,6 +4349,7 @@ fn report_grid_menu(app: AppHandle, payload: serde_json::Value) {
                 above,
                 prose,
                 ts_ms: unix_now_ms() as u128,
+                parsed_offset: payload.get("parsedOffset").and_then(|v| v.as_u64()),
             });
         }
     }
@@ -4835,6 +4895,10 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
     // lines below) is now the sole menu detector. Start from None and let the
     // grid override/build set it.
     let mut detected: Option<PtyMenu> = None;
+    // Provenance of the current detection: the parsed-offset stamp of the
+    // grid snapshot every build/override below derives from
+    // (causal-menu-staleness). Consumed by the post-dismiss suppression.
+    let mut detected_frame_offset: Option<u64> = None;
 
     // Sample the scan diagnostic at ~5 Hz so spinner activity doesn't
     // flood the trace. Emit after the lock is released so the trace
@@ -4925,10 +4989,12 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
         above: grid_above,
         prose: _,
         ts_ms: ts,
+        parsed_offset: grid_parsed_offset,
     }) = grid_snapshot
     {
         if (unix_now_ms() as u128).saturating_sub(ts) < 1500 && grid_opts.len() >= 2 {
             grid_was_fresh = true;
+            detected_frame_offset = grid_parsed_offset;
             let grid_labels = || {
                 grid_opts
                     .iter()
@@ -5220,18 +5286,30 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
         }
     }
 
-    // Post-click suppression: if the user just dismissed a menu for
-    // tool X, ignore detections of tool X for ~2s. The just-dismissed
-    // menu's text is still sitting in PTY_TAIL.
+    // Post-click suppression (causal-menu-staleness): after a user-input
+    // dismissal, a fingerprint-matched redetect is judged by the ABSENCE
+    // FENCE, not clocks. Until the grid has once reported the menu gone
+    // (present:false → seen_absent), a matching redetect is the same
+    // pixels the user already answered — suppressed however long the
+    // repaint lags (the 600 ms window ghosted at exactly 600 ms under
+    // repaint load, 2026-07-05). After the fence, a match is a genuinely
+    // new — or never-actually-answered — menu: shown, suppressor retired,
+    // and stale hook ownership released (the old stranded-reclaim case).
+    // Replaces the 600 ms stale-reread window, the 600 ms
+    // sustained-presence threshold, and the 10 s suppression cap.
+    // Offsets (frame_off/dismiss_off) ride the traces as provenance
+    // evidence but are not decision inputs: pre-keystroke output can be
+    // read post-keystroke, so offsets alone misclassify the processing
+    // window.
+    let mut retire_suppressor = false;
     if let Some(ref new_menu) = detected {
         if let Ok(suppressed) = pty_menu_suppressed_cell().lock() {
             if let Some(d) = suppressed.as_ref() {
-                if d.tool == new_menu.tool && d.when.elapsed() < std::time::Duration::from_secs(10)
-                {
-                    // Fingerprint gate (#193): suppress only when this is the
+                if d.tool == new_menu.tool {
+                    // Fingerprint gate (#193): act only when this is the
                     // *identical* just-dismissed menu (matching signature, or
                     // matching option-label set when no signature). A genuinely
-                    // different same-tool menu within the window is let through.
+                    // different same-tool menu passes through untouched.
                     let sig_match = matches!(
                         (&d.signature, &new_menu.tool_call_signature),
                         (Some(a), Some(b)) if a == b
@@ -5252,127 +5330,82 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                         .as_deref()
                         .map(|s| format!(" signature={:?}", s))
                         .unwrap_or_default();
+                    let provenance = format!(
+                        " frame_off={} dismiss_off={}",
+                        detected_frame_offset
+                            .map(|o| o.to_string())
+                            .unwrap_or_else(|| "none".to_string()),
+                        d.at_offset,
+                    );
                     if sig_match || labels_match {
-                        if menu_hook_owns_slot() {
-                            // Hook owns the slot: normally the grid defers show/clear
-                            // to the hook's POSTs. But once the grid has re-detected the
-                            // SAME menu past the stale-reread window (~600ms) while the
-                            // hook still owns the slot, that is the signature of a hook
-                            // that claimed/held the slot yet never surfaced the menu —
-                            // e.g. a worklist-covered Edit the guard allowed: Claude
-                            // still shows its native 1/2/3 prompt, but the hook
-                            // resolved/cleared the slot, so the grid's own
-                            // turn_state_set_menu (gated by menu_hook_owns_slot) stays
-                            // deferred and nothing surfaces.
-                            //
-                            // Reclaim (release-only): drop the stale hook ownership so
-                            // the grid's downstream turn_state_set_menu is no longer
-                            // deferred and can surface the live menu on its next
-                            // transition. Deliberately NOT a forced re-emit: a hook
-                            // clear does not clear pty_menu_cell (see
-                            // emit_pty_menu_with_prose), so when the grid cell already
-                            // matches the detection there is no transition and the menu
-                            // stays stranded — the same outcome as before (no worse
-                            // off), flagged by the `stranded-reclaim` trace for a
-                            // possible force-surface follow-up. Scoped to the
-                            // post-dismiss branch (recent same-tool dismiss + sustained
-                            // presence) so legit hook-surfaced menus and Codex
-                            // hook-primary steady state are untouched.
-                            let stranded =
-                                d.when.elapsed() > std::time::Duration::from_millis(600);
-                            if stranded {
+                        if d.seen_absent {
+                            // The grid saw this menu leave the screen after the
+                            // dismissal; its reappearance is real.
+                            if menu_hook_owns_slot() {
+                                // A hook claimed/cleared the slot but the menu is
+                                // demonstrably live on screen — release the stale
+                                // ownership so turn_state_set_menu can surface it.
                                 set_menu_hook_owner(None);
                             }
+                            retire_suppressor = true;
                             if bram_trace_enabled() {
                                 append_bram_trace_line(
                                     app,
                                     "pty-menu",
                                     &format!(
-                                        "state={} tool={} reason={} elapsed_ms={} new_options=[{}]{}",
-                                        if stranded { "stranded-reclaim" } else { "suppressed" },
-                                        new_menu.tool,
-                                        if stranded {
-                                            "hook-owns-slot"
-                                        } else {
-                                            "post-dismiss-redetect-hook-owned"
-                                        },
-                                        d.when.elapsed().as_millis(),
-                                        option_summary,
-                                        signature_summary,
-                                    ),
-                                );
-                            }
-                            if !stranded {
-                                // Inside the stale-reread window, hook ownership is
-                                // no reason to skip suppression: this is the same
-                                // menu the user just answered, re-read from the
-                                // not-yet-repainted grid. Letting it through
-                                // re-surfaced a ghost the user answered again,
-                                // sending a stray "1" turn to a menu-less PTY
-                                // (2026-07-05, ghost-menu-hook-owned-post-dismiss).
-                                detected = None;
-                            }
-                        } else if d.when.elapsed() > std::time::Duration::from_millis(600) {
-                            // Sustained presence: the grid has re-detected this
-                            // menu continuously well past the window a stale
-                            // buffer re-read survives (~1-2 scans). So it is a
-                            // LIVE menu whose hook ownership was dropped by a
-                            // spurious/foreign clear — show it instead of
-                            // stranding it (the second miss class). The dismiss
-                            // record is left in place; subsequent scans keep
-                            // resurrecting until a genuine new dismiss replaces it.
-                            if bram_trace_enabled() {
-                                append_bram_trace_line(
-                                    app,
-                                    "pty-menu",
-                                    &format!(
-                                        "state=suppress-skipped tool={} reason=sustained-presence elapsed_ms={} new_options=[{}]{}",
+                                        "state=shown tool={} reason=post-absence-reappear elapsed_ms={} new_options=[{}]{}{}",
                                         new_menu.tool,
                                         d.when.elapsed().as_millis(),
                                         option_summary,
                                         signature_summary,
+                                        provenance,
                                     ),
                                 );
                             }
                         } else {
-                            eprintln!(
-                                "[pty-menu] suppressed re-detection of tool={} ({}ms after dismissal)",
-                                new_menu.tool,
-                                d.when.elapsed().as_millis()
-                            );
+                            // Menu has not been observed absent since the
+                            // answer: stale pixels, regardless of hook
+                            // ownership or how much time has passed.
                             if bram_trace_enabled() {
                                 append_bram_trace_line(
                                     app,
                                     "pty-menu",
                                     &format!(
-                                        "state=suppressed tool={} reason=post-dismiss-redetect elapsed_ms={} new_options=[{}]{}",
+                                        "state=suppressed tool={} reason=pre-absence-redetect elapsed_ms={} new_options=[{}]{}{}",
                                         new_menu.tool,
                                         d.when.elapsed().as_millis(),
                                         option_summary,
                                         signature_summary,
+                                        provenance,
                                     ),
                                 );
                             }
                             detected = None;
                         }
                     } else if bram_trace_enabled() {
-                        // Same tool + window, but the fingerprint differs: a
-                        // genuinely new menu, not a stale re-read. Let it through
+                        // Same tool but the fingerprint differs: a genuinely
+                        // new menu, not a stale re-read. Let it through
                         // (this is the #193 over-fire the old tool-only key hit).
                         append_bram_trace_line(
                             app,
                             "pty-menu",
                             &format!(
-                                "state=shown tool={} reason=post-dismiss-fingerprint-mismatch elapsed_ms={} new_options=[{}]{}",
+                                "state=shown tool={} reason=post-dismiss-fingerprint-mismatch elapsed_ms={} new_options=[{}]{}{}",
                                 new_menu.tool,
                                 d.when.elapsed().as_millis(),
                                 option_summary,
                                 signature_summary,
+                                provenance,
                             ),
                         );
                     }
                 }
             }
+        }
+    }
+    if retire_suppressor {
+        if let Ok(mut s) = pty_menu_suppressed_cell().lock() {
+            *s = None;
         }
     }
 
@@ -6221,6 +6254,8 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
                 option_labels,
                 signature,
                 when: std::time::Instant::now(),
+                at_offset: PTY_OUT_OFFSET.load(std::sync::atomic::Ordering::SeqCst),
+                seen_absent: false,
             });
         }
         if clears_inflight {
@@ -8142,7 +8177,18 @@ fn pty_spawn(
                             kill_current_codex_turn_from_pty_cancel(&app_for_thread);
                         }
                     }
-                    if on_data.send(buf[..n].to_vec()).is_err() {
+                    // Prefix every frame with the cumulative output offset
+                    // AFTER this chunk (8 bytes LE), so the parent can stamp
+                    // grid reports with exact frame provenance
+                    // (causal-menu-staleness). Parent and host ship in the
+                    // same binary, so the framing has no version skew.
+                    let offset_after = PTY_OUT_OFFSET
+                        .fetch_add(n as u64, std::sync::atomic::Ordering::SeqCst)
+                        + n as u64;
+                    let mut framed = Vec::with_capacity(8 + n);
+                    framed.extend_from_slice(&offset_after.to_le_bytes());
+                    framed.extend_from_slice(&buf[..n]);
+                    if on_data.send(framed).is_err() {
                         break;
                     }
                 }

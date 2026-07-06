@@ -1481,6 +1481,15 @@ struct DismissedMenu {
     // a fingerprint match is a genuinely new (or never-actually-
     // answered) menu and shows. No clocks anywhere.
     seen_absent: bool,
+    // The answered call's tool_use id, captured at dismissal (the
+    // menu's call is the oldest unresolved at that moment). Gate two
+    // keys on THIS, not the signature: a retried identical command is
+    // a new tool_use with the same signature, and signature-keyed
+    // suppression ate its real menu for 20+ s
+    // (fence-gate-two-answered-id, 2026-07-06 14:11). None when the
+    // record had not flushed by dismissal time — gate two then falls
+    // back to signature comparison.
+    answered_id: Option<String>,
 }
 
 // Cumulative bytes of PTY output ever sent to the parent terminal —
@@ -1515,24 +1524,41 @@ enum FenceDecision {
     Admit,
 }
 
-fn fence_decision(
-    seen_absent: bool,
+// Is the ANSWERED call still unresolved? Keys on tool_use identity when
+// the dismissal captured it: nothing older than the answered call can
+// appear later, so "oldest unresolved id == answered id" is exact — and
+// a retried identical command (new id, same signature) correctly reads
+// as NOT the answered call (fence-gate-two-answered-id). Falls back to
+// signature/tool comparison only when the dismissal-time record had not
+// flushed (answered_id None).
+fn answered_call_still_pending(
+    answered_id: Option<&str>,
     dismissed_tool: &str,
     dismissed_sig: Option<&str>,
+    pending_id: Option<&str>,
     pending_sig: Option<&str>,
+) -> bool {
+    if let Some(aid) = answered_id {
+        return pending_id == Some(aid);
+    }
+    match (pending_sig, dismissed_sig) {
+        (Some(ls), Some(ds)) => ls == ds,
+        // Signature-less dismissal record: compare by tool. Execution is
+        // sequential, so a same-tool unresolved call is the answered one.
+        (Some(ls), None) => ls.starts_with(&format!("{}(", dismissed_tool)),
+        (None, _) => false,
+    }
+}
+
+fn fence_decision(
+    seen_absent: bool,
+    answered_still_pending: bool,
     frame_offset: Option<u64>,
     dismissed_at_offset: u64,
 ) -> FenceDecision {
     if !seen_absent {
         return FenceDecision::SuppressPreAbsence;
     }
-    let answered_still_pending = match (pending_sig, dismissed_sig) {
-        (Some(ls), Some(ds)) => ls == ds,
-        // Signature-less dismissal record: compare by tool. Execution is
-        // sequential, so a same-tool unresolved call is the answered one.
-        (Some(ls), None) => ls.starts_with(&format!("{}(", dismissed_tool)),
-        (None, _) => false,
-    };
     if answered_still_pending {
         return FenceDecision::SuppressPreResult;
     }
@@ -1551,79 +1577,82 @@ fn fence_decision(
 
 #[cfg(test)]
 mod fence_decision_tests {
-    use super::{fence_decision, FenceDecision};
+    use super::{answered_call_still_pending, fence_decision, FenceDecision};
 
     // A frame provably painted after the dismissal offset.
     const FRESH: Option<u64> = Some(2000);
     const DISMISS_OFF: u64 = 1000;
 
-    // 2026-07-06 02:07 live specimen: fence set by a flicker frame at
-    // 329ms while the answered command was still executing; the ghost
-    // was admitted and clicked. With the guard: suppressed.
+    // 2026-07-06 14:11 live specimen (fence-gate-two-answered-id): a
+    // failed command retried VERBATIM — identical signature, new
+    // tool_use id. Signature-keyed gate two suppressed the retry's
+    // real menu for 20+ s; identity-keyed gate two must not.
+    #[test]
+    fn identical_retry_is_not_the_answered_call() {
+        let sig = "Bash(cd /Users/jonudell/bram/src-tauri && cargo build)";
+        assert!(!answered_call_still_pending(
+            Some("toolu_answered"),
+            "Bash",
+            Some(sig),
+            Some("toolu_retry"),
+            Some(sig),
+        ));
+        // And with the answered call genuinely still executing, the
+        // SAME inputs minus the retry keep suppressing.
+        assert!(answered_call_still_pending(
+            Some("toolu_answered"),
+            "Bash",
+            Some(sig),
+            Some("toolu_answered"),
+            Some(sig),
+        ));
+    }
+
+    // Flush-lag fallback: dismissal captured no id → legacy signature
+    // comparison (2026-07-06 02:07 flicker specimen shape) and the
+    // signature-less tool-prefix variant.
+    #[test]
+    fn missing_answered_id_falls_back_to_signature() {
+        let sig = "Bash(cargo build)";
+        assert!(answered_call_still_pending(None, "Bash", Some(sig), Some("toolu_x"), Some(sig)));
+        assert!(answered_call_still_pending(None, "Bash", None, Some("toolu_x"), Some("Bash(cargo test)")));
+        assert!(!answered_call_still_pending(None, "Edit", None, Some("toolu_x"), Some("Bash(cargo test)")));
+        assert!(!answered_call_still_pending(None, "Bash", Some(sig), None, None));
+    }
+
+    // 2026-07-06 02:07 live specimen: fence set by a flicker frame
+    // while the answered command was still executing — suppressed.
     #[test]
     fn flicker_admit_while_answered_call_executes_is_suppressed() {
-        let sig = "Bash(cd /Users/jonudell/bram/src-tauri && cargo build)";
         assert_eq!(
-            fence_decision(true, "Bash", Some(sig), Some(sig), FRESH, DISMISS_OFF),
+            fence_decision(true, true, FRESH, DISMISS_OFF),
             FenceDecision::SuppressPreResult
         );
     }
 
     // 2026-07-06 02:23:55 live specimen (the fast-command hole): a
-    // ~100ms awk resolved BEFORE the flicker redetect arrived, so
-    // absence and resolution both held while the pixels were stale.
-    // The frame carried no provenance stamp — gate three suppresses.
+    // ~100ms awk resolved BEFORE the flicker redetect arrived. The
+    // frame carried no provenance stamp — gate three suppresses; same
+    // for a frame stamped from PRE-dismissal output.
     #[test]
     fn fast_command_stale_frame_is_suppressed() {
-        let sig = "Bash(awk ... bram-trace.log)";
         assert_eq!(
-            fence_decision(true, "Bash", Some(sig), None, None, DISMISS_OFF),
+            fence_decision(true, false, None, DISMISS_OFF),
             FenceDecision::SuppressUnprovenFrame
         );
-        // Same but the frame is stamped from PRE-dismissal output.
         assert_eq!(
-            fence_decision(true, "Bash", Some(sig), None, Some(999), DISMISS_OFF),
+            fence_decision(true, false, Some(999), DISMISS_OFF),
             FenceDecision::SuppressUnprovenFrame
         );
     }
 
-    // Signature-less dismissal record (grid-built menu answered before
-    // the JSONL enriched it): same-tool unresolved call keeps the fence.
-    #[test]
-    fn signatureless_dismissal_suppresses_on_same_tool_pending() {
-        assert_eq!(
-            fence_decision(true, "Bash", None, Some("Bash(cargo test)"), FRESH, DISMISS_OFF),
-            FenceDecision::SuppressPreResult
-        );
-        assert_eq!(
-            fence_decision(true, "Edit", None, Some("Bash(cargo test)"), FRESH, DISMISS_OFF),
-            FenceDecision::Admit
-        );
-    }
-
-    // Real re-prompt: the answered call resolved, a matching menu
-    // reappears in a provably post-dismissal frame — admit.
+    // Real re-prompt: the answered call resolved (or a retry's fresh
+    // id), a matching menu reappears in a provably post-dismissal
+    // frame — admit.
     #[test]
     fn resolved_answer_with_fresh_frame_admits() {
         assert_eq!(
-            fence_decision(true, "Bash", Some("Bash(cargo build)"), None, FRESH, DISMISS_OFF),
-            FenceDecision::Admit
-        );
-    }
-
-    // Next prompt for a DIFFERENT call of the same tool (its tool_use
-    // already flushed): different signature, fresh frame — admit.
-    #[test]
-    fn different_pending_signature_admits() {
-        assert_eq!(
-            fence_decision(
-                true,
-                "Edit",
-                Some("Edit(/a/b.rs)"),
-                Some("Edit(/c/d.rs)"),
-                FRESH,
-                DISMISS_OFF
-            ),
+            fence_decision(true, false, FRESH, DISMISS_OFF),
             FenceDecision::Admit
         );
     }
@@ -1635,11 +1664,11 @@ mod fence_decision_tests {
     #[test]
     fn no_absence_always_suppresses() {
         assert_eq!(
-            fence_decision(false, "Bash", Some("Bash(x)"), None, FRESH, DISMISS_OFF),
+            fence_decision(false, true, FRESH, DISMISS_OFF),
             FenceDecision::SuppressPreAbsence
         );
         assert_eq!(
-            fence_decision(false, "Bash", None, Some("Bash(x)"), None, DISMISS_OFF),
+            fence_decision(false, false, None, DISMISS_OFF),
             FenceDecision::SuppressPreAbsence
         );
     }
@@ -5507,11 +5536,16 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                         // once the fence is set.
                         let decision = if d.seen_absent {
                             let lookup = lookup_pending_tool_call(app);
-                            fence_decision(
-                                true,
+                            let still_pending = answered_call_still_pending(
+                                d.answered_id.as_deref(),
                                 &d.tool,
                                 d.signature.as_deref(),
+                                lookup.tool_use_id.as_deref(),
                                 lookup.signature.as_deref(),
+                            );
+                            fence_decision(
+                                true,
+                                still_pending,
                                 detected_frame_offset,
                                 d.at_offset,
                             )
@@ -6475,6 +6509,10 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
             );
         }
         menu_prose_probe_record_dismiss(app, &tool, "user-input");
+        // Capture the answered call's identity while it is still the
+        // oldest unresolved tool_use (one 4MB-tail read; dismissals are
+        // user-paced). May be None under record-flush lag.
+        let answered_id = lookup_pending_tool_call(app).tool_use_id;
         if let Ok(mut s) = pty_menu_suppressed_cell().lock() {
             *s = Some(DismissedMenu {
                 tool,
@@ -6483,6 +6521,7 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
                 when: std::time::Instant::now(),
                 at_offset: PTY_OUT_OFFSET.load(std::sync::atomic::Ordering::SeqCst),
                 seen_absent: false,
+                answered_id,
             });
         }
         if clears_inflight {
@@ -12716,11 +12755,18 @@ fn read_latest_session_pending<R: tauri::Runtime>(
 struct PendingToolCall {
     name: String,
     input: serde_json::Value,
+    // The tool_use id — the call's IDENTITY. Signatures are not
+    // identities: a retried identical command is a new tool_use with a
+    // new id and the same signature (fence-gate-two-answered-id).
+    id: String,
 }
 
 #[derive(Debug)]
 struct PendingToolCallLookup {
     signature: Option<String>,
+    // The oldest unresolved call's tool_use id (None when nothing is
+    // pending or the record has not flushed).
+    tool_use_id: Option<String>,
     diff: Option<String>,
     // Raw markdown-rendering content (currently Write `input.content`
     // only) passed through to `PtyMenu.tool_call_content` so the
@@ -13021,6 +13067,7 @@ fn extract_pending_tool_cluster_from_jsonl(text: &str) -> Vec<PendingToolCall> {
             record_calls.push(PendingToolCall {
                 name: name.to_string(),
                 input,
+                id: id.to_string(),
             });
         }
         if !record_calls.is_empty() {
@@ -13143,6 +13190,7 @@ mod apply_edit_calls_tests {
         PendingToolCall {
             name: "Edit".to_string(),
             input: serde_json::json!({ "file_path": "/f", "old_string": old, "new_string": new }),
+            id: String::new(),
         }
     }
 
@@ -13174,6 +13222,7 @@ mod apply_edit_calls_tests {
         let w = PendingToolCall {
             name: "Write".to_string(),
             input: serde_json::json!({ "file_path": "/f", "content": "fresh" }),
+            id: String::new(),
         };
         let follow = edit("fresh", "fresher");
         let calls = vec![&w, &follow];
@@ -13311,6 +13360,7 @@ fn lookup_pending_tool_call<R: tauri::Runtime>(app: &AppHandle<R>) -> PendingToo
     let Some(path) = latest_claude_session_path(app).ok().flatten() else {
         return PendingToolCallLookup {
             signature: None,
+            tool_use_id: None,
             diff: None,
             content: None,
             reason: "no-session-path",
@@ -13320,6 +13370,7 @@ fn lookup_pending_tool_call<R: tauri::Runtime>(app: &AppHandle<R>) -> PendingToo
     let Ok(mut file) = std::fs::File::open(&path) else {
         return PendingToolCallLookup {
             signature: None,
+            tool_use_id: None,
             diff: None,
             content: None,
             reason: "open-failed",
@@ -13329,6 +13380,7 @@ fn lookup_pending_tool_call<R: tauri::Runtime>(app: &AppHandle<R>) -> PendingToo
     let Ok(metadata) = file.metadata() else {
         return PendingToolCallLookup {
             signature: None,
+            tool_use_id: None,
             diff: None,
             content: None,
             reason: "metadata-failed",
@@ -13350,6 +13402,7 @@ fn lookup_pending_tool_call<R: tauri::Runtime>(app: &AppHandle<R>) -> PendingToo
     if file.seek(SeekFrom::Start(read_from)).is_err() {
         return PendingToolCallLookup {
             signature: None,
+            tool_use_id: None,
             diff: None,
             content: None,
             reason: "seek-failed",
@@ -13360,6 +13413,7 @@ fn lookup_pending_tool_call<R: tauri::Runtime>(app: &AppHandle<R>) -> PendingToo
     if file.read_to_end(&mut tail).is_err() {
         return PendingToolCallLookup {
             signature: None,
+            tool_use_id: None,
             diff: None,
             content: None,
             reason: "read-failed",
@@ -13399,6 +13453,7 @@ fn lookup_pending_tool_call<R: tauri::Runtime>(app: &AppHandle<R>) -> PendingToo
             };
             PendingToolCallLookup {
                 signature: Some(format_pending_tool_call(&call)),
+                tool_use_id: Some(call.id.clone()),
                 // Batch approvals preview the whole cluster (one approval
                 // executes them all); single calls keep the snippet diff.
                 // The signature stays the oldest call's either way, so
@@ -13427,6 +13482,7 @@ fn lookup_pending_tool_call<R: tauri::Runtime>(app: &AppHandle<R>) -> PendingToo
                 };
                 return PendingToolCallLookup {
                     signature: Some(format_pending_tool_call(&call)),
+                    tool_use_id: Some(call.id.clone()),
                     diff: pending_tool_call_diff(&call, app),
                     content,
                     reason: "subagent-found",
@@ -13435,6 +13491,7 @@ fn lookup_pending_tool_call<R: tauri::Runtime>(app: &AppHandle<R>) -> PendingToo
             }
             PendingToolCallLookup {
                 signature: None,
+                tool_use_id: None,
                 diff: None,
                 content: None,
                 reason: "no-unmatched-tool-use",
@@ -22667,6 +22724,7 @@ mod pty_menu_tests {
         let write = super::PendingToolCall {
             name: "Write".to_string(),
             input: json!({"file_path":"/tmp/a.txt","content":"one\ntwo\n"}),
+            id: String::new(),
         };
         assert_eq!(
             format_pending_tool_call(&write),
@@ -22676,6 +22734,7 @@ mod pty_menu_tests {
         let mcp = super::PendingToolCall {
             name: "mcp__filesystem__edit_file".to_string(),
             input: json!({"path":"/tmp/a.txt","edits":[{"oldText":"a","newText":"b"}]}),
+            id: String::new(),
         };
         assert!(format_pending_tool_call(&mcp).starts_with("filesystem:edit_file("));
     }

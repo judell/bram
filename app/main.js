@@ -1168,6 +1168,13 @@ function __gridShadowCheck() {
       options: menu.options,
       above: menu.above,
       prose: inflightProse,
+      // Provenance travels WITH the snapshot: the keep-alive interval
+      // below re-sends this capture-time offset, not a fresh one — the
+      // frame is still the one parsed at capture. (Pre-fix, the 1 s
+      // keep-alive re-reported unstamped and overwrote the stamped
+      // first report in the host cell: 686 parsed_offset=none vs a
+      // handful stamped in the 2026-07-06 census.)
+      parsedOffset: __ptyParsedOffset,
     };
     // Authoritative: feed the clean structure to the host, which splices the
     // options into the emitted permission menu (or builds it when the host
@@ -1222,6 +1229,7 @@ setInterval(() => {
         options: __gridLastMenu.options,
         above: __gridLastMenu.above,
         prose: __gridLastMenu.prose,
+        parsedOffset: __gridLastMenu.parsedOffset,
       },
     }).catch(() => {});
   }

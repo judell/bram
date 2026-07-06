@@ -4554,6 +4554,27 @@ window.__bramAgentChipLabel = function (agent) {
   return label + (agent.finished ? " ✓" : " ●");
 };
 
+// "claude-fable-5" → "Fable 5", "claude-haiku-4-5-20251001" → "Haiku 4.5":
+// strip the vendor prefix and date suffix, capitalize the family, join
+// version parts with dots. Display-only; tooltips keep the raw id.
+window.__bramPrettyModel = function (model) {
+  if (!model) return "";
+  var s = String(model).replace(/^claude-/, "").replace(/-\d{8}$/, "");
+  var parts = s.split("-");
+  if (!parts.length) return model;
+  var family = parts[0].charAt(0).toUpperCase() + parts[0].slice(1);
+  var nums = parts.slice(1).filter(function (p) { return p !== ""; });
+  return nums.length ? family + " " + nums.join(".") : family;
+};
+
+// Main-chip tooltip: base text plus the main session's current model
+// (roster's mainModel, host-extracted from the session tail).
+window.__bramMainChipTooltip = function (roster) {
+  var base = "Show the main conversation in the Transcript tab";
+  var m = roster && roster.mainModel;
+  return m ? base + " — " + m : base;
+};
+
 // Chip / overflow-item tooltip: type, description, and the model the
 // subagent ran on (host-extracted from the transcript head).
 window.__bramAgentChipTooltip = function (agent) {
@@ -4582,7 +4603,9 @@ window.__bramFooterSessionLine = function (session, agentId, roster) {
       if (agents[i].agentId === agentId) { match = agents[i]; break; }
     }
     view = "subagent: " + ((match && (match.description || match.agentType)) || agentId);
-    if (match && match.model) view += " (" + match.model + ")";
+    if (match && match.model) view += " (" + window.__bramPrettyModel(match.model) + ")";
+  } else if (roster && roster.mainModel) {
+    view = "Main (" + window.__bramPrettyModel(roster.mainModel) + ")";
   }
   if (!meta) return view;
   var sp = meta.indexOf(" ");

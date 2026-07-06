@@ -520,7 +520,7 @@
           label="Main"
           size="xs"
           variant="outlined"
-          tooltip="Show the main conversation in the Transcript tab"
+          tooltip="{window.__bramMainChipTooltip ? window.__bramMainChipTooltip(footerAgents.value) : 'Show the main conversation in the Transcript tab'}"
           onClick="transcriptAgentId = ''; navigate('/transcript')" />
         <!-- One continuous reverse-chron read: newest chip leftmost (after
              Main), then the dropdown continues newest→oldest top-down. -->

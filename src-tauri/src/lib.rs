@@ -5882,7 +5882,12 @@ fn maybe_resolved_clear_held_menu<R: tauri::Runtime>(app: &AppHandle<R>) -> bool
         if let Some(menu_sig) = held_menu_sig {
             let lookup = lookup_pending_tool_call(app);
             if let Some(ref lookup_sig) = lookup.signature {
-                if lookup_sig != &menu_sig {
+                // Supersede only on MAIN-session evidence. A subagent-found
+                // signature can come from a transcript whose result flush
+                // lags minutes behind the agent's actual completion
+                // (observed 2026-07-06 11:36) — voiding a live held menu
+                // over that would be a false supersede.
+                if lookup_sig != &menu_sig && lookup.reason == "found" {
                     pty_menu_clear_for_outcome(app, "superseded");
                 }
             } else if lookup.reason == "no-unmatched-tool-use" {
@@ -13041,6 +13046,50 @@ fn extract_pending_tool_call_from_jsonl(text: &str) -> Option<PendingToolCall> {
     None
 }
 
+// Sweep the active session's subagent transcripts for an unmatched
+// tool_use (subagent-menu-signatures). A subagent's permission prompt has
+// its tool_use in <sid>/subagents/agent-<id>.jsonl, invisible to the
+// main-session scan — the 2026-07-06 menu workout showed every
+// subagent-fired menu rendering signature-less, gate two of the absence
+// fence passing trivially, and the jsonl-resolved janitor blind the same
+// way. Called only when the MAIN scan found nothing pending (a subagent
+// prompt only surfaces while the main turn is blocked on it, so that
+// ordering is also the correct priority). Most-recently-modified first;
+// finished agents are skipped without a full read.
+fn sweep_subagents_for_pending_call(session_path: &Path) -> Option<PendingToolCall> {
+    let dir = st_session_subagents_dir(session_path)?;
+    let rd = std::fs::read_dir(&dir).ok()?;
+    let mut candidates: Vec<(std::time::SystemTime, std::path::PathBuf)> = Vec::new();
+    for entry in rd.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !(name.starts_with("agent-") && name.ends_with(".jsonl")) {
+            continue;
+        }
+        let Ok(md) = entry.metadata() else { continue };
+        let mtime = md
+            .modified()
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        candidates.push((mtime, entry.path()));
+    }
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, p) in candidates {
+        // A finished agent has no pending prompt; tail-line check is far
+        // cheaper than the full extraction read.
+        if st_subagent_finished(&p) {
+            continue;
+        }
+        // Same 4 MB budget as the main-session scan: subagent transcripts
+        // accumulate the same file-history-snapshot bloat (#170).
+        let Some(text) = st_read_tail(&p, 4 * 1024 * 1024) else {
+            continue;
+        };
+        if let Some(call) = extract_pending_tool_call_from_jsonl(&text) {
+            return Some(call);
+        }
+    }
+    None
+}
+
 fn lookup_pending_tool_call<R: tauri::Runtime>(app: &AppHandle<R>) -> PendingToolCallLookup {
     use std::io::{Read, Seek, SeekFrom};
     let Some(path) = latest_claude_session_path(app).ok().flatten() else {
@@ -13139,13 +13188,37 @@ fn lookup_pending_tool_call<R: tauri::Runtime>(app: &AppHandle<R>) -> PendingToo
                 tail_bytes,
             }
         }
-        None => PendingToolCallLookup {
-            signature: None,
-            diff: None,
-            content: None,
-            reason: "no-unmatched-tool-use",
-            tail_bytes,
-        },
+        None => {
+            // Main session has nothing pending — check the subagents
+            // before reporting no-unmatched-tool-use. reason
+            // "subagent-found" (vs "no-unmatched-tool-use") also keeps
+            // the jsonl-resolved janitor from voiding a live held
+            // subagent menu.
+            if let Some(call) = sweep_subagents_for_pending_call(&path) {
+                let content = if call.name == "Write" {
+                    call.input
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                } else {
+                    None
+                };
+                return PendingToolCallLookup {
+                    signature: Some(format_pending_tool_call(&call)),
+                    diff: pending_tool_call_diff(&call, app),
+                    content,
+                    reason: "subagent-found",
+                    tail_bytes,
+                };
+            }
+            PendingToolCallLookup {
+                signature: None,
+                diff: None,
+                content: None,
+                reason: "no-unmatched-tool-use",
+                tail_bytes,
+            }
+        }
     }
 }
 
@@ -15301,6 +15374,31 @@ fn read_subagent_turns<R: tauri::Runtime>(
     serde_json::to_vec(&body).map_err(|e| e.to_string())
 }
 
+// Model the MAIN session is currently running on: the LAST assistant
+// record's message.model in the tail (models can switch mid-session, so
+// head reads lie). Feeds the footer Main chip's tooltip.
+fn st_last_session_model(session_path: &Path) -> String {
+    let Some(tail) = st_read_tail(session_path, 256 * 1024) else {
+        return String::new();
+    };
+    for line in tail.lines().rev() {
+        let Ok(r) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if r.get("type").and_then(|v| v.as_str()) != Some("assistant") {
+            continue;
+        }
+        if let Some(m) = r
+            .get("message")
+            .and_then(|m| m.get("model"))
+            .and_then(|v| v.as_str())
+        {
+            return m.to_string();
+        }
+    }
+    String::new()
+}
+
 // /__agents — roster of the active session's subagents: label fields from
 // each meta.json sidecar, running/finished from the transcript tail,
 // started/updated from file times. Drives the footer chips strip.
@@ -15353,7 +15451,11 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
-    let body = serde_json::json!({ "sid": sid, "agents": agents });
+    let body = serde_json::json!({
+        "sid": sid,
+        "agents": agents,
+        "mainModel": st_last_session_model(&session_path),
+    });
     serde_json::to_vec(&body).map_err(|e| e.to_string())
 }
 

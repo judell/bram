@@ -6388,23 +6388,32 @@ fn pty_output_clears_inflight(output: &[u8]) -> bool {
 // re-fire when the next PTY chunk arrives (the dismissed text is still
 // in the rolling buffer).
 fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
-    let dismissed: Option<(String, Vec<String>, Option<String>)> = match pty_menu_cell().lock() {
-        Ok(mut menu) => {
-            let fp = menu.as_ref().map(|m| {
-                (
-                    m.tool.clone(),
-                    m.options
-                        .iter()
-                        .map(|o| o.label.clone())
-                        .collect::<Vec<_>>(),
-                    m.tool_call_signature.clone(),
-                )
-            });
-            *menu = None;
-            fp
-        }
-        Err(_) => None,
-    };
+    let dismissed: Option<(String, Vec<String>, Option<String>, Option<String>)> =
+        match pty_menu_cell().lock() {
+            Ok(mut menu) => {
+                let fp = menu.as_ref().map(|m| {
+                    (
+                        m.tool.clone(),
+                        m.options
+                            .iter()
+                            .map(|o| o.label.clone())
+                            .collect::<Vec<_>>(),
+                        m.tool_call_signature.clone(),
+                        // The rejection option's key (the "No" answer),
+                        // derived from the menu rather than hardcoded —
+                        // 2-option safety prompts put No at 2, standard
+                        // menus at 3 (menu-rejection-soft-turn-end).
+                        m.options
+                            .iter()
+                            .find(|o| o.label.trim_start().starts_with("No"))
+                            .map(|o| o.key.clone()),
+                    )
+                });
+                *menu = None;
+                fp
+            }
+            Err(_) => None,
+        };
     // Drain PTY_TAIL so the dismissed menu's bytes can't trigger a stale
     // re-detection once PTY_MENU_SUPPRESSED expires. Only genuinely new
     // PTY output can re-fire the detector after this point.
@@ -6415,8 +6424,29 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
     if let Ok(mut held) = pty_menu_held_cell().lock() {
         *held = None;
     }
-    if let Some((tool, option_labels, signature)) = dismissed {
+    if let Some((tool, option_labels, signature, rejection_key)) = dismissed {
         let clears_inflight = pty_menu_input_clears_inflight(input);
+        // A "No" answer is an Esc wearing a menu costume: Claude Code
+        // enters its post-rejection wait with no end_turn record, so the
+        // JSONL-driven working signal sticks and the banner freezes on
+        // the last verb (live specimen 2026-07-06 11:48: banner stuck at
+        // "working… (1m 26s)" through a 97 s wait). Arm the same deferred
+        // soft turn-end check the single-Esc path uses. Limitation: a
+        // terminal user selecting No via arrow-highlight + bare Enter
+        // sends only "\r" and is not recognized; the pane's buttons
+        // always send "<key>\r".
+        if let Some(ref key) = rejection_key {
+            if input.trim_start().starts_with(key.as_str()) {
+                schedule_single_esc_soft_turn_end(app, unix_now_ms());
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        app,
+                        "pty-menu",
+                        &format!("op=rejection-soft-turn-end tool={} key={}", tool, key),
+                    );
+                }
+            }
+        }
         // Pending menus never emitted `state=shown` to subscribers
         // (their tool name hadn't resolved yet). Don't emit the matching
         // `state=dismissed` trace and don't add a re-detection

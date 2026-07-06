@@ -41,10 +41,13 @@ sustained-presence (`0442e95`), foreign-POST token guard (`34f9ff4`),
 stranded-menu reclaim (`aefbe9d`, traced via `545a90f`). Gens 1–3
 are no longer authoritative; they're fallback + oracle. Staged disposition:
 
-- **Now, low risk:** the Gen-2 forensic scaffolding (`pty_scan_anchor_ranges` et
-  al.) is removable — it's burn-in diagnostics for a detector that no longer
-  drives the pane. (The per-scan `op=skip` log is already gated behind
-  `traces.gridScanVerbose`.)
+- **Now, low risk — DONE (delete-phase tranche 2, #214, 2026-07-06):** the
+  Gen-2 forensic scaffolding (`pty_scan_anchor_ranges` et al., ~520 lines
+  including the `traces.gridScanVerbose` gate) was deleted after a
+  gate-evidence check: zero `[pty-menu-scan]` lines across the heaviest
+  menu-forensics week the codebase has had — every diagnosis came from the
+  grid-menu / pty-menu / fence / hook trace layers. Future menu forensics:
+  `record-trace.sh` plus those surviving layers.
 - **Post-burn-in:** delete/demote the Gen-3 authoritative detection for
   hook-covered tools (the Bash/Edit/Write classifiers); drop the Gen-2 PTY
   detector to oracle-only.

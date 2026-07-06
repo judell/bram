@@ -341,8 +341,6 @@ struct TracesConfig {
     enabled: Option<bool>,
     #[serde(default, rename = "inspectorTap")]
     inspector_tap: Option<bool>,
-    #[serde(default, rename = "gridScanVerbose")]
-    grid_scan_verbose: Option<bool>,
 }
 
 // Optional menus block. `parseAndDisplay` gates PTY menu detection +
@@ -499,14 +497,6 @@ static BRAM_MENUS_PARSE_ENABLED: std::sync::atomic::AtomicBool =
 static BRAM_MENUS_HOOK_DRIVEN: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-// Gates the high-frequency `[pty-menu-scan] op=skip` trace (traces.gridScanVerbose).
-// Default OFF: with the hook primary the grid is fallback+oracle, and the per-scan
-// "skip" stream is ~5k lines/day of noise that buries the burn-in signal. Detections
-// ("fire") are always traced; only the no-match skips are gated. Flip on to debug a
-// suspected miss. Atomic inits false; the startup config apply sets the real value.
-static BRAM_GRID_SCAN_VERBOSE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
 // Defer tools-pane-reload while a cycle is active (refs #93).
 // Set when the watcher would otherwise emit during sentinel-active.
 // Cleared and flushed once the sentinel is cleared. Single boolean
@@ -589,17 +579,6 @@ fn bram_menus_hook_driven_enabled() -> bool {
 
 fn apply_bram_menus_hook_driven_from_config(enabled: bool) {
     BRAM_MENUS_HOOK_DRIVEN.store(enabled, std::sync::atomic::Ordering::Relaxed);
-}
-
-fn grid_scan_verbose_enabled() -> bool {
-    BRAM_GRID_SCAN_VERBOSE.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-// Apply the `traces.gridScanVerbose` setting from .bram.json. Called at startup
-// (after project config is loaded) and on the settings POST path, so the toggle
-// takes effect without a code change. Default OFF.
-fn apply_bram_grid_scan_verbose_from_config(enabled: bool) {
-    BRAM_GRID_SCAN_VERBOSE.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
 // Hook-primary coordination (menus.hookDriven). When the permission-menu hook
@@ -1862,6 +1841,26 @@ struct PtyMenu {
     signature_source: Option<&'static str>,
 }
 
+// (Comment context restored with the impl below; the byte-scan helpers that
+// surrounded it were deleted in delete-phase tranche 2.)
+// produce bursty `state=shown` re-emits for the same on-screen prompt.
+// Refs #77 tighten-pty-menu-emit-cadence.
+impl PartialEq for PtyMenu {
+    fn eq(&self, other: &Self) -> bool {
+        // Compare `tool` and the parsed option count. Text is intentionally
+        // excluded (it tracks PTY-tail position and would defeat dedup), but
+        // option count changes are real user-visible state — a first emit
+        // before options were buffered (`options=0`) followed by a re-detect
+        // with options populated should fire a fresh `state=shown` so the UI
+        // gets the parsed labels.
+        self.tool == other.tool
+            && self.options.len() == other.options.len()
+            && self.tool_call_signature.is_some() == other.tool_call_signature.is_some()
+            && self.tool_call_diff.is_some() == other.tool_call_diff.is_some()
+            && self.tool_call_content.is_some() == other.tool_call_content.is_some()
+    }
+}
+
 fn pty_menu_preview_source(menu: &PtyMenu) -> &'static str {
     if menu.tool_call_signature.is_some() {
         if menu.signature_source == Some("jsonl") {
@@ -2092,58 +2091,6 @@ fn trace_pty_menu_options<R: tauri::Runtime>(app: &AppHandle<R>, payload: &Optio
     );
 }
 
-// True when `line` looks like the menu footer — "Esc to cancel",
-// "Tab to amend", or "ctrl+e to explain". Whitespace-insensitive so
-// the strip_ansi-collapsed shape ("Esctocancel·Tabtoamend…") matches
-// the same as the literal `\r\n`-spaced shape. Used to terminate the
-// option list when the footer appears, instead of relying on a blank
-// line — which Mac fixture
-// `bram-pty-menu-options-collapsed.txt` showed can also appear
-// *between* options when Claude TUI wraps a long option-2 label.
-// Refs #187.
-fn line_is_menu_footer(line: &str) -> bool {
-    let collapsed: String = line
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect::<String>()
-        .to_ascii_lowercase();
-    collapsed.contains("esctocancel")
-        || collapsed.contains("tabtoamend")
-        || collapsed.contains("ctrl+etoexplain")
-}
-
-// PtyMenu equality compares only `tool` — `text` carries surrounding
-// PTY bytes captured by position (`pos1 - 200`..`pos2 + 200`), which
-// shifts as the rolling 8 KB tail evolves even when the user-visible
-// menu is unchanged. Comparing text would defeat dedup-on-emit and
-// produce bursty `state=shown` re-emits for the same on-screen prompt.
-// Refs #77 tighten-pty-menu-emit-cadence.
-impl PartialEq for PtyMenu {
-    fn eq(&self, other: &Self) -> bool {
-        // Compare `tool` and the parsed option count. Text is intentionally
-        // excluded (it tracks PTY-tail position and would defeat dedup), but
-        // option count changes are real user-visible state — a first emit
-        // before options were buffered (`options=0`) followed by a re-detect
-        // with options populated should fire a fresh `state=shown` so the UI
-        // gets the parsed labels.
-        self.tool == other.tool
-            && self.options.len() == other.options.len()
-            && self.tool_call_signature.is_some() == other.tool_call_signature.is_some()
-            && self.tool_call_diff.is_some() == other.tool_call_diff.is_some()
-            && self.tool_call_content.is_some() == other.tool_call_content.is_some()
-    }
-}
-impl Eq for PtyMenu {}
-
-// Sentinel for "menu detected via `❯1.` cursor bytes but the
-// `Do you want to use X?` header text has not yet landed in the
-// rolling buffer". First detection cycle stores this state but does
-// NOT emit `state=shown`; the second cycle either resolves a real
-// tool name from the now-buffered header or falls back to the
-// pre-menu grep. Race observed when a user-input dismissal arrives
-// between the cursor's PTY chunk and the header's PTY chunk, which
-// previously caused `tool=Bash` to leak from a prior prompt onto a
-// Read prompt's shown emit. Refs #77 tighten-pty-menu-emit-cadence.
 fn pty_menu_same_identity_for_option_carry(new_menu: &PtyMenu, prev_menu: &PtyMenu) -> bool {
     new_menu.tool == prev_menu.tool
         && new_menu.tool_call_signature.is_some()
@@ -4554,485 +4501,6 @@ fn pty_menu_held_cell() -> &'static Mutex<Option<std::time::Instant>> {
     PTY_MENU_HELD.get_or_init(|| Mutex::new(None))
 }
 
-// Sampled timestamp for `[pty-menu-scan]` instrumentation. Throttles
-// scan-trace emission to ~5 Hz so spinner-driven PTY chatter (10+
-// chunks/s during a working turn) doesn't flood bram-trace.log.
-fn pty_menu_scan_last_log_cell() -> &'static Mutex<u128> {
-    static CELL: OnceLock<Mutex<u128>> = OnceLock::new();
-    CELL.get_or_init(|| Mutex::new(0))
-}
-
-fn pty_scan_line_col(bytes: &[u8], pos: usize) -> (usize, usize) {
-    let bounded = pos.min(bytes.len());
-    let line = bytes[..bounded].iter().filter(|b| **b == b'\n').count();
-    let col = bytes[..bounded]
-        .iter()
-        .rposition(|&b| b == b'\n')
-        .map(|p| bounded.saturating_sub(p + 1))
-        .unwrap_or(bounded);
-    (line, col)
-}
-
-fn pty_scan_anchor_ranges(stripped: &[u8]) -> String {
-    let anchors: [(&str, &[u8]); 3] = [("1", b"1."), ("2", b"2."), ("3", b"3.")];
-    anchors
-        .iter()
-        .map(|(label, needle)| {
-            stripped
-                .windows(needle.len())
-                .position(|w| w == *needle)
-                .map(|p| {
-                    let (line, col) = pty_scan_line_col(stripped, p);
-                    format!(
-                        "{}:{}..{}@{}:{}",
-                        label,
-                        p,
-                        (p + needle.len()).min(stripped.len()),
-                        line,
-                        col
-                    )
-                })
-                .unwrap_or_else(|| format!("{}:n/a", label))
-        })
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-fn pty_raw_position_map(input: &[u8]) -> Vec<Option<(u32, u32)>> {
-    let mut map = Vec::with_capacity(input.len());
-    let mut row = 1u32;
-    let mut col = 1u32;
-    let mut i = 0usize;
-    #[cfg(windows)]
-    let mut last_csi_row: u32 = 0;
-    while i < input.len() {
-        let b = input[i];
-        if b == 0x1B && i + 1 < input.len() {
-            match input[i + 1] {
-                b'[' => {
-                    let param_start = i + 2;
-                    let mut j = param_start;
-                    let mut final_byte = 0u8;
-                    while j < input.len() {
-                        let c = input[j];
-                        j += 1;
-                        if (0x40..=0x7E).contains(&c) {
-                            final_byte = c;
-                            break;
-                        }
-                    }
-                    let params_end = j.saturating_sub(1).max(param_start);
-                    let params = &input[param_start..params_end];
-                    match final_byte {
-                        b'G' => {
-                            col = parse_csi_first_u32(params).max(1);
-                            map.push(Some((row, col)));
-                            col = col.saturating_add(1);
-                        }
-                        b'H' | b'f' => {
-                            let (next_row, next_col) = parse_csi_h_row_col(params);
-                            row = next_row.max(1);
-                            col = next_col.max(1);
-                            #[cfg(windows)]
-                            {
-                                if row > last_csi_row && col == 1 {
-                                    map.push(Some((row, col)));
-                                    col = col.saturating_add(1);
-                                    last_csi_row = row;
-                                } else if row > last_csi_row {
-                                    map.push(Some((row, col)));
-                                    col = col.saturating_add(1);
-                                    last_csi_row = row;
-                                } else if row < last_csi_row {
-                                    last_csi_row = row;
-                                }
-                            }
-                        }
-                        #[cfg(windows)]
-                        b'C' | b'D' => {
-                            let amount = parse_csi_first_u32(params).max(1);
-                            if final_byte == b'C' {
-                                col = col.saturating_add(amount);
-                            } else {
-                                col = col.saturating_sub(amount).max(1);
-                            }
-                            map.push(Some((row, col)));
-                            col = col.saturating_add(1);
-                        }
-                        #[cfg(not(windows))]
-                        b'C' => {
-                            col = col.saturating_add(parse_csi_first_u32(params).max(1));
-                        }
-                        #[cfg(not(windows))]
-                        b'D' => {
-                            col = col
-                                .saturating_sub(parse_csi_first_u32(params).max(1))
-                                .max(1);
-                        }
-                        _ => {}
-                    }
-                    i = j;
-                    continue;
-                }
-                b']' => {
-                    let mut j = i + 2;
-                    while j < input.len() {
-                        if input[j] == 0x07 {
-                            j += 1;
-                            break;
-                        }
-                        if input[j] == 0x1B && j + 1 < input.len() && input[j + 1] == b'\\' {
-                            j += 2;
-                            break;
-                        }
-                        j += 1;
-                    }
-                    i = j;
-                    continue;
-                }
-                _ => {
-                    i += 2;
-                    continue;
-                }
-            }
-        }
-        map.push(Some((row, col)));
-        if b == b'\n' {
-            row = row.saturating_add(1);
-            col = 1;
-        } else if b == b'\r' {
-            col = 1;
-        } else {
-            col = col.saturating_add(1);
-        }
-        i += 1;
-    }
-    map
-}
-
-fn pty_scan_raw_anchor_ranges(
-    stripped: &[u8],
-    raw_positions: &[Option<(u32, u32)>],
-) -> (String, &'static str) {
-    let anchors: [(&str, &[u8]); 3] = [("1", b"1."), ("2", b"2."), ("3", b"3.")];
-    let mut rows: Vec<u32> = Vec::new();
-    let rendered = anchors
-        .iter()
-        .map(|(label, needle)| {
-            stripped
-                .windows(needle.len())
-                .position(|w| w == *needle)
-                .and_then(|p| {
-                    raw_positions.get(p).and_then(|pos| *pos).map(|(row, col)| {
-                        rows.push(row);
-                        format!("{}:{}..{}@{}:{}", label, p, p + needle.len(), row, col)
-                    })
-                })
-                .unwrap_or_else(|| format!("{}:n/a", label))
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    rows.sort_unstable();
-    rows.dedup();
-    let raw_format = if rows.len() >= 2 {
-        "vertical"
-    } else if rows.len() == 1 {
-        "horizontal"
-    } else {
-        "unknown"
-    };
-    (rendered, raw_format)
-}
-
-fn parse_csi_first_u32(params: &[u8]) -> u32 {
-    if params.is_empty() {
-        return 1;
-    }
-    let first = params.split(|&b| b == b';').next().unwrap_or(&[]);
-    if first.is_empty() {
-        return 1;
-    }
-    std::str::from_utf8(first)
-        .ok()
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(1)
-}
-
-fn pty_raw_layout_diagnostic(input: &[u8]) -> String {
-    let raw_lf = input.iter().filter(|b| **b == b'\n').count();
-    let raw_cr = input.iter().filter(|b| **b == b'\r').count();
-    let mut csi_total = 0usize;
-    let mut csi_hf = 0usize;
-    let mut csi_g = 0usize;
-    let mut csi_c = 0usize;
-    let mut csi_d = 0usize;
-    let mut csi_other = 0usize;
-    let mut row_forward = 0usize;
-    let mut row_back = 0usize;
-    let mut row_same = 0usize;
-    let mut col_abs = 0usize;
-    let mut col_rel = 0usize;
-    let mut max_row_delta = 0u32;
-    let mut min_row: Option<u32> = None;
-    let mut max_row: Option<u32> = None;
-    let mut last_row: Option<u32> = None;
-    let mut i = 0usize;
-    while i < input.len() {
-        if input[i] != 0x1B || i + 1 >= input.len() || input[i + 1] != b'[' {
-            i += 1;
-            continue;
-        }
-        let param_start = i + 2;
-        let mut j = param_start;
-        let mut final_byte = 0u8;
-        while j < input.len() {
-            let c = input[j];
-            j += 1;
-            if (0x40..=0x7E).contains(&c) {
-                final_byte = c;
-                break;
-            }
-        }
-        if final_byte == 0 {
-            break;
-        }
-        csi_total += 1;
-        let params_end = j.saturating_sub(1).max(param_start);
-        let params = &input[param_start..params_end];
-        match final_byte {
-            b'H' | b'f' => {
-                csi_hf += 1;
-                let (row, _col) = parse_csi_h_row_col(params);
-                min_row = Some(min_row.map(|r| r.min(row)).unwrap_or(row));
-                max_row = Some(max_row.map(|r| r.max(row)).unwrap_or(row));
-                if let Some(prev) = last_row {
-                    if row > prev {
-                        row_forward += 1;
-                    } else if row < prev {
-                        row_back += 1;
-                    } else {
-                        row_same += 1;
-                    }
-                    max_row_delta = max_row_delta.max(row.abs_diff(prev));
-                }
-                last_row = Some(row);
-            }
-            b'G' => {
-                csi_g += 1;
-                col_abs += 1;
-                let _col = parse_csi_first_u32(params);
-            }
-            b'C' => {
-                csi_c += 1;
-                col_rel += 1;
-            }
-            b'D' => {
-                csi_d += 1;
-                col_rel += 1;
-            }
-            _ => {
-                csi_other += 1;
-            }
-        }
-        i = j;
-    }
-    let row_span = match (min_row, max_row) {
-        (Some(min), Some(max)) => format!("{}..{}", min, max),
-        _ => "n/a".to_string(),
-    };
-    format!(
-        "raw_len={} raw_lf={} raw_cr={} csi_total={} csi_hf={} csi_g={} csi_c={} csi_d={} csi_other={} row_moves=+{}/-{}/={} row_span={} max_row_delta={} col_abs={} col_rel={}",
-        input.len(),
-        raw_lf,
-        raw_cr,
-        csi_total,
-        csi_hf,
-        csi_g,
-        csi_c,
-        csi_d,
-        csi_other,
-        row_forward,
-        row_back,
-        row_same,
-        row_span,
-        max_row_delta,
-        col_abs,
-        col_rel,
-    )
-}
-
-// "Looks like a cataloged menu" predicate for selective skip capture.
-// True when the stripped buffer carries one of the catalog's anchor
-// fragments (header, numbered pair, or footer) even though the scanner
-// skipped. Gating `excerpt=` on skips by this predicate records only
-// high-signal "candidate catalog addition / detection gap" skips, not
-// every spinner tick — which is what flooded the dropped `.bin` ring
-// (#197: 779 skips vs 15 fires in 2–3s). Refs docs/pty-menu-shapes.md.
-fn pty_skip_buffer_looks_menu_bearing(stripped: &[u8]) -> bool {
-    let full = String::from_utf8_lossy(stripped);
-    let lower = full.to_ascii_lowercase();
-    let has_header = lower.contains("do you want") || lower.contains("use skill");
-    let needle2: &[u8] = b"2.";
-    let has_numbered_pair = pty_menu_anchor_pos(stripped)
-        .or_else(|| pty_any_numbered_menu_anchor_pos(stripped))
-        .map(|p1| stripped[p1..].windows(needle2.len()).any(|w| w == needle2))
-        .unwrap_or(false);
-    let has_footer = full.lines().any(line_is_menu_footer);
-    has_header || has_numbered_pair || has_footer
-}
-
-// One-line, whitespace-collapsed excerpt of the menu region for the
-// `[pty-menu-scan]` trace, so a fly-by menu can be eyeball-matched to a
-// `docs/pty-menu-shapes.md` row (and a menu_bearing skip flagged as a
-// candidate catalog addition). Anchored on the header / cursor / first
-// numbered option and capped so the trace line stays bounded. Refs #197
-// deliverable 3.
-fn pty_menu_scan_excerpt(stripped: &[u8]) -> String {
-    const CAP: usize = 200;
-    let header: &[u8] = b"Do you want";
-    let pos1 = pty_menu_anchor_pos(stripped).or_else(|| pty_any_numbered_menu_anchor_pos(stripped));
-    let header_pos = stripped.windows(header.len()).rposition(|w| w == header);
-    let start = match (header_pos, pos1) {
-        (Some(h), Some(p)) => h.min(p),
-        (Some(h), None) => h,
-        (None, Some(p)) => p,
-        (None, None) => stripped.len().saturating_sub(CAP * 2),
-    };
-    let end = (start + CAP * 3).min(stripped.len());
-    let region = String::from_utf8_lossy(&stripped[start..end]);
-    // split_whitespace collapses the redraw padding / newlines the TUI
-    // injects between option lines into single spaces; the quote swap
-    // keeps the value from breaking the `key='value'` trace grammar.
-    let collapsed = region.split_whitespace().collect::<Vec<_>>().join(" ");
-    collapsed
-        .chars()
-        .take(CAP)
-        .collect::<String>()
-        .replace('\'', "’")
-}
-
-// Diagnostic summary of which menu-detection anchors are present in
-// the current PTY tail. Returns a compact `k=v` string suitable for
-// embedding in a `[pty-menu-scan]` trace line. Re-runs the same
-// anchor checks the menu scan uses but doesn't do the full
-// detection — cheap to compute (a handful of byte scans) and tells
-// us *why* a detection cycle decided not to fire. `is_fire` selects
-// whether the content excerpt is always included (fire) or only when
-// the buffer is menu-bearing (skip). Refs #197 deliverable 3.
-fn pty_menu_scan_diagnostic(tail: &[u8], is_fire: bool) -> String {
-    let raw_codex_action = pty_codex_action_required_pos(tail).is_some();
-    let stripped = strip_ansi(tail);
-    let s = stripped.as_slice();
-    let pos1_cursor = pty_menu_anchor_pos(s);
-    let pos1_numbered = if raw_codex_action {
-        pty_numbered_menu_anchor_pos(s).or_else(|| pty_any_numbered_menu_anchor_pos(s))
-    } else {
-        None
-    };
-    let needle2: &[u8] = b"2.";
-    let header: &[u8] = b"Do you want";
-    let pos1 = pos1_cursor.or(pos1_numbered);
-    let needle2_after_pos1 = pos1
-        .and_then(|p1| {
-            let after = &s[p1..];
-            after
-                .windows(needle2.len())
-                .position(|w| w == needle2)
-                .map(|rel| (rel, p1 + rel))
-        })
-        .map(|(_, p2)| p2);
-    let needle2_anywhere = s.windows(needle2.len()).any(|w| w == needle2);
-    let header_pos = s.windows(header.len()).rposition(|w| w == header);
-    let distance_ok = match (pos1, needle2_after_pos1) {
-        (Some(p1), Some(p2)) => Some(p2 - p1 <= 512),
-        _ => None,
-    };
-    let span_format = match (pos1, needle2_after_pos1) {
-        (Some(p1), Some(p2)) => {
-            let end = (p2 + 200).min(s.len());
-            let span = &s[p1..end];
-            let newline_count = span.iter().filter(|b| **b == b'\n' || **b == b'\r').count();
-            let ratio_per_1000 = if span.is_empty() {
-                0
-            } else {
-                newline_count * 1000 / span.len()
-            };
-            if ratio_per_1000 >= 20 {
-                "vertical"
-            } else {
-                "horizontal"
-            }
-        }
-        _ => "unknown",
-    };
-    let stripped_lf = s.iter().filter(|b| **b == b'\n').count();
-    let stripped_cr = s.iter().filter(|b| **b == b'\r').count();
-    let anchor_range = pos1
-        .map(|p| format!("{}..{}", p, (p + 3).min(s.len())))
-        .unwrap_or_else(|| "n/a".to_string());
-    let needle2_range = needle2_after_pos1
-        .map(|p| format!("{}..{}", p, (p + needle2.len()).min(s.len())))
-        .unwrap_or_else(|| "n/a".to_string());
-    let opt_anchors = pty_scan_anchor_ranges(s);
-    let raw_positions = pty_raw_position_map(tail);
-    let (raw_opt_anchors, raw_format) = if raw_positions.len() == s.len() {
-        pty_scan_raw_anchor_ranges(s, &raw_positions)
-    } else {
-        (
-            format!("map-len-mismatch:{}!={}", raw_positions.len(), s.len()),
-            "unknown",
-        )
-    };
-    let raw_layout = pty_raw_layout_diagnostic(tail);
-    let stripped_len = s.len();
-    let head_hex = s
-        .iter()
-        .take(16)
-        .map(|b| format!("{:02x}", b))
-        .collect::<String>();
-    let tail_hex = s
-        .iter()
-        .rev()
-        .take(16)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .map(|b| format!("{:02x}", b))
-        .collect::<String>();
-    let menu_bearing = pty_skip_buffer_looks_menu_bearing(s);
-    let excerpt = if is_fire || menu_bearing {
-        pty_menu_scan_excerpt(s)
-    } else {
-        String::new()
-    };
-    format!(
-        "stripped_len={} stripped_lf={} stripped_cr={} cursor={} numbered={} needle2_after_anchor={} needle2_anywhere={} header={} anchor_distance_ok={} codex_action={} format={} raw_format={} anchor_range={} needle2_range={} opt_anchors={} raw_opt_anchors={} {} fp_head={} fp_tail={} menu_bearing={} excerpt='{}'",
-        stripped_len,
-        stripped_lf,
-        stripped_cr,
-        pos1_cursor.is_some(),
-        pos1_numbered.is_some(),
-        needle2_after_pos1.is_some(),
-        needle2_anywhere,
-        header_pos.is_some(),
-        distance_ok
-            .map(|b| if b { "true" } else { "false" })
-            .unwrap_or("n/a"),
-        raw_codex_action,
-        span_format,
-        raw_format,
-        anchor_range,
-        needle2_range,
-        opt_anchors,
-        raw_opt_anchors,
-        raw_layout,
-        head_hex,
-        tail_hex,
-        menu_bearing,
-        excerpt,
-    )
-}
-
 // Update the menu detection state with a fresh chunk of PTY output.
 // Maintains a rolling 8KB tail buffer; checks for claude's menu signature
 // ("1. Yes" + "2. Yes" within proximity); transitions PTY_MENU accordingly.
@@ -5085,43 +4553,7 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
     // (causal-menu-staleness). Consumed by the post-dismiss suppression.
     let mut detected_frame_offset: Option<u64> = None;
 
-    // Sample the scan diagnostic at ~5 Hz so spinner activity doesn't
-    // flood the trace. Emit after the lock is released so the trace
-    // append doesn't hold up downstream scans. See
-    // `pty_menu_scan_diagnostic` for the field shape.
-    let scan_log: Option<String> = if bram_trace_enabled() {
-        let now_ms = unix_now_ms() as u128;
-        let last = pty_menu_scan_last_log_cell()
-            .lock()
-            .map(|g| *g)
-            .unwrap_or(0);
-        // Always trace a detection ("fire"). Gate the throttled no-match
-        // stream ("skip") behind traces.gridScanVerbose — once the hook is
-        // primary the grid is fallback+oracle and the per-scan skips are
-        // ~5k lines/day of noise that buries the burn-in signal. Flip the
-        // flag on to debug a suspected miss.
-        let want_skip = grid_scan_verbose_enabled() && now_ms.saturating_sub(last) >= 200;
-        if detected.is_some() || want_skip {
-            if let Ok(mut g) = pty_menu_scan_last_log_cell().lock() {
-                *g = now_ms;
-            }
-            Some(pty_menu_scan_diagnostic(&tail, detected.is_some()))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    let scan_outcome: &'static str = if detected.is_some() { "fire" } else { "skip" };
-
     drop(tail);
-    if let Some(diag) = scan_log {
-        append_bram_trace_line(
-            app,
-            "pty-menu-scan",
-            &format!("op={} {}", scan_outcome, diag),
-        );
-    }
 
     let mut signature_trace: Option<(bool, &'static str, usize, usize)> = None;
     if let Some(menu) = detected.as_mut() {
@@ -6333,59 +5765,6 @@ fn strip_ansi(input: &[u8]) -> Vec<u8> {
         i += 1;
     }
     out
-}
-
-// Find the newest cursor-anchored first option: ❯ (U+276F) followed by
-// an optional run of spaces / NBSP, then "1.". Claude Code's TUI once
-// rendered the gap as cursor-positioning escapes (collapsing to "❯1."
-// after strip_ansi); newer builds emit a literal space and/or NBSP
-// (U+00A0 = c2 a0), giving "❯ 1." / "❯\u{a0} 1.". Tolerate all three so
-// the anchor survives the format drift. Walk back to older arrows when
-// the newest one is a redraw artifact rather than the option-1 row.
-// Refs #36.
-fn pty_menu_anchor_pos(tail: &[u8]) -> Option<usize> {
-    let arrow: &[u8] = b"\xe2\x9d\xaf";
-    let mut end = tail.len();
-    while let Some(rel) = tail[..end].windows(arrow.len()).rposition(|w| w == arrow) {
-        let mut k = rel + arrow.len();
-        loop {
-            if tail.get(k) == Some(&0x20) {
-                k += 1;
-            } else if tail.get(k) == Some(&0xc2) && tail.get(k + 1) == Some(&0xa0) {
-                k += 2;
-            } else {
-                break;
-            }
-        }
-        if tail[k..].starts_with(b"1.") {
-            return Some(rel);
-        }
-        end = rel;
-    }
-    None
-}
-
-fn pty_numbered_menu_anchor_pos(tail: &[u8]) -> Option<usize> {
-    let mut end = tail.len();
-    while let Some(rel) = tail[..end].windows(2).rposition(|w| w == b"1.") {
-        let line_start = tail[..rel]
-            .iter()
-            .rposition(|&b| b == b'\n' || b == b'\r')
-            .map(|idx| idx + 1)
-            .unwrap_or(0);
-        if tail[line_start..rel]
-            .iter()
-            .all(|&b| b == b' ' || b == b'\t')
-        {
-            return Some(rel);
-        }
-        end = rel;
-    }
-    None
-}
-
-fn pty_any_numbered_menu_anchor_pos(tail: &[u8]) -> Option<usize> {
-    tail.windows(2).rposition(|w| w == b"1.")
 }
 
 fn pty_codex_action_required_pos(tail: &[u8]) -> Option<usize> {
@@ -11091,13 +10470,6 @@ fn handle_settings_post<R: tauri::Runtime>(
             .and_then(|c| c.menus.as_ref())
             .and_then(|m| m.hook_driven)
             .unwrap_or(true),
-    );
-    apply_bram_grid_scan_verbose_from_config(
-        config
-            .as_ref()
-            .and_then(|c| c.traces.as_ref())
-            .and_then(|t| t.grid_scan_verbose)
-            .unwrap_or(false),
     );
     let body = settings_view_from_config(config).to_string().into_bytes();
     (200, "application/json; charset=utf-8", body)
@@ -28676,12 +28048,6 @@ pub fn run() {
         if let Some(enabled) = cfg.traces.as_ref().and_then(|t| t.enabled) {
             apply_bram_trace_from_config(enabled);
         }
-        apply_bram_grid_scan_verbose_from_config(
-            cfg.traces
-                .as_ref()
-                .and_then(|t| t.grid_scan_verbose)
-                .unwrap_or(false),
-        );
         apply_bram_menus_parse_from_config(
             cfg.menus
                 .as_ref()

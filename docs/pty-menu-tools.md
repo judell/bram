@@ -25,7 +25,7 @@ stripped `excerpt='…'`.
 
 | Tool | Question it answers | Granularity | Output |
 | --- | --- | --- | --- |
-| `pty-menu-scan-report.py` | *Which menus did we cover / miss / not recognize?* | per-excerpt | covered/missed/unknown classification; `--write-specimens` drafts specimen files |
+| `pty-menu-scan-report.py` | **RETIRED** — its data source (`[pty-menu-scan]` lines) was deleted in delete-phase tranche 2 (#214, 2026-07-06); useful only against pre-deletion rotated logs. *Original question: which menus did we cover / miss / not recognize?* | per-excerpt | covered/missed/unknown classification; `--write-specimens` drafts specimen files |
 | `pty-menu-timeline.py` | *Do menus interfere across time (succession hazards)?* | per-menu **episode** (temporal) | episode timeline + DISTINCT-SHAPE-MISS / SAME-SHAPE-SKIP-TAIL flags |
 
 Supporting trace infrastructure (general, not menu-specific):

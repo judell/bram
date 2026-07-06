@@ -4616,6 +4616,7 @@ window.__bramSubagentHeaderLine = function (payload) {
 window.__bramSendLedgerNotice = function (payload) {
   var entries = (payload && payload.entries) || [];
   var nowMs = (payload && payload.nowMs) || Date.now();
+  var staleTerminalInput = !!(payload && payload.staleTerminalInput);
   var latest = null;
   for (var i = 0; i < entries.length; i++) {
     var e = entries[i];
@@ -4643,6 +4644,7 @@ window.__bramSendLedgerNotice = function (payload) {
     return "Your message" + label + " was interrupted before the agent took it — it's back in the composer.";
   }
   if (latest.state === "landed" && latest.cause === "aborted") {
+    if (!staleTerminalInput) return "";
     // Truthful semantics (2026-07-06 esc drill): the send landed as a
     // transport record but Esc made Claude Code retract and re-stage it
     // in the TERMINAL input, unanswered — and the copy there prepends

@@ -641,9 +641,8 @@ fn clear_hook_permission_menu<R: tauri::Runtime>(
             .lock()
             .ok()
             .and_then(|m| {
-                m.as_ref().map(|menu| {
-                    (menu.tool.clone(), menu.tool_call_signature.is_some())
-                })
+                m.as_ref()
+                    .map(|menu| (menu.tool.clone(), menu.tool_call_signature.is_some()))
             })
             .unwrap_or_else(|| ("(none)".to_string(), false));
         let clear_tool_matches = menu_tool != "(none)" && menu_tool == tool;
@@ -1593,10 +1592,34 @@ mod fence_decision_tests {
     #[test]
     fn missing_answered_id_falls_back_to_signature() {
         let sig = "Bash(cargo build)";
-        assert!(answered_call_still_pending(None, "Bash", Some(sig), Some("toolu_x"), Some(sig)));
-        assert!(answered_call_still_pending(None, "Bash", None, Some("toolu_x"), Some("Bash(cargo test)")));
-        assert!(!answered_call_still_pending(None, "Edit", None, Some("toolu_x"), Some("Bash(cargo test)")));
-        assert!(!answered_call_still_pending(None, "Bash", Some(sig), None, None));
+        assert!(answered_call_still_pending(
+            None,
+            "Bash",
+            Some(sig),
+            Some("toolu_x"),
+            Some(sig)
+        ));
+        assert!(answered_call_still_pending(
+            None,
+            "Bash",
+            None,
+            Some("toolu_x"),
+            Some("Bash(cargo test)")
+        ));
+        assert!(!answered_call_still_pending(
+            None,
+            "Edit",
+            None,
+            Some("toolu_x"),
+            Some("Bash(cargo test)")
+        ));
+        assert!(!answered_call_still_pending(
+            None,
+            "Bash",
+            Some(sig),
+            None,
+            None
+        ));
     }
 
     // 2026-07-06 02:07 live specimen: fence set by a flicker frame
@@ -2008,9 +2031,7 @@ fn grid_menu_edit_write_tool(
 ) -> Option<&'static str> {
     let has = |needle: &str| {
         grid_header.to_lowercase().contains(needle)
-            || grid_above
-                .iter()
-                .any(|l| l.to_lowercase().contains(needle))
+            || grid_above.iter().any(|l| l.to_lowercase().contains(needle))
     };
     if has("do you want to make this edit") {
         return Some("Edit");
@@ -4975,12 +4996,7 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                                 lookup.tool_use_id.as_deref(),
                                 lookup.signature.as_deref(),
                             );
-                            fence_decision(
-                                true,
-                                still_pending,
-                                detected_frame_offset,
-                                d.at_offset,
-                            )
+                            fence_decision(true, still_pending, detected_frame_offset, d.at_offset)
                         } else {
                             FenceDecision::SuppressPreAbsence
                         };
@@ -5283,15 +5299,13 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                 // signature arrives. Refs #170.
                 if let Some(m) = menu.as_ref() {
                     menu_prose_probe_record_open(app, &m.tool, m.tool_call_signature.as_deref());
-                    let needs_signature =
-                        m.tool != PENDING_TOOL && m.tool_call_signature.is_none();
+                    let needs_signature = m.tool != PENDING_TOOL && m.tool_call_signature.is_none();
                     // Write produces a `Write(<path>)` signature via PTY-scrape,
                     // so the signature-missing branch above does not fire — but
                     // the markdown content lives only in JSONL `input.content`,
                     // which the same race can delay. Trigger the recheck loop
                     // so `tool_call_content` gets filled in on the next pass.
-                    let needs_write_content =
-                        m.tool == "Write" && m.tool_call_content.is_none();
+                    let needs_write_content = m.tool == "Write" && m.tool_call_content.is_none();
                     if needs_signature || needs_write_content {
                         recheck_target = Some(m.tool.clone());
                     }
@@ -5363,7 +5377,10 @@ fn maybe_resolved_clear_held_menu<R: tauri::Runtime>(app: &AppHandle<R>) -> bool
             // seek-failed, read-failed, metadata-failed) → do nothing.
         }
     }
-    pty_menu_held_cell().lock().map(|g| g.is_some()).unwrap_or(false)
+    pty_menu_held_cell()
+        .lock()
+        .map(|g| g.is_some())
+        .unwrap_or(false)
 }
 
 // where the timer cadence (5.2 s cumulative) is too tight for very
@@ -5586,14 +5603,12 @@ fn schedule_held_menu_poll<R: tauri::Runtime>(app: &AppHandle<R>) {
         return;
     }
     let app_handle = app.clone();
-    std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            let still_held = maybe_resolved_clear_held_menu(&app_handle);
-            if !still_held {
-                HELD_MENU_POLLER_ACTIVE.store(false, Ordering::Release);
-                return;
-            }
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let still_held = maybe_resolved_clear_held_menu(&app_handle);
+        if !still_held {
+            HELD_MENU_POLLER_ACTIVE.store(false, Ordering::Release);
+            return;
         }
     });
 }
@@ -5881,10 +5896,7 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
             append_bram_trace_line(
                 app,
                 "pty-menu",
-                &format!(
-                    "state=dismissed tool={} reason=user-input",
-                    tool
-                ),
+                &format!("state=dismissed tool={} reason=user-input", tool),
             );
         }
         menu_prose_probe_record_dismiss(app, &tool, "user-input");
@@ -7733,8 +7745,7 @@ fn pty_spawn(
                     // #transcript-nav-activity-sparkline: meter output volume
                     // for the activity row (unconditional — not gated on
                     // tracing). The ticker thread converts this to intensity.
-                    pty_throughput_bytes()
-                        .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+                    pty_throughput_bytes().fetch_add(n, std::sync::atomic::Ordering::Relaxed);
                     if bram_trace_enabled() {
                         let data = &buf[..n];
                         if n >= SMALL_THRESHOLD {
@@ -7978,7 +7989,10 @@ fn pty_write_internal<R: tauri::Runtime>(
         // submit-bearing write carries \r (the Windows payload chunk does not),
         // so this fires once per send on both platforms.
         if caller_hint.starts_with("pty-intent-toTurn") && data.contains('\r') {
-            let _ = app.emit("pty-send-sent", serde_json::json!({ "source": caller_hint }));
+            let _ = app.emit(
+                "pty-send-sent",
+                serde_json::json!({ "source": caller_hint }),
+            );
         }
     }
     let mut guard = state.0.lock().unwrap();
@@ -8360,6 +8374,7 @@ fn write_pty_turn_intent<R: tauri::Runtime>(
             ),
         );
     }
+    clear_stale_terminal_input_before_pane_send(app, state);
     inject_turn_payload(app, state, data)
 }
 
@@ -8430,6 +8445,7 @@ fn switch_agent(
             &format!("op=start provider={} command={}", provider_key, command),
         );
     }
+    clear_stale_terminal_input_for_switch(&app, &state, "agent-switch");
     // Dismiss any open agent menu/picker first (e.g. a Claude `/resume` list
     // left open by a prior first-command). Claude exits only on two Ctrl+C at
     // an empty prompt; an open picker swallows the first Ctrl+C dismissing
@@ -8680,6 +8696,7 @@ fn reload_agent_session(
             ),
         );
     }
+    clear_stale_terminal_input_for_switch(&app, &state, "agent-reload");
     // Dismiss any open agent menu/picker first so both Ctrl+C land on an empty
     // prompt and the agent actually exits (see switch_agent for the full
     // rationale). ESC is harmless at a clean prompt.
@@ -12261,7 +12278,9 @@ fn format_pending_tool_call(call: &PendingToolCall) -> String {
 // prompt is for. The full cluster feeds the batch roll-up diff
 // (batch-edit-rollup-diff).
 fn extract_pending_tool_call_from_jsonl(text: &str) -> Option<PendingToolCall> {
-    extract_pending_tool_cluster_from_jsonl(text).into_iter().next()
+    extract_pending_tool_cluster_from_jsonl(text)
+        .into_iter()
+        .next()
 }
 
 // The contiguous pending CLUSTER, oldest first: every unresolved
@@ -12399,11 +12418,7 @@ fn extract_pending_tool_cluster_from_jsonl(text: &str) -> Vec<PendingToolCall> {
         }
     }
     if !cluster_records.is_empty() {
-        return cluster_records
-            .into_iter()
-            .rev()
-            .flatten()
-            .collect();
+        return cluster_records.into_iter().rev().flatten().collect();
     }
     // Dump-on-fail diagnostic: when the parser walks the full buffer and
     // returns None, write a snapshot to /tmp/bram-jsonl-parse-debug.log
@@ -12521,7 +12536,10 @@ mod apply_edit_calls_tests {
         let a = edit("one", "two");
         let b = edit("two three", "four");
         let calls = vec![&a, &b];
-        assert_eq!(apply_edit_calls("one three", &calls).as_deref(), Some("four"));
+        assert_eq!(
+            apply_edit_calls("one three", &calls).as_deref(),
+            Some("four")
+        );
     }
 
     #[test]
@@ -12548,7 +12566,10 @@ mod apply_edit_calls_tests {
         };
         let follow = edit("fresh", "fresher");
         let calls = vec![&w, &follow];
-        assert_eq!(apply_edit_calls("old stuff", &calls).as_deref(), Some("fresher"));
+        assert_eq!(
+            apply_edit_calls("old stuff", &calls).as_deref(),
+            Some("fresher")
+        );
     }
 }
 
@@ -12583,7 +12604,11 @@ fn build_batch_rollup_diff<R: tauri::Runtime>(
     let mut by_file: std::collections::HashMap<&str, Vec<&PendingToolCall>> =
         std::collections::HashMap::new();
     for call in &file_calls {
-        let path = call.input.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+        let path = call
+            .input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if !by_file.contains_key(path) {
             order.push(path);
         }
@@ -12653,9 +12678,7 @@ fn sweep_subagents_for_pending_call(session_path: &Path) -> Option<PendingToolCa
             continue;
         }
         let Ok(md) = entry.metadata() else { continue };
-        let mtime = md
-            .modified()
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        let mtime = md.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
         candidates.push((mtime, entry.path()));
     }
     candidates.sort_by(|a, b| b.0.cmp(&a.0));
@@ -13671,7 +13694,9 @@ fn st_strip_image_markers(text: &str) -> String {
 // app/__shell/helpers.js.
 fn st_strip_image_paths(text: &str) -> String {
     let stripped = st_strip_image_markers(text);
-    st_strip_read_screenshot_prefix(&stripped).trim().to_string()
+    st_strip_read_screenshot_prefix(&stripped)
+        .trim()
+        .to_string()
 }
 
 fn st_extract_image_paths(text: &str) -> Vec<String> {
@@ -14763,7 +14788,10 @@ fn st_subagent_finished(jsonl_path: &Path) -> bool {
         {
             return true;
         }
-        if let Some(blocks) = msg.and_then(|m| m.get("content")).and_then(|c| c.as_array()) {
+        if let Some(blocks) = msg
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+        {
             if blocks
                 .iter()
                 .any(|b| b.get("type").and_then(|v| v.as_str()) == Some("tool_use"))
@@ -14823,7 +14851,8 @@ fn st_tag_agent_tool_entries(session_path: &Path, turns: &mut [serde_json::Value
     let Ok(rd) = std::fs::read_dir(&dir) else {
         return;
     };
-    let mut by_tool_use: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut by_tool_use: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     for entry in rd.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         let Some(agent_id) = name
@@ -15192,7 +15221,9 @@ fn outbound_turn_id_from_frame(text: &str) -> Option<String> {
     }
     let after_at = &t[t.find('@')? + 1..];
     let path_str = after_at.split_whitespace().next()?;
-    let file_name = std::path::Path::new(path_str).file_name()?.to_string_lossy();
+    let file_name = std::path::Path::new(path_str)
+        .file_name()?
+        .to_string_lossy();
     let stem = file_name.strip_suffix(".json").unwrap_or(&file_name);
     if stem.is_empty() || stem.contains('/') || stem.contains('\\') {
         return None;
@@ -15409,6 +15440,132 @@ fn send_ledger_cell() -> &'static Mutex<Vec<SendLedgerEntry>> {
     CELL.get_or_init(|| Mutex::new(Vec::new()))
 }
 
+// pane-send-clears-stale-terminal-input: after an Esc-aborted send the
+// agent CLI re-stages the delivered message in its own terminal input,
+// and Bram no longer clears it (the clear rode the composer restore
+// removed by esc-aborted-no-composer-restore). The stale copy prepends
+// onto the next pane send (live specimen 2026-07-06 20:42). This latch
+// marks the input as known-stale so the next pane-originated send can
+// clear it first. Set at the aborted latch; cleared by any successful
+// landing or by the gated pre-send clear itself. A flag rather than a
+// blanket pre-send clear: an unconditional clear would nuke a
+// half-typed terminal draft whenever the user works both surfaces.
+// The latch records WHEN the abort marked the input stale (unix ms;
+// 0 = clean), because the pane-send busy check must ask "did the agent
+// resume work AFTER the abort" — see
+// clear_stale_terminal_input_before_pane_send.
+fn stale_terminal_input_cell() -> &'static Mutex<i64> {
+    static CELL: OnceLock<Mutex<i64>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(0))
+}
+
+fn set_stale_terminal_input_latched_at(ms: i64) {
+    if let Ok(mut g) = stale_terminal_input_cell().lock() {
+        *g = ms;
+    }
+}
+
+fn stale_terminal_input_latched_at() -> i64 {
+    stale_terminal_input_cell().lock().map(|g| *g).unwrap_or(0)
+}
+
+fn stale_terminal_input() -> bool {
+    stale_terminal_input_latched_at() != 0
+}
+
+fn stale_terminal_input_clear_for_provider(provider: Option<SessionProvider>) -> &'static str {
+    match provider {
+        Some(SessionProvider::Codex) => "\x15",
+        _ => "\x03",
+    }
+}
+
+fn mark_stale_terminal_input_cleared<R: tauri::Runtime>(app: &AppHandle<R>, source: &str) {
+    set_stale_terminal_input_latched_at(0);
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "send-ledger",
+            &format!("op=stale-input-clear source={}", source),
+        );
+    }
+    emit_replayable_signal(app, "send-ledger-changed");
+}
+
+fn clear_stale_terminal_input_before_pane_send<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &State<'_, AppState>,
+) {
+    // pane-send-clears-stale-terminal-input: when the ledger latched an
+    // Esc-aborted send, the CLI's re-staged copy sits in the terminal
+    // input and this injection would concatenate onto it (live specimen
+    // 2026-07-06 20:42). Clear the input first — but NEVER while the
+    // agent is working or a permission menu is up: Ctrl-C there is an
+    // interrupt / menu dismissal, not an input clear, and a busy agent
+    // queues the send without passing through the composer anyway (the
+    // latch stays set for the next idle-time send).
+    let latched_at = stale_terminal_input_latched_at();
+    if latched_at == 0 {
+        return;
+    }
+    // "Busy" means RESUMED SINCE THE ABORT, not phase == "working": an
+    // Esc-canceled turn never records end_turn, so the phase lingers
+    // "working" in exactly the post-abort state this guard exists for
+    // (live specimen 2026-07-06 21:13: skip reason=agent-working while
+    // the agent sat idle, and the send concatenated anyway). Resumption
+    // evidence: a permission menu up right now, assistant output after
+    // the latch, or a turn that STARTED after the latch. Detection lags
+    // true resumption by the JSONL-poll latency (~1 s); a pane send
+    // inside that window still risks a mid-turn Ctrl-C — accepted as
+    // narrow. On skip the latch stays set: a busy agent queues the send
+    // without passing through the composer.
+    let busy = turn_state_cell()
+        .lock()
+        .map(|s| {
+            if s.pending_menu.is_some() {
+                Some("pending-menu")
+            } else if s.last_non_final_assistant_at_ms > latched_at {
+                Some("assistant-output-after-abort")
+            } else {
+                match s.turn_stamp.as_deref().and_then(|t| t.parse::<i64>().ok()) {
+                    Some(t) if t > latched_at => Some("turn-started-after-abort"),
+                    _ => None,
+                }
+            }
+        })
+        .unwrap_or(None);
+    if let Some(reason) = busy {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "send-ledger",
+                &format!("op=stale-input-clear-skip source=pane-send reason={}", reason),
+            );
+        }
+        return;
+    }
+    let clear = stale_terminal_input_clear_for_provider(current_provider(app));
+    let _ = pty_write_internal(app, state, clear, "pane-send-stale-input-clear");
+    mark_stale_terminal_input_cleared(app, "pane-send");
+}
+
+fn clear_stale_terminal_input_for_switch<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &State<'_, AppState>,
+    source: &str,
+) {
+    // A provider switch/reload intentionally tears down the current CLI, so
+    // a stale re-staged composer copy should disappear at that boundary too.
+    // Clear before the switch's normal Esc/Ctrl-C sequence, using the OLD
+    // current provider because that is the TUI whose input owns the stale text.
+    if !stale_terminal_input() {
+        return;
+    }
+    let clear = stale_terminal_input_clear_for_provider(current_provider(app));
+    let _ = pty_write_internal(app, state, clear, source);
+    mark_stale_terminal_input_cleared(app, source);
+}
+
 // Largest char-boundary index <= offset, so a byte offset captured from
 // file metadata can safely slice the UTF-8 session text.
 fn char_floor(text: &str, offset: usize) -> usize {
@@ -15493,7 +15650,8 @@ fn send_ledger_line_delivers(line: &str) -> Option<bool> {
     };
     let is_synthetic = |r: &serde_json::Value| -> bool {
         let text = send_ledger_record_text(r);
-        st_is_synthetic_codex_message(&text) || text.trim_start().starts_with("[Request interrupted")
+        st_is_synthetic_codex_message(&text)
+            || text.trim_start().starts_with("[Request interrupted")
     };
     match r.get("type").and_then(|v| v.as_str()) {
         Some("user") => {
@@ -15649,7 +15807,10 @@ enum SendLedgerAction {
         aborted: bool,
     },
     // Re-inject a mechanically-stranded send's exact payload (trust-gated).
-    AutoResend { id: String, payload: String },
+    AutoResend {
+        id: String,
+        payload: String,
+    },
 }
 
 // `force_user_strand_before_ms`: the escape-sweep path passes the Esc
@@ -15704,6 +15865,9 @@ fn update_send_ledger<R: tauri::Runtime>(
                 entry.state = "landed";
                 entry.resolved_at_ms = now;
                 entry.via_queue = via_queue;
+                // A landing proves the composer path delivered clean —
+                // drop any stale-input latch from an earlier abort.
+                set_stale_terminal_input_latched_at(0);
                 transitions.push(format!(
                     "op=transition id={} state=landed via_queue={} elapsed_ms={}",
                     entry.id,
@@ -15716,8 +15880,8 @@ fn update_send_ledger<R: tauri::Runtime>(
                 // Classification (plan invariant 3): an Esc inside the
                 // send's window means the user may have cancelled on
                 // purpose — restore their words, never auto-resend.
-                let user_caused = last_esc_ms >= entry.injected_at_ms
-                    || force_user_strand_before_ms.is_some();
+                let user_caused =
+                    last_esc_ms >= entry.injected_at_ms || force_user_strand_before_ms.is_some();
                 entry.cause = if user_caused { "user" } else { "mechanical" };
                 entry.state = "stranded";
                 entry.resolved_at_ms = now;
@@ -15838,10 +16002,12 @@ fn update_send_ledger<R: tauri::Runtime>(
                             // interrupted the answer" with "my question was
                             // lost" (live specimen 2026-07-06 20:33). Keep
                             // the ledger record; leave the composer alone.
-                            transitions.push(format!(
-                                "op=aborted-no-restore id={}",
-                                entry.id,
-                            ));
+                            // The CLI's re-staged copy now sits in the
+                            // terminal input — latch it as known-stale so
+                            // the next pane send clears it before
+                            // injecting (pane-send-clears-stale-terminal-input).
+                            set_stale_terminal_input_latched_at(now);
+                            transitions.push(format!("op=aborted-no-restore id={}", entry.id,));
                         }
                     }
                 } else {
@@ -15948,7 +16114,10 @@ fn schedule_send_ledger_escape_sweep<R: tauri::Runtime>(app: &AppHandle<R>, esca
 // The text a Restore puts back in the composer: the envelope's full text
 // for framed sends (mode prefix reattached so a resubmit keeps its
 // semantics), the recorded payload for inline sends.
-fn send_ledger_restore_text<R: tauri::Runtime>(app: &AppHandle<R>, entry: &SendLedgerEntry) -> String {
+fn send_ledger_restore_text<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    entry: &SendLedgerEntry,
+) -> String {
     if entry.kind == "framed" {
         if let Some(envelope) = read_outbound_turn_by_id(app, &entry.id) {
             let text = outbound_turn_text(&envelope);
@@ -16148,7 +16317,11 @@ fn project_user_text<R: tauri::Runtime>(
         let stripped = st_strip_image_paths(&body);
         return Some((
             stripped,
-            if images.is_empty() { None } else { Some(images) },
+            if images.is_empty() {
+                None
+            } else {
+                Some(images)
+            },
         ));
     }
     // 3) Inline worklist payload (current send path).
@@ -22748,7 +22921,10 @@ mod session_turn_tests {
             ..framed
         };
         // Needle must be JSON-escaped so it matches inside a JSONL string.
-        assert_eq!(super::send_ledger_needle(&inline), "say \\\"hi\\\" \\\\ there");
+        assert_eq!(
+            super::send_ledger_needle(&inline),
+            "say \\\"hi\\\" \\\\ there"
+        );
     }
 
     #[test]
@@ -25538,7 +25714,11 @@ fn route_request<R: tauri::Runtime>(
                     .collect()
             })
             .unwrap_or_default();
-        let body = serde_json::json!({ "entries": entries, "nowMs": unix_now_ms() });
+        let body = serde_json::json!({
+            "entries": entries,
+            "nowMs": unix_now_ms(),
+            "staleTerminalInput": stale_terminal_input()
+        });
         return match serde_json::to_vec(&body) {
             Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
             Err(e) => (500, "text/plain; charset=utf-8", e.to_string().into_bytes()),

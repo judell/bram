@@ -12666,8 +12666,39 @@ fn extract_pending_tool_call_from_jsonl(text: &str) -> Option<PendingToolCall> {
     // back — surfaced in the dump-on-fail diagnostic so we can see exactly
     // what the parser saw vs. what we expected.
     let mut recent_tool_use_ids: Vec<(String, String, bool)> = Vec::new();
+    // The prompt on screen is always the OLDEST unresolved tool_use:
+    // Claude executes tool calls in record order, so with N>1 pending (a
+    // multi-edit turn flushed as consecutive assistant records) returning
+    // the newest decorated every menu with the LAST call's signature/diff
+    // — the user previewed edit D while approving edit A, and the
+    // unchanging signature froze the pane menu across the whole series
+    // (menu-signature-oldest-unresolved, 2026-07-05). Keep the reverse
+    // walk — it protects against stale never-resolved tool_uses deeper in
+    // the tail — but collect through the contiguous pending cluster and
+    // return its oldest member. Cluster boundaries: a plain user message
+    // (turn boundary), or a tool_use-bearing assistant record whose calls
+    // are all resolved (a completed earlier cycle). tool_result user
+    // records and text/thinking-only assistant records are neutral —
+    // they interleave within a live turn.
+    let mut candidate: Option<PendingToolCall> = None;
     for r in parsed.iter().rev() {
-        if r.get("type").and_then(|v| v.as_str()) != Some("assistant") {
+        let typ = r.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if typ == "user" {
+            let has_tool_result = r
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .any(|c| c.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+                })
+                .unwrap_or(false);
+            if !has_tool_result && candidate.is_some() {
+                break;
+            }
+            continue;
+        }
+        if typ != "assistant" {
             continue;
         }
         let Some(arr) = r
@@ -12677,10 +12708,13 @@ fn extract_pending_tool_call_from_jsonl(text: &str) -> Option<PendingToolCall> {
         else {
             continue;
         };
+        let mut saw_tool_use = false;
+        let mut found_unresolved = false;
         for c in arr {
             if c.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
                 continue;
             }
+            saw_tool_use = true;
             let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("");
             let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("");
             if recent_tool_use_ids.len() < 6 {
@@ -12696,15 +12730,19 @@ fn extract_pending_tool_call_from_jsonl(text: &str) -> Option<PendingToolCall> {
                 .get("input")
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({}));
-            return Some(PendingToolCall {
+            candidate = Some(PendingToolCall {
                 name: name.to_string(),
                 input,
             });
+            found_unresolved = true;
+            break;
         }
-        // No unresolved tool_use in this assistant message — keep walking
-        // back. The latest tool_use might live in a prior assistant turn
-        // if interleaved thinking-only or text-only assistant messages
-        // came after it (rare, but possible).
+        if saw_tool_use && !found_unresolved && candidate.is_some() {
+            break;
+        }
+    }
+    if candidate.is_some() {
+        return candidate;
     }
     // Dump-on-fail diagnostic: when the parser walks the full buffer and
     // returns None, write a snapshot to /tmp/bram-jsonl-parse-debug.log

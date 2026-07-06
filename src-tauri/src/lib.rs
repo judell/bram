@@ -12889,7 +12889,19 @@ fn format_pending_tool_call(call: &PendingToolCall) -> String {
     }
 }
 
+// Thin wrapper: the oldest unresolved call — the one the on-screen
+// prompt is for. The full cluster feeds the batch roll-up diff
+// (batch-edit-rollup-diff).
 fn extract_pending_tool_call_from_jsonl(text: &str) -> Option<PendingToolCall> {
+    extract_pending_tool_cluster_from_jsonl(text).into_iter().next()
+}
+
+// The contiguous pending CLUSTER, oldest first: every unresolved
+// tool_use between turn boundaries. Element 0 is what the on-screen
+// prompt asks about; the rest are the batch Claude Code will execute
+// under the same approval (parallel same-message tool calls prompt
+// once — "4 updates rolled past with no menu interaction").
+fn extract_pending_tool_cluster_from_jsonl(text: &str) -> Vec<PendingToolCall> {
     // Two-pass design (replaced the prior reverse-walk-with-breaks because
     // any interleaved regular `user` text turn or thinking-only `assistant`
     // turn between the pending `tool_use` and the search start would
@@ -12953,7 +12965,10 @@ fn extract_pending_tool_call_from_jsonl(text: &str) -> Option<PendingToolCall> {
     // are all resolved (a completed earlier cycle). tool_result user
     // records and text/thinking-only assistant records are neutral —
     // they interleave within a live turn.
-    let mut candidate: Option<PendingToolCall> = None;
+    // Records' unresolved calls, collected newest-record-first (walk
+    // order); each inner Vec keeps the record's own forward order.
+    // Flattened to chronological at the end.
+    let mut cluster_records: Vec<Vec<PendingToolCall>> = Vec::new();
     for r in parsed.iter().rev() {
         let typ = r.get("type").and_then(|v| v.as_str()).unwrap_or("");
         if typ == "user" {
@@ -12966,7 +12981,7 @@ fn extract_pending_tool_call_from_jsonl(text: &str) -> Option<PendingToolCall> {
                         .any(|c| c.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
                 })
                 .unwrap_or(false);
-            if !has_tool_result && candidate.is_some() {
+            if !has_tool_result && !cluster_records.is_empty() {
                 break;
             }
             continue;
@@ -12982,7 +12997,7 @@ fn extract_pending_tool_call_from_jsonl(text: &str) -> Option<PendingToolCall> {
             continue;
         };
         let mut saw_tool_use = false;
-        let mut found_unresolved = false;
+        let mut record_calls: Vec<PendingToolCall> = Vec::new();
         for c in arr {
             if c.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
                 continue;
@@ -13003,19 +13018,23 @@ fn extract_pending_tool_call_from_jsonl(text: &str) -> Option<PendingToolCall> {
                 .get("input")
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({}));
-            candidate = Some(PendingToolCall {
+            record_calls.push(PendingToolCall {
                 name: name.to_string(),
                 input,
             });
-            found_unresolved = true;
-            break;
         }
-        if saw_tool_use && !found_unresolved && candidate.is_some() {
+        if !record_calls.is_empty() {
+            cluster_records.push(record_calls);
+        } else if saw_tool_use && !cluster_records.is_empty() {
             break;
         }
     }
-    if candidate.is_some() {
-        return candidate;
+    if !cluster_records.is_empty() {
+        return cluster_records
+            .into_iter()
+            .rev()
+            .flatten()
+            .collect();
     }
     // Dump-on-fail diagnostic: when the parser walks the full buffer and
     // returns None, write a snapshot to /tmp/bram-jsonl-parse-debug.log
@@ -13073,7 +13092,174 @@ fn extract_pending_tool_call_from_jsonl(text: &str) -> Option<PendingToolCall> {
         .append(true)
         .open("/tmp/bram-jsonl-parse-debug.log")
         .and_then(|mut f| std::io::Write::write_all(&mut f, snapshot.as_bytes()));
-    None
+    Vec::new()
+}
+
+// Apply a cluster's Edit/Write calls for one file, in order, against the
+// given original content — the simulation that makes the batch roll-up
+// diff show exactly what approval will land (sequential edits to the
+// same file included). Returns None when any Edit's old_string is not
+// found (stale preview race): the caller falls back to the single-call
+// snippet diff rather than showing a wrong simulation.
+fn apply_edit_calls(original: &str, calls: &[&PendingToolCall]) -> Option<String> {
+    let mut content = original.to_string();
+    for call in calls {
+        let field = |name: &str| call.input.get(name).and_then(|v| v.as_str()).unwrap_or("");
+        match call.name.as_str() {
+            "Write" => {
+                content = field("content").to_string();
+            }
+            "Edit" | "MultiEdit" => {
+                let old = field("old_string");
+                let new = field("new_string");
+                if old.is_empty() {
+                    return None;
+                }
+                if !content.contains(old) {
+                    return None;
+                }
+                let replace_all = call
+                    .input
+                    .get("replace_all")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                content = if replace_all {
+                    content.replace(old, new)
+                } else {
+                    content.replacen(old, new, 1)
+                };
+            }
+            _ => return None,
+        }
+    }
+    Some(content)
+}
+
+#[cfg(test)]
+mod apply_edit_calls_tests {
+    use super::{apply_edit_calls, PendingToolCall};
+
+    fn edit(old: &str, new: &str) -> PendingToolCall {
+        PendingToolCall {
+            name: "Edit".to_string(),
+            input: serde_json::json!({ "file_path": "/f", "old_string": old, "new_string": new }),
+        }
+    }
+
+    #[test]
+    fn sequential_edits_apply_in_order() {
+        let a = edit("one", "two");
+        let b = edit("two three", "four");
+        let calls = vec![&a, &b];
+        assert_eq!(apply_edit_calls("one three", &calls).as_deref(), Some("four"));
+    }
+
+    #[test]
+    fn missing_old_string_falls_back() {
+        let a = edit("absent", "x");
+        let calls = vec![&a];
+        assert_eq!(apply_edit_calls("content", &calls), None);
+    }
+
+    #[test]
+    fn replace_all_honored() {
+        let mut c = edit("x", "y");
+        c.input["replace_all"] = serde_json::json!(true);
+        let calls = vec![&c];
+        assert_eq!(apply_edit_calls("x x x", &calls).as_deref(), Some("y y y"));
+    }
+
+    #[test]
+    fn write_replaces_whole_content() {
+        let w = PendingToolCall {
+            name: "Write".to_string(),
+            input: serde_json::json!({ "file_path": "/f", "content": "fresh" }),
+        };
+        let follow = edit("fresh", "fresher");
+        let calls = vec![&w, &follow];
+        assert_eq!(apply_edit_calls("old stuff", &calls).as_deref(), Some("fresher"));
+    }
+}
+
+// Batch roll-up diff (batch-edit-rollup-diff): when the pending cluster
+// holds more than one file-mutating call, preview the WHOLE approval —
+// group Edit/Write calls by file, simulate each file's sequence against
+// on-disk content, and emit one unified diff per file (original → final)
+// under a banner line stating the batch scope. Any file whose simulation
+// fails is skipped here; the caller's single-call fallback still covers
+// the prompt's own edit. Returns None unless at least two file-mutating
+// calls exist and at least one file simulates cleanly.
+fn build_batch_rollup_diff<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    cluster: &[PendingToolCall],
+) -> Option<String> {
+    use similar::TextDiff;
+    let file_calls: Vec<&PendingToolCall> = cluster
+        .iter()
+        .filter(|c| {
+            matches!(c.name.as_str(), "Edit" | "MultiEdit" | "Write")
+                && c.input
+                    .get("file_path")
+                    .and_then(|v| v.as_str())
+                    .map_or(false, |p| !p.is_empty())
+        })
+        .collect();
+    if file_calls.len() < 2 {
+        return None;
+    }
+    // Group by file_path, preserving first-seen order.
+    let mut order: Vec<&str> = Vec::new();
+    let mut by_file: std::collections::HashMap<&str, Vec<&PendingToolCall>> =
+        std::collections::HashMap::new();
+    for call in &file_calls {
+        let path = call.input.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+        if !by_file.contains_key(path) {
+            order.push(path);
+        }
+        by_file.entry(path).or_default().push(call);
+    }
+    let root = project_root(Some(app));
+    let mut sections: Vec<String> = Vec::new();
+    for path in &order {
+        let calls = &by_file[path];
+        let original = std::fs::read_to_string(path).unwrap_or_default();
+        let Some(final_content) = apply_edit_calls(&original, calls) else {
+            continue;
+        };
+        let display_path = match &root {
+            Some(r) => match std::path::Path::new(path).strip_prefix(r) {
+                Ok(rel) => rel.to_string_lossy().into_owned(),
+                Err(_) => path.trim_start_matches('/').to_string(),
+            },
+            None => path.trim_start_matches('/').to_string(),
+        };
+        let diff_text = TextDiff::from_lines(original.as_str(), final_content.as_str())
+            .unified_diff()
+            .context_radius(3)
+            .missing_newline_hint(false)
+            .header(
+                &format!("a/{}", display_path),
+                &format!("b/{}", display_path),
+            )
+            .to_string();
+        if !diff_text.is_empty() {
+            sections.push(diff_text);
+        }
+    }
+    if sections.is_empty() {
+        return None;
+    }
+    // "Pending batch", not "Batch approval": Claude Code sometimes
+    // covers the whole cluster with one approval (parallel same-file
+    // edits) and sometimes re-prompts per call (cross-file Desktop
+    // Writes, observed 2026-07-06 13:27) — the preview describes what
+    // is QUEUED, promising nothing about what one Yes covers.
+    let banner = format!(
+        "Pending batch: {} edits across {} file(s)\n",
+        file_calls.len(),
+        order.len(),
+    );
+    Some(format!("{}{}", banner, sections.join("\n")))
 }
 
 // Sweep the active session's subagent transcripts for an unmatched
@@ -13182,7 +13368,8 @@ fn lookup_pending_tool_call<R: tauri::Runtime>(app: &AppHandle<R>) -> PendingToo
     }
     let tail_bytes = tail.len();
     let text = String::from_utf8_lossy(&tail);
-    let result = extract_pending_tool_call_from_jsonl(&text);
+    let cluster = extract_pending_tool_cluster_from_jsonl(&text);
+    let result = cluster.first().cloned();
     // Path + size diagnostic pairs with the parser-debug dump on failure.
     // Written only when the parser returned None so we can correlate.
     if result.is_none() {
@@ -13212,7 +13399,12 @@ fn lookup_pending_tool_call<R: tauri::Runtime>(app: &AppHandle<R>) -> PendingToo
             };
             PendingToolCallLookup {
                 signature: Some(format_pending_tool_call(&call)),
-                diff: pending_tool_call_diff(&call, app),
+                // Batch approvals preview the whole cluster (one approval
+                // executes them all); single calls keep the snippet diff.
+                // The signature stays the oldest call's either way, so
+                // menu identity and the fence fingerprint are unchanged.
+                diff: build_batch_rollup_diff(app, &cluster)
+                    .or_else(|| pending_tool_call_diff(&call, app)),
                 content,
                 reason: "found",
                 tail_bytes,

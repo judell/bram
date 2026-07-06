@@ -100,9 +100,8 @@ each kind of code should live, and how XMLUI markup calls into it.
 - **XMLUI attribute handlers** → a single function call:
   `onClick="window.foo(...)"` (or `onClick="foo(...)"` if `foo` is an
   xs function). Never multi-statement bodies, never multi-line arrow
-  bodies, never object-literal blobs. The full rationale and past
-  failure modes are catalogued in
-  `docs/code-organization-audit.md`.
+  bodies, never object-literal blobs. The past failure modes are
+  catalogued in *Failure modes that informed these rules* below.
 
 ### When and why do we need delegators?
 
@@ -125,9 +124,9 @@ bare `window` surface. Each delegator we add hoists `function foo`
 onto `window.foo`, expanding the collision-prone surface — the
 exchange rate has to be worth it.
 
-The `Globals.xs` of today has 86 delegators, mostly fossil from a
-prior model. The audit at `docs/code-organization-audit.md` lists
-them in groups and a filed worklist item that pares them down.
+The `Globals.xs` of today has zero delegators — the fossil set from a
+prior model was pared away during the host-route migrations. The rule
+above governs whether any new one earns its place.
 
 ### The `__bram*` namespace prefix
 
@@ -425,10 +424,9 @@ serves an empty default; the Worklist tab creates the file (and
      No agent-side bracket needed. The host detects the `iterate:`
      prefix on the `toTurn` write path and sets the inflight sentinel
      automatically; the same turn-finished detectors that clear
-     approve/drop sentinels clear iterate's too. Legacy
-     `/__iterate/begin` and `/__iterate/end` routes still work for
-     back-compat but are no longer required. See
-     *Host-managed inflight sentinel*.
+     approve/drop sentinels clear iterate's too. (The legacy
+     `/__iterate/begin` and `/__iterate/end` routes were removed in
+     the #214 delete phase.) See *Host-managed inflight sentinel*.
 
      The Iterate payload's per-item shape is `{id, feedbackRef}`
      where `feedbackRef` names a file at
@@ -772,9 +770,8 @@ reference: `docs/apis.md` §11. Agent-side conventions:
   `iterate:` prefix on the `toTurn` write path and sets the sentinel
   automatically (parallel to how `resolve` sets it for the commit gate and
   drops); the same turn-finished detectors that clear approve/drop
-  sentinels clear iterate's too. Legacy `/__iterate/begin` and
-  `/__iterate/end` routes still work for back-compat but are no longer
-  required.
+  sentinels clear iterate's too. (The legacy `/__iterate/begin` and
+  `/__iterate/end` routes were removed in the #214 delete phase.)
 
 ### Failure modes
 
@@ -791,8 +788,8 @@ commonly:
 - **Iterate stuck:** rare now that the host auto-detects the
   `iterate:` prefix and the turn-finished clearer fires for all
   sentinel kinds. If it does stick, host-side completion detectors
-  will clear it on the next normal turn end; the explicit
-  `/__iterate/end` route is still available as a manual unwind.
+  will clear it on the next normal turn end; `/__worklist/end` remains
+  available as an explicit manual unwind.
 - **Premature clear:** silence alone is not authoritative. PTY silence
   can request a sentinel clear, but the host first checks the latest
   provider JSONL completion detector. If JSONL says the assistant turn is

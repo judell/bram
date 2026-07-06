@@ -123,10 +123,9 @@
     when="{closeIssuesDialog !== null}" />
   <!-- Sentinel-derived inflight consumer (#84 item 3). The host writes
        resources/.inflight-claim.json on /__worklist/resolve (approved
-       / drop) and /__iterate/begin. Approved/drop sentinels clear at
-       host silence-detected turn-end, with /__worklist/end available
-       as an explicit endpoint; iterate sentinels clear via
-       /__iterate/end. Each write/clear emits
+       / drop) and on the toTurn write path (approved / iterate).
+       Sentinels clear at host turn-end detection, with /__worklist/end
+       available as an explicit endpoint. Each write/clear emits
        inflightTick below and forces this DataSource to refetch. When
        the sentinel no longer claims the targeted item, the onLoaded
        handler clears localStorage and resets per-cycle state.

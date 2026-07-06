@@ -13495,8 +13495,6 @@ struct ConversationStateCache {
     path: std::path::PathBuf,
     mtime_ms: i64,
     len: u64,
-    last_assistant_text_bytes: Vec<u8>,
-    last_exchange_bytes: Vec<u8>,
     current_turn_edits_bytes: Vec<u8>,
     conversation_state_bytes: Vec<u8>,
 }
@@ -13543,9 +13541,6 @@ fn build_conversation_cache_entry<R: tauri::Runtime>(
         "path": path.to_string_lossy().to_string(),
         "mtime": mtime_ms,
     });
-    let last_assistant_text_bytes =
-        serde_json::to_vec(&last_assistant_value).map_err(|e| e.to_string())?;
-
     // last_exchange sub-payload (port of the original read_last_exchange body)
     let mut user_text = String::new();
     let mut assistant_text = String::new();
@@ -13664,9 +13659,6 @@ fn build_conversation_cache_entry<R: tauri::Runtime>(
         "provider": provider_str,
         "iterateFeedback": iterate_feedback,
     });
-    let last_exchange_bytes =
-        serde_json::to_vec(&last_exchange_value).map_err(|e| e.to_string())?;
-
     // current_turn_edits sub-payload — reuse legacy 64KB-tail derivation
     // for byte-for-byte parity with the existing route.
     let current_turn_edits_value = compute_current_turn_edits_from_text(&text);
@@ -13685,8 +13677,6 @@ fn build_conversation_cache_entry<R: tauri::Runtime>(
         path,
         mtime_ms,
         len,
-        last_assistant_text_bytes,
-        last_exchange_bytes,
         current_turn_edits_bytes,
         conversation_state_bytes,
     })
@@ -13712,63 +13702,10 @@ fn resolve_conversation_path_meta<R: tauri::Runtime>(
     Ok(Some((path, mtime_ms, metadata.len())))
 }
 
-fn read_last_assistant_text<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    preferred: Option<SessionProvider>,
-) -> Result<Vec<u8>, String> {
-    let Some((path, mtime_ms, len)) = resolve_conversation_path_meta(app, preferred)? else {
-        return Ok(br#"{"text":"","source":"session-turns"}"#.to_vec());
-    };
-    {
-        let cache = conversation_state_cache_cell().lock().unwrap();
-        if let Some(c) = cache.as_ref() {
-            if c.path == path && c.mtime_ms == mtime_ms && c.len == len {
-                return Ok(c.last_assistant_text_bytes.clone());
-            }
-        }
-    }
-    let entry = build_conversation_cache_entry(app, preferred, path, mtime_ms, len)?;
-    let bytes = entry.last_assistant_text_bytes.clone();
-    *conversation_state_cache_cell().lock().unwrap() = Some(entry);
-    Ok(bytes)
-}
-
-// Companion to read_last_assistant_text: returns the most recent USER
-// message text plus the most recent ASSISTANT message text (which may be
-// empty if the assistant hasn't responded yet) plus the active provider
-// label. Used by the Worklist tab's "You said" / "Claude said" panel.
-fn read_last_exchange<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    preferred: Option<SessionProvider>,
-) -> Result<Vec<u8>, String> {
-    let provider = preferred.or_else(|| current_provider(app));
-    let provider_str = match provider {
-        Some(SessionProvider::Claude) => "claude",
-        Some(SessionProvider::Codex) => "codex",
-        None => "",
-    };
-    let Some((path, mtime_ms, len)) = resolve_conversation_path_meta(app, preferred)? else {
-        let body = serde_json::json!({
-            "userText": "",
-            "assistantText": "",
-            "tools": [],
-            "provider": provider_str,
-        });
-        return serde_json::to_vec(&body).map_err(|e| e.to_string());
-    };
-    {
-        let cache = conversation_state_cache_cell().lock().unwrap();
-        if let Some(c) = cache.as_ref() {
-            if c.path == path && c.mtime_ms == mtime_ms && c.len == len {
-                return Ok(c.last_exchange_bytes.clone());
-            }
-        }
-    }
-    let entry = build_conversation_cache_entry(app, preferred, path, mtime_ms, len)?;
-    let bytes = entry.last_exchange_bytes.clone();
-    *conversation_state_cache_cell().lock().unwrap() = Some(entry);
-    Ok(bytes)
-}
+// (delete-phase tranche 1, #214: the standalone /__last-assistant-text
+// and /__last-exchange route wrappers were deleted — zero app/ callers;
+// Workspace consumes both payloads through /__conversation-state, which
+// shares the same cache entry.)
 
 // Host-side `is the agent waiting for the assistant to speak` derivation.
 // Mirrors the iframe helper isWaitingForAssistant(jsonlText) in Globals.xs:
@@ -14245,7 +14182,7 @@ mod conversation_state_tests {
 // helper chain (~400 LOC of JSONL walking and shape-massaging) with a
 // host-side derivation that emits the same structured array Transcript
 // renders against today. Pure functions first, then the route entry
-// points read_session_turns / read_tool_detail.
+// points (/__turns via read_projected_turns, and read_tool_detail).
 //
 // Output shape (must match the iframe so Transcript.xmlui doesn't
 // need to change other than its DataSource binding):
@@ -15681,18 +15618,6 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
     serde_json::to_vec(&body).map_err(|e| e.to_string())
 }
 
-// Single-entry mtime cache for read_session_turns. The parse runs
-// ~300 ms on a 600+ turn session; in steady-state polling (every ~2 s
-// from `currentTurnEditsTick`) the JSONL mtime is unchanged across
-// most fetches, so the cache hit drops the route to a stat() call.
-// When the agent appends, mtime advances and we re-parse once.
-// Path is part of the key so a provider flip (Claude ↔ Codex) misses
-// the cache cleanly and reparses against the new file.
-static SESSION_TURNS_CACHE: std::sync::Mutex<
-    Option<(std::path::PathBuf, std::time::SystemTime, Vec<u8>)>,
-> = std::sync::Mutex::new(None);
-
-// Read the freshest session JSONL and produce the structured turn array.
 // Session-size thresholds. Calibrated from observation: at ~21 MB the
 // agent pane became unusable; at ~5 MB earlier in the same session
 // everything was responsive. The middle band is a guess and worth
@@ -15821,29 +15746,9 @@ fn session_size_status_row<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json:
     })
 }
 
-fn read_session_turns<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String> {
-    let Some(path) = active_session_path(app)? else {
-        return Ok(b"[]".to_vec());
-    };
-    let mtime = std::fs::metadata(&path)
-        .and_then(|m| m.modified())
-        .map_err(|e| e.to_string())?;
-    // Cache hit: same path + same mtime as last serve.
-    if let Ok(guard) = SESSION_TURNS_CACHE.lock() {
-        if let Some((cached_path, cached_mtime, cached_bytes)) = guard.as_ref() {
-            if cached_path == &path && cached_mtime == &mtime {
-                return Ok(cached_bytes.clone());
-            }
-        }
-    }
-    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let turns = st_parse_lines_to_turns(&text);
-    let bytes = serde_json::to_vec(&turns).map_err(|e| e.to_string())?;
-    if let Ok(mut guard) = SESSION_TURNS_CACHE.lock() {
-        *guard = Some((path, mtime, bytes.clone()));
-    }
-    Ok(bytes)
-}
+// (delete-phase tranche 1, #214: /__session-turns and its dedicated
+// mtime cache were deleted — zero app/ callers; every turn-display
+// surface consumes /__turns.)
 
 // =====================================================================
 // Turn projection (docs/turn-transport-redesign.md).
@@ -16884,10 +16789,9 @@ fn project_user_turns<R: tauri::Runtime>(app: &AppHandle<R>, turns: &mut [serde_
     }
 }
 
-// Single-entry (path, mtime) cache, same rationale as SESSION_TURNS_CACHE:
-// steady-state refetches between JSONL appends hit the cache; each append
-// re-parses once. Envelope/draft/feedback files are write-once, so keying
-// on the JSONL alone is sound.
+// Single-entry (path, mtime) cache: steady-state refetches between JSONL
+// appends hit the cache; each append re-parses once. Envelope/draft/
+// feedback files are write-once, so keying on the JSONL alone is sound.
 static PROJECTED_TURNS_CACHE: std::sync::Mutex<
     Option<(std::path::PathBuf, std::time::SystemTime, Vec<u8>)>,
 > = std::sync::Mutex::new(None);
@@ -26160,21 +26064,6 @@ fn route_request<R: tauri::Runtime>(
         };
     }
 
-    // Architectural experiment: derive-at-the-boundary for the
-    // "last assistant text" panel. Iframe binds to this route's
-    // {text} field instead of calling lastAssistantText(lastJsonl) and
-    // walking the buffer per fanout. Refetch is event-driven via
-    // talk-session-changed.
-    if path == "__last-assistant-text" {
-        return match read_last_assistant_text(app, None) {
-            Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
-            Err(e) => {
-                eprintln!("[http /__last-assistant-text] {}", e);
-                (500, "text/plain; charset=utf-8", e.into_bytes())
-            }
-        };
-    }
-
     // Combined conversation-derived state for Workspace.xmlui's single
     // conversationStateDS binding. Returns nested
     // { lastAssistantText, lastExchange, currentTurnEdits }. Backed by
@@ -26190,17 +26079,7 @@ fn route_request<R: tauri::Runtime>(
         };
     }
 
-    if path == "__last-exchange" {
-        return match read_last_exchange(app, None) {
-            Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
-            Err(e) => {
-                eprintln!("[http /__last-exchange] {}", e);
-                (500, "text/plain; charset=utf-8", e.into_bytes())
-            }
-        };
-    }
-
-    // Companion to /__last-assistant-text: per-file edit aggregates for
+    // Per-file edit aggregates for
     // the current turn. Same architecture (host parses 64 KB tail once
     // per request, iframe binds via DataSource), replaces the iframe's
     // currentTurnEdits(lastJsonl) helper which had started exceeding
@@ -26320,17 +26199,7 @@ fn route_request<R: tauri::Runtime>(
         };
     }
 
-    if path == "__session-turns" {
-        return match read_session_turns(app) {
-            Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
-            Err(e) => {
-                eprintln!("[http /__session-turns] {}", e);
-                (500, "text/plain; charset=utf-8", e.into_bytes())
-            }
-        };
-    }
-
-    // Companion to /__session-turns: full input + result for a single
+    // Full input + result for a single
     // tool by id. Mirrors getToolDetail(jsonlText, toolId). Returns
     // {input, result} or null.
     if path == "__tool-detail" {
@@ -27172,11 +27041,7 @@ fn drain_worklist_intent<R: tauri::Runtime>(app: &AppHandle<R>) {
                 let (s, _m, b) = handle_worklist_commit(app, &body_bytes);
                 (s, b)
             }
-            "iterate-begin" => {
-                let (s, _m, b) = handle_iterate_begin(app, &body_bytes);
-                (s, b)
-            }
-            "iterate-end" | "worklist-end" => {
+            "worklist-end" => {
                 let (s, _m, b) = handle_iterate_end(app, &body_bytes);
                 (s, b)
             }
@@ -27235,50 +27100,13 @@ fn drain_worklist_intent<R: tauri::Runtime>(app: &AppHandle<R>) {
 // resources/.worklist-authorization.json before the write: prune
 // requires `kind: "drop"`, advance requires `kind: "approved"`, and
 // every requested id must appear in the auth record's ids.
-// POST /__iterate/begin — the agent calls this at the start of any
-// iterate cycle. Writes the inflight sentinel with kind="iterate" and
-// the ids from the iterate payload. Refs #84.
-fn handle_iterate_begin<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    body: &[u8],
-) -> (u16, &'static str, Vec<u8>) {
-    let req_json: serde_json::Value = match serde_json::from_slice(body) {
-        Ok(v) => v,
-        Err(e) => {
-            return (
-                400,
-                "application/json; charset=utf-8",
-                format!("{{\"error\":\"invalid JSON: {}\"}}", e).into_bytes(),
-            );
-        }
-    };
-    let ids: Vec<String> = req_json
-        .get("ids")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    if ids.is_empty() {
-        return (
-            400,
-            "application/json; charset=utf-8",
-            br#"{"error":"ids[] required"}"#.to_vec(),
-        );
-    }
-    write_inflight_claim_sentinel(app, &ids, "iterate");
-    (
-        200,
-        "application/json; charset=utf-8",
-        br#"{"ok":true}"#.to_vec(),
-    )
-}
-
-// POST /__iterate/end — the agent calls this at the end of any
-// iterate cycle. Clears the sentinel if it fully covers the supplied
-// ids (same coverage rule as /__worklist/mutate). Refs #84.
+// POST /__worklist/end (and the Codex intent route "worklist-end") —
+// the optional last action of an approved/drop turn: clears the
+// sentinel if it fully covers the supplied ids (same coverage rule as
+// /__worklist/mutate). The legacy /__iterate/begin + /__iterate/end
+// routes this handler once also served were deleted (delete-phase
+// tranche 1, #214): the host writes and clears the iterate sentinel on
+// the toTurn path. Refs #84, #91.
 fn handle_iterate_end<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
@@ -28426,22 +28254,14 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             let _ = request.as_reader().read_to_end(&mut buf);
             handle_permission_menu(app, &buf, true)
         }
-    } else if path == "__iterate/begin" {
-        if method != "POST" {
-            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
-        } else {
-            let mut buf = Vec::new();
-            let _ = request.as_reader().read_to_end(&mut buf);
-            handle_iterate_begin(app, &buf)
-        }
-    } else if path == "__iterate/end" || path == "__worklist/end" {
-        // `/__worklist/end` is the alias agents call as the last action
-        // of approved/drop turns (closing the cycle the resolve handler
-        // opened by writing the sentinel). Both names route through the
-        // same kind-agnostic handler — the sentinel doesn't care
-        // whether it was written with kind:"approved", "drop", or
-        // "iterate", and the clear logic only needs the id set.
-        // Closes #91.
+    } else if path == "__worklist/end" {
+        // The last-action route agents may call to close approved/drop
+        // turns (the sentinel doesn't care which kind wrote it; the
+        // clear logic only needs the id set). The legacy
+        // `/__iterate/begin` + `/__iterate/end` routes were deleted
+        // (delete-phase tranche 1, #214): the host sets and clears the
+        // iterate sentinel on the toTurn write path, so no agent-side
+        // bracket exists to serve. Closes #91.
         if method != "POST" {
             (405, "text/plain; charset=utf-8", b"POST only".to_vec())
         } else {

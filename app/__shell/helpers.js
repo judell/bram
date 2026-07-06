@@ -4971,16 +4971,8 @@ window.startBramLatestJsonlPush = function (getProvider) {
 window.startLatestJsonlPolling = window.startLatestJsonlPush;
 window.startBramLatestJsonlPolling = window.startBramLatestJsonlPush;
 // Convenience: subscribe + remember the unsubscriber on window under the
-// caller-supplied key. Avoids `window.X = ...` left-value expressions in
-// XMLUI source, which XMLUI's evaluator rejects with "Left value variable
-// (X) not found in the scope." The property assignment happens entirely in
-// plain JS here; the XMLUI handler just calls this function.
-window.subscribeLatestJsonl = function (key, fn) {
-  if (typeof window[key] === "function") {
-    try { window[key](); } catch (e) {}
-  }
-  window[key] = window.onLatestJsonlChange(fn);
-};
+// (delete-phase tranche 1, #214: window.subscribeLatestJsonl was
+// deleted — defined for xmlui use but never called from any markup.)
 // Append a delta chunk to the shared cache (diff-based latest-tail path,
 // issue #100). Caps the cache at __latestJsonlMaxBytes by head-trimming
 // at the next newline boundary — keeps the buffer always-valid JSONL so

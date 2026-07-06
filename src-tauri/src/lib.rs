@@ -2941,6 +2941,7 @@ fn handle_permission_menu<R: tauri::Runtime>(
             ),
         );
     }
+    retire_dismissed_menu_on_hook_claim(app, &menu);
     let payload = Some(menu);
     turn_state_set_menu(app, payload.clone(), "hook-permission", "detected");
     emit_pty_menu_with_prose(app, &payload);
@@ -4516,6 +4517,27 @@ fn report_grid_menu(app: AppHandle, payload: serde_json::Value) {
 
 fn pty_menu_suppressed_cell() -> &'static Mutex<Option<DismissedMenu>> {
     PTY_MENU_SUPPRESSED.get_or_init(|| Mutex::new(None))
+}
+
+fn retire_dismissed_menu_on_hook_claim<R: tauri::Runtime>(app: &AppHandle<R>, menu: &PtyMenu) {
+    let retired = pty_menu_suppressed_cell()
+        .lock()
+        .ok()
+        .and_then(|mut suppressed| suppressed.take());
+    if let Some(d) = retired {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "hook-menu",
+                &format!(
+                    "op=retire-suppressor reason=fresh-permission tool={} dismissed_tool={} elapsed_ms={}",
+                    menu.tool,
+                    d.tool,
+                    d.when.elapsed().as_millis()
+                ),
+            );
+        }
+    }
 }
 
 fn pty_menu_held_cell() -> &'static Mutex<Option<std::time::Instant>> {
@@ -15539,7 +15561,10 @@ fn clear_stale_terminal_input_before_pane_send<R: tauri::Runtime>(
             append_bram_trace_line(
                 app,
                 "send-ledger",
-                &format!("op=stale-input-clear-skip source=pane-send reason={}", reason),
+                &format!(
+                    "op=stale-input-clear-skip source=pane-send reason={}",
+                    reason
+                ),
             );
         }
         return;

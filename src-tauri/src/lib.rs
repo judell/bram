@@ -27771,9 +27771,32 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         return worklist_json_error(400, e);
     }
 
-    let add_args = worklist_commit_add_args(&files);
-    if let Err(e) = git_run_owned(app, &add_args) {
-        return worklist_json_error(500, format!("git add failed: {}", e.trim()));
+    // Stage per-file, tolerating paths git cannot match at all — even
+    // with `-A`, a pathspec that matches neither the working tree nor
+    // the index (never tracked, or its deletion already committed)
+    // fails the whole add. A stale worklist `files` entry aborted
+    // delete-phase tranche 1's commit four times this way
+    // (worklist-commit-stage-deletions, 2026-07-06). Unmatched paths
+    // are skipped and traced; every other add failure still aborts,
+    // and the staged_after emptiness guard below still refuses a
+    // commit where nothing staged.
+    let mut skipped_unmatched: Vec<String> = Vec::new();
+    for file in &files {
+        let add_args = worklist_commit_add_args(std::slice::from_ref(file));
+        if let Err(e) = git_run_owned(app, &add_args) {
+            if e.contains("did not match any files") {
+                skipped_unmatched.push(file.clone());
+                continue;
+            }
+            return worklist_json_error(500, format!("git add failed: {}", e.trim()));
+        }
+    }
+    if !skipped_unmatched.is_empty() && bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "worklist-commit",
+            &format!("op=skip-unmatched files={:?}", skipped_unmatched),
+        );
     }
     let staged_after = match git_staged_files(app) {
         Ok(files) => files,
@@ -27792,7 +27815,16 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         message.to_string(),
         "--".to_string(),
     ];
-    commit_args.extend(files.iter().cloned());
+    // Scope the commit pathspec to files staging actually acted on —
+    // `git commit -- <path>` fails on a nothing-matching path exactly
+    // like `git add` does, one step downstream (caught by the
+    // verify-stage-deletions fixture on first exercise).
+    commit_args.extend(
+        files
+            .iter()
+            .filter(|f| !skipped_unmatched.contains(f))
+            .cloned(),
+    );
     if let Err(e) = git_run_owned(app, &commit_args) {
         return worklist_json_error(500, format!("git commit failed: {}", e.trim()));
     }

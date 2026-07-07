@@ -38,7 +38,8 @@
   var.submittedKind="{window.__bramRestoreWorklistSubmittedKind()}"
   var.agentDockLaunchResponseDim="{window.__bramShouldDimAgentDockOnMount ? window.__bramShouldDimAgentDockOnMount() : true}"
   var.agentDockLaunchResponseText="{''}"
-  var.agentDockLaunchUserText="{''}">
+  var.agentDockLaunchUserText="{''}"
+  var.currentTurnEditsTick="{0}">
   <DataSource
     id="worklist"
     url="/__worklist"
@@ -163,17 +164,18 @@
   <ChangeListener
     listenTo="{(expandedItemIds || []).length === 0 ? 'none' : 'some'}"
     onDidChange="() => { if ((expandedItemIds || []).length === 0 && worklistVoiceTarget === 'feedback') setWorklistVoiceTarget('message-agent'); }" />
-  <!-- Worklist still consumes conversation-derived currentTurnEdits for
-       in-flight edit hints. Transcript owns the chat surface. -->
   <PushSource
-    id="conversationStateDS"
+    id="projectedTurnsDS"
     initial="{null}"
-    subscribe="{window.bramSubscribeConversationState()}" />
+    subscribe="{window.bramSubscribeProjectedTurns()}" />
+  <DataSource
+    id="currentTurnEditsDS"
+    url="/__current-turn-edits?t={currentTurnEditsTick}" />
   <ChangeListener
     listenToSources="{{
-      assistantText: conversationStateDS.value &amp;&amp; conversationStateDS.value.lastAssistantText &amp;&amp; conversationStateDS.value.lastAssistantText.text,
-      exchangeUserText: conversationStateDS.value &amp;&amp; conversationStateDS.value.lastExchange &amp;&amp; conversationStateDS.value.lastExchange.userText,
-      exchangeAssistantText: conversationStateDS.value &amp;&amp; conversationStateDS.value.lastExchange &amp;&amp; conversationStateDS.value.lastExchange.assistantText
+      assistantText: window.__bramProjectedLastExchange(projectedTurnsDS.value).lastAssistantText.text,
+      exchangeUserText: window.__bramProjectedLastExchange(projectedTurnsDS.value).lastExchange.userText,
+      exchangeAssistantText: window.__bramProjectedLastExchange(projectedTurnsDS.value).lastExchange.assistantText
     }}"
     onDidChange="(c) => {
       const v = c.newValue || {};
@@ -386,8 +388,7 @@
           const correlationId = (ev &amp;&amp; ev.correlationId) || '';
           const atHostMs = (ev &amp;&amp; ev.atHostMs) || 0;
           window.__bramIframeTrace('listener-fired', {context: 'talk-session-changed', correlation_id: correlationId, at_host_ms: atHostMs, delta_to_emit_ms: atHostMs ? (Date.now() - atHostMs) : -1});
-          // conversation-state now arrives via the conversationStateDS PushSource
-          // push (conversation-state-changed); no refetch needed here.
+          currentTurnEditsTick = currentTurnEditsTick + 1;
         }" />
       <PushSource
         id="voiceArrival"
@@ -594,16 +595,14 @@
                   <Text value="{$item.id}" fontWeight="$fontWeight-bold" />
                 </HStack>
                 <!-- In-flight feedback panel: shows files touched in the
-                     agent's current turn while a cycle targets this
-                     item. Reads from conversationStateDS.currentTurnEdits
-                     (host-side derivation backed by the shared parse cache);
-                     replaces the iframe currentTurnEdits walk that had
-                     started timing out on busy turns. -->
+                     agent's current turn while a cycle targets this item.
+                     Reads the host-derived /__current-turn-edits endpoint;
+                     the legacy conversationStateDS path is retired. -->
                 <VStack
                   when="{submitting && actionProgressScope !== 'batch' && submittedItemId === $item.id}"
                   gap="$space-0_5"
                   paddingLeft="$space-3"
-                  var.turnEdits="{(conversationStateDS.value &amp;&amp; conversationStateDS.value.currentTurnEdits) || []}">
+                  var.turnEdits="{(currentTurnEditsDS.value) || []}">
                   <Text
                     when="{turnEdits.length > 0}"
                     fontSize="$fontSize-xs"
@@ -1181,22 +1180,21 @@ Drop is the clean rejection path; Iterate is what you want if the item just need
         window.__bramIframeTrace('listener-fired', {context: 'inflight-claim-changed'});
         inflightTick = inflightTick + 1;
       }" />
-    <!-- Agent dock: the last exchange, so you can read output without
-         leaving the Worklist page for the Transcript tab. Last response =
-         conversationStateDS.value.lastAssistantText.text, bounded with an
-         internal scroller so a long response doesn't lengthen the page.
-         (Pending menus render in the app footer — Main.xmlui.) -->
+    <!-- Agent dock: the last exchange from the same projected-turns
+         source Transcript uses, so provider switches update both
+         surfaces together. Pending menus render in the app footer. -->
+    <VStack var.dockExchange="{window.__bramProjectedLastExchange(projectedTurnsDS.value)}">
     <VStack
-      when="{(conversationStateDS.value &amp;&amp; conversationStateDS.value.lastExchange &amp;&amp; conversationStateDS.value.lastExchange.userText) || (conversationStateDS.value &amp;&amp; conversationStateDS.value.lastExchange &amp;&amp; conversationStateDS.value.lastExchange.userImages &amp;&amp; conversationStateDS.value.lastExchange.userImages.length > 0) || (conversationStateDS.value &amp;&amp; conversationStateDS.value.lastAssistantText &amp;&amp; conversationStateDS.value.lastAssistantText.text)}"
+      when="{(dockExchange.lastExchange &amp;&amp; dockExchange.lastExchange.userText) || (dockExchange.lastExchange &amp;&amp; dockExchange.lastExchange.userImages &amp;&amp; dockExchange.lastExchange.userImages.length > 0) || (dockExchange.lastAssistantText &amp;&amp; dockExchange.lastAssistantText.text)}"
       gap="$space-2"
       width="100%"
       paddingTop="$space-4">
       <VStack
-        when="{conversationStateDS.value &amp;&amp; conversationStateDS.value.lastExchange &amp;&amp; (conversationStateDS.value.lastExchange.userText || (conversationStateDS.value.lastExchange.userImages &amp;&amp; conversationStateDS.value.lastExchange.userImages.length > 0))}"
+        when="{dockExchange.lastExchange &amp;&amp; (dockExchange.lastExchange.userText || (dockExchange.lastExchange.userImages &amp;&amp; dockExchange.lastExchange.userImages.length > 0))}"
         gap="$space-1"
         width="100%"
-        var.youText="{conversationStateDS.value.lastExchange.userText || ''}"
-        var.youImages="{conversationStateDS.value.lastExchange.userImages || []}">
+        var.youText="{dockExchange.lastExchange.userText || ''}"
+        var.youImages="{dockExchange.lastExchange.userImages || []}">
         <Text
           fontSize="$fontSize-xs"
           color="$textColor-secondary"
@@ -1219,11 +1217,11 @@ Drop is the clean rejection path; Iterate is what you want if the item just need
            the answered exchange as a Worklist submission from this app
            session. -->
       <VStack
-        when="{conversationStateDS.value &amp;&amp; conversationStateDS.value.lastAssistantText &amp;&amp; conversationStateDS.value.lastAssistantText.text}"
+        when="{dockExchange.lastAssistantText &amp;&amp; dockExchange.lastAssistantText.text}"
         gap="$space-1"
         width="100%"
-        opacity="{(agentDockLaunchResponseDim || (conversationStateDS.value &amp;&amp; conversationStateDS.value.lastExchange &amp;&amp; conversationStateDS.value.lastExchange.userText &amp;&amp; !conversationStateDS.value.lastExchange.assistantText)) ? 0.45 : 1}"
-        var.lastResp="{conversationStateDS.value.lastAssistantText.text}">
+        opacity="{(agentDockLaunchResponseDim || (dockExchange.lastExchange &amp;&amp; dockExchange.lastExchange.userText &amp;&amp; !dockExchange.lastExchange.assistantText)) ? 0.45 : 1}"
+        var.lastResp="{dockExchange.lastAssistantText.text}">
         <Text
           fontSize="$fontSize-xs"
           color="$textColor-secondary"
@@ -1232,6 +1230,7 @@ Drop is the clean rejection path; Iterate is what you want if the item just need
           <Markdown content="{window.__bramStripImagePaths(lastResp)}" />
         </VStack>
       </VStack>
+    </VStack>
     </VStack>
 
   </VStack>

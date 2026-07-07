@@ -3384,45 +3384,6 @@ window.bramSubscribePtyThroughput = (function () {
   };
 })();
 
-// External-driven conversation-state push. Replaces the conversationStateDS
-// DataSource: the host emits `conversation-state-changed` with the full
-// /__conversation-state payload, deduped, so subscribers re-render only on a
-// real content change (not on every session signal). A one-time seed fetch
-// populates the value on first subscribe so the chat pane is not blank before
-// the first push.
-window.bramSubscribeConversationState = (function () {
-  var factory;
-  return function () {
-    if (factory) return factory;
-    var subscribers = new Set();
-    var lastValue = null;
-    var notify = function () {
-      subscribers.forEach(function (fn) {
-        try { fn(); } catch (e) { console.error("[bramSubscribeConversationState] subscriber threw:", e); }
-      });
-    };
-    window.subscribeTauriEvent("__bramConversationStateExternalUnsub",
-      "conversation-state-changed", function (e) {
-        lastValue = (e && e.payload) || null;
-        notify();
-      });
-    // Seed once so the pane has content before the first push event arrives.
-    try {
-      window.fetch("/__conversation-state")
-        .then(function (r) { return r.json(); })
-        .then(function (v) { if (lastValue == null) { lastValue = v; notify(); } })
-        .catch(function () {});
-    } catch (e) {}
-    factory = function (emit) {
-      var fire = function () { emit(lastValue); };
-      subscribers.add(fire);
-      fire();
-      return function () { subscribers.delete(fire); };
-    };
-    return factory;
-  };
-})();
-
 // External-driven enhance-status tick. Emits an incrementing tick on
 // each enhance-status-changed event so a downstream ChangeListener can
 // trigger DataSource.refetch() (a markup-only operation).
@@ -4327,6 +4288,39 @@ window.__bramProjectedSessionTurns = function (payload) {
   return (payload && payload.turns) || [];
 };
 
+window.__bramProjectedLastExchange = function (payload) {
+  var turns = (payload && payload.turns) || [];
+  var lastUser = null;
+  var lastAssistantText = "";
+  for (var i = 0; i < turns.length; i++) {
+    var t = turns[i] || {};
+    if (t.notification) continue;
+    if (t.role === "user") {
+      lastUser = {
+        userText: t.text || "",
+        userImages: t.images || [],
+        assistantText: "",
+      };
+    } else if (t.role === "assistant") {
+      var parts = [];
+      var entries = t.entries || [];
+      for (var j = 0; j < entries.length; j++) {
+        var e = entries[j] || {};
+        if (e.kind === "text" && e.text) parts.push(e.text);
+      }
+      var text = parts.join("\n\n").trim();
+      if (text) {
+        lastAssistantText = text;
+        if (lastUser) lastUser.assistantText = text;
+      }
+    }
+  }
+  return {
+    lastAssistantText: { text: lastAssistantText },
+    lastExchange: lastUser || { userText: "", userImages: [], assistantText: "" },
+  };
+};
+
 // ---- Subagent visibility (surface-subagent-activity-in-pane) ----
 // The Transcript viewport switch is an inline ternary in Transcript.xmlui
 // (not a helper here) so the hot-reloaded markup keeps working against a
@@ -4582,6 +4576,7 @@ window.__bramToggleInArray = function (arr, id) {
 // stored under the same key.
 var __bramTurnsTickLast = { sid: "", len: -1 };
 window.startBramLatestJsonlPush = function (getProvider) {
+  window.__bramRefetchProjectedTurns("provider-start");
   return window.subscribeTalkSessionChange(
     "__bramTurnsTickUnsub",
     function (correlationId, atHostMs, payload) {

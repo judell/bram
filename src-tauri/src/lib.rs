@@ -1437,6 +1437,16 @@ static LIVE_CLAUDE_SESSION: OnceLock<Mutex<Option<(PathBuf, std::time::SystemTim
 static LIVE_CODEX_SESSION: OnceLock<Mutex<Option<(PathBuf, std::time::SystemTime)>>> =
     OnceLock::new();
 
+#[derive(Clone)]
+struct CodexReloadTarget {
+    id: String,
+    path: PathBuf,
+    previous_path: Option<PathBuf>,
+    set_at: std::time::SystemTime,
+}
+
+static CODEX_RELOAD_TARGET: OnceLock<Mutex<Option<CodexReloadTarget>>> = OnceLock::new();
+
 // Real-time detection of claude's permission menu by tapping the PTY
 // byte stream. Necessary because the JSONL file lags claude's actual
 // state by ~10-20s (claude buffers a turn's records and flushes as one
@@ -8611,6 +8621,43 @@ fn session_path_for_id<R: tauri::Runtime>(
     }
 }
 
+fn pin_codex_reload_target<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
+    if id.is_empty() {
+        return Ok(());
+    }
+    let Some(path) = session_path_for_id(app, SessionProvider::Codex, id) else {
+        return Ok(());
+    };
+    let previous_path = latest_codex_session_path(app)?.filter(|p| p != &path);
+    let target = CodexReloadTarget {
+        id: id.to_string(),
+        path: path.clone(),
+        previous_path: previous_path.clone(),
+        set_at: std::time::SystemTime::now(),
+    };
+    *CODEX_RELOAD_TARGET
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|e| e.to_string())? = Some(target);
+    if bram_trace_enabled() {
+        let target_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let previous_name = previous_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        append_bram_trace_line(
+            app,
+            "agent-switch",
+            &format!(
+                "op=codex-reload-pin session={} target={} previous={}",
+                id, target_name, previous_name
+            ),
+        );
+    }
+    Ok(())
+}
+
 // Set the host-owned current-provider record. This is the single fact for
 // "which agent is foregrounded"; current_provider, the auto-detected session
 // lists, and enhanceStatus.activeProvider all read it. It is written ONLY by
@@ -8787,6 +8834,9 @@ fn reload_agent_session(
                 provider_key, session, command
             ),
         );
+    }
+    if provider_key == "codex" {
+        pin_codex_reload_target(&app, &session)?;
     }
     clear_stale_terminal_input_for_switch(&app, &state, "agent-reload");
     // Dismiss any open agent menu/picker first so both Ctrl+C land on an empty
@@ -11758,7 +11808,69 @@ fn latest_codex_session_path<R: tauri::Runtime>(
             },
         )
         .max_by_key(|(mtime, _)| *mtime);
-    let (chosen_mtime, chosen) = active_best.unwrap_or(raw_best);
+    let reload_target = CODEX_RELOAD_TARGET
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone();
+    let (chosen_mtime, chosen) =
+        if let Some(target) = reload_target {
+            let target_now = all
+                .iter()
+                .find(|(_, path)| path == &target.path)
+                .map(|(mtime, path)| (*mtime, path.clone()));
+            if let Some((target_mtime, target_path)) = target_now {
+                let successor = all
+                    .iter()
+                    .filter(|(mtime, path)| {
+                        path != &target_path
+                            && target.previous_path.as_ref() != Some(path)
+                            && *mtime >= target.set_at
+                    })
+                    .filter_map(
+                        |(mtime, path)| match codex_session_has_real_user_activity(path) {
+                            Ok(true) => Some((*mtime, path.clone())),
+                            Ok(false) => None,
+                            Err(_) => None,
+                        },
+                    )
+                    .max_by_key(|(mtime, _)| *mtime);
+                if let Some((successor_mtime, successor_path)) = successor {
+                    if let Ok(mut guard) = CODEX_RELOAD_TARGET
+                        .get_or_init(|| Mutex::new(None))
+                        .lock()
+                        .map_err(|e| e.to_string())
+                    {
+                        *guard = None;
+                    }
+                    if bram_trace_enabled() {
+                        append_bram_trace_line(
+                            app,
+                            "agent-switch",
+                            &format!(
+                            "op=codex-reload-pin-clear session={} reason=successor successor={}",
+                            target.id,
+                            successor_path.file_name().and_then(|n| n.to_str()).unwrap_or("")
+                        ),
+                        );
+                    }
+                    (successor_mtime, successor_path)
+                } else {
+                    (target_mtime, target_path)
+                }
+            } else {
+                if let Ok(mut guard) = CODEX_RELOAD_TARGET
+                    .get_or_init(|| Mutex::new(None))
+                    .lock()
+                    .map_err(|e| e.to_string())
+                {
+                    *guard = None;
+                }
+                active_best.unwrap_or(raw_best)
+            }
+        } else {
+            active_best.unwrap_or(raw_best)
+        };
     let cache_cell = LIVE_CODEX_SESSION.get_or_init(|| Mutex::new(None));
     let mut cached = cache_cell.lock().map_err(|e| e.to_string())?;
     *cached = Some((chosen.clone(), chosen_mtime));

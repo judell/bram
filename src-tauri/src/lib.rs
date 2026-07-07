@@ -6078,17 +6078,37 @@ fn schedule_single_esc_soft_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, esca
             }
             // Fail closed (skip) on unreadable/missing JSONL: a lingering banner
             // is better than one cleared mid-turn.
+            // xterm-wedge-liveness-instrumentation: each poll reads and
+            // walks the full session — time it (O(session size), up to
+            // ~10 polls per Esc).
+            let scan_started = std::time::Instant::now();
+            let mut scanned_bytes = 0usize;
             let should_fire = match latest_session_path(&app_handle, None).ok().flatten() {
                 Some(path) => match std::fs::read_to_string(&path) {
-                    Ok(content) => single_esc_soft_end_should_fire(
-                        claude_jsonl_completion_decision(&content).detected,
-                        claude_jsonl_last_assistant_ts_ms(&content),
-                        escape_ts_ms,
-                    ),
+                    Ok(content) => {
+                        scanned_bytes = content.len();
+                        single_esc_soft_end_should_fire(
+                            claude_jsonl_completion_decision(&content).detected,
+                            claude_jsonl_last_assistant_ts_ms(&content),
+                            escape_ts_ms,
+                        )
+                    }
                     Err(_) => false,
                 },
                 None => false,
             };
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    &app_handle,
+                    "esc-scan",
+                    &format!(
+                        "op=soft-turn-end ms={} bytes={} waited_ms={}",
+                        scan_started.elapsed().as_millis(),
+                        scanned_bytes,
+                        waited
+                    ),
+                );
+            }
             if should_fire {
                 let turn_user_ts = claude_turn_stats_cell()
                     .lock()
@@ -16199,10 +16219,27 @@ fn schedule_send_ledger_escape_sweep<R: tauri::Runtime>(app: &AppHandle<R>, esca
         let Ok(Some(path)) = active_session_path(&app_handle) else {
             return;
         };
+        // xterm-wedge-liveness-instrumentation: time the full-session
+        // read + ledger scan this sweep performs on every qualifying Esc
+        // — untimed until the 2026-07-07 wedge hunt, and O(session size).
+        let started = std::time::Instant::now();
         let Ok(text) = std::fs::read_to_string(&path) else {
             return;
         };
+        let read_ms = started.elapsed().as_millis();
         update_send_ledger(&app_handle, &text, Some(escape_ts_ms));
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                &app_handle,
+                "esc-scan",
+                &format!(
+                    "op=sweep read_ms={} total_ms={} bytes={}",
+                    read_ms,
+                    started.elapsed().as_millis(),
+                    text.len()
+                ),
+            );
+        }
     });
 }
 

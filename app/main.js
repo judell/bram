@@ -69,6 +69,39 @@ invoke("log_from_right_pane", {
   }, 1000);
 })();
 
+// Parent main-thread liveness watchdog (xterm-wedge-liveness-
+// instrumentation). xterm renders on THIS thread; when it freezes the
+// user feels a wedged terminal, but until the 2026-07-07 codex-esc
+// wedge hunt nothing measured it — freezes were inferred by
+// elimination from iframe/route logs. A 250 ms heartbeat notes when a
+// beat lands late by >500 ms and logs the observed gap. One line per
+// stall, logged at recovery (a frozen thread cannot log mid-stall):
+// timers coalesce while blocked, so the late beat's gap IS the stall
+// length. Stall lines bracketed by a slow named host operation
+// implicate it; stall absence during a felt wedge relocates the
+// problem below the webview (PTY / process level).
+(function installXtermLivenessWatchdog() {
+  const TICK_MS = 250;
+  const STALL_MS = 500;
+  let last = Date.now();
+  setInterval(() => {
+    const now = Date.now();
+    const gap = now - last - TICK_MS;
+    last = now;
+    if (gap < STALL_MS) return;
+    invoke("log_from_right_pane", {
+      payload: {
+        kind: "iframe-trace",
+        subkind: "xterm-liveness",
+        context: "parent",
+        op: "stall",
+        gap_ms: gap,
+        at: new Date().toISOString(),
+      },
+    }).catch(() => {});
+  }, TICK_MS);
+})();
+
 // Input-latency probe (diagnostic, #150). Parent-window twin of the iframe
 // probe in helpers.js — measures responsiveness of the terminal + shell
 // chrome (e.g. the #reload-right button). Capture-phase pointerdown/keydown

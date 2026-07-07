@@ -4035,15 +4035,39 @@ window.__bramBroadcastProjectedTurns = function (payload) {
   }
 };
 
-// Adaptive coalesce (2026-07-07 codex esc wedge): one /__turns
+// Splice a latest=N window onto the accumulated full projection
+// (bound-turns-projection-and-gate-edit-hints). Returns null when the
+// window cannot be aligned — sid change (rotation), total shrink
+// (compaction), or a gap (more than N new turns since the last fetch)
+// — and the caller falls back to a full fetch. Prefix turns are reused
+// by reference, so the broadcast's index-wise reference preservation
+// keeps unchanged rows mounted for free.
+window.__bramMergeProjectedTurnsWindow = function (prev, payload) {
+  if (!prev || !payload) return null;
+  if (!payload.sid || payload.sid !== prev.sid) return null;
+  var ws = payload.windowStart;
+  var total = payload.total;
+  if (typeof ws !== "number" || typeof total !== "number") return null;
+  var prevTurns = prev.turns || [];
+  if (ws > prevTurns.length) return null;
+  if (total < prevTurns.length) return null;
+  var turns = prevTurns.slice(0, ws).concat(payload.turns || []);
+  if (turns.length !== total) return null;
+  return { sid: payload.sid, provider: payload.provider, turns: turns };
+};
+
+// Adaptive coalesce (2026-07-07 codex esc wedge): one full /__turns
 // fetch+parse+broadcast of a long session costs real main-thread time
-// (~1.2 s observed on a 4.2 MB / 2,500-turn rollout), so a fixed 250 ms
-// window lets streaming ticks eat the UI whole. Scale the window to the
-// LAST observed cost (4x, floor 250 ms, cap 5 s) so the projection
-// pipeline never takes more than ~25% of the main thread; small
-// sessions keep the snappy 250 ms cadence. A bounded "latest turns"
-// /__turns mode is the follow-up if this proves insufficient.
+// (~1.3 s p50 observed on multi-MB sessions), so the window scales to
+// the LAST observed cost (4x, floor 250 ms, cap 5 s). With the windowed
+// tick below, steady-state fetches are small and the cadence stays at
+// the 250 ms floor; the scaling still guards the full-fetch fallbacks.
 var __projectedTurnsLastCostMs = 0;
+// Tail-window size for tick refreshes. Streaming mutates only the
+// in-flight turn (tool results appending) and appends new turns; 8
+// covers both with margin. Worst-case tick payload is bounded by turn
+// size, not session size.
+var __projectedTurnsTickWindow = 8;
 window.__bramRefetchProjectedTurns = function (reason) {
   if (typeof window.fetch !== "function") return;
   if (__projectedTurnsTimer) return; // trailing-edge coalesce
@@ -4052,11 +4076,26 @@ window.__bramRefetchProjectedTurns = function (reason) {
     __projectedTurnsTimer = null;
     var seq = ++__projectedTurnsSeq;
     var startedMs = Date.now();
-    window.fetch("/__turns", { cache: "no-store" })
+    var prev = __projectedTurnsValue;
+    var windowed = !!(prev && prev.sid && prev.turns
+      && prev.turns.length > __projectedTurnsTickWindow);
+    var url = windowed
+      ? "/__turns?latest=" + __projectedTurnsTickWindow
+      : "/__turns";
+    window.fetch(url, { cache: "no-store" })
       .then(function (r) { return r.json(); })
       .then(function (payload) {
         if (seq !== __projectedTurnsSeq) return; // superseded by a later fetch
-        window.__bramBroadcastProjectedTurns(payload);
+        var next = windowed
+          ? window.__bramMergeProjectedTurnsWindow(prev, payload)
+          : payload;
+        if (!next) {
+          // Rotation/compaction/gap: re-enter for a full fetch (the
+          // timer is clear, so this schedules normally).
+          window.__bramRefetchProjectedTurns((reason || "") + "-window-miss");
+          return;
+        }
+        window.__bramBroadcastProjectedTurns(next);
         __projectedTurnsLastCostMs = Date.now() - startedMs;
         try {
           if (window.logToHost && !window.__bramMenuPending) {
@@ -4065,8 +4104,9 @@ window.__bramRefetchProjectedTurns = function (reason) {
               subkind: "projected-turns",
               at: new Date().toISOString(),
               reason: reason || "",
-              sid: (payload && payload.sid) || "",
-              turns: (payload && payload.turns && payload.turns.length) || 0,
+              windowed: windowed ? 1 : 0,
+              sid: (next && next.sid) || "",
+              turns: (next && next.turns && next.turns.length) || 0,
               ms: Date.now() - startedMs,
             });
           }

@@ -168,9 +168,14 @@
     id="projectedTurnsDS"
     initial="{null}"
     subscribe="{window.bramSubscribeProjectedTurns()}" />
+  <!-- Edit hints only matter while a Worklist action is in flight;
+       ungated this fetched (~650 ms host walk) on every session write
+       for a 2-byte empty response
+       (bound-turns-projection-and-gate-edit-hints). -->
   <DataSource
     id="currentTurnEditsDS"
-    url="/__current-turn-edits?t={currentTurnEditsTick}" />
+    url="/__current-turn-edits?t={currentTurnEditsTick}"
+    when="{submitting}" />
   <ChangeListener
     listenToSources="{{
       assistantText: window.__bramProjectedLastExchange(projectedTurnsDS.value).lastAssistantText.text,
@@ -388,7 +393,7 @@
           const correlationId = (ev &amp;&amp; ev.correlationId) || '';
           const atHostMs = (ev &amp;&amp; ev.atHostMs) || 0;
           window.__bramIframeTrace('listener-fired', {context: 'talk-session-changed', correlation_id: correlationId, at_host_ms: atHostMs, delta_to_emit_ms: atHostMs ? (Date.now() - atHostMs) : -1});
-          currentTurnEditsTick = currentTurnEditsTick + 1;
+          if (submitting) { currentTurnEditsTick = currentTurnEditsTick + 1; }
         }" />
       <PushSource
         id="voiceArrival"

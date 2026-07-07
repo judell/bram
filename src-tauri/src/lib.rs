@@ -13049,6 +13049,35 @@ fn resolve_conversation_path_meta<R: tauri::Runtime>(
     Ok(Some((path, mtime_ms, metadata.len())))
 }
 
+fn path_meta(path: std::path::PathBuf) -> Result<(std::path::PathBuf, i64, u64), String> {
+    let metadata = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+    let mtime_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    Ok((path, mtime_ms, metadata.len()))
+}
+
+fn resolve_current_turn_edits_path_meta<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    preferred: Option<SessionProvider>,
+) -> Result<Option<(std::path::PathBuf, i64, u64)>, String> {
+    let provider = preferred.or_else(|| current_provider(app));
+    if matches!(provider, Some(SessionProvider::Codex)) {
+        if let Some((path, _)) = LIVE_CODEX_SESSION
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .map_err(|e| e.to_string())?
+            .clone()
+        {
+            return path_meta(path).map(Some);
+        }
+    }
+    resolve_conversation_path_meta(app, preferred)
+}
+
 // (delete-phase tranche 1, #214: the standalone /__last-assistant-text
 // and /__last-exchange route wrappers were deleted — zero app/ callers;
 // Workspace consumes both payloads through /__conversation-state, which
@@ -13172,7 +13201,7 @@ fn read_current_turn_edits<R: tauri::Runtime>(
     app: &AppHandle<R>,
     preferred: Option<SessionProvider>,
 ) -> Result<Vec<u8>, String> {
-    let Some((path, mtime_ms, len)) = resolve_conversation_path_meta(app, preferred)? else {
+    let Some((path, mtime_ms, len)) = resolve_current_turn_edits_path_meta(app, preferred)? else {
         return Ok(b"[]".to_vec());
     };
     {
@@ -13183,10 +13212,11 @@ fn read_current_turn_edits<R: tauri::Runtime>(
             }
         }
     }
-    let entry = build_conversation_cache_entry(app, preferred, path, mtime_ms, len)?;
-    let bytes = entry.current_turn_edits_bytes.clone();
-    *conversation_state_cache_cell().lock().unwrap() = Some(entry);
-    Ok(bytes)
+    let tail = st_read_jsonl_suffix_from(&path, len.saturating_sub(64 * 1024))
+        .map(|(text, _)| text)
+        .unwrap_or_default();
+    let value = compute_current_turn_edits_from_text(&tail);
+    serde_json::to_vec(&value).map_err(|e| e.to_string())
 }
 
 // /__conversation-state — combined endpoint. Workspace.xmlui currently uses
@@ -13508,7 +13538,7 @@ fn compute_current_turn_edits_from_text(text: &str) -> serde_json::Value {
 
 #[cfg(test)]
 mod conversation_state_tests {
-    use super::compute_current_turn_edits_from_text;
+    use super::{compute_current_turn_edits_from_text, merge_projected_turn_tail};
 
     #[test]
     fn current_turn_edits_tail_start_handles_decomposed_unicode_boundary() {
@@ -13521,6 +13551,32 @@ mod conversation_state_tests {
         let edits = compute_current_turn_edits_from_text(&text);
 
         assert!(edits.as_array().is_some());
+    }
+
+    #[test]
+    fn projected_turn_tail_merge_replaces_overlapped_suffix() {
+        let cached = vec![
+            serde_json::json!({"role": "user", "text": "one"}),
+            serde_json::json!({"role": "assistant", "text": "two"}),
+            serde_json::json!({"role": "user", "text": "three"}),
+        ];
+        let tail = vec![
+            serde_json::json!({"role": "assistant", "text": "two"}),
+            serde_json::json!({"role": "user", "text": "three"}),
+            serde_json::json!({"role": "assistant", "text": "four"}),
+        ];
+
+        let merged = merge_projected_turn_tail(&cached, tail).unwrap();
+
+        assert_eq!(
+            merged,
+            vec![
+                serde_json::json!({"role": "user", "text": "one"}),
+                serde_json::json!({"role": "assistant", "text": "two"}),
+                serde_json::json!({"role": "user", "text": "three"}),
+                serde_json::json!({"role": "assistant", "text": "four"}),
+            ]
+        );
     }
 }
 
@@ -14698,6 +14754,24 @@ fn st_read_tail(path: &Path, max_bytes: u64) -> Option<String> {
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
+fn st_read_jsonl_suffix_from(path: &Path, start: u64) -> Result<(String, u64), String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let len = f.metadata().map_err(|e| e.to_string())?.len();
+    let start = start.min(len);
+    f.seek(SeekFrom::Start(start)).map_err(|e| e.to_string())?;
+    let mut buf = Vec::with_capacity((len - start) as usize);
+    f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    if start == 0 {
+        return Ok((text, 0));
+    }
+    Ok(match text.find('\n') {
+        Some(nl) => (text[nl + 1..].to_string(), start + nl as u64 + 1),
+        None => (String::new(), len),
+    })
+}
+
 // A subagent transcript does NOT reliably end with a stop_reason
 // "end_turn" record: observed 2026-07-05, a finished agent whose 7
 // assistant records were 5×null + 2×tool_use — no end_turn anywhere —
@@ -15838,6 +15912,15 @@ fn update_send_ledger<R: tauri::Runtime>(
     session_text: &str,
     force_user_strand_before_ms: Option<i64>,
 ) {
+    update_send_ledger_from_slice(app, session_text, 0, force_user_strand_before_ms);
+}
+
+fn update_send_ledger_from_slice<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    session_text: &str,
+    base_offset: u64,
+    force_user_strand_before_ms: Option<i64>,
+) {
     let now = unix_now_ms();
     let auto_resend = send_ledger_auto_resend_enabled(app);
     let last_esc_ms = last_pty_escape_ms_cell().lock().map(|g| *g).unwrap_or(0);
@@ -15849,7 +15932,8 @@ fn update_send_ledger<R: tauri::Runtime>(
             if entry.state != "injected" {
                 continue;
             }
-            let start = char_floor(session_text, entry.jsonl_offset_at_inject as usize);
+            let rel_offset = entry.jsonl_offset_at_inject.saturating_sub(base_offset) as usize;
+            let start = char_floor(session_text, rel_offset);
             let suffix = &session_text[start..];
             let needle = send_ledger_needle(entry);
             // Walk every needle occurrence and accept only a line whose
@@ -16385,20 +16469,133 @@ fn project_user_turns<R: tauri::Runtime>(app: &AppHandle<R>, turns: &mut [serde_
     }
 }
 
-// Single-entry (path, mtime) cache: steady-state refetches between JSONL
+// Single-entry (path, mtime) cache holding the PARSED projection
+// (bound-turns-projection-and-gate-edit-hints): full requests serialize
+// everything, latest=N requests serialize only the tail window, so a
+// steady tick stream on a multi-MB session neither re-projects nor
+// re-ships the whole history. Steady-state refetches between JSONL
 // appends hit the cache; each append re-parses once. Envelope/draft/
 // feedback files are write-once, so keying on the JSONL alone is sound.
-static PROJECTED_TURNS_CACHE: std::sync::Mutex<
-    Option<(std::path::PathBuf, std::time::SystemTime, Vec<u8>)>,
-> = std::sync::Mutex::new(None);
+#[derive(Clone)]
+struct ProjectedTurnsCacheEntry {
+    path: std::path::PathBuf,
+    mtime: std::time::SystemTime,
+    len: u64,
+    sid: String,
+    provider_label: &'static str,
+    turns: Vec<serde_json::Value>,
+}
+static PROJECTED_TURNS_CACHE: std::sync::Mutex<Option<ProjectedTurnsCacheEntry>> =
+    std::sync::Mutex::new(None);
 
-// /__turns[?provider=claude|codex][&id=<session-id>] — the projection
-// route. No id: freshest session (provider-scoped when given). With id:
-// that session, resolved the same way /__sessions/content resolves it.
+const PROJECTED_TURNS_INCREMENTAL_OVERLAP_BYTES: u64 = 1024 * 1024;
+
+fn merge_projected_turn_tail(
+    cached: &[serde_json::Value],
+    tail: Vec<serde_json::Value>,
+) -> Option<Vec<serde_json::Value>> {
+    if tail.is_empty() {
+        return Some(cached.to_vec());
+    }
+    let max_overlap = cached.len().min(tail.len());
+    for overlap in (1..=max_overlap).rev() {
+        if cached[cached.len() - overlap..] == tail[..overlap] {
+            let mut merged = Vec::with_capacity(cached.len() - overlap + tail.len());
+            merged.extend_from_slice(&cached[..cached.len() - overlap]);
+            merged.extend(tail);
+            return Some(merged);
+        }
+    }
+    None
+}
+
+fn try_incremental_projected_turns<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    path: &Path,
+    mtime: std::time::SystemTime,
+    len: u64,
+    latest: Option<usize>,
+    update_ledger: bool,
+) -> Option<Result<Vec<u8>, String>> {
+    latest?;
+    let entry = PROJECTED_TURNS_CACHE.lock().ok()?.as_ref()?.clone();
+    if entry.path != path || len < entry.len {
+        return None;
+    }
+    if entry.mtime == mtime {
+        return Some(projected_turns_body(
+            &entry.sid,
+            entry.provider_label,
+            &entry.turns,
+            latest,
+        ));
+    }
+    let start = entry
+        .len
+        .saturating_sub(PROJECTED_TURNS_INCREMENTAL_OVERLAP_BYTES);
+    let (text, text_base_offset) = match st_read_jsonl_suffix_from(path, start) {
+        Ok(result) => result,
+        Err(e) => return Some(Err(e)),
+    };
+    if update_ledger {
+        update_send_ledger_from_slice(app, &text, text_base_offset, None);
+    }
+    let mut tail_turns = st_parse_lines_to_turns(&text);
+    project_user_turns(app, &mut tail_turns);
+    st_tag_agent_tool_entries(path, &mut tail_turns);
+    let Some(merged) = merge_projected_turn_tail(&entry.turns, tail_turns) else {
+        return None;
+    };
+    let sid = entry.sid.clone();
+    let provider_label = entry.provider_label;
+    let body = projected_turns_body(&sid, provider_label, &merged, latest);
+    if body.is_ok() {
+        if let Ok(mut guard) = PROJECTED_TURNS_CACHE.lock() {
+            *guard = Some(ProjectedTurnsCacheEntry {
+                path: path.to_path_buf(),
+                mtime,
+                len,
+                sid,
+                provider_label,
+                turns: merged,
+            });
+        }
+    }
+    Some(body)
+}
+
+// Serialize a projection window. `latest=Some(N)` ships the last N turns
+// with `windowStart`/`total` so the iframe can splice the window onto its
+// accumulated history and detect gaps/rotation; full requests ship
+// windowStart=0.
+fn projected_turns_body(
+    sid: &str,
+    provider_label: &str,
+    turns: &[serde_json::Value],
+    latest: Option<usize>,
+) -> Result<Vec<u8>, String> {
+    let total = turns.len();
+    let window_start = latest.map(|n| total.saturating_sub(n.max(1))).unwrap_or(0);
+    let body = serde_json::json!({
+        "sid": sid,
+        "provider": provider_label,
+        "total": total,
+        "windowStart": window_start,
+        "turns": &turns[window_start..],
+    });
+    serde_json::to_vec(&body).map_err(|e| e.to_string())
+}
+
+// /__turns[?provider=claude|codex][&id=<session-id>][&latest=N] — the
+// projection route. No id: freshest session (provider-scoped when
+// given). With id: that session, resolved the same way
+// /__sessions/content resolves it. latest=N: tail window for live
+// refreshes.
 fn read_projected_turns<R: tauri::Runtime>(
     app: &AppHandle<R>,
     id: &str,
     provider: Option<SessionProvider>,
+    latest: Option<usize>,
 ) -> Result<Vec<u8>, String> {
     let path_opt = if id.is_empty() {
         match provider {
@@ -16413,15 +16610,28 @@ fn read_projected_turns<R: tauri::Runtime>(
         sessions.into_iter().find(|s| s.id == id).map(|s| s.path)
     };
     let Some(path) = path_opt else {
-        return Ok(br#"{"sid":"","provider":"","turns":[]}"#.to_vec());
+        return Ok(br#"{"sid":"","provider":"","total":0,"windowStart":0,"turns":[]}"#.to_vec());
     };
     let mtime = std::fs::metadata(&path)
         .and_then(|m| m.modified())
         .map_err(|e| e.to_string())?;
+    let len = std::fs::metadata(&path)
+        .map(|m| m.len())
+        .map_err(|e| e.to_string())?;
+    if let Some(result) =
+        try_incremental_projected_turns(app, &path, mtime, len, latest, id.is_empty())
+    {
+        return result;
+    }
     if let Ok(guard) = PROJECTED_TURNS_CACHE.lock() {
-        if let Some((cached_path, cached_mtime, cached_bytes)) = guard.as_ref() {
-            if cached_path == &path && cached_mtime == &mtime {
-                return Ok(cached_bytes.clone());
+        if let Some(entry) = guard.as_ref() {
+            if entry.path == path && entry.mtime == mtime {
+                return projected_turns_body(
+                    &entry.sid,
+                    entry.provider_label,
+                    &entry.turns,
+                    latest,
+                );
             }
         }
     }
@@ -16445,22 +16655,27 @@ fn read_projected_turns<R: tauri::Runtime>(
     } else {
         "claude"
     };
-    let body = serde_json::json!({
-        "sid": sid,
-        "provider": provider_label,
-        "turns": turns,
-    });
-    let bytes = serde_json::to_vec(&body).map_err(|e| e.to_string())?;
+    let bytes = projected_turns_body(&sid, provider_label, &turns, latest)?;
     eprintln!(
-        "[turns-projection] sid={} provider={} turns={} bytes={} ms={}",
+        "[turns-projection] sid={} provider={} turns={} window={} bytes={} ms={}",
         sid,
         provider_label,
         turn_count,
+        latest
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "all".to_string()),
         bytes.len(),
         started.elapsed().as_millis(),
     );
     if let Ok(mut guard) = PROJECTED_TURNS_CACHE.lock() {
-        *guard = Some((path, mtime, bytes.clone()));
+        *guard = Some(ProjectedTurnsCacheEntry {
+            path,
+            mtime,
+            len,
+            sid,
+            provider_label,
+            turns,
+        });
     }
     Ok(bytes)
 }
@@ -25517,6 +25732,17 @@ fn route_request<R: tauri::Runtime>(
     // currentTurnEdits(lastJsonl) helper which had started exceeding
     // XMLUI's 1000 ms sync-evaluation limit on busy turns.
     if path == "__current-turn-edits" {
+        // Fast path (bound-turns-projection-and-gate-edit-hints): edit
+        // hints only render during an active worklist action; with no
+        // inflight claim there is nothing to hint and no reason to walk
+        // the session (measured 2026-07-07: 48 idle calls at ~643 ms
+        // each for 2-byte responses).
+        let claim_active = inflight_claim_ids_and_claimed_at(app)
+            .map(|(ids, _)| !ids.is_empty())
+            .unwrap_or(false);
+        if !claim_active {
+            return (200, "application/json; charset=utf-8", b"[]".to_vec());
+        }
         return match read_current_turn_edits(app, None) {
             Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
             Err(e) => {
@@ -25596,6 +25822,7 @@ fn route_request<R: tauri::Runtime>(
         let mut provider: Option<SessionProvider> = None;
         let mut session_id = String::new();
         let mut agent_id = String::new();
+        let mut latest: Option<usize> = None;
         for pair in query.split('&') {
             if let Some(v) = pair.strip_prefix("provider=") {
                 provider = SessionProvider::from_str(&percent_decode(v));
@@ -25603,6 +25830,8 @@ fn route_request<R: tauri::Runtime>(
                 session_id = percent_decode(v);
             } else if let Some(v) = pair.strip_prefix("agent=") {
                 agent_id = percent_decode(v);
+            } else if let Some(v) = pair.strip_prefix("latest=") {
+                latest = percent_decode(v).parse::<usize>().ok().filter(|n| *n > 0);
             }
         }
         // agent=<agentId>: project that subagent's transcript under the
@@ -25616,7 +25845,7 @@ fn route_request<R: tauri::Runtime>(
                 }
             };
         }
-        return match read_projected_turns(app, &session_id, provider) {
+        return match read_projected_turns(app, &session_id, provider, latest) {
             Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
             Err(e) => {
                 eprintln!("[http /__turns] {}", e);

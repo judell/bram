@@ -4106,7 +4106,7 @@ window.__bramRefetchProjectedTurns = function (reason) {
         } catch (e) {}
       })
       .catch(function () {});
-  }, 250);
+  }, delayMs);
 };
 
 // External subscribe factory for projected turns. Same memoized-singleton

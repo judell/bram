@@ -7989,6 +7989,27 @@ fn pty_write(app: AppHandle, data: String, state: State<'_, AppState>) -> Result
     pty_write_internal(&app, &state, &data, "unknown")
 }
 
+fn pty_escape_is_user_interrupt_source(caller_hint: &str) -> bool {
+    !matches!(caller_hint, "agent-switch-escape" | "agent-reload-escape")
+}
+
+#[cfg(test)]
+mod pty_escape_source_tests {
+    #[test]
+    fn shell_control_escapes_are_not_user_interrupts() {
+        assert!(!super::pty_escape_is_user_interrupt_source(
+            "agent-switch-escape"
+        ));
+        assert!(!super::pty_escape_is_user_interrupt_source(
+            "agent-reload-escape"
+        ));
+        assert!(super::pty_escape_is_user_interrupt_source(
+            "pty-intent-sendKeys"
+        ));
+        assert!(super::pty_escape_is_user_interrupt_source("unknown"));
+    }
+}
+
 // Shared body of `pty_write` so the disk-mediated relay (#86) can write
 // queued intents through the same trace + menu-clear + auth-record
 // pipeline as direct callers. `caller_hint` flows into the `[pty-out]`
@@ -8023,7 +8044,8 @@ fn pty_write_internal<R: tauri::Runtime>(
         // sequences; still write them to the PTY (Claude Code may use
         // the focus signal). Closes #94.
         let is_focus_track = data == "\x1b[O" || data == "\x1b[I";
-        if !is_focus_track {
+        let is_control_escape = data == "\x1b" && !pty_escape_is_user_interrupt_source(caller_hint);
+        if !is_focus_track && !is_control_escape {
             pty_menu_clear(app, data);
         } else if bram_trace_enabled() {
             let tool = pty_menu_cell()
@@ -8031,27 +8053,32 @@ fn pty_write_internal<R: tauri::Runtime>(
                 .ok()
                 .and_then(|g| g.as_ref().map(|m| m.tool.clone()))
                 .unwrap_or_default();
-            if !tool.is_empty() {
+            if !tool.is_empty() || is_control_escape {
                 append_bram_trace_line(
                     app,
                     "pty-menu",
                     &format!(
-                        "state=preserved tool={} reason=focus-track preview={}",
+                        "state=preserved tool={} reason={} preview={}",
                         tool,
+                        if is_control_escape {
+                            "control-escape"
+                        } else {
+                            "focus-track"
+                        },
                         bram_trace_preview(data, 16),
                     ),
                 );
             }
         }
         record_worklist_authorization_from_input(app, data);
-        // #210 characterization: a bare Esc reached the PTY from ANY origin — a
-        // key typed into xterm, the agent-pane Esc/number buttons (which arrive
-        // as pty-intent-sendKeys), an agent-switch, etc. Emit so the parent
-        // shell, which owns the xterm grid, can snapshot the terminal and
-        // capture the agent's post-Esc bytes. caller_hint tags the origin — the
-        // discriminator for which Esc path leaves residue. Emitted before the
-        // write so the snapshot has a chance to run ahead of the agent's repaint.
-        if data == "\x1b" {
+        // #210 characterization: emit bare user Esc so the parent shell, which
+        // owns the xterm grid, can snapshot the terminal and capture the
+        // agent's post-Esc bytes. Shell-control Esc origins (agent switch/
+        // reload) deliberately bypass this event: they still go to the PTY,
+        // but should not run user-interrupt diagnostics or xterm capture.
+        // Emitted before the write so the snapshot has a chance to run ahead
+        // of the agent's repaint.
+        if data == "\x1b" && pty_escape_is_user_interrupt_source(caller_hint) {
             let _ = app.emit("pty-esc-sent", serde_json::json!({ "source": caller_hint }));
         }
         // #210 follow-up: a toTurn submit (an agent-pane send) reached the PTY.
@@ -22608,8 +22635,7 @@ mod sessions_discovery_tests {
 #[cfg(test)]
 mod session_turn_tests {
     use super::{
-        handle_paste_image, st_extract_image_paths, st_parse_lines_to_turns,
-        st_strip_image_paths,
+        handle_paste_image, st_extract_image_paths, st_parse_lines_to_turns, st_strip_image_paths,
     };
 
     #[test]
@@ -22883,7 +22909,6 @@ mod session_turn_tests {
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0]["images"].as_array().unwrap().len(), 0);
     }
-
 }
 
 #[cfg(test)]

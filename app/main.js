@@ -1460,16 +1460,35 @@ const _spawnPty = async () => {
 // buster.
 const { listen } = window.__TAURI__.event;
 
-// #210: drive captures off the host's universal PTY-write detector
-// (pty-esc-sent) so an Esc from ANY origin is caught — typed into xterm, the
-// agent-pane Esc/number buttons (pty-intent-sendKeys), agent-switch, etc. — not
-// just keys that pass through term.onData. MUST stay below the `const { listen }`
+const CONTROL_ESCAPE_SOURCES = new Set([
+  "agent-switch-escape",
+  "agent-reload-escape",
+]);
+const isControlEscapeSource = (source) => CONTROL_ESCAPE_SOURCES.has(String(source || ""));
+
+// #210: drive user-Esc captures off the host's PTY-write detector
+// (pty-esc-sent), not just keys that pass through term.onData. Shell-control
+// Esc origins (agent switch/reload) are intentionally excluded: they are PTY
+// control bytes, not user interruption gestures, and must not start xterm grid
+// capture on the parent webview hot path. MUST stay below the `const { listen }`
 // above: a top-level listen() call before that line throws at load and aborts
 // the whole shell. The payload's `source` tags origin.
 listen("pty-esc-sent", (e) => {
+  const source = (e && e.payload && e.payload.source) || "unknown";
+  if (isControlEscapeSource(source)) {
+    logShellEvent({
+      kind: "iframe-trace",
+      subkind: "esc-capture",
+      stage: "skipped",
+      reason: "control-escape",
+      source,
+      at: new Date().toISOString(),
+    });
+    return;
+  }
   if (__escCapture) return;
   try {
-    __escBeginCapture("esc", (e && e.payload && e.payload.source) || "unknown");
+    __escBeginCapture("esc", source);
   } catch (err) {
     logShellEvent({
       kind: "iframe-trace",

@@ -25,9 +25,7 @@
   var.messageSubmitResult="{null}"
   var.worklistActionResult="{null}"
   var.messageSentAtText="{''}"
-  var.awaitingResponse="{window.__bramRestoreWorklistAwaiting()}"
-  var.awaitingResponseSetAt="{window.__bramRestoreWorklistAwaitingSetAt()}"
-  var.agentTurnEndedSinceSubmit="{false}"
+  var.awaitingResponse="{false}"
   var.fullscreenImage="{null}"
   var.messageVoiceRecording="{false}"
   var.feedbackVoiceRecording="{false}"
@@ -150,11 +148,6 @@
           window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds || [], feedbackDraftsById: feedbackDraftsById});
         }
         submitting = false;
-        if (window.__bramMarkTurnEnded('inflight-clear', {awaitingResponse: awaitingResponse, submitting: submitting, awaitingResponseSetAt: awaitingResponseSetAt, submittedKind: submittedKind})) {
-          awaitingResponse = false;
-          submittedKind = null;
-          window.__bramClearWorklistAwaiting(false);
-        }
         submittedItemId = null;
         submittedKind = null;
         window.__bramSetWorklistSubmittedKind(null);
@@ -228,14 +221,11 @@
     enabled="{submitting &amp;&amp; actionProgressKind}"
     onTick="actionProgressTick = actionProgressTick + 1" />
   <ChangeListener
-    listenTo="{awaitingResponse}"
-    onDidChange="(c) => { if (c.newValue &amp;&amp; !c.prevValue) { agentTurnEndedSinceSubmit = false; } }" />
-  <ChangeListener
     listenTo="{messageSubmitResult &amp;&amp; messageSubmitResult.seq}"
-    onDidChange="() => { const r = messageSubmitResult || {}; if (!r.submitted) return; pendingPastedImageCount = r.pendingPastedImageCount; pendingPastedImagePaths = r.pendingPastedImagePaths; stagingPastedImageCount = r.stagingPastedImageCount; submittedWorklistImages = r.submittedWorklistImages; submittedWorklistMessage = r.submittedWorklistMessage; messageSentAtText = r.messageSentAtText; submittedKind = r.submittedKind; awaitingResponse = r.awaitingResponse; awaitingResponseSetAt = r.awaitingResponseSetAt; }" />
+    onDidChange="() => { const r = messageSubmitResult || {}; if (!r.submitted) return; pendingPastedImageCount = r.pendingPastedImageCount; pendingPastedImagePaths = r.pendingPastedImagePaths; stagingPastedImageCount = r.stagingPastedImageCount; submittedWorklistImages = r.submittedWorklistImages; submittedWorklistMessage = r.submittedWorklistMessage; messageSentAtText = r.messageSentAtText; submittedKind = r.submittedKind; awaitingResponse = r.awaitingResponse; }" />
   <ChangeListener
     listenTo="{worklistActionResult &amp;&amp; worklistActionResult.seq}"
-    onDidChange="() => { const r = worklistActionResult || {}; if (!r.submittedKind) return; submittedWorklistImages = r.submittedWorklistImages; submittedWorklistMessage = r.submittedWorklistMessage; messageSentAtText = r.messageSentAtText; awaitingResponse = r.awaitingResponse; awaitingResponseSetAt = r.awaitingResponseSetAt; pendingPastedImageCount = r.pendingPastedImageCount; pendingPastedImagePaths = r.pendingPastedImagePaths; stagingPastedImageCount = r.stagingPastedImageCount; submittedItemId = r.submittedItemId; submittedKind = r.submittedKind; submitting = r.submitting; actionProgressScope = r.actionProgressScope || 'item'; actionProgressKind = r.actionProgressKind; actionProgressTick = r.actionProgressTick; const nextDrafts = Object.assign({}, r.feedbackDraftsById || {}); feedbackDraftsById = nextDrafts; window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds || [], feedbackDraftsById: feedbackDraftsById}); }" />
+    onDidChange="() => { const r = worklistActionResult || {}; if (!r.submittedKind) return; submittedWorklistImages = r.submittedWorklistImages; submittedWorklistMessage = r.submittedWorklistMessage; messageSentAtText = r.messageSentAtText; awaitingResponse = r.awaitingResponse; pendingPastedImageCount = r.pendingPastedImageCount; pendingPastedImagePaths = r.pendingPastedImagePaths; stagingPastedImageCount = r.stagingPastedImageCount; submittedItemId = r.submittedItemId; submittedKind = r.submittedKind; submitting = r.submitting; actionProgressScope = r.actionProgressScope || 'item'; actionProgressKind = r.actionProgressKind; actionProgressTick = r.actionProgressTick; const nextDrafts = Object.assign({}, r.feedbackDraftsById || {}); feedbackDraftsById = nextDrafts; window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds || [], feedbackDraftsById: feedbackDraftsById}); }" />
   <DataSource
     id="worklistToolDetailDS"
     url="/__tool-detail?id={openToolId || ''}"
@@ -243,10 +233,27 @@
   <!-- Lightweight latest-state DataSources follow talk-session changes
        during streaming. Full session turns are larger and refresh on
        turn boundaries via worklistTurnsTick. -->
-  <!-- The form clears on submit; the submitted text is shown below as
-       the persisted "You" half of the local exchange. awaitingResponse
-       is memory-only display state; it never locks typing and never
-       restores from localStorage after iframe reload. -->
+  <!-- Host-derived submit gate (issue-214-tranche-3b). awaitingTurn on
+       /__send-ledger is computed host-side from ledger state plus the
+       turn-completion detectors; the mirror below is the only writer of
+       awaitingResponse besides the optimistic set at each submit site.
+       Replaces the retired four-detector inference (inflight-clear,
+       agent-turn-end, agent-turn-killed, agent-status-finished) and the
+       localStorage awaiting keys - a Bram restart resets host and
+       iframe together, so nothing restores on mount. -->
+  <DataSource
+    id="sendLedgerGate"
+    url="/__send-ledger" />
+  <PushSource
+    id="sendLedgerGateEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('send-ledger-changed')}" />
+  <ChangeListener
+    listenTo="{sendLedgerGateEvt.value &amp;&amp; sendLedgerGateEvt.value.tick}"
+    onDidChange="() => sendLedgerGate.refetch()" />
+  <ChangeListener
+    listenTo="{sendLedgerGate.value &amp;&amp; sendLedgerGate.value.awaitingTurn}"
+    onDidChange="() => { if (sendLedgerGate.value) { awaitingResponse = !!sendLedgerGate.value.awaitingTurn; } }" />
 
   <VStack
     paddingTop="0"
@@ -1105,7 +1112,6 @@ Before you `Approve` a `TO-APPLY` item you can `Iterate` to refine the proposal.
                 submittedKind = window.__bramSetWorklistSubmittedKind('message');
                 messageSentAtText = new Date().toLocaleTimeString();
                 awaitingResponse = true;
-                awaitingResponseSetAt = window.__bramMarkAwaitingStarted();
                 toTurn(msg);
                 newItemHelp = false; newItemIssue = null; newItemVoiceRecording = false; setWorklistVoiceTarget('message-agent'); newItemBox.setValue('');
               })()" />
@@ -1159,33 +1165,12 @@ Drop is the clean rejection path; Iterate is what you want if the item just need
           newItemTurnEnded = true;
           worklist.refetch();
         }
-        if (awaitingResponse) {
-          agentTurnEndedSinceSubmit = true;
-          if (window.__bramMarkTurnEnded('agent-turn-end', {awaitingResponse: awaitingResponse, submitting: submitting, awaitingResponseSetAt: awaitingResponseSetAt, submittedKind: submittedKind})) {
-            awaitingResponse = false;
-            submittedKind = null;
-            window.__bramClearWorklistAwaiting(false);
-          }
-        }
       }" />
     <!-- The listener above used to drain ALL staged pasted images on every
          agent turn end, with no target. That silently ate images the user
          staged while the agent was still responding: the 2026-07-03
          skip-worklist image drop. Staged images now persist until a submit
          consumes them or the user removes them from the strip. -->
-    <PushSource
-      id="agentTurnKilledEvt"
-      initial="{null}"
-      subscribe="{window.bramSubscribeTauriEvent('agent-turn-killed')}" />
-    <ChangeListener
-      listenTo="{agentTurnKilledEvt.value &amp;&amp; agentTurnKilledEvt.value.tick}"
-      onDidChange="() => {
-        if (window.__bramMarkTurnEnded('agent-turn-killed', {awaitingResponse: awaitingResponse, submitting: submitting, awaitingResponseSetAt: awaitingResponseSetAt, submittedKind: submittedKind})) {
-          awaitingResponse = false;
-          submittedKind = null;
-          window.__bramClearWorklistAwaiting(false);
-        }
-      }" />
     <PushSource
       id="inflightClaimChangedEvt"
       initial="{null}"
@@ -1196,27 +1181,6 @@ Drop is the clean rejection path; Iterate is what you want if the item just need
         window.__bramIframeTrace('listener-fired', {context: 'inflight-claim-changed'});
         inflightTick = inflightTick + 1;
       }" />
-    <PushSource
-      id="workspaceAgentStatusEvt"
-      initial="{null}"
-      subscribe="{window.bramSubscribeTauriEvent('agent-status-changed')}" />
-    <!-- Key on payload.state (transitions), not .tick (every push): the handler
-         only acts on a working->finished transition, so waking it on every
-         ~1/sec elapsed tick was pure churn. See
-         decouple-elapsed-from-agent-status-broadcast. -->
-    <ChangeListener
-      listenTo="{workspaceAgentStatusEvt.value &amp;&amp; workspaceAgentStatusEvt.value.payload &amp;&amp; workspaceAgentStatusEvt.value.payload.state}"
-      onDidChange="() => {
-        const p = (workspaceAgentStatusEvt.value &amp;&amp; workspaceAgentStatusEvt.value.payload) || null;
-        if (awaitingResponse &amp;&amp; p &amp;&amp; p.state !== 'working') {
-          if (p.state === 'finished' &amp;&amp; window.__bramMarkTurnEnded('agent-status-finished', {awaitingResponse: awaitingResponse, submitting: submitting, awaitingResponseSetAt: awaitingResponseSetAt, submittedKind: submittedKind})) {
-            awaitingResponse = false;
-            submittedKind = null;
-            window.__bramClearWorklistAwaiting(false);
-          }
-        }
-      }" />
-
     <!-- Agent dock: the last exchange, so you can read output without
          leaving the Worklist page for the Transcript tab. Last response =
          conversationStateDS.value.lastAssistantText.text, bounded with an

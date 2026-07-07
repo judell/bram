@@ -1030,31 +1030,6 @@ window.__bramClearWorklistUiState = function () {
   __bramWriteLS("bram.worklistUiState", "");
 };
 
-window.__bramRestoreWorklistAwaiting = function () {
-  var flag = __bramReadLS("bram.awaitingResponse", "");
-  var setAtRaw = __bramReadLS("bram.awaitingResponseSetAt", "");
-  var setAt = parseInt(setAtRaw, 10);
-  if (flag === "1" && !isNaN(setAt) && (Date.now() - setAt) < 300000) {
-    return true;
-  }
-  __bramWriteLS("bram.awaitingResponse", "");
-  __bramWriteLS("bram.awaitingResponseSetAt", "");
-  return false;
-};
-
-window.__bramRestoreWorklistAwaitingSetAt = function () {
-  var setAtRaw = __bramReadLS("bram.awaitingResponseSetAt", "");
-  var setAt = parseInt(setAtRaw, 10);
-  return isNaN(setAt) ? 0 : setAt;
-};
-
-window.__bramMarkAwaitingStarted = function () {
-  var now = Date.now();
-  __bramWriteLS("bram.awaitingResponse", "1");
-  __bramWriteLS("bram.awaitingResponseSetAt", String(now));
-  return now;
-};
-
 window.__bramRestoreWorklistSubmittedMessage = function () {
   return __bramReadLS("bram.worklistSubmittedMessage", "");
 };
@@ -1083,15 +1058,6 @@ window.__bramSetWorklistSubmittedKind = function (kind) {
     __bramWriteLS("bram.worklistSubmittedKind", "");
   }
   return kind || null;
-};
-
-window.__bramClearWorklistAwaiting = function (clearDraft) {
-  __bramWriteLS("bram.awaitingResponse", "");
-  __bramWriteLS("bram.awaitingResponseSetAt", "");
-  window.__bramSetWorklistSubmittedKind(null);
-  if (clearDraft) {
-    __bramWriteLS("bram.worklistMessageDraft", "");
-  }
 };
 
 window.__bramRestoreSplitterSize = function (key, fallback) {
@@ -1388,31 +1354,6 @@ window.__bramInflightBannerLabel = function (claim) {
 
 window.__bramStripImageMarkerPrefix = function (text) {
   return (text || "").replace(/^(\s*Read this screenshot: @\S+\s*)+/, "").trim();
-};
-
-// Canonical turn-end observer. Returns true iff the caller should clear
-// awaitingResponse / submittedKind and persist that cleared state. Emits
-// the trace line itself so callers stay uniform: `clear-awaiting` on a
-// true result, `mark-turn-ended-skipped` with an explicit reason on a
-// false result.
-window.__bramMarkTurnEnded = function (via, state) {
-  state = state || {};
-  var awaitingResponse = !!state.awaitingResponse;
-  if (!awaitingResponse) return false;
-  var submitting = !!state.submitting;
-  var setAt = state.awaitingResponseSetAt || 0;
-  var submittedKind = state.submittedKind || "";
-  var sinceSet = setAt ? (Date.now() - setAt) : -1;
-  if (submitting) {
-    window.__bramIframeTrace("mark-turn-ended-skipped", { via: via, reason: "action-in-flight", sinceSetMs: sinceSet, submittedKind: submittedKind });
-    return false;
-  }
-  if (sinceSet >= 0 && sinceSet < 750) {
-    window.__bramIframeTrace("mark-turn-ended-skipped", { via: via, reason: "within-window", sinceSetMs: sinceSet, submittedKind: submittedKind });
-    return false;
-  }
-  window.__bramIframeTrace("clear-awaiting", { via: via, sinceSetMs: sinceSet, submittedKind: submittedKind });
-  return true;
 };
 
 // Plain-JS equivalent of xs `App.mark(label)`. App.mark pushes a
@@ -1892,8 +1833,9 @@ window.__bramPrepareWorklistMessageSubmission = function (opts) {
     submittedWorklistMessage: sent.message,
     messageSentAtText: sent.sentAtText,
     submittedKind: window.__bramSetWorklistSubmittedKind("message"),
+    // Optimistic close; the host-derived awaitingTurn on /__send-ledger
+    // takes over on the next refetch (issue-214-tranche-3b).
     awaitingResponse: true,
-    awaitingResponseSetAt: window.__bramMarkAwaitingStarted(),
   };
 };
 
@@ -1912,7 +1854,6 @@ window.__bramPrepareWorklistActionSubmission = function (opts) {
   var sent = window.__bramRecordWorklistFeedbackConversation(feedback ? (displayText + "\n\n" + feedback) : displayText);
   var submittedImages = [];
   var awaitingResponse = false;
-  var awaitingResponseSetAt = 0;
 
   if (sent) {
     submittedImages = ((sent.images && sent.images.length > 0) ? sent.images : window.__bramExtractImagePaths(feedback));
@@ -1922,8 +1863,9 @@ window.__bramPrepareWorklistActionSubmission = function (opts) {
       count: submittedImages.length,
       first: submittedImages[0] || "",
     });
+    // Optimistic close; host-derived awaitingTurn takes over on the
+    // next /__send-ledger refetch (issue-214-tranche-3b).
     awaitingResponse = true;
-    awaitingResponseSetAt = window.__bramMarkAwaitingStarted();
   }
 
   if (opts.inflightTarget) {
@@ -1966,7 +1908,6 @@ window.__bramPrepareWorklistActionSubmission = function (opts) {
     submittedWorklistMessage: sent ? sent.message : "",
     messageSentAtText: sent ? sent.sentAtText : "",
     awaitingResponse: awaitingResponse,
-    awaitingResponseSetAt: awaitingResponseSetAt,
     submittedItemId: selectedId,
     submittedKind: window.__bramSetWorklistSubmittedKind("action"),
     submitting: true,

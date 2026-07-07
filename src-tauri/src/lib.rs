@@ -3297,6 +3297,10 @@ fn agent_status_emit_finished<R: tauri::Runtime>(
         s.last_completion_source = next.source.clone();
         s.pending_menu = None;
     });
+    // issue-214-tranche-3b: completion flips /__send-ledger's awaitingTurn
+    // gate, but the ledger itself has no transition at turn end — nudge
+    // subscribers to refetch.
+    emit_replayable_signal(app, "send-ledger-changed");
     true
 }
 
@@ -15495,6 +15499,72 @@ fn stale_terminal_input() -> bool {
     stale_terminal_input_latched_at() != 0
 }
 
+// issue-214-tranche-3b-ledger-submit-gate: host-derived submit gate for
+// the agent pane, served as `awaitingTurn` on /__send-ledger. True while
+// a pane-submitted send is in flight or its turn is still running — the
+// iframe consumes this one field instead of inferring turn end from four
+// event streams (the retired awaitingResponse machinery). The newest
+// ledger entry decides:
+//   injected              -> awaiting (transport in flight)
+//   stranded              -> open (send failed; user must be able to act)
+//   landed via queue      -> open (delivered into a turn already running;
+//                            holding until THAT turn ends over-locks)
+//   landed, cause latched -> open (aborted/retracted/steer — the turn was
+//                            interrupted or the message re-staged)
+//   landed, clean         -> awaiting while BOTH no completion has been
+//                            recorded after delivery AND the phase still
+//                            says working. Requiring both to hold errs
+//                            open: either signal alone can be stale (an
+//                            Esc-canceled turn leaves phase "working"; a
+//                            deduped finished emit can skip
+//                            last_completion_at_ms).
+fn send_ledger_awaiting_turn() -> bool {
+    let newest = send_ledger_cell().lock().ok().and_then(|l| {
+        l.iter()
+            .max_by_key(|e| e.injected_at_ms)
+            .map(|e| (e.state, e.cause, e.via_queue, e.resolved_at_ms))
+    });
+    let Some((state, cause, via_queue, resolved_at_ms)) = newest else {
+        return false;
+    };
+    let turn_state = turn_state_cell()
+        .lock()
+        .map(|s| (s.last_completion_at_ms, s.phase.clone()))
+        .ok();
+    let Some((last_completion_at_ms, phase)) = turn_state else {
+        return false;
+    };
+    send_ledger_awaiting_turn_for_entry(
+        state,
+        cause,
+        via_queue,
+        resolved_at_ms,
+        last_completion_at_ms,
+        &phase,
+    )
+}
+
+fn send_ledger_awaiting_turn_for_entry(
+    state: &str,
+    cause: &str,
+    via_queue: bool,
+    resolved_at_ms: i64,
+    last_completion_at_ms: i64,
+    phase: &str,
+) -> bool {
+    match state {
+        "injected" => true,
+        "landed" => {
+            if via_queue || !cause.is_empty() {
+                return false;
+            }
+            last_completion_at_ms <= resolved_at_ms
+                && (phase == "working" || phase == "waiting-for-permission")
+        }
+        _ => false,
+    }
+}
+
 fn stale_terminal_input_clear_for_provider(provider: Option<SessionProvider>) -> &'static str {
     match provider {
         Some(SessionProvider::Codex) => "\x15",
@@ -22953,6 +23023,39 @@ mod session_turn_tests {
     }
 
     #[test]
+    fn send_ledger_awaiting_turn_decision_table() {
+        assert!(super::send_ledger_awaiting_turn_for_entry(
+            "injected", "", false, 0, 999, "idle"
+        ));
+        assert!(super::send_ledger_awaiting_turn_for_entry(
+            "landed", "", false, 30, 0, "working"
+        ));
+        assert!(super::send_ledger_awaiting_turn_for_entry(
+            "landed",
+            "",
+            false,
+            30,
+            0,
+            "waiting-for-permission"
+        ));
+        assert!(!super::send_ledger_awaiting_turn_for_entry(
+            "landed", "", false, 30, 31, "working"
+        ));
+        assert!(!super::send_ledger_awaiting_turn_for_entry(
+            "landed", "", false, 30, 0, "idle"
+        ));
+        assert!(!super::send_ledger_awaiting_turn_for_entry(
+            "landed", "", true, 30, 0, "working"
+        ));
+        assert!(!super::send_ledger_awaiting_turn_for_entry(
+            "landed", "user", false, 30, 0, "working"
+        ));
+        assert!(!super::send_ledger_awaiting_turn_for_entry(
+            "stranded", "", false, 30, 0, "working"
+        ));
+    }
+
+    #[test]
     fn char_floor_respects_utf8_boundaries() {
         let s = "ab—cd"; // em-dash is 3 bytes starting at index 2
         assert_eq!(super::char_floor(s, 3), 2);
@@ -25742,7 +25845,8 @@ fn route_request<R: tauri::Runtime>(
         let body = serde_json::json!({
             "entries": entries,
             "nowMs": unix_now_ms(),
-            "staleTerminalInput": stale_terminal_input()
+            "staleTerminalInput": stale_terminal_input(),
+            "awaitingTurn": send_ledger_awaiting_turn()
         });
         return match serde_json::to_vec(&body) {
             Ok(bytes) => (200, "application/json; charset=utf-8", bytes),

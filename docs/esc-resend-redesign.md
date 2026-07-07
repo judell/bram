@@ -132,6 +132,14 @@ Phase-4 execution ledger (delete-phase tranche 3a, #214, 2026-07-06):
   mount). `awaitingResponse` + the localStorage awaiting keys KEPT —
   they are the live submit-button gate; their removal is tranche 3b, a
   ledger-driven rewire needing its own design.
+- **DONE (tranche 3b, 2026-07-06)** The awaiting rewire: `awaitingTurn`
+  is now derived host-side on `/__send-ledger` (newest ledger entry +
+  turn-completion detectors) and mirrored into the `awaitingResponse`
+  var; the four iframe end-detectors, `__bramMarkTurnEnded`, and the
+  localStorage awaiting keys are deleted. `submittedKind` + its
+  localStorage key remain (still the `worklistActionResult` validity
+  signal); with the detectors gone its persisted value has no readers
+  left at turn end — a candidate for the next dead-state sweep.
 - **DONE (phase 3)** The `\r` Resend.
 - **KEPT with evidence** Capture scrapers: demoted to diagnostics as
   planned, and their send-capture traces did real forensic work on

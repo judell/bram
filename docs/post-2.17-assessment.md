@@ -12,7 +12,7 @@ transcripts.
 | Redesign | Consolidated | Delete phase status |
 | --- | --- | --- |
 | Turn-transport | transport / persistence / projection split; clients became pure consumers of `/__turns` | **Complete** (steps 1–7; client JSONL parsers deleted in `b773098`) |
-| Esc-resend | outcome-anchored send ledger replaced bounce heuristics, landing state, Resend button | Phases 1–3 done for v0.2.17; **phase 4 "delete the superseded layers" is TODO** |
+| Esc-resend | outcome-anchored send ledger replaced bounce heuristics, landing state, Resend button | **Phase 4 mostly executed** in #214 tranches 3a/3b: bounce heuristics, write-only landing state, four iframe end-detectors, and localStorage awaiting keys deleted; capture scrapers intentionally kept as diagnostics |
 | Menus (#182 lineage, four generations) | hooks primary (Gen-4), grid sole detector (Gen-3), byte detection retired | `dc74e78` delivered the Gen-2 detector deletion (−1,852); **post-burn-in demotion of Gen-3 classifiers and Gen-2 scan diagnostics not done; "the prize" (ExitPlanMode hook → Gens 1–3 become trivial oracle) deferred** |
 | xterm-grid reading | grid replaces strip_ansi parsing | `e77ed36` deleted parsers (−499); **step 4 "retire raw-PTY fallback" pending trace-coverage validation** |
 | Turn-state spine (#182) | one arbitration point for turn state | Complete as designed (overlay, not replacement — nothing to delete) |
@@ -129,7 +129,13 @@ When these are quiet, execute the table top-down.
   ledger-driven rewire is tranche 3b, filed as
   `issue-214-tranche-3b-ledger-submit-gate`), and
   `submittedWorklistMessage` (read on mount). Candidate #4's remainder
-  is tranche 3b; candidates #5–6 remain gated as tabled.
+  moved to tranche 3b.
+- **2026-07-06 — tranche 3b executed** (`f2125e3`, +17 net):
+  candidate #4's live submit-button gate moved onto the host send
+  ledger. `awaitingTurn` is derived from `/__send-ledger`; the iframe's
+  four end-detectors, `__bramMarkTurnEnded`, and awaiting localStorage
+  keys were deleted. The small positive diff is intentional: it trades
+  scattered iframe state for one host-owned outcome source.
 - **2026-07-06 — candidate #5 executed** (worklist
   `issue-214-latest-tail-slim-tick`): the latest-tail push pipeline
   retired end to end — host cursor/diff/cap machinery and the
@@ -142,3 +148,50 @@ When these are quiet, execute the table top-down.
   Apply-time verification also caught two stale conventions.md trace
   rows (`sessionTurns-parse`, `helper-call`) whose emitters were
   deleted in an earlier phase — pruned with the four retired rows.
+
+## 7. Current status after issue #214 cleanup
+
+As of `9d5fff9` plus the follow-on Esc hardening (`b77868f`,
+`a7fda3f`), the planned delete-phase release has largely done what this
+assessment asked for. Candidates #1–5 are executed or intentionally
+bounded:
+
+| Candidate | Status | Result |
+| --- | --- | --- |
+| #1 Dead routes / client JSONL remnants | Done in `8dea22f` | Removed zero-caller routes and helper surface; no app callers left behind |
+| #2 Legacy iterate endpoints | Done in `8dea22f` | Removed legacy begin/end routes; host-managed iterate sentinel remains canonical |
+| #3 Gen-2 byte-scan diagnostics | Done in `b9bc27a` | Deleted the PTY byte-scan diagnostic layer and orphaned helpers after grid/fence/hook traces proved sufficient |
+| #4 Esc-resend superseded layers | Mostly done in `d8ad622` + `f2125e3` | Bounce heuristics, iframe match/baseline state, four turn-end detectors, `__bramMarkTurnEnded`, and awaiting localStorage keys are gone; capture scrapers remain diagnostic by explicit evidence |
+| #5 Latest-tail push pipeline | Done in `9d5fff9` | Replaced the raw-JSONL push/cache/startup pipeline with a slim session-change tick that refetches `/__turns`; Transcript's projected-turns consumer stayed stable |
+| #6 ExitPlanMode hook / menu classifier simplification | Remaining major item | Still higher-risk and still depends on hook-coverage burn-in (`op=gap` silence) before demoting Gen-3 classifiers and simplifying Gen-1 cross-reference |
+
+The cleanup is therefore close to the original target through the
+medium-risk items: the table's concrete, priced candidates #1–5 have
+landed, and the largest unresolved cleanup is the deliberately deferred
+"prize" (#6). The remaining work is no longer a broad post-2.17
+debt pile; it is a narrower menu-architecture decision gated on evidence.
+
+Net simplification from the main #214 commits:
+
+- `8dea22f`: 46 insertions / 238 deletions.
+- `b9bc27a`: 28 insertions / 659 deletions.
+- `d8ad622`: 27 insertions / 91 deletions.
+- `f2125e3`: 141 insertions / 124 deletions, trading iframe state for
+  host-owned ledger-derived submit state.
+- `9d5fff9`: 112 insertions / 853 deletions.
+
+That totals 354 insertions / 1,965 deletions across the five cleanup
+commits, before counting smaller follow-on hardening. The release did
+become net-negative in the intended places: less client parsing, fewer
+legacy routes, less raw JSONL transport machinery, and a single
+host-owned send ledger doing work previously split across heuristics,
+localStorage, and iframe listeners.
+
+Residual follow-ons to track separately:
+
+- Candidate #6: decide whether the PermissionRequest / ExitPlanMode hook
+  evidence is strong enough to demote the remaining menu inference layers.
+- Capture scrapers: keep for one release where they are unconsulted, then
+  revisit deletion.
+- Small dead-state sweeps such as `submittedKind` persistence, if caller
+  verification still shows no turn-end readers.

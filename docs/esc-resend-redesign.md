@@ -2,12 +2,14 @@
 
 ## Current status
 
-Implemented through phase 3 for v0.2.17: Bram now records every
-agent-pane send in the host-side ledger, confirms delivery from the
-session JSONL, restores user-caused or retracted sends into the composer,
-and removes the old Resend button from the recovery path. Mechanical
-auto-resend remains trust-gated off by default until more soak time proves
-zero false strands.
+Implemented through phase 4's substantive cleanup tranches as of
+2026-07-07: Bram records every agent-pane send in the host-side ledger,
+confirms delivery from the session JSONL, restores user-caused or
+retracted sends into the composer, removes the old Resend button from
+the recovery path, and derives the Worklist submit gate from the host
+ledger instead of iframe-local turn-end listeners. Mechanical auto-resend
+remains trust-gated off by default until more soak time proves zero false
+strands.
 
 ## Why this document exists
 
@@ -162,7 +164,12 @@ The redo must end net-simpler, as the transport redesign did.
    phase-2 soak shows zero false strands — a false strand plus
    auto-resend would create a duplicate send, the one harm the old
    button never had.
-4. TODO: Delete the superseded layers.
+4. MOSTLY DONE (#214 tranches 3a/3b): delete the superseded layers.
+   Bounce heuristics, write-only landing state, iframe awaiting keys, and
+   the four turn-end detectors are gone. Capture scrapers remain
+   intentionally as diagnostics; `submittedKind` persistence remains a
+   small dead-state follow-up if caller verification confirms it is still
+   unused at turn end.
 
 Never span old and new detection across the affordance at the same time.
 

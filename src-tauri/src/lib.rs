@@ -667,6 +667,12 @@ fn clear_hook_permission_menu<R: tauri::Runtime>(
     pty_menu_clear_for_outcome(app, "hook-clear");
     turn_state_set_menu(app, None, "hook-permission", "dismissed");
     emit_pty_menu_with_prose(app, &None);
+    // The guarded call resolved — drop any hook-burst entries so a
+    // fast follow-up prompt starts a fresh cluster
+    // (hook-payload-edit-diff-preview).
+    if let Ok(mut guard) = hook_edit_burst_cell().lock() {
+        guard.clear();
+    }
 }
 
 #[allow(dead_code)]
@@ -2970,6 +2976,92 @@ fn menu_session_token() -> &'static str {
     })
 }
 
+// Burst accumulator for parallel-batch hook posts
+// (hook-payload-edit-diff-preview). A fully-gated parallel edit batch
+// never reaches the session JSONL before it RESOLVES (verified
+// 2026-07-07 13:24: the 4-edit record landed only alongside the
+// rejection results), so the jsonl cluster/rollup path is blind and
+// the pane preview rendered empty. The PermissionRequest hook arrives
+// WITH the prompt and carries tool_input; posts for one batch land
+// within milliseconds. Collect them in a short window and build the
+// same rollup diff the jsonl path would have built.
+const HOOK_EDIT_BURST_WINDOW_MS: u128 = 1500;
+
+fn hook_edit_burst_cell() -> &'static Mutex<Vec<(std::time::Instant, PendingToolCall)>> {
+    static CELL: OnceLock<Mutex<Vec<(std::time::Instant, PendingToolCall)>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+// Attach a preview diff (and Write content) to a hook-built menu from
+// the payload's tool_input, using the burst cluster when more than one
+// gated call is in flight. Single calls reuse pending_tool_call_diff;
+// clusters reuse build_batch_rollup_diff — no new diff machinery.
+fn attach_hook_edit_diff<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    value: &serde_json::Value,
+    menu: &mut PtyMenu,
+) {
+    if !matches!(menu.tool.as_str(), "Edit" | "Write" | "MultiEdit") {
+        return;
+    }
+    let input = value.get("tool_input").cloned().unwrap_or(serde_json::Value::Null);
+    if input.is_null() {
+        return;
+    }
+    let call = PendingToolCall {
+        name: menu.tool.clone(),
+        input,
+        id: value
+            .get("tool_use_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+    };
+    let cluster: Vec<PendingToolCall> = {
+        let Ok(mut guard) = hook_edit_burst_cell().lock() else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        guard.retain(|(at, _)| now.duration_since(*at).as_millis() <= HOOK_EDIT_BURST_WINDOW_MS);
+        // A re-post for the same tool_use replaces its prior entry;
+        // id-less posts are deduped by identical (name, input).
+        if call.id.is_empty() {
+            guard.retain(|(_, c)| !(c.name == call.name && c.input == call.input));
+        } else {
+            guard.retain(|(_, c)| c.id != call.id);
+        }
+        guard.push((now, call.clone()));
+        guard.iter().map(|(_, c)| c.clone()).collect()
+    };
+    let diff = if cluster.len() > 1 {
+        build_batch_rollup_diff(app, &cluster).or_else(|| pending_tool_call_diff(&call, app))
+    } else {
+        pending_tool_call_diff(&call, app)
+    };
+    if menu.tool == "Write" && menu.tool_call_content.is_none() {
+        menu.tool_call_content = call
+            .input
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+    }
+    if let Some(diff) = diff {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "hook-menu",
+                &format!(
+                    "op=hook-diff tool={} cluster={} chars={}",
+                    menu.tool,
+                    cluster.len(),
+                    diff.chars().count(),
+                ),
+            );
+        }
+        menu.tool_call_diff = Some(diff);
+    }
+}
+
 fn handle_permission_menu<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
@@ -3045,7 +3137,7 @@ fn handle_permission_menu<R: tauri::Runtime>(
             )
         }
     };
-    let Some(menu) = permission_request_to_menu(&value) else {
+    let Some(mut menu) = permission_request_to_menu(&value) else {
         return (
             200,
             "application/json; charset=utf-8",
@@ -3066,7 +3158,20 @@ fn handle_permission_menu<R: tauri::Runtime>(
                 menu.options.len()
             ),
         );
+        // Raw-payload capture (hook-payload-edit-diff-preview step 1):
+        // the batch shape question — one POST per call vs per file —
+        // is answerable only from real payloads. Capped; trace-gated.
+        append_bram_trace_line(
+            app,
+            "hook-menu",
+            &format!(
+                "op=payload tool={} body={}",
+                menu.tool,
+                bram_trace_preview(&value.to_string(), 4000),
+            ),
+        );
     }
+    attach_hook_edit_diff(app, &value, &mut menu);
     retire_dismissed_menu_on_hook_claim(app, &menu);
     let payload = Some(menu);
     turn_state_set_menu(app, payload.clone(), "hook-permission", "detected");
@@ -5469,7 +5574,19 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
     if let Some(payload) = emit_payload {
         let payload = stamp_pty_menu_payload(payload, "setAgentMenuFromEvent");
         turn_state_set_menu(app, payload.clone(), "pty-menu", "detected");
-        emit_pty_menu_with_prose(app, &payload);
+        // Mirror turn_state_set_menu's hook-primary deferral for the pane
+        // emit too: while a hook menu owns the slot, a grid emit of the
+        // same prompt OVERWRITES the pane with a diff-less copy — the
+        // hook-payload-edit-diff-preview verification showed the enriched
+        // 436-byte hook menu replaced 330 ms later by the grid's 266-byte
+        // one, blanking the preview the hook had just attached.
+        if menu_hook_owns_slot() {
+            if bram_trace_enabled() {
+                append_bram_trace_line(app, "hook-menu", "op=grid-emit-deferred source=pty-menu");
+            }
+        } else {
+            emit_pty_menu_with_prose(app, &payload);
+        }
         trace_pty_menu_options(app, &payload);
     }
 
@@ -5632,6 +5749,35 @@ fn schedule_signature_recheck<R: tauri::Runtime>(app_handle: AppHandle<R>, targe
         // Each tick is cumulative sleep time, not a delta. Refs #170.
         for delay_ms in [200u64, 500u64, 1500u64, 3000u64] {
             std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            // hook-payload-edit-diff-preview: while a hook menu owns the
+            // pane slot and already carries a diff, grid enrichment
+            // cannot render (the grid defers to the hook owner) — skip
+            // the expensive full-tail jsonl lookups entirely. This was
+            // 8+ multi-MB parses per gated batch, polling for a record
+            // Claude Code does not write until the batch resolves.
+            let hook_enriched = menu_hook_owns_slot()
+                && turn_state_cell()
+                    .lock()
+                    .ok()
+                    .and_then(|s| {
+                        s.pending_menu
+                            .as_ref()
+                            .map(|m| m.tool_call_diff.is_some())
+                    })
+                    .unwrap_or(false);
+            if hook_enriched {
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        &app_handle,
+                        "pty-menu",
+                        &format!(
+                            "state=recheck-skip tool={} reason=hook-enriched",
+                            target_tool
+                        ),
+                    );
+                }
+                return;
+            }
             // Quick out: if the cached menu's tool no longer matches
             // (user clicked or a different menu took its place) or
             // signature was already populated by some other path,

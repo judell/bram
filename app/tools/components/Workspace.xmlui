@@ -267,7 +267,7 @@
     paddingHorizontal="$space-6"
     paddingBottom="$space-10"
     gap="$space-6"
-    onInit="">
+    onInit="window.__bramWorkspaceMount(worklist)">
     <Theme
       maxWidth-ModalDialog="50vw"
       backgroundColor-ModalDialog="$color-surface-50"
@@ -393,6 +393,7 @@
           const correlationId = (ev &amp;&amp; ev.correlationId) || '';
           const atHostMs = (ev &amp;&amp; ev.atHostMs) || 0;
           window.__bramIframeTrace('listener-fired', {context: 'talk-session-changed', correlation_id: correlationId, at_host_ms: atHostMs, delta_to_emit_ms: atHostMs ? (Date.now() - atHostMs) : -1});
+          window.__bramRefetchProjectedTurns('worklist-talk-session');
           if (submitting) { currentTurnEditsTick = currentTurnEditsTick + 1; }
         }" />
       <PushSource
@@ -1165,6 +1166,7 @@ Drop is the clean rejection path; Iterate is what you want if the item just need
     <ChangeListener
       listenTo="{agentTurnEndEvt.value &amp;&amp; agentTurnEndEvt.value.tick}"
       onDidChange="() => {
+        window.__bramRefetchProjectedTurns('worklist-turn-end');
         if (newItemSubmitting) {
           newItemTurnEnded = true;
           worklist.refetch();

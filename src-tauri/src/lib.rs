@@ -1447,6 +1447,97 @@ struct CodexReloadTarget {
 
 static CODEX_RELOAD_TARGET: OnceLock<Mutex<Option<CodexReloadTarget>>> = OnceLock::new();
 
+// The pin survives Bram restarts via a project-resources dot-file. The
+// 2026-07-07 flip-back repro lost the in-memory pin to a relaunch at
+// 15:00:46, after which mtime selection reverted the Transcript to the
+// previous rollout and the next provider switch resumed it in codex too
+// (transcript-list-consumes-current-projection).
+fn codex_reload_target_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    project_resource_path(app, ".codex-reload-target.json")
+}
+
+fn persist_codex_reload_target<R: tauri::Runtime>(app: &AppHandle<R>, target: &CodexReloadTarget) {
+    let Some(path) = codex_reload_target_file(app) else {
+        return;
+    };
+    let set_at_ms = target
+        .set_at
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let body = serde_json::json!({
+        "id": target.id,
+        "path": target.path.to_string_lossy(),
+        "previousPath": target.previous_path.as_ref().map(|p| p.to_string_lossy()),
+        "setAtMs": set_at_ms,
+    });
+    if let Ok(text) = serde_json::to_string_pretty(&body) {
+        let _ = std::fs::write(&path, text);
+    }
+}
+
+fn load_codex_reload_target<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<CodexReloadTarget> {
+    let path = codex_reload_target_file(app)?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let id = v.get("id")?.as_str()?.to_string();
+    let target_path = PathBuf::from(v.get("path")?.as_str()?);
+    if !target_path.exists() {
+        return None;
+    }
+    let previous_path = v
+        .get("previousPath")
+        .and_then(|p| p.as_str())
+        .map(PathBuf::from);
+    let set_at_ms = v.get("setAtMs").and_then(|m| m.as_i64()).unwrap_or(0);
+    Some(CodexReloadTarget {
+        id,
+        path: target_path,
+        previous_path,
+        set_at: std::time::SystemTime::UNIX_EPOCH
+            + std::time::Duration::from_millis(set_at_ms.max(0) as u64),
+    })
+}
+
+// Read the pin, lazily rehydrating the in-memory cell from disk after a
+// restart.
+fn codex_reload_target<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<CodexReloadTarget> {
+    let cell = CODEX_RELOAD_TARGET.get_or_init(|| Mutex::new(None));
+    if let Ok(mut guard) = cell.lock() {
+        if guard.is_none() {
+            *guard = load_codex_reload_target(app);
+        }
+        return guard.clone();
+    }
+    None
+}
+
+// Single clear path: memory + dot-file + trace. The pre-existing
+// target-missing clear was silent, which made pin loss undiagnosable.
+fn clear_codex_reload_target<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    session: &str,
+    reason: &str,
+    successor: &str,
+) {
+    if let Ok(mut guard) = CODEX_RELOAD_TARGET.get_or_init(|| Mutex::new(None)).lock() {
+        *guard = None;
+    }
+    if let Some(path) = codex_reload_target_file(app) {
+        let _ = std::fs::remove_file(&path);
+    }
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "agent-switch",
+            &format!(
+                "op=codex-reload-pin-clear session={} reason={} successor={}",
+                session, reason, successor
+            ),
+        );
+    }
+}
+
 // Real-time detection of claude's permission menu by tapping the PTY
 // byte stream. Necessary because the JSONL file lags claude's actual
 // state by ~10-20s (claude buffers a turn's records and flushes as one
@@ -8535,7 +8626,20 @@ fn switch_agent(
         other => return Err(format!("unknown agent provider: {}", other)),
     };
     let base_command = if configured_continue_last(&app) {
-        agent_resume_command(provider_key, "")
+        // A pinned codex session outranks `resume --last`: after a
+        // cross-provider round-trip, codex must reopen the session Bram
+        // is displaying, not codex's own idea of most-recent. The
+        // 2026-07-07 flip-back had the switch resume the 36 MB rollout
+        // while the pane showed the pinned one, and the two sessions'
+        // mtimes then raced for "latest".
+        if provider_key == "codex" {
+            match codex_reload_target(&app) {
+                Some(target) => agent_resume_command("codex", &target.id),
+                None => agent_resume_command("codex", ""),
+            }
+        } else {
+            agent_resume_command(provider_key, "")
+        }
     } else {
         agent_launch_command(provider_key).map(str::to_string)
     }
@@ -8626,6 +8730,13 @@ fn pin_codex_reload_target<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> R
         return Ok(());
     }
     let Some(path) = session_path_for_id(app, SessionProvider::Codex, id) else {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "agent-switch",
+                &format!("op=codex-reload-pin-miss session={} reason=id-unresolved", id),
+            );
+        }
         return Ok(());
     };
     let previous_path = latest_codex_session_path(app)?.filter(|p| p != &path);
@@ -8635,6 +8746,7 @@ fn pin_codex_reload_target<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> R
         previous_path: previous_path.clone(),
         set_at: std::time::SystemTime::now(),
     };
+    persist_codex_reload_target(app, &target);
     *CODEX_RELOAD_TARGET
         .get_or_init(|| Mutex::new(None))
         .lock()
@@ -11808,11 +11920,7 @@ fn latest_codex_session_path<R: tauri::Runtime>(
             },
         )
         .max_by_key(|(mtime, _)| *mtime);
-    let reload_target = CODEX_RELOAD_TARGET
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .map_err(|e| e.to_string())?
-        .clone();
+    let reload_target = codex_reload_target(app);
     let (chosen_mtime, chosen) =
         if let Some(target) = reload_target {
             let target_now = all
@@ -11836,36 +11944,21 @@ fn latest_codex_session_path<R: tauri::Runtime>(
                     )
                     .max_by_key(|(mtime, _)| *mtime);
                 if let Some((successor_mtime, successor_path)) = successor {
-                    if let Ok(mut guard) = CODEX_RELOAD_TARGET
-                        .get_or_init(|| Mutex::new(None))
-                        .lock()
-                        .map_err(|e| e.to_string())
-                    {
-                        *guard = None;
-                    }
-                    if bram_trace_enabled() {
-                        append_bram_trace_line(
-                            app,
-                            "agent-switch",
-                            &format!(
-                            "op=codex-reload-pin-clear session={} reason=successor successor={}",
-                            target.id,
-                            successor_path.file_name().and_then(|n| n.to_str()).unwrap_or("")
-                        ),
-                        );
-                    }
+                    clear_codex_reload_target(
+                        app,
+                        &target.id,
+                        "successor",
+                        successor_path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or(""),
+                    );
                     (successor_mtime, successor_path)
                 } else {
                     (target_mtime, target_path)
                 }
             } else {
-                if let Ok(mut guard) = CODEX_RELOAD_TARGET
-                    .get_or_init(|| Mutex::new(None))
-                    .lock()
-                    .map_err(|e| e.to_string())
-                {
-                    *guard = None;
-                }
+                clear_codex_reload_target(app, &target.id, "target-missing", "");
                 active_best.unwrap_or(raw_best)
             }
         } else {

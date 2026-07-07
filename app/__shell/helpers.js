@@ -3910,12 +3910,30 @@ window.bramSubscribeTauriEvent = (function () {
         });
       }
     );
+    var replayLatest = function () {
+      if (typeof window.fetch !== "function") return;
+      window.fetch("/__event/latest?name=" + encodeURIComponent(eventName), { cache: "no-store" })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (!data || !data.exists) return;
+          tick += 1;
+          lastPayload = data.payload || null;
+          var snapshot = { tick: tick, payload: lastPayload, replayed: true };
+          subscribers.forEach(function (fn) {
+            try { fn(snapshot); } catch (err) {
+              console.error("[bramSubscribeTauriEvent] replay subscriber threw:", err);
+            }
+          });
+        })
+        .catch(function () {});
+    };
     var factory = function (emit) {
       var fire = function (snapshot) {
         emit(snapshot || { tick: tick, payload: lastPayload });
       };
       subscribers.add(fire);
       fire();
+      replayLatest();
       return function () { subscribers.delete(fire); };
     };
     byEvent[eventName] = factory;
@@ -4138,16 +4156,28 @@ window.bramSubscribeProjectedTurns = (function () {
       });
     };
     window.onProjectedTurnsChange(function (v) { lastValue = v; notify(); });
-    window.__bramRefetchProjectedTurns(lastValue == null ? "first-subscribe" : "subscribe");
     factory = function (emit) {
       var fire = function () { emit(lastValue); };
       subscribers.add(fire);
       fire();
+      window.__bramRefetchProjectedTurns(lastValue == null ? "first-subscribe" : "subscribe");
       return function () { subscribers.delete(fire); };
     };
     return factory;
   };
 })();
+
+window.__bramTranscriptMount = function () {
+  if (window.__bramSetTranscriptMounted) window.__bramSetTranscriptMounted(true);
+  if (window.__bramRefetchProjectedTurns) window.__bramRefetchProjectedTurns("transcript-mount");
+};
+
+window.__bramWorkspaceMount = function (worklistDataSource) {
+  if (worklistDataSource && typeof worklistDataSource.refetch === "function") {
+    worklistDataSource.refetch();
+  }
+  if (window.__bramRefetchProjectedTurns) window.__bramRefetchProjectedTurns("worklist-mount");
+};
 
 // Map a Read/Write/Edit path hint (the tool summary) to a Markdown code-fence
 // language. Used only for file-op tools so a Bash command that merely mentions

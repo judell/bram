@@ -3981,6 +3981,7 @@ var __projectedTurnsValue = null; // { sid, provider, turns } | null
 var __projectedTurnsSubscribers = [];
 var __projectedTurnsTimer = null;
 var __projectedTurnsSeq = 0;
+var __projectedTurnsRevision = 0;
 
 window.getProjectedTurns = function () { return __projectedTurnsValue; };
 window.onProjectedTurnsChange = function (fn) {
@@ -4006,8 +4007,14 @@ window.__bramProjectedTurnEqual = function (a, b) {
     var x = ae[i] || {}, y = be[i] || {};
     if (x.kind !== y.kind) return false;
     if (x.kind === "tool") {
-      if (x.id !== y.id || !!x.isError !== !!y.isError) return false;
-      if (((x.result || "").length) !== ((y.result || "").length)) return false;
+      if (
+        x.id !== y.id ||
+        x.name !== y.name ||
+        x.summary !== y.summary ||
+        x.commandDisplay !== y.commandDisplay ||
+        x.result !== y.result ||
+        !!x.isError !== !!y.isError
+      ) return false;
       if ((x.agentId || "") !== (y.agentId || "")) return false;
     } else if (x.text !== y.text) {
       return false;
@@ -4028,6 +4035,7 @@ window.__bramBroadcastProjectedTurns = function (payload) {
       }
     }
   }
+  payload.revision = ++__projectedTurnsRevision;
   __projectedTurnsValue = payload;
   var n = __projectedTurnsSubscribers.length;
   for (var j = 0; j < n; j++) {
@@ -4130,7 +4138,7 @@ window.bramSubscribeProjectedTurns = (function () {
       });
     };
     window.onProjectedTurnsChange(function (v) { lastValue = v; notify(); });
-    if (lastValue == null) window.__bramRefetchProjectedTurns("first-subscribe");
+    window.__bramRefetchProjectedTurns(lastValue == null ? "first-subscribe" : "subscribe");
     factory = function (emit) {
       var fire = function () { emit(lastValue); };
       subscribers.add(fire);

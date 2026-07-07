@@ -80,6 +80,7 @@
     onInit="window.__bramSetTranscriptMounted(true)"
     onCleanup="window.__bramSetTranscriptMounted(false)"
     var.events="{window.__bramTranscriptEventsFromTurns($props.agentId ? subagentTurns.value : turnsEvt.value, null)}"
+    var.eventsVersion="{($props.agentId ? (subagentTurns.value &amp;&amp; subagentTurns.value.total) : (turnsEvt.value &amp;&amp; turnsEvt.value.revision)) || events.length}"
     var.expanded="{[]}"
     var.atBottom="{true}"
     var.repinArmed="{false}"
@@ -219,7 +220,7 @@
          is parked there — so following never fights reading, and there's no
          RO-driven re-stick to loop or yank the viewport. -->
     <ChangeListener
-      listenTo="{events.length}"
+      listenTo="{events.length + ':' + eventsVersion}"
       onDidChange="() => { if (atBottom) { transcriptList.scrollToBottom(); window.__bramIframeTrace('transcript-repin', {events: events.length, agentId: $props.agentId || 'main'}); } }" />
     <!-- Viewport switch (chip click: Main ↔ subagent) always lands at the
          bottom: re-arm follow mode so the async refetch's events swap

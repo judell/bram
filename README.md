@@ -6,6 +6,8 @@ A desktop app that helps you make best use of git and GitHub for AI-assisted sof
 
 Bram runs agents mindfully.
 
+Smoke test marker for apply_patch transcript rendering.
+
 ## Who is it for?
 
 Anyone who wants to use AI coding agents in a safe, orderly, and accountable way.

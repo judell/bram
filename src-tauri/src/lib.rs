@@ -14204,6 +14204,11 @@ fn st_codex_tool_command_display(payload: &serde_json::Value) -> String {
             return st_line_oriented_command_display(cmd);
         }
     }
+    if name == "apply_patch" {
+        if let Some(patch) = input.as_str() {
+            return patch.to_string();
+        }
+    }
     if input.is_object() {
         let display_name = if name.is_empty() {
             st_codex_tool_name(payload)

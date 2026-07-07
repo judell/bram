@@ -182,7 +182,11 @@
             padding="$space-2"
             borderRadius="$borderRadius">
             <Markdown
-              when="{$item.commandDisplay || $item.summary}"
+              when="{$item.commandDisplay &amp;&amp; $item.name === 'apply_patch'}"
+              overflowMode="scroll"
+              content="{window.__bramFormatToolResult($item.commandDisplay, $item.name, $item.summary)}" />
+            <Markdown
+              when="{($item.commandDisplay || $item.summary) &amp;&amp; ($item.name !== 'apply_patch' || !$item.commandDisplay)}"
               overflowMode="scroll"
               content="{window.__bramFormatToolCommand($item.commandDisplay || $item.summary)}" />
             <!-- Tool result: typed Markdown code-fence when the formatter

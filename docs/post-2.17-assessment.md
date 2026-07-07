@@ -111,3 +111,22 @@ When these are quiet, execute the table top-down.
   paths — fixed as `worklist-commit-stage-deletions` so tranches 2+
   can delete real files through the gate. Candidates #3–6 remain,
   gated as tabled.
+- **2026-07-06 — tranche 2 executed** (`b9bc27a`, −631 net): candidate
+  #3, the Gen-2 byte-scan diagnostics. Gate evidence: zero
+  `[pty-menu-scan]` lines across the heaviest menu-forensics stretch to
+  date (2026-07-05/06, six menu failure modes diagnosed entirely from
+  the grid/fence/hook trace layers). The excision cascaded — rustc
+  flagged four more byte-scan-era helpers orphaned, taking the net from
+  the priced ~580 to −631. `pty-menu-scan-report.py` marked retired
+  against its now-dead data source.
+- **2026-07-06 — tranche 3a executed** (`d8ad622`, −64 net): the
+  dead-only half of candidate #4 — bounce heuristics end to end and
+  write-only iframe landing state. Kept, with evidence recorded in the
+  esc-resend phase-4 execution ledger (`docs/esc-resend-redesign.md`,
+  the authoritative per-item record for candidate #4): capture scrapers
+  (their `send-capture` traces did live forensic work twice that same
+  day), `awaitingResponse` (the live submit-button gate; its
+  ledger-driven rewire is tranche 3b, filed as
+  `issue-214-tranche-3b-ledger-submit-gate`), and
+  `submittedWorklistMessage` (read on mount). Candidate #4's remainder
+  is tranche 3b; candidates #5–6 remain gated as tabled.

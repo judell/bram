@@ -36,20 +36,23 @@
   <!-- Subagent stream for the chip-selected view (agentId prop from the
        footer chips strip). Refreshed by the dedicated subagents-changed
        signal (subagent JSONL appends never reach sessions-list-changed —
-       see the watcher's subagents-changed emit). With no agentId the
-       fetch degenerates to the main projection and is ignored by the
-       viewport switch. -->
+       see the watcher's subagents-changed emit). Gated on agentId: with
+       none, the fetch degenerated to the FULL main projection and was
+       ignored by the viewport switch — on a multi-MB session those
+       redundant fetches froze the shared webview main thread and wedged
+       the terminal (2026-07-07 codex esc wedge, third recurrence). -->
   <DataSource
     id="subagentTurns"
     url="/__turns"
-    queryParams="{{ agent: $props.agentId || '' }}" />
+    queryParams="{{ agent: $props.agentId }}"
+    when="{!!$props.agentId}" />
   <PushSource
     id="transcriptSubagentsChangedEvt"
     initial="{null}"
     subscribe="{window.bramSubscribeTauriEvent('subagents-changed')}" />
   <ChangeListener
     listenTo="{transcriptSubagentsChangedEvt.value &amp;&amp; transcriptSubagentsChangedEvt.value.tick}"
-    onDidChange="() => subagentTurns.refetch()" />
+    onDidChange="() => { if ($props.agentId) { subagentTurns.refetch(); } }" />
   <PushSource
     id="transcriptSessionsChangedEvt"
     initial="{null}"

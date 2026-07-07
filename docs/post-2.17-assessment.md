@@ -130,3 +130,15 @@ When these are quiet, execute the table top-down.
   `issue-214-tranche-3b-ledger-submit-gate`), and
   `submittedWorklistMessage` (read on mount). Candidate #4's remainder
   is tranche 3b; candidates #5–6 remain gated as tabled.
+- **2026-07-06 — candidate #5 executed** (worklist
+  `issue-214-latest-tail-slim-tick`): the latest-tail push pipeline
+  retired end to end — host cursor/diff/cap machinery and the
+  `/__sessions/latest-tail` route (zero fetchers), the iframe raw-JSONL
+  cache with its startup gating and replay path, the four `jsonl-*`
+  trace subkinds, and the Status tab's latest-tail/fanout/backpressure
+  counters. `talk-session-changed` now carries only `{sid, provider}`
+  and the iframe tick calls `__bramRefetchProjectedTurns` directly; the
+  `__projectedTurns*` broadcast Transcript consumes is unchanged.
+  Apply-time verification also caught two stale conventions.md trace
+  rows (`sessionTurns-parse`, `helper-call`) whose emitters were
+  deleted in an earlier phase — pruned with the four retired rows.

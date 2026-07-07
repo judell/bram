@@ -37,7 +37,6 @@ function statusSectionSubhead(title) {
     'Hooks': 'agent guard setup',
     'Agent Coordination': 'Setup-managed file health',
     'Authorization': 'approval record flow',
-    'Latest Tail And Fanout': 'session stream pressure',
     'Guards, Staleness, Interrupts, Traces': 'safety signal trail',
   };
   return descriptions[title] || '';
@@ -45,7 +44,6 @@ function statusSectionSubhead(title) {
 
 function statusSignalDescription(signal) {
   const descriptions = {
-    'Payload maxima': 'Largest startup payloads seen during the first minute. Big tails, fanout bodies, or repeated resets point to sluggish UI, excess JSONL parsing, or trace noise worth trimming.',
     'Renderer drift': 'Measures PTY volume and heartbeat delay during startup. High drift means the UI thread or terminal stream was busy enough to delay visible updates.',
     'Inspector export': 'Shows whether a recent XMLUI Inspector trace exists. A fresh export gives agents concrete interaction, API, and state-change evidence instead of guessing from markup.',
     'Current items': 'Counts active Worklist rows by lifecycle phase. It tells you whether Bram is waiting for apply approval, commit approval, or cleanup.',
@@ -61,8 +59,6 @@ function statusSignalDescription(signal) {
     'Codex hook': 'Shows whether Codex has Bram’s worklist guard installed and registered. It enforces the same proposal and approval gate for Codex file mutations.',
     'Latest record': 'Shows the newest structured authorization or close-helper record. It helps diagnose stale approvals, consumed payloads, and what the agent is currently allowed to do.',
     'Record age': 'Reports how old the latest coordination record is. Old unconsumed records often explain stuck buttons, stale approvals, or surprising guard behavior.',
-    'latest-tail': 'Tracks session-tail polling work. Large or frequent tail reads can make Transcript and Worklist updates feel slow.',
-    'JSONL fanout': 'Shows shared JSONL broadcast activity and subscriber count. It helps identify whether session updates are efficiently shared or repeatedly reparsed.',
     'Guard decisions': 'Counts recent guard blocks. Warnings here mean an agent tried to mutate files outside the approved Worklist path.',
     'Stale approvals': 'Counts rejected stale approvals. These happen when Worklist content changed after the user clicked, so the agent must not apply that payload.',
     'Interrupts': 'Shows recent interruption or silence-clear events. These explain why an agent cycle stopped, a spinner cleared, or an active turn ended unexpectedly.',

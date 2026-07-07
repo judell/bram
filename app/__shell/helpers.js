@@ -2928,8 +2928,8 @@ window.getRightPaneSize = function (callback) {
 
 // Subscribe to session-JSONL change events. The parent shell receives
 // `talk-session-changed` Tauri events from the file watcher; same-origin
-// iframes consume them through this bridge. Used by Transcript / Workspace
-// to receive latest-tail deltas immediately on provider session-file writes.
+// iframes consume them through this bridge. It is the change-signal tick
+// that drives the projected-turns refetch on provider session-file writes.
 var __talkSessionSubscribers = [];
 var __talkSessionMainUnsub = null;
 window.onTalkSessionChange = function (fn) {
@@ -3999,170 +3999,16 @@ window.bramSubscribeAgentMenu = (function () {
   };
 })();
 
-// Shared cache for the latest session-tail JSONL. The host pushes the
-// latest-tail envelope on talk-session-changed, and both the Worklist tab
-// (Workspace.xmlui) and the Transcript tab subscribe via
-// onLatestJsonlChange() so they share one cache and survive tab switches.
-// Keeping the value in helpers.js avoids routing large JSONL response
-// bodies through XMLUI DataSource tracing / Inspector retention.
-//
-// Why a window-level cache and not global.lastJsonl on the App: XMLUI
-// 0.12.27's global-write path runs the assigned value through its
-// expression parser, and a JSONL string (starts with `{`) parses as
-// the start of an unclosed XMLUI expression. Keeping the value in
-// plain JS sidesteps the parser entirely.
-var __latestJsonlValue = null;
-var __latestJsonlSubscribers = [];
-var __latestJsonlPushers = {};
-var __latestJsonlStartupReplayRequested = false;
-var __latestJsonlStartupBootMs = Date.now();
-var __latestJsonlStartupGateMs = 4500;
-var __latestJsonlStartupGuardMs = 9000;
-var __latestJsonlStartupMinDeferMs = 1500;
-var __latestJsonlStartupStableFrameMs = 40;
-var __latestJsonlStartupStableFrames = 3;
-var __latestJsonlStartupStableFrameMaxWaitMs = 3000;
-var __latestJsonlStartupLargePayloadBytes = 384 * 1024;
-window.getLatestJsonl = function () { return __latestJsonlValue; };
-window.setLatestJsonl = function (value) {
-  __latestJsonlValue = value;
-  var n = __latestJsonlSubscribers.length;
-  for (var i = 0; i < n; i++) {
-    try { __latestJsonlSubscribers[i](value); } catch (e) {}
-  }
-  // Trace the broadcast so #100-style perf observation can see how many
-  // subscribers were notified per fetch. With <Pages> only mounting one
-  // route at a time, n is typically 1 after a single tab visit, 2 after
-  // both tabs have been visited in this iframe session.
-  try {
-    if (window.logToHost && !window.__bramMenuPending) {
-      window.logToHost({
-        kind: "iframe-trace",
-        subkind: "jsonl-broadcast",
-        at: new Date().toISOString(),
-        subscribers: n,
-        len: (value && value.length) || 0,
-      });
-    }
-  } catch (e) {}
-};
-window.onLatestJsonlChange = function (fn) {
-  if (typeof fn !== "function") return function () {};
-  __latestJsonlSubscribers.push(fn);
-  return function () {
-    var idx = __latestJsonlSubscribers.indexOf(fn);
-    if (idx >= 0) __latestJsonlSubscribers.splice(idx, 1);
-  };
-};
-function __bramLatestJsonlStartupAgeMs() {
-  return Math.max(0, Date.now() - __latestJsonlStartupBootMs);
-}
-function __bramLatestJsonlPayloadBytes(payload) {
-  if (!payload || typeof payload !== "object") return 0;
-  return ((payload.content || "").length || 0);
-}
-function __bramLatestJsonlStartupGateRemainingMs() {
-  return Math.max(0, __latestJsonlStartupGateMs - __bramLatestJsonlStartupAgeMs());
-}
-function __bramShouldGateLatestJsonlStartup(payload) {
-  return __bramLatestJsonlStartupAgeMs() < __latestJsonlStartupGuardMs
-    && __bramLatestJsonlPayloadBytes(payload) >= __latestJsonlStartupLargePayloadBytes;
-}
-function __bramLatestJsonlStartupBaseWaitMs(deferredAtMs) {
-  var minRemainingMs = deferredAtMs
-    ? Math.max(0, __latestJsonlStartupMinDeferMs - (Date.now() - deferredAtMs))
-    : __latestJsonlStartupMinDeferMs;
-  return Math.max(__bramLatestJsonlStartupGateRemainingMs(), minRemainingMs);
-}
-function __bramAfterLatestJsonlStartupStableFrame(deferredAtMs, done) {
-  var baseWaitMs = __bramLatestJsonlStartupBaseWaitMs(deferredAtMs);
-  window.setTimeout(function () {
-    if (typeof window.requestAnimationFrame !== "function") {
-      done("startup-base-wait", { stableFrames: 0, stableWaitMs: 0 });
-      return;
-    }
-    var probeStartedMs = Date.now();
-    var lastFrameTs = 0;
-    var stableFrames = 0;
-    var bestStableFrames = 0;
-    var finish = function (reason) {
-      done(reason, {
-        stableFrames: bestStableFrames,
-        stableWaitMs: Math.max(0, Date.now() - probeStartedMs),
-      });
-    };
-    var step = function (ts) {
-      if (lastFrameTs > 0 && ts - lastFrameTs <= __latestJsonlStartupStableFrameMs) {
-        stableFrames += 1;
-      } else {
-        stableFrames = 0;
-      }
-      bestStableFrames = Math.max(bestStableFrames, stableFrames);
-      lastFrameTs = ts;
-      if (stableFrames >= __latestJsonlStartupStableFrames) {
-        finish("stable-frame");
-        return;
-      }
-      if (Date.now() - probeStartedMs >= __latestJsonlStartupStableFrameMaxWaitMs) {
-        finish("stable-frame-timeout");
-        return;
-      }
-      window.requestAnimationFrame(step);
-    };
-    window.requestAnimationFrame(step);
-  }, Math.max(100, baseWaitMs));
-}
-function __bramTraceLatestJsonlStartup(action, fields) {
-  try {
-    fields = fields || {};
-    fields.action = action;
-    fields.ageMs = __bramLatestJsonlStartupAgeMs();
-    fields.gateMs = __latestJsonlStartupGateMs;
-    fields.guardMs = __latestJsonlStartupGuardMs;
-    fields.minDeferMs = __latestJsonlStartupMinDeferMs;
-    fields.thresholdBytes = __latestJsonlStartupLargePayloadBytes;
-    fields.route = (window.location && (window.location.hash || window.location.pathname)) || "";
-    var delayMs = Math.max(250, __bramLatestJsonlStartupGateRemainingMs() + 250);
-    window.setTimeout(function () {
-      window.__bramIframeTrace("startup-backpressure", fields);
-    }, delayMs);
-  } catch (e) {}
-}
-
-// --- Transcript (foldable, structured, full history) ---------------------
-// External subscribe factory for the latest session JSONL. Memoized
-// singleton matching bramSubscribeConversationState: the onLatestJsonlChange
-// subscription is set up ONCE, the factory reference is stable across
-// renders (so the External doesn't re-subscribe every render), and each
-// subscriber gets a clean teardown. The non-memoized version churned the
-// subscription on every render and broke navigation out of the tab.
-window.bramSubscribeLatestJsonl = (function () {
-  var factory;
-  return function () {
-    if (factory) return factory;
-    var subscribers = new Set();
-    var lastValue = window.getLatestJsonl();
-    var notify = function () {
-      subscribers.forEach(function (fn) {
-        try { fn(); } catch (e) { console.error("[bramSubscribeLatestJsonl] subscriber threw:", e); }
-      });
-    };
-    window.onLatestJsonlChange(function (v) { lastValue = v; notify(); });
-    factory = function (emit) {
-      var fire = function () { emit(lastValue); };
-      subscribers.add(fire);
-      fire();
-      return function () { subscribers.delete(fire); };
-    };
-    return factory;
-  };
-})();
+// (issue-214 candidate #5: the shared raw-JSONL cache, its startup
+// gating, and bramSubscribeLatestJsonl were retired here — no consumer
+// remained. talk-session-changed is now a slim change-signal tick; see
+// startBramLatestJsonlPush below.)
 
 // --- Projected turns (single host projection; docs/turn-transport-redesign.md)
 // Turn-display surfaces bound to the LIVE session consume /__turns through
-// this pipeline instead of parsing raw JSONL. The latest-tail push above
-// stays the CHANGE SIGNAL: each applied envelope coalesces into one
-// projection refetch. Turn objects are reference-preserved across fetches
+// this pipeline instead of parsing raw JSONL. talk-session-changed is the
+// CHANGE SIGNAL: each tick coalesces into one projection refetch. Turn
+// objects are reference-preserved across fetches
 // so XMLUI lists don't re-mount unchanged rows.
 var __projectedTurnsValue = null; // { sid, provider, turns } | null
 var __projectedTurnsSubscribers = [];
@@ -4222,9 +4068,19 @@ window.__bramBroadcastProjectedTurns = function (payload) {
   }
 };
 
+// Adaptive coalesce (2026-07-07 codex esc wedge): one /__turns
+// fetch+parse+broadcast of a long session costs real main-thread time
+// (~1.2 s observed on a 4.2 MB / 2,500-turn rollout), so a fixed 250 ms
+// window lets streaming ticks eat the UI whole. Scale the window to the
+// LAST observed cost (4x, floor 250 ms, cap 5 s) so the projection
+// pipeline never takes more than ~25% of the main thread; small
+// sessions keep the snappy 250 ms cadence. A bounded "latest turns"
+// /__turns mode is the follow-up if this proves insufficient.
+var __projectedTurnsLastCostMs = 0;
 window.__bramRefetchProjectedTurns = function (reason) {
   if (typeof window.fetch !== "function") return;
   if (__projectedTurnsTimer) return; // trailing-edge coalesce
+  var delayMs = Math.max(250, Math.min(4 * __projectedTurnsLastCostMs, 5000));
   __projectedTurnsTimer = window.setTimeout(function () {
     __projectedTurnsTimer = null;
     var seq = ++__projectedTurnsSeq;
@@ -4234,6 +4090,7 @@ window.__bramRefetchProjectedTurns = function (reason) {
       .then(function (payload) {
         if (seq !== __projectedTurnsSeq) return; // superseded by a later fetch
         window.__bramBroadcastProjectedTurns(payload);
+        __projectedTurnsLastCostMs = Date.now() - startedMs;
         try {
           if (window.logToHost && !window.__bramMenuPending) {
             window.logToHost({
@@ -4703,263 +4560,44 @@ window.__bramToggleInArray = function (arr, id) {
   if (arr.indexOf(id) >= 0) return arr.filter(function (x) { return x !== id; });
   return arr.concat([id]);
 };
-window.__bramApplyLatestJsonlEnvelope = function (env, source) {
-  if (!env || typeof env !== "object") return;
-  var content = env.content || "";
-  try {
-    if (typeof window.logToHost === "function" && !window.__bramMenuPending) {
-      window.logToHost({
-        kind: "iframe-trace",
-        subkind: "jsonl-fanout",
-        at: new Date().toISOString(),
-        source: source || env.source || "push",
-        len: content.length,
-        reset: !!env.reset,
-        truncated: !!env.truncated,
-        sid: env.sid || "",
-        offset: env.offset || 0,
-      });
-    }
-  } catch (e) {}
-  if (env.reset) {
-    window.setLatestJsonl(content);
-    window.__bramRefetchProjectedTurns("jsonl-reset");
-  } else if (content) {
-    window.appendLatestJsonl(content);
-    window.__bramRefetchProjectedTurns("jsonl-append");
-  }
-};
-
-window.startLatestJsonlPush = function (key, getProvider) {
-  key = key || "__bramLatestJsonlPush";
-  if (__latestJsonlPushers[key] && typeof __latestJsonlPushers[key].stop === "function") {
-    try { __latestJsonlPushers[key].stop(); } catch (e) {}
-  }
-  var sessionSid = "";
-  var lastProvider = null;
-  var stopped = false;
-  var deferredPayload = null;
-  var deferredAtMs = 0;
-  var deferredWaitToken = 0;
-  var stopAfterDeferred = false;
-  function providerValue() {
-    try {
-      var value = typeof getProvider === "function" ? getProvider() : "";
-      if (value && typeof value.then === "function") return "";
-      return typeof value === "string" ? value : "";
-    } catch (e) {
-      return "";
-    }
-  }
-  function tracePayloadDecision(action, correlationId, atHostMs, payload, fields) {
-    fields = fields || {};
-    fields.bytes = __bramLatestJsonlPayloadBytes(payload);
-    fields.reset = !!(payload && payload.reset);
-    fields.sid = (payload && payload.sid) || "";
-    fields.provider = (payload && payload.provider) || "";
-    fields.correlation_id = correlationId || "";
-    fields.at_host_ms = atHostMs || 0;
-    __bramTraceLatestJsonlStartup(action, fields);
-  }
-  function clearDeferredTimer() {
-    deferredWaitToken += 1;
-  }
-  function mergeDeferredPayload(current, next) {
-    if (!current || !current.payload) return next;
-    if (!next || !next.payload) return current;
-    var currentPayload = current.payload;
-    var nextPayload = next.payload;
-    if (nextPayload.reset || currentPayload.sid !== nextPayload.sid) return next;
-    var merged = {};
-    Object.keys(currentPayload).forEach(function (k) { merged[k] = currentPayload[k]; });
-    Object.keys(nextPayload).forEach(function (k) {
-      if (k !== "content") merged[k] = nextPayload[k];
-    });
-    merged.content = (currentPayload.content || "") + (nextPayload.content || "");
-    return {
-      correlationId: next.correlationId,
-      atHostMs: next.atHostMs,
-      payload: merged,
-    };
-  }
-  function flushDeferred(reason) {
-    clearDeferredTimer();
-    var pending = deferredPayload;
-    deferredPayload = null;
-    if (!pending || !pending.payload) return;
-    if (stopped) {
-      tracePayloadDecision("drop-stopped", pending.correlationId, pending.atHostMs, pending.payload, {
-        reason: reason || "stopped",
-        deferredForMs: deferredAtMs ? Date.now() - deferredAtMs : 0,
-      });
-      return;
-    }
-    tracePayloadDecision("admit", pending.correlationId, pending.atHostMs, pending.payload, {
-      reason: reason || "gate-open",
-      deferredForMs: deferredAtMs ? Date.now() - deferredAtMs : 0,
-    });
-    deferredAtMs = 0;
-    applyPayloadNow(pending.correlationId, pending.atHostMs, pending.payload);
-    if (stopAfterDeferred) stopped = true;
-  }
-  function deferPayload(correlationId, atHostMs, payload) {
-    var previous = deferredPayload;
-    var next = { correlationId: correlationId, atHostMs: atHostMs, payload: payload };
-    deferredPayload = mergeDeferredPayload(deferredPayload, next);
-    if (!deferredAtMs) deferredAtMs = Date.now();
-    var waitMs = __bramLatestJsonlStartupBaseWaitMs(deferredAtMs);
-    tracePayloadDecision(previous ? "coalesce" : "defer", correlationId, atHostMs, deferredPayload.payload, {
-      previousBytes: previous ? __bramLatestJsonlPayloadBytes(previous.payload) : 0,
-      reason: "startup-large-payload",
-      delayMs: waitMs,
-    });
-    clearDeferredTimer();
-    var token = deferredWaitToken;
-    __bramAfterLatestJsonlStartupStableFrame(deferredAtMs, function (reason, fields) {
-      if (token !== deferredWaitToken) return;
-      fields = fields || {};
-      tracePayloadDecision("stable-check", correlationId, atHostMs, deferredPayload && deferredPayload.payload, {
-        reason: reason,
-        stableFrames: fields.stableFrames || 0,
-        stableWaitMs: fields.stableWaitMs || 0,
-      });
-      flushDeferred(reason);
-    });
-  }
-  function applyPayloadNow(correlationId, atHostMs, payload) {
-    if (stopped || !payload) return;
-    var provider = providerValue();
-    if (provider !== lastProvider) {
-      lastProvider = provider;
-      sessionSid = "";
-    }
-    if (provider && payload.provider && provider !== payload.provider) {
-      tracePayloadDecision("drop-provider-mismatch", correlationId, atHostMs, payload, {
-        expectedProvider: provider,
-        reason: "provider-mismatch",
-      });
-      return;
-    }
-    if (payload.reset && sessionSid && payload.sid === sessionSid && !payload.content && window.getLatestJsonl()) {
-      try {
-        window.__bramIframeTrace("jsonl-fanout-ignored", {
-          reason: "empty-same-session-reset",
-          sid: payload.sid || "",
-          provider: payload.provider || "",
-          correlation_id: correlationId || "",
-          at_host_ms: atHostMs || 0,
-        });
-      } catch (e) {}
-      return;
-    }
-    window.__bramApplyLatestJsonlEnvelope(payload, "push");
-    sessionSid = payload.sid || "";
-  }
-  function applyPayload(correlationId, atHostMs, payload) {
-    if (stopped || !payload) return;
-    if (deferredPayload) {
-      deferPayload(correlationId, atHostMs, payload);
-      return;
-    }
-    if (__bramShouldGateLatestJsonlStartup(payload)) {
-      deferPayload(correlationId, atHostMs, payload);
-      return;
-    }
-    applyPayloadNow(correlationId, atHostMs, payload);
-  }
-  var unsubscribe = window.subscribeTalkSessionChange(key + "TalkSessionUnsub", applyPayload);
-  __latestJsonlPushers[key] = {
-    stop: function () {
-      if (deferredPayload) {
-        stopAfterDeferred = true;
-      } else {
-        stopped = true;
-      }
-      if (typeof unsubscribe === "function") {
-        try { unsubscribe(); } catch (e) {}
-      }
-      delete __latestJsonlPushers[key];
-    },
-  };
-  if (!__latestJsonlStartupReplayRequested) {
-    __latestJsonlStartupReplayRequested = true;
-    try {
-      window.fetch("/__startup-ready?event=talk-session-changed", { cache: "no-store" }).catch(function () {});
-    } catch (e) {}
-  }
-  return __latestJsonlPushers[key].stop;
-};
+// Slim change-signal tick (issue-214 candidate #5). The latest-tail
+// content pipeline is retired: talk-session-changed IS the signal that
+// the live session file changed, and its only remaining consumer is the
+// projected-turns refetch (coalesced + reference-preserved above), so
+// each tick just requests one. Cross-provider ticks are dropped, like
+// the old pipeline's provider-mismatch guard: a background provider's
+// session write cannot change the active /__turns projection, and
+// refetching a multi-MB projection for it is pure waste (2026-07-07
+// codex esc wedge: this session's writes were triggering 1.2 s fetches
+// of the codex rollout). The function keeps its historical name —
+// Main.xmlui calls it on init and on provider changes with a
+// getProvider reading the active provider; re-invocation is idempotent
+// because subscribeTalkSessionChange unsubscribes the prior handler
+// stored under the same key.
+var __bramTurnsTickLast = { sid: "", len: -1 };
 window.startBramLatestJsonlPush = function (getProvider) {
-  if (typeof window.__bramLatestJsonlPollerStop === "function") {
-    try { window.__bramLatestJsonlPollerStop(); } catch (e) {}
-  }
-  window.__bramLatestJsonlPollerStop = window.startLatestJsonlPush(
-    "__bramLatestJsonlPush",
-    getProvider
-  );
-};
-window.startLatestJsonlPolling = window.startLatestJsonlPush;
-window.startBramLatestJsonlPolling = window.startBramLatestJsonlPush;
-// Convenience: subscribe + remember the unsubscriber on window under the
-// (delete-phase tranche 1, #214: window.subscribeLatestJsonl was
-// deleted — defined for xmlui use but never called from any markup.)
-// Append a delta chunk to the shared cache (diff-based latest-tail path,
-// issue #100). Caps the cache at __latestJsonlMaxBytes by head-trimming
-// at the next newline boundary — keeps the buffer always-valid JSONL so
-// downstream consumers (isWaitingForAssistant and the other status
-// detectors) walk line-by-line safely. The cap is the missing bound that caused the
-// 4138070 revert: without it, every reset:false append grew the buffer
-// forever.
-var __latestJsonlMaxBytes = 1500000; // ~1.5 MB
-window.appendLatestJsonl = function (chunk) {
-  if (!chunk) return;
-  // Profiling for the responsiveness roadmap (#103-era): pin down which
-  // phase costs ~200ms on big appends. Three measurable phases —
-  // `concat` is the buffer string-concatenation, `cap` is the cap-check
-  // plus optional head-trim, `broadcast` is setLatestJsonl's subscriber
-  // dispatch + its own trace log. Sum is `total`.
-  var t0 = performance.now();
-  var combined = (__latestJsonlValue || "") + chunk;
-  var t1 = performance.now();
-  var capTrimmed = false;
-  if (combined.length > __latestJsonlMaxBytes) {
-    capTrimmed = true;
-    var beforeLen = combined.length;
-    var dropTo = combined.length - __latestJsonlMaxBytes;
-    var nl = combined.indexOf("\n", dropTo);
-    combined = nl >= 0 ? combined.slice(nl + 1) : combined.slice(dropTo);
-    try {
-      if (window.logToHost) {
-        window.logToHost({
-          kind: "iframe-trace",
-          subkind: "jsonl-cap-trim",
-          at: new Date().toISOString(),
-          before: beforeLen,
-          after: combined.length,
-          dropped: beforeLen - combined.length,
-        });
-      }
-    } catch (e) {}
-  }
-  var t2 = performance.now();
-  window.setLatestJsonl(combined);
-  var t3 = performance.now();
-  try {
-    if (window.logToHost && !window.__bramMenuPending) {
-      window.logToHost({
-        kind: "iframe-trace",
-        subkind: "jsonl-pipeline-ms",
-        at: new Date().toISOString(),
-        chunkLen: chunk.length,
-        bufferLen: combined.length,
-        concatMs: Math.round((t1 - t0) * 100) / 100,
-        capMs: Math.round((t2 - t1) * 100) / 100,
-        capTrimmed: capTrimmed,
-        broadcastMs: Math.round((t3 - t2) * 100) / 100,
-        totalMs: Math.round((t3 - t0) * 100) / 100,
-      });
+  return window.subscribeTalkSessionChange(
+    "__bramTurnsTickUnsub",
+    function (correlationId, atHostMs, payload) {
+      var active = "";
+      try {
+        var v = typeof getProvider === "function" ? getProvider() : "";
+        if (typeof v === "string") active = v;
+      } catch (e) {}
+      if (active && payload && payload.provider && active !== payload.provider) return;
+      // Zero-delta suppression — the old cursor pipeline's dedupe
+      // without the cursors: watchers fire 2-3 events per session
+      // write, and a tick whose session file identity AND byte size
+      // are unchanged cannot change the projection. Append-only JSONL
+      // makes (sid, len) a safe change key. Ticks without a usable
+      // len (len < 0) always refetch.
+      var sid = (payload && payload.sid) || "";
+      var len = (payload && typeof payload.len === "number") ? payload.len : -1;
+      if (sid && len >= 0 && sid === __bramTurnsTickLast.sid && len === __bramTurnsTickLast.len) return;
+      __bramTurnsTickLast = { sid: sid, len: len };
+      window.__bramRefetchProjectedTurns("tick");
     }
-  } catch (e) {}
+  );
 };
 
 // Continuous variant: register a callback that fires on every resize

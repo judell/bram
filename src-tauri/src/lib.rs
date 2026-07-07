@@ -1072,9 +1072,34 @@ fn emit_talk_session_changed_for_provider<R: tauri::Runtime>(
         "at_host_ms": at_host_ms,
     });
     if let Some(provider) = provider {
-        if let Some(latest_tail) = latest_tail_push_payload(app, provider) {
-            merge_json_object_fields(&mut payload, &latest_tail);
-        }
+        // Slim change-signal tick (issue-214 candidate #5): the latest-tail
+        // content envelope is retired. Subscribers only need "which session
+        // changed" — the projected-turns pipeline refetches /__turns on each
+        // tick and detects rotation from the payload it fetches. `len` (the
+        // session file's byte size) rides along so the iframe can skip
+        // zero-delta ticks: watchers fire 2-3 events per write, and on a
+        // multi-MB session each redundant refetch costs real main-thread
+        // time (2026-07-07 codex esc wedge).
+        let (sid, len) = latest_session_path_for_provider(app, provider)
+            .unwrap_or(None)
+            .map(|p| {
+                let sid = p
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let len = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+                (sid, len)
+            })
+            .unwrap_or((String::new(), 0));
+        merge_json_object_fields(
+            &mut payload,
+            &serde_json::json!({
+                "sid": sid,
+                "len": len,
+                "provider": session_provider_label(provider),
+                "source": "push",
+            }),
+        );
         // menu-stack-pty-inflight-prose probe: on each Claude session-JSONL
         // write, correlate the latest assistant-record timestamp against the
         // open/dismissed menu so we can settle the race. Trace-gated.
@@ -8526,9 +8551,6 @@ fn switch_agent(
         SessionProvider::Claude
     };
     let crossing = current_provider(&app) != Some(session_provider);
-    if let Ok(mut guard) = latest_tail_cursors_cell().lock() {
-        guard.remove(session_provider_label(session_provider));
-    }
     schedule_agent_switch_refresh(app.clone(), provider_key, "switch");
     schedule_agent_first_command(app.clone(), "switch");
     if crossing {
@@ -8652,9 +8674,6 @@ fn resync_transcript_to_session<R: tauri::Runtime>(
     }
     if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&path) {
         let _ = file.set_modified(std::time::SystemTime::now());
-    }
-    if let Ok(mut guard) = latest_tail_cursors_cell().lock() {
-        guard.remove(session_provider_label(provider));
     }
     if bram_trace_enabled() {
         append_bram_trace_line(
@@ -11855,153 +11874,6 @@ fn read_latest_session_tail<R: tauri::Runtime>(
     let mut out = Vec::with_capacity((file_size - start_offset) as usize);
     file.read_to_end(&mut out).map_err(|e| e.to_string())?;
     Ok(out)
-}
-
-// Match the client-side latest-jsonl buffer cap (__latestJsonlMaxBytes =
-// 1_500_000 in helpers.js). A reset re-seeds the iframe's buffer on reload;
-// if the host cap is smaller than the client cap, every reload shrinks the
-// transcript from the ~1.5 MB it had accumulated down to this size. Keeping
-// them equal lets a reload restore the same window the user was viewing.
-const LATEST_TAIL_MAX_BYTES: usize = 1_500_000;
-
-fn cap_latest_tail_payload(content: Vec<u8>) -> (Vec<u8>, bool) {
-    if content.len() <= LATEST_TAIL_MAX_BYTES {
-        return (content, false);
-    }
-    let start = content.len().saturating_sub(LATEST_TAIL_MAX_BYTES);
-    let Some(first_newline) = content[start..].iter().position(|b| *b == b'\n') else {
-        return (content, true);
-    };
-    let keep_from = start + first_newline + 1;
-    if keep_from >= content.len() {
-        return (content, true);
-    }
-    (content[keep_from..].to_vec(), true)
-}
-
-#[derive(Clone)]
-struct LatestTailCursor {
-    sid: String,
-    offset: u64,
-}
-
-fn latest_tail_cursors_cell() -> &'static Mutex<HashMap<String, LatestTailCursor>> {
-    static CELL: OnceLock<Mutex<HashMap<String, LatestTailCursor>>> = OnceLock::new();
-    CELL.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn clear_latest_tail_cursor_for_current<R: tauri::Runtime>(app: &AppHandle<R>) {
-    let Some(provider) = current_provider(app) else {
-        return;
-    };
-    let provider_label = session_provider_label(provider).to_string();
-    if let Ok(mut guard) = latest_tail_cursors_cell().lock() {
-        guard.remove(&provider_label);
-    }
-}
-
-fn latest_tail_envelope<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    provider: Option<SessionProvider>,
-    expected_sid: &str,
-    since: u64,
-    lines_param: Option<&str>,
-    bypass_active_hint_gate: bool,
-) -> Result<serde_json::Value, String> {
-    let path_opt = if bypass_active_hint_gate {
-        match provider {
-            Some(provider) => latest_session_path_for_provider(app, provider).unwrap_or(None),
-            None => latest_session_path(app, None).unwrap_or(None),
-        }
-    } else {
-        latest_session_path(app, provider).unwrap_or(None)
-    };
-    let (current_sid, file_size) = match &path_opt {
-        Some(path) => {
-            let sid = path
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-            (sid, size)
-        }
-        None => (String::new(), 0),
-    };
-    let incremental =
-        !expected_sid.is_empty() && expected_sid == current_sid && since > 0 && since <= file_size;
-    let content_result: Result<Vec<u8>, String> = if incremental {
-        match &path_opt {
-            Some(path) => {
-                use std::io::{Read, Seek, SeekFrom};
-                std::fs::File::open(path)
-                    .map_err(|e| e.to_string())
-                    .and_then(|mut f| {
-                        f.seek(SeekFrom::Start(since)).map_err(|e| e.to_string())?;
-                        let mut out = Vec::with_capacity((file_size - since) as usize);
-                        f.read_to_end(&mut out).map_err(|e| e.to_string())?;
-                        Ok(out)
-                    })
-            }
-            None => Ok(Vec::new()),
-        }
-    } else {
-        match lines_param {
-            Some("all") if bypass_active_hint_gate => match &path_opt {
-                Some(path) => std::fs::read(path).map_err(|e| e.to_string()),
-                None => Ok(Vec::new()),
-            },
-            Some("all") => read_latest_session(app, provider),
-            None => read_latest_session_tail(app, provider, 200),
-            Some(s) => match s.parse::<usize>() {
-                Ok(n) => read_latest_session_tail(app, provider, n),
-                Err(_) => read_latest_session_tail(app, provider, 200),
-            },
-        }
-    };
-    content_result.map(|content| {
-        let (content, truncated) = cap_latest_tail_payload(content);
-        serde_json::json!({
-            "sid": current_sid,
-            "offset": file_size,
-            "content": String::from_utf8_lossy(&content).into_owned(),
-            "reset": !incremental || truncated,
-            "truncated": truncated,
-        })
-    })
-}
-
-fn latest_tail_push_payload<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    provider: SessionProvider,
-) -> Option<serde_json::Value> {
-    let provider_label = session_provider_label(provider).to_string();
-    let cursor = latest_tail_cursors_cell()
-        .lock()
-        .ok()
-        .and_then(|guard| guard.get(&provider_label).cloned());
-    let expected_sid = cursor.as_ref().map(|c| c.sid.as_str()).unwrap_or("");
-    let since = cursor.as_ref().map(|c| c.offset).unwrap_or(0);
-    // On a reset (no cursor / sid change / cleared by /__startup-ready on an
-    // iframe reload), ship the full session capped to the recent window
-    // (`cap_latest_tail_payload`) instead of just the last 200 records, so a
-    // reload restores what the user was viewing rather than gutting the
-    // transcript to a tiny slice. Incremental deltas ignore this arg.
-    let mut envelope =
-        latest_tail_envelope(app, Some(provider), expected_sid, since, Some("all"), true).ok()?;
-    if let Ok(mut guard) = latest_tail_cursors_cell().lock() {
-        let sid = envelope
-            .get("sid")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let offset = envelope.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
-        guard.insert(provider_label.clone(), LatestTailCursor { sid, offset });
-    }
-    if let Some(obj) = envelope.as_object_mut() {
-        obj.insert("provider".to_string(), serde_json::json!(provider_label));
-        obj.insert("source".to_string(), serde_json::json!("push"));
-    }
-    Some(envelope)
 }
 
 // Detect whether the latest session has a pending tool_use awaiting
@@ -20362,52 +20234,16 @@ fn trace_json_field_i64(line: &str, name: &str) -> Option<i64> {
 
 fn coordination_trace_summary(trace_text: &str) -> serde_json::Value {
     let lines: Vec<&str> = trace_text.lines().rev().take(5000).collect();
-    let mut latest_tail_fresh = 0;
-    let mut latest_tail_diff = 0;
-    let mut latest_tail_bytes = 0;
-    let mut fanout_events = 0;
-    let mut fanout_resets = 0;
-    let mut fanout_subscribers: Option<i64> = None;
-    let mut cap_trims = 0;
     let mut inflight_writes = 0;
     let mut inflight_clears = 0;
     let mut stale_rejects = 0;
     let mut guard_blocks = 0;
     let mut interrupts = 0;
-    let mut last_latest_tail = String::new();
-    let mut last_fanout = String::new();
     let mut last_inflight = String::new();
     let mut last_guard = String::new();
     let mut last_interrupt = String::new();
 
     for line in lines.into_iter().rev() {
-        if line.contains("[latest-tail]") {
-            if line.contains("mode=fresh") {
-                latest_tail_fresh += 1;
-            }
-            if line.contains("mode=diff") {
-                latest_tail_diff += 1;
-            }
-            if let Some(bytes) = trace_field_i64(line, "bytes") {
-                latest_tail_bytes += bytes;
-            }
-            last_latest_tail = coordination_trace_line_iso(line);
-        }
-        if line.contains("] [iframe] subkind=jsonl-fanout ") {
-            fanout_events += 1;
-            if line.contains("\"reset\":true") || line.contains("reset=true") {
-                fanout_resets += 1;
-            }
-            last_fanout = coordination_trace_line_iso(line);
-        }
-        if line.contains("jsonl-broadcast") {
-            fanout_subscribers = trace_json_field_i64(line, "subscribers")
-                .or_else(|| trace_field_i64(line, "subscribers"));
-            last_fanout = coordination_trace_line_iso(line);
-        }
-        if line.contains("jsonl-cap-trim") {
-            cap_trims += 1;
-        }
         if line.contains("[inflight-sentinel]") {
             if line.contains("op=write") {
                 inflight_writes += 1;
@@ -20438,20 +20274,11 @@ fn coordination_trace_summary(trace_text: &str) -> serde_json::Value {
     }
 
     serde_json::json!({
-        "latestTailFresh": latest_tail_fresh,
-        "latestTailDiff": latest_tail_diff,
-        "latestTailBytes": latest_tail_bytes,
-        "fanoutEvents": fanout_events,
-        "fanoutResets": fanout_resets,
-        "fanoutSubscribers": fanout_subscribers,
-        "capTrims": cap_trims,
         "inflightWrites": inflight_writes,
         "inflightClears": inflight_clears,
         "staleRejects": stale_rejects,
         "guardBlocks": guard_blocks,
         "interrupts": interrupts,
-        "lastLatestTail": last_latest_tail,
-        "lastFanout": last_fanout,
         "lastInflight": last_inflight,
         "lastGuard": last_guard,
         "lastInterrupt": last_interrupt,
@@ -20546,20 +20373,6 @@ fn startup_run_summary(
     let end_ms = started_at_ms.saturating_add(window_ms);
     let start_iso = format_iso_utc_ms(started_at_ms);
     let end_iso = format_iso_utc_ms(end_ms);
-    let mut latest_tail_requests = 0;
-    let mut latest_tail_resets = 0;
-    let mut latest_tail_truncations = 0;
-    let mut latest_tail_max_body = 0;
-    let mut latest_tail_max_content = 0;
-    let mut fanout_events = 0;
-    let mut fanout_max_len = 0;
-    let mut startup_backpressure_events = 0;
-    let mut startup_backpressure_deferred = 0;
-    let mut startup_backpressure_coalesced = 0;
-    let mut startup_backpressure_admitted = 0;
-    let mut startup_backpressure_dropped = 0;
-    let mut startup_backpressure_max_bytes = 0;
-    let mut startup_backpressure_last = String::new();
     let mut heartbeat_max_drift = 0;
     let mut pty_chunks = 0;
     let mut pty_bytes = 0;
@@ -20571,47 +20384,6 @@ fn startup_run_summary(
             continue;
         }
         last_seen = iso.clone();
-        if line.contains("path=__sessions/latest-tail") && line.contains("phase=exit") {
-            latest_tail_requests += 1;
-            if let Some(body_size) = trace_field_i64(line, "body_size") {
-                latest_tail_max_body = latest_tail_max_body.max(body_size);
-            }
-        }
-        if line.contains("[latest-tail]") {
-            if let Some(bytes) = trace_field_i64(line, "bytes") {
-                latest_tail_max_content = latest_tail_max_content.max(bytes);
-            }
-            if line.contains("truncated=true") {
-                latest_tail_truncations += 1;
-            }
-        }
-        if line.contains("] [iframe] subkind=jsonl-fanout ") {
-            fanout_events += 1;
-            if line.contains("\"reset\":true") || line.contains("reset=true") {
-                latest_tail_resets += 1;
-            }
-            if let Some(len) =
-                trace_json_field_i64(line, "len").or_else(|| trace_field_i64(line, "len"))
-            {
-                fanout_max_len = fanout_max_len.max(len);
-            }
-        }
-        if line.contains("] [iframe] subkind=startup-backpressure ") {
-            startup_backpressure_events += 1;
-            if line.contains("\"action\":\"defer\"") {
-                startup_backpressure_deferred += 1;
-            } else if line.contains("\"action\":\"coalesce\"") {
-                startup_backpressure_coalesced += 1;
-            } else if line.contains("\"action\":\"admit\"") {
-                startup_backpressure_admitted += 1;
-            } else if line.contains("\"action\":\"drop") {
-                startup_backpressure_dropped += 1;
-            }
-            if let Some(bytes) = trace_json_field_i64(line, "bytes") {
-                startup_backpressure_max_bytes = startup_backpressure_max_bytes.max(bytes);
-            }
-            startup_backpressure_last = iso.clone();
-        }
         if line.contains("heartbeat-batch") {
             if let Some(max_drift) = trace_json_field_i64(line, "maxDriftMs") {
                 heartbeat_max_drift = heartbeat_max_drift.max(max_drift);
@@ -20632,13 +20404,9 @@ fn startup_run_summary(
         .and_then(|v| v.get("path").and_then(|s| s.as_str()))
         .unwrap_or("");
     let complete = now >= end_ms;
-    let level = if latest_tail_max_body > 1_000_000
-        || fanout_max_len > 1_000_000
-        || heartbeat_max_drift > 1_000
-        || trace_export_size > 5_000_000
-    {
+    let level = if heartbeat_max_drift > 1_000 || trace_export_size > 5_000_000 {
         "warn"
-    } else if latest_tail_requests > 0 || pty_chunks > 0 {
+    } else if pty_chunks > 0 {
         "ok"
     } else {
         "neutral"
@@ -20649,20 +20417,6 @@ fn startup_run_summary(
         "windowMs": window_ms,
         "complete": complete,
         "level": level,
-        "latestTailRequests": latest_tail_requests,
-        "latestTailMaxBody": latest_tail_max_body,
-        "latestTailMaxContent": latest_tail_max_content,
-        "latestTailResets": latest_tail_resets,
-        "latestTailTruncations": latest_tail_truncations,
-        "fanoutEvents": fanout_events,
-        "fanoutMaxLen": fanout_max_len,
-        "startupBackpressureEvents": startup_backpressure_events,
-        "startupBackpressureDeferred": startup_backpressure_deferred,
-        "startupBackpressureCoalesced": startup_backpressure_coalesced,
-        "startupBackpressureAdmitted": startup_backpressure_admitted,
-        "startupBackpressureDropped": startup_backpressure_dropped,
-        "startupBackpressureMaxBytes": startup_backpressure_max_bytes,
-        "startupBackpressureLast": startup_backpressure_last,
         "heartbeatMaxDrift": heartbeat_max_drift,
         "ptyChunks": pty_chunks,
         "ptyBytes": pty_bytes,
@@ -21348,20 +21102,6 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
         .first()
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
-    let latest_total = trace["latestTailFresh"].as_i64().unwrap_or(0)
-        + trace["latestTailDiff"].as_i64().unwrap_or(0);
-    let fresh_heavy = latest_total >= 5
-        && trace["latestTailFresh"].as_i64().unwrap_or(0)
-            > trace["latestTailDiff"].as_i64().unwrap_or(0);
-    let fanout_level = if trace["fanoutEvents"].as_i64().unwrap_or(0) == 0 {
-        "neutral"
-    } else if trace["fanoutResets"].as_i64().unwrap_or(0) > 3
-        || trace["capTrims"].as_i64().unwrap_or(0) > 2
-    {
-        "warn"
-    } else {
-        "ok"
-    };
     let trace_export = latest_xs_trace_export();
     let startup_run = startup_run_summary(
         &trace_text,
@@ -21379,12 +21119,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
             app,
             "startup-run",
             &format!(
-                "latest_tail_max_body={} fanout_max_len={} startup_backpressure_events={} startup_backpressure_deferred={} startup_backpressure_admitted={} heartbeat_max_drift={} pty_chunks={} pty_bytes={} trace_export_size={} level={}",
-                startup_run["latestTailMaxBody"].as_i64().unwrap_or(0),
-                startup_run["fanoutMaxLen"].as_i64().unwrap_or(0),
-                startup_run["startupBackpressureEvents"].as_i64().unwrap_or(0),
-                startup_run["startupBackpressureDeferred"].as_i64().unwrap_or(0),
-                startup_run["startupBackpressureAdmitted"].as_i64().unwrap_or(0),
+                "heartbeat_max_drift={} pty_chunks={} pty_bytes={} trace_export_size={} level={}",
                 startup_run["heartbeatMaxDrift"].as_i64().unwrap_or(0),
                 startup_run["ptyChunks"].as_i64().unwrap_or(0),
                 startup_run["ptyBytes"].as_i64().unwrap_or(0),
@@ -21689,34 +21424,6 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
                 "title": "Startup Run",
                 "rows": [
                     {
-                        "signal": "Payload maxima",
-                        "level": startup_run["level"].as_str().unwrap_or("neutral"),
-                        "state": if startup_run["complete"].as_bool().unwrap_or(false) { "complete" } else { "collecting" },
-                        "detail": format!(
-                            "latest-tail body {} KB; content {} KB; fanout {} KB; resets {}; truncations {}",
-                            (startup_run["latestTailMaxBody"].as_i64().unwrap_or(0) + 1023) / 1024,
-                            (startup_run["latestTailMaxContent"].as_i64().unwrap_or(0) + 1023) / 1024,
-                            (startup_run["fanoutMaxLen"].as_i64().unwrap_or(0) + 1023) / 1024,
-                            startup_run["latestTailResets"].as_i64().unwrap_or(0),
-                            startup_run["latestTailTruncations"].as_i64().unwrap_or(0)
-                        ),
-                        "seen": startup_run["lastSeen"].as_str().unwrap_or(""),
-                    },
-                    {
-                        "signal": "Startup backpressure",
-                        "level": if startup_run["startupBackpressureDropped"].as_i64().unwrap_or(0) > 0 { "warn" } else if startup_run["startupBackpressureEvents"].as_i64().unwrap_or(0) > 0 { "ok" } else { "neutral" },
-                        "state": format!("{} events", startup_run["startupBackpressureEvents"].as_i64().unwrap_or(0)),
-                        "detail": format!(
-                            "deferred {}, coalesced {}, admitted {}, dropped {}, max {} KB",
-                            startup_run["startupBackpressureDeferred"].as_i64().unwrap_or(0),
-                            startup_run["startupBackpressureCoalesced"].as_i64().unwrap_or(0),
-                            startup_run["startupBackpressureAdmitted"].as_i64().unwrap_or(0),
-                            startup_run["startupBackpressureDropped"].as_i64().unwrap_or(0),
-                            (startup_run["startupBackpressureMaxBytes"].as_i64().unwrap_or(0) + 1023) / 1024
-                        ),
-                        "seen": startup_run["startupBackpressureLast"].as_str().unwrap_or(""),
-                    },
-                    {
                         "signal": "Renderer drift",
                         "level": if startup_run["heartbeatMaxDrift"].as_i64().unwrap_or(0) > 1000 { "warn" } else if startup_run["heartbeatMaxDrift"].as_i64().unwrap_or(0) > 0 { "ok" } else { "neutral" },
                         "state": format!("{} ms max", startup_run["heartbeatMaxDrift"].as_i64().unwrap_or(0)),
@@ -21796,30 +21503,6 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
             {
                 "title": "Authorization",
                 "rows": authorization_rows
-            },
-            {
-                "title": "Latest Tail And Fanout",
-                "rows": [
-                    {
-                        "signal": "latest-tail",
-                        "level": if fresh_heavy { "warn" } else if latest_total > 0 { "ok" } else { "neutral" },
-                        "state": format!("{} diff / {} fresh", trace["latestTailDiff"].as_i64().unwrap_or(0), trace["latestTailFresh"].as_i64().unwrap_or(0)),
-                        "detail": if trace["latestTailBytes"].as_i64().unwrap_or(0) > 0 { format!("{} KB observed in recent trace window", (trace["latestTailBytes"].as_i64().unwrap_or(0) + 1023) / 1024) } else { "No latest-tail trace records in recent window".to_string() },
-                        "seen": trace["lastLatestTail"].as_str().unwrap_or(""),
-                    },
-                    {
-                        "signal": "JSONL fanout",
-                        "level": fanout_level,
-                        "state": format!("{} fanout events", trace["fanoutEvents"].as_i64().unwrap_or(0)),
-                        "detail": format!(
-                            "resets {}, cap trims {}{}",
-                            trace["fanoutResets"].as_i64().unwrap_or(0),
-                            trace["capTrims"].as_i64().unwrap_or(0),
-                            trace["fanoutSubscribers"].as_i64().map(|n| format!(", subscribers {}", n)).unwrap_or_default()
-                        ),
-                        "seen": trace["lastFanout"].as_str().unwrap_or(""),
-                    }
-                ]
             },
             {
                 "title": "Guards, Staleness, Interrupts, Traces",
@@ -22925,8 +22608,8 @@ mod sessions_discovery_tests {
 #[cfg(test)]
 mod session_turn_tests {
     use super::{
-        cap_latest_tail_payload, handle_paste_image, st_extract_image_paths,
-        st_parse_lines_to_turns, st_strip_image_paths, LATEST_TAIL_MAX_BYTES,
+        handle_paste_image, st_extract_image_paths, st_parse_lines_to_turns,
+        st_strip_image_paths,
     };
 
     #[test]
@@ -23201,16 +22884,6 @@ mod session_turn_tests {
         assert_eq!(turns[0]["images"].as_array().unwrap().len(), 0);
     }
 
-    #[test]
-    fn latest_tail_cap_preserves_single_oversized_record() {
-        let record = format!(
-            "{{\"blob\":\"{}\"}}\n",
-            "x".repeat(LATEST_TAIL_MAX_BYTES + 1024)
-        );
-        let (content, truncated) = cap_latest_tail_payload(record.as_bytes().to_vec());
-        assert!(truncated);
-        assert_eq!(content, record.as_bytes());
-    }
 }
 
 #[cfg(test)]
@@ -25467,7 +25140,6 @@ fn route_request<R: tauri::Runtime>(
             );
         }
         if event == "talk-session-changed" {
-            clear_latest_tail_cursor_for_current(app);
             emit_talk_session_changed(app);
             let body = serde_json::to_vec(&serde_json::json!({
                 "ok": true,
@@ -26009,62 +25681,6 @@ fn route_request<R: tauri::Runtime>(
                 "application/json; charset=utf-8",
                 read_latest_session_pending(app, provider),
             )
-        } else if rest == "latest-tail" {
-            // Issue #100 / #71: diff-based response. Clients pass `?since=<N>`
-            // and `?sid=<id>`; when sid matches the current latest session,
-            // server returns bytes from offset `since` to EOF. Otherwise it
-            // falls back to last-N-lines (or full file with `lines=all`).
-            // Response is always a JSON envelope: { sid, offset, content, reset }
-            // so the client can detect session rotation (sid change ⇒ reset)
-            // and update its `since` cursor for the next request.
-            let mut lines_param: Option<String> = None;
-            let mut since: u64 = 0;
-            let mut expected_sid = String::new();
-            for pair in query.split('&') {
-                if let Some(v) = pair.strip_prefix("lines=") {
-                    lines_param = Some(percent_decode(v));
-                } else if let Some(v) = pair.strip_prefix("since=") {
-                    since = percent_decode(v).parse().unwrap_or(0);
-                } else if let Some(v) = pair.strip_prefix("sid=") {
-                    expected_sid = percent_decode(v);
-                }
-            }
-            let result = latest_tail_envelope(
-                app,
-                provider,
-                &expected_sid,
-                since,
-                lines_param.as_deref(),
-                false,
-            )
-            .and_then(|envelope| {
-                let appended = envelope
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.len())
-                    .unwrap_or(0);
-                let current_sid = envelope.get("sid").and_then(|v| v.as_str()).unwrap_or("");
-                let file_size = envelope.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
-                let reset = envelope
-                    .get("reset")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
-                let truncated = envelope
-                    .get("truncated")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                eprintln!(
-                    "[latest-tail] mode={} sid={} since={} eof={} bytes={} truncated={}",
-                    if reset { "fresh" } else { "diff" },
-                    current_sid,
-                    since,
-                    file_size,
-                    appended,
-                    truncated,
-                );
-                serde_json::to_vec(&envelope).map_err(|e| e.to_string())
-            });
-            ("application/json; charset=utf-8", result)
         } else if rest == "content" {
             (
                 "text/plain; charset=utf-8",
@@ -28631,9 +28247,8 @@ pub fn run() {
             // diff against the on-disk baseline rather than treating the
             // entire current file as "new".
             init_worklist_cache(app.handle());
-            // Seed a replayable latest-tail payload before the tools iframe
-            // subscribes. The iframe no longer pulls /__sessions/latest-tail
-            // on boot; it asks /__startup-ready to replay this event.
+            // Seed a replayable talk-session tick before the tools iframe
+            // subscribes; /__startup-ready replays this event on boot.
             emit_talk_session_changed(app.handle());
             // Watch contract: events are emitted on two channels, NOT one.
             //   - "right-pane-reload" fires for changes inside proj_root only;
@@ -29043,8 +28658,8 @@ pub fn run() {
 
                     // Session JSONL changes get their own dispatch. The
                     // Transcript / Workspace panes subscribe to
-                    // talk-session-changed and consume the pushed latest-tail
-                    // delta without waiting on a fallback poll interval.
+                    // talk-session-changed as the change-signal tick, without
+                    // waiting on a fallback poll interval.
                     let is_session_event = event.paths.iter().any(|p| {
                         p.extension().map_or(false, |e| e == "jsonl")
                             && (claude_sessions_dir.as_ref().map_or(false, |sd| p.starts_with(sd))

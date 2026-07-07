@@ -714,13 +714,19 @@ window.__bramSetToolbarPendingMenuFromEvent = function (e) {
 window.__bramSetToolbarPendingMenuFromTurnState = function (turnState) {
   window.recordToolbarPendingMenuFromEvent({ payload: turnState && turnState.pendingMenu });
 };
-window.__bramTraceToolbarKey = function (key) {
+window.__bramTraceToolbarKey = function (key, extra) {
   var state = window.getToolbarPendingMenuState();
-  window.__bramIframeTrace("toolbar-key", {
+  var payload = {
     key: key,
     menuPresent: state.present ? 1 : 0,
     menuAgeMs: state.atMs ? (Date.now() - state.atMs) : -1,
-  });
+  };
+  if (extra && typeof extra === "object") {
+    Object.keys(extra).forEach(function (k) {
+      payload[k] = extra[k];
+    });
+  }
+  window.__bramIframeTrace("toolbar-key", payload);
 };
 window.logToHost = function (payload) {
   // Master-flag short-circuit. Paired with `window.iframeTrace`

@@ -583,6 +583,9 @@ function appendVoiceTranscript(component, transcript) {
   return next;
 }
 
+const ESC_TOOLBAR_DEDUPE_MS = 200;
+var lastEscToolbarClickAtMs = 0;
+
 // Toolbar Esc — always interrupts. The #210 hold-gate was reverted: every gating
 // signal we tried (awaitingResponse → held the whole turn; a 1s time-debounce →
 // too short for a 3.4s strand window; a JSONL first-output check → held during
@@ -590,7 +593,14 @@ function appendVoiceTranscript(component, transcript) {
 // interrupt, which matters more than the recoverable send-strand it prevented.
 // #210 stays open for a non-Esc-blocking approach (detect + clear the bounce-back).
 function escToolbarClick() {
-  window.__bramTraceToolbarKey('esc');
+  const now = Date.now();
+  const deltaMs = lastEscToolbarClickAtMs ? now - lastEscToolbarClickAtMs : -1;
+  if (deltaMs >= 0 && deltaMs < ESC_TOOLBAR_DEDUPE_MS) {
+    window.__bramTraceToolbarKey('esc', { suppressed: 1, reason: 'dedupe', deltaMs });
+    return;
+  }
+  lastEscToolbarClickAtMs = now;
+  window.__bramTraceToolbarKey('esc', { suppressed: 0, deltaMs });
   window.sendKeys('\x1b');
 }
 

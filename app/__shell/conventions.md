@@ -1082,6 +1082,46 @@ without a restart:
 - `gh issue close <n>` / `gh issue reopen <n>`
 
 
+## Log-first development
+
+Agents default to writing and reading code; in Bram the higher-value
+habit is writing and reading logs. Behavior here arises from the
+interplay of Rust, the parent shell, XMLUI, two agent CLIs, and
+Markdown/Python-governed workflow — runtime questions ("was the right
+message sent at the right time? did the transition fire? did it
+render?") are answered by evidence, not inspection. The norms:
+
+- **The drill.** When behavior goes wrong — or a new mechanism is
+  being designed — the first question is: does the trace already
+  capture what happened? If no, add the instrumentation (as its own
+  worklist item when scope warrants) and keep dogfooding until the
+  problem recurs; the next occurrence should be self-diagnosing. If
+  yes, use it before theorizing. A fix proposed without trace
+  evidence should say so explicitly.
+- **Observe-only first for behavior changes.** Mechanisms that will
+  act on inferred conditions (auto-clears, auto-reveals, suppressors)
+  ship first as trace lines only, with graduation criteria written
+  into the worklist draft as falsifiable checks against the soak
+  ("every would-X corresponds to a corroborated moment; zero fire
+  during Y"). Precedents: the send-ledger's observe-only phase, the
+  reveal-floor observer. The design review is a grep.
+- **Baselines are commits.** Perf work starts with an instrumentation
+  commit that records the before (see `a99c7d9`, "sets up the
+  before/after": ~1.7 footer re-renders/sec while typing, 49 ms avg
+  drift), and the same trace line verifies the after. Numbers in
+  commit messages come from the trace, not from estimates.
+- **Logs cannot prove absence.** Event-shaped logging proves presence
+  only: a missing line means "nothing flushed", not "nothing
+  happened" (the `[pty-in]` small-read accumulator is the canonical
+  trap). Any claim of the form "X never happens" requires an
+  instrument that affirmatively records zeros with a denominator —
+  the reveal-floor's per-turn gap distributions are the pattern.
+- **Register new subkinds.** Every new trace op or subkind lands in
+  the trace-vocabulary table (below) in the same change that
+  introduces it, so the reading half keeps pace with the writing
+  half.
+
+
 ## Debugging Bram itself
 
 Three forensics surfaces, used together. The first two are raw

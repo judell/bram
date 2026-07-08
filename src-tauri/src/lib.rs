@@ -16886,6 +16886,7 @@ fn try_incremental_projected_turns<R: tauri::Runtime>(
             latest,
         ));
     }
+    let inc_started = std::time::Instant::now();
     let start = entry
         .len
         .saturating_sub(PROJECTED_TURNS_INCREMENTAL_OVERLAP_BYTES);
@@ -16904,6 +16905,22 @@ fn try_incremental_projected_turns<R: tauri::Runtime>(
     };
     let sid = entry.sid.clone();
     let provider_label = entry.provider_label;
+    // Incremental-path cost line (analyze-turns-projection-compaction-
+    // cost): pairs with the full-rebuild op=rebuild trace so the ratio
+    // of cheap tail merges to expensive rebuilds is observable.
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "turns-projection",
+            &format!(
+                "op=incremental sid={} suffix_bytes={} merged_turns={} ms={}",
+                sid,
+                text.len(),
+                merged.len(),
+                inc_started.elapsed().as_millis(),
+            ),
+        );
+    }
     let body = projected_turns_body(&sid, provider_label, &merged, latest);
     if body.is_ok() {
         if let Ok(mut guard) = PROJECTED_TURNS_CACHE.lock() {
@@ -16991,16 +17008,29 @@ fn read_projected_turns<R: tauri::Runtime>(
             }
         }
     }
+    // Phase timers (analyze-turns-projection-compaction-cost, 2026-07-07):
+    // a full rebuild of the 36.8 MB codex rollout measured 1.6 s in-situ
+    // while a bare JSON parse of the same file costs ~0.2 s — the cost
+    // lives in the projection passes and serialization, not record
+    // parsing. (26.6% of that file is `compacted` records, but skipping
+    // them pre-parse would shave only tens of ms.) The per-phase trace
+    // keeps that conclusion verifiable from normal use; full rebuilds
+    // are rare now that the incremental tail path serves windowed ticks.
     let started = std::time::Instant::now();
     let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let read_ms = started.elapsed().as_millis();
     // Send-ledger check piggybacks on the live-session parse (plan step 1).
     // By-id fetches of other sessions must not resolve ledger entries.
     if id.is_empty() {
         update_send_ledger(app, &text, None);
     }
+    let parse_started = std::time::Instant::now();
     let mut turns = st_parse_lines_to_turns(&text);
+    let parse_ms = parse_started.elapsed().as_millis();
+    let project_started = std::time::Instant::now();
     project_user_turns(app, &mut turns);
     st_tag_agent_tool_entries(&path, &mut turns);
+    let project_ms = project_started.elapsed().as_millis();
     let turn_count = turns.len();
     let sid = path
         .file_stem()
@@ -17011,11 +17041,18 @@ fn read_projected_turns<R: tauri::Runtime>(
     } else {
         "claude"
     };
+    let serialize_started = std::time::Instant::now();
     let bytes = projected_turns_body(&sid, provider_label, &turns, latest)?;
-    eprintln!(
-        "[turns-projection] sid={} provider={} turns={} window={} bytes={} ms={}",
+    let serialize_ms = serialize_started.elapsed().as_millis();
+    let summary = format!(
+        "op=rebuild sid={} provider={} src_bytes={} read_ms={} parse_ms={} project_ms={} serialize_ms={} turns={} window={} body_bytes={} total_ms={}",
         sid,
         provider_label,
+        text.len(),
+        read_ms,
+        parse_ms,
+        project_ms,
+        serialize_ms,
         turn_count,
         latest
             .map(|n| n.to_string())
@@ -17023,6 +17060,10 @@ fn read_projected_turns<R: tauri::Runtime>(
         bytes.len(),
         started.elapsed().as_millis(),
     );
+    eprintln!("[turns-projection] {}", summary);
+    if bram_trace_enabled() {
+        append_bram_trace_line(app, "turns-projection", &summary);
+    }
     if let Ok(mut guard) = PROJECTED_TURNS_CACHE.lock() {
         *guard = Some(ProjectedTurnsCacheEntry {
             path,

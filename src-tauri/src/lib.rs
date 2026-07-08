@@ -2536,7 +2536,14 @@ fn stamp_pty_menu_payload(
 // test literal. The prose rides to `window.bramAgentMenu.inflightProse` and
 // feeds the Transcript's provisional-prose reactive guard. Fail-silent: when
 // the extractor found nothing (`None`), no field is added.
+// Whether the last pane emit carried a menu (vs a clear). The
+// reveal-floor observer's discriminator for "waiting while a menu is
+// displayed" (terminal-reveal-floor-observe): a pane-displayed menu
+// means the user can answer without the terminal.
+static PANE_MENU_DISPLAYED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn emit_pty_menu_with_prose<R: tauri::Runtime>(app: &AppHandle<R>, payload: &Option<PtyMenu>) {
+    PANE_MENU_DISPLAYED.store(payload.is_some(), std::sync::atomic::Ordering::Relaxed);
     let mut value = serde_json::to_value(payload).unwrap_or(serde_json::Value::Null);
     if let Some(obj) = value.as_object_mut() {
         if let Some(prose) = latest_grid_menu_cell()
@@ -5575,16 +5582,43 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
         let payload = stamp_pty_menu_payload(payload, "setAgentMenuFromEvent");
         turn_state_set_menu(app, payload.clone(), "pty-menu", "detected");
         // Mirror turn_state_set_menu's hook-primary deferral for the pane
-        // emit too: while a hook menu owns the slot, a grid emit of the
+        // emit too: while a hook menu is DISPLAYED, a grid emit of the
         // same prompt OVERWRITES the pane with a diff-less copy — the
         // hook-payload-edit-diff-preview verification showed the enriched
         // 436-byte hook menu replaced 330 ms later by the grid's 266-byte
         // one, blanking the preview the hook had just attached.
-        if menu_hook_owns_slot() {
+        //
+        // The predicate is structural, not temporal
+        // (grid-emit-defer-requires-pending-hook-menu): owner-timestamp
+        // freshness alone over-suppressed — the hook fires once per
+        // parallel message, so a second gated call's prompt arrived with
+        // the owner still fresh but NO hook menu pending, and the muzzled
+        // grid emit was a pane miss (live specimen 2026-07-08 00:46:05).
+        // Requiring an actually-pending hook menu keeps the overwrite
+        // protection and restores the grid safety net, with no duration
+        // in the decision.
+        let hook_menu_pending = menu_hook_owns_slot()
+            && turn_state_cell()
+                .lock()
+                .ok()
+                .map(|s| s.pending_menu.is_some())
+                .unwrap_or(false);
+        if hook_menu_pending {
             if bram_trace_enabled() {
-                append_bram_trace_line(app, "hook-menu", "op=grid-emit-deferred source=pty-menu");
+                append_bram_trace_line(
+                    app,
+                    "hook-menu",
+                    "op=grid-emit-deferred source=pty-menu pending=1",
+                );
             }
         } else {
+            if bram_trace_enabled() && menu_hook_owns_slot() {
+                append_bram_trace_line(
+                    app,
+                    "hook-menu",
+                    "op=grid-emit-allowed source=pty-menu reason=owner-no-pending-menu",
+                );
+            }
             emit_pty_menu_with_prose(app, &payload);
         }
         trace_pty_menu_options(app, &payload);
@@ -8004,6 +8038,32 @@ fn pty_spawn(
             const FULL_SCALE_BPS: f64 = 32768.0;
             let full_ln = (1.0 + FULL_SCALE_BPS / KNEE_BPS).ln();
             let mut last_emitted: f64 = -1.0;
+            // Reveal-floor observer (terminal-reveal-floor-observe,
+            // Phase 0, observe-only): true byte silence during an open
+            // turn, discriminated by pane-menu-displayed state. The
+            // trace backtest over sampled [pty-in] lines over-fired on
+            // mid-turn quiet stretches; this runs on the ticker's real
+            // 300 ms byte counts, where a thinking agent's spinner
+            // trickle should register as activity. Threshold adapts to
+            // the CURRENT turn's observed inter-activity gaps; the
+            // multiple and minimum floor are the Phase-0 tunables the
+            // soak exists to fit. Emits latched trace lines only — no
+            // UI behavior.
+            const RF_MIN_SILENT_MS: i64 = 3_000;
+            const RF_GAP_MULTIPLE: i64 = 8;
+            let mut rf_gaps: Vec<i64> = Vec::new();
+            let mut rf_last_activity_ms: i64 = 0;
+            let mut rf_silent_ms: i64 = 0;
+            let mut rf_latched = false;
+            let mut rf_turn_stamp: Option<String> = None;
+            let rf_p95 = |gaps: &Vec<i64>| -> i64 {
+                if gaps.is_empty() {
+                    return 0;
+                }
+                let mut sorted = gaps.clone();
+                sorted.sort_unstable();
+                sorted[(sorted.len() * 95 / 100).min(sorted.len() - 1)]
+            };
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(TICK_MS));
                 let bytes = pty_throughput_bytes().swap(0, Ordering::Relaxed);
@@ -8018,6 +8078,88 @@ fn pty_spawn(
                 if (q - last_emitted).abs() > 0.0001 {
                     let _ = app_for_throughput.emit("pty-throughput", q);
                     last_emitted = q;
+                }
+                let now_ms = unix_now_ms();
+                let (turn_open, turn_stamp) = turn_state_cell()
+                    .lock()
+                    .map(|s| {
+                        (
+                            s.phase == "working" || s.phase == "waiting-for-permission",
+                            s.turn_stamp.clone(),
+                        )
+                    })
+                    .unwrap_or((false, None));
+                if turn_stamp != rf_turn_stamp {
+                    // New turn: its gap distribution starts fresh.
+                    if rf_latched && bram_trace_enabled() {
+                        append_bram_trace_line(
+                            &app_for_throughput,
+                            "reveal-floor",
+                            &format!("op=reset reason=turn-changed silence_ms={}", rf_silent_ms),
+                        );
+                    }
+                    rf_turn_stamp = turn_stamp;
+                    rf_gaps.clear();
+                    rf_silent_ms = 0;
+                    rf_latched = false;
+                }
+                if bytes > 0 {
+                    if rf_last_activity_ms > 0 {
+                        let gap = now_ms - rf_last_activity_ms;
+                        rf_gaps.push(gap);
+                        if rf_gaps.len() > 64 {
+                            rf_gaps.remove(0);
+                        }
+                    }
+                    rf_last_activity_ms = now_ms;
+                    if rf_latched {
+                        if bram_trace_enabled() {
+                            append_bram_trace_line(
+                                &app_for_throughput,
+                                "reveal-floor",
+                                &format!("op=reset reason=activity silence_ms={}", rf_silent_ms),
+                            );
+                        }
+                        rf_latched = false;
+                    }
+                    rf_silent_ms = 0;
+                } else if turn_open {
+                    rf_silent_ms += TICK_MS as i64;
+                    if !rf_latched && rf_silent_ms >= RF_MIN_SILENT_MS {
+                        let p95 = rf_p95(&rf_gaps);
+                        let threshold = RF_MIN_SILENT_MS.max(RF_GAP_MULTIPLE * p95);
+                        if rf_silent_ms >= threshold {
+                            rf_latched = true;
+                            if bram_trace_enabled() {
+                                let menu_displayed = PANE_MENU_DISPLAYED
+                                    .load(std::sync::atomic::Ordering::Relaxed);
+                                let line = if menu_displayed {
+                                    format!(
+                                        "op=reveal-suppressed reason=menu-displayed silence_ms={} gap_p95_ms={} gaps_n={}",
+                                        rf_silent_ms, p95, rf_gaps.len()
+                                    )
+                                } else {
+                                    format!(
+                                        "op=would-reveal silence_ms={} gap_p95_ms={} gaps_n={}",
+                                        rf_silent_ms, p95, rf_gaps.len()
+                                    )
+                                };
+                                append_bram_trace_line(&app_for_throughput, "reveal-floor", &line);
+                            }
+                        }
+                    }
+                } else {
+                    if rf_latched {
+                        if bram_trace_enabled() {
+                            append_bram_trace_line(
+                                &app_for_throughput,
+                                "reveal-floor",
+                                &format!("op=reset reason=turn-closed silence_ms={}", rf_silent_ms),
+                            );
+                        }
+                        rf_latched = false;
+                    }
+                    rf_silent_ms = 0;
                 }
             }
         });

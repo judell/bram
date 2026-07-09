@@ -170,7 +170,10 @@
         </VStack>
         <!-- tool call (foldable) -->
         <VStack when="{$item.kind === 'tool'}" gap="$space-0_5">
-          <Link noIndicator="true" onClick="expanded = window.__bramToggleInArray(expanded, $item.id)">
+          <!-- Expand toggles the fold; when the ai.describeCommands opt-in
+               is on, opening a command-bearing row also requests a Haiku
+               intent header via /__describe-command (no-op otherwise). -->
+          <Link noIndicator="true" onClick="expanded = window.__bramExpandTool(expanded, $item)">
             <HStack gap="$space-1" verticalAlignment="center">
               <Text fontSize="$fontSize-sm" fontWeight="bold" value="{((expanded || []).includes($item.id) ? '▾' : '▸') + '  🔧 ' + $item.name}" />
               <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{$item.summary}" />
@@ -189,7 +192,7 @@
             <Markdown
               when="{($item.commandDisplay || $item.summary) &amp;&amp; ($item.name !== 'apply_patch' || !$item.commandDisplay)}"
               overflowMode="scroll"
-              content="{window.__bramFormatToolCommand($item.commandDisplay || $item.summary)}" />
+              content="{window.__bramFormatToolCommand($item.commandDisplay || $item.summary, $item.description)}" />
             <!-- Tool result: typed Markdown code-fence when the formatter
                  helper is live (after a rebuild), else the prior raw Text so a
                  hot-reload never blanks or markdown-mangles the expansion.

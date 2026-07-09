@@ -134,6 +134,22 @@
             icon="info"
             size="xs"
             variant="ghost"
+            tooltip="About AI"
+            onClick="infoTitle = 'AI'; infoBody = window.settingsInfoBodies.ai; settingInfoDialog.open()" />
+          <Heading level="h3">AI</Heading>
+        </HStack>
+        <Switch
+          label="Tool Descriptions"
+          initialValue="{settingsDescribeCommands(settingsConfig.value)}"
+          onDidChange="(v) => saveSettings.execute({ ai: { describeCommands: v } })" />
+      </VStack>
+
+      <VStack gap="$space-2">
+        <HStack gap="$space-2" verticalAlignment="center">
+          <Button
+            icon="info"
+            size="xs"
+            variant="ghost"
             tooltip="About Traces"
             onClick="infoTitle = 'Traces'; infoBody = window.settingsInfoBodies.traces; settingInfoDialog.open()" />
           <Heading level="h3">Traces</Heading>

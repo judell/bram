@@ -805,6 +805,31 @@ window.__bramIframeTrace = function (subkind, fields) {
   } catch (e) {}
 };
 
+// Iframe long-task tracer (2026-07-09 describe-freeze hunt). The
+// xterm-liveness watchdog covers the PARENT main thread; a frozen
+// IFRAME was invisible — the trace just went silent at the freeze
+// instant with nothing attributing the block. This logs every iframe
+// main-thread task ≥200ms at recovery, so the next freeze names its
+// duration instead of leaving a gap. Attribution granularity is
+// whatever the webview provides (often just "self"), but duration +
+// timing against the surrounding trace is the diagnostic payload.
+try {
+  if (typeof PerformanceObserver === "function") {
+    new PerformanceObserver(function (list) {
+      var entries = list.getEntries();
+      for (var i = 0; i < entries.length; i++) {
+        var e = entries[i];
+        if (e.duration >= 200) {
+          window.__bramIframeTrace("long-task", {
+            ms: Math.round(e.duration),
+            name: e.name || "",
+          });
+        }
+      }
+    }).observe({ entryTypes: ["longtask"] });
+  }
+} catch (e) { /* longtask unsupported: instrument absent, not broken */ }
+
 // Cascade-diagnosis instrumentation (refs #93). Emits a helper-call
 // record when a hot JSONL-walking helper exceeds the threshold. Cheap
 // paths (no-op early returns, cache hits) don't log because their _t0
@@ -1134,6 +1159,22 @@ window.settingsInfoBodies = {
     "Only matters when developing Bram itself: when on, the agent pane " +
     "reloads automatically as you edit Bram’s own source. Leave it off " +
     "otherwise.",
+  ai:
+    "## Tool Descriptions\n\n" +
+    "When a tool-use expansion in the Transcript shows a command with no " +
+    "agent-authored intent sentence (or a weak one), Bram asks Claude Haiku " +
+    "for a one-line description and renders it as a `#` header above the " +
+    "command. Requests fire only when you expand a row, results are cached, " +
+    "and each call is a fraction of a cent.\n\n" +
+    "On by default, but it only does anything when `ANTHROPIC_API_KEY` is " +
+    "set in the environment Bram was launched from — no key, no calls, no " +
+    "behavior change. The key is read from the environment only; it is " +
+    "never written to `.bram.json`.\n\n" +
+    "Note: with this on and a key present, expanded command text is sent " +
+    "to the Anthropic API. Turn this off if that's not acceptable for your " +
+    "project. Per-call cost is traced as `[ai-describe]` in " +
+    "resources/bram-traces/bram-trace.log.\n\n" +
+    "Persists in .bram.json under ai.describeCommands.",
   traces:
     "## Tracing enabled\n\n" +
     "Master switch for writes to " +
@@ -1539,13 +1580,87 @@ window.__bramStripMarkdownImages = function (text) {
     .replace(/\n*<img\b[^>]*\bsrc=["'][^"']+["'][^>]*>/gi, "");
 };
 
-window.__bramFormatToolCommand = function (command) {
+// Quote-aware top-level split of a compound command at && / || / ; / |
+// boundaries (tool-expansion-wrap-and-describe). Display-only: each
+// segment becomes its own line, continuation lines keep their
+// separator as a prefix so the chain reads naturally. Separators
+// inside single/double/back quotes are never split points. Long
+// segments soft-wrap at spaces near the width cap with a hanging
+// indent, so the code fence stops needing a horizontal scrollbar.
+window.__bramSplitCommandSegments = function (body, widthCap) {
+  var cap = widthCap || 96;
+  var segs = [];
+  var cur = "";
+  var q = null;
+  var i = 0;
+  while (i < body.length) {
+    var ch = body.charAt(i);
+    if (q) {
+      cur += ch;
+      if (ch === q && body.charAt(i - 1) !== "\\") q = null;
+      i++;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") {
+      q = ch;
+      cur += ch;
+      i++;
+      continue;
+    }
+    var two = body.substr(i, 2);
+    if (two === "&&" || two === "||") {
+      segs.push(cur);
+      cur = two + " ";
+      i += 2;
+      while (body.charAt(i) === " ") i++;
+      continue;
+    }
+    if (ch === ";" || ch === "|") {
+      segs.push(cur);
+      cur = ch + " ";
+      i += 1;
+      while (body.charAt(i) === " ") i++;
+      continue;
+    }
+    cur += ch;
+    i++;
+  }
+  segs.push(cur);
+  var lines = [];
+  for (var s = 0; s < segs.length; s++) {
+    var seg = (s === 0 ? segs[s].trim() : "  " + segs[s].trim());
+    while (seg.length > cap) {
+      var brk = seg.lastIndexOf(" ", cap);
+      if (brk <= 4) break;
+      lines.push(seg.slice(0, brk));
+      seg = "      " + seg.slice(brk + 1);
+    }
+    lines.push(seg);
+  }
+  return lines;
+};
+
+window.__bramFormatToolCommand = function (command, description) {
   if (command == null) return "";
   var body = String(command);
   if (!body) return "";
+  // Multi-line commands (heredocs, scripts) keep their own layout;
+  // splitting/wrapping is for the single-line compound case.
+  var display = body.indexOf("\n") >= 0
+    ? body
+    : window.__bramSplitCommandSegments(body).join("\n");
+  // The agent-authored intent sentence renders as a comment above the
+  // command — reliable because the calling agent wrote it at call
+  // time; absent (e.g. codex shell calls) means no header, no
+  // synthesis.
+  var head = "";
+  if (description) {
+    head = "# " + String(description).replace(/\s+/g, " ").trim() + "\n";
+  }
+  var scan = head + display;
   var longest = 0, run = 0;
-  for (var i = 0; i < body.length; i++) {
-    if (body.charAt(i) === "`") {
+  for (var i = 0; i < scan.length; i++) {
+    if (scan.charAt(i) === "`") {
       run++;
       if (run > longest) longest = run;
     } else {
@@ -1555,7 +1670,7 @@ window.__bramFormatToolCommand = function (command) {
   var fenceLen = Math.max(3, longest + 1);
   var fence = "";
   for (var j = 0; j < fenceLen; j++) fence += "`";
-  return fence + "bash\n" + body + "\n" + fence;
+  return fence + "bash\n" + head + display + "\n" + fence;
 };
 
 window.__bramToolInputJsonLines = function (input, maxLines) {
@@ -4030,6 +4145,11 @@ window.__bramProjectedTurnEqual = function (a, b) {
         x.name !== y.name ||
         x.summary !== y.summary ||
         x.commandDisplay !== y.commandDisplay ||
+        // description participates: the ai-describe overlay changes ONLY
+        // this field, and an "equal" verdict would reuse the stale turn
+        // reference and silently drop the new header (2026-07-08 "no
+        // description line appeared").
+        (x.description || "") !== (y.description || "") ||
         x.result !== y.result ||
         !!x.isError !== !!y.isError
       ) return false;
@@ -4080,6 +4200,41 @@ window.__bramMergeProjectedTurnsWindow = function (prev, payload) {
   var turns = prevTurns.slice(0, ws).concat(payload.turns || []);
   if (turns.length !== total) return null;
   return { sid: payload.sid, provider: payload.provider, turns: turns };
+};
+
+// ai-describe delivery: patch the described entry into the accumulated
+// projection directly and re-broadcast. A refetch cannot deliver it —
+// tick refetches are windowed (latest=8) and an expanded row usually
+// sits OUTSIDE that window, so the merge keeps the stale entry
+// (2026-07-08 "no description line appeared"); it's also ~1s of wasted
+// projection work on multi-MB codex sessions. The describe response
+// already carries the description, so this is a pure client-side splice:
+// clone the turn/entry (never mutate — the broadcast's reference
+// preservation depends on prev staying pristine) and re-push.
+window.__bramPatchProjectedToolDescription = function (toolId, description) {
+  var prev = __projectedTurnsValue;
+  if (!prev || !prev.turns || !toolId || !description) return false;
+  var turns = prev.turns;
+  for (var i = 0; i < turns.length; i++) {
+    var entries = (turns[i] && turns[i].entries) || [];
+    for (var k = 0; k < entries.length; k++) {
+      var e = entries[k];
+      if (e && e.kind === "tool" && e.id === toolId) {
+        if ((e.description || "") === description) return true;
+        var newEntries = entries.slice();
+        newEntries[k] = Object.assign({}, e, { description: description });
+        var newTurns = turns.slice();
+        newTurns[i] = Object.assign({}, turns[i], { entries: newEntries });
+        window.__bramBroadcastProjectedTurns({
+          sid: prev.sid,
+          provider: prev.provider,
+          turns: newTurns,
+        });
+        return true;
+      }
+    }
+  }
+  return false;
 };
 
 // Adaptive coalesce (2026-07-07 codex esc wedge): one full /__turns
@@ -4232,6 +4387,20 @@ window.__bramFormatToolResult = function (result, toolName, hint) {
     lang = window.__bramLangFromHint(hint);
   }
 
+  // Render cap (2026-07-09 describe-freeze): an expanded 41KB result
+  // re-rendering through Markdown froze the codex transcript's main
+  // thread hard (trace went silent at the describe-patch instant; the
+  // 4.8KB row a few seconds earlier sailed through). Unbounded content
+  // in the webview is the recurring codex-session killer, so bound the
+  // rendered block; the full output remains in the session JSONL
+  // (Sessions tab / /__tool-detail).
+  var MAX_RENDER = 16000;
+  if (body.length > MAX_RENDER) {
+    body =
+      body.slice(0, MAX_RENDER) +
+      "\n… (+" + (body.length - MAX_RENDER) + " more chars — full output in the session JSONL)";
+  }
+
   // Fence-safety: the fence must be longer than the longest backtick run in
   // the body, or content containing ``` would break the block.
   var longest = 0, run = 0;
@@ -4344,6 +4513,7 @@ window.__bramTranscriptEventsFromTurns = function (payload, menu) {
               name: e.name || "Tool",
               summary: e.summary || "",
               commandDisplay: e.commandDisplay || "",
+              description: e.description || "",
               result: e.result || "",
               isError: !!e.isError,
               agentId: e.agentId || "",
@@ -4664,6 +4834,120 @@ window.__bramToggleInArray = function (arr, id) {
   arr = arr || [];
   if (arr.indexOf(id) >= 0) return arr.filter(function (x) { return x !== id; });
   return arr.concat([id]);
+};
+
+// ai-describe (haiku-command-descriptions): tool-row expand handler.
+// Toggles the fold like __bramToggleInArray, and on OPEN of a
+// command-bearing entry fires a describe request. The host route is
+// double-gated (ai.describeCommands flag + ANTHROPIC_API_KEY) and
+// answers {ok:false, reason} when off, so this is a no-op by default.
+// Sent even when an agent-authored description exists — the host prompt
+// keeps a good description unchanged and upgrades a weak one (approval
+// feedback on haiku-command-descriptions).
+window.__bramDescribeRequested = {};
+window.__bramExpandTool = function (arr, item) {
+  var next = window.__bramToggleInArray(arr, item && item.id);
+  try {
+    var opening = item && item.id && (next || []).indexOf(item.id) >= 0;
+    var cmd = (item && item.commandDisplay) || "";
+    if (opening && cmd && item.name !== "apply_patch") {
+      window.__bramRequestCommandDescription(item);
+    }
+  } catch (e) { /* expand must never fail on describe plumbing */ }
+  return next;
+};
+
+// Fire-and-forget describe POST. The route is synchronous (the host
+// serves each request on its own thread); on success the description is
+// spliced straight into the accumulated projection via
+// __bramPatchProjectedToolDescription (no refetch — see that helper for
+// why a windowed refetch can't deliver it). The host also caches the
+// result, so later full projections re-serve it via the overlay. Per-id
+// dedupe keeps re-expands from re-POSTing while a request is in flight
+// (the host also dedupes).
+// The prose nearest BEFORE the tool entry — the agent's stated intent
+// for the call ("Let me check whether ..."), the highest-signal
+// describe context. Scans backward across TURN BOUNDARIES: Claude
+// records prose + tool_use in one assistant turn, but Codex records
+// each function_call as its own turn with the prose in a PRECEDING
+// turn (the 2026-07-09 ctx=0 finding — same-turn-only lookup found
+// nothing on codex). A user turn is an acceptable source too: when a
+// command directly answers the user's request, that request IS the
+// intent. Lookback bounded to 4 turns; tail-capped to 500 chars so the
+// sentence closest to the call survives. Empty when the entry isn't in
+// the main projection (e.g. subagent views).
+window.__bramDescribeContextForTool = function (toolId) {
+  var prev = window.getProjectedTurns && window.getProjectedTurns();
+  if (!prev || !prev.turns || !toolId) return "";
+  var turns = prev.turns;
+  for (var i = 0; i < turns.length; i++) {
+    var entries = (turns[i] && turns[i].entries) || [];
+    for (var k = 0; k < entries.length; k++) {
+      var e = entries[k];
+      if (!e || e.kind !== "tool" || e.id !== toolId) continue;
+      var prose = "";
+      var ti = i, ei = k - 1, back = 0;
+      while (!prose && back <= 4 && ti >= 0) {
+        var es = (turns[ti] && turns[ti].entries) || [];
+        for (var p = ei; p >= 0; p--) {
+          var t = es[p];
+          if (t && t.kind === "text" && t.text) { prose = t.text; break; }
+        }
+        if (!prose && ti > 0) {
+          // Fall back to the turn's own text (user turns carry their
+          // message there rather than in a text entry).
+          var tt = turns[ti - 1] && turns[ti - 1].text;
+          if (tt) { prose = tt; }
+        }
+        ti -= 1;
+        ei = ((turns[ti] && turns[ti].entries) || []).length - 1;
+        back += 1;
+      }
+      return prose.length > 500 ? prose.slice(-500) : prose;
+    }
+  }
+  return "";
+};
+
+window.__bramRequestCommandDescription = function (item) {
+  var id = item && item.id;
+  if (!id || window.__bramDescribeRequested[id]) return;
+  window.__bramDescribeRequested[id] = true;
+  window
+    .fetch("/__describe-command", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: id,
+        name: item.name || "",
+        command: item.commandDisplay || "",
+        description: item.description || "",
+        // Intent prose + result head (iterate 2026-07-08): the agent's
+        // stated reason for the call and what it produced — Haiku
+        // describes intent, not just syntax. Both capped; the host
+        // re-caps defensively.
+        context: window.__bramDescribeContextForTool(id),
+        result: String(item.result || "").slice(0, 400),
+      }),
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (res) {
+      if (res && res.ok && res.description) {
+        // Direct splice into the accumulated projection — see
+        // __bramPatchProjectedToolDescription for why a refetch can't
+        // deliver this. Patch misses (subagent view: the entry isn't in
+        // the main projection) are covered by the host's
+        // subagents-changed emit, which refetches the subagent stream
+        // with the overlay applied.
+        window.__bramPatchProjectedToolDescription(id, res.description);
+      } else {
+        // Allow a retry on a later expand (disabled/no-key/error).
+        delete window.__bramDescribeRequested[id];
+      }
+    })
+    .catch(function () {
+      delete window.__bramDescribeRequested[id];
+    });
 };
 // Slim change-signal tick (issue-214 candidate #5). The latest-tail
 // content pipeline is retired: talk-session-changed IS the signal that

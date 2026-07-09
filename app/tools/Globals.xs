@@ -220,6 +220,13 @@ function settingsToolsPaneHotReload(s) {
   if (!s || !s.ui) return false;
   return s.ui.toolsPaneHotReload === true;
 }
+// Default ON — only explicit `false` disables. Matches the host
+// default for ai.describeCommands; the effective gate is
+// ANTHROPIC_API_KEY in the host environment (no key, no calls).
+function settingsDescribeCommands(s) {
+  if (!s || !s.ai) return true;
+  return s.ai.describeCommands !== false;
+}
 
 // Diff rendering — used by the DiffView component, which all three
 // diff sites (Transcript, Workspace, Commits) share. Per-line

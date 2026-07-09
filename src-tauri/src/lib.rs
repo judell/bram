@@ -282,6 +282,8 @@ struct ProjectConfig {
     traces: Option<TracesConfig>,
     #[serde(default)]
     menus: Option<MenusConfig>,
+    #[serde(default)]
+    ai: Option<AiConfig>,
 }
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
@@ -354,6 +356,23 @@ struct MenusConfig {
     // agent-pane menu from structured data, alongside the grid detector.
     #[serde(default, rename = "hookDriven")]
     hook_driven: Option<bool>,
+}
+
+// Optional ai block. `describeCommands` gates the /__describe-command
+// route (haiku-command-descriptions): Haiku-synthesized one-line intent
+// headers for tool expansions whose command lacks — or carries a weak —
+// agent-authored description. Default ON ("Tool Descriptions" in the
+// Settings tab); the effective gate is ANTHROPIC_API_KEY in the host
+// environment — key absent means the feature silently does nothing. The
+// key is never stored in .bram.json (it's a tracked file).
+#[derive(Default, Clone, serde::Deserialize)]
+struct AiConfig {
+    #[serde(default, rename = "describeCommands")]
+    describe_commands: Option<bool>,
+    // Anthropic model id for description synthesis. Defaults to the
+    // Haiku alias validated in the feasibility test.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 fn default_server_path() -> String {
@@ -2540,7 +2559,8 @@ fn stamp_pty_menu_payload(
 // reveal-floor observer's discriminator for "waiting while a menu is
 // displayed" (terminal-reveal-floor-observe): a pane-displayed menu
 // means the user can answer without the terminal.
-static PANE_MENU_DISPLAYED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static PANE_MENU_DISPLAYED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 fn emit_pty_menu_with_prose<R: tauri::Runtime>(app: &AppHandle<R>, payload: &Option<PtyMenu>) {
     PANE_MENU_DISPLAYED.store(payload.is_some(), std::sync::atomic::Ordering::Relaxed);
@@ -3011,7 +3031,10 @@ fn attach_hook_edit_diff<R: tauri::Runtime>(
     if !matches!(menu.tool.as_str(), "Edit" | "Write" | "MultiEdit") {
         return;
     }
-    let input = value.get("tool_input").cloned().unwrap_or(serde_json::Value::Null);
+    let input = value
+        .get("tool_input")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     if input.is_null() {
         return;
     }
@@ -5793,11 +5816,7 @@ fn schedule_signature_recheck<R: tauri::Runtime>(app_handle: AppHandle<R>, targe
                 && turn_state_cell()
                     .lock()
                     .ok()
-                    .and_then(|s| {
-                        s.pending_menu
-                            .as_ref()
-                            .map(|m| m.tool_call_diff.is_some())
-                    })
+                    .and_then(|s| s.pending_menu.as_ref().map(|m| m.tool_call_diff.is_some()))
                     .unwrap_or(false);
             if hook_enriched {
                 if bram_trace_enabled() {
@@ -8131,8 +8150,8 @@ fn pty_spawn(
                         if rf_silent_ms >= threshold {
                             rf_latched = true;
                             if bram_trace_enabled() {
-                                let menu_displayed = PANE_MENU_DISPLAYED
-                                    .load(std::sync::atomic::Ordering::Relaxed);
+                                let menu_displayed =
+                                    PANE_MENU_DISPLAYED.load(std::sync::atomic::Ordering::Relaxed);
                                 let line = if menu_displayed {
                                     format!(
                                         "op=reveal-suppressed reason=menu-displayed silence_ms={} gap_p95_ms={} gaps_n={}",
@@ -8141,7 +8160,9 @@ fn pty_spawn(
                                 } else {
                                     format!(
                                         "op=would-reveal silence_ms={} gap_p95_ms={} gaps_n={}",
-                                        rf_silent_ms, p95, rf_gaps.len()
+                                        rf_silent_ms,
+                                        p95,
+                                        rf_gaps.len()
                                     )
                                 };
                                 append_bram_trace_line(&app_for_throughput, "reveal-floor", &line);
@@ -9022,7 +9043,10 @@ fn pin_codex_reload_target<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) -> R
             append_bram_trace_line(
                 app,
                 "agent-switch",
-                &format!("op=codex-reload-pin-miss session={} reason=id-unresolved", id),
+                &format!(
+                    "op=codex-reload-pin-miss session={} reason=id-unresolved",
+                    id
+                ),
             );
         }
         return Ok(());
@@ -9515,6 +9539,14 @@ fn tools_pane_hot_reload_enabled<R: tauri::Runtime>(app: &AppHandle<R>) -> bool 
 // so the consumer never sees nulls; out-of-scope blocks like `server`
 // stay invisible — they're project infrastructure, not Settings knobs.
 fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value {
+    // Default ON — the Settings tab's "Tool Descriptions" switch; the
+    // effective gate is ANTHROPIC_API_KEY in the host env. Only an
+    // explicit `false` disables.
+    let describe_commands = config
+        .as_ref()
+        .and_then(|c| c.ai.as_ref())
+        .and_then(|a| a.describe_commands)
+        .unwrap_or(true);
     let (
         agent,
         args,
@@ -9588,6 +9620,7 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
         "ui": { "showTargetApp": show_target_app, "toolsPaneHotReload": tools_pane_hot_reload },
         "traces": { "enabled": tracing_enabled, "inspectorTap": inspector_tap },
         "menus": { "parseAndDisplay": menus_parse },
+        "ai": { "describeCommands": describe_commands },
     })
 }
 
@@ -12209,49 +12242,48 @@ fn latest_codex_session_path<R: tauri::Runtime>(
         )
         .max_by_key(|(mtime, _)| *mtime);
     let reload_target = codex_reload_target(app);
-    let (chosen_mtime, chosen) =
-        if let Some(target) = reload_target {
-            let target_now = all
+    let (chosen_mtime, chosen) = if let Some(target) = reload_target {
+        let target_now = all
+            .iter()
+            .find(|(_, path)| path == &target.path)
+            .map(|(mtime, path)| (*mtime, path.clone()));
+        if let Some((target_mtime, target_path)) = target_now {
+            let successor = all
                 .iter()
-                .find(|(_, path)| path == &target.path)
-                .map(|(mtime, path)| (*mtime, path.clone()));
-            if let Some((target_mtime, target_path)) = target_now {
-                let successor = all
-                    .iter()
-                    .filter(|(mtime, path)| {
-                        path != &target_path
-                            && target.previous_path.as_ref() != Some(path)
-                            && *mtime >= target.set_at
-                    })
-                    .filter_map(
-                        |(mtime, path)| match codex_session_has_real_user_activity(path) {
-                            Ok(true) => Some((*mtime, path.clone())),
-                            Ok(false) => None,
-                            Err(_) => None,
-                        },
-                    )
-                    .max_by_key(|(mtime, _)| *mtime);
-                if let Some((successor_mtime, successor_path)) = successor {
-                    clear_codex_reload_target(
-                        app,
-                        &target.id,
-                        "successor",
-                        successor_path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or(""),
-                    );
-                    (successor_mtime, successor_path)
-                } else {
-                    (target_mtime, target_path)
-                }
+                .filter(|(mtime, path)| {
+                    path != &target_path
+                        && target.previous_path.as_ref() != Some(path)
+                        && *mtime >= target.set_at
+                })
+                .filter_map(
+                    |(mtime, path)| match codex_session_has_real_user_activity(path) {
+                        Ok(true) => Some((*mtime, path.clone())),
+                        Ok(false) => None,
+                        Err(_) => None,
+                    },
+                )
+                .max_by_key(|(mtime, _)| *mtime);
+            if let Some((successor_mtime, successor_path)) = successor {
+                clear_codex_reload_target(
+                    app,
+                    &target.id,
+                    "successor",
+                    successor_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(""),
+                );
+                (successor_mtime, successor_path)
             } else {
-                clear_codex_reload_target(app, &target.id, "target-missing", "");
-                active_best.unwrap_or(raw_best)
+                (target_mtime, target_path)
             }
         } else {
+            clear_codex_reload_target(app, &target.id, "target-missing", "");
             active_best.unwrap_or(raw_best)
-        };
+        }
+    } else {
+        active_best.unwrap_or(raw_best)
+    };
     let cache_cell = LIVE_CODEX_SESSION.get_or_init(|| Mutex::new(None));
     let mut cached = cache_cell.lock().map_err(|e| e.to_string())?;
     *cached = Some((chosen.clone(), chosen_mtime));
@@ -14862,6 +14894,11 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
                             "name": name,
                             "summary": summary,
                             "commandDisplay": st_tool_command_display(name, input),
+                            // The agent-authored intent sentence (Claude's Bash
+                            // tool requires it; other tools/providers may lack
+                            // it). Rendered above the command in the Transcript
+                            // expansion (tool-expansion-wrap-and-describe).
+                            "description": input.get("description").and_then(|v| v.as_str()).unwrap_or(""),
                         });
                         let entry_idx = entries.len();
                         entries.push(entry);
@@ -15440,6 +15477,7 @@ fn read_subagent_turns<R: tauri::Runtime>(
     };
     let mut turns = st_parse_lines_to_turns(&text);
     project_user_turns(app, &mut turns);
+    apply_describe_overlay(&mut turns, &describe_overlay_snapshot());
     let sid = session_path
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
@@ -16988,6 +17026,66 @@ static PROJECTED_TURNS_CACHE: std::sync::Mutex<Option<ProjectedTurnsCacheEntry>>
 
 const PROJECTED_TURNS_INCREMENTAL_OVERLAP_BYTES: u64 = 1024 * 1024;
 
+// ai-describe cache (haiku-command-descriptions): Haiku-synthesized
+// one-line intent headers for tool expansions. `by_id` (tool_use id →
+// description) feeds the projection overlay below; `by_key` (command +
+// existing description → description) dedupes API calls when the same
+// command recurs under different tool_use ids. In-memory only — a Bram
+// restart re-describes on the next expand, which is fine at Haiku cost.
+#[derive(Default)]
+struct DescribeCache {
+    by_id: std::collections::HashMap<String, String>,
+    by_key: std::collections::HashMap<String, String>,
+}
+static DESCRIBE_CACHE: std::sync::Mutex<Option<DescribeCache>> = std::sync::Mutex::new(None);
+
+// Snapshot of by_id for the projection overlay. Empty map when nothing
+// has been described this run — the common case, which the overlay
+// callers use to skip cloning entirely.
+fn describe_overlay_snapshot() -> std::collections::HashMap<String, String> {
+    DESCRIBE_CACHE
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|c| c.by_id.clone()))
+        .unwrap_or_default()
+}
+
+// Overwrite tool-entry descriptions in place from the describe cache.
+// Applies to any provider's projection: entries are matched by tool_use
+// id, and a cache hit wins over an agent-authored description (the cache
+// only holds entries the user explicitly asked to describe/upgrade).
+fn apply_describe_overlay(
+    turns: &mut [serde_json::Value],
+    overlay: &std::collections::HashMap<String, String>,
+) {
+    if overlay.is_empty() {
+        return;
+    }
+    for turn in turns.iter_mut() {
+        let Some(entries) = turn.get_mut("entries").and_then(|e| e.as_array_mut()) else {
+            continue;
+        };
+        for entry in entries.iter_mut() {
+            if entry.get("kind").and_then(|v| v.as_str()) != Some("tool") {
+                continue;
+            }
+            let Some(desc) = entry
+                .get("id")
+                .and_then(|v| v.as_str())
+                .and_then(|id| overlay.get(id))
+            else {
+                continue;
+            };
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert(
+                    "description".to_string(),
+                    serde_json::Value::String(desc.clone()),
+                );
+            }
+        }
+    }
+}
+
 fn merge_projected_turn_tail(
     cached: &[serde_json::Value],
     tail: Vec<serde_json::Value>,
@@ -17091,6 +17189,24 @@ fn projected_turns_body(
 ) -> Result<Vec<u8>, String> {
     let total = turns.len();
     let window_start = latest.map(|n| total.saturating_sub(n.max(1))).unwrap_or(0);
+    // ai-describe overlay: served at body-build time (not parse time)
+    // because a describe completion doesn't touch the JSONL, so the
+    // parsed-projection cache stays valid. The clone only happens when
+    // something has been described this run; otherwise the zero-copy
+    // slice path below serializes as before.
+    let overlay = describe_overlay_snapshot();
+    if !overlay.is_empty() {
+        let mut window: Vec<serde_json::Value> = turns[window_start..].to_vec();
+        apply_describe_overlay(&mut window, &overlay);
+        let body = serde_json::json!({
+            "sid": sid,
+            "provider": provider_label,
+            "total": total,
+            "windowStart": window_start,
+            "turns": window,
+        });
+        return serde_json::to_vec(&body).map_err(|e| e.to_string());
+    }
     let body = serde_json::json!({
         "sid": sid,
         "provider": provider_label,
@@ -28389,6 +28505,296 @@ mod project_config_tests {
     }
 }
 
+// POST /__describe-command {id, command, description?} — synthesize (or
+// upgrade) a one-line intent header for a tool expansion via the
+// Anthropic Messages API (haiku-command-descriptions). Opt-in twice
+// over: the .bram.json `ai.describeCommands` flag must be true AND
+// ANTHROPIC_API_KEY must be present in the host environment (the key is
+// never stored in .bram.json — it's a tracked file). When an
+// agent-authored description rides along, the prompt asks the model to
+// keep it if accurate and upgrade it if warranted (approval feedback on
+// haiku-command-descriptions). Synchronous by design: handle_http runs
+// each request on its own thread, and the iframe caller awaits the
+// response to trigger its /__turns refetch — a describe completion
+// doesn't change the session file, so the slim tick's zero-delta
+// suppression would swallow a host-side signal.
+fn handle_describe_command<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    body: &[u8],
+) -> (u16, &'static str, Vec<u8>) {
+    const JSON: &str = "application/json; charset=utf-8";
+    let parsed: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                400,
+                JSON,
+                serde_json::json!({ "ok": false, "reason": format!("bad json: {}", e) })
+                    .to_string()
+                    .into_bytes(),
+            )
+        }
+    };
+    let id = parsed.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let command = parsed.get("command").and_then(|v| v.as_str()).unwrap_or("");
+    let existing = parsed
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    if id.is_empty() || command.trim().is_empty() {
+        return (
+            400,
+            JSON,
+            br#"{"ok":false,"reason":"id and command required"}"#.to_vec(),
+        );
+    }
+    let config = project_root(Some(app)).and_then(|root| load_project_config(&root));
+    // Default ON — only an explicit `false` (the Settings tab's "Tool
+    // Descriptions" switch) disables. The key check below is the
+    // effective gate for users who never configured anything.
+    let enabled = config
+        .as_ref()
+        .and_then(|c| c.ai.as_ref())
+        .and_then(|a| a.describe_commands)
+        .unwrap_or(true);
+    if !enabled {
+        append_bram_trace_line(
+            app,
+            "ai-describe",
+            &format!("op=skip reason=disabled id={}", id),
+        );
+        return (200, JSON, br#"{"ok":false,"reason":"disabled"}"#.to_vec());
+    }
+    let key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+    if key.trim().is_empty() {
+        append_bram_trace_line(
+            app,
+            "ai-describe",
+            &format!("op=skip reason=no-key id={}", id),
+        );
+        return (200, JSON, br#"{"ok":false,"reason":"no-key"}"#.to_vec());
+    }
+    let model = config
+        .and_then(|c| c.ai)
+        .and_then(|a| a.model)
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| "claude-haiku-4-5".to_string());
+    // Optional context riders (iterate 2026-07-08 "what could we send to
+    // make best use of it"): the tool name, the agent's prose immediately
+    // before the call (its stated intent — the highest-signal input), and
+    // the head of the command's output. Caller caps them; re-cap here so
+    // the payload stays bounded regardless of caller. Char-boundary-safe
+    // truncation: context keeps its TAIL (the sentence nearest the call),
+    // result keeps its HEAD.
+    let tool_name = parsed
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    let context_raw = parsed
+        .get("context")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    let context: String = {
+        let chars: Vec<char> = context_raw.chars().collect();
+        let start = chars.len().saturating_sub(800);
+        chars[start..].iter().collect()
+    };
+    let result_head: String = parsed
+        .get("result")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(600)
+        .collect();
+    // Cache: id hit means this exact expansion was already described;
+    // key hit means an identical payload (command + description + context
+    // + result head) was described under another tool_use id — reuse
+    // without an API call. Context participates in the key because it
+    // changes the intended output: the same command run for different
+    // reasons should describe differently.
+    let cache_key = format!(
+        "{}\u{1}{}\u{1}{}\u{1}{}",
+        command, existing, context, result_head
+    );
+    {
+        let Ok(mut guard) = DESCRIBE_CACHE.lock() else {
+            return (500, JSON, br#"{"ok":false,"reason":"cache lock"}"#.to_vec());
+        };
+        let cache = guard.get_or_insert_with(DescribeCache::default);
+        let hit = cache
+            .by_id
+            .get(id)
+            .cloned()
+            .or_else(|| cache.by_key.get(&cache_key).cloned());
+        if let Some(desc) = hit {
+            cache.by_id.insert(id.to_string(), desc.clone());
+            append_bram_trace_line(app, "ai-describe", &format!("op=hit id={}", id));
+            let body = serde_json::json!({ "ok": true, "description": desc, "cached": true });
+            return (200, JSON, body.to_string().into_bytes());
+        }
+    }
+    // Prompt shape grown from the 2026-07-08 Haiku feasibility test (12
+    // real Codex exec_command samples, 11/12 shippable on command text
+    // alone) plus the context riders above: the agent's stated intent
+    // beats a mechanical paraphrase of the command, and the result head
+    // disambiguates what actually happened. The upgrade variant carries
+    // the agent-authored sentence and asks for it back unchanged when
+    // it's already good.
+    let mut prompt = String::from(
+        "You are writing the one-line intent header shown above a command in a \
+         developer-tool log.\n\n",
+    );
+    if !tool_name.is_empty() {
+        prompt.push_str(&format!("Tool: {}\n\n", tool_name));
+    }
+    prompt.push_str(&format!("<command>\n{}\n</command>\n", command));
+    if !context.is_empty() {
+        prompt.push_str(&format!(
+            "\nWhat the agent said just before running it:\n<agent_context>\n{}\n</agent_context>\n",
+            context
+        ));
+    }
+    if !result_head.is_empty() {
+        prompt.push_str(&format!(
+            "\nFirst lines of the command's output:\n<result>\n{}\n</result>\n",
+            result_head
+        ));
+    }
+    if !existing.is_empty() {
+        prompt.push_str(&format!(
+            "\nThe agent also authored this description; if it is accurate and concise, \
+             return it unchanged, otherwise improve it:\n<description>\n{}\n</description>\n",
+            existing
+        ));
+    }
+    prompt.push_str(
+        "\nWrite a one-line description (under 12 words, active voice, name the \
+         specific target) of what this command does — prefer the agent's stated \
+         intent over a mechanical paraphrase. Return only the description line — \
+         no quotes, no trailing period.",
+    );
+    let req_body = serde_json::json!({
+        "model": model,
+        "max_tokens": 100,
+        "messages": [{ "role": "user", "content": prompt }],
+    });
+    let started = std::time::Instant::now();
+    let resp = ureq::post("https://api.anthropic.com/v1/messages")
+        .set("x-api-key", &key)
+        .set("anthropic-version", "2023-06-01")
+        .set("content-type", "application/json")
+        .send_string(&req_body.to_string());
+    let ms = started.elapsed().as_millis();
+    let resp = match resp {
+        Ok(r) => r,
+        Err(ureq::Error::Status(code, r)) => {
+            let detail = r.into_string().unwrap_or_default();
+            let detail_line = detail
+                .split('\n')
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(200)
+                .collect::<String>();
+            append_bram_trace_line(
+                app,
+                "ai-describe",
+                &format!(
+                    "op=error status={} ms={} id={} detail={}",
+                    code, ms, id, detail_line
+                ),
+            );
+            let body = serde_json::json!({ "ok": false, "reason": format!("api status {}", code) });
+            return (502, JSON, body.to_string().into_bytes());
+        }
+        Err(e) => {
+            append_bram_trace_line(
+                app,
+                "ai-describe",
+                &format!("op=error status=transport ms={} id={} detail={}", ms, id, e),
+            );
+            return (502, JSON, br#"{"ok":false,"reason":"transport"}"#.to_vec());
+        }
+    };
+    let payload: serde_json::Value = match resp
+        .into_string()
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+    {
+        Some(v) => v,
+        None => {
+            append_bram_trace_line(
+                app,
+                "ai-describe",
+                &format!("op=error status=parse ms={} id={}", ms, id),
+            );
+            return (502, JSON, br#"{"ok":false,"reason":"parse"}"#.to_vec());
+        }
+    };
+    let desc = payload
+        .get("content")
+        .and_then(|c| c.as_array())
+        .and_then(|a| {
+            a.iter()
+                .find(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+        })
+        .and_then(|b| b.get("text"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if desc.is_empty() {
+        append_bram_trace_line(
+            app,
+            "ai-describe",
+            &format!("op=error status=empty ms={} id={}", ms, id),
+        );
+        return (502, JSON, br#"{"ok":false,"reason":"empty"}"#.to_vec());
+    }
+    let input_tokens = payload
+        .get("usage")
+        .and_then(|u| u.get("input_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let output_tokens = payload
+        .get("usage")
+        .and_then(|u| u.get("output_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    if let Ok(mut guard) = DESCRIBE_CACHE.lock() {
+        let cache = guard.get_or_insert_with(DescribeCache::default);
+        cache.by_id.insert(id.to_string(), desc.clone());
+        cache.by_key.insert(cache_key, desc.clone());
+    }
+    // Main-view refresh is caller-driven (helpers.js awaits this response
+    // and refetches /__turns). Subagent views refetch on subagents-changed,
+    // which nothing else fires for a finished agent — nudge it here so a
+    // described row in a subagent transcript re-renders too.
+    emit_replayable_signal(app, "subagents-changed");
+    append_bram_trace_line(
+        app,
+        "ai-describe",
+        &format!(
+            "op=call ms={} model={} input_tokens={} output_tokens={} upgraded={} ctx={} result={} id={}",
+            ms,
+            model,
+            input_tokens,
+            output_tokens,
+            if existing.is_empty() { 0 } else { 1 },
+            if context.is_empty() { 0 } else { 1 },
+            if result_head.is_empty() { 0 } else { 1 },
+            id
+        ),
+    );
+    let body = serde_json::json!({ "ok": true, "description": desc });
+    (200, JSON, body.to_string().into_bytes())
+}
+
 fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Request) {
     let url = request.url().to_string();
     let method = request.method().as_str().to_uppercase();
@@ -28418,6 +28824,14 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             let mut buf = Vec::new();
             let _ = request.as_reader().read_to_end(&mut buf);
             handle_worklist_commit(app, &buf)
+        }
+    } else if path == "__describe-command" {
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            let mut buf = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut buf);
+            handle_describe_command(app, &buf)
         }
     } else if path == "__menu/permission" {
         if method != "POST" {

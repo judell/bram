@@ -1,4 +1,4 @@
-<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{''}" var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.footerVoiceRecording="{false}" var.headerInflightTick="{0}" var.agentSwitcherSelected="{'claude'}" var.agentSwitching="{false}" var.composerFocused="{false}" var.transcriptAgentId="{''}"
+<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{''}" var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.footerVoiceRecording="{false}" var.headerInflightTick="{0}" var.agentSwitcherSelected="{'claude'}" var.agentSwitching="{false}" var.composerFocused="{false}" var.transcriptAgentId="{''}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}"
   onInit="updateBannerDismissedVersion = readLocalStorage('bram.updateBannerDismissedVersion', ''); startBramLatestJsonlPush(() => (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || '')">
   <PushSource
     id="mainAgentStatus"
@@ -559,16 +559,28 @@
         value="{(window.__bramFooterSessionLine || window.__bramSessionMetaLine)(window.__bramCurrentSessionOf(footerSessions.value), transcriptAgentId, footerAgents.value)}" />
       <!-- Passive send-ledger note — in the sticky footer so it's always
            visible. Text comes from the host ledger's resolved outcomes;
-           recovery is automatic, so there are no action buttons. -->
+           recovery is automatic. Dismissal is keyed to the producing
+           ledger entry's id (esc-banner-dismissable): ✕ hides THIS
+           notice instantly and across reloads; a new resolved entry
+           notices normally. -->
       <VStack
-        when="{window.__bramSendLedgerNotice(sendLedgerDs.value)}"
+        when="{window.__bramSendLedgerNotice(sendLedgerDs.value, sendNoticeDismissed)}"
         padding="$space-2"
         gap="$space-1"
         backgroundColor="$color-info-50"
         borderTop="1px solid $color-info-200">
-        <Text
-          fontSize="$fontSize-sm"
-          value="{window.__bramSendLedgerNotice(sendLedgerDs.value)}" />
+        <HStack gap="$space-2" verticalAlignment="center">
+          <Text
+            fontSize="$fontSize-sm"
+            width="*"
+            value="{window.__bramSendLedgerNotice(sendLedgerDs.value, sendNoticeDismissed)}" />
+          <Button
+            label="✕"
+            variant="ghost"
+            size="xs"
+            tooltip="Dismiss this notice"
+            onClick="sendNoticeDismissed = window.__bramDismissSendNotice(window.__bramSendLedgerNoticeKey(sendLedgerDs.value))" />
+        </HStack>
       </VStack>
     </VStack>
     </Theme>

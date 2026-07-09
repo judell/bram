@@ -4489,17 +4489,44 @@ window.__bramSubagentHeaderLine = function (payload) {
 // last 10 minutes, or "" for silence. No action buttons by design:
 // recovery is automatic (restore / trust-gated auto-resend), and
 // landed-then-aborted gets silence.
-window.__bramSendLedgerNotice = function (payload) {
+// The ledger entry a notice would be about: latest resolved. Shared by
+// the notice text builder and the dismissal key
+// (esc-banner-dismissable).
+function __bramLatestResolvedLedgerEntry(payload) {
   var entries = (payload && payload.entries) || [];
-  var nowMs = (payload && payload.nowMs) || Date.now();
-  var staleTerminalInput = !!(payload && payload.staleTerminalInput);
   var latest = null;
   for (var i = 0; i < entries.length; i++) {
     var e = entries[i];
     if (!e || !e.resolvedAtMs) continue;
     if (!latest || e.resolvedAtMs > latest.resolvedAtMs) latest = e;
   }
+  return latest;
+}
+
+// Key identifying the current notice for dismissal: the producing
+// ledger entry's id. A dismissed key hides THAT notice only; a new
+// resolved entry (new id) notices normally.
+window.__bramSendLedgerNoticeKey = function (payload) {
+  var latest = __bramLatestResolvedLedgerEntry(payload);
+  return (latest && latest.id) || "";
+};
+
+window.__bramDismissSendNotice = function (key) {
+  __bramWriteLS("bram.sendNoticeDismissed", key || "");
+  return key || "";
+};
+
+window.__bramRestoreSendNoticeDismissed = function () {
+  return __bramReadLS("bram.sendNoticeDismissed", "");
+};
+
+window.__bramSendLedgerNotice = function (payload, dismissedKey) {
+  var entries = (payload && payload.entries) || [];
+  var nowMs = (payload && payload.nowMs) || Date.now();
+  var staleTerminalInput = !!(payload && payload.staleTerminalInput);
+  var latest = __bramLatestResolvedLedgerEntry(payload);
   if (!latest) return "";
+  if (dismissedKey && latest.id === dismissedKey) return "";
   if (nowMs - latest.resolvedAtMs > 2 * 60 * 1000) return "";
   // The user moving on dismisses the note: any send injected after this
   // entry resolved means they have re-engaged (2026-07-03: "too sticky").

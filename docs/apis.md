@@ -108,6 +108,7 @@ uses them for the target app info dialog.
 | `/__settings` | HTTP POST | body matches GET shape | merged response after writing `.bram.json` atomically; preserves unknown top-level keys; 400 on JSON parse error / 500 on IO error | agent pane iframe (Settings tab) |
 | `settings-changed` | Tauri event | — | same payload `GET /__settings` returns | agent pane iframe (Settings DataSource refetch), parent shell (`app/main.js` `targetAppMinimized` driver) |
 | `/__coordination-status` | HTTP GET | — | derived status payload for the Status tab: `{ generatedAt, sections: [{ title, rows: [{ signal, level, state, detail, seen }] }] }`. Aggregates worklist counts by status, inflight sentinel state, turn-completion monitor state, authorization record freshness, watcher / hook health, recent trace tails. | agent pane iframe (Status tab) |
+| `/__event/latest` | HTTP GET | `name=<event-name>` | `{ exists, payload, tsMs }` — the most recently remembered Tauri event of the given name; subscriber replay for late-attaching listeners. | agent pane iframe, diagnostics |
 | `pty_spawn` | IPC | `{ shell, cwd, env, agentAutostart? }` | `Result<(), String>` | parent shell |
 | `pty_write` | IPC | `{ data: String }` | `Result<(), String>` | parent shell, iframe helpers (direct) |
 | `pty_resize` | IPC | `{ cols, rows }` | `Result<(), String>` | parent shell |
@@ -220,12 +221,12 @@ Codex's sandbox refuses loopback connections (`curl: (7)` even when Bram
 listens), so Codex drives the lifecycle through files instead of the HTTP
 routes above. The host watches the intent file and dispatches it through the
 *same* handlers (`handle_worklist_resolve`, `handle_worklist_mutate`,
-`handle_worklist_commit`, `handle_iterate_begin`, `handle_iterate_end`), so all
+`handle_worklist_commit`, `handle_worklist_end`, `handle_issue_close`), so all
 side effects and auth checks are identical.
 
 | Surface | Type | Shape |
 |---|---|---|
-| `resources/.worklist-intent.json` | file (agent writes) | `{ nonce, route, body? }` — `route` ∈ `worklist-resolve` \| `worklist-mutate` \| `worklist-commit` \| `iterate-begin` \| `iterate-end` \| `worklist-end`; `body` is the matching HTTP route's request body |
+| `resources/.worklist-intent.json` | file (agent writes) | `{ nonce, route, body? }` — `route` ∈ `worklist-resolve` \| `worklist-mutate` \| `worklist-commit` \| `worklist-end` \| `issue-close`; `body` is the matching HTTP route's request body |
 | `resources/.worklist-result.json` | file (host writes) | `{ nonce, ok, status, result? , error?, completedAtMs }` — `result` is the HTTP route's response body verbatim; `error` present when `ok:false` |
 
 - The watcher drain reads-then-deletes the intent file (so duplicate notify
@@ -300,48 +301,21 @@ providers, switched by the `provider=` query.
 | `/__sessions/latest` | HTTP GET | `provider=` | full JSONL body, `text/plain` | agent pane iframe |
 | `/__sessions/latest-meta` | HTTP GET | `provider=` | `{ size, mtime, id }` | agent pane iframe |
 | `/__sessions/latest-pending` | HTTP GET | `provider=` | pending tool-use record, JSON | agent pane iframe |
-| `/__sessions/latest-tail` | HTTP GET | `provider=`, `since=N`, `sid=ID`, `lines=N\|all` | JSON envelope `{sid, offset, content, reset}` | agent pane iframe |
 | `/__sessions/content` | HTTP GET | `provider=`, `id=` | full JSONL body for that session, `text/plain` | agent pane iframe |
 | `/__sessions/search` | HTTP GET | `provider=`, `q=`, `scope=recent\|all` | `[{ id, title, hits: [{ line, snippet }] }, …]` | agent pane iframe |
 | `/__sessions/delete` | HTTP GET | `provider=`, `id=` | `{ ok: true }` | agent pane iframe |
 | `/__sessions/rename` | HTTP GET | `provider=`, `id=`, `title=` | `{ ok: true }` | agent pane iframe |
-| `/__last-assistant-text` | HTTP GET | — | `{ text, mtime, path, source }`. Legacy compatibility route returning the most recent assistant text from the current session JSONL. Transcript now owns the live chat surface. | compatibility consumers / diagnostics |
+| `/__turns` | HTTP GET | `provider=claude\|codex` (optional), `id=<session-id>` (optional; by-id fetch), `agent=<agentId>` (optional; subagent transcript), `latest=N` (optional; tail window for live refreshes) | `{ sid, provider, total, windowStart, turns: [...] }` — `total` is the full turn count; `windowStart` is the index of the first returned turn (0 for full fetches); with `latest=N` only the last N turns are returned so the iframe can splice the window onto accumulated history and detect rotation/shrink. | agent pane iframe (Transcript, Sessions) |
+| `/__send-ledger` | HTTP GET | — | `{ entries: [...], nowMs, staleTerminalInput, awaitingTurn }` — snapshot of the outbound-send ledger. `entries` carry `id/kind/state/cause/viaQueue/mode/preview/injectedAtMs/resolvedAtMs/retried`. `staleTerminalInput` = an Esc-aborted send's copy is known to sit in the terminal input; `awaitingTurn` = a pane-submitted turn is in flight (drives the composer gate). | agent pane iframe |
 | `/__current-turn-edits` | HTTP GET | — | `{ added, removed, filePath, kind, lastToolId }` for the current turn's edit aggregates. Same derive-at-the-boundary pattern: host parses the 64 KB tail once per request, iframe binds via DataSource instead of running `currentTurnEdits(lastJsonl)` on every fanout. | agent pane iframe (Workspace turn-edits hint) |
 | `/__waiting-for-assistant` | HTTP GET | — | `{ waiting: bool }` — true when the most recent meaningful JSONL record is a user message (`tool_result`-only records skipped). Mirror of the iframe `isWaitingForAssistant` helper. | agent pane iframe |
-| `/__session-turns` | HTTP GET | — | `[{ role, text, entries, images }, …]` — host-derived turn timeline. Mirror of the iframe `sessionTurns(jsonlText)` helper that walked the full JSONL per fanout. | compatibility consumers / diagnostics |
-| `/__tool-detail` | HTTP GET | `id=<toolId>` | `{ input, result }` or `null` for a single tool by id. Companion to `/__session-turns`; mirrors `getToolDetail(jsonlText, toolId)`. | agent pane iframe (Workspace in-flight edit detail / compatibility consumers) |
+| `/__tool-detail` | HTTP GET | `id=<toolId>` | `{ input, result }` or `null` for a single tool by id. Mirrors `getToolDetail(jsonlText, toolId)`. | agent pane iframe (Workspace in-flight edit detail / compatibility consumers) |
 
 - Provider directories: `~/.claude/projects/<encoded-cwd>/` for Claude
   Code (`claude_sessions_dir` at `lib.rs:1942`),
   `~/.codex/sessions/...` for Codex (`discover_codex_sessions` at
   `lib.rs:2224`). The encoding is the absolute project path with `/`
   → `-`.
-- `latest-tail` is diff-aware (issue #100). Clients pass `since=<N>` (byte
-  offset) and `sid=<id>` (session-file stem). When `sid` matches the current
-  latest session AND `since > 0` AND `since` is in-bounds, the server returns
-  bytes `[since, EOF)` with `reset: false` — typical case is a tiny ~10 KB
-  delta or a 90-byte no-op envelope on idle polls. Otherwise it falls back to
-  a fresh tail (lines-default 200, or `lines=all` for the full file) with
-  `reset: true`. The `since > 0` guard is load-bearing: without it, an iframe
-  reactivity race (`sid` updated before `since` on first load) would make the
-  server treat `since=0&sid=X` as a delta-from-byte-0 and ship the entire
-  file.
-- The shared-cache iframe pattern: `Main.xmlui`'s App-level `DataSource`
-  consumes the envelope; a `ChangeListener` branches on `reset` —
-  `true` replaces the cache via `window.setLatestJsonl(env.content)`,
-  `false` appends via `window.appendLatestJsonl(env.content)`. The cap
-  on `appendLatestJsonl` (1.5 MB byte limit, head-trim at newline
-  boundary) bounds growth across long sessions without rotation.
-  Multiple iframe components subscribe so each fetch fans out to all
-  consumers without re-fetching per tab. Helpers in `app/__shell/helpers.js`:
-
-| Helper | Signature | Purpose |
-| --- | --- | --- |
-| `getLatestJsonl()` | `() => string \| null` | Read the current cumulative cache. Used by component `onInit` to bootstrap local `lastJsonl` before subscribing. |
-| `setLatestJsonl(value)` | `(string) => void` | Replace the cache. Called from the App-level `ChangeListener` on `reset: true` envelopes. Bypasses the cap. |
-| `appendLatestJsonl(chunk)` | `(string) => void` | Append a delta chunk. Called from the App-level `ChangeListener` on `reset: false` envelopes. Enforces the 1.5 MB byte cap; head-trims at the next newline boundary to keep the buffer valid JSONL. Emits a `jsonl-cap-trim` trace event when the cap fires. |
-| `onLatestJsonlChange(fn)` | `((value) => void) => unsubscribe` | Subscribe to broadcasts. Returns an unsubscribe function. Used directly by code that wants multi-subscriber semantics on its own terms. |
-| `subscribeLatestJsonl(key, fn)` | `(string, (value) => void) => void` | Convenience wrapper: subscribe and remember the unsubscriber on `window[key]`. Hot-reload-safe (revokes the prior subscription before re-registering). Used by `Workspace.xmlui` and its conversation components. XMLUI's expression evaluator rejects `window.X = ...` left-values at the top level of an `onInit` handler with "Left value variable not found in the scope" — this wrapper keeps the property assignment inside plain JS. |
 
 ## 6. Git & repo
 
@@ -442,8 +416,6 @@ file / event reference.
 | Surface | Kind | Query / params | Response | Consumer |
 | --- | --- | --- | --- | --- |
 | `/__inflight` | HTTP GET | — | sentinel JSON or `{}` if no claim | agent pane iframe |
-| `/__iterate/begin` | HTTP POST | body `{ ids: [...] }` | `{ ok: true }` / 400 `{ error: "…" }` | agent (curl) |
-| `/__iterate/end` | HTTP POST | body `{ ids: [...] }` | `{ ok: true }` / 400 `{ error: "…" }` | agent (curl) |
 | `resources/.inflight-claim.json` | file | — | `{ ids: [...], claimedAt: <ms>, kind: "approved" \| "drop" \| "iterate" }` or absent | host write, iframe via `/__inflight` |
 | `inflight-claim-changed` | Tauri event | — | empty payload | agent pane iframe |
 
@@ -459,10 +431,10 @@ file / event reference.
   - `drop` — written as a side effect of `/__worklist/resolve` serving a
     `kind:"drop"` record; cleared by `/__worklist/mutate prune`
     covering every claimed id, with the same host fallback.
-  - `iterate` — written by `POST /__iterate/begin`; cleared by
-    `POST /__iterate/end` covering every claimed id. The agent is
-    responsible for calling these around iterate processing (see
-    `conventions.md`).
+  - `iterate` — written by the host on the `toTurn` write path when an
+    `iterate:` prefix is detected; cleared by the same turn-finished
+    detectors that clear `approved` and `drop` sentinels.
+    `POST /__worklist/end` remains as the explicit manual unwind.
 - **Coverage rule for clears.** `clear` operations are no-ops unless
   every id currently claimed is in the supplied ids. Partial coverage
   intentionally leaves the file in place — a stuck sentinel is the

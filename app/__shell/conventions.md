@@ -1165,7 +1165,10 @@ a quick read on whether something looks off — then drop down to
 ### Trace subkind vocabulary
 
 `bram-trace.log` records iframe-side events as
-`[iframe] subkind=<name> {…fields}`. Common subkinds you'll grep for:
+`[iframe] subkind=<name> {…fields}` and host-side events as
+`[<category>] op=<name> …` lines (parent-shell events arrive as
+iframe-shaped subkinds with `context:parent`). Common entries you'll
+grep for:
 
 | Subkind | Emitter | Fields | Used for |
 | --- | --- | --- | --- |
@@ -1180,3 +1183,9 @@ a quick read on whether something looks off — then drop down to
 | `voice-input` | Worklist voice input path in `Globals.xs` | `stage` (`start` \| `recording-started` \| `stop` \| `append`), `target`, `requestId`, `stopAtMs`, `stopToResultMs`, `stopToAppendMs`, `parentStopToDeliverMs` | End-to-end voice latency for iframe-driven dictation. `stopToAppendMs` on `stage:append` measures Stop Record click to text insertion in the XMLUI input, useful for Mac/Windows comparisons. |
 | `inspector-event` | `__inspectorTapTick` in `helpers.js` | `entry` (verbatim `window._xsLogs` record) | Per-entry forwarding of the XMLUI Inspector log into `bram-trace.log` so Inspector events interleave with host traces live (#181). Opt-in via the **Traces → Inspector trace tap** switch in Settings (persisted as `traces.inspectorTap` in `.bram.json`). Inspector traces are intentionally complete — every keystroke, render, state change — so volume is high; selectivity filters (drop categories, sample) are a follow-up. |
 | `inspector-overflow` | `__inspectorTapTick` in `helpers.js` | `dropped`, `totalSeen` | Per-tick (200 ms) cap of 50 forwarded entries was exceeded; high-water mark advanced to current length and the listed count was dropped. Persistent overflow means cadence or cap needs tuning. |
+| `turns-projection` (host) | `read_projected_turns` / `try_incremental_projected_turns` in `lib.rs` | `op=rebuild` (`src_bytes`, phase ms `read/parse/project/serialize`, `turns`, `window`, `body_bytes`, `total_ms`); `op=incremental` (`suffix_bytes`, `merged_turns`, `ms`) | Projection cost accounting on long sessions: the rebuild-vs-tail-merge ratio and which phase dominates (post-#214 measurement: parsing is ~10% of a rebuild; project/serialize dominate). |
+| `reveal-floor` (host) | quiescence observer in the pty-throughput ticker, `lib.rs` | `op=would-reveal` / `op=reveal-suppressed reason=menu-displayed` / `op=reset reason=activity\|turn-changed\|turn-closed`, with `silence_ms`, `gap_p95_ms`, `gaps_n` | Phase-0 observe-only soak for the auto-reveal-terminal predicate ("turn open + byte-silent + no pane menu"). The graduation review greps these: every `would-reveal` must map to a corroborated terminal-needing moment. |
+| `esc-scan` (host) | send-ledger escape sweep and soft turn-end poller, `lib.rs` | `op=sweep` (`read_ms`, `total_ms`, `bytes`); `op=soft-turn-end` (`ms`, `bytes`, `waited_ms`) | Times the per-Esc full-session scans. Exonerated the host in the 2026-07-08 wedge hunt (5 ms over a 26 MB session). |
+| `xterm-liveness` (parent shell) | heartbeat watchdog in `app/main.js`, arrives with `context:parent` | `op=stall`, `gap_ms` | Measures freezes ≥500 ms of the parent main thread xterm renders on; one line per stall, logged at recovery. Stalls bracketed by a slow named op implicate it; absence during a felt wedge relocates the problem below the webview (child process / PTY). |
+| `send-ledger` (host) | ledger transitions and guards, `lib.rs` | `op=inject/transition/restore/auto-resend/aborted-no-restore/aborted-skip/stale-input-clear/stale-input-clear-skip` with entry ids, causes, byte counts | Outbound-send lifecycle forensics: landing vs strand vs abort classification, restores, and the stale-terminal-input clear decisions. |
+| `hook-menu` (host) | permission-hook handlers and grid-defer decisions, `lib.rs` | `op=permission/payload/hook-diff/clear/retire-suppressor/grid-deferred/grid-emit-deferred/grid-emit-allowed` | Hook-primary menu coordination: hook claims and their payloads, diff enrichment (`hook-diff cluster=N`), fence-suppressor retirement, and whether the grid deferred or emitted for a hook-owned prompt. The menu-miss retrospective greps these. |

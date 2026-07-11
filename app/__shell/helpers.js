@@ -4478,6 +4478,29 @@ window.__bramFormatToolResult = function (result, toolName, hint) {
   if (result == null) return "";
   var text = String(result);
   if (text.trim() === "") return text;
+  // tool-format sync bracket (variant-B expansion freeze, 2026-07-11
+  // 22:48Z): the freeze lives somewhere in formatter → Markdown → WebKit
+  // layout of a large expanded row, with the click handler exonerated by
+  // the host-side describe route entry. Bracket the formatter's string
+  // work synchronously (logToHost → invoke survives a freeze) for large
+  // inputs only: begin-no-end names the formatter; begin+end then silence
+  // names Markdown/layout by elimination. longestLine captures the
+  // dimension the 16KB cap below does NOT bound — the rg row's 11.5K-char
+  // single line is the prime layout suspect.
+  var bracketT0 = 0;
+  var bracketBig = text.length > 8000;
+  if (bracketBig) {
+    var lineLongest = 0, lineCur = 0;
+    for (var bi = 0; bi < text.length; bi++) {
+      if (text.charCodeAt(bi) === 10) { lineCur = 0; }
+      else { lineCur++; if (lineCur > lineLongest) lineLongest = lineCur; }
+    }
+    bracketT0 = performance.now();
+    window.__bramIframeTrace("tool-format", {
+      stage: "begin", tool: String(toolName || ""),
+      chars: text.length, longestLine: lineLongest,
+    });
+  }
   // Strip ANSI escape sequences so raw \x1b[...m bytes don't render literally.
   text = text.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, "");
 
@@ -4531,7 +4554,14 @@ window.__bramFormatToolResult = function (result, toolName, hint) {
   var fenceLen = Math.max(3, longest + 1);
   for (var j = 0; j < fenceLen; j++) { fence += "`"; }
 
-  return fence + lang + "\n" + body + "\n" + fence;
+  var out = fence + lang + "\n" + body + "\n" + fence;
+  if (bracketBig) {
+    window.__bramIframeTrace("tool-format", {
+      stage: "end", tool: String(toolName || ""),
+      ms: Math.round(performance.now() - bracketT0), outChars: out.length,
+    });
+  }
+  return out;
 };
 
 // Append the live pending agent menu (if any) as the last transcript event.

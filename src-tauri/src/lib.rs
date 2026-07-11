@@ -9962,7 +9962,7 @@ fn handle_project_config_reload<R: tauri::Runtime>(app_handle: &AppHandle<R>, pr
                 format!("/{}", cfg.path)
             };
             (
-                format!("{}/__project{}", SHELL_ORIGIN, path),
+                format!("{}/__project{}", TARGET_ORIGIN, path),
                 format!("http://localhost:{}/", cfg.port),
             )
         }
@@ -9979,7 +9979,7 @@ fn handle_project_config_reload<R: tauri::Runtime>(app_handle: &AppHandle<R>, pr
                 .rsplit_once('/')
                 .map(|(base, _)| format!("{}/", base))
                 .unwrap_or_else(|| default.clone());
-            (format!("{}/__project/index.html", SHELL_ORIGIN), upstream)
+            (format!("{}/__project/index.html", TARGET_ORIGIN), upstream)
         }
     };
     {
@@ -28935,6 +28935,18 @@ const SHELL_ORIGIN: &str = "http://tauri.localhost";
 #[cfg(not(any(target_os = "windows", target_os = "android")))]
 const SHELL_ORIGIN: &str = "tauri://localhost";
 
+// Distinct origin for the target-app pane so same-origin policy isolates it
+// from the shell's `window.__TAURI__` and the loopback `/__*` routes
+// (security C1 / #113, #112). Mirrors SHELL_ORIGIN's platform split: Tauri
+// presents custom schemes as `http://<scheme>.localhost` (secure context) on
+// Windows/Android and `<scheme>://localhost` elsewhere. The target pane is a
+// pure display surface — see `handle_target_scheme`.
+#[cfg(any(target_os = "windows", target_os = "android"))]
+const TARGET_ORIGIN: &str = "http://bramapp.localhost";
+
+#[cfg(not(any(target_os = "windows", target_os = "android")))]
+const TARGET_ORIGIN: &str = "bramapp://localhost";
+
 // Tauri custom-scheme handler that overrides Tauri's default tauri://
 // behavior. Tauri 2 skips registering its built-in handler when an
 // app-level handler with the same scheme name is present (see
@@ -29022,6 +29034,70 @@ fn handle_tauri_scheme<R: tauri::Runtime>(
         urls.right_pane_upstream.clone()
     };
     proxy_to_target(upstream, rel, uri.query(), request)
+}
+
+// Isolation scheme for the target-app pane (security C1 / #113, #112). Served
+// at a DISTINCT origin (TARGET_ORIGIN) from the shell, so same-origin policy
+// denies target content `window.parent.__TAURI__`, the PTY-driving helpers,
+// and the loopback's internal `/__*` routes. The target pane is a pure display
+// surface with no host authority: only project content is proxied to
+// `right_pane_upstream`; every Bram-internal route and shell asset (including
+// `__shell/helpers.js`) is refused. Contrast `handle_tauri_scheme`, which
+// deliberately keeps the shell and agent-tools drawer same-origin.
+fn handle_target_scheme<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    request: http::Request<Vec<u8>>,
+) -> http::Response<Vec<u8>> {
+    let uri = request.uri().clone();
+    let rel = uri.path().trim_start_matches('/');
+    let (right_pane_upstream, loopback_origin) = {
+        let state = app.state::<PaneUrlsState>();
+        let urls = state.0.lock().unwrap();
+        (urls.right_pane_upstream.clone(), urls.loopback_origin.clone())
+    };
+    // Self-diagnosing: one line per request so we can confirm the bramapp
+    // scheme is actually routed to this handler (C1 build-gate probe).
+    if bram_trace_enabled() {
+        append_bram_trace_line(app, "target-scheme", &format!("op=enter rel={}", rel));
+    }
+    // /__project/* — project content escape hatch; strip the prefix and proxy
+    // to the project upstream, exactly as the shell scheme's Tier 1 does, so
+    // relative sub-resource URLs resolve identically at the isolated origin.
+    if let Some(after) = rel.strip_prefix("__project/") {
+        return proxy_to_target(right_pane_upstream, after, uri.query(), request);
+    }
+    if rel.starts_with("__") {
+        // Static Bram assets the target legitimately needs to RENDER — vendored
+        // libraries (`__vendor/*`: xmlui-standalone, xterm) and the helper shim
+        // (`__shell/*`) — are served from the loopback like the shell scheme's
+        // Tier 3. The shim is inert here: cross-origin, its `getTauriInvoke()`
+        // cannot reach the shell's `window.__TAURI__`, so `toShell`/`toTurn`/
+        // `sendKeys`/`open_url` no-op. What we REFUSE is the dynamic host-route
+        // surface (`__file`, `__worklist/*`, `__issue/*`, `__context/*`,
+        // `__local-file-preview`, `__settings`, `__menu/*`, `__git/*`, …) — the
+        // loopback endpoints that read files, mutate git, or drive the PTY. The
+        // origin boundary is the primary isolation; this is defense in depth.
+        if rel.starts_with("__vendor/") || rel.starts_with("__shell/") {
+            return proxy_to_target(loopback_origin, rel, uri.query(), request);
+        }
+        if bram_trace_enabled() {
+            append_bram_trace_line(app, "target-scheme", &format!("op=refuse rel={}", rel));
+        }
+        return http::Response::builder()
+            .status(403)
+            .header("Content-Type", "text/plain; charset=utf-8")
+            .body(b"forbidden: the target pane has no access to Bram host routes".to_vec())
+            .unwrap_or_else(|_| {
+                http::Response::builder()
+                    .status(403)
+                    .body(Vec::new())
+                    .unwrap()
+            });
+    }
+    // Project sub-resources at absolute non-`__` paths (e.g. /xmlui/foo.js,
+    // /Main.xmlui) — proxy straight to the project upstream, mirroring the
+    // shell scheme's Tier 4.
+    proxy_to_target(right_pane_upstream, rel, uri.query(), request)
 }
 
 fn proxy_to_target(
@@ -29209,6 +29285,15 @@ pub fn run() {
                 responder.respond(response);
             });
         })
+        .register_asynchronous_uri_scheme_protocol("bramapp", |ctx, request, responder| {
+            // Isolation origin for the target-app pane (C1). Serves project
+            // content only; runs on its own thread like the shell scheme.
+            let app = ctx.app_handle().clone();
+            std::thread::spawn(move || {
+                let response = handle_target_scheme(&app, request);
+                responder.respond(response);
+            });
+        })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(AppState::default())
@@ -29334,7 +29419,7 @@ pub fn run() {
                     } else {
                         format!("/{}", cfg.path)
                     };
-                    format!("{}/__project{}", SHELL_ORIGIN, path)
+                    format!("{}/__project{}", TARGET_ORIGIN, path)
                 };
                 match probe_port_http(cfg.port, &cfg.path) {
                     PortStatus::Live => {
@@ -29397,7 +29482,7 @@ pub fn run() {
                 }
             } else {
                 (
-                    format!("{}/__project/index.html", SHELL_ORIGIN),
+                    format!("{}/__project/index.html", TARGET_ORIGIN),
                     internal_base.clone(),
                 )
             };

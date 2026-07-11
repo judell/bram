@@ -25875,8 +25875,43 @@ fn route_request<R: tauri::Runtime>(
                 break;
             }
         }
-        let p = std::path::Path::new(&file_path);
-        let result = match std::fs::read_to_string(p) {
+        // Allowlist (security C3): /__context/file backs the Context tab, whose
+        // legitimate file set is exactly what the Context enumeration returns
+        // (project CLAUDE.md + @-imports, ~/.claude memory/settings, project
+        // .claude/hooks, ~/.codex files). Those live outside the project root,
+        // so root containment doesn't fit — instead require the requested path
+        // to be a MEMBER of the enumerated set (union of both providers). This
+        // preserves the read-home-config feature while blocking arbitrary reads
+        // (~/.aws/credentials, /etc/passwd). Canonicalize both sides so symlinks
+        // and `..` can't dodge the membership check.
+        let requested = std::path::Path::new(&file_path)
+            .canonicalize()
+            .ok()
+            .map(strip_unc_prefix);
+        let allowed: std::collections::HashSet<PathBuf> =
+            [SessionProvider::Claude, SessionProvider::Codex]
+                .into_iter()
+                .flat_map(|prov| collect_context_files(app, Some(prov)))
+                .filter_map(|cf| cf.path.canonicalize().ok().map(strip_unc_prefix))
+                .collect();
+        let allowed_hit = requested
+            .as_ref()
+            .map(|r| allowed.contains(r))
+            .unwrap_or(false);
+        if !allowed_hit {
+            eprintln!(
+                "[http /__context/file path={}] refused: not in the Context file set",
+                file_path
+            );
+            let body = serde_json::to_vec(&serde_json::json!({
+                "content": "",
+                "error": "forbidden: not in the Context file set"
+            }))
+            .unwrap_or_default();
+            return (403, "application/json; charset=utf-8", body);
+        }
+        let p = requested.unwrap();
+        let result = match std::fs::read_to_string(&p) {
             Ok(content) => serde_json::json!({ "content": content }),
             Err(e) => {
                 eprintln!("[http /__context/file path={}] {}", file_path, e);

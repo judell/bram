@@ -25802,6 +25802,40 @@ mod worklist_history_tests {
 }
 
 // Routing for the right-pane HTTP server. Returns (status, content-type, body).
+// Security C2: true iff `candidate` (an already-canonicalized path) lives under
+// one of `roots`. Each root is canonicalized here so symlinked roots (e.g.
+// macOS `/var` -> `/private/var`) compare correctly. Used to contain `/__file`
+// reads to the screenshot/paste caches and the project root.
+fn path_within_allowed_roots(candidate: &std::path::Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|r| {
+        let r = strip_unc_prefix(r.canonicalize().unwrap_or_else(|_| r.clone()));
+        candidate.starts_with(&r)
+    })
+}
+
+#[cfg(test)]
+mod c2_file_containment_tests {
+    use super::*;
+
+    #[test]
+    fn allows_paths_inside_a_root_and_rejects_outside() {
+        let base = std::env::temp_dir().join("bram-c2-containment");
+        let _ = std::fs::create_dir_all(&base);
+        let inside = base.join("shot.png");
+        std::fs::write(&inside, b"x").unwrap();
+        let roots = vec![base.clone()];
+
+        let inside_canon = strip_unc_prefix(inside.canonicalize().unwrap());
+        assert!(path_within_allowed_roots(&inside_canon, &roots));
+
+        // A real file outside every allowed root is rejected.
+        if let Ok(outside) = std::path::Path::new("/etc/hosts").canonicalize() {
+            assert!(!path_within_allowed_roots(&strip_unc_prefix(outside), &roots));
+        }
+        let _ = std::fs::remove_file(&inside);
+    }
+}
+
 fn route_request<R: tauri::Runtime>(
     app: &AppHandle<R>,
     path: &str,
@@ -26356,9 +26390,44 @@ fn route_request<R: tauri::Runtime>(
                 break;
             }
         }
-        let p = std::path::Path::new(&file_path);
-        return match std::fs::read(p) {
-            Ok(bytes) => (200, mime_for(p), bytes),
+        // Containment (security C2): `/__file` serves pasted images
+        // (`~/.cache/bram/paste/`) and captured screenshots (the app cache dir)
+        // by absolute path, so it legitimately reads outside the project — but
+        // it must NOT read arbitrary host files. Canonicalize the request
+        // (collapsing `..` and resolving symlinks) and require it to live under
+        // one allowed root: the Bram cache, the app cache dir, or the project
+        // root. Blocks `/etc/passwd`, `~/.ssh/id_rsa`, and symlink escapes.
+        let expanded = expand_tilde(&file_path);
+        let canonical = match std::path::Path::new(&expanded).canonicalize() {
+            Ok(c) => strip_unc_prefix(c),
+            Err(e) => {
+                eprintln!("[http /__file path={}] {}", file_path, e);
+                return (404, "text/plain; charset=utf-8", Vec::new());
+            }
+        };
+        let mut allowed_roots: Vec<PathBuf> = Vec::new();
+        if let Some(home) = home_dir() {
+            allowed_roots.push(home.join(".cache").join("bram"));
+        }
+        if let Ok(cache) = app.path().app_cache_dir() {
+            allowed_roots.push(cache);
+        }
+        if let Some(root) = project_root(Some(app)) {
+            allowed_roots.push(root);
+        }
+        if !path_within_allowed_roots(&canonical, &allowed_roots) {
+            eprintln!(
+                "[http /__file path={}] refused: outside allowed roots",
+                file_path
+            );
+            return (
+                403,
+                "text/plain; charset=utf-8",
+                b"forbidden: path outside allowed roots".to_vec(),
+            );
+        }
+        return match std::fs::read(&canonical) {
+            Ok(bytes) => (200, mime_for(&canonical), bytes),
             Err(e) => {
                 eprintln!("[http /__file path={}] {}", file_path, e);
                 (404, "text/plain; charset=utf-8", Vec::new())

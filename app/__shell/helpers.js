@@ -4225,11 +4225,39 @@ window.__bramPatchProjectedToolDescription = function (toolId, description) {
         newEntries[k] = Object.assign({}, e, { description: description });
         var newTurns = turns.slice();
         newTurns[i] = Object.assign({}, turns[i], { entries: newEntries });
+        // Observe-only (describe-freeze recurrence, 2026-07-11): the
+        // full-projection rebroadcast below re-renders the entire transcript
+        // and is the suspected hard-freeze on large Codex sessions. Log BEFORE
+        // it via logToHost -> invoke (synchronous IPC dispatch), so the host
+        // records the attempt even if the iframe main thread freezes in the
+        // broadcast. A `begin` with no matching `end` names the culprit and its
+        // size. Tracing must never break the patch, hence the try/catch.
+        try {
+          window.__bramIframeTrace("describe-patch", {
+            stage: "begin",
+            toolId: toolId,
+            provider: prev.provider || "",
+            name: e.name || "",
+            turns: turns.length,
+            resultChars: String(e.result || "").length,
+            descChars: String(description || "").length,
+          });
+        } catch (traceErr) { /* ignore */ }
+        var __describePatchT0 = Date.now();
         window.__bramBroadcastProjectedTurns({
           sid: prev.sid,
           provider: prev.provider,
           turns: newTurns,
         });
+        try {
+          window.__bramIframeTrace("describe-patch", {
+            stage: "end",
+            toolId: toolId,
+            provider: prev.provider || "",
+            turns: turns.length,
+            ms: Date.now() - __describePatchT0,
+          });
+        } catch (traceErr2) { /* ignore */ }
         return true;
       }
     }

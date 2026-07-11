@@ -25,8 +25,22 @@ window._xsLogs = window._xsLogs || [];
   var Native = window.ResizeObserver;
   if (!Native || Native.__bramFloodWrapped) return;
   var FLOOD_PER_SEC = 50;
+  var RING_MAX = 60;
   var total = 0;
   var counts = Object.create(null);
+  // Identity + geometry ring (ro-flood-identity-ring-buffer): the flood
+  // line alone cannot distinguish (a) one row oscillating between two
+  // heights, (b) many rows re-measuring under container size churn, or
+  // (c) rows remounting — observe() fires one initial notification per
+  // new element, so a remount loop floods the counter with zero real
+  // resizes. Each fire records element identity (data-index, seen-before)
+  // and contentRect geometry; the detail line dumps the ring when the
+  // flood threshold trips.
+  var seen = typeof WeakSet === "function" ? new WeakSet() : null;
+  var newElements = 0;
+  var repeatFires = 0;
+  var ring = [];
+  var lastFireMs = 0;
   function describe(el) {
     try {
       if (!el || el.nodeType !== 1) return String(el);
@@ -37,13 +51,37 @@ window._xsLogs = window._xsLogs || [];
       return el.tagName.toLowerCase() + id + cls;
     } catch (e) { return "?"; }
   }
+  function shortKey(k) {
+    if (k.indexOf("._row_") >= 0) return "row";
+    if (k.indexOf("._mainContentArea_") >= 0) return "main";
+    if (k.indexOf("html") === 0) return "html";
+    return k.slice(0, 24);
+  }
   var Wrapped = class extends Native {
     constructor(cb) {
       super(function (entries, observer) {
         total += entries.length || 1;
+        var now = Math.round(performance.now());
         for (var i = 0; i < entries.length; i++) {
-          var k = describe(entries[i] && entries[i].target);
+          var el = entries[i] && entries[i].target;
+          var k = describe(el);
           counts[k] = (counts[k] || 0) + 1;
+          var isNew = false;
+          if (seen && el && el.nodeType === 1) {
+            if (seen.has(el)) { repeatFires++; }
+            else { seen.add(el); isNew = true; newElements++; }
+          }
+          var r = entries[i] && entries[i].contentRect;
+          ring.push([
+            lastFireMs ? now - lastFireMs : 0,
+            shortKey(k),
+            el && el.getAttribute ? el.getAttribute("data-index") : null,
+            r ? Math.round(r.width * 10) / 10 : null,
+            r ? Math.round(r.height * 10) / 10 : null,
+            isNew,
+          ]);
+          lastFireMs = now;
+          if (ring.length > RING_MAX) ring.shift();
         }
         return cb.call(this, entries, observer);
       });
@@ -54,16 +92,37 @@ window._xsLogs = window._xsLogs || [];
   setInterval(function () {
     var t = total; total = 0;
     var snap = counts; counts = Object.create(null);
+    var newN = newElements; newElements = 0;
+    var repN = repeatFires; repeatFires = 0;
     if (t < FLOOD_PER_SEC) return;
     var top = Object.keys(snap)
       .map(function (k) { return [k, snap[k]]; })
       .sort(function (a, b) { return b[1] - a[1]; })
       .slice(0, 6)
       .map(function (p) { return p[0] + "=" + p[1]; });
+    // One entry per fire: "+dt key#idx WxH*" — dt is ms since the prior
+    // fire, #idx is the element's data-index when present (XMLUI's List
+    // Item sets it), trailing * marks a first-ever observation (mount).
+    // Encoded as chunked strings because the trace serializer summarizes
+    // arrays to 3 samples and truncates strings at 500 chars
+    // (__bramTraceSafeValue).
+    var enc = ring.map(function (e) {
+      return "+" + e[0] + " " + e[1] + (e[2] != null ? "#" + e[2] : "") +
+        " " + e[3] + "x" + e[4] + (e[5] ? "*" : "");
+    }).join(";");
+    ring = [];
     if (typeof window.__bramIframeTrace === "function") {
       window.__bramIframeTrace("resizeobserver-flood", {
         context: "iframe", firesPerSec: t, top: top,
       });
+      var detail = {
+        context: "iframe", newElements: newN, repeatFires: repN,
+        ring1: enc.slice(0, 480),
+      };
+      if (enc.length > 480) detail.ring2 = enc.slice(480, 960);
+      if (enc.length > 960) detail.ring3 = enc.slice(960, 1440);
+      if (enc.length > 1440) detail.ring4 = enc.slice(1440, 1920);
+      window.__bramIframeTrace("resizeobserver-flood-detail", detail);
     }
   }, 1000);
 })();

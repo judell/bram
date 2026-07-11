@@ -41,6 +41,19 @@ window._xsLogs = window._xsLogs || [];
   var repeatFires = 0;
   var ring = [];
   var lastFireMs = 0;
+  // Sync in-callback dump (ro-flood-sync-dump): the interval dump below
+  // requires the main thread to yield, so a non-converging RO loop — the
+  // terminal-freeze variant, e.g. 2026-07-11T17:07 (last iframe line, then
+  // 53 min of silence) — dies without testifying. firesSinceTick is reset
+  // by every interval tick; if it reaches SYNC_BURST_FIRES the thread has
+  // NOT yielded through a whole flooding second, and we emit the detail
+  // line directly from the callback via logToHost → invoke, whose IPC
+  // dispatch the host logs even if the iframe never yields again (the
+  // describe-patch precedent).
+  var SYNC_BURST_FIRES = 120;
+  var SYNC_MIN_GAP_MS = 2000;
+  var firesSinceTick = 0;
+  var lastSyncDumpMs = 0;
   function describe(el) {
     try {
       if (!el || el.nodeType !== 1) return String(el);
@@ -56,6 +69,25 @@ window._xsLogs = window._xsLogs || [];
     if (k.indexOf("._mainContentArea_") >= 0) return "main";
     if (k.indexOf("html") === 0) return "html";
     return k.slice(0, 24);
+  }
+  function encodeRing() {
+    var enc = ring.map(function (e) {
+      return "+" + e[0] + " " + e[1] + (e[2] != null ? "#" + e[2] : "") +
+        " " + e[3] + "x" + e[4] + (e[5] ? "*" : "");
+    }).join(";");
+    ring = [];
+    return enc;
+  }
+  function emitDetail(via, newN, repN, enc) {
+    if (typeof window.__bramIframeTrace !== "function") return;
+    var detail = {
+      context: "iframe", via: via, newElements: newN, repeatFires: repN,
+      ring1: enc.slice(0, 480),
+    };
+    if (enc.length > 480) detail.ring2 = enc.slice(480, 960);
+    if (enc.length > 960) detail.ring3 = enc.slice(960, 1440);
+    if (enc.length > 1440) detail.ring4 = enc.slice(1440, 1920);
+    window.__bramIframeTrace("resizeobserver-flood-detail", detail);
   }
   var Wrapped = class extends Native {
     constructor(cb) {
@@ -82,6 +114,14 @@ window._xsLogs = window._xsLogs || [];
           ]);
           lastFireMs = now;
           if (ring.length > RING_MAX) ring.shift();
+          firesSinceTick++;
+          if (firesSinceTick >= SYNC_BURST_FIRES && now - lastSyncDumpMs >= SYNC_MIN_GAP_MS) {
+            firesSinceTick = 0;
+            lastSyncDumpMs = now;
+            var newN = 0;
+            for (var j = 0; j < ring.length; j++) if (ring[j][5]) newN++;
+            emitDetail("sync", newN, ring.length - newN, encodeRing());
+          }
         }
         return cb.call(this, entries, observer);
       });
@@ -94,6 +134,10 @@ window._xsLogs = window._xsLogs || [];
     var snap = counts; counts = Object.create(null);
     var newN = newElements; newElements = 0;
     var repN = repeatFires; repeatFires = 0;
+    // Every tick proves the thread yielded: reset the sync-dump burst
+    // counter so the in-callback dump fires only when a whole flooding
+    // second passes without this tick running (i.e., a hard freeze).
+    firesSinceTick = 0;
     if (t < FLOOD_PER_SEC) return;
     var top = Object.keys(snap)
       .map(function (k) { return [k, snap[k]]; })
@@ -106,23 +150,11 @@ window._xsLogs = window._xsLogs || [];
     // Encoded as chunked strings because the trace serializer summarizes
     // arrays to 3 samples and truncates strings at 500 chars
     // (__bramTraceSafeValue).
-    var enc = ring.map(function (e) {
-      return "+" + e[0] + " " + e[1] + (e[2] != null ? "#" + e[2] : "") +
-        " " + e[3] + "x" + e[4] + (e[5] ? "*" : "");
-    }).join(";");
-    ring = [];
     if (typeof window.__bramIframeTrace === "function") {
       window.__bramIframeTrace("resizeobserver-flood", {
         context: "iframe", firesPerSec: t, top: top,
       });
-      var detail = {
-        context: "iframe", newElements: newN, repeatFires: repN,
-        ring1: enc.slice(0, 480),
-      };
-      if (enc.length > 480) detail.ring2 = enc.slice(480, 960);
-      if (enc.length > 960) detail.ring3 = enc.slice(960, 1440);
-      if (enc.length > 1440) detail.ring4 = enc.slice(1440, 1920);
-      window.__bramIframeTrace("resizeobserver-flood-detail", detail);
+      emitDetail("interval", newN, repN, encodeRing());
     }
   }, 1000);
 })();

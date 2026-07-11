@@ -123,6 +123,15 @@ from the **target app** (XMLUI or not), the target's `index.html` must
 include `<script src="/__shell/helpers.js"></script>`. If it doesn't, drive
 these from the agent pane instead.
 
+> **Since C1 (target-pane origin isolation).** The target pane is served at a
+> distinct `bramapp://localhost` origin, so cross-origin `getTauriInvoke()`
+> returns `null` and the PTY-driving helpers (`toShell` / `toTurn` /
+> `sendKeys` / `openExternal`) **no-op inside an embedded target app** — the
+> pane is **display-only**. `helpers.js` is still served there (so XMLUI apps
+> boot) but its host-driving functions are inert. Render agent-facing controls
+> (`Select` / `Button` → `toTurn`) in the **agent pane**, which stays
+> same-origin and where the helpers work.
+
 | intent | call | what the host does |
 |---|---|---|
 | inject text the user can edit | `toShell(text)` | text + `\n` appears in your stdin; user must press Enter |

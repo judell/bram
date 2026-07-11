@@ -1022,6 +1022,18 @@ project's `index.html` to expose:
 Use `toTurn` for one-shot form submissions (Approve, Confirm). Use
 `toShell` to inject text the user can edit before sending.
 
+> **Since C1 (target-pane origin isolation).** The target pane is served at a
+> distinct `bramapp://localhost` origin, so `getTauriInvoke()` returns `null`
+> there and `toShell` / `toTurn` / `sendKeys` / `openExternal` **no-op** inside
+> an embedded target app — the pane is display-only. `helpers.js` is still
+> served (so XMLUI apps boot) but its host-driving functions are inert; only
+> Bram's own agent pane (Worklist/Sessions), which stays same-origin, drives
+> them. If an embedded app needs to talk back to the agent, render the control
+> in the agent pane instead. The target scheme (`handle_target_scheme` in
+> `lib.rs`) refuses the dynamic host routes (`__file`, `__worklist/*`,
+> `__settings`, …) and serves only project content plus the static
+> `__vendor/*` / `__shell/*` namespaces.
+
 ### UI patterns
 
 #### Fold optional companion input into existing actions
@@ -1176,6 +1188,7 @@ grep for:
 | `heartbeat-batch` | iframe heartbeat `Timer` | `fires`, `avgDriftMs`, `maxDriftMs`, `spikes`, `sumDriftMs`, `spanMs` | Iframe main-thread drift signal. Spikes correlate with fanouts that did real work; steady-state `maxDriftMs:11, spikes:0` is the green target between fanouts. |
 | `listener-fired` | various `tauri.event.listen` handlers | `context` (`worklist-changed` \| `inflight-claim-changed` \| `pty-menu-changed` \| `talk-session-changed`); for `talk-session-changed` also `correlation_id`, `at_host_ms`, `delta_to_emit_ms` (iframe receive minus host emit, `-1` if the event predates `at_host_ms`) | Tauri event delivery into the iframe. |
 | `event-received` | `talk-session-changed` listener in `helpers.js` | `correlation_id`, `subscribers`, `at_host_ms`, `delta_to_emit_ms` | Parent → iframe hand-off latency for `talk-session-changed`, logged once per host emit before subscriber fan-out. Pairs with the host `[emit] ... correlation_id=...` line to expose the Tauri event hop in isolation from subscriber dispatch. |
+| `target-scheme` (host) | `handle_target_scheme` in `lib.rs` | `op=enter rel=<path>`, `op=refuse rel=<path>` | Per-request trace for the isolated target-pane origin (`bramapp://`, security C1). `op=enter` confirms the `bramapp` scheme is routed to the handler; `op=refuse` flags a dynamic host route (`__file`, `__worklist/*`, `__settings`, …) denied to target content. Static namespaces (`__project/*`, `__vendor/*`, `__shell/*`) proxy through with only an `op=enter` line. Used to confirm the isolation is live and to see what target content probes. |
 | `refetch-called` | Workspace.xmlui debounce after `talk-session-changed` | `context`, `correlation_id`, `at_host_ms`, `delta_to_emit_ms` (host emit minus refetch-fire time, so it includes the 400 ms debounce coalesce) | Post-debounce refetch tick. A `delta_to_emit_ms` far above 400 ms means the iframe main thread was busy between emit and refetch. |
 | `inspector-tap-tick` | `__inspectorTapTick` in `helpers.js` | `batch` (entries forwarded this tick), `available` (entries ready), `ms` (loop wall time) | Per-non-empty tick of the Inspector tap poller. Empty ticks are silent so this is a slow-tick alarm: a tick with `ms` ≫ 200 (the tick interval) means the IPC channel is backed up while the poller serializes entries through `logToHost`. Pairs with `inspector-event` / `inspector-overflow`. |
 | `click` | UI Button onClick handlers (Workspace) | `target` (`approve` \| `drop` \| `iterate`), `item` | Worklist tab user actions. |

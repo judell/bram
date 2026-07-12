@@ -1722,7 +1722,15 @@ window.__bramSplitCommandSegments = function (body, widthCap) {
     var seg = (s === 0 ? segs[s].trim() : "  " + segs[s].trim());
     while (seg.length > cap) {
       var brk = seg.lastIndexOf(" ", cap);
-      if (brk <= 4) break;
+      // A break point at or inside the 6-char hanging indent means the
+      // visible content has no usable space: stop wrapping and leave the
+      // long token on one line. With the old `brk <= 4` guard, a wrapped
+      // continuation ("      " + >cap spaceless token, e.g. a long session
+      // path or rg pattern) found brk=5 forever and rebuilt seg
+      // byte-identical each pass — the transcript-expansion freeze
+      // (fix-command-wrap-infinite-loop; probe capture 2026-07-12T03:34Z).
+      // For brk >= 7 the segment strictly shrinks, so wrapping terminates.
+      if (brk <= 6) break;
       lines.push(seg.slice(0, brk));
       seg = "      " + seg.slice(brk + 1);
     }
@@ -4995,6 +5003,12 @@ window.__bramToggleInArray = function (arr, id) {
 // feedback on haiku-command-descriptions).
 window.__bramDescribeRequested = {};
 window.__bramExpandTool = function (arr, item) {
+  // Arm the xmlui freeze-probe window (xmlui-eval-probe-vendor): for 1.5s
+  // after an expansion click, the instrumented vendored engine emits
+  // xmlui-probe trace lines (op=eval|stmt|action) synchronously via
+  // logToHost → invoke, so a hang in the ensuing re-render names its exact
+  // site — the trace stream ends AT the hanging statement/binding/action.
+  try { window.__bramXmluiTraceUntil = performance.now() + 1500; } catch (e) {}
   var next = window.__bramToggleInArray(arr, item && item.id);
   try {
     var opening = item && item.id && (next || []).indexOf(item.id) >= 0;

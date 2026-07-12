@@ -8840,6 +8840,7 @@ fn write_pty_turn_intent<R: tauri::Runtime>(
         Some(frame) => frame,
         None => st_collapse_whitespace(data),
     };
+    let payload = sanitize_pty_turn_payload(&payload);
     let data = payload.as_str();
     // Outbound-send ledger: record the exact PTY payload so landing can be
     // confirmed by outcome. Runs after framing so the ledger sees what the
@@ -8886,6 +8887,16 @@ fn write_pty_turn_intent<R: tauri::Runtime>(
     inject_turn_payload(app, state, data)
 }
 
+fn sanitize_pty_turn_payload(data: &str) -> String {
+    data.chars()
+        .filter(|ch| *ch == '\n' || *ch == '\t' || !ch.is_control())
+        .collect()
+}
+
+fn bracketed_paste_turn_payload(data: &str) -> String {
+    format!("\x1b\x15\x1b[200~{}\x1b[201~\r", data)
+}
+
 // The raw PTY injection for a turn payload. Shared by the normal send
 // path above and the ledger's trust-gated auto-resend.
 fn inject_turn_payload<R: tauri::Runtime>(
@@ -8904,7 +8915,7 @@ fn inject_turn_payload<R: tauri::Runtime>(
         // as "discard current input." Belt and suspenders so partial
         // text typed into CC's input doesn't get concatenated with our
         // bracketed paste.
-        let wrapped = format!("\x1b\x15\x1b[200~{}\x1b[201~\r", data);
+        let wrapped = bracketed_paste_turn_payload(data);
         pty_write_internal(app, state, &wrapped, "pty-intent-toTurn")
     }
 }
@@ -23535,7 +23546,8 @@ mod sessions_discovery_tests {
 #[cfg(test)]
 mod session_turn_tests {
     use super::{
-        handle_paste_image, st_extract_image_paths, st_last_session_model, st_parse_lines_to_turns,
+        bracketed_paste_turn_payload, handle_paste_image, sanitize_pty_turn_payload,
+        st_extract_image_paths, st_last_session_model, st_parse_lines_to_turns,
         st_strip_image_paths,
     };
     use std::path::PathBuf;
@@ -23588,6 +23600,33 @@ mod session_turn_tests {
 
         assert_eq!(st_last_session_model(&path), "claude-fable-5");
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn sanitize_pty_turn_payload_preserves_text_and_safe_whitespace() {
+        let text = "first line\nsecond\tline 😀";
+
+        assert_eq!(sanitize_pty_turn_payload(text), text);
+    }
+
+    #[test]
+    fn sanitize_pty_turn_payload_removes_terminal_controls() {
+        let text = "hello\x1b[201~\rmalicious\x07 done";
+
+        assert_eq!(
+            sanitize_pty_turn_payload(text),
+            "hello[201~malicious done"
+        );
+    }
+
+    #[test]
+    fn sanitized_turn_payload_cannot_close_bracketed_paste_early() {
+        let payload = sanitize_pty_turn_payload("safe\x1b[201~\rmalicious");
+        let wrapped = bracketed_paste_turn_payload(&payload);
+        let inner = &wrapped["\x1b\x15\x1b[200~".len()..wrapped.len() - "\x1b[201~\r".len()];
+
+        assert!(!inner.contains("\x1b[201~"));
+        assert_eq!(wrapped.matches("\x1b[201~").count(), 1);
     }
 
     #[test]

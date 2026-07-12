@@ -81,8 +81,6 @@
     onCleanup="window.__bramSetTranscriptMounted(false)"
     var.events="{window.__bramTranscriptEventsFromTurns($props.agentId ? subagentTurns.value : turnsEvt.value, null)}"
     var.eventsVersion="{($props.agentId ? (subagentTurns.value &amp;&amp; subagentTurns.value.total) : (turnsEvt.value &amp;&amp; turnsEvt.value.revision)) || events.length}"
-    var.windowSize="{40}"
-    var.windowedEvents="{events.slice(-windowSize)}"
     var.expanded="{[]}"
     var.atBottom="{true}"
     var.repinArmed="{false}"
@@ -108,26 +106,10 @@
       when="{events.length === 0}"
       color="$textColor-secondary"
       value="No transcript yet." />
-    <!-- Windowed tail (transcript-windowed-render): the List renders only
-         the last windowSize events so a scroll-up fling can never walk the
-         virtualizer through the whole session's unmeasured rows (the
-         remount-storm freeze named by resizeobserver-flood-detail; virtua
-         flushSync-re-renders per measurement batch, virtua #470). Pulling
-         in older rows changes the first row id, which flips virtua's
-         supported keep-scroll-position prepend path. -->
-    <Link
-      when="{events.length > windowSize}"
-      noIndicator="true"
-      onClick="windowSize = windowSize + 100">
-      <Text
-        fontSize="$fontSize-sm"
-        color="$color-primary-600"
-        value="{'▲ Show earlier (' + (events.length - windowedEvents.length) + ' more)'}" />
-    </Link>
     <List
       id="transcriptList"
       height="*"
-      data="{windowedEvents}"
+      data="{events}"
       onScroll="(ev) => { if (atBottom !== ev.atEnd) window.__bramIframeTrace('transcript-follow', {atBottom: ev.atEnd, agentId: $props.agentId || 'main'}); atBottom = ev.atEnd }">
       <property name="emptyListTemplate"><Fragment/></property>
       <VStack gap="$space-1" paddingVertical="$space-1">
@@ -258,7 +240,7 @@
          component-owned and disposes cleanly. -->
     <ChangeListener
       listenTo="{$props.agentId}"
-      onDidChange="() => { windowSize = 40; atBottom = true; repinArmed = true; window.__bramIframeTrace('subagent-switch', {agentId: $props.agentId || 'main', events: events.length}); transcriptList.scrollToBottom(); }" />
+      onDidChange="() => { atBottom = true; repinArmed = true; window.__bramIframeTrace('subagent-switch', {agentId: $props.agentId || 'main', events: events.length}); transcriptList.scrollToBottom(); }" />
     <Timer
       interval="400"
       enabled="{repinArmed}"

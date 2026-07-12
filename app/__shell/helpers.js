@@ -567,6 +567,39 @@ window.toTurn = function (text) {
     } catch (le) {}
   });
 };
+
+window.recordWorklistActionAuthorization = function (payload) {
+  var invoke = getTauriInvoke();
+  if (!invoke || !payload) return Promise.resolve(false);
+  return invoke("record_worklist_action_authorization", { payload: payload })
+    .then(function () { return true; })
+    .catch(function (e) {
+      console.error("recordWorklistActionAuthorization invoke", e);
+      try {
+        window.logToHost({
+          kind: "iframe-trace",
+          subkind: "worklist-action-auth-failed",
+          error: String((e && e.message) || e),
+          at: new Date().toISOString(),
+        });
+      } catch (le) {}
+      return false;
+    });
+};
+
+window.submitAuthorizedWorklistTurn = function (result, onFailure) {
+  result = result || {};
+  var payload = result.authorizationPayload || null;
+  var turnText = result.turnText || "";
+  if (!payload) {
+    if (turnText) window.toTurn(turnText);
+    return;
+  }
+  window.recordWorklistActionAuthorization(payload).then(function (ok) {
+    if (ok && turnText) window.toTurn(turnText);
+    if (!ok && typeof onFailure === "function") onFailure();
+  });
+};
 // sendKeys writes raw bytes to the PTY with NO trailing newline (unlike
 // toShell which always appends \n). Use it for control sequences like ESC,
 // arrow keys, or single-keypress menu shortcuts.
@@ -1582,6 +1615,16 @@ window.__bramBuildDropPayload = function (items, selectedId, feedback) {
   });
 };
 
+window.__bramBuildApproveItems = function (items, selectedId, feedback) {
+  return (items || []).filter(function (i) { return i.id === selectedId; })
+    .map(function (i) { return { id: i.id, feedback: feedback }; });
+};
+
+window.__bramBuildDropItems = function (items, selectedId, feedback) {
+  return (items || []).filter(function (i) { return i.id === selectedId; })
+    .map(function (i) { return { id: i.id, feedback: feedback }; });
+};
+
 window.__bramBuildSingleItemApprovePayload = function (itemRef, feedback) {
   __bramAppMark("build-single-item-approve-payload");
   return JSON.stringify({
@@ -1601,12 +1644,22 @@ window.__bramBuildBatchApprovePayload = function (items, feedback) {
   });
 };
 
+window.__bramBuildBatchApproveItems = function (items, feedback) {
+  return (items || []).filter(function (i) { return (i.status || "proposed") === "applied"; })
+    .map(function (i) { return { id: i.id, feedback: feedback || "" }; });
+};
+
 window.__bramBuildBatchDropPayload = function (items, feedback) {
   __bramAppMark("build-batch-drop-payload");
   return JSON.stringify({
     items: (items || []).filter(function (i) { return (i.status || "proposed") === "applied"; })
       .map(function (i) { return { id: i.id, feedback: feedback || "" }; }),
   });
+};
+
+window.__bramBuildBatchDropItems = function (items, feedback) {
+  return (items || []).filter(function (i) { return (i.status || "proposed") === "applied"; })
+    .map(function (i) { return { id: i.id, feedback: feedback || "" }; });
 };
 
 window.__bramPrepareBatchWorklistActionSubmission = function (opts) {
@@ -1620,12 +1673,16 @@ window.__bramPrepareBatchWorklistActionSubmission = function (opts) {
   var submittedItemId = ids.length > 0 ? ids[0].id : null;
   var submittedKind = window.__bramSetWorklistSubmittedKind("action");
   window.__bramIframeTrace("inflight-set", { item: submittedItemId, via: "click", target: target });
+  var authItems = kind === "drop"
+    ? window.__bramBuildBatchDropItems(items, "")
+    : window.__bramBuildBatchApproveItems(items, "");
   return {
     turnText: (kind === "drop" ? "drop: " : "approved: ") + (
       kind === "drop"
         ? window.__bramBuildBatchDropPayload(items, "")
         : window.__bramBuildBatchApprovePayload(items, "")
     ),
+    authorizationPayload: { kind: kind, items: authItems },
     submitting: true,
     submittedItemId: submittedItemId,
     submittedKind: submittedKind,
@@ -2108,12 +2165,16 @@ window.__bramPrepareWorklistActionSubmission = function (opts) {
     ? opts.payloadFeedback
     : feedback;
   var turnText = "";
+  var authorizationPayload = null;
   if (opts.payloadKind === "single-approve") {
     turnText = "approved: " + window.__bramBuildSingleItemApprovePayload(opts.itemRef, payloadFeedback);
+    authorizationPayload = { kind: "approved", items: [{ id: opts.itemRef.id, feedback: payloadFeedback }] };
   } else if (kind === "approved") {
     turnText = "approved: " + window.__bramBuildApprovePayload(items, selectedId, payloadFeedback);
+    authorizationPayload = { kind: "approved", items: window.__bramBuildApproveItems(items, selectedId, payloadFeedback) };
   } else if (kind === "drop") {
     turnText = "drop: " + window.__bramBuildDropPayload(items, selectedId, payloadFeedback);
+    authorizationPayload = { kind: "drop", items: window.__bramBuildDropItems(items, selectedId, payloadFeedback) };
   }
 
   var pasteState = window.__bramPasteStateSnapshot(opts.voiceTarget || "message-agent");
@@ -2121,6 +2182,7 @@ window.__bramPrepareWorklistActionSubmission = function (opts) {
     seq: seq,
     feedback: feedback,
     turnText: turnText,
+    authorizationPayload: authorizationPayload,
     pendingPastedImageCount: pasteState.count,
     pendingPastedImagePaths: pasteState.paths,
     stagingPastedImageCount: pasteState.staging,

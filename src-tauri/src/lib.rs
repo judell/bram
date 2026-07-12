@@ -957,8 +957,8 @@ fn file_fingerprint(path: &Path) -> String {
 // True when the normalized turn submission begins with one of the
 // structured-intent prefixes recognized by `parse_worklist_authorization_message`
 // (`approved:`, `drop:`) or by chat-side convention (`iterate:`, `talk:`).
-// Used by `[pty-out]` to flag candidate authorization writes; the
-// authoritative parse still happens in `record_worklist_authorization_from_input`.
+// Used by `[pty-out]` diagnostics only; approved/drop authority is recorded
+// through the host-owned `record_worklist_action_authorization` command.
 fn is_structured_intent_prefix(data: &str) -> bool {
     let n = normalize_turn_submission(data);
     let s = n.as_str();
@@ -8480,7 +8480,6 @@ fn pty_write_internal<R: tauri::Runtime>(
                 );
             }
         }
-        record_worklist_authorization_from_input(app, data);
         // #210 characterization: emit bare user Esc so the parent shell, which
         // owns the xterm grid, can snapshot the terminal and capture the
         // agent's post-Esc bytes. Shell-control Esc origins (agent switch/
@@ -8724,20 +8723,6 @@ fn record_iterate_inflight_sentinel<R: tauri::Runtime>(app: &AppHandle<R>, turn_
     record_prefixed_inflight_sentinel(app, turn_text, "iterate:", "iterate");
 }
 
-/// Mirror of `record_iterate_inflight_sentinel` for `approved:` payloads.
-/// Setting the sentinel here — at approval time, on the toTurn write path —
-/// lets the apply gate (proposed → applied) skip the `/__worklist/resolve`
-/// round-trip whose only remaining job was to raise the spinner. The agent
-/// edits from the proposal it authored and calls `/__worklist/mutate`
-/// op:advance, which consumes the approved auth and clears this sentinel.
-/// Covers both apply- and commit-approve payloads (both are `approved:`):
-/// for commit-approve a later `resolve` simply rewrites the identical
-/// sentinel, and the existing turn-finished clearer is the fallback if the
-/// agent never reaches `mutate` (e.g. it asks a clarifying question instead).
-fn record_approved_inflight_sentinel<R: tauri::Runtime>(app: &AppHandle<R>, turn_text: &str) {
-    record_prefixed_inflight_sentinel(app, turn_text, "approved:", "approved");
-}
-
 /// Shared body for the prefix-triggered sentinel writers: strip `prefix`,
 /// parse `items[].id`, and write the inflight sentinel with `sentinel_kind`.
 /// Returns silently on any parse failure — non-matching or malformed
@@ -8830,7 +8815,6 @@ fn write_pty_turn_intent<R: tauri::Runtime>(
     // the lifecycle detectors see exactly what the user submitted.
     record_codex_direct_edit_authorization(app, data);
     record_iterate_inflight_sentinel(app, data);
-    record_approved_inflight_sentinel(app, data);
     record_skip_worklist_authorization(app, data);
     // Envelope switch (docs/turn-transport-redesign.md step 6): substantial
     // or image-bearing sends are persisted as an outbound-turn envelope and
@@ -24211,11 +24195,13 @@ fn normalize_turn_submission(data: &str) -> String {
 // the legacy `{ids: [...]}` drop shape, which carries ids only; the
 // modern `{items: [{id, feedback?}, ...]}` shape always carries a feedback
 // key (possibly empty), which is how the build step tells the two apart.
+#[derive(Debug, PartialEq)]
 struct ParsedWorklistAuthorization {
     kind: String,
     requests: Vec<(String, Option<String>)>,
 }
 
+#[cfg(test)]
 fn parse_worklist_authorization_message(text: &str) -> Option<ParsedWorklistAuthorization> {
     let trimmed = text.trim();
     for (prefix, kind) in [("approved:", "approved"), ("drop:", "drop")] {
@@ -24257,6 +24243,41 @@ fn parse_worklist_authorization_message(text: &str) -> Option<ParsedWorklistAuth
         });
     }
     None
+}
+
+fn parse_worklist_authorization_payload(
+    payload: &serde_json::Value,
+) -> Result<ParsedWorklistAuthorization, String> {
+    let kind = payload
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .ok_or("missing kind")?;
+    if !matches!(kind, "approved" | "drop") {
+        return Err(format!("unsupported worklist authorization kind: {}", kind));
+    }
+    let items = payload
+        .get("items")
+        .and_then(|v| v.as_array())
+        .ok_or("missing items")?;
+    let requests: Vec<(String, Option<String>)> = items
+        .iter()
+        .filter_map(|item| {
+            let id = item.get("id").and_then(|v| v.as_str())?;
+            let feedback = item
+                .get("feedback")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            Some((id.to_string(), Some(feedback)))
+        })
+        .collect();
+    if requests.is_empty() {
+        return Err("no valid worklist authorization items".to_string());
+    }
+    Ok(ParsedWorklistAuthorization {
+        kind: kind.to_string(),
+        requests,
+    })
 }
 
 fn build_worklist_authorization_record(
@@ -24305,12 +24326,11 @@ fn build_worklist_authorization_record(
     }
 }
 
-fn record_worklist_authorization_from_input<R: tauri::Runtime>(app: &AppHandle<R>, data: &str) {
-    let normalized = normalize_turn_submission(data);
-    let Some(parsed) = parse_worklist_authorization_message(&normalized) else {
-        return;
-    };
-
+fn write_worklist_authorization_record<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    parsed: ParsedWorklistAuthorization,
+    source: &str,
+) -> Result<WorklistAuthorizationRecord, String> {
     // Look up each requested id in the on-disk worklist and embed its
     // resolved body (metadata + draft prose + feedback) so the agent reads
     // it via /__worklist/resolve instead of re-reading worklist.json.
@@ -24327,16 +24347,16 @@ fn record_worklist_authorization_from_input<R: tauri::Runtime>(app: &AppHandle<R
         &on_disk_items,
         drafts_dir.as_deref(),
         unix_now_ms(),
-        "pty-write",
+        source,
     );
 
     let Some(path) = worklist_auth_file(app) else {
-        return;
+        return Err("could not resolve worklist authorization path".to_string());
     };
     if let Some(parent) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             eprintln!("[worklist-auth] create {} failed: {}", parent.display(), e);
-            return;
+            return Err(format!("create {}: {}", parent.display(), e));
         }
     }
     // Detect clobber: if a prior, not-yet-consumed record exists with a
@@ -24382,12 +24402,31 @@ fn record_worklist_authorization_from_input<R: tauri::Runtime>(app: &AppHandle<R
         Ok(s) => s,
         Err(e) => {
             eprintln!("[worklist-auth] serialize failed: {}", e);
-            return;
+            return Err(format!("serialize worklist authorization: {}", e));
         }
     };
     if let Err(e) = std::fs::write(&path, format!("{}\n", body)) {
         eprintln!("[worklist-auth] write {} failed: {}", path.display(), e);
+        return Err(format!("write {}: {}", path.display(), e));
     }
+    Ok(record)
+}
+
+#[tauri::command]
+fn record_worklist_action_authorization<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    payload: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let parsed = parse_worklist_authorization_payload(&payload)?;
+    let record = write_worklist_authorization_record(&app, parsed, "worklist-action-command")?;
+    if !record.ids.is_empty() {
+        write_inflight_claim_sentinel(&app, &record.ids, &record.kind);
+    }
+    Ok(serde_json::json!({
+        "ok": true,
+        "kind": record.kind,
+        "ids": record.ids,
+    }))
 }
 
 fn record_codex_direct_edit_authorization<R: tauri::Runtime>(app: &AppHandle<R>, turn_text: &str) {
@@ -28306,7 +28345,8 @@ mod worklist_authorization_tests {
         apply_worklist_mutation, build_worklist_authorization_record, classify_worklist_removals,
         draft_markdown_path, ensure_no_unrelated_staged_files, ensure_worklist_commit_authorized,
         feedback_draft_path, inflight_claim_fully_covered, parse_worklist_authorization_message,
-        resource_relative_path, turn_text_has_direct_edit_opt_out,
+        parse_worklist_authorization_payload, resource_relative_path,
+        turn_text_has_direct_edit_opt_out,
         validate_post_commit_prune_status, validate_worklist_advance_status,
         validate_worklist_mutate_authorization, worklist_commit_add_args,
         worklist_commit_files_for_ids, worklist_draft_path, worklist_feedback_ref_item_id,
@@ -28396,6 +28436,34 @@ mod worklist_authorization_tests {
         assert_eq!(record.kind, "drop");
         assert_eq!(record.ids, ids(&["old-drop"]));
         assert!(record.items.is_empty());
+    }
+
+    #[test]
+    fn host_worklist_authorization_payload_parses_approved_items() {
+        let parsed = parse_worklist_authorization_payload(&json!({
+            "kind": "approved",
+            "items": [
+                { "id": "security-h2", "feedback": "ship it" }
+            ]
+        }))
+        .expect("host payload parses");
+
+        assert_eq!(parsed.kind, "approved");
+        assert_eq!(
+            parsed.requests,
+            vec![("security-h2".to_string(), Some("ship it".to_string()))]
+        );
+    }
+
+    #[test]
+    fn host_worklist_authorization_payload_rejects_missing_items() {
+        let err = parse_worklist_authorization_payload(&json!({
+            "kind": "approved",
+            "items": []
+        }))
+        .expect_err("empty authorization is rejected");
+
+        assert_eq!(err, "no valid worklist authorization items");
     }
 
     #[test]
@@ -29533,6 +29601,7 @@ pub fn run() {
             reload_agent_session,
             queue_pty_intent,
             queue_feedback_draft,
+            record_worklist_action_authorization,
             pty_resize,
             log_from_right_pane,
             report_grid_menu,

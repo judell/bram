@@ -119,6 +119,16 @@ struct WorklistAuthorizationRecord {
     consumed_at_ms: Option<i64>,
 }
 
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingWorklistPushMirror {
+    item_id: String,
+    issue: u64,
+    commit_sha: String,
+    changelog: String,
+    created_at_ms: i64,
+}
+
 fn turn_text_has_direct_edit_opt_out(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("just do it")
@@ -7416,7 +7426,10 @@ fn gh_issue_close_with_commit<R: tauri::Runtime>(
     };
     if push_before_close {
         match push_focused_commit(app, &full_sha) {
-            Ok(pushed_sha) => full_sha = pushed_sha,
+            Ok(pushed_sha) => {
+                full_sha = pushed_sha;
+                flush_pending_worklist_push_mirrors(app);
+            }
             Err(e) => {
                 return (
                     502,
@@ -10322,7 +10335,7 @@ fn git_push(app: AppHandle, branch: Option<String>) -> Result<(), String> {
     }
     let stderr = match git_run(&app, &["push"]) {
         Ok(_) => {
-            emit_replayable_signal(&app, "git-status-changed");
+            finish_git_push(&app);
             return Ok(());
         }
         Err(e) => e,
@@ -10332,7 +10345,7 @@ fn git_push(app: AppHandle, branch: Option<String>) -> Result<(), String> {
         || stderr.contains("set the remote as upstream");
     if missing_upstream {
         git_run(&app, &["push", "-u", "origin", &current])?;
-        emit_replayable_signal(&app, "git-status-changed");
+        finish_git_push(&app);
         return Ok(());
     }
     let is_nonff = stderr.contains("non-fast-forward") || stderr.contains("fetch first");
@@ -10340,8 +10353,13 @@ fn git_push(app: AppHandle, branch: Option<String>) -> Result<(), String> {
         return Err(stderr);
     }
     auto_rebase_and_push(&app)
-        .map(|_| emit_replayable_signal(&app, "git-status-changed"))
+        .map(|_| finish_git_push(&app))
         .map_err(|e| format!("non-fast-forward; {}", e))
+}
+
+fn finish_git_push<R: tauri::Runtime>(app: &AppHandle<R>) {
+    emit_replayable_signal(app, "git-status-changed");
+    flush_pending_worklist_push_mirrors(app);
 }
 
 fn git_current_branch<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<String, String> {
@@ -17625,6 +17643,7 @@ const WORKLIST_AUTH_REL: &str = "resources/.worklist-authorization.json";
 // dot-files, polled/written like the others above — not tracked changes.
 const WORKLIST_INTENT_REL: &str = "resources/.worklist-intent.json";
 const WORKLIST_RESULT_REL: &str = "resources/.worklist-result.json";
+const WORKLIST_PUSH_MIRROR_REL: &str = "resources/.worklist-push-mirror.json";
 // Host-managed inflight sentinel (#84). Written when /__worklist/resolve
 // serves an approved or drop record, OR when /__iterate/begin is
 // called. Approved/drop sentinels clear at host silence-detected
@@ -19496,6 +19515,10 @@ fn worklist_drafts_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf>
 
 fn worklist_auth_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
     project_relative_path(app, WORKLIST_AUTH_REL)
+}
+
+fn worklist_push_mirror_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    project_relative_path(app, WORKLIST_PUSH_MIRROR_REL)
 }
 
 fn feedback_drafts_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
@@ -25312,6 +25335,110 @@ fn worklist_lifecycle_comment_body(
     body
 }
 
+fn read_pending_worklist_push_mirrors(path: &Path) -> Vec<PendingWorklistPushMirror> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<PendingWorklistPushMirror>>(&s).ok())
+        .unwrap_or_default()
+}
+
+fn write_pending_worklist_push_mirrors(
+    path: &Path,
+    records: &[PendingWorklistPushMirror],
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create {}: {}", parent.display(), e))?;
+    }
+    let body = serde_json::to_string_pretty(records).map_err(|e| e.to_string())?;
+    std::fs::write(path, format!("{}\n", body))
+        .map_err(|e| format!("write {}: {}", path.display(), e))
+}
+
+fn enqueue_pending_worklist_push_mirror_path(
+    path: &Path,
+    record: PendingWorklistPushMirror,
+) -> Result<(), String> {
+    let mut records = read_pending_worklist_push_mirrors(path);
+    let exists = records.iter().any(|r| {
+        r.item_id == record.item_id && r.issue == record.issue && r.commit_sha == record.commit_sha
+    });
+    if !exists {
+        records.push(record);
+        write_pending_worklist_push_mirrors(path, &records)?;
+    }
+    Ok(())
+}
+
+fn enqueue_pending_worklist_push_mirror<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    item_id: &str,
+    issue: u64,
+    commit_sha: &str,
+    changelog: &str,
+) {
+    let Some(path) = worklist_push_mirror_file(app) else {
+        return;
+    };
+    let record = PendingWorklistPushMirror {
+        item_id: item_id.to_string(),
+        issue,
+        commit_sha: commit_sha.to_string(),
+        changelog: changelog.to_string(),
+        created_at_ms: unix_now_ms(),
+    };
+    if let Err(e) = enqueue_pending_worklist_push_mirror_path(&path, record) {
+        eprintln!("[worklist-push-mirror] enqueue failed: {}", e);
+    }
+}
+
+fn worklist_pushed_lifecycle_comment_body(
+    item_id: &str,
+    changelog: &str,
+    commit_sha: &str,
+) -> String {
+    worklist_lifecycle_comment_body(item_id, "pushed", changelog, Some(commit_sha))
+}
+
+fn flush_pending_worklist_push_mirrors<R: tauri::Runtime>(app: &AppHandle<R>) {
+    if !worklist_lifecycle_mirror_enabled(app) {
+        return;
+    }
+    let Some(path) = worklist_push_mirror_file(app) else {
+        return;
+    };
+    let records = read_pending_worklist_push_mirrors(&path);
+    if records.is_empty() {
+        return;
+    }
+    let Some(repo_slug) = repo_owner_name(app) else {
+        return;
+    };
+    let mut remaining: Vec<PendingWorklistPushMirror> = Vec::new();
+    for record in records {
+        match gh_commit_visible(app, &repo_slug, &record.commit_sha) {
+            Ok(true) => {
+                let body = worklist_pushed_lifecycle_comment_body(
+                    &record.item_id,
+                    &record.changelog,
+                    &record.commit_sha,
+                );
+                if let Err(e) = gh_issue_comment(app, record.issue, &body) {
+                    eprintln!(
+                        "[worklist-push-mirror] issue #{} item={} sha={} failed: {}",
+                        record.issue, record.item_id, record.commit_sha, e
+                    );
+                    remaining.push(record);
+                }
+            }
+            Ok(false) | Err(_) => remaining.push(record),
+        }
+    }
+    if let Err(e) = write_pending_worklist_push_mirrors(&path, &remaining) {
+        eprintln!("[worklist-push-mirror] write remaining failed: {}", e);
+    }
+}
+
 fn worklist_feedback_ref_item_id(feedback_ref: &str) -> Option<String> {
     if feedback_ref.is_empty()
         || feedback_ref.contains('/')
@@ -25440,6 +25567,10 @@ fn mirror_worklist_lifecycle_to_issues<R: tauri::Runtime>(
                     "[worklist-lifecycle-mirror] issue #{} item={} state={} failed: {}",
                     issue, change.id, change.kind, e
                 );
+            } else if change.kind == "committed" {
+                if let Some(sha) = commit_sha.as_deref() {
+                    enqueue_pending_worklist_push_mirror(app, &change.id, issue, sha, changelog);
+                }
             }
         }
     }
@@ -28343,15 +28474,17 @@ fn handle_worklist_commit<R: tauri::Runtime>(
 mod worklist_authorization_tests {
     use super::{
         apply_worklist_mutation, build_worklist_authorization_record, classify_worklist_removals,
-        draft_markdown_path, ensure_no_unrelated_staged_files, ensure_worklist_commit_authorized,
-        feedback_draft_path, inflight_claim_fully_covered, parse_worklist_authorization_message,
-        parse_worklist_authorization_payload, resource_relative_path,
-        turn_text_has_direct_edit_opt_out,
+        draft_markdown_path, enqueue_pending_worklist_push_mirror_path,
+        ensure_no_unrelated_staged_files, ensure_worklist_commit_authorized, feedback_draft_path,
+        inflight_claim_fully_covered, parse_worklist_authorization_message,
+        parse_worklist_authorization_payload, read_pending_worklist_push_mirrors,
+        resource_relative_path, turn_text_has_direct_edit_opt_out,
         validate_post_commit_prune_status, validate_worklist_advance_status,
         validate_worklist_mutate_authorization, worklist_commit_add_args,
         worklist_commit_files_for_ids, worklist_draft_path, worklist_feedback_ref_item_id,
         worklist_iteration_comment_body, worklist_lifecycle_comment_body,
-        worklist_lifecycle_item_issue_numbers,
+        worklist_lifecycle_item_issue_numbers, worklist_pushed_lifecycle_comment_body,
+        PendingWorklistPushMirror,
     };
     use serde_json::json;
     use std::path::Path;
@@ -28733,6 +28866,45 @@ mod worklist_authorization_tests {
         assert!(body.starts_with("bram-lifecycle: committed\nbram-commit: abcdef123456\n"));
         assert!(body.contains("Bram worklist item `issue-209-mirror` moved to `committed`."));
         assert!(body.contains("**Summary:** 1 committed"));
+    }
+
+    #[test]
+    fn pushed_lifecycle_comment_body_has_parseable_trailers() {
+        let body = worklist_pushed_lifecycle_comment_body(
+            "issue-215-pushed-lifecycle-event",
+            "**Summary:** pushed mirror",
+            "abcdef123456",
+        );
+
+        assert!(body.starts_with("bram-lifecycle: pushed\nbram-commit: abcdef123456\n"));
+        assert!(body
+            .contains("Bram worklist item `issue-215-pushed-lifecycle-event` moved to `pushed`."));
+        assert!(body.contains("**Summary:** pushed mirror"));
+    }
+
+    #[test]
+    fn pending_push_mirror_enqueue_dedupes_item_issue_sha() {
+        let dir =
+            std::env::temp_dir().join(format!("bram-push-mirror-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir should be created");
+        let path = dir.join(".worklist-push-mirror.json");
+        let record = PendingWorklistPushMirror {
+            item_id: "issue-215-pushed-lifecycle-event".to_string(),
+            issue: 215,
+            commit_sha: "abcdef123456".to_string(),
+            changelog: "**Summary:** 1 committed".to_string(),
+            created_at_ms: 123,
+        };
+
+        enqueue_pending_worklist_push_mirror_path(&path, record.clone()).expect("enqueue works");
+        enqueue_pending_worklist_push_mirror_path(&path, record).expect("dedupe works");
+
+        let records = read_pending_worklist_push_mirrors(&path);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].issue, 215);
+        assert_eq!(records[0].commit_sha, "abcdef123456");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

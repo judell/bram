@@ -80,12 +80,12 @@
     subscribe="{window.bramSubscribeTauriEvent('sessions-list-changed')}" />
   <ChangeListener
     listenTo="{footerSessionsChangedEvt.value &amp;&amp; footerSessionsChangedEvt.value.tick}"
-    onDidChange="() => footerSessions.refetch()" />
-  <!-- Subagent roster for the footer chips strip. Refreshed by the
-       dedicated subagents-changed signal: subagent JSONL appends are
-       swallowed by the watcher's session-JSONL branch and never reach
-       sessions-list-changed, which left chips stale until the main
-       conversation next moved. -->
+    onDidChange="() => { footerSessions.refetch(); footerAgents.refetch(); }" />
+  <!-- Subagent roster for the footer chips strip, and main-model metadata
+       for the footer session line. Refreshed by both session and subagent
+       signals: subagent JSONL appends are swallowed by the watcher's
+       session-JSONL branch and never reach sessions-list-changed, which
+       left chips stale until the main conversation next moved. -->
   <DataSource
     id="footerAgents"
     url="/__agents"
@@ -131,7 +131,7 @@
        polling, ~once per turn. -->
   <ChangeListener
     listenTo="{mainAgentStatus.value &amp;&amp; mainAgentStatus.value.state}"
-    onDidChange="() => footerSessions.refetch()" />
+    onDidChange="() => { footerSessions.refetch(); footerAgents.refetch(); }" />
   <!-- Footer perf instrument (instrument-footer-composer-rerender): count how
        often the shared footer scope's sources change while the message composer
        is focused, to correlate with heartbeat-batch drift during a typing

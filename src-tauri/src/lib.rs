@@ -15289,6 +15289,13 @@ fn st_read_tail(path: &Path, max_bytes: u64) -> Option<String> {
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
+fn st_read_head(path: &Path, max_bytes: u64) -> Option<String> {
+    let f = std::fs::File::open(path).ok()?;
+    let mut buf = Vec::new();
+    f.take(max_bytes).read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
 fn st_read_jsonl_suffix_from(path: &Path, start: u64) -> Result<(String, u64), String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
@@ -15496,26 +15503,41 @@ fn read_subagent_turns<R: tauri::Runtime>(
     serde_json::to_vec(&body).map_err(|e| e.to_string())
 }
 
-// Model the MAIN session is currently running on: the LAST assistant
-// record's message.model in the tail (models can switch mid-session, so
-// head reads lie). Feeds the footer Main chip's tooltip.
+fn st_session_record_model(r: &serde_json::Value) -> Option<&str> {
+    r.get("message")
+        .and_then(|m| m.get("model"))
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            r.get("payload")
+                .and_then(|p| p.get("model"))
+                .and_then(|v| v.as_str())
+        })
+        .or_else(|| r.get("model").and_then(|v| v.as_str()))
+}
+
+// Model the MAIN session is currently running on. Prefer the tail so
+// mid-session switches win; fall back to the head for Codex sessions where
+// the model is present in early session/turn metadata before any assistant
+// model record exists. Feeds the footer Main chip's tooltip.
 fn st_last_session_model(session_path: &Path) -> String {
-    let Some(tail) = st_read_tail(session_path, 256 * 1024) else {
-        return String::new();
-    };
-    for line in tail.lines().rev() {
-        let Ok(r) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        if r.get("type").and_then(|v| v.as_str()) != Some("assistant") {
-            continue;
+    if let Some(tail) = st_read_tail(session_path, 256 * 1024) {
+        for line in tail.lines().rev() {
+            let Ok(r) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if let Some(m) = st_session_record_model(&r) {
+                return m.to_string();
+            }
         }
-        if let Some(m) = r
-            .get("message")
-            .and_then(|m| m.get("model"))
-            .and_then(|v| v.as_str())
-        {
-            return m.to_string();
+    }
+    if let Some(head) = st_read_head(session_path, 256 * 1024) {
+        for line in head.lines().rev() {
+            let Ok(r) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if let Some(m) = st_session_record_model(&r) {
+                return m.to_string();
+            }
         }
     }
     String::new()
@@ -15532,11 +15554,23 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
     let Some(session_path) = active_session_path(app)? else {
         return empty();
     };
+    let sid = session_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let empty_session = || {
+        serde_json::to_vec(&serde_json::json!({
+            "sid": sid,
+            "agents": [],
+            "mainModel": st_last_session_model(&session_path),
+        }))
+        .map_err(|e| e.to_string())
+    };
     let Some(dir) = st_session_subagents_dir(&session_path) else {
-        return empty();
+        return empty_session();
     };
     let Ok(rd) = std::fs::read_dir(&dir) else {
-        return empty();
+        return empty_session();
     };
     let to_ms = |t: std::time::SystemTime| -> i64 {
         t.duration_since(std::time::UNIX_EPOCH)
@@ -15569,10 +15603,6 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
         }));
     }
     agents.sort_by_key(|a| a.get("startedAtMs").and_then(|v| v.as_i64()).unwrap_or(0));
-    let sid = session_path
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
     let body = serde_json::json!({
         "sid": sid,
         "agents": agents,
@@ -23505,8 +23535,60 @@ mod sessions_discovery_tests {
 #[cfg(test)]
 mod session_turn_tests {
     use super::{
-        handle_paste_image, st_extract_image_paths, st_parse_lines_to_turns, st_strip_image_paths,
+        handle_paste_image, st_extract_image_paths, st_last_session_model, st_parse_lines_to_turns,
+        st_strip_image_paths,
     };
+    use std::path::PathBuf;
+
+    fn write_model_fixture(name: &str, text: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "bram-model-fixture-{}-{}.jsonl",
+            std::process::id(),
+            name
+        ));
+        std::fs::write(&path, text).expect("model fixture should be written");
+        path
+    }
+
+    #[test]
+    fn last_session_model_reads_claude_assistant_message() {
+        let path = write_model_fixture(
+            "claude",
+            r#"{"type":"user","message":{"role":"user","content":"hello"}}
+{"type":"assistant","message":{"role":"assistant","model":"claude-sonnet-4-20250514","content":[]}}
+"#,
+        );
+
+        assert_eq!(st_last_session_model(&path), "claude-sonnet-4-20250514");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn last_session_model_reads_codex_turn_context_payload() {
+        let path = write_model_fixture(
+            "codex",
+            r#"{"type":"session_meta","payload":{"session_id":"abc","model_provider":"openai"}}
+{"type":"turn_context","payload":{"turn_id":"t1","model":"gpt-5.4"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[]}}
+"#,
+        );
+
+        assert_eq!(st_last_session_model(&path), "gpt-5.4");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn last_session_model_prefers_newer_tail_model() {
+        let path = write_model_fixture(
+            "tail",
+            r#"{"type":"turn_context","payload":{"turn_id":"t1","model":"gpt-5.4"}}
+{"type":"assistant","message":{"role":"assistant","model":"claude-fable-5","content":[]}}
+"#,
+        );
+
+        assert_eq!(st_last_session_model(&path), "claude-fable-5");
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn extract_image_paths_handles_windows_absolute_path() {

@@ -4745,7 +4745,9 @@ window.__bramAgentChipLabel = function (agent) {
 // version parts with dots. Display-only; tooltips keep the raw id.
 window.__bramPrettyModel = function (model) {
   if (!model) return "";
-  var s = String(model).replace(/^claude-/, "").replace(/-\d{8}$/, "");
+  var raw = String(model);
+  if (/^gpt[-.]/i.test(raw)) return raw.replace(/^gpt/i, "GPT");
+  var s = raw.replace(/^claude-/, "").replace(/-\d{8}$/, "");
   var parts = s.split("-");
   if (!parts.length) return model;
   var family = parts[0].charAt(0).toUpperCase() + parts[0].slice(1);
@@ -4778,10 +4780,10 @@ window.__bramAgentChipTooltip = function (agent) {
 window.__bramFooterSessionLine = function (session, agentId, roster) {
   var meta = window.__bramSessionMetaLine(session) || "";
   var agents = (roster && roster.agents) || [];
-  // Zero-subagent sessions get the plain meta line: a viewport
-  // indicator that can only ever say "Main" is footer noise, and
-  // footer vertical space is contended (2026-07-06 feedback).
-  if (!agentId && agents.length === 0) return meta;
+  var mainModel = roster && roster.mainModel;
+  // Zero-subagent sessions still get the plain meta line unless we have
+  // the main model to report; a bare "Main" is footer noise.
+  if (!agentId && agents.length === 0 && !mainModel) return meta;
   var view = "Main";
   if (agentId) {
     var match = null;
@@ -4790,8 +4792,8 @@ window.__bramFooterSessionLine = function (session, agentId, roster) {
     }
     view = "subagent: " + ((match && (match.description || match.agentType)) || agentId);
     if (match && match.model) view += " (" + window.__bramPrettyModel(match.model) + ")";
-  } else if (roster && roster.mainModel) {
-    view = "Main (" + window.__bramPrettyModel(roster.mainModel) + ")";
+  } else if (mainModel) {
+    view = "Main (" + window.__bramPrettyModel(mainModel) + ")";
   }
   if (!meta) return view;
   var sp = meta.indexOf(" ");

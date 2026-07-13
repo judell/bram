@@ -30,6 +30,7 @@ import os
 import re
 import sys
 import tempfile
+import urllib.request
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,10 +51,51 @@ BYPASS_TTL_SECONDS = 60 * 60  # an authorization record is fresh for 1h
 # Issue #49 [hook] trace + issue #95 phantom-write diagnostic.
 # - Always emits one `[worklist-guard]` line to stderr, including cwd,
 #   so the hook's decision is visible to the agent / user without
-#   BRAM_TRACE being enabled. Refs #95.
-# - Additionally appends to resources/bram-traces/bram-trace.log when BRAM_TRACE=1
-#   and BRAM_TRACE_LOG is set on the agent's PTY child env (existing
-#   issue #49 behavior).
+#   tracing enabled. Refs #95.
+# - Additionally POSTs the line to the host's /__hook-trace route, which
+#   appends to resources/bram-traces/bram-trace.log iff the live Traces
+#   setting is on (hook-trace-follow-settings).
+def _post_hook_trace(event, tool, target, decision, reason, cwd):
+    """Ship the [hook] decision line to the host's /__hook-trace route, which
+    appends to bram-trace.log iff the LIVE Traces setting is on
+    (hook-trace-follow-settings). Replaces spawn-time BRAM_TRACE env gating,
+    which desynced from the Settings toggle for running sessions. Failures
+    are swallowed; tracing must never block a tool call."""
+    try:
+        cur = os.path.abspath(cwd or os.getcwd())
+        port = None
+        while True:
+            candidate = os.path.join(cur, "resources", ".bram-port")
+            if os.path.exists(candidate):
+                with open(candidate) as f:
+                    port = int(f.read().strip())
+                break
+            parent = os.path.dirname(cur)
+            if parent == cur:
+                break
+            cur = parent
+        if not port:
+            return
+        body = json.dumps({
+            "script": "worklist-guard-codex.py",
+            "event": event,
+            "tool": tool,
+            "target": str(target)[:300],
+            "cwd": cwd or "",
+            "decision": decision,
+            "reason": reason,
+        }).encode()
+        req = urllib.request.Request(
+            "http://127.0.0.1:%d/__hook-trace" % port,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=0.3).read()
+    except Exception:
+        pass
+
+
 def _trace_hook(event, tool, target, decision, reason, cwd=None):
     if cwd is None:
         cwd = _HOOK_CTX.get("cwd", "")
@@ -66,23 +108,7 @@ def _trace_hook(event, tool, target, decision, reason, cwd=None):
         sys.stderr.flush()
     except Exception:
         pass
-    try:
-        if os.environ.get("BRAM_TRACE") != "1":
-            return
-        log_path = os.environ.get("BRAM_TRACE_LOG")
-        if not log_path:
-            return
-        now = datetime.now(timezone.utc)
-        ts = now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
-        line = (
-            f"[{ts}] [hook] script=worklist-guard-codex.py event={event} "
-            f"tool={tool} target={target} cwd={cwd} "
-            f"decision={decision} reason={reason}\n"
-        )
-        with open(log_path, "a") as f:
-            f.write(line)
-    except Exception:
-        pass
+    _post_hook_trace(event, tool, target, decision, reason, cwd)
 
 
 # Module-level context for [hook] trace records. main() populates these

@@ -29260,6 +29260,43 @@ fn handle_describe_command<R: tauri::Runtime>(
     (200, JSON, body.to_string().into_bytes())
 }
 
+// hook-trace-follow-settings: the PreToolUse guards POST their [hook]
+// decision lines here instead of appending to the trace file gated on
+// spawn-time BRAM_TRACE env (which desynced from the Settings toggle for
+// the lifetime of a running agent). append_bram_trace_line is gated on
+// the LIVE trace setting, so the toggle takes effect immediately.
+fn handle_hook_trace<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    body: &[u8],
+) -> (u16, &'static str, Vec<u8>) {
+    const JSON: &str = "application/json; charset=utf-8";
+    let v: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => return (400, JSON, b"{\"ok\":false}".to_vec()),
+    };
+    let field = |k: &str| -> String {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .replace(['\n', '\r'], " ")
+    };
+    append_bram_trace_line(
+        app,
+        "hook",
+        &format!(
+            "script={} event={} tool={} target={} cwd={} decision={} reason={}",
+            field("script"),
+            field("event"),
+            field("tool"),
+            field("target"),
+            field("cwd"),
+            field("decision"),
+            field("reason")
+        ),
+    );
+    (200, JSON, b"{\"ok\":true}".to_vec())
+}
+
 fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Request) {
     let url = request.url().to_string();
     let method = request.method().as_str().to_uppercase();
@@ -29313,6 +29350,14 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             let mut buf = Vec::new();
             let _ = request.as_reader().read_to_end(&mut buf);
             handle_permission_menu(app, &buf, true)
+        }
+    } else if path == "__hook-trace" {
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            let mut buf = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut buf);
+            handle_hook_trace(app, &buf)
         }
     } else if path == "__worklist/end" {
         // The last-action route agents may call to close approved/drop

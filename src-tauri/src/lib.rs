@@ -4321,7 +4321,16 @@ fn agent_status_set_claude_jsonl_working<R: tauri::Runtime>(
     }
     update_turn_state(app, "jsonl-non-final", reason, |s| {
         s.provider = Some("claude".to_string());
-        s.phase = "working".to_string();
+        // pty-menu outranks jsonl-non-final: when a permission menu is
+        // open the tool_use block IS the last assistant content, so the
+        // JSONL reads non-final-assistant, but the user-facing truth is
+        // "waiting-for-permission". Guard the phase exactly as the
+        // pty-status path does (see pty_agent_status_update); the next
+        // pty-menu source emit (dismissed / cleared) releases it back to
+        // working. Other fields are bookkeeping, not user-facing phase.
+        if s.pending_menu.is_none() {
+            s.phase = "working".to_string();
+        }
         s.turn_stamp = Some(stats.user_ts_ms.to_string());
         s.last_jsonl_activity_at_ms = file_mtime_ms;
         s.last_non_final_assistant_at_ms = file_mtime_ms;

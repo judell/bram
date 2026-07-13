@@ -147,7 +147,21 @@ On some Windows 11 setups, Smart App Control may block the unsigned binary — m
 
 ### First-run setup
 
-The first time you launch `claude` or `codex` in a repo, Bram checks what that provider needs and prompts once if anything is missing — no prompt on later launches. Accepting it installs the same two things for either provider: the worklist conventions the agent reads each session, and a `PreToolUse` guard hook that blocks file edits not covered by an approved worklist item. A provider-neutral authorization record plus a watcher-revert fallback back the hook up.
+The first time you launch `claude` or `codex` in a repo, Bram checks what that provider needs and prompts once if anything is missing — no prompt on later launches. Accepting Bram's setup prompt installs the worklist conventions the agent reads each session plus provider-specific hooks that enforce the worklist and surface permission menus. A provider-neutral authorization record and watcher-revert fallback back up those hooks.
+
+Claude and Codex differ in the trust step you see after Bram writes those files:
+
+- **Claude setup** is repo-local. Bram writes `.claude/bram-conventions.md`, `.claude/hooks/worklist-guard.py`, `.claude/hooks/permission-menu-hook.py`, and `.claude/settings.json` registrations. Claude reads that project config on launch; there is no separate Codex-style hook trust menu. The Claude `PreToolUse` hook is the safety gate for `Write`, `Edit`, and `Bash`; the permission hook surfaces Claude permission and AskUserQuestion prompts in Bram's agent pane.
+- **Codex setup** has an explicit trust/approval step. Bram writes user-global hook scripts under `~/.bram`, updates `~/.codex/config.toml`, writes Bram `developer_instructions`, and adds a repo-local `AGENTS.md` block. Codex then shows its hook approval screen; approve it only when it points at Bram-owned paths such as `~/.bram/codex-worklist-guard.py`, `~/.bram/codex-permission-menu-hook.py`, `~/.codex/config.toml`, and this repo's `AGENTS.md`. The Codex `PreToolUse` hook gates `apply_patch`, `Bash`, `Write`, `Edit`, and mutation-shaped MCP tools; the Codex permission hook surfaces `PermissionRequest` / `PostToolUse` menus in Bram's agent pane.
+- **Do not approve unexpected Codex paths.** If the Codex approval screen lists hook scripts somewhere other than `~/.bram` or config changes somewhere other than the expected Codex/project files, stop and inspect them first.
+
+Hook names mean the same thing in both providers:
+
+- **`PreToolUse`** runs before a tool executes and blocks mutations that are not covered by the worklist or by an explicit direct-edit authorization.
+- **`PermissionRequest`** lets Bram render permission prompts from structured hook payloads instead of scraping the terminal grid.
+- **`PostToolUse`**, when present, is post-tool bookkeeping for the same hook-driven permission/menu path.
+
+A healthy Codex hook screen should show Bram's installed lifecycle hooks as both **Installed** and **Active**. In the current setup that means at least `PreToolUse`, `PermissionRequest`, and `PostToolUse` each show `1 / 1`; lifecycle events Bram does not use, such as `SessionStart` or `Stop`, can remain `0 / 0`.
 
 <details>
 <summary>Setup internals: hook adapters, guard source-of-truth, and how conventions.md binds each provider</summary>
@@ -164,8 +178,8 @@ Current behavior:
 When the prompt runs, Bram installs two layers:
 
 - A provider-neutral core: Bram records the latest structured `approved:` / `drop:` payload in `resources/.worklist-authorization.json` and uses that local record when validating worklist removals. The desktop watcher can revert an invalid prune as a defense-in-depth fallback if a hook ever fails to fire.
-- A Claude adapter: `.claude/hooks/worklist-guard.py`, registered in `.claude/settings.json` to fire on `Write|Edit`. The hook denies edits to project files not covered by a proposed/applied worklist item (with explicit opt-out phrases in the last user message as the escape hatch), and validates worklist-prune authorization for changes to `resources/worklist.json` itself. Setup also installs `.claude/hooks/permission-menu-hook.py`, which surfaces Claude permission and AskUserQuestion menus in the agent pane from structured hook payloads.
-- A Codex adapter: `~/.bram/codex-worklist-guard.py`, registered in `~/.codex/config.toml` as a `PreToolUse` hook with matcher `^(apply_patch|Bash|Write|Edit|mcp__.*)$`. Same coverage logic as the Claude hook, broadened to catch Codex's `apply_patch` tool, mutation-shaped Bash commands, and MCP filesystem write/edit/create/move calls. Setup also writes `developer_instructions` into the Codex config so the gate prose lands in the developer-role context part of every session, not just the user-role `AGENTS.md`, and installs `~/.bram/codex-permission-menu-hook.py` so Codex approval menus can surface from hook payloads with the xterm grid retained as fallback. Existing `~/.xmlui-desktop/codex-worklist-guard.py` installs remain accepted during migration; rerunning Setup rewrites the config to the Bram path.
+- A Claude adapter: `.claude/hooks/worklist-guard.py`, registered in `.claude/settings.json` as a `PreToolUse` hook for `Write|Edit|Bash`. The hook denies edits to project files not covered by a proposed/applied worklist item (with explicit opt-out phrases in the last user message as the escape hatch), validates worklist-prune authorization for changes to `resources/worklist.json` itself, and blocks mutation-shaped Bash commands without worklist coverage. Setup also installs `.claude/hooks/permission-menu-hook.py` for Claude permission and AskUserQuestion surfacing in the agent pane.
+- A Codex adapter: `~/.bram/codex-worklist-guard.py`, registered in `~/.codex/config.toml` as a `PreToolUse` hook with matcher `^(apply_patch|Bash|Write|Edit|mcp__.*)$`. Same coverage logic as the Claude hook, broadened to catch Codex's `apply_patch` tool and MCP filesystem write/edit/create/move calls. Setup also writes `developer_instructions` into the Codex config so the gate prose lands in the developer-role context part of every session, not just the user-role `AGENTS.md`, and installs `~/.bram/codex-permission-menu-hook.py` for `PermissionRequest` / `PostToolUse` menu surfacing with the xterm grid retained as fallback. Existing `~/.xmlui-desktop/codex-worklist-guard.py` installs remain accepted during migration; rerunning Setup rewrites the config to the Bram path.
 
 In the Bram source repo, the Claude guard's source of truth is
 `app/__shell/worklist-guard.py`. The `.claude/hooks/worklist-guard.py`

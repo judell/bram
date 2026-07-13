@@ -117,7 +117,21 @@ struct WorklistAuthorizationRecord {
     source: String,
     #[serde(default)]
     consumed_at_ms: Option<i64>,
+    // security-h4: set when an interrupt/cancel (Esc, menu-reject, provider
+    // cancel) abandons the turn before the agent reached mutate/commit.
+    // Distinct from consumed_at_ms — a drop's resolve consumes on read but
+    // the same-turn prune must still succeed, so consumption cannot gate
+    // mutate. An interrupted record is fail-closed: mutate and commit reject
+    // it. #[serde(default)] so pre-H4 auth files load.
+    #[serde(default)]
+    interrupted_at_ms: Option<i64>,
 }
+
+// security-h4: TTL bounding how long an approved/drop authorization stays
+// valid for a mutate/commit — approximates "same turn as the resolve" so a
+// stale record left on disk by an abandoned turn can't be replayed later.
+// Mirrors the direct-edit BYPASS_TTL_SECONDS precedent.
+const WORKLIST_AUTH_TTL_MS: i64 = 5 * 60 * 1000;
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -3336,6 +3350,8 @@ fn kill_current_codex_turn_from_pty_cancel<R: tauri::Runtime>(app: &AppHandle<R>
             ),
         );
     }
+    // security-h4: a provider cancel abandons any in-flight worklist action.
+    invalidate_worklist_authorization(app, "codex-pty-output-user-cancel");
     if agent_status_emit_finished(app, "codex", None, None, "pty-output-user-cancel") {
         pty_menu_clear_for_outcome(app, "turn-end");
         trace_emit_signal(app, "agent-turn-killed");
@@ -6355,6 +6371,7 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
             eprintln!("[pty-menu] cleared by user input (pending menu — shown emit was deferred)");
             if clears_inflight {
                 clear_active_sentinel_with_reason(app, "pty-menu-pending-user-reject");
+                invalidate_worklist_authorization(app, "pty-menu-pending-user-reject");
             }
             return;
         }
@@ -6387,6 +6404,7 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
         }
         if clears_inflight {
             clear_active_sentinel_with_reason(app, "pty-menu-user-reject");
+            invalidate_worklist_authorization(app, "pty-menu-user-reject");
         }
         // Tell subscribers the menu went away. Emit AFTER releasing all
         // pty_menu_* locks for the same anti-deadlock reason as in
@@ -6395,6 +6413,10 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
         emit_replayable_payload(app, "pty-menu-changed", Option::<PtyMenu>::None);
     } else if input == "\x1b" {
         clear_active_sentinel_with_reason(app, "pty-escape");
+        // security-h4: Esc abandons the in-flight worklist action; fail the
+        // approval closed so a later turn can't replay it. No-op when no
+        // active approved/drop record is pending.
+        invalidate_worklist_authorization(app, "pty-escape");
         // Single Esc usually just interrupts the current tool call; CC
         // continues the same turn. But a rapid SECOND Esc (within ~1 s)
         // is CC's universal "cancel everything" gesture — treat that as
@@ -19098,6 +19120,7 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
             issued_at_ms: 0,
             source: "setup".to_string(),
             consumed_at_ms: None,
+            interrupted_at_ms: None,
         };
         let serialized_core = serde_json::to_string_pretty(&core_stub)
             .map_err(|e| format!("serialize worklist authorization stub: {}", e))?;
@@ -24455,6 +24478,7 @@ fn build_worklist_authorization_record(
         issued_at_ms,
         source: source.to_string(),
         consumed_at_ms: None,
+        interrupted_at_ms: None,
     }
 }
 
@@ -24646,6 +24670,51 @@ fn consume_worklist_authorization<R: tauri::Runtime>(app: &AppHandle<R>) {
         );
     }
     record.consumed_at_ms = Some(unix_now_ms());
+    let body = match serde_json::to_string_pretty(&record) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let _ = std::fs::write(&path, format!("{}\n", body));
+}
+
+// security-h4: mark the active (unconsumed, un-interrupted) worklist
+// authorization interrupted when an Esc / menu-reject / provider-cancel
+// abandons the turn. Marking (not deleting) keeps the record visible for
+// the Status tab / audit and is idempotent; the interrupted flag then
+// fails mutate/commit closed so a later turn can't replay the approval.
+// No-op for consumed records (the legitimate flow already ran) and for
+// direct-edit/none kinds.
+fn invalidate_worklist_authorization<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str) {
+    let Some(path) = worklist_auth_file(app) else {
+        return;
+    };
+    let content = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let mut record = match serde_json::from_str::<WorklistAuthorizationRecord>(&content) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    if !matches!(record.kind.as_str(), "approved" | "drop") {
+        return;
+    }
+    if record.consumed_at_ms.is_some() || record.interrupted_at_ms.is_some() {
+        return;
+    }
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "auth-record",
+            &format!(
+                "op=invalidate reason={} kind={} ids={}",
+                reason,
+                record.kind,
+                serde_json::to_string(&record.ids).unwrap_or_else(|_| "[]".to_string())
+            ),
+        );
+    }
+    record.interrupted_at_ms = Some(unix_now_ms());
     let body = match serde_json::to_string_pretty(&record) {
         Ok(s) => s,
         Err(_) => return,
@@ -27944,10 +28013,36 @@ fn worklist_json_ids(value: &serde_json::Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+// security-h4: reject an authorization that a turn-interrupt abandoned
+// (interruptedAtMs set), or that is older than the same-turn TTL, so a
+// stale approved/drop record left on disk by an abandoned turn cannot be
+// replayed on a later turn. Consumption is intentionally NOT checked here:
+// a drop's resolve consumes the record on read but the same-turn prune must
+// still succeed (see handle_worklist_mutate). Pure over now_ms for testing.
+fn worklist_auth_freshness_ok(auth: &serde_json::Value, now_ms: i64) -> Result<(), String> {
+    if auth
+        .get("interruptedAtMs")
+        .and_then(|v| v.as_i64())
+        .is_some()
+    {
+        return Err("authorization was interrupted; re-approve to proceed".to_string());
+    }
+    let issued = auth.get("issuedAtMs").and_then(|v| v.as_i64()).unwrap_or(0);
+    if issued > 0 && now_ms - issued > WORKLIST_AUTH_TTL_MS {
+        return Err(format!(
+            "authorization expired ({} ms old, TTL {} ms); re-approve to proceed",
+            now_ms - issued,
+            WORKLIST_AUTH_TTL_MS
+        ));
+    }
+    Ok(())
+}
+
 fn validate_worklist_mutate_authorization(
     op: &str,
     ids: &[String],
     auth: &serde_json::Value,
+    now_ms: i64,
 ) -> Result<String, String> {
     let required_kind = worklist_mutate_required_kind(op)?;
     let auth_kind = auth.get("kind").and_then(|v| v.as_str()).unwrap_or("");
@@ -27967,6 +28062,8 @@ fn validate_worklist_mutate_authorization(
             return Err(format!("id not in auth: {}", id));
         }
     }
+
+    worklist_auth_freshness_ok(auth, now_ms)?;
 
     Ok(auth_kind.to_string())
 }
@@ -28017,6 +28114,7 @@ fn validate_worklist_advance_status(op: &str, new_status: &str) -> Result<(), St
 fn ensure_worklist_commit_authorized(
     ids: &[String],
     auth: &serde_json::Value,
+    now_ms: i64,
 ) -> Result<(), String> {
     let auth_kind = auth.get("kind").and_then(|v| v.as_str()).unwrap_or("");
     if auth_kind != "approved" {
@@ -28031,6 +28129,8 @@ fn ensure_worklist_commit_authorized(
             return Err(format!("id not in auth: {}", id));
         }
     }
+    // security-h4: same interrupted/TTL gate as mutate.
+    worklist_auth_freshness_ok(auth, now_ms)?;
     Ok(())
 }
 
@@ -28284,7 +28384,7 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| serde_json::json!({}));
-    let auth_kind = match validate_worklist_mutate_authorization(op, &ids, &auth) {
+    let auth_kind = match validate_worklist_mutate_authorization(op, &ids, &auth, unix_now_ms()) {
         Ok(kind) => kind,
         Err(e) => {
             return (
@@ -28487,7 +28587,7 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| serde_json::json!({}));
-    if let Err(e) = ensure_worklist_commit_authorized(&ids, &auth) {
+    if let Err(e) = ensure_worklist_commit_authorized(&ids, &auth, unix_now_ms()) {
         return worklist_json_error(400, e);
     }
 
@@ -28634,6 +28734,7 @@ mod worklist_authorization_tests {
         draft_markdown_path, enqueue_pending_worklist_push_mirror_path,
         ensure_no_unrelated_staged_files, ensure_worklist_commit_authorized, feedback_draft_path,
         inflight_claim_fully_covered, installed_twins_for, parse_worklist_authorization_message,
+        WORKLIST_AUTH_TTL_MS,
         parse_worklist_authorization_payload, read_pending_worklist_push_mirrors,
         resource_relative_path, turn_text_has_direct_edit_opt_out,
         validate_post_commit_prune_status, validate_worklist_advance_status,
@@ -28770,30 +28871,88 @@ mod worklist_authorization_tests {
 
     #[test]
     fn mutate_authorization_rejects_wrong_kind_and_missing_ids() {
-        let auth = json!({"kind": "drop", "ids": ["a"]});
+        let auth = json!({"kind": "drop", "ids": ["a"], "issuedAtMs": 1000});
 
-        let wrong_kind = validate_worklist_mutate_authorization("advance", &ids(&["a"]), &auth)
-            .expect_err("advance requires approved auth");
+        let wrong_kind =
+            validate_worklist_mutate_authorization("advance", &ids(&["a"]), &auth, 1000)
+                .expect_err("advance requires approved auth");
         assert!(wrong_kind.contains("auth kind mismatch"));
 
-        let missing_id = validate_worklist_mutate_authorization("prune", &ids(&["b"]), &auth)
+        let missing_id = validate_worklist_mutate_authorization("prune", &ids(&["b"]), &auth, 1000)
             .expect_err("id must be covered by auth");
         assert_eq!(missing_id, "id not in auth: b");
     }
 
     #[test]
     fn worklist_commit_authorization_requires_approved_ids() {
-        let auth = json!({"kind": "approved", "ids": ["a"]});
-        ensure_worklist_commit_authorized(&ids(&["a"]), &auth).expect("approved id is accepted");
+        let auth = json!({"kind": "approved", "ids": ["a"], "issuedAtMs": 1000});
+        ensure_worklist_commit_authorized(&ids(&["a"]), &auth, 1000)
+            .expect("approved id is accepted");
 
-        let wrong_kind = json!({"kind": "drop", "ids": ["a"]});
-        let err = ensure_worklist_commit_authorized(&ids(&["a"]), &wrong_kind)
+        let wrong_kind = json!({"kind": "drop", "ids": ["a"], "issuedAtMs": 1000});
+        let err = ensure_worklist_commit_authorized(&ids(&["a"]), &wrong_kind, 1000)
             .expect_err("commit requires approved auth");
         assert_eq!(err, "auth kind mismatch: expected approved, got drop");
 
-        let err = ensure_worklist_commit_authorized(&ids(&["b"]), &auth)
+        let err = ensure_worklist_commit_authorized(&ids(&["b"]), &auth, 1000)
             .expect_err("commit ids must be covered");
         assert_eq!(err, "id not in auth: b");
+    }
+
+    // security-h4: interrupted / stale authorizations fail closed, while the
+    // same-turn drop flow (resolve-consumed, un-interrupted, fresh) stays valid.
+    #[test]
+    fn h4_interrupted_authorization_is_rejected() {
+        let now = 1_000_000;
+        let interrupted = json!({
+            "kind": "approved", "ids": ["a"], "issuedAtMs": now, "interruptedAtMs": now
+        });
+        let adv = validate_worklist_mutate_authorization("advance", &ids(&["a"]), &interrupted, now)
+            .expect_err("interrupted approval must not advance");
+        assert!(adv.contains("interrupted"), "got: {adv}");
+        let com = ensure_worklist_commit_authorized(&ids(&["a"]), &interrupted, now)
+            .expect_err("interrupted approval must not commit");
+        assert!(com.contains("interrupted"), "got: {com}");
+        // prune (drop kind) also rejected when interrupted
+        let interrupted_drop = json!({
+            "kind": "drop", "ids": ["a"], "issuedAtMs": now, "interruptedAtMs": now
+        });
+        assert!(
+            validate_worklist_mutate_authorization("prune", &ids(&["a"]), &interrupted_drop, now)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn h4_stale_authorization_past_ttl_is_rejected() {
+        let issued = 1_000_000;
+        let auth = json!({"kind": "approved", "ids": ["a"], "issuedAtMs": issued});
+        let stale_now = issued + WORKLIST_AUTH_TTL_MS + 1;
+        let err = validate_worklist_mutate_authorization("advance", &ids(&["a"]), &auth, stale_now)
+            .expect_err("advance past TTL is rejected");
+        assert!(err.contains("expired"), "got: {err}");
+    }
+
+    #[test]
+    fn h4_fresh_uninterrupted_approval_still_advances() {
+        let now = 1_000_000;
+        let auth = json!({"kind": "approved", "ids": ["a"], "issuedAtMs": now});
+        validate_worklist_mutate_authorization("advance", &ids(&["a"]), &auth, now + 1000)
+            .expect("fresh approval advances (same-turn flow intact)");
+        ensure_worklist_commit_authorized(&ids(&["a"]), &auth, now + 1000)
+            .expect("fresh approval commits");
+    }
+
+    #[test]
+    fn h4_consumed_but_uninterrupted_drop_still_prunes() {
+        // Regression guard: a drop's resolve consumes the record on read, but
+        // the same-turn prune must still succeed — consumption is NOT a gate.
+        let now = 1_000_000;
+        let auth = json!({
+            "kind": "drop", "ids": ["a"], "issuedAtMs": now, "consumedAtMs": now
+        });
+        validate_worklist_mutate_authorization("prune", &ids(&["a"]), &auth, now + 1000)
+            .expect("consumed-but-fresh drop still prunes");
     }
 
     #[test]

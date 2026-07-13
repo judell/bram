@@ -4292,32 +4292,60 @@ fn agent_status_set_claude_jsonl_working<R: tauri::Runtime>(
         return;
     }
     let elapsed_ms = (unix_now_ms() - stats.user_ts_ms).max(0);
-    let next = AgentStatus {
-        provider: Some("claude".to_string()),
-        state: "working".to_string(),
-        verb: Some("working".to_string()),
-        elapsed_text: Some(format_elapsed_text(elapsed_ms)),
-        substate: None,
-        output_tokens_text: None,
-        updated_at_ms: unix_now_ms(),
-        source: Some("jsonl-non-final".to_string()),
-    };
-    let mut emit_payload: Option<AgentStatus> = None;
-    if let Ok(mut cur) = agent_status_cell().lock() {
-        let changed = cur.state != next.state
-            || cur.provider != next.provider
-            || cur.verb != next.verb
-            || cur.elapsed_text != next.elapsed_text
-            || cur.substate != next.substate;
-        if changed {
-            *cur = next.clone();
-            emit_payload = Some(next);
-        } else {
-            cur.updated_at_ms = next.updated_at_ms;
+    // suppress-generic-working-verb-over-grid: the grid-status path reads a
+    // live, specific verb ("Spelunking", …) from the CLI banner every
+    // ~100-200ms. This jsonl-non-final path fires on every tool result /
+    // assistant chunk and would emit a flavorless verb="working", clobbering
+    // the grid verb until the next grid tick restores it (59× in one
+    // 2026-07-13 turn). When a FRESH grid banner verb exists (<2s), the grid
+    // path already owns the working state with a better label, so skip this
+    // agent-status emit entirely. The turn-state bookkeeping below still runs
+    // — including establishing "working" — so this only stops the verb
+    // downgrade, never the working state itself. When the grid banner is
+    // stale/absent (e.g. just after a send, before the first spinner frame),
+    // this path still emits "working" as the fallback.
+    let fresh_grid_verb = latest_grid_banner_cell()
+        .lock()
+        .ok()
+        .and_then(|c| c.clone())
+        .filter(|(verb, _, ts)| !verb.is_empty() && (unix_now_ms() - ts) < 2000)
+        .map(|(verb, _, _)| verb);
+    if let Some(gv) = fresh_grid_verb.as_ref() {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "agent-status",
+                &format!("op=skip-jsonl-working-verb reason=fresh-grid-verb grid_verb={:?}", gv),
+            );
         }
-    }
-    if let Some(payload) = emit_payload {
-        maybe_emit_agent_status(app, &payload);
+    } else {
+        let next = AgentStatus {
+            provider: Some("claude".to_string()),
+            state: "working".to_string(),
+            verb: Some("working".to_string()),
+            elapsed_text: Some(format_elapsed_text(elapsed_ms)),
+            substate: None,
+            output_tokens_text: None,
+            updated_at_ms: unix_now_ms(),
+            source: Some("jsonl-non-final".to_string()),
+        };
+        let mut emit_payload: Option<AgentStatus> = None;
+        if let Ok(mut cur) = agent_status_cell().lock() {
+            let changed = cur.state != next.state
+                || cur.provider != next.provider
+                || cur.verb != next.verb
+                || cur.elapsed_text != next.elapsed_text
+                || cur.substate != next.substate;
+            if changed {
+                *cur = next.clone();
+                emit_payload = Some(next);
+            } else {
+                cur.updated_at_ms = next.updated_at_ms;
+            }
+        }
+        if let Some(payload) = emit_payload {
+            maybe_emit_agent_status(app, &payload);
+        }
     }
     update_turn_state(app, "jsonl-non-final", reason, |s| {
         s.provider = Some("claude".to_string());

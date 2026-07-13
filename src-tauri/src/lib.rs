@@ -4781,6 +4781,12 @@ fn report_grid_menu(app: AppHandle, payload: serde_json::Value) {
                     ),
                 );
             }
+            // Record the first grid sighting of this menu (observe-only,
+            // menu-redetect-storm-after-completion). Fingerprint by labels
+            // so repeated reports of the same menu keep the earliest clock.
+            note_grid_menu_sighting(&menu_labels_fingerprint(
+                options.iter().map(|o| o.label.as_str()),
+            ));
             *cell = Some(GridMenuSnapshot {
                 options,
                 header,
@@ -4797,6 +4803,34 @@ fn report_grid_menu(app: AppHandle, payload: serde_json::Value) {
     // already detected before the grid report arrived and didn't re-detect).
     // Empty chunk appends nothing; pty_menu_update re-scans the current tail.
     pty_menu_update(&app, &[]);
+}
+
+// menu-redetect-storm-after-completion (observe-only): measure the gap
+// between the grid FIRST parsing a menu fingerprint and that menu
+// surfacing to the pane. A large gap with a stale suppressor armed — or a
+// grid/suppressor tool mismatch — is the signature of a genuinely-new menu
+// held back by the post-dismiss suppressor (facet B). Cleared on surface.
+static MENU_FIRST_SIGHTING: OnceLock<Mutex<Option<(String, std::time::Instant)>>> = OnceLock::new();
+fn menu_first_sighting_cell() -> &'static Mutex<Option<(String, std::time::Instant)>> {
+    MENU_FIRST_SIGHTING.get_or_init(|| Mutex::new(None))
+}
+
+// Stamp the first grid sighting of a menu fingerprint. Re-stamps only when
+// the fingerprint changes, so repeated reports of the same menu keep the
+// earliest time; the next distinct menu starts a fresh clock.
+fn note_grid_menu_sighting(labels_fp: &str) {
+    if let Ok(mut cell) = menu_first_sighting_cell().lock() {
+        let restamp = cell.as_ref().map(|(fp, _)| fp != labels_fp).unwrap_or(true);
+        if restamp {
+            *cell = Some((labels_fp.to_string(), std::time::Instant::now()));
+        }
+    }
+}
+
+// Compact fingerprint of a menu's option labels — the identity available at
+// both the grid-report and surface sites.
+fn menu_labels_fingerprint<'a, I: IntoIterator<Item = &'a str>>(labels: I) -> String {
+    labels.into_iter().collect::<Vec<_>>().join("|")
 }
 
 fn pty_menu_suppressed_cell() -> &'static Mutex<Option<DismissedMenu>> {
@@ -5544,6 +5578,44 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                     ),
                 ),
                 _ => {}
+            }
+            // Surface-gap instrument (menu-redetect-storm-after-completion):
+            // when a menu newly surfaces, report how long since the grid
+            // first parsed this fingerprint and whether a stale suppressor
+            // was armed (and for which tool) at surface time. Attributes the
+            // "menu on terminal but not pane" blindness window.
+            if let Some(nm) = detected.as_ref() {
+                let fp = menu_labels_fingerprint(nm.options.iter().map(|o| o.label.as_str()));
+                let gap_ms = menu_first_sighting_cell()
+                    .lock()
+                    .ok()
+                    .and_then(|mut cell| {
+                        let matched = cell.as_ref().map(|(f, _)| *f == fp).unwrap_or(false);
+                        let g = cell.as_ref().map(|(_, t)| t.elapsed().as_millis());
+                        cell.take(); // one surface consumes the sighting
+                        if matched { g } else { None }
+                    });
+                let (supp_armed, supp_age_ms, supp_tool) = pty_menu_suppressed_cell()
+                    .lock()
+                    .ok()
+                    .and_then(|c| {
+                        c.as_ref()
+                            .map(|d| (true, d.when.elapsed().as_millis(), d.tool.clone()))
+                    })
+                    .unwrap_or((false, 0, "none".to_string()));
+                append_bram_trace_line(
+                    app,
+                    "pty-menu",
+                    &format!(
+                        "op=surface-gap tool={} ms={} suppressor_armed={} suppressor_age_ms={} suppressor_tool={} fp=[{}]",
+                        nm.tool,
+                        gap_ms.map(|g| g.to_string()).unwrap_or_else(|| "-1".to_string()),
+                        supp_armed,
+                        supp_age_ms,
+                        supp_tool,
+                        fp,
+                    ),
+                );
             }
         }
 

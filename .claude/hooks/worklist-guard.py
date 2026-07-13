@@ -105,6 +105,35 @@ def is_gh_body_at_antipattern(command):
     return bool(_GH_BODY_AT_RX.search(command))
 
 
+# Bash commands we deny without worklist coverage. This intentionally matches
+# the Codex guard's H3-level classifier: broad enough to stop common write and
+# external side-effect bypasses, but narrow enough to keep read-only shell
+# investigation usable.
+_BASH_WRITE_PATTERNS = [
+    re.compile(r"(^|[\s;&|`(])>+\s*[^\s>&]"),         # > file or >> file
+    re.compile(r"(^|[\s;&|`(])tee\b"),                # tee
+    re.compile(r"(^|[\s;&|`(])sed\s+[^|;&]*-i\b"),    # sed -i
+    re.compile(r"(^|[\s;&|`(])perl\s+[^|;&]*-i\b"),   # perl -i
+    re.compile(r"(^|[\s;&|`(])(rm|mv|cp|truncate|install)\b"),
+    re.compile(r"(^|[\s;&|`(])git\s+(add|commit|push|rm|mv|reset|checkout|restore|stash|am|apply|cherry-pick|rebase|revert|tag|branch)\b"),
+    re.compile(r"(^|[\s;&|`(])gh\s+issue\s+(close|reopen|edit|comment|create|delete|transfer|pin|unpin|lock|unlock)\b"),
+    re.compile(r"open\s*\(\s*['\"][^'\"]+['\"]\s*,\s*['\"][wax]"),
+    re.compile(r"(^|[\s;&|`(])python[0-9.]*\s+-c\b"),  # python -c can write
+    re.compile(r"(^|[\s;&|`(])node\s+-e\b"),
+    re.compile(r"(^|[\s;&|`(])bash\s+-c\b"),
+    re.compile(r"(^|[\s;&|`(])sh\s+-c\b"),
+]
+
+
+def bash_writes(command):
+    if not isinstance(command, str):
+        return False
+    for rx in _BASH_WRITE_PATTERNS:
+        if rx.search(command):
+            return True
+    return False
+
+
 def _trace_hook(event, tool, target, decision, reason, cwd=None):
     """Issue #49 [hook] trace + issue #95 phantom-write diagnostic.
 
@@ -361,6 +390,26 @@ def deny_coverage(target_rel, opt_out_attempted):
     sys.exit(2)
 
 
+def deny_bash_coverage(command, cwd=None):
+    preview = (command or "")[:200]
+    _trace_hook(
+        "PreToolUse",
+        "Bash",
+        preview,
+        "deny",
+        "bash-write-no-coverage",
+        cwd,
+    )
+    print(
+        "Bash blocked: this command writes to the filesystem or performs a "
+        "sensitive side effect, and resources/worklist.json has no proposed "
+        "or applied items covering active work. Propose the work in the "
+        "worklist first, or have the user issue a direct-edit authorization.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
 def worklist_version_from_text(text):
     """Return (present, version) for a worklist.json text. `present` is
     True iff the JSON parsed and the top-level `version` field was an
@@ -482,26 +531,58 @@ def deny_mechanical_worklist_change(removed, status_changed):
     sys.exit(2)
 
 
+def self_test():
+    write_commands = [
+        "echo x > out.txt",
+        "printf x >> out.txt",
+        "printf x | tee out.txt",
+        "sed -i '' s/a/b/ file.txt",
+        "perl -i -pe s/a/b/ file.txt",
+        "python -c \"open('x', 'w').write('x')\"",
+        "node -e \"require('fs').writeFileSync('x','x')\"",
+        "git commit -m test",
+        "git push",
+        "gh issue close 119 --repo judell/bram",
+        "rm stale.txt",
+        "mv a b",
+        "cp a b",
+        "truncate -s 0 file.txt",
+        "bash -c 'echo x > out.txt'",
+        "sh -c 'echo x > out.txt'",
+    ]
+    read_commands = [
+        "ls -la",
+        "rg Bash app/__shell/worklist-guard.py",
+        "git status --short",
+        "gh issue view 119 --repo judell/bram",
+        "python --version",
+        "curl -I https://example.com",
+    ]
+    for command in write_commands:
+        assert bash_writes(command), command
+    for command in read_commands:
+        assert not bash_writes(command), command
+
+
 def main():
     payload = json.load(sys.stdin)
     tool_name = payload.get("tool_name", "")
 
-    # Issue #176: gh --body @ antipattern check fires on any Bash call.
-    # Bash is otherwise out of scope for this hook (worklist coverage on
-    # Bash is #109/#118 territory) — we exit 0 after the check either way.
     if tool_name == "Bash":
         ti = payload.get("tool_input", {})
         command = ti.get("command", "") if isinstance(ti, dict) else ""
+        preview = command[:200]
+        cwd = payload.get("cwd") or os.getcwd()
         if is_gh_body_at_antipattern(command):
             m = _GH_BODY_AT_RX.search(command)
             matched = m.group(0).strip() if m else ""
-            preview = command[:200]
             _trace_hook(
                 "PreToolUse",
                 "Bash",
                 preview,
                 "deny",
                 "gh-body-at-antipattern",
+                cwd,
             )
             print(
                 "gh --body takes a literal string, not stdin or a file reference.\n"
@@ -510,7 +591,21 @@ def main():
                 file=sys.stderr,
             )
             sys.exit(2)
-        sys.exit(0)
+        if not bash_writes(command):
+            _trace_hook("PreToolUse", "Bash", preview, "allow", "bash-read-only", cwd)
+            sys.exit(0)
+        project_root = find_project_root(cwd)
+        if project_root is None:
+            _trace_hook("PreToolUse", "Bash", preview, "allow", "unmanaged-repo", cwd)
+            sys.exit(0)
+        if WORKLIST_DRAFTS_PREFIX in command or ".worklist-intent.json" in command:
+            _trace_hook("PreToolUse", "Bash", preview, "allow", "bram-lifecycle-channel", cwd)
+            sys.exit(0)
+        covered = worklist_covered_files(project_root)
+        if covered or fresh_bypass(project_root, "*"):
+            _trace_hook("PreToolUse", "Bash", preview, "allow", "covered-by-worklist-item", cwd)
+            sys.exit(0)
+        deny_bash_coverage(command, cwd)
 
     if tool_name not in ("Write", "Edit"):
         sys.exit(0)
@@ -601,4 +696,8 @@ def main():
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--self-test":
+        self_test()
+        print("worklist-guard self-test passed")
+        sys.exit(0)
     main()

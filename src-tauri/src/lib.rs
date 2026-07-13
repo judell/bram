@@ -27976,6 +27976,39 @@ fn worklist_commit_files_for_ids(
     Ok(files)
 }
 
+// Canonical → installed sync pairs, mirroring build.rs's installed-hook
+// sync list. The installed copies under .claude/hooks/ are build
+// artifacts refreshed from their canonical on every cargo build and
+// checked for sync by CI's verify job. When an item stages a canonical,
+// the commit gate auto-stages its twin
+// (commit-route-auto-stages-installed-twins) so item authors never
+// hand-list generated files — 76b1be8 (canonical committed, twin left
+// dirty, CI red until 2c9648d) is the failure this prevents. A dirty
+// twin WITHOUT its canonical in the item is still refused as unrelated:
+// the artifact only travels with its source.
+const INSTALLED_TWIN_PAIRS: &[(&str, &str)] = &[
+    (
+        "app/__shell/worklist-guard.py",
+        ".claude/hooks/worklist-guard.py",
+    ),
+    (
+        "app/__shell/permission-menu-hook.py",
+        ".claude/hooks/permission-menu-hook.py",
+    ),
+];
+
+// Installed twins implied by an approved file set: for each canonical
+// present, its installed twin, unless the item already lists it.
+fn installed_twins_for(files: &[String]) -> Vec<String> {
+    let mut twins = Vec::new();
+    for (canonical, installed) in INSTALLED_TWIN_PAIRS {
+        if files.iter().any(|f| f == canonical) && !files.iter().any(|f| f == installed) {
+            twins.push((*installed).to_string());
+        }
+    }
+    twins
+}
+
 // Build the `git add` argv for the commit gate. `-A` so a pure deletion
 // (a tracked file already removed from the working tree) stages as a
 // removal instead of failing the pathspec match; the trailing
@@ -28359,10 +28392,25 @@ fn handle_worklist_commit<R: tauri::Runtime>(
     let Some(items) = wl.get("items").and_then(|v| v.as_array()) else {
         return worklist_json_error(500, "worklist missing items[]");
     };
-    let files = match worklist_commit_files_for_ids(items, &ids) {
+    let mut files = match worklist_commit_files_for_ids(items, &ids) {
         Ok(files) => files,
         Err(e) => return worklist_json_error(400, e),
     };
+    // Auto-stage installed twins of listed canonicals (see
+    // INSTALLED_TWIN_PAIRS). Extending `files` here covers the scoped
+    // git add AND both unrelated-staged checks below in one place; an
+    // unchanged twin stages nothing, so this is a no-op unless the
+    // build refreshed it.
+    for twin in installed_twins_for(&files) {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "worklist-commit",
+                &format!("op=auto-stage-twin path={}", twin),
+            );
+        }
+        files.push(twin);
+    }
 
     let staged_before = match git_staged_files(app) {
         Ok(files) => files,
@@ -28476,7 +28524,7 @@ mod worklist_authorization_tests {
         apply_worklist_mutation, build_worklist_authorization_record, classify_worklist_removals,
         draft_markdown_path, enqueue_pending_worklist_push_mirror_path,
         ensure_no_unrelated_staged_files, ensure_worklist_commit_authorized, feedback_draft_path,
-        inflight_claim_fully_covered, parse_worklist_authorization_message,
+        inflight_claim_fully_covered, installed_twins_for, parse_worklist_authorization_message,
         parse_worklist_authorization_payload, read_pending_worklist_push_mirrors,
         resource_relative_path, turn_text_has_direct_edit_opt_out,
         validate_post_commit_prune_status, validate_worklist_advance_status,
@@ -28656,6 +28704,29 @@ mod worklist_authorization_tests {
             err,
             "worklist commit requires applied status: b is proposed"
         );
+    }
+
+    #[test]
+    fn installed_twin_follows_its_canonical() {
+        let files = vec!["app/__shell/worklist-guard.py".to_string()];
+        assert_eq!(
+            installed_twins_for(&files),
+            vec![".claude/hooks/worklist-guard.py".to_string()]
+        );
+    }
+
+    #[test]
+    fn installed_twin_not_added_without_canonical_or_when_listed() {
+        // No canonical in the set → no twin (a dirty twin alone stays
+        // refusable as unrelated).
+        let files = vec!["src-tauri/src/lib.rs".to_string()];
+        assert!(installed_twins_for(&files).is_empty());
+        // Twin already listed explicitly → not duplicated.
+        let files = vec![
+            "app/__shell/worklist-guard.py".to_string(),
+            ".claude/hooks/worklist-guard.py".to_string(),
+        ];
+        assert!(installed_twins_for(&files).is_empty());
     }
 
     #[test]

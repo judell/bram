@@ -14863,6 +14863,74 @@ fn st_tool_command_display(name: &str, input: &serde_json::Value) -> String {
     String::new()
 }
 
+fn st_edit_tool_diff(name: &str, input: &serde_json::Value) -> String {
+    use similar::TextDiff;
+    if name != "Edit" && name != "MultiEdit" {
+        return String::new();
+    }
+    let display_path = input
+        .get("file_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim_start_matches('/');
+    let header_old = if display_path.is_empty() {
+        "a".to_string()
+    } else {
+        format!("a/{}", display_path)
+    };
+    let header_new = if display_path.is_empty() {
+        "b".to_string()
+    } else {
+        format!("b/{}", display_path)
+    };
+    let diff_one = |old_string: &str, new_string: &str| -> String {
+        if old_string.is_empty() && new_string.is_empty() {
+            return String::new();
+        }
+        TextDiff::from_lines(old_string, new_string)
+            .unified_diff()
+            .context_radius(3)
+            .missing_newline_hint(false)
+            .header(&header_old, &header_new)
+            .to_string()
+    };
+    if name == "Edit" {
+        return diff_one(
+            input
+                .get("old_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+            input
+                .get("new_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        );
+    }
+    let Some(edits) = input.get("edits").and_then(|v| v.as_array()) else {
+        return String::new();
+    };
+    edits
+        .iter()
+        .filter_map(|edit| {
+            let old_string = edit
+                .get("old_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let new_string = edit
+                .get("new_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let diff = diff_one(old_string, new_string);
+            if diff.is_empty() {
+                None
+            } else {
+                Some(diff)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 // Codex variant: exec_command carries the command in input.cmd. Mirrors
 // __bramCodexToolCommandDisplay.
 fn st_codex_tool_command_display(payload: &serde_json::Value) -> String {
@@ -15032,7 +15100,7 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
                         let empty = serde_json::json!({});
                         let input = c_obj.get("input").unwrap_or(&empty);
                         let summary = st_tool_summary(name, input);
-                        let entry = serde_json::json!({
+                        let mut entry = serde_json::json!({
                             "kind": "tool",
                             "id": id,
                             "name": name,
@@ -15044,6 +15112,13 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
                             // expansion (tool-expansion-wrap-and-describe).
                             "description": input.get("description").and_then(|v| v.as_str()).unwrap_or(""),
                         });
+                        let diff = st_edit_tool_diff(name, input);
+                        if !diff.is_empty() {
+                            if let Some(entry_obj) = entry.as_object_mut() {
+                                entry_obj
+                                    .insert("diff".to_string(), serde_json::Value::String(diff));
+                            }
+                        }
                         let entry_idx = entries.len();
                         entries.push(entry);
                         if !id.is_empty() {
@@ -17525,6 +17600,7 @@ fn read_tool_detail<R: tauri::Runtime>(
     let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let mut input: Option<serde_json::Value> = None;
     let mut result: Option<serde_json::Value> = None;
+    let mut diff: Option<String> = None;
     for line in text.lines() {
         if line.is_empty() {
             continue;
@@ -17540,11 +17616,16 @@ fn read_tool_detail<R: tauri::Runtime>(
             for c in arr {
                 let c_typ = c.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 if c_typ == "tool_use" && c.get("id").and_then(|v| v.as_str()) == Some(tool_id) {
-                    input = Some(
-                        c.get("input")
-                            .cloned()
-                            .unwrap_or_else(|| serde_json::json!({})),
-                    );
+                    let tool_input = c
+                        .get("input")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    let tool_diff = st_edit_tool_diff(name, &tool_input);
+                    if !tool_diff.is_empty() {
+                        diff = Some(tool_diff);
+                    }
+                    input = Some(tool_input);
                 } else if c_typ == "tool_result"
                     && c.get("tool_use_id").and_then(|v| v.as_str()) == Some(tool_id)
                 {
@@ -17574,6 +17655,7 @@ fn read_tool_detail<R: tauri::Runtime>(
     let body = serde_json::json!({
         "input": input.unwrap_or_else(|| serde_json::json!({})),
         "result": result.unwrap_or(serde_json::Value::Null),
+        "diff": diff,
     });
     serde_json::to_vec(&body).map_err(|e| e.to_string())
 }
@@ -22744,7 +22826,7 @@ mod pty_menu_tests {
         codex_command_policy_prefix, extract_pending_tool_call_from_jsonl,
         format_pending_tool_call, pty_menu_input_clears_inflight, pty_menu_preview_chars,
         pty_menu_preview_source, pty_menu_same_identity_for_option_carry,
-        pty_output_clears_inflight,
+        pty_output_clears_inflight, st_edit_tool_diff,
     };
     use serde_json::json;
 
@@ -22776,6 +22858,59 @@ mod pty_menu_tests {
             live_lfs,
             expected_lfs,
             diff
+        );
+    }
+
+    #[test]
+    fn claude_edit_tool_diff_uses_unified_diff() {
+        let input = json!({
+            "file_path": "/Users/example/project/src/lib.rs",
+            "old_string": "fn main() {\n    println!(\"old\");\n}\n",
+            "new_string": "fn main() {\n    println!(\"new\");\n}\n",
+        });
+        let diff = st_edit_tool_diff("Edit", &input);
+        assert!(
+            diff.contains("--- a/Users/example/project/src/lib.rs"),
+            "{diff}"
+        );
+        assert!(
+            diff.contains("+++ b/Users/example/project/src/lib.rs"),
+            "{diff}"
+        );
+        assert!(diff.contains("-    println!(\"old\");"), "{diff}");
+        assert!(diff.contains("+    println!(\"new\");"), "{diff}");
+
+        let multi = json!({
+            "file_path": "src/lib.rs",
+            "edits": [
+                {"old_string": "alpha\n", "new_string": "beta\n"},
+                {"old_string": "one\n", "new_string": "two\n"}
+            ],
+        });
+        let multi_diff = st_edit_tool_diff("MultiEdit", &multi);
+        assert!(multi_diff.contains("-alpha"), "{multi_diff}");
+        assert!(multi_diff.contains("+beta"), "{multi_diff}");
+        assert!(multi_diff.contains("-one"), "{multi_diff}");
+        assert!(multi_diff.contains("+two"), "{multi_diff}");
+        assert!(st_edit_tool_diff("Read", &input).is_empty());
+    }
+
+    #[test]
+    fn claude_edit_projection_carries_diff() {
+        let jsonl = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"Edit","input":{"file_path":"src/lib.rs","old_string":"old\n","new_string":"new\n"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"The file /tmp/src/lib.rs has been updated successfully."}]}}"#;
+        let turns = super::st_parse_lines_to_turns(jsonl);
+        let entry = turns[0]["entries"][0].as_object().expect("tool entry");
+        let diff = entry
+            .get("diff")
+            .and_then(|v| v.as_str())
+            .expect("projected edit diff");
+        assert!(diff.contains("--- a/src/lib.rs"), "{diff}");
+        assert!(diff.contains("-old"), "{diff}");
+        assert!(diff.contains("+new"), "{diff}");
+        assert_eq!(
+            entry.get("result").and_then(|v| v.as_str()),
+            Some("The file /tmp/src/lib.rs has been updated successfully.")
         );
     }
 

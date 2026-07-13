@@ -193,6 +193,10 @@
               when="{($item.commandDisplay || $item.summary) &amp;&amp; ($item.name !== 'apply_patch' || !$item.commandDisplay)}"
               overflowMode="scroll"
               content="{window.__bramFormatToolCommand($item.commandDisplay || $item.summary, $item.description)}" />
+            <DiffView
+              when="{$item.diff}"
+              compact="true"
+              text="{$item.diff}" />
             <!-- Tool result: typed Markdown code-fence when the formatter
                  helper is live (after a rebuild), else the prior raw Text so a
                  hot-reload never blanks or markdown-mangles the expansion.

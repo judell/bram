@@ -4734,6 +4734,12 @@ window.__bramTranscriptEventsFromTurns = function (payload, menu) {
               commandDisplay: e.commandDisplay || "",
               description: e.description || "",
               result: e.result || "",
+              // Edit/MultiEdit reconstructed diff from the host projection
+              // (claude-edit-tool-result-diff-preview). Transcript.xmlui
+              // renders it via DiffView when present; the adapter must pass
+              // it through or $item.diff is undefined and the view never
+              // mounts.
+              diff: e.diff || "",
               isError: !!e.isError,
               agentId: e.agentId || "",
             });

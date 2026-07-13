@@ -284,7 +284,8 @@
       title="Tool"
       var.openDetail="{worklistToolDetailDS.value}"
       var.modalInput="{openDetail &amp;&amp; openDetail.input}"
-      var.modalResult="{openDetail &amp;&amp; openDetail.result}">
+      var.modalResult="{openDetail &amp;&amp; openDetail.result}"
+      var.modalDiff="{(openTool &amp;&amp; openTool.diff) || (openDetail &amp;&amp; openDetail.diff) || ''}">
       <VStack gap="$space-2">
         <Text
           when="{openTool &amp;&amp; openTool.summary}"
@@ -335,6 +336,21 @@
             color="$textColor-secondary"
             paddingHorizontal="$space-2"
             value="{inputBody.remaining + ' more line' + (inputBody.remaining === 1 ? '' : 's') + '…'}" />
+        </VStack>
+        <VStack
+          when="{modalDiff}"
+          gap="{0}"
+          padding="$space-3"
+          border="1px solid $color-surface-200"
+          borderRadius="$borderRadius"
+          backgroundColor="$backgroundColor-primary">
+          <Text
+            fontSize="$fontSize-xs"
+            fontWeight="$fontWeight-bold"
+            color="$textColor-secondary"
+            paddingHorizontal="$space-2"
+            value="Diff" />
+          <DiffView text="{modalDiff}" />
         </VStack>
         <VStack
           when="{modalResult &amp;&amp; modalResult.lines.length > 0}"

@@ -30236,23 +30236,36 @@ pub fn run() {
     init_bram_trace_from_env();
     let initial_proj = determine_project_root();
     eprintln!("[bram] project root: {}", initial_proj.display());
-    if let Some(cfg) = load_project_config(&initial_proj) {
-        if let Some(enabled) = cfg.traces.as_ref().and_then(|t| t.enabled) {
-            apply_bram_trace_from_config(enabled);
-        }
-        apply_bram_menus_parse_from_config(
-            cfg.menus
-                .as_ref()
-                .and_then(|m| m.parse_and_display)
-                .unwrap_or(false),
-        );
-        apply_bram_menus_hook_driven_from_config(
-            cfg.menus
-                .as_ref()
-                .and_then(|m| m.hook_driven)
-                .unwrap_or(true),
-        );
+    // Apply project config at boot. The menu-setting defaults MUST apply
+    // even when there is no .bram.json (fix-menu-defaults-without-bram-json):
+    // the atomics init false, so gating the apply on config presence left a
+    // freshly-cloned project (no .bram.json) with hook_driven=false ->
+    // handle_permission_menu early-returns applied:false, and
+    // parse_and_display=false disables the grid fallback, so NO menus surface
+    // at all. Read through cfg.as_ref() so None still yields the intended
+    // defaults (hook_driven=true, parse_and_display=false). The traces apply
+    // stays conditional: init_bram_trace_from_env already set the env-based
+    // value, and only an explicit setting should override it.
+    let cfg = load_project_config(&initial_proj);
+    if let Some(enabled) = cfg
+        .as_ref()
+        .and_then(|c| c.traces.as_ref())
+        .and_then(|t| t.enabled)
+    {
+        apply_bram_trace_from_config(enabled);
     }
+    apply_bram_menus_parse_from_config(
+        cfg.as_ref()
+            .and_then(|c| c.menus.as_ref())
+            .and_then(|m| m.parse_and_display)
+            .unwrap_or(false),
+    );
+    apply_bram_menus_hook_driven_from_config(
+        cfg.as_ref()
+            .and_then(|c| c.menus.as_ref())
+            .and_then(|m| m.hook_driven)
+            .unwrap_or(true),
+    );
     if !initial_proj.join("index.html").exists() {
         eprintln!(
             "[bram] WARNING: no index.html at project root; the right pane will fail to load. Run with `bram /path/to/project` or cd into the project before launching."

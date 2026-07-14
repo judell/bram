@@ -14656,6 +14656,62 @@ fn st_codex_tool_input(payload: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({})
 }
 
+// Codex "unified exec" (custom_tool_call, name="exec", CLI upgrade — NOT
+// model-specific): `input` is a JS orchestration script that calls
+// `tools.exec_command({cmd:"..."})`, possibly several times. Extract each
+// embedded shell command, quote/escape-aware, so the display shows the
+// actual commands instead of the raw JS. Empty when none found (caller
+// falls back to the raw script). Transitional: the legacy
+// function_call/exec_command path is untouched.
+fn st_codex_exec_cmds(input: &str) -> Vec<String> {
+    let chars: Vec<char> = input.chars().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == 'c'
+            && chars.get(i + 1) == Some(&'m')
+            && chars.get(i + 2) == Some(&'d')
+            && chars.get(i + 3) == Some(&':')
+        {
+            let mut j = i + 4;
+            while chars.get(j) == Some(&' ') {
+                j += 1;
+            }
+            if chars.get(j) == Some(&'"') {
+                j += 1;
+                let mut val = String::new();
+                while j < chars.len() {
+                    let c = chars[j];
+                    if c == '\\' {
+                        if let Some(&n) = chars.get(j + 1) {
+                            val.push(match n {
+                                '"' => '"',
+                                '\\' => '\\',
+                                'n' => '\n',
+                                't' => '\t',
+                                other => other,
+                            });
+                            j += 2;
+                            continue;
+                        }
+                    }
+                    if c == '"' {
+                        j += 1;
+                        break;
+                    }
+                    val.push(c);
+                    j += 1;
+                }
+                out.push(val);
+                i = j;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
 fn st_codex_tool_summary(payload: &serde_json::Value) -> String {
     let raw_name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let full_name = st_codex_tool_name(payload);
@@ -14667,6 +14723,26 @@ fn st_codex_tool_summary(payload: &serde_json::Value) -> String {
                 return format!("{}…", truncated);
             }
             return cmd.to_string();
+        }
+    }
+    // Unified exec: summarize by the first embedded shell command (or the
+    // first non-empty script line as a fallback), truncated like above.
+    if raw_name == "exec" {
+        if let Some(script) = input.as_str() {
+            let first = st_codex_exec_cmds(script).into_iter().next().or_else(|| {
+                script
+                    .lines()
+                    .map(|l| l.trim())
+                    .find(|l| !l.is_empty())
+                    .map(|l| l.to_string())
+            });
+            if let Some(cmd) = first {
+                if cmd.chars().count() > 80 {
+                    let truncated: String = cmd.chars().take(80).collect();
+                    return format!("{}…", truncated);
+                }
+                return cmd;
+            }
         }
     }
     if raw_name == "write_stdin" {
@@ -14732,9 +14808,22 @@ fn st_codex_tool_output(payload: &serde_json::Value) -> Option<(String, bool)> {
     if typ != "function_call_output" && typ != "custom_tool_call_output" {
         return None;
     }
-    let raw = match payload.get("output").and_then(|v| v.as_str()) {
-        Some(s) => s,
-        None => return Some((String::new(), false)),
+    // Transitional output shape: legacy is a plain string; unified exec's
+    // custom_tool_call_output carries an array of {type, text} items —
+    // concatenate their text so the result body isn't lost.
+    let output_val = payload.get("output");
+    let joined_array;
+    let raw: &str = if let Some(s) = output_val.and_then(|v| v.as_str()) {
+        s
+    } else if let Some(arr) = output_val.and_then(|v| v.as_array()) {
+        joined_array = arr
+            .iter()
+            .filter_map(|it| it.get("text").and_then(|v| v.as_str()))
+            .collect::<Vec<_>>()
+            .join("");
+        &joined_array
+    } else {
+        return Some((String::new(), false));
     };
     if let Some(parsed) = st_parse_json_string(raw) {
         if parsed.is_object() {
@@ -14999,6 +15088,75 @@ mod apply_patch_diff_tests {
     }
 }
 
+// Codex "unified exec" (custom_tool_call name=exec) transitional parsing.
+#[cfg(test)]
+mod codex_unified_exec_tests {
+    use super::{
+        st_codex_exec_cmds, st_codex_tool_command_display, st_codex_tool_output, st_codex_tool_summary,
+    };
+
+    fn exec_call(input: &str) -> serde_json::Value {
+        serde_json::json!({ "type": "custom_tool_call", "name": "exec", "input": input })
+    }
+
+    #[test]
+    fn extracts_embedded_shell_commands_quote_aware() {
+        let script = r#"const rs = await Promise.all([
+  tools.exec_command({cmd:"git status --short", "workdir":"/x"}),
+  tools.exec_command({cmd:"rg -n \"GPT-5\\.5\" app", "workdir":"/x"}),
+]);"#;
+        let cmds = st_codex_exec_cmds(script);
+        assert_eq!(cmds.len(), 2);
+        assert_eq!(cmds[0], "git status --short");
+        assert_eq!(cmds[1], "rg -n \"GPT-5\\.5\" app");
+    }
+
+    #[test]
+    fn exec_display_and_summary_use_the_commands() {
+        let call = exec_call(
+            "await tools.exec_command({cmd:\"sed -n '1,5p' f.rs\"});\ntools.exec_command({cmd:\"ls -la\"});",
+        );
+        assert_eq!(
+            st_codex_tool_command_display(&call),
+            "sed -n '1,5p' f.rs\nls -la"
+        );
+        assert_eq!(st_codex_tool_summary(&call), "sed -n '1,5p' f.rs");
+    }
+
+    #[test]
+    fn exec_display_falls_back_to_raw_script_when_no_cmd() {
+        let call = exec_call("await tools.web_search({query:\"hi\"});");
+        assert_eq!(
+            st_codex_tool_command_display(&call),
+            "await tools.web_search({query:\"hi\"});"
+        );
+    }
+
+    #[test]
+    fn custom_tool_call_output_array_is_concatenated() {
+        let out = serde_json::json!({
+            "type": "custom_tool_call_output",
+            "output": [
+                { "type": "input_text", "text": "Script completed\n" },
+                { "type": "input_text", "text": "hello world" }
+            ]
+        });
+        let (text, errored) = st_codex_tool_output(&out).expect("array output parses");
+        assert_eq!(text, "Script completed\nhello world");
+        assert!(!errored);
+    }
+
+    #[test]
+    fn legacy_string_output_still_parses() {
+        let out = serde_json::json!({
+            "type": "function_call_output",
+            "output": "plain legacy output"
+        });
+        let (text, _) = st_codex_tool_output(&out).expect("string output parses");
+        assert_eq!(text, "plain legacy output");
+    }
+}
+
 fn st_codex_tool_command_display(payload: &serde_json::Value) -> String {
     let input = st_codex_tool_input(payload);
     let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -15010,6 +15168,18 @@ fn st_codex_tool_command_display(payload: &serde_json::Value) -> String {
     if name == "apply_patch" {
         if let Some(patch) = input.as_str() {
             return st_apply_patch_to_unified_diff(patch);
+        }
+    }
+    // Unified exec (custom_tool_call, name="exec"): show the embedded shell
+    // commands one per line; fall back to the raw JS script when extraction
+    // finds none, so nothing is ever silently dropped.
+    if name == "exec" {
+        if let Some(script) = input.as_str() {
+            let cmds = st_codex_exec_cmds(script);
+            if !cmds.is_empty() {
+                return cmds.join("\n");
+            }
+            return script.to_string();
         }
     }
     if input.is_object() {

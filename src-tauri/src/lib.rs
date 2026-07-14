@@ -14933,6 +14933,72 @@ fn st_edit_tool_diff(name: &str, input: &serde_json::Value) -> String {
 
 // Codex variant: exec_command carries the command in input.cmd. Mirrors
 // __bramCodexToolCommandDisplay.
+// Normalize a Codex apply_patch envelope into a standard unified diff so
+// DiffView (via /__diff/annotate) renders it git-style — file headers plus
+// red/green hunks — instead of the raw `*** Begin Patch / *** Add File: /
+// @@` scaffolding (apply-patch-diffview-render iterate: "improve the
+// format"). Drops the Begin/End wrapper and maps the file markers to
+// ---/+++ headers; every other line (@@, +, -, context) passes through
+// unchanged. Input without the envelope is returned as-is.
+fn st_apply_patch_to_unified_diff(patch: &str) -> String {
+    if !patch.contains("*** Begin Patch") {
+        return patch.to_string();
+    }
+    let mut out: Vec<String> = Vec::new();
+    for line in patch.lines() {
+        if line == "*** Begin Patch" || line == "*** End Patch" {
+            continue;
+        }
+        if let Some(p) = line.strip_prefix("*** Add File: ") {
+            out.push("--- /dev/null".to_string());
+            out.push(format!("+++ b/{}", p));
+        } else if let Some(p) = line.strip_prefix("*** Update File: ") {
+            out.push(format!("--- a/{}", p));
+            out.push(format!("+++ b/{}", p));
+        } else if let Some(p) = line.strip_prefix("*** Delete File: ") {
+            out.push(format!("--- a/{}", p));
+            out.push("+++ /dev/null".to_string());
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    out.join("\n")
+}
+
+#[cfg(test)]
+mod apply_patch_diff_tests {
+    use super::st_apply_patch_to_unified_diff;
+
+    #[test]
+    fn add_file_becomes_dev_null_header() {
+        let patch = "*** Begin Patch\n*** Add File: resources/x.json\n+{\"a\":1}\n*** End Patch";
+        assert_eq!(
+            st_apply_patch_to_unified_diff(patch),
+            "--- /dev/null\n+++ b/resources/x.json\n+{\"a\":1}"
+        );
+    }
+
+    #[test]
+    fn update_and_delete_map_to_ab_headers() {
+        let upd = "*** Begin Patch\n*** Update File: src/f.rs\n@@\n-old\n+new\n*** End Patch";
+        assert_eq!(
+            st_apply_patch_to_unified_diff(upd),
+            "--- a/src/f.rs\n+++ b/src/f.rs\n@@\n-old\n+new"
+        );
+        let del = "*** Begin Patch\n*** Delete File: src/gone.rs\n*** End Patch";
+        assert_eq!(
+            st_apply_patch_to_unified_diff(del),
+            "--- a/src/gone.rs\n+++ /dev/null"
+        );
+    }
+
+    #[test]
+    fn non_envelope_input_is_unchanged() {
+        let plain = "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b";
+        assert_eq!(st_apply_patch_to_unified_diff(plain), plain);
+    }
+}
+
 fn st_codex_tool_command_display(payload: &serde_json::Value) -> String {
     let input = st_codex_tool_input(payload);
     let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -14943,7 +15009,7 @@ fn st_codex_tool_command_display(payload: &serde_json::Value) -> String {
     }
     if name == "apply_patch" {
         if let Some(patch) = input.as_str() {
-            return patch.to_string();
+            return st_apply_patch_to_unified_diff(patch);
         }
     }
     if input.is_object() {

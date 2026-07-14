@@ -185,10 +185,10 @@
             backgroundColor="$color-surface-50"
             padding="$space-2"
             borderRadius="$borderRadius">
-            <Markdown
+            <DiffView
               when="{$item.commandDisplay &amp;&amp; $item.name === 'apply_patch'}"
-              overflowMode="scroll"
-              content="{window.__bramFormatToolResult($item.commandDisplay, $item.name, $item.summary)}" />
+              compact="true"
+              text="{$item.commandDisplay}" />
             <Markdown
               when="{($item.commandDisplay || $item.summary) &amp;&amp; ($item.name !== 'apply_patch' || !$item.commandDisplay)}"
               overflowMode="scroll"

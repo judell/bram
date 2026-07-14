@@ -128,10 +128,13 @@ struct WorklistAuthorizationRecord {
 }
 
 // security-h4: TTL bounding how long an approved/drop authorization stays
-// valid for a mutate/commit — approximates "same turn as the resolve" so a
-// stale record left on disk by an abandoned turn can't be replayed later.
-// Mirrors the direct-edit BYPASS_TTL_SECONDS precedent.
-const WORKLIST_AUTH_TTL_MS: i64 = 5 * 60 * 1000;
+// valid for a mutate/commit, so a stale record left on disk by an abandoned
+// turn can't be replayed on a later one. Sized to fit real implementation
+// time, NOT a tight "same turn" proxy: a legitimate approve → agent
+// implements + tests for several minutes → advance flow must not be rejected
+// (a 5-minute window did reject one on 2026-07-14). The sharper H4 control is
+// the interrupted_at_ms fail-closed gate, which is independent of this TTL.
+const WORKLIST_AUTH_TTL_MS: i64 = 30 * 60 * 1000;
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

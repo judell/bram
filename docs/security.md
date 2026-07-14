@@ -79,7 +79,7 @@ the tracking issues.
 | H2 | Worklist authorization is forged from PTY input: relayed `toShell`/`toTurn`/`sendKeys` text of the form `approved: {...}` writes an auth record → injection self-authorizes repo mutations. | `lib.rs:8483`, `24187`, `8831` | #112 #109 | M |
 | H3 | Claude guard exits 0 for all `Bash`; `>`, `tee`, `sed -i`, `python -c`, `git commit/push`, `gh issue close` bypass worklist coverage entirely. Codex's `_BASH_WRITE_PATTERNS` already implements the fix. | `worklist-guard.py:492`; `worklist-guard-codex.py:280` | #119 #118 | M |
 | H4 | **DONE** (security-h4-auth-fail-closed-on-interrupt). Interrupt/cancel now marks the active auth record `interruptedAtMs` via `invalidate_worklist_authorization` at every interrupt sentinel-clear site (Esc, menu-reject, Codex cancel); `validate_worklist_mutate_authorization` + `ensure_worklist_commit_authorized` reject an interrupted record or one past `WORKLIST_AUTH_TTL_MS` (5 min ≈ "same turn"). `consumedAtMs` stays ignored so the same-turn drop flow (resolve consumes on read → prune) still works — the regression guard test covers it. | `lib.rs` | #120 | ~~M~~ done |
-| H5 | `/__issue/close` closes an issue **and** performs `git push` (`push=true`) with no auth record, no `closesIssues` check, and no confirmation; agent-reachable via the allowlisted loopback curl. | `lib.rs:26292`, `7417`, `7471` | #118 #121 | M (S stopgap) |
+| H5 | **DONE** (security-h5-host-authorize-issue-close + security-h5-manual-push-multi-close). A successful approved-item commit mints short-lived, single-use grants only for exact `close-issue:` selections intersected with the host-resolved `closesIssues` metadata; optional approved comments are bound too. Grants live in a durable per-repository queue keyed by item, issue, and committed SHA, so multiple commits survive until one explicit manual Push publishes the branch. Every `/__issue/close` path consumes one matching grant before invoking `gh`; missing, stale, replayed, wrong-SHA, undeclared-issue, and altered-comment requests fail closed. The close route cannot push. | `lib.rs` | #118 #121 | ~~M~~ done |
 | H6 | `Access-Control-Allow-Origin: *` on every loopback response amplifies the read + mutation routes to any local browser tab or process that learns the port. | `lib.rs:28906` | #110 #113 #121 | M |
 
 ### Medium
@@ -199,8 +199,11 @@ shrinks the reachability of much of the rest.
   lacks containment (C2). Also update `docs/apis.md` to state the trust boundary
   per command/route explicitly. **High.**
 - **#118 — gate commit/push/issue-close on worklist state.** Commit and prune
-  are correctly gated; issue-close and push are not (H5), and Claude can bypass
-  commit/push via Bash (H3). Two of four side effects ungated. **Moderate–High.**
+  are host-gated; provider Bash parity closes the direct shell bypass; and
+  issue close now consumes a host-minted grant tied to the approved item's
+  `closesIssues` metadata and committed SHA. Push remains a separate explicit
+  action and cannot be triggered by the close route. **Addressed; close after
+  the H5 end-to-end validation passes.**
 - **#119 — guard coverage across agents.** Guards are in sync, executable, and
   registered, but the Claude `Bash` surface is ungated (H3), the guard fails
   open without Python (M1), and the Codex Bash gate is path-blind (M5).

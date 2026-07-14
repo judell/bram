@@ -2211,10 +2211,9 @@ function __bramBuildCloseIssueLines(state) {
   return lines;
 }
 
-function __bramCombineFeedbackWithCloseLines(base, lines, pushBeforeClose) {
+function __bramCombineFeedbackWithCloseLines(base, lines) {
   var baseTrim = (base || "").trim();
   var generated = [];
-  if (pushBeforeClose) generated.push("push-before-close: true");
   if (lines && lines.length > 0) generated.push.apply(generated, lines);
   if (generated.length === 0) return baseTrim;
   if (!baseTrim) return generated.join("\n");
@@ -2233,8 +2232,7 @@ window.__bramPrepareCloseIssueWorklistActionSubmission = function (opts) {
   if (opts.closeIssues) {
     payloadFeedback = __bramCombineFeedbackWithCloseLines(
       window.__bramWithStagedImageMarkers(rawFeedback, pasteTarget),
-      __bramBuildCloseIssueLines(opts.closeIssuesState),
-      true,
+      __bramBuildCloseIssueLines(opts.closeIssuesState)
     );
     imageAction = "approved-close";
   }

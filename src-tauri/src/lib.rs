@@ -146,6 +146,21 @@ struct PendingWorklistPushMirror {
     created_at_ms: i64,
 }
 
+// close-on-push-automatic (security H5): a pending issue-close intent recorded
+// at the commit gate from the user's close-on-commit dialog selections, bound
+// to that commit's SHA. Nothing closes at commit time; on the user's explicit
+// Push, flush_pending_issue_closes closes each issue whose commit is now
+// visible on origin. Independent of the lifecycle-mirror (comment) queue.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingIssueClose {
+    issue: u64,
+    commit_sha: String,
+    #[serde(default)]
+    comment: Option<String>,
+    created_at_ms: i64,
+}
+
 fn turn_text_has_direct_edit_opt_out(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("just do it")
@@ -7466,18 +7481,6 @@ fn close_issue_commit_comment(repo_slug: &str, full_sha: &str, subject: &str) ->
     }
 }
 
-fn issue_close_json_error(code: &str, issue: u64, sha: &str, message: String) -> Vec<u8> {
-    serde_json::json!({
-        "ok": false,
-        "code": code,
-        "issue": issue,
-        "sha": sha,
-        "message": message,
-    })
-    .to_string()
-    .into_bytes()
-}
-
 fn git_full_commit_sha<R: tauri::Runtime>(app: &AppHandle<R>, sha: &str) -> Result<String, String> {
     let trimmed = sha.trim();
     if trimmed.is_empty() || !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -7524,142 +7527,6 @@ fn gh_commit_missing_stderr(stderr: &str) -> bool {
         || stderr.contains("HTTP 422")
         || stderr.contains("Not Found")
         || stderr.contains("No commit found")
-}
-
-fn gh_issue_close_with_commit<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    number: u64,
-    sha: &str,
-    push_before_close: bool,
-) -> (u16, &'static str, Vec<u8>) {
-    let mut full_sha = match git_full_commit_sha(app, sha) {
-        Ok(s) => s,
-        Err(e) => {
-            return (
-                400,
-                "application/json; charset=utf-8",
-                issue_close_json_error("invalid-commit", number, sha, e),
-            );
-        }
-    };
-    let repo_slug = match repo_owner_name(app) {
-        Some(slug) => slug,
-        None => {
-            return (
-                400,
-                "application/json; charset=utf-8",
-                issue_close_json_error(
-                    "no-github-remote",
-                    number,
-                    &full_sha,
-                    "Cannot close with a commit link because origin is not a GitHub remote."
-                        .to_string(),
-                ),
-            );
-        }
-    };
-    if push_before_close {
-        match push_focused_commit(app, &full_sha) {
-            Ok(pushed_sha) => {
-                full_sha = pushed_sha;
-                flush_pending_worklist_push_mirrors(app);
-            }
-            Err(e) => {
-                return (
-                    502,
-                    "application/json; charset=utf-8",
-                    issue_close_json_error("focused-push-failed", number, &full_sha, e),
-                );
-            }
-        }
-    }
-    match gh_commit_visible(app, &repo_slug, &full_sha) {
-        Ok(true) => {}
-        Ok(false) => {
-            let short_sha: String = full_sha.chars().take(7).collect();
-            return (
-                409,
-                "application/json; charset=utf-8",
-                issue_close_json_error(
-                    "commit-not-visible",
-                    number,
-                    &full_sha,
-                    format!(
-                        "Committed {}, but did not close #{} because GitHub cannot see the commit yet. Retry the verified close helper after the push problem is resolved.",
-                        short_sha, number
-                    ),
-                ),
-            );
-        }
-        Err(e) => {
-            return (
-                502,
-                "application/json; charset=utf-8",
-                issue_close_json_error("commit-visibility-check-failed", number, &full_sha, e),
-            );
-        }
-    }
-
-    let comment = if worklist_lifecycle_mirror_enabled(app) {
-        String::new()
-    } else {
-        let subject = git_commit_subject(app, &full_sha).unwrap_or_default();
-        close_issue_commit_comment(&repo_slug, &full_sha, &subject)
-    };
-    match gh_issue_close(app, number, &comment) {
-        Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
-        Err(e) => {
-            eprintln!("[gh issue close {}] {}", number, e);
-            (500, "text/plain; charset=utf-8", e.into_bytes())
-        }
-    }
-}
-
-fn handle_issue_close_json<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    body: &[u8],
-) -> (u16, &'static str, Vec<u8>) {
-    let parsed: serde_json::Value = serde_json::from_slice(body).unwrap_or(serde_json::Value::Null);
-    if parsed.is_null() {
-        return (
-            400,
-            "application/json; charset=utf-8",
-            br#"{"error":"malformed issue close JSON"}"#.to_vec(),
-        );
-    }
-    let number = parsed.get("number").and_then(|v| v.as_u64()).unwrap_or(0);
-    if number == 0 {
-        return (
-            400,
-            "application/json; charset=utf-8",
-            br#"{"error":"missing number"}"#.to_vec(),
-        );
-    }
-    let commit = parsed
-        .get("commit")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    let push_before_close = parsed
-        .get("push")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let comment = parsed
-        .get("comment")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    if !commit.is_empty() {
-        return gh_issue_close_with_commit(app, number, &commit, push_before_close);
-    }
-    match gh_issue_close(app, number, &comment) {
-        Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
-        Err(e) => {
-            eprintln!("[issue close intent number={}] {}", number, e);
-            (500, "text/plain; charset=utf-8", e.into_bytes())
-        }
-    }
 }
 
 #[cfg(test)]
@@ -10494,6 +10361,9 @@ fn git_push(app: AppHandle, branch: Option<String>) -> Result<(), String> {
 fn finish_git_push<R: tauri::Runtime>(app: &AppHandle<R>) {
     emit_replayable_signal(app, "git-status-changed");
     flush_pending_worklist_push_mirrors(app);
+    // close-on-push-automatic: after the user's explicit push, close any queued
+    // issue whose commit is now on origin. Runs regardless of the mirror setting.
+    flush_pending_issue_closes(app);
 }
 
 fn git_current_branch<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<String, String> {
@@ -10728,101 +10598,6 @@ fn auto_rebase_and_push<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), Str
                 .unwrap_or_else(|| "push succeeded".to_string());
             return Err(format!(
                 "{}; stash pop failed: {} (stash retained — recover with `git stash list` / `git stash apply`)",
-                prefix,
-                pop_err.trim()
-            ));
-        }
-    }
-
-    result
-}
-
-fn push_focused_commit<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    full_sha: &str,
-) -> Result<String, String> {
-    let branch =
-        git_run(app, &["rev-parse", "--abbrev-ref", "HEAD"]).map(|s| s.trim().to_string())?;
-    if branch == "HEAD" || branch.is_empty() {
-        return Err("refusing focused close push from a detached HEAD".to_string());
-    }
-    let head_sha = git_run(app, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string())?;
-    if head_sha != full_sha {
-        return Err(format!(
-            "refusing focused close push because commit {} is not HEAD ({})",
-            full_sha, head_sha
-        ));
-    }
-
-    git_run(app, &["fetch", "origin"])?;
-
-    // Fast-forward fast path: origin has nothing HEAD lacks, so push the
-    // focused commit directly — no stash, no rebase. This is the common case
-    // and sidesteps the Windows filemode-stash failure mode (#208).
-    if upstream_is_fast_forward(app, &branch) {
-        if bram_trace_enabled() {
-            append_bram_trace_line(
-                app,
-                "git-push",
-                &format!("op=focused-close path=fast-forward branch={}", branch),
-            );
-        }
-        let refspec = format!("{}:refs/heads/{}", full_sha, branch);
-        git_run(app, &["push", "origin", &refspec])?;
-        return Ok(full_sha.to_string());
-    }
-
-    if bram_trace_enabled() {
-        append_bram_trace_line(
-            app,
-            "git-push",
-            &format!("op=focused-close path=rebase branch={}", branch),
-        );
-    }
-    let dirty = working_tree_dirty_ignoring_filemode(app);
-    let mut stashed = false;
-    if dirty {
-        if has_stash_labeled(app, "bram-focused-close-push") {
-            return Err("a previous bram-focused-close-push stash is still present — resolve it (`git stash list` / `git stash pop` / `git stash drop`) before retrying the close push".to_string());
-        }
-        git_run(
-            app,
-            &[
-                "stash",
-                "push",
-                "--include-untracked",
-                "-m",
-                "bram-focused-close-push",
-            ],
-        )
-        .map_err(|e| format!("auto-stash failed: {}", e))?;
-        stashed = true;
-    }
-
-    let result: Result<String, String> = (|| {
-        let upstream = format!("origin/{}", branch);
-        if let Err(rebase_err) = git_run(app, &["rebase", &upstream]) {
-            let _ = git_run(app, &["rebase", "--abort"]);
-            return Err(format!(
-                "rebase conflicts (aborted, working tree clean - re-run the rebase manually or ask the agent, then retry close): {}",
-                rebase_err.trim()
-            ));
-        }
-        let pushed_sha = git_run(app, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string())?;
-        let refspec = format!("{}:refs/heads/{}", pushed_sha, branch);
-        git_run(app, &["push", "origin", &refspec])?;
-        Ok(pushed_sha)
-    })();
-
-    if stashed {
-        if let Err(pop_err) = git_run(app, &["stash", "pop"]) {
-            let prefix = result
-                .as_ref()
-                .err()
-                .cloned()
-                .unwrap_or_else(|| "focused push succeeded".to_string());
-            return Err(format!(
-                "{}; stash pop failed: {} (stash retained - recover with `git stash list` / `git stash apply`)",
                 prefix,
                 pop_err.trim()
             ));
@@ -25991,6 +25766,208 @@ fn flush_pending_worklist_push_mirrors<R: tauri::Runtime>(app: &AppHandle<R>) {
     }
 }
 
+// ---- close-on-push-automatic (security H5) ----
+
+fn issue_close_queue_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    project_resource_path(app, ".worklist-issue-close.json")
+}
+
+fn read_pending_issue_closes(path: &Path) -> Vec<PendingIssueClose> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<PendingIssueClose>>(&s).ok())
+        .unwrap_or_default()
+}
+
+fn write_pending_issue_closes(path: &Path, records: &[PendingIssueClose]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let body = serde_json::to_string_pretty(records).map_err(|e| e.to_string())?;
+    std::fs::write(path, format!("{}\n", body)).map_err(|e| e.to_string())
+}
+
+// Enqueue a close intent, deduped by (issue, commit_sha). A later record for
+// the same pair updates the comment (the dialog's last word wins) but never
+// duplicates.
+fn enqueue_pending_issue_close_path(
+    path: &Path,
+    record: PendingIssueClose,
+) -> Result<(), String> {
+    let mut records = read_pending_issue_closes(path);
+    if let Some(existing) = records
+        .iter_mut()
+        .find(|r| r.issue == record.issue && r.commit_sha == record.commit_sha)
+    {
+        existing.comment = record.comment;
+    } else {
+        records.push(record);
+    }
+    write_pending_issue_closes(path, &records)
+}
+
+// Parse the dialog-authored `close-issue: N [comment: "..."]` lines out of an
+// item's approved feedback. Mirrors the emit in Globals.xs / helpers.js. Only
+// these explicit selections close — declared `closesIssues` the user left
+// unticked (Approve-without-closing) produce no line and never close.
+fn parse_close_issue_selections(feedback: &str) -> Vec<(u64, Option<String>)> {
+    let mut out: Vec<(u64, Option<String>)> = Vec::new();
+    for line in feedback.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("close-issue:") else {
+            continue;
+        };
+        let rest = rest.trim();
+        let (num_str, comment) = match rest.find("comment:") {
+            Some(idx) => {
+                let raw = rest[idx + "comment:".len()..].trim();
+                // The comment is JSON.stringify'd (quoted). Decode; fall back to raw.
+                let decoded = serde_json::from_str::<String>(raw).ok();
+                (rest[..idx].trim(), decoded.filter(|s| !s.is_empty()))
+            }
+            None => (rest, None),
+        };
+        if let Ok(n) = num_str.trim().parse::<u64>() {
+            out.push((n, comment));
+        }
+    }
+    out
+}
+
+// From an approved-auth record's embedded items, enqueue a close intent per
+// ticked issue bound to the just-created commit SHA. Called by the commit gate.
+fn enqueue_issue_closes_from_auth<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    auth: &serde_json::Value,
+    commit_sha: &str,
+) {
+    let Some(path) = issue_close_queue_file(app) else {
+        return;
+    };
+    let Some(items) = auth.get("items").and_then(|v| v.as_array()) else {
+        return;
+    };
+    for item in items {
+        let Some(feedback) = item.get("feedback").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        for (issue, comment) in parse_close_issue_selections(feedback) {
+            let record = PendingIssueClose {
+                issue,
+                commit_sha: commit_sha.to_string(),
+                comment,
+                created_at_ms: unix_now_ms(),
+            };
+            if let Err(e) = enqueue_pending_issue_close_path(&path, record) {
+                eprintln!("[issue-close-queue] enqueue #{} failed: {}", issue, e);
+            }
+        }
+    }
+}
+
+// On the user's explicit Push, close each queued issue whose commit is now
+// visible on origin, with the commit-link comment (plus any user comment).
+// Records whose commit isn't visible yet stay queued. NOT gated on the
+// lifecycle-mirror setting — closing is a core action, not the optional mirror.
+fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let Some(path) = issue_close_queue_file(app) else {
+        return;
+    };
+    let records = read_pending_issue_closes(&path);
+    if records.is_empty() {
+        return;
+    }
+    let Some(repo_slug) = repo_owner_name(app) else {
+        return;
+    };
+    let mut remaining: Vec<PendingIssueClose> = Vec::new();
+    for record in records {
+        match gh_commit_visible(app, &repo_slug, &record.commit_sha) {
+            Ok(true) => {
+                let full_sha = git_full_commit_sha(app, &record.commit_sha)
+                    .unwrap_or_else(|_| record.commit_sha.clone());
+                let subject = git_commit_subject(app, &full_sha).unwrap_or_default();
+                let mut comment = close_issue_commit_comment(&repo_slug, &full_sha, &subject);
+                if let Some(user) = record.comment.as_deref().filter(|s| !s.is_empty()) {
+                    comment = format!("{}\n\n{}", user, comment);
+                }
+                if let Err(e) = gh_issue_close(app, record.issue, &comment) {
+                    eprintln!(
+                        "[issue-close-queue] close #{} sha={} failed: {}",
+                        record.issue, record.commit_sha, e
+                    );
+                    remaining.push(record);
+                } else if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        app,
+                        "issue-close-queue",
+                        &format!("op=closed issue={} sha={}", record.issue, full_sha),
+                    );
+                }
+            }
+            Ok(false) | Err(_) => remaining.push(record),
+        }
+    }
+    if let Err(e) = write_pending_issue_closes(&path, &remaining) {
+        eprintln!("[issue-close-queue] write remaining failed: {}", e);
+    }
+}
+
+#[cfg(test)]
+mod close_on_push_tests {
+    use super::{
+        enqueue_pending_issue_close_path, parse_close_issue_selections, read_pending_issue_closes,
+        PendingIssueClose,
+    };
+
+    #[test]
+    fn parses_bare_and_commented_close_lines_only() {
+        let feedback = "looks good\nclose-issue: 42\nclose-issue: 50 comment: \"shipped, see msg\"\nnot a close line";
+        let sel = parse_close_issue_selections(feedback);
+        assert_eq!(sel.len(), 2);
+        assert_eq!(sel[0], (42, None));
+        assert_eq!(sel[1], (50, Some("shipped, see msg".to_string())));
+    }
+
+    #[test]
+    fn ignores_feedback_without_close_lines() {
+        assert!(parse_close_issue_selections("approve without closing").is_empty());
+        assert!(parse_close_issue_selections("").is_empty());
+    }
+
+    #[test]
+    fn enqueue_dedupes_by_issue_and_sha_updating_comment() {
+        let dir = std::env::temp_dir().join(format!("bram-close-queue-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".worklist-issue-close.json");
+        let rec = |c: Option<&str>| PendingIssueClose {
+            issue: 7,
+            commit_sha: "abc123".to_string(),
+            comment: c.map(String::from),
+            created_at_ms: 0,
+        };
+        enqueue_pending_issue_close_path(&path, rec(None)).unwrap();
+        enqueue_pending_issue_close_path(&path, rec(Some("final"))).unwrap();
+        // Different SHA is a distinct record.
+        enqueue_pending_issue_close_path(
+            &path,
+            PendingIssueClose {
+                issue: 7,
+                commit_sha: "def456".to_string(),
+                comment: None,
+                created_at_ms: 0,
+            },
+        )
+        .unwrap();
+        let recs = read_pending_issue_closes(&path);
+        assert_eq!(recs.len(), 2);
+        let same_sha = recs.iter().find(|r| r.commit_sha == "abc123").unwrap();
+        assert_eq!(same_sha.comment.as_deref(), Some("final"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 fn worklist_feedback_ref_item_id(feedback_ref: &str) -> Option<String> {
     if feedback_ref.is_empty()
         || feedback_ref.contains('/')
@@ -27201,37 +27178,10 @@ fn route_request<R: tauri::Runtime>(
         };
     }
 
-    if path == "__issue/close" {
-        let mut number: u64 = 0;
-        let mut comment = String::new();
-        let mut commit = String::new();
-        let mut push_before_close = false;
-        for pair in query.split('&') {
-            if let Some(v) = pair.strip_prefix("number=") {
-                number = percent_decode(v).parse().unwrap_or(0);
-            } else if let Some(v) = pair.strip_prefix("comment=") {
-                comment = percent_decode(v);
-            } else if let Some(v) = pair.strip_prefix("commit=") {
-                commit = percent_decode(v);
-            } else if let Some(v) = pair.strip_prefix("push=") {
-                let v = percent_decode(v);
-                push_before_close = v == "1" || v.eq_ignore_ascii_case("true");
-            }
-        }
-        if number == 0 {
-            return (400, "text/plain; charset=utf-8", b"missing number".to_vec());
-        }
-        if !commit.trim().is_empty() {
-            return gh_issue_close_with_commit(app, number, &commit, push_before_close);
-        }
-        return match gh_issue_close(app, number, &comment) {
-            Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
-            Err(e) => {
-                eprintln!("[http /__issue/close number={}] {}", number, e);
-                (500, "text/plain; charset=utf-8", e.into_bytes())
-            }
-        };
-    }
+    // close-on-push-automatic (security H5): the agent-reachable `/__issue/close`
+    // route was removed. Issue close is now purely a host consequence of the
+    // user's explicit Push (flush_pending_issue_closes); no agent has a close
+    // path.
 
     if path == "__repo/origin" {
         return match repo_origin_info(app) {
@@ -28203,7 +28153,7 @@ fn handle_worklist_resolve<R: tauri::Runtime>(
 //
 // Intent shape:  {"nonce": "...", "route": "<r>", "body": { ... }}
 //   routes: worklist-resolve | worklist-mutate | worklist-commit |
-//           iterate-begin | iterate-end | worklist-end | issue-close
+//           iterate-begin | iterate-end | worklist-end
 // Result shape:  {"nonce": "...", "ok": <bool>, "status": <u16>,
 //                 "result"|"error": <json>, "completedAtMs": <ms>}
 fn drain_worklist_intent<R: tauri::Runtime>(app: &AppHandle<R>) {
@@ -28255,10 +28205,6 @@ fn drain_worklist_intent<R: tauri::Runtime>(app: &AppHandle<R>) {
             }
             "worklist-end" => {
                 let (s, _m, b) = handle_iterate_end(app, &body_bytes);
-                (s, b)
-            }
-            "issue-close" => {
-                let (s, _m, b) = handle_issue_close_json(app, &body_bytes);
                 (s, b)
             }
             other => (
@@ -29069,6 +29015,11 @@ fn handle_worklist_commit<R: tauri::Runtime>(
             )
         }
     };
+
+    // close-on-push-automatic: record the commit-gate dialog's close-issue
+    // selections as pending closes bound to this SHA. Nothing closes now; the
+    // user's next Push triggers flush_pending_issue_closes.
+    enqueue_issue_closes_from_auth(app, &auth, &sha);
 
     let prune_body = serde_json::json!({
         "op": "prune",

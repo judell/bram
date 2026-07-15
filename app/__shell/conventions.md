@@ -472,8 +472,14 @@ proposal, then `mutate op:"advance"`.
 send one request with `{ ids, message }`. The host verifies approved auth,
 requires every id to be `applied`, stages only those items' files, refuses
 unrelated staged files, commits, prunes the items, consumes auth, and clears
-the sentinel. Close-on-commit (`close-issue:` / `push-before-close:`) stays
-on the existing `/__issue/close` path after the commit returns its `sha`.
+the sentinel. **Issue close is automatic — the agent does nothing.** When the
+approved feedback carries `close-issue:` selections (from the close-on-commit
+dialog), the host records them at commit time bound to the new SHA, then
+closes each issue automatically after the user's next explicit **Push** (only
+once its commit is visible on origin). There is no agent-reachable close
+route — `/__issue/close` was removed — so there is nothing for the agent to
+call and no close step to instruct the user to run; closing follows Push with
+no further action (close-on-push-automatic, security H5). Closing never pushes.
 
 **Drops: still `resolve` before `mutate`.** Resolve returns the recorded
 items and writes the drop sentinel (drops aren't set at approval time), then
@@ -496,9 +502,9 @@ runs without a prompt. `$BRAM_PORT` won't work — Claude Code's
 permission matcher doesn't expand variables, so `$` breaks the match
 (see https://code.claude.com/docs/en/permissions.md).
 
-The POST routes (`worklist-mutate`, `worklist-commit`,
-`issue-close`) have their own allowlist entries, but the match is
-narrow — keep the call in this exact shape or it will prompt:
+The POST routes (`worklist-mutate`, `worklist-commit`) have their
+own allowlist entries, but the match is narrow — keep the call in
+this exact shape or it will prompt:
 
 ```
 curl -4 -sS --retry-connrefused --retry 3 --retry-delay 1 -X POST \
@@ -548,17 +554,16 @@ two coordination dot-files instead:
    { "nonce": "<unique-per-request>", "route": "<route>", "body": { ... } }
    ```
 
-   `route` is one of `worklist-resolve`, `worklist-mutate`, `worklist-commit`, or
-   `issue-close`. `body` matches the HTTP route:
+   `route` is one of `worklist-resolve`, `worklist-mutate`, or
+   `worklist-commit`. `body` matches the HTTP route:
    - `worklist-resolve` — omit, or `{ "ids": [...] }` to filter.
    - `worklist-mutate` — `{ "op": "advance", "ids": [...], "status": "applied" }`
      or `{ "op": "prune", "ids": [...] }`.
    - `worklist-commit` — `{ "ids": [...], "message": "..." }`.
-   - `issue-close` — `{ "number": N, "commit": "<full-sha>", "push": <bool> }`
-     for the generated-comment verified path, or
-     `{ "number": N, "comment": "<user-supplied>" }` for the
-     user-supplied-comment path. Same field semantics as
-     `/__issue/close` — see the close-on-commit section below.
+
+   There is no `issue-close` route: closing is fully automatic on the
+   user's next Push (close-on-push-automatic, security H5). The agent
+   never writes a close intent.
 
 2. **Read** `resources/.worklist-result.json` for the record whose
    `nonce` matches (ignore stale results from prior requests):
@@ -761,9 +766,10 @@ reference: `docs/apis.md` §11. Agent-side conventions:
   auth and clears the sentinel. One call.
 - **`approved:` (commit gate)** → `worklist-commit` with `{ ids, message }`.
   The host stages only the approved files, commits, prunes, consumes auth,
-  and clears the sentinel. If the approved feedback includes `close-issue:` /
-  `push-before-close:` lines, call the existing `issue-close` route after
-  the commit route returns `sha`.
+  and clears the sentinel. If the approved feedback includes `close-issue:`
+  lines, the host itself records the pending close bound to the new SHA;
+  the agent does nothing further — closing fires automatically on the
+  user's next Push. There is no `issue-close` route to call.
 - **`drop:`** → `resolve` → `mutate op:"prune"`. Drops aren't set at
   approval time, so `resolve` is what raises the spinner.
 - **`iterate:`** → no agent-side bracket needed. The host detects the
@@ -924,13 +930,12 @@ When an item's `applied` commit would resolve a GitHub issue, set
 from `gh issue view N --json title`; refresh if you iterate).
 Approving a TO COMMIT item with non-empty `closesIssues` opens a
 confirm dialog — one row per issue plus an optional close-comment
-textbox, with three actions: close after verifying the commit is
-visible on GitHub; push then verify and close; or commit only. The
-push-before-close path is branch-scoped, not item-scoped: it pushes
-the new worklist commit plus any unpublished commits already reachable
-from the current branch tip. The dialog must show that scope before
-confirmation, including a table of pending commits when any already
-exist.
+textbox. Ticking issues records them for automatic close-on-push (see
+below); "commit only" commits without queuing any close. There is no
+push-from-close path: closing follows the user's separate, explicit
+Push. (A residual `push-before-close:` toggle in the dialog is inert —
+the backend ignores it; removing it from the dialog UI is a small
+follow-up.)
 
 Issue-derived items (e.g. "Propose a worklist item to address #N
 ...") default to pairing the `issue-<N>-...` id with `closesIssues`
@@ -945,58 +950,32 @@ commit truly resolves an issue; set `closesIssues` explicitly when
 it does.
 
 The user's choices arrive in the per-item `feedback` of the
-`approved:` payload as lines appended after any free-text feedback:
+`approved:` payload as `close-issue:` lines appended after any free-text
+feedback:
 
 ```
 close-issue: 52
 close-issue: 50 comment: "shipped, see commit message"
-push-before-close: true
 ```
 
-After resolving and committing as usual:
+**Closing is fully automatic — the agent does nothing (close-on-push-
+automatic, security H5).** At the commit gate the host itself parses these
+verified `close-issue:` selections and records a pending close bound to the
+new commit SHA. Nothing closes or pushes at commit time. On the user's next
+explicit **Push**, once each commit is visible on origin, the host closes
+its issue automatically with the `Closed by <commit-url>` comment (prefixed
+with the user's comment when one was given).
 
-1. Parse the verified `feedback`: lines starting with `close-issue: N`
-   each name an issue to close; an exact `push-before-close: true`
-   line toggles push-before-close.
-2. Resolve the new commit's full SHA.
-3. For each `close-issue: N` **without** a user-supplied comment,
-   call Bram's backend route through your transport (don't `gh issue
-   close` directly):
+So after `worklist-commit` returns its `sha`, you are **done** — do not
+resolve the SHA and do not tell the user to run a close step. There is no
+close route or `issue-close` intent to write (both were removed); the host
+does everything. Report the commit and stop; closing follows their Push with
+no further action. **Closing never pushes** — the user's explicit
+Push is the only thing that publishes commits, so closing one issue can
+never silently push others stacked behind it.
 
-   - **Claude (loopback curl):**
-
-     ```sh
-     curl -4 -sS --retry-connrefused --retry 3 --retry-delay 1 \
-       "http://127.0.0.1:<bram-port>/__issue/close?number=N&commit=<full-sha>[&push=true]"
-     ```
-
-     Append `&push=true` if `push-before-close: true` was present.
-
-   - **Codex (filesystem intent):** write `resources/.worklist-intent.json`
-     with `{ "nonce": "...", "route": "issue-close", "body": { "number": N,
-     "commit": "<full-sha>", "push": <bool> } }` and read
-     `resources/.worklist-result.json` for the matching nonce. Same
-     drain-and-retry rules as the worklist routes above.
-
-   Either way, the backend pushes (if requested), verifies GitHub
-   sees the commit, and on success closes with the generated comment
-   `Closed by https://github.com/<owner>/<repo>/commit/<full-sha>`.
-
-4. For `close-issue: N comment: "..."`, close with the same transport
-   shapes — Claude:
-   `/__issue/close?number=N&comment=<encoded-comment>`; Codex:
-   `route: "issue-close", body: { "number": N, "comment": "..." }`.
-   Don't rewrite the user's comment into the generated form.
-
-5. On backend refusal (`{"ok":false,"code":"commit-not-visible"}` or
-   `"push-failed"`), do **not** fall back to `gh issue close`. Report
-   the message plainly, e.g.: "Committed `<short-sha>`, but did not
-   close #N because GitHub cannot see the commit yet." The worklist
-   item may still be pruned if the commit succeeded — issue closing
-   is a post-commit side effect.
-
-6. **Approve without closing** arrives as feedback with no
-   `close-issue:` lines — commit only.
+**Approve without closing** arrives as feedback with no `close-issue:`
+lines — commit only, nothing queued.
 
 
 ## Bram shell mechanics
@@ -1144,10 +1123,10 @@ routes, iframe events, and inflight-sentinel writes / clears.
 Always on; grep it directly. Best for plumbing: stuck spinner,
 sentinel anomalies, route errors, agent-turn-end detection,
 heartbeat drift, close-cycle verification (`grep
-"path=__issue/close" resources/bram-traces/bram-trace.log` — absence around a
-known close timestamp means the agent bypassed
-`gh_issue_close_with_commit` and shelled out to `gh issue close`
-directly).
+"[issue-close-queue] op=closed" resources/bram-traces/bram-trace.log` —
+one line per issue the host auto-closed after a Push; absence around a
+known close timestamp means the commit wasn't visible on origin yet, or
+no close was queued at the commit gate).
 
 **Inspector Export** — XMLUI runtime trace (events, state changes,
 handler invocations) for Bram's own XMLUI UI, captured on demand.

@@ -879,42 +879,8 @@
       <VStack gap="$space-3" padding="$space-2">
         <Text>
           This commit is flagged as resolving the GitHub issue(s) below.
-          Confirm to let the close helper commit this worklist item, push the current branch, verify GitHub can see the commit, then close with a commit-link comment.
+          Commit and queue the close; the issue(s) close automatically the next time you push this branch and GitHub can see the commit. Nothing is pushed now.
         </Text>
-        <VStack
-          gap="$space-2"
-          padding="$space-3"
-          border="{closeIssueExistingPendingCount(commits.value) > 0 ? '1px solid $color-warning-300' : '1px solid $color-surface-200'}"
-          borderRadius="$borderRadius"
-          backgroundColor="{closeIssueExistingPendingCount(commits.value) > 0 ? '$color-warning-50' : '$color-surface-100'}">
-          <Text fontWeight="$fontWeight-bold">
-            Push-before-close scope
-          </Text>
-          <Text fontSize="$fontSize-sm" color="$textColor-secondary">
-            A branch push publishes the new worklist commit plus every unpublished commit already reachable from this branch tip.
-          </Text>
-          <Text
-            when="{closeIssueExistingPendingCount(commits.value) > 0}"
-            fontSize="$fontSize-sm"
-            color="$color-warning-700"
-            fontWeight="$fontWeight-bold">
-            This close path will also push {closeIssueExistingPendingCount(commits.value)} existing pending commit(s).
-          </Text>
-          <VStack border="1px solid $color-surface-300" borderRadius="$borderRadius">
-            <HStack gap="$space-2" padding="$space-2" backgroundColor="$color-surface-200">
-              <Text width="70px" fontWeight="$fontWeight-bold" fontSize="$fontSize-xs">Commit</Text>
-              <Text width="*" fontWeight="$fontWeight-bold" fontSize="$fontSize-xs">Subject</Text>
-              <Text width="190px" fontWeight="$fontWeight-bold" fontSize="$fontSize-xs">Relation</Text>
-            </HStack>
-            <Items data="{closeIssuePushScopeRows(closeIssuesItemRef, commits.value)}">
-              <HStack gap="$space-2" padding="$space-2" borderTop="1px solid $color-surface-200">
-                <Text width="70px" variant="code" fontSize="$fontSize-xs" value="{$item.sha}" />
-                <Text width="*" fontSize="$fontSize-sm" maxLines="2" value="{$item.subject}" />
-                <Text width="190px" fontSize="$fontSize-xs" color="$textColor-secondary" value="{$item.relation}" />
-              </HStack>
-            </Items>
-          </VStack>
-        </VStack>
         <Items data="{closeIssuesItemRef ? closeIssuesItemRef.closesIssues : []}">
           <VStack
             gap="$space-2"
@@ -943,8 +909,8 @@
         </Items>
         <HStack gap="$space-2" paddingTop="$space-3" borderTop="1px solid $borderColor">
           <Button
-            label="Confirm"
-            tooltip="Commit, push this commit through the verified close helper, then close"
+            label="Commit and queue close"
+            tooltip="Commit now and queue the close; the issue closes automatically on your next push"
             onClick="const sentId = closeIssuesItemRef &amp;&amp; closeIssuesItemRef.id; const sentText = sentId ? ((feedbackDraftsById || {})[sentId] || '') : ''; const r = window.__bramPrepareCloseIssueWorklistActionSubmission({item: closeIssuesItemRef, closeIssuesState: closeIssuesState, closeIssues: true, feedbackDraftsById: feedbackDraftsById || {}, expandedItemIds: expandedItemIds || [], voiceTarget: worklistVoiceTarget || 'message-agent'}); const next = Object.assign({}, r.feedbackDraftsById || {}); feedbackDraftsById = next; window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds || [], feedbackDraftsById: feedbackDraftsById}); worklistActionResult = r; window.submitAuthorizedWorklistTurn(r, () => { submitting = false; actionProgressScope = ''; actionProgressKind = ''; actionProgressTick = 0; submittedItemId = null; submittedKind = ''; awaitingResponse = false; worklistActionResult = null; }); closeIssuesDialog = null; closeIssuesItemRef = null; closeIssuesState = null" />
           <Button
             label="Approve without closing"

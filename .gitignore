@@ -56,6 +56,7 @@ resources/.worklist-intent.json
 resources/.worklist-result.json
 resources/.codex-reload-target.json
 resources/.worklist-push-mirror.json
+resources/.worklist-issue-close.json
 
 # Local startup forensics dumps; per-restart, not shared.
 resources/startup-traces/

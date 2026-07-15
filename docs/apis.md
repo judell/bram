@@ -226,7 +226,7 @@ side effects and auth checks are identical.
 
 | Surface | Type | Shape |
 |---|---|---|
-| `resources/.worklist-intent.json` | file (agent writes) | `{ nonce, route, body? }` — `route` ∈ `worklist-resolve` \| `worklist-mutate` \| `worklist-commit` \| `worklist-end` \| `issue-close`; `body` is the matching HTTP route's request body |
+| `resources/.worklist-intent.json` | file (agent writes) | `{ nonce, route, body? }` — `route` ∈ `worklist-resolve` \| `worklist-mutate` \| `worklist-commit` \| `worklist-end`; `body` is the matching HTTP route's request body |
 | `resources/.worklist-result.json` | file (host writes) | `{ nonce, ok, status, result? , error?, completedAtMs }` — `result` is the HTTP route's response body verbatim; `error` present when `ok:false` |
 
 - The watcher drain reads-then-deletes the intent file (so duplicate notify
@@ -340,13 +340,14 @@ The HTTP routes shell out to `git`; the IPC command shells out to
 ## 7. Issues
 
 GitHub issue passthrough via the local `gh` CLI. Read endpoints fetch
-JSON; write endpoints (`/__issue/comment`, `/__issue/close`) shell out
-to `gh issue comment` / `gh issue close` on the host. `/__issue/close`
-also has a close-on-commit mode (`commit=`/`push=`) that verifies a
-commit is visible on GitHub — pushing first when asked — before closing
-with a generated commit-URL comment; see the table note below. Issue
-*creation* is still user-driven via the agent's own shell — there's no
-`/__issue/create` endpoint.
+JSON; the one write endpoint (`/__issue/comment`) shells out to
+`gh issue comment` on the host. There is **no** agent-reachable close
+route: `/__issue/close` was removed (close-on-push-automatic, security
+H5). Closing is now a host consequence of the user's explicit Push — the
+commit gate records ticked issues into `.worklist-issue-close.json`, and
+`flush_pending_issue_closes` closes each one whose commit is visible on
+origin after the next push. Issue *creation* is still user-driven via the
+agent's own shell — there's no `/__issue/create` endpoint.
 
 | Surface | Kind | Query / params | Response | Consumer |
 | --- | --- | --- | --- | --- |
@@ -354,7 +355,6 @@ with a generated commit-URL comment; see the table note below. Issue
 | `/__issues/search` | HTTP GET | `q=` | filtered issue list | agent pane iframe |
 | `/__issue` | HTTP GET | `n=<number>` | `{ number, title, body, state, comments: [...] }` | agent pane iframe |
 | `/__issue/comment` | HTTP GET | `number=<n>&body=<urlencoded>` | `gh issue comment` JSON on success, 400 if `number` missing | agent pane iframe |
-| `/__issue/close` | HTTP GET | plain: `number=<n>&comment=<urlencoded>`; close-on-commit: `number=<n>&commit=<sha>[&push=true]` | plain: `gh issue close` JSON. Close-on-commit: verifies the commit is visible on GitHub (pushing first when `push=true`), then closes with a generated commit-link comment that includes `Closed by https://github.com/<owner>/<repo>/commit/<full-sha>` and, when available, `Commit: <subject>`; on refusal returns `{ok:false,code,...}` where `code` ∈ `commit-not-visible` \| `focused-push-failed` \| `no-github-remote` \| `invalid-commit` \| `commit-visibility-check-failed`. 400 if `number` missing | agent pane iframe |
 
 ## 8. Context
 

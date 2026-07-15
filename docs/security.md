@@ -79,7 +79,7 @@ the tracking issues.
 | H2 | Worklist authorization is forged from PTY input: relayed `toShell`/`toTurn`/`sendKeys` text of the form `approved: {...}` writes an auth record → injection self-authorizes repo mutations. | `lib.rs:8483`, `24187`, `8831` | #112 #109 | M |
 | H3 | Claude guard exits 0 for all `Bash`; `>`, `tee`, `sed -i`, `python -c`, `git commit/push`, `gh issue close` bypass worklist coverage entirely. Codex's `_BASH_WRITE_PATTERNS` already implements the fix. | `worklist-guard.py:492`; `worklist-guard-codex.py:280` | #119 #118 | M |
 | H4 | **DONE** (security-h4-auth-fail-closed-on-interrupt). Interrupt/cancel now marks the active auth record `interruptedAtMs` via `invalidate_worklist_authorization` at every interrupt sentinel-clear site (Esc, menu-reject, Codex cancel); `validate_worklist_mutate_authorization` + `ensure_worklist_commit_authorized` reject an interrupted record or one past `WORKLIST_AUTH_TTL_MS` (5 min ≈ "same turn"). `consumedAtMs` stays ignored so the same-turn drop flow (resolve consumes on read → prune) still works — the regression guard test covers it. | `lib.rs` | #120 | ~~M~~ done |
-| H5 | `/__issue/close` closes an issue **and** performs `git push` (`push=true`) with no auth record, no `closesIssues` check, and no confirmation; agent-reachable via the allowlisted loopback curl. | `lib.rs:26292`, `7417`, `7471` | #118 #121 | M (S stopgap) |
+| H5 | **DONE** (close-on-push-automatic). Root fix: the agent-reachable `/__issue/close` route (and `push_before_close`) is **removed**. Closing is now a host consequence of two explicit user actions — you tick issues in the commit-gate dialog, then you Push — after which the host auto-closes each issue whose commit is visible on origin. No agent close path, no push-as-a-side-effect-of-close, no grants. An earlier over-scoped attempt (24h-TTL grant subsystem + manual "Close queued issues") was reverted as the cure-worse-than-disease. | `lib.rs` | #118 #121 | ~~M~~ done |
 | H6 | `Access-Control-Allow-Origin: *` on every loopback response amplifies the read + mutation routes to any local browser tab or process that learns the port. | `lib.rs:28906` | #110 #113 #121 | M |
 
 ### Medium
@@ -147,9 +147,10 @@ shrinks the reachability of much of the rest.
     `mutate`-ignores-`consumedAtMs` invariant to "same turn as the resolve."
 
 - **Phase 4 — route hardening (M).**
-  - H5: gate `/__issue/close` on a fresh `approved` auth record whose item
-    declares `closesIssues` containing the number; require an explicit push
-    authorization rather than the `push=true` side effect; make it POST-only.
+  - H5: **resolved by removal** (close-on-push-automatic) — rather than
+    hardening `/__issue/close`, the agent-reachable route was deleted and
+    closing became a host consequence of the user's explicit Push. See the
+    status table above.
   - H6: add a per-session bearer token (write it alongside `.bram-port`,
     require it on `/__*` routes) and tighten `Access-Control-Allow-Origin`
     from `*` to the shell origin. Copy the `BRAM_MENU_TOKEN` pattern
@@ -209,7 +210,8 @@ shrinks the reachability of much of the rest.
   instrumented and the spinner recovers, but the *authorization* half fails open
   on interrupt (H4, M9). **High.**
 - **#121 — UI-only affordances must not be the policy authority.** Worklist
-  buttons correctly delegate to re-verifying host routes. But `/__issue/close`,
-  `/__issue/comment`, and `open_url` are gated only by frontend state or bare
-  reachability (H5, M6, M7). Same-origin policy blocks the cross-origin-page
+  buttons correctly delegate to re-verifying host routes. `/__issue/close` (H5)
+  is now gone entirely — closing is host-driven off the user's Push — but
+  `/__issue/comment` and `open_url` are still gated only by frontend state or
+  bare reachability (M6, M7). Same-origin policy blocks the cross-origin-page
   vector, keeping this from High. **Moderate.**

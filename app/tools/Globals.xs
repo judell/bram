@@ -140,43 +140,6 @@ function buildCloseIssueLines(state) {
   }
   return lines;
 }
-// Merge user-typed feedback with the dialog-generated close-issue lines.
-// Empty base + no lines → empty string; otherwise lines come after the user's
-// text separated by a blank line so the agent can split on `\n\n`.
-function combineFeedbackWithCloseLines(base, lines, pushBeforeClose) {
-  const baseTrim = (base || '').trim();
-  const generated = [];
-  if (pushBeforeClose) generated.push('push-before-close: true');
-  if (lines && lines.length > 0) generated.push.apply(generated, lines);
-  if (generated.length === 0) return baseTrim;
-  if (!baseTrim) return generated.join('\n');
-  return baseTrim + '\n\n' + generated.join('\n');
-}
-
-function closeIssuePushScopeRows(item, commits) {
-  const rows = [];
-  if (item && item.id) {
-    rows.push({
-      sha: '(new)',
-      subject: item.id,
-      relation: 'Approved worklist item',
-    });
-  }
-  for (const c of (commits || [])) {
-    if (!c || c.pushed) continue;
-    rows.push({
-      sha: (c.sha || '').slice(0, 7),
-      subject: (c.commit && c.commit.message) || '',
-      relation: 'Already pending on this branch',
-    });
-  }
-  return rows;
-}
-
-function closeIssueExistingPendingCount(commits) {
-  return (commits || []).filter(function (c) { return c && !c.pushed; }).length;
-}
-
 // Worklist-hotspot instrumentation helpers (`Workspace.xmlui` per-item
 // Approve / Iterate / Drop + closeIssues dialog). Each helper calls
 // `App.mark(label)` — the xmlui-native, sandbox-safe replacement for

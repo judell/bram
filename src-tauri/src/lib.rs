@@ -20607,6 +20607,61 @@ fn claude_jsonl_completion_decision(content: &str) -> JsonlCompletionDecision {
     }
 }
 
+// A `user` JSONL record that is a real user message, not a tool_result. Normal
+// mid-turn flow is assistant(tool_use) -> user(tool_result) -> assistant, where
+// the trailing user record IS a tool_result and must NOT count as a turn
+// boundary. Content is a plain string, or an array with a text block and no
+// tool_result block.
+fn claude_jsonl_is_genuine_user_message(entry: &serde_json::Value) -> bool {
+    match entry.get("message").and_then(|m| m.get("content")) {
+        Some(serde_json::Value::String(_)) => true,
+        Some(serde_json::Value::Array(blocks)) => {
+            let block_type = |b: &serde_json::Value| {
+                b.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string()
+            };
+            let has_tool_result = blocks.iter().any(|b| block_type(b) == "tool_result");
+            let has_text = blocks.iter().any(|b| block_type(b) == "text");
+            has_text && !has_tool_result
+        }
+        _ => false,
+    }
+}
+
+// Observe-only (jsonl-turn-end-user-after-permission): true when the JSONL tail
+// has a genuine user message (not a tool_result) AFTER the last assistant
+// record, and that assistant is non-final (no end_turn). This is the
+// interrupt/takeover signature: the user spoke after a pending permission, so
+// the turn is over and any latched menu should clear — but the completion
+// detector currently ignores user records and reports non-final-assistant,
+// pinning the menu. Instrument first; graduate to ending the turn after a soak.
+fn claude_jsonl_user_after_nonfinal_assistant(content: &str) -> bool {
+    let mut saw_user_message = false;
+    for line in content.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        match entry.get("type").and_then(|v| v.as_str()) {
+            Some("assistant") => {
+                let final_turn = entry
+                    .get("message")
+                    .and_then(|m| m.get("stop_reason"))
+                    .and_then(|v| v.as_str())
+                    == Some("end_turn");
+                return saw_user_message && !final_turn;
+            }
+            Some("user") if claude_jsonl_is_genuine_user_message(&entry) => {
+                saw_user_message = true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 // Timestamp (ms) of the most recent `type=assistant` record in a Claude
 // session JSONL. Used to tell whether a detected end_turn belongs to the
 // current turn, or is a stale prior-turn record read during the new turn's
@@ -20980,6 +21035,17 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
         });
         if provider == JsonlCompletionProvider::Claude && decision.reason == "non-final-assistant" {
             agent_status_set_claude_jsonl_working(app, file_mtime_ms, decision.reason);
+            // jsonl-turn-end-user-after-permission (observe-only): flag the
+            // interrupt signature — a real user message trailing the non-final
+            // assistant — where a future fix would end the turn and clear the
+            // pinned menu. No behavior change yet.
+            if bram_trace_enabled() && claude_jsonl_user_after_nonfinal_assistant(&content) {
+                append_bram_trace_line(
+                    app,
+                    "jsonl-turn-end",
+                    &format!("op=would-end reason=user-after-assistant path={}", basename),
+                );
+            }
         }
         if provider == JsonlCompletionProvider::Codex && should_set_codex_jsonl_working(&decision) {
             agent_status_set_codex_jsonl_working(
@@ -23675,7 +23741,8 @@ mod pty_menu_tests {
 #[cfg(test)]
 mod turn_completion_tests {
     use super::{
-        claude_jsonl_completion_decision, codex_jsonl_completion_decision,
+        claude_jsonl_completion_decision, claude_jsonl_user_after_nonfinal_assistant,
+        codex_jsonl_completion_decision,
         codex_killed_turn_suppresses_jsonl_working, codex_latest_user_message_ts_ms,
         codex_session_has_real_user_activity, jsonl_completion_provider_for_path,
     };
@@ -23721,6 +23788,32 @@ mod turn_completion_tests {
         let decision = claude_jsonl_completion_decision(content);
         assert!(!decision.detected);
         assert_eq!(decision.reason, "non-final-assistant");
+    }
+
+    #[test]
+    fn user_message_after_nonfinal_assistant_is_flagged() {
+        // Interrupt/takeover: assistant tool_use, then a real user message.
+        let content = concat!(
+            r#"{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use"}]}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":"did not mean tab"}}"#,
+            "\n",
+        );
+        assert!(claude_jsonl_user_after_nonfinal_assistant(content));
+    }
+
+    #[test]
+    fn tool_result_after_assistant_is_not_flagged() {
+        // Normal mid-turn: assistant tool_use, then a tool_result user record —
+        // must NOT be flagged (the guard that keeps a real fix from ending
+        // live turns).
+        let content = concat!(
+            r#"{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use"}]}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#,
+            "\n",
+        );
+        assert!(!claude_jsonl_user_after_nonfinal_assistant(content));
     }
 
     #[test]

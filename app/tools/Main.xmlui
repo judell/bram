@@ -209,14 +209,14 @@
 
   <ModalDialog id="urlInfoDialog" title="Target app info">
     <VStack gap="$space-3">
-      <VStack gap="$space-1">
+      <VStack gap="$space-1" var.browserUrl="{rpInfo.value ? (rpInfo.value.spawned ? ('http://localhost:' + rpInfo.value.spawned.port + rpInfo.value.spawned.path) : rpInfo.value.default_right_pane) : ''}">
         <Text fontWeight="bold">URL</Text>
-        <Text fontFamily="$fontFamily-monospace" fontSize="$fontSize-sm">{rpInfo.value && rpInfo.value.url}</Text>
+        <Text fontFamily="$fontFamily-monospace" fontSize="$fontSize-sm">{browserUrl}</Text>
         <HStack gap="$space-2">
           <Button
             label="Open in browser"
             size="sm"
-            onClick="rpInfo.value &amp;&amp; openExternal(rpInfo.value.url)" />
+            onClick="browserUrl &amp;&amp; openExternal(browserUrl)" />
         </HStack>
       </VStack>
 

@@ -16235,6 +16235,13 @@ struct SendLedgerEntry {
     // offset, so an identical earlier send in history can't false-land a
     // new entry.
     jsonl_offset_at_inject: u64,
+    // send-ledger-observe-sid-switch-strand: active session JSONL path at
+    // injection. jsonl_offset_at_inject is only meaningful within THIS file;
+    // if the active session rolls over (Codex resume/compaction) before the
+    // send lands, landing detection searches the wrong file and false-strands.
+    // Observe-only for now: used to emit `would-suppress-strand` in the
+    // mechanical-strand branch, no behavior change yet.
+    session_path_at_inject: String,
     state: &'static str, // "injected" | "landed" | "stranded"
     resolved_at_ms: i64,
     via_queue: bool,
@@ -16587,12 +16594,16 @@ fn send_ledger_line_delivers(line: &str) -> Option<bool> {
 // the exact PTY payload).
 fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
     let now = unix_now_ms();
-    let jsonl_offset = active_session_path(app)
-        .ok()
-        .flatten()
+    let session_path = active_session_path(app).ok().flatten();
+    let jsonl_offset = session_path
+        .as_ref()
         .and_then(|p| std::fs::metadata(p).ok())
         .map(|m| m.len())
         .unwrap_or(0);
+    let session_path_at_inject = session_path
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let trimmed = payload.trim_start();
     let (mode, body) = match trimmed.strip_prefix("skip-worklist:") {
         Some(rest) => ("skip-worklist", rest.trim_start()),
@@ -16607,6 +16618,7 @@ fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
             mode: mode.to_string(),
             injected_at_ms: now,
             jsonl_offset_at_inject: jsonl_offset,
+            session_path_at_inject: session_path_at_inject.clone(),
             state: "injected",
             resolved_at_ms: 0,
             via_queue: false,
@@ -16622,6 +16634,7 @@ fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
             mode: mode.to_string(),
             injected_at_ms: now,
             jsonl_offset_at_inject: jsonl_offset,
+            session_path_at_inject: session_path_at_inject.clone(),
             state: "injected",
             resolved_at_ms: 0,
             via_queue: false,
@@ -16723,6 +16736,14 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
     let now = unix_now_ms();
     let auto_resend = send_ledger_auto_resend_enabled(app);
     let last_esc_ms = last_pty_escape_ms_cell().lock().map(|g| *g).unwrap_or(0);
+    // send-ledger-observe-sid-switch-strand: the active session file right now.
+    // Compared against each entry's session_path_at_inject to spot a rollover
+    // that orphaned an in-flight send (observe-only, mechanical strands only).
+    let current_session_path = active_session_path(app)
+        .ok()
+        .flatten()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let mut actions: Vec<SendLedgerAction> = Vec::new();
     let mut transitions: Vec<String> = Vec::new();
     let mut user_strand_hit = false;
@@ -16788,6 +16809,23 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                     entry.cause,
                     now - entry.injected_at_ms,
                 ));
+                // send-ledger-observe-sid-switch-strand (observe-only): a
+                // mechanical strand whose session file changed since inject is
+                // the false-strand signature — the send likely landed in the
+                // prior rollout. Record what a future suppressor WOULD do; the
+                // strand above still stands for now.
+                if !user_caused
+                    && !current_session_path.is_empty()
+                    && !entry.session_path_at_inject.is_empty()
+                    && current_session_path != entry.session_path_at_inject
+                {
+                    transitions.push(format!(
+                        "op=would-suppress-strand id={} reason=sid-changed old={} new={}",
+                        entry.id,
+                        entry.session_path_at_inject.rsplit('/').next().unwrap_or(""),
+                        current_session_path.rsplit('/').next().unwrap_or(""),
+                    ));
+                }
                 if user_caused {
                     user_strand_hit = true;
                     actions.push(SendLedgerAction::Restore {
@@ -24024,6 +24062,7 @@ mod session_turn_tests {
             mode: String::new(),
             injected_at_ms: 0,
             jsonl_offset_at_inject: 0,
+            session_path_at_inject: String::new(),
             state: "injected",
             resolved_at_ms: 0,
             via_queue: false,

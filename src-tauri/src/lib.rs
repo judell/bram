@@ -16859,14 +16859,17 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
     let now = unix_now_ms();
     let auto_resend = send_ledger_auto_resend_enabled(app);
     let last_esc_ms = last_pty_escape_ms_cell().lock().map(|g| *g).unwrap_or(0);
-    // send-ledger-observe-sid-switch-strand: the active session file right now.
-    // Compared against each entry's session_path_at_inject to spot a rollover
-    // that orphaned an in-flight send (observe-only, mechanical strands only).
+    // send-ledger-reanchor-cross-session-strand: the active session file right
+    // now. When an in-flight send's inject session differs from this, the
+    // send's jsonl_offset_at_inject is a byte offset into the OLD file and is
+    // meaningless here, so landing detection re-anchors to the whole current
+    // session (lazily read once into current_session_full_text below).
     let current_session_path = active_session_path(app)
         .ok()
         .flatten()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let mut current_session_full_text: Option<String> = None;
     let mut actions: Vec<SendLedgerAction> = Vec::new();
     let mut transitions: Vec<String> = Vec::new();
     let mut user_strand_hit = false;
@@ -16875,9 +16878,33 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
             if entry.state != "injected" {
                 continue;
             }
-            let rel_offset = entry.jsonl_offset_at_inject.saturating_sub(base_offset) as usize;
-            let start = char_floor(session_text, rel_offset);
-            let suffix = &session_text[start..];
+            // Re-anchor across a session switch: the inject offset only means
+            // something within the inject session. If the active session
+            // changed, search the whole current session (full read) so a send
+            // that landed at offset ~0 of the new file is still found; a send
+            // that landed nowhere still falls through to the strand check.
+            let sid_changed = !entry.session_path_at_inject.is_empty()
+                && !current_session_path.is_empty()
+                && current_session_path != entry.session_path_at_inject;
+            let (search_text, rel_offset): (&str, usize) = if sid_changed {
+                if current_session_full_text.is_none() {
+                    current_session_full_text = std::fs::read_to_string(&current_session_path).ok();
+                }
+                match current_session_full_text.as_deref() {
+                    Some(t) => (t, 0),
+                    None => (
+                        session_text,
+                        entry.jsonl_offset_at_inject.saturating_sub(base_offset) as usize,
+                    ),
+                }
+            } else {
+                (
+                    session_text,
+                    entry.jsonl_offset_at_inject.saturating_sub(base_offset) as usize,
+                )
+            };
+            let start = char_floor(search_text, rel_offset);
+            let suffix = &search_text[start..];
             let needle = send_ledger_needle(entry);
             // Walk every needle occurrence and accept only a line whose
             // record SEMANTICS constitute delivery. Text presence alone is
@@ -16915,6 +16942,18 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                     entry.via_queue,
                     now - entry.injected_at_ms,
                 ));
+                // The send landed in a DIFFERENT session than it was injected
+                // against — the false-strand case (send-ledger-observe-sid-
+                // switch-strand's pa11 specimen) now resolves correctly instead
+                // of stranding. Record it so cross-session lands stay auditable.
+                if sid_changed {
+                    transitions.push(format!(
+                        "op=cross-session-land id={} old={} new={}",
+                        entry.id,
+                        entry.session_path_at_inject.rsplit('/').next().unwrap_or(""),
+                        current_session_path.rsplit('/').next().unwrap_or(""),
+                    ));
+                }
             } else if now - entry.injected_at_ms > SEND_LEDGER_STRAND_GRACE_MS
                 || matches!(force_user_strand_before_ms, Some(esc_ms) if entry.injected_at_ms <= esc_ms)
             {
@@ -16932,18 +16971,15 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                     entry.cause,
                     now - entry.injected_at_ms,
                 ));
-                // send-ledger-observe-sid-switch-strand (observe-only): a
-                // mechanical strand whose session file changed since inject is
-                // the false-strand signature — the send likely landed in the
-                // prior rollout. Record what a future suppressor WOULD do; the
-                // strand above still stands for now.
-                if !user_caused
-                    && !current_session_path.is_empty()
-                    && !entry.session_path_at_inject.is_empty()
-                    && current_session_path != entry.session_path_at_inject
-                {
+                // A mechanical strand that survives DESPITE the cross-session
+                // re-anchor above (sid changed, yet the send was found in
+                // neither the inject session nor the current one) is a genuine
+                // suspect — a real loss across a switch, not the benign
+                // false-strand the re-anchor already fixes. Flag it; the strand
+                // stands and the user is still warned.
+                if !user_caused && sid_changed {
                     transitions.push(format!(
-                        "op=would-suppress-strand id={} reason=sid-changed old={} new={}",
+                        "op=cross-session-strand id={} reason=not-found old={} new={}",
                         entry.id,
                         entry.session_path_at_inject.rsplit('/').next().unwrap_or(""),
                         current_session_path.rsplit('/').next().unwrap_or(""),

@@ -1128,6 +1128,34 @@ fn next_talk_session_correlation_id() -> String {
     format!("tsc-{}-{}", now_ms, seq)
 }
 
+// session-rotation-self-diagnose: last sid emitted per provider label, so a
+// genuine rotation (sid changed within one provider) can be detected at the
+// emit point. Provider-keyed so a Claude<->Codex switch is not a rotation.
+fn last_talk_session_sid_cell() -> &'static Mutex<std::collections::HashMap<String, String>> {
+    static CELL: OnceLock<Mutex<std::collections::HashMap<String, String>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+// The last ~max_chars visible chars of the PTY tail, ANSI-stripped and
+// whitespace-collapsed, with quotes neutralized for a single trace line. The
+// terminal contents at a rotation name its cause: a usage-limit banner, a
+// fresh-launch banner, a shell prompt (process exited), or a /clear.
+fn pty_tail_snippet(max_chars: usize) -> String {
+    let raw = match pty_tail_cell().lock() {
+        Ok(g) => g.clone(),
+        Err(e) => e.into_inner().clone(),
+    };
+    let stripped = strip_ansi(&raw);
+    let text = String::from_utf8_lossy(&stripped);
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ").replace('"', "'");
+    let n = collapsed.chars().count();
+    if n <= max_chars {
+        collapsed
+    } else {
+        collapsed.chars().skip(n - max_chars).collect()
+    }
+}
+
 fn emit_talk_session_changed_for_provider<R: tauri::Runtime>(
     app: &AppHandle<R>,
     provider: Option<SessionProvider>,
@@ -1167,6 +1195,39 @@ fn emit_talk_session_changed_for_provider<R: tauri::Runtime>(
                 "source": "push",
             }),
         );
+        // session-rotation-self-diagnose: fire once when this provider's active
+        // sid actually changes, capturing the terminal tail + pre-rotation
+        // silence so the rotation names its own cause. Runs on every JSONL
+        // write but is a no-op except at a real change.
+        if bram_trace_enabled() {
+            let provider_label = session_provider_label(provider).to_string();
+            let rotated_from = {
+                let mut last = match last_talk_session_sid_cell().lock() {
+                    Ok(g) => g,
+                    Err(e) => e.into_inner(),
+                };
+                let prev = last.get(&provider_label).cloned().unwrap_or_default();
+                let changed = !prev.is_empty() && !sid.is_empty() && prev != sid;
+                last.insert(provider_label.clone(), sid.clone());
+                if changed { Some(prev) } else { None }
+            };
+            if let Some(prev) = rotated_from {
+                let last_out = LAST_PTY_OUTPUT_MS.load(std::sync::atomic::Ordering::Relaxed);
+                let silence_ms = if last_out > 0 { at_host_ms - last_out } else { -1 };
+                append_bram_trace_line(
+                    app,
+                    "session-rotation",
+                    &format!(
+                        "op=detected provider={} old={} new={} silence_ms={} tail=\"{}\"",
+                        provider_label,
+                        prev,
+                        sid,
+                        silence_ms,
+                        pty_tail_snippet(400),
+                    ),
+                );
+            }
+        }
         // menu-stack-pty-inflight-prose probe: on each Claude session-JSONL
         // write, correlate the latest assistant-record timestamp against the
         // open/dismissed menu so we can settle the race. Trace-gated.
@@ -1623,6 +1684,10 @@ fn clear_codex_reload_target<R: tauri::Runtime>(
 // pane shows the menu briefly after click. Suppression breaks that
 // loop until either time elapses or a *different* tool's menu appears.
 static PTY_TAIL: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
+// session-rotation-self-diagnose: unix-ms of the most recent PTY output byte,
+// stamped in pty_menu_update. Read at a session rotation to report the pre-
+// rotation silence gap. 0 until the first output.
+static LAST_PTY_OUTPUT_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 static PTY_MENU: OnceLock<Mutex<Option<PtyMenu>>> = OnceLock::new();
 // Fingerprint of the just-dismissed menu so a post-dismiss re-read of the
 // *identical* menu (option labels + signature) is suppressed, while a
@@ -4930,6 +4995,10 @@ fn pty_menu_held_cell() -> &'static Mutex<Option<std::time::Instant>> {
 // Logs every state transition to stderr so failures-to-render can be
 // correlated against actual detector activity.
 fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
+    // session-rotation-self-diagnose: stamp the last PTY output time so a
+    // rotation can report how long the terminal was silent beforehand (a long
+    // gap points at an idle/limit wait before a fresh relaunch).
+    LAST_PTY_OUTPUT_MS.store(unix_now_ms(), std::sync::atomic::Ordering::Relaxed);
     let tail_cell = pty_tail_cell();
     let mut tail = match tail_cell.lock() {
         Ok(g) => g,

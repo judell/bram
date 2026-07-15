@@ -9543,7 +9543,10 @@ fn configured_continue_last<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
     project_root(Some(app))
         .and_then(|root| load_project_config(&root))
         .and_then(|cfg| cfg.shell.and_then(|s| s.continue_last))
-        .unwrap_or(false)
+        // continue-last-session-default-on: resume the most recent session
+        // unless a project explicitly opts out. A fresh launch on every
+        // restart silently drops context and drove the pa11 rotation cascade.
+        .unwrap_or(true)
 }
 
 // After a fresh launch (autostart / switch), wait for the agent's TUI to
@@ -9657,11 +9660,13 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
                     .as_ref()
                     .and_then(|s| s.first_command.clone())
                     .unwrap_or_default(),
-                // Default OFF — fresh launch unless the Continue toggle is set.
+                // Default ON (continue-last-session-default-on) — resume unless
+                // explicitly opted out; keeps the Settings toggle matching the
+                // runtime default in configured_continue_last.
                 shell
                     .as_ref()
                     .and_then(|s| s.continue_last)
-                    .unwrap_or(false),
+                    .unwrap_or(true),
                 c.worklist
                     .and_then(|w| w.batch_commit_actions)
                     .unwrap_or(false),

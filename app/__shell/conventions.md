@@ -469,13 +469,11 @@ the proposal you authored. So an apply-approve is one call: edit from the
 proposal, then `mutate op:"advance"`.
 
 **Commit gate: call `worklist-commit`.** For approved TO COMMIT items,
-send one request with `{ ids, message }` (or the narrowly validated
-`{ ids, message, amendSha }` form when the approved item explicitly calls for
-amending the current unpushed HEAD). The host verifies approved auth,
+send one request with `{ ids, message }`. The host verifies approved auth,
 requires every id to be `applied`, stages only those items' files, refuses
 unrelated staged files, commits, prunes the items, consumes auth, and clears
-the sentinel. Selected `close-issue:` feedback queues host-owned grants; issue
-close happens only after the user separately pushes the branch.
+the sentinel. Close-on-commit (`close-issue:` / `push-before-close:`) stays
+on the existing `/__issue/close` path after the commit returns its `sha`.
 
 **Drops: still `resolve` before `mutate`.** Resolve returns the recorded
 items and writes the drop sentinel (drops aren't set at approval time), then
@@ -550,19 +548,17 @@ two coordination dot-files instead:
    { "nonce": "<unique-per-request>", "route": "<route>", "body": { ... } }
    ```
 
-   `route` is one of `worklist-resolve`, `worklist-mutate`, `worklist-commit`,
-   `issue-close`, or `issue-close-pending`. `body` matches the HTTP route:
+   `route` is one of `worklist-resolve`, `worklist-mutate`, `worklist-commit`, or
+   `issue-close`. `body` matches the HTTP route:
    - `worklist-resolve` — omit, or `{ "ids": [...] }` to filter.
    - `worklist-mutate` — `{ "op": "advance", "ids": [...], "status": "applied" }`
      or `{ "op": "prune", "ids": [...] }`.
-   - `worklist-commit` — `{ "ids": [...], "message": "..." }`, optionally
-     with `"amendSha":"<exact-unpushed-HEAD>"` when the approved item requires
-     an amend.
-   - `issue-close-pending` — `{}`; returns every fresh unconsumed grant.
-   - `issue-close` — `{ "number": N, "commit": "<full-sha>" }`, optionally
-     with the exact host-approved `"comment":"..."` carried by that pending
-     grant. Same field semantics as `/__issue/close` — see the close-on-commit
-     section below.
+   - `worklist-commit` — `{ "ids": [...], "message": "..." }`.
+   - `issue-close` — `{ "number": N, "commit": "<full-sha>", "push": <bool> }`
+     for the generated-comment verified path, or
+     `{ "number": N, "comment": "<user-supplied>" }` for the
+     user-supplied-comment path. Same field semantics as
+     `/__issue/close` — see the close-on-commit section below.
 
 2. **Read** `resources/.worklist-result.json` for the record whose
    `nonce` matches (ignore stale results from prior requests):
@@ -765,9 +761,9 @@ reference: `docs/apis.md` §11. Agent-side conventions:
   auth and clears the sentinel. One call.
 - **`approved:` (commit gate)** → `worklist-commit` with `{ ids, message }`.
   The host stages only the approved files, commits, prunes, consumes auth,
-  and clears the sentinel. If the approved feedback includes `close-issue:`
-  lines, report the queued closes and ask the user to click **Push**. Do not
-  call `issue-close` until that explicit push completes.
+  and clears the sentinel. If the approved feedback includes `close-issue:` /
+  `push-before-close:` lines, call the existing `issue-close` route after
+  the commit route returns `sha`.
 - **`drop:`** → `resolve` → `mutate op:"prune"`. Drops aren't set at
   approval time, so `resolve` is what raises the spinner.
 - **`iterate:`** → no agent-side bracket needed. The host detects the
@@ -928,11 +924,13 @@ When an item's `applied` commit would resolve a GitHub issue, set
 from `gh issue view N --json title`; refresh if you iterate).
 Approving a TO COMMIT item with non-empty `closesIssues` opens a
 confirm dialog — one row per issue plus an optional close-comment
-textbox. **Commit and queue close** commits and records a narrow grant for
-each selected issue; **Approve without closing** commits without grants. Push
-is always a separate user action through the Commits-tab **Push** control.
-One Push publishes the current branch, so it may make several independently
-queued issue-closing commits visible at once.
+textbox, with three actions: close after verifying the commit is
+visible on GitHub; push then verify and close; or commit only. The
+push-before-close path is branch-scoped, not item-scoped: it pushes
+the new worklist commit plus any unpublished commits already reachable
+from the current branch tip. The dialog must show that scope before
+confirmation, including a table of pending commits when any already
+exist.
 
 Issue-derived items (e.g. "Propose a worklist item to address #N
 ...") default to pairing the `issue-<N>-...` id with `closesIssues`
@@ -952,62 +950,52 @@ The user's choices arrive in the per-item `feedback` of the
 ```
 close-issue: 52
 close-issue: 50 comment: "shipped, see commit message"
+push-before-close: true
 ```
 
 After resolving and committing as usual:
 
 1. Parse the verified `feedback`: lines starting with `close-issue: N`
-   each select an issue to close. The host independently intersects those
-   selections with the item's `closesIssues` metadata and binds any supplied
-   comment into the grant. Empty feedback means commit only and mints no
-   close authority.
-2. Read the `worklist-commit` response. It returns the new full `sha`, the
-   number of grants created, and `pendingIssueCloses` for every still-pending
-   issue/SHA grant in the project queue.
-3. Stop after the commit and ask the user to click **Push**. Never run
-   `git push`, never pass `push=true` to the close route, and never describe
-   close as implicitly publishing the branch.
-4. After the user confirms Push completed (or the pushed lifecycle event is
-   observed), refresh the pending queue:
-
-   - **Claude:** `GET /__issue/close/pending` through the standard literal-port
-     loopback transport.
-   - **Codex:** filesystem intent route `issue-close-pending` with `{}` body.
-
-   A single Push may make several queued commits visible. Process every
-   returned pending grant independently; one failed close must not block the
-   others.
-5. For each pending grant, call Bram's close route through your transport
-   (don't `gh issue close` directly):
+   each name an issue to close; an exact `push-before-close: true`
+   line toggles push-before-close.
+2. Resolve the new commit's full SHA.
+3. For each `close-issue: N` **without** a user-supplied comment,
+   call Bram's backend route through your transport (don't `gh issue
+   close` directly):
 
    - **Claude (loopback curl):**
 
      ```sh
      curl -4 -sS --retry-connrefused --retry 3 --retry-delay 1 \
-       "http://127.0.0.1:<bram-port>/__issue/close?number=N&commit=<full-sha>"
+       "http://127.0.0.1:<bram-port>/__issue/close?number=N&commit=<full-sha>[&push=true]"
      ```
+
+     Append `&push=true` if `push-before-close: true` was present.
 
    - **Codex (filesystem intent):** write `resources/.worklist-intent.json`
      with `{ "nonce": "...", "route": "issue-close", "body": { "number": N,
-     "commit": "<full-sha>" } }` and read
+     "commit": "<full-sha>", "push": <bool> } }` and read
      `resources/.worklist-result.json` for the matching nonce. Same
      drain-and-retry rules as the worklist routes above.
 
-   The backend verifies GitHub sees the commit and on success closes with the generated comment
+   Either way, the backend pushes (if requested), verifies GitHub
+   sees the commit, and on success closes with the generated comment
    `Closed by https://github.com/<owner>/<repo>/commit/<full-sha>`.
 
-6. For a grant carrying a user comment, send that exact comment with the same
-   issue and commit SHA. The host rejects absent, altered, or newly invented
-   comments; don't rewrite the approved text into the generated form.
+4. For `close-issue: N comment: "..."`, close with the same transport
+   shapes — Claude:
+   `/__issue/close?number=N&comment=<encoded-comment>`; Codex:
+   `route: "issue-close", body: { "number": N, "comment": "..." }`.
+   Don't rewrite the user's comment into the generated form.
 
-7. On backend refusal (`{"ok":false,"code":"commit-not-visible"}`), do not
-   fall back to `git push` or `gh issue close`. Report
+5. On backend refusal (`{"ok":false,"code":"commit-not-visible"}` or
+   `"push-failed"`), do **not** fall back to `gh issue close`. Report
    the message plainly, e.g.: "Committed `<short-sha>`, but did not
-   close #N because GitHub cannot see the commit yet." The grant remains
-   pending and retryable after the explicit Push; unrelated grants are
-   unaffected.
+   close #N because GitHub cannot see the commit yet." The worklist
+   item may still be pruned if the commit succeeded — issue closing
+   is a post-commit side effect.
 
-8. **Approve without closing** arrives as feedback with no
+6. **Approve without closing** arrives as feedback with no
    `close-issue:` lines — commit only.
 
 

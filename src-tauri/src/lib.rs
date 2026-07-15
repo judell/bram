@@ -136,23 +136,6 @@ struct WorklistAuthorizationRecord {
 // the interrupted_at_ms fail-closed gate, which is independent of this TTL.
 const WORKLIST_AUTH_TTL_MS: i64 = 30 * 60 * 1000;
 
-const ISSUE_CLOSE_GRANT_TTL_MS: i64 = 24 * 60 * 60 * 1000;
-
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct IssueCloseGrant {
-    item_id: String,
-    issue: u64,
-    commit_sha: String,
-    issued_at_ms: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    comment: Option<String>,
-    #[serde(default)]
-    consumed_at_ms: Option<i64>,
-}
-
-static ISSUE_CLOSE_GRANT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PendingWorklistPushMirror {
@@ -7543,346 +7526,19 @@ fn gh_commit_missing_stderr(stderr: &str) -> bool {
         || stderr.contains("No commit found")
 }
 
-fn declared_close_issue_numbers(item: &serde_json::Value) -> Vec<u64> {
-    let mut issues = Vec::new();
-    let Some(entries) = item.get("closesIssues").and_then(|v| v.as_array()) else {
-        return issues;
-    };
-    for entry in entries {
-        let number = entry
-            .as_u64()
-            .or_else(|| entry.get("number").and_then(|v| v.as_u64()))
-            .unwrap_or(0);
-        if number > 0 && !issues.contains(&number) {
-            issues.push(number);
-        }
-    }
-    issues
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct SelectedIssueClose {
-    issue: u64,
-    comment: Option<String>,
-}
-
-fn parse_selected_issue_closes(feedback: &str) -> Result<Vec<SelectedIssueClose>, String> {
-    let mut selected = Vec::new();
-    for raw_line in feedback.lines() {
-        let line = raw_line.trim();
-        let Some(rest) = line.strip_prefix("close-issue:") else {
-            continue;
-        };
-        let rest = rest.trim_start();
-        let number_end = rest
-            .find(|c: char| !c.is_ascii_digit())
-            .unwrap_or(rest.len());
-        let issue = rest[..number_end]
-            .parse::<u64>()
-            .map_err(|_| format!("malformed close-issue line: {}", line))?;
-        if issue == 0
-            || selected
-                .iter()
-                .any(|entry: &SelectedIssueClose| entry.issue == issue)
-        {
-            return Err(format!("invalid or duplicate close-issue: {}", issue));
-        }
-        let tail = rest[number_end..].trim();
-        let comment = if tail.is_empty() {
-            None
-        } else {
-            let encoded = tail
-                .strip_prefix("comment:")
-                .ok_or_else(|| format!("malformed close-issue line: {}", line))?
-                .trim();
-            let parsed: String = serde_json::from_str(encoded)
-                .map_err(|e| format!("invalid close-issue comment for #{}: {}", issue, e))?;
-            if parsed.trim().is_empty() {
-                None
-            } else {
-                Some(parsed.trim().to_string())
-            }
-        };
-        selected.push(SelectedIssueClose { issue, comment });
-    }
-    Ok(selected)
-}
-
-fn issue_close_grants_for_commit(
-    auth: &serde_json::Value,
-    ids: &[String],
-    commit_sha: &str,
-    issued_at_ms: i64,
-) -> Result<Vec<IssueCloseGrant>, String> {
-    let mut grants = Vec::new();
-    let Some(items) = auth.get("items").and_then(|v| v.as_array()) else {
-        return Ok(grants);
-    };
-    for item in items {
-        let Some(item_id) = item.get("id").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if !ids.iter().any(|id| id == item_id) {
-            continue;
-        }
-        let declared = declared_close_issue_numbers(item);
-        let feedback = item.get("feedback").and_then(|v| v.as_str()).unwrap_or("");
-        for selected in parse_selected_issue_closes(feedback)? {
-            if !declared.contains(&selected.issue) {
-                return Err(format!(
-                    "issue #{} was selected for close but is absent from {} closesIssues",
-                    selected.issue, item_id
-                ));
-            }
-            grants.push(IssueCloseGrant {
-                item_id: item_id.to_string(),
-                issue: selected.issue,
-                commit_sha: commit_sha.to_string(),
-                issued_at_ms,
-                comment: selected.comment,
-                consumed_at_ms: None,
-            });
-        }
-    }
-    Ok(grants)
-}
-
-fn select_issue_close_grant(
-    grants: &[IssueCloseGrant],
-    issue: u64,
-    requested_sha: Option<&str>,
-    now_ms: i64,
-) -> Result<usize, String> {
-    let issue_matches: Vec<(usize, &IssueCloseGrant)> = grants
-        .iter()
-        .enumerate()
-        .filter(|(_, grant)| grant.issue == issue)
-        .collect();
-    if issue_matches.is_empty() {
-        return Err(format!(
-            "issue #{} was not declared by the approved worklist item",
-            issue
-        ));
-    }
-    let sha_matches: Vec<(usize, &IssueCloseGrant)> = issue_matches
-        .into_iter()
-        .filter(|(_, grant)| {
-            requested_sha.map_or(true, |sha| grant.commit_sha.eq_ignore_ascii_case(sha))
-        })
-        .collect();
-    if sha_matches.is_empty() {
-        return Err("commit SHA does not match the approved issue-close grant".to_string());
-    }
-    if let Some((index, _)) = sha_matches.iter().rev().find(|(_, grant)| {
-        grant.consumed_at_ms.is_none() && now_ms - grant.issued_at_ms <= ISSUE_CLOSE_GRANT_TTL_MS
-    }) {
-        return Ok(*index);
-    }
-    if sha_matches
-        .iter()
-        .any(|(_, grant)| grant.consumed_at_ms.is_some())
-    {
-        return Err("issue-close grant was already consumed".to_string());
-    }
-    Err(format!(
-        "issue-close grant expired (TTL {} ms)",
-        ISSUE_CLOSE_GRANT_TTL_MS
-    ))
-}
-
-fn read_issue_close_grants(path: &Path) -> Result<Vec<IssueCloseGrant>, String> {
-    match std::fs::read_to_string(path) {
-        Ok(raw) => {
-            serde_json::from_str(&raw).map_err(|e| format!("parse {}: {}", path.display(), e))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(format!("read {}: {}", path.display(), e)),
-    }
-}
-
-fn write_issue_close_grants(path: &Path, grants: &[IssueCloseGrant]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("create {}: {}", parent.display(), e))?;
-    }
-    let body = serde_json::to_string_pretty(grants)
-        .map_err(|e| format!("serialize issue-close grants: {}", e))?;
-    atomic_write_text(path, &format!("{}\n", body))
-}
-
-fn peek_issue_close_grant_path(
-    path: &Path,
-    issue: u64,
-    requested_sha: Option<&str>,
-    now_ms: i64,
-) -> Result<IssueCloseGrant, String> {
-    let grants = read_issue_close_grants(path)?;
-    let index = select_issue_close_grant(&grants, issue, requested_sha, now_ms)?;
-    Ok(grants[index].clone())
-}
-
-fn consume_issue_close_grant_path(
-    path: &Path,
-    issue: u64,
-    requested_sha: &str,
-    now_ms: i64,
-) -> Result<IssueCloseGrant, String> {
-    let lock = ISSUE_CLOSE_GRANT_LOCK.get_or_init(|| Mutex::new(()));
-    let _guard = lock
-        .lock()
-        .map_err(|_| "issue-close grant lock poisoned".to_string())?;
-    let mut grants = read_issue_close_grants(path)?;
-    let index = select_issue_close_grant(&grants, issue, Some(requested_sha), now_ms)?;
-    grants[index].consumed_at_ms = Some(now_ms);
-    let consumed = grants[index].clone();
-    write_issue_close_grants(path, &grants)?;
-    Ok(consumed)
-}
-
-fn append_issue_close_grants_path(
-    path: &Path,
-    new_grants: &[IssueCloseGrant],
-    replace_sha: Option<&str>,
-) -> Result<Vec<IssueCloseGrant>, String> {
-    let lock = ISSUE_CLOSE_GRANT_LOCK.get_or_init(|| Mutex::new(()));
-    let _guard = lock
-        .lock()
-        .map_err(|_| "issue-close grant lock poisoned".to_string())?;
-    let mut grants = read_issue_close_grants(path)?;
-    if let Some(old_sha) = replace_sha {
-        grants.retain(|grant| !grant.commit_sha.eq_ignore_ascii_case(old_sha));
-    }
-    for grant in new_grants {
-        grants.retain(|existing| {
-            !(existing.item_id == grant.item_id
-                && existing.issue == grant.issue
-                && existing.commit_sha.eq_ignore_ascii_case(&grant.commit_sha))
-        });
-        grants.push(grant.clone());
-    }
-    write_issue_close_grants(path, &grants)?;
-    Ok(grants)
-}
-
-fn issue_close_grants_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
-    git_dir_path(app).map(|dir| dir.join("bram").join("issue-close-grants.json"))
-}
-
-fn install_issue_close_grants<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    grants: Vec<IssueCloseGrant>,
-    replace_sha: Option<&str>,
-) -> Result<Vec<IssueCloseGrant>, String> {
-    let path = issue_close_grants_file(app)
-        .ok_or_else(|| "could not resolve issue-close grant queue".to_string())?;
-    let pending = append_issue_close_grants_path(&path, &grants, replace_sha)?;
-    if bram_trace_enabled() {
-        for grant in &grants {
-            append_bram_trace_line(
-                app,
-                "issue-close-grant",
-                &format!(
-                    "op=create item={} issue={} sha={} ttl_ms={}",
-                    grant.item_id, grant.issue, grant.commit_sha, ISSUE_CLOSE_GRANT_TTL_MS
-                ),
-            );
-        }
-    }
-    Ok(pending)
-}
-
-fn pending_issue_close_grants_json<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-) -> Result<Vec<u8>, String> {
-    let path = issue_close_grants_file(app)
-        .ok_or_else(|| "could not resolve issue-close grant queue".to_string())?;
-    let now_ms = unix_now_ms();
-    let grants = read_issue_close_grants(&path)?
-        .into_iter()
-        .filter(|grant| {
-            grant.consumed_at_ms.is_none()
-                && now_ms - grant.issued_at_ms <= ISSUE_CLOSE_GRANT_TTL_MS
-        })
-        .collect::<Vec<IssueCloseGrant>>();
-    serde_json::to_vec(&serde_json::json!({ "pending": grants })).map_err(|e| e.to_string())
-}
-
-fn issue_close_auth_error(issue: u64, sha: &str, message: String) -> (u16, &'static str, Vec<u8>) {
-    (
-        403,
-        "application/json; charset=utf-8",
-        issue_close_json_error("issue-close-not-authorized", issue, sha, message),
-    )
-}
-
-fn gh_issue_close_authorized<R: tauri::Runtime>(
+fn gh_issue_close_with_commit<R: tauri::Runtime>(
     app: &AppHandle<R>,
     number: u64,
     sha: &str,
-    comment: &str,
-    push_requested: bool,
+    push_before_close: bool,
 ) -> (u16, &'static str, Vec<u8>) {
-    let requested_full_sha = if sha.trim().is_empty() {
-        None
-    } else {
-        match git_full_commit_sha(app, sha) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                return (
-                    400,
-                    "application/json; charset=utf-8",
-                    issue_close_json_error("invalid-commit", number, sha, e),
-                );
-            }
-        }
-    };
-    let Some(grants_path) = issue_close_grants_file(app) else {
-        return issue_close_auth_error(number, sha, "no git-backed grant queue".to_string());
-    };
-    let grant = match peek_issue_close_grant_path(
-        &grants_path,
-        number,
-        requested_full_sha.as_deref(),
-        unix_now_ms(),
-    ) {
-        Ok(grant) => grant,
-        Err(e) => {
-            if bram_trace_enabled() {
-                append_bram_trace_line(
-                    app,
-                    "issue-close-grant",
-                    &format!("op=refuse issue={} reason={}", number, e),
-                );
-            }
-            return issue_close_auth_error(number, sha, e);
-        }
-    };
-    let requested_comment = comment.trim();
-    match grant.comment.as_deref() {
-        Some(approved) if approved == requested_comment => {}
-        Some(_) => {
-            return issue_close_auth_error(
-                number,
-                sha,
-                "close comment does not match the approved grant".to_string(),
-            )
-        }
-        None if !requested_comment.is_empty() => {
-            return issue_close_auth_error(
-                number,
-                sha,
-                "close comment was not approved by the worklist action".to_string(),
-            )
-        }
-        None => {}
-    }
-    let full_sha = match git_full_commit_sha(app, &grant.commit_sha) {
+    let mut full_sha = match git_full_commit_sha(app, sha) {
         Ok(s) => s,
         Err(e) => {
             return (
                 400,
                 "application/json; charset=utf-8",
-                issue_close_json_error("invalid-grant-commit", number, &grant.commit_sha, e),
+                issue_close_json_error("invalid-commit", number, sha, e),
             );
         }
     };
@@ -7902,14 +7558,20 @@ fn gh_issue_close_authorized<R: tauri::Runtime>(
             );
         }
     };
-    // Compatibility input only. H5 deliberately removes push as an issue-close
-    // side effect; the explicit Push control must make the SHA visible first.
-    if push_requested && bram_trace_enabled() {
-        append_bram_trace_line(
-            app,
-            "issue-close-grant",
-            &format!("op=ignore-push-request issue={} sha={}", number, full_sha),
-        );
+    if push_before_close {
+        match push_focused_commit(app, &full_sha) {
+            Ok(pushed_sha) => {
+                full_sha = pushed_sha;
+                flush_pending_worklist_push_mirrors(app);
+            }
+            Err(e) => {
+                return (
+                    502,
+                    "application/json; charset=utf-8",
+                    issue_close_json_error("focused-push-failed", number, &full_sha, e),
+                );
+            }
+        }
     }
     match gh_commit_visible(app, &repo_slug, &full_sha) {
         Ok(true) => {}
@@ -7923,7 +7585,7 @@ fn gh_issue_close_authorized<R: tauri::Runtime>(
                     number,
                     &full_sha,
                     format!(
-                        "Committed {}, but did not close #{} because GitHub cannot see the commit yet. Push with the explicit Push control, then retry the verified close helper.",
+                        "Committed {}, but did not close #{} because GitHub cannot see the commit yet. Retry the verified close helper after the push problem is resolved.",
                         short_sha, number
                     ),
                 ),
@@ -7938,52 +7600,14 @@ fn gh_issue_close_authorized<R: tauri::Runtime>(
         }
     }
 
-    if let Err(e) = consume_issue_close_grant_path(&grants_path, number, &full_sha, unix_now_ms()) {
-        if bram_trace_enabled() {
-            append_bram_trace_line(
-                app,
-                "issue-close-grant",
-                &format!(
-                    "op=refuse-consume issue={} sha={} reason={}",
-                    number, full_sha, e
-                ),
-            );
-        }
-        return issue_close_auth_error(number, &full_sha, e);
-    }
-    if bram_trace_enabled() {
-        append_bram_trace_line(
-            app,
-            "issue-close-grant",
-            &format!(
-                "op=consume item={} issue={} sha={}",
-                grant.item_id, number, full_sha
-            ),
-        );
-    }
-
-    let generated_comment = if let Some(approved) = grant.comment.as_deref() {
-        approved.to_string()
-    } else if worklist_lifecycle_mirror_enabled(app) {
+    let comment = if worklist_lifecycle_mirror_enabled(app) {
         String::new()
     } else {
         let subject = git_commit_subject(app, &full_sha).unwrap_or_default();
         close_issue_commit_comment(&repo_slug, &full_sha, &subject)
     };
-    match gh_issue_close(app, number, &generated_comment) {
-        Ok(bytes) => {
-            if bram_trace_enabled() {
-                append_bram_trace_line(
-                    app,
-                    "issue-close-grant",
-                    &format!(
-                        "op=close item={} issue={} sha={}",
-                        grant.item_id, number, full_sha
-                    ),
-                );
-            }
-            (200, "application/json; charset=utf-8", bytes)
-        }
+    match gh_issue_close(app, number, &comment) {
+        Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
         Err(e) => {
             eprintln!("[gh issue close {}] {}", number, e);
             (500, "text/plain; charset=utf-8", e.into_bytes())
@@ -8026,29 +7650,21 @@ fn handle_issue_close_json<R: tauri::Runtime>(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    gh_issue_close_authorized(app, number, &commit, &comment, push_before_close)
+    if !commit.is_empty() {
+        return gh_issue_close_with_commit(app, number, &commit, push_before_close);
+    }
+    match gh_issue_close(app, number, &comment) {
+        Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
+        Err(e) => {
+            eprintln!("[issue close intent number={}] {}", number, e);
+            (500, "text/plain; charset=utf-8", e.into_bytes())
+        }
+    }
 }
 
 #[cfg(test)]
 mod issue_close_tests {
-    use super::{
-        append_issue_close_grants_path, close_issue_commit_comment, consume_issue_close_grant_path,
-        gh_commit_missing_stderr, issue_close_grants_for_commit, parse_selected_issue_closes,
-        read_issue_close_grants, select_issue_close_grant, IssueCloseGrant,
-        ISSUE_CLOSE_GRANT_TTL_MS,
-    };
-    use serde_json::json;
-
-    fn grant(issue: u64, sha: &str, issued_at_ms: i64) -> IssueCloseGrant {
-        IssueCloseGrant {
-            item_id: "security-h5".to_string(),
-            issue,
-            commit_sha: sha.to_string(),
-            issued_at_ms,
-            comment: None,
-            consumed_at_ms: None,
-        }
-    }
+    use super::{close_issue_commit_comment, gh_commit_missing_stderr};
 
     #[test]
     fn generated_commit_close_comment_uses_full_url_without_trailing_period() {
@@ -8084,176 +7700,6 @@ mod issue_close_tests {
         assert!(gh_commit_missing_stderr(
             "gh: No commit found for SHA: abcdef1234567890 (HTTP 422)\n"
         ));
-    }
-
-    #[test]
-    fn h5_commit_grants_use_only_approved_closes_issues_metadata() {
-        let auth = json!({
-            "items": [
-                {
-                    "id": "security-h5",
-                    "closesIssues": [
-                        {"number": 118, "title": "gate side effects"},
-                        119,
-                        {"number": 118}
-                    ],
-                    "feedback": "close-issue: 118\nclose-issue: 119 comment: \"ship it\""
-                },
-                {
-                    "id": "other",
-                    "closesIssues": [{"number": 121}],
-                    "feedback": "close-issue: 121"
-                }
-            ]
-        });
-        let ids = vec!["security-h5".to_string()];
-        let grants = issue_close_grants_for_commit(&auth, &ids, "abc123", 10)
-            .expect("selected declared issues mint grants");
-
-        assert_eq!(grants.len(), 2);
-        assert_eq!(grants[0].issue, 118);
-        assert_eq!(grants[1].issue, 119);
-        assert_eq!(grants[1].comment.as_deref(), Some("ship it"));
-        assert!(grants.iter().all(|g| g.item_id == "security-h5"));
-        assert!(grants.iter().all(|g| g.commit_sha == "abc123"));
-    }
-
-    #[test]
-    fn h5_approve_without_closing_mints_no_grants() {
-        let auth = json!({
-            "items": [{
-                "id": "security-h5",
-                "closesIssues": [{"number": 118}],
-                "feedback": ""
-            }]
-        });
-        let grants =
-            issue_close_grants_for_commit(&auth, &["security-h5".to_string()], "abc123", 10)
-                .expect("empty close selection is valid");
-        assert!(grants.is_empty());
-    }
-
-    #[test]
-    fn h5_undeclared_selected_issue_is_rejected() {
-        let auth = json!({
-            "items": [{
-                "id": "security-h5",
-                "closesIssues": [{"number": 118}],
-                "feedback": "close-issue: 119"
-            }]
-        });
-        let err = issue_close_grants_for_commit(&auth, &["security-h5".to_string()], "abc123", 10)
-            .expect_err("selection cannot broaden closesIssues");
-        assert!(err.contains("absent from security-h5 closesIssues"));
-    }
-
-    #[test]
-    fn h5_feedback_parser_binds_json_comment_exactly() {
-        let selected = parse_selected_issue_closes(
-            "notes\nclose-issue: 118 comment: \"quoted \\\"text\\\"\"\n",
-        )
-        .expect("feedback parses");
-        assert_eq!(
-            selected,
-            vec![super::SelectedIssueClose {
-                issue: 118,
-                comment: Some("quoted \"text\"".to_string()),
-            }]
-        );
-    }
-
-    #[test]
-    fn h5_grant_requires_exact_issue_and_sha() {
-        let grants = vec![grant(118, "abc123", 1_000)];
-
-        select_issue_close_grant(&grants, 118, Some("ABC123"), 1_100)
-            .expect("exact issue and SHA are authorized");
-        let wrong_issue = select_issue_close_grant(&grants, 119, Some("abc123"), 1_100)
-            .expect_err("undeclared issue must fail closed");
-        assert!(wrong_issue.contains("not declared"));
-        let wrong_sha = select_issue_close_grant(&grants, 118, Some("def456"), 1_100)
-            .expect_err("wrong SHA must fail closed");
-        assert!(wrong_sha.contains("does not match"));
-    }
-
-    #[test]
-    fn h5_stale_and_consumed_grants_fail_closed() {
-        let stale = vec![grant(118, "abc123", 1_000)];
-        let stale_err = select_issue_close_grant(
-            &stale,
-            118,
-            Some("abc123"),
-            1_000 + ISSUE_CLOSE_GRANT_TTL_MS + 1,
-        )
-        .expect_err("stale grant must fail closed");
-        assert!(stale_err.contains("expired"));
-
-        let mut consumed = grant(118, "abc123", 1_000);
-        consumed.consumed_at_ms = Some(1_100);
-        let replay_err = select_issue_close_grant(&[consumed], 118, Some("abc123"), 1_200)
-            .expect_err("consumed grant must not replay");
-        assert!(replay_err.contains("already consumed"));
-    }
-
-    #[test]
-    fn h5_grant_file_consumes_exactly_once() {
-        let path = std::env::temp_dir().join(format!(
-            "bram-h5-issue-close-consume-{}.json",
-            std::process::id()
-        ));
-        std::fs::write(
-            &path,
-            serde_json::to_string_pretty(&vec![grant(118, "abc123", 1_000)])
-                .expect("serialize fixture"),
-        )
-        .expect("write grant fixture");
-
-        let consumed = consume_issue_close_grant_path(&path, 118, "abc123", 1_100)
-            .expect("first consume succeeds");
-        assert_eq!(consumed.consumed_at_ms, Some(1_100));
-        let replay = consume_issue_close_grant_path(&path, 118, "abc123", 1_200)
-            .expect_err("second consume is rejected");
-        assert!(replay.contains("already consumed"));
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn h5_queue_preserves_multiple_commits_and_independent_consumption() {
-        let path = std::env::temp_dir().join(format!(
-            "bram-h5-issue-close-queue-{}.json",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&path);
-        append_issue_close_grants_path(
-            &path,
-            &[grant(118, "aaa111", 1_000), grant(119, "aaa111", 1_000)],
-            None,
-        )
-        .expect("first commit queues");
-        append_issue_close_grants_path(&path, &[grant(121, "bbb222", 1_100)], None)
-            .expect("second commit appends without clobbering");
-        assert_eq!(read_issue_close_grants(&path).expect("read queue").len(), 3);
-
-        consume_issue_close_grant_path(&path, 118, "aaa111", 1_200).expect("one grant consumes");
-        let grants = read_issue_close_grants(&path).expect("read consumed queue");
-        assert_eq!(
-            grants.iter().filter(|g| g.consumed_at_ms.is_some()).count(),
-            1
-        );
-        select_issue_close_grant(&grants, 119, Some("aaa111"), 1_300)
-            .expect("sibling issue remains usable");
-        select_issue_close_grant(&grants, 121, Some("bbb222"), 1_300)
-            .expect("later commit remains usable");
-
-        append_issue_close_grants_path(&path, &[grant(118, "ccc333", 1_400)], Some("aaa111"))
-            .expect("amend replaces all grants bound to the old SHA");
-        let replaced = read_issue_close_grants(&path).expect("read replaced queue");
-        assert!(!replaced.iter().any(|g| g.commit_sha == "aaa111"));
-        assert!(replaced.iter().any(|g| g.commit_sha == "bbb222"));
-        assert!(replaced.iter().any(|g| g.commit_sha == "ccc333"));
-
-        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -11069,60 +10515,6 @@ fn git_upstream_branch<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<String> 
     .filter(|s| !s.is_empty())
 }
 
-fn git_commit_reachable_from_origin<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    commit_sha: &str,
-) -> Result<bool, String> {
-    git_run(
-        app,
-        &[
-            "for-each-ref",
-            "--format=%(refname)",
-            "--contains",
-            commit_sha,
-            "refs/remotes/origin",
-        ],
-    )
-    .map(|refs| !refs.trim().is_empty())
-}
-
-fn validate_worklist_amend_target(
-    expected_sha: &str,
-    head_sha: &str,
-    already_published: bool,
-) -> Result<(), String> {
-    if !expected_sha.eq_ignore_ascii_case(head_sha) {
-        return Err(format!(
-            "amend target {} is not current HEAD {}",
-            expected_sha, head_sha
-        ));
-    }
-    if already_published {
-        return Err(format!(
-            "refusing to amend published commit {}",
-            expected_sha
-        ));
-    }
-    Ok(())
-}
-
-fn worklist_amend_target<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    requested_sha: &str,
-) -> Result<String, String> {
-    let expected = git_full_commit_sha(app, requested_sha)?;
-    let head = git_run(app, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string())?;
-    let published = match git_run(app, &["remote", "get-url", "origin"]) {
-        Ok(_) => {
-            git_run(app, &["fetch", "origin"])?;
-            git_commit_reachable_from_origin(app, &expected)?
-        }
-        Err(_) => false,
-    };
-    validate_worklist_amend_target(&expected, &head, published)?;
-    Ok(expected)
-}
-
 fn git_dir_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
     let root = project_root(Some(app))?;
     let raw = git_run(app, &["rev-parse", "--git-dir"]).ok()?;
@@ -11336,6 +10728,101 @@ fn auto_rebase_and_push<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), Str
                 .unwrap_or_else(|| "push succeeded".to_string());
             return Err(format!(
                 "{}; stash pop failed: {} (stash retained — recover with `git stash list` / `git stash apply`)",
+                prefix,
+                pop_err.trim()
+            ));
+        }
+    }
+
+    result
+}
+
+fn push_focused_commit<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    full_sha: &str,
+) -> Result<String, String> {
+    let branch =
+        git_run(app, &["rev-parse", "--abbrev-ref", "HEAD"]).map(|s| s.trim().to_string())?;
+    if branch == "HEAD" || branch.is_empty() {
+        return Err("refusing focused close push from a detached HEAD".to_string());
+    }
+    let head_sha = git_run(app, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string())?;
+    if head_sha != full_sha {
+        return Err(format!(
+            "refusing focused close push because commit {} is not HEAD ({})",
+            full_sha, head_sha
+        ));
+    }
+
+    git_run(app, &["fetch", "origin"])?;
+
+    // Fast-forward fast path: origin has nothing HEAD lacks, so push the
+    // focused commit directly — no stash, no rebase. This is the common case
+    // and sidesteps the Windows filemode-stash failure mode (#208).
+    if upstream_is_fast_forward(app, &branch) {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "git-push",
+                &format!("op=focused-close path=fast-forward branch={}", branch),
+            );
+        }
+        let refspec = format!("{}:refs/heads/{}", full_sha, branch);
+        git_run(app, &["push", "origin", &refspec])?;
+        return Ok(full_sha.to_string());
+    }
+
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "git-push",
+            &format!("op=focused-close path=rebase branch={}", branch),
+        );
+    }
+    let dirty = working_tree_dirty_ignoring_filemode(app);
+    let mut stashed = false;
+    if dirty {
+        if has_stash_labeled(app, "bram-focused-close-push") {
+            return Err("a previous bram-focused-close-push stash is still present — resolve it (`git stash list` / `git stash pop` / `git stash drop`) before retrying the close push".to_string());
+        }
+        git_run(
+            app,
+            &[
+                "stash",
+                "push",
+                "--include-untracked",
+                "-m",
+                "bram-focused-close-push",
+            ],
+        )
+        .map_err(|e| format!("auto-stash failed: {}", e))?;
+        stashed = true;
+    }
+
+    let result: Result<String, String> = (|| {
+        let upstream = format!("origin/{}", branch);
+        if let Err(rebase_err) = git_run(app, &["rebase", &upstream]) {
+            let _ = git_run(app, &["rebase", "--abort"]);
+            return Err(format!(
+                "rebase conflicts (aborted, working tree clean - re-run the rebase manually or ask the agent, then retry close): {}",
+                rebase_err.trim()
+            ));
+        }
+        let pushed_sha = git_run(app, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string())?;
+        let refspec = format!("{}:refs/heads/{}", pushed_sha, branch);
+        git_run(app, &["push", "origin", &refspec])?;
+        Ok(pushed_sha)
+    })();
+
+    if stashed {
+        if let Err(pop_err) = git_run(app, &["stash", "pop"]) {
+            let prefix = result
+                .as_ref()
+                .err()
+                .cloned()
+                .unwrap_or_else(|| "focused push succeeded".to_string());
+            return Err(format!(
+                "{}; stash pop failed: {} (stash retained - recover with `git stash list` / `git stash apply`)",
                 prefix,
                 pop_err.trim()
             ));
@@ -26435,39 +25922,6 @@ fn enqueue_pending_worklist_push_mirror_path(
     Ok(())
 }
 
-fn rebind_pending_worklist_push_mirrors_path(
-    path: &Path,
-    old_sha: &str,
-    new_sha: &str,
-) -> Result<(), String> {
-    if old_sha.eq_ignore_ascii_case(new_sha) {
-        return Ok(());
-    }
-    let records = read_pending_worklist_push_mirrors(path);
-    let mut rebound: Vec<PendingWorklistPushMirror> = Vec::with_capacity(records.len());
-    let mut changed = false;
-    for mut record in records {
-        if record.commit_sha.eq_ignore_ascii_case(old_sha) {
-            record.commit_sha = new_sha.to_string();
-            changed = true;
-        }
-        let duplicate = rebound.iter().any(|existing| {
-            existing.item_id == record.item_id
-                && existing.issue == record.issue
-                && existing.commit_sha == record.commit_sha
-        });
-        if !duplicate {
-            rebound.push(record);
-        } else {
-            changed = true;
-        }
-    }
-    if changed {
-        write_pending_worklist_push_mirrors(path, &rebound)?;
-    }
-    Ok(())
-}
-
 fn enqueue_pending_worklist_push_mirror<R: tauri::Runtime>(
     app: &AppHandle<R>,
     item_id: &str,
@@ -27767,13 +27221,15 @@ fn route_request<R: tauri::Runtime>(
         if number == 0 {
             return (400, "text/plain; charset=utf-8", b"missing number".to_vec());
         }
-        return gh_issue_close_authorized(app, number, &commit, &comment, push_before_close);
-    }
-
-    if path == "__issue/close/pending" {
-        return match pending_issue_close_grants_json(app) {
+        if !commit.trim().is_empty() {
+            return gh_issue_close_with_commit(app, number, &commit, push_before_close);
+        }
+        return match gh_issue_close(app, number, &comment) {
             Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
-            Err(e) => (500, "text/plain; charset=utf-8", e.into_bytes()),
+            Err(e) => {
+                eprintln!("[http /__issue/close number={}] {}", number, e);
+                (500, "text/plain; charset=utf-8", e.into_bytes())
+            }
         };
     }
 
@@ -28747,8 +28203,7 @@ fn handle_worklist_resolve<R: tauri::Runtime>(
 //
 // Intent shape:  {"nonce": "...", "route": "<r>", "body": { ... }}
 //   routes: worklist-resolve | worklist-mutate | worklist-commit |
-//           iterate-begin | iterate-end | worklist-end | issue-close |
-//           issue-close-pending
+//           iterate-begin | iterate-end | worklist-end | issue-close
 // Result shape:  {"nonce": "...", "ok": <bool>, "status": <u16>,
 //                 "result"|"error": <json>, "completedAtMs": <ms>}
 fn drain_worklist_intent<R: tauri::Runtime>(app: &AppHandle<R>) {
@@ -28806,10 +28261,6 @@ fn drain_worklist_intent<R: tauri::Runtime>(app: &AppHandle<R>) {
                 let (s, _m, b) = handle_issue_close_json(app, &body_bytes);
                 (s, b)
             }
-            "issue-close-pending" => match pending_issue_close_grants_json(app) {
-                Ok(bytes) => (200, bytes),
-                Err(e) => (500, e.into_bytes()),
-            },
             other => (
                 400,
                 format!("{{\"error\":\"unknown route: {}\"}}", other).into_bytes(),
@@ -29513,22 +28964,6 @@ fn handle_worklist_commit<R: tauri::Runtime>(
     if let Err(e) = ensure_worklist_commit_authorized(&ids, &auth, unix_now_ms()) {
         return worklist_json_error(400, e);
     }
-    let amend_target = req_json
-        .get("amendSha")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|sha| worklist_amend_target(app, sha))
-        .transpose();
-    let amend_target = match amend_target {
-        Ok(value) => value,
-        Err(e) => return worklist_json_error(400, e),
-    };
-    let mut issue_close_grants = match issue_close_grants_for_commit(&auth, &ids, "", unix_now_ms())
-    {
-        Ok(grants) => grants,
-        Err(e) => return worklist_json_error(400, e),
-    };
 
     let Some(wl_path) = worklist_file(app) else {
         return worklist_json_error(500, "no project root");
@@ -29606,21 +29041,12 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         return worklist_json_error(400, "no staged changes for approved files");
     }
 
-    let mut commit_args = if amend_target.is_some() {
-        vec![
-            "commit".to_string(),
-            "--amend".to_string(),
-            "--no-edit".to_string(),
-            "--".to_string(),
-        ]
-    } else {
-        vec![
-            "commit".to_string(),
-            "-m".to_string(),
-            message.to_string(),
-            "--".to_string(),
-        ]
-    };
+    let mut commit_args = vec![
+        "commit".to_string(),
+        "-m".to_string(),
+        message.to_string(),
+        "--".to_string(),
+    ];
     // Scope the commit pathspec to files staging actually acted on —
     // `git commit -- <path>` fails on a nothing-matching path exactly
     // like `git add` does, one step downstream (caught by the
@@ -29632,18 +29058,7 @@ fn handle_worklist_commit<R: tauri::Runtime>(
             .cloned(),
     );
     if let Err(e) = git_run_owned(app, &commit_args) {
-        return worklist_json_error(
-            500,
-            format!(
-                "git {} failed: {}",
-                if amend_target.is_some() {
-                    "amend"
-                } else {
-                    "commit"
-                },
-                e.trim()
-            ),
-        );
+        return worklist_json_error(500, format!("git commit failed: {}", e.trim()));
     }
     let sha = match git_run(app, &["rev-parse", "HEAD"]) {
         Ok(s) => s.trim().to_string(),
@@ -29654,11 +29069,6 @@ fn handle_worklist_commit<R: tauri::Runtime>(
             )
         }
     };
-    // The selected-close set was parsed and validated before git mutation.
-    // Bind those grants to the final SHA now (new commit or amended HEAD).
-    for grant in &mut issue_close_grants {
-        grant.commit_sha = sha.clone();
-    }
 
     let prune_body = serde_json::json!({
         "op": "prune",
@@ -29681,55 +29091,13 @@ fn handle_worklist_commit<R: tauri::Runtime>(
             .into_bytes(),
         );
     }
-    let issue_close_grant_count = issue_close_grants.len();
-    let pending_issue_closes =
-        match install_issue_close_grants(app, issue_close_grants, amend_target.as_deref()) {
-            Ok(grants) => grants
-                .into_iter()
-                .filter(|grant| {
-                    grant.consumed_at_ms.is_none()
-                        && unix_now_ms() - grant.issued_at_ms <= ISSUE_CLOSE_GRANT_TTL_MS
-                })
-                .collect::<Vec<IssueCloseGrant>>(),
-            Err(e) => return (
-                500,
-                "application/json; charset=utf-8",
-                serde_json::json!({
-                    "error": "commit created and item pruned, but issue-close authorization failed",
-                    "sha": sha,
-                    "detail": e,
-                })
-                .to_string()
-                .into_bytes(),
-            ),
-        };
-    if let Some(old_sha) = amend_target.as_deref() {
-        if let Some(path) = worklist_push_mirror_file(app) {
-            if let Err(e) = rebind_pending_worklist_push_mirrors_path(&path, old_sha, &sha) {
-                eprintln!("[worklist-push-mirror] amend rebind failed: {}", e);
-            }
-        }
-        if bram_trace_enabled() {
-            append_bram_trace_line(
-                app,
-                "worklist-commit",
-                &format!("op=amend old_sha={} new_sha={}", old_sha, sha),
-            );
-        }
-    }
 
     (
         200,
         "application/json; charset=utf-8",
-        serde_json::json!({
-            "ok": true,
-            "sha": sha,
-            "amended": amend_target,
-            "issueCloseGrants": issue_close_grant_count,
-            "pendingIssueCloses": pending_issue_closes,
-        })
-        .to_string()
-        .into_bytes(),
+        serde_json::json!({ "ok": true, "sha": sha })
+            .to_string()
+            .into_bytes(),
     )
 }
 
@@ -29740,15 +29108,15 @@ mod worklist_authorization_tests {
         draft_markdown_path, enqueue_pending_worklist_push_mirror_path,
         ensure_no_unrelated_staged_files, ensure_worklist_commit_authorized, feedback_draft_path,
         inflight_claim_fully_covered, installed_twins_for, parse_worklist_authorization_message,
+        WORKLIST_AUTH_TTL_MS,
         parse_worklist_authorization_payload, read_pending_worklist_push_mirrors,
-        rebind_pending_worklist_push_mirrors_path, resource_relative_path,
-        turn_text_has_direct_edit_opt_out, validate_post_commit_prune_status,
-        validate_worklist_advance_status, validate_worklist_amend_target,
+        resource_relative_path, turn_text_has_direct_edit_opt_out,
+        validate_post_commit_prune_status, validate_worklist_advance_status,
         validate_worklist_mutate_authorization, worklist_commit_add_args,
         worklist_commit_files_for_ids, worklist_draft_path, worklist_feedback_ref_item_id,
         worklist_iteration_comment_body, worklist_lifecycle_comment_body,
         worklist_lifecycle_item_issue_numbers, worklist_pushed_lifecycle_comment_body,
-        PendingWorklistPushMirror, WORKLIST_AUTH_TTL_MS,
+        PendingWorklistPushMirror,
     };
     use serde_json::json;
     use std::path::Path;
@@ -29903,20 +29271,6 @@ mod worklist_authorization_tests {
         let err = ensure_worklist_commit_authorized(&ids(&["b"]), &auth, 1000)
             .expect_err("commit ids must be covered");
         assert_eq!(err, "id not in auth: b");
-    }
-
-    #[test]
-    fn worklist_amend_requires_exact_unpublished_head() {
-        validate_worklist_amend_target("abc123", "ABC123", false)
-            .expect("exact unpushed HEAD can be amended");
-
-        let wrong_head = validate_worklist_amend_target("abc123", "def456", false)
-            .expect_err("non-HEAD target is rejected");
-        assert!(wrong_head.contains("is not current HEAD"));
-
-        let published = validate_worklist_amend_target("abc123", "abc123", true)
-            .expect_err("published target is rejected");
-        assert!(published.contains("refusing to amend published commit"));
     }
 
     // security-h4: interrupted / stale authorizations fail closed, while the
@@ -30263,53 +29617,6 @@ mod worklist_authorization_tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].issue, 215);
         assert_eq!(records[0].commit_sha, "abcdef123456");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn pending_push_mirror_rebind_preserves_all_items_and_dedupes() {
-        let dir = std::env::temp_dir().join(format!(
-            "bram-push-mirror-rebind-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp dir should be created");
-        let path = dir.join(".worklist-push-mirror.json");
-        let record = |item_id: &str, issue: u64, commit_sha: &str| PendingWorklistPushMirror {
-            item_id: item_id.to_string(),
-            issue,
-            commit_sha: commit_sha.to_string(),
-            changelog: format!("**Summary:** {} committed", item_id),
-            created_at_ms: 123,
-        };
-
-        enqueue_pending_worklist_push_mirror_path(&path, record("first", 118, "oldsha"))
-            .expect("first old-SHA record enqueues");
-        enqueue_pending_worklist_push_mirror_path(&path, record("second", 119, "oldsha"))
-            .expect("second old-SHA record enqueues");
-        enqueue_pending_worklist_push_mirror_path(&path, record("first", 118, "newsha"))
-            .expect("new-SHA duplicate identity enqueues before rebind");
-        enqueue_pending_worklist_push_mirror_path(&path, record("unrelated", 121, "othersha"))
-            .expect("unrelated record enqueues");
-
-        rebind_pending_worklist_push_mirrors_path(&path, "oldsha", "newsha")
-            .expect("amend rebind succeeds");
-        let records = read_pending_worklist_push_mirrors(&path);
-        assert_eq!(records.len(), 3);
-        assert!(!records.iter().any(|record| record.commit_sha == "oldsha"));
-        assert_eq!(
-            records
-                .iter()
-                .filter(|record| record.item_id == "first" && record.commit_sha == "newsha")
-                .count(),
-            1
-        );
-        assert!(records
-            .iter()
-            .any(|record| record.item_id == "second" && record.commit_sha == "newsha"));
-        assert!(records
-            .iter()
-            .any(|record| record.item_id == "unrelated" && record.commit_sha == "othersha"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

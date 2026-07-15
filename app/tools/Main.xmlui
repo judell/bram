@@ -124,6 +124,15 @@
   <ChangeListener
     listenTo="{sendRestoreEvt.value &amp;&amp; sendRestoreEvt.value.tick}"
     onDidChange="() => window.__bramApplySendRestore(sendRestoreEvt.value, footerComposerBox)" />
+  <!-- toast-issue-closed-on-push: toast when the user's Push auto-closes a
+       queued issue. Host emits issues-closed-on-push after the close flush. -->
+  <PushSource
+    id="issuesClosedOnPushEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('issues-closed-on-push')}" />
+  <ChangeListener
+    listenTo="{issuesClosedOnPushEvt.value &amp;&amp; issuesClosedOnPushEvt.value.tick}"
+    onDidChange="() => window.__bramToastIssuesClosed(issuesClosedOnPushEvt.value, toast)" />
   <!-- Light-touch backstop: the always-mounted footer never re-mounts, so its
        session meta can stay frozen at launch values. Refetch on agent
        turn-state transitions (the App-scope status push already driving the

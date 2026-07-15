@@ -4968,6 +4968,20 @@ window.__bramSendLedgerNotice = function (payload, dismissedKey) {
 // restored text is appended below a blank line rather than overwriting.
 // Called from Main.xmlui / Workspace.xmlui ChangeListeners with their
 // respective composer refs.
+// toast-issue-closed-on-push: format the host's `issues-closed-on-push`
+// payload and toast it. `evtValue` is the bramSubscribeTauriEvent wrapper
+// `{ tick, payload }`; the host payload is `{ issues: [n, ...] }`.
+window.__bramToastIssuesClosed = function (evtValue, toastApi) {
+  var issues = (evtValue && evtValue.payload && evtValue.payload.issues) || [];
+  if (!issues.length || typeof toastApi !== "function") return;
+  var list = issues
+    .map(function (n) {
+      return "#" + n;
+    })
+    .join(", ");
+  toastApi("Closed " + list + " on push");
+};
+
 window.__bramApplySendRestore = function (snapshot, box) {
   try {
     window.__bramIframeTrace("send-restore", {

@@ -25881,6 +25881,7 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>) {
         return;
     };
     let mut remaining: Vec<PendingIssueClose> = Vec::new();
+    let mut closed: Vec<u64> = Vec::new();
     for record in records {
         match gh_commit_visible(app, &repo_slug, &record.commit_sha) {
             Ok(true) => {
@@ -25897,12 +25898,15 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>) {
                         record.issue, record.commit_sha, e
                     );
                     remaining.push(record);
-                } else if bram_trace_enabled() {
-                    append_bram_trace_line(
-                        app,
-                        "issue-close-queue",
-                        &format!("op=closed issue={} sha={}", record.issue, full_sha),
-                    );
+                } else {
+                    closed.push(record.issue);
+                    if bram_trace_enabled() {
+                        append_bram_trace_line(
+                            app,
+                            "issue-close-queue",
+                            &format!("op=closed issue={} sha={}", record.issue, full_sha),
+                        );
+                    }
                 }
             }
             Ok(false) | Err(_) => remaining.push(record),
@@ -25910,6 +25914,15 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>) {
     }
     if let Err(e) = write_pending_issue_closes(&path, &remaining) {
         eprintln!("[issue-close-queue] write remaining failed: {}", e);
+    }
+    // toast-issue-closed-on-push: announce the auto-close in the agent pane.
+    // Only fires when a close actually happened, so no-op pushes stay silent.
+    // Plain (non-replayable) emit on purpose: a toast is transient and must
+    // fire once, at the moment of the close. emit_replayable_payload would
+    // remember the payload host-side, and the frontend's replayLatest would
+    // re-toast on every iframe reload (toast-issue-closed-no-replay).
+    if !closed.is_empty() {
+        let _ = app.emit("issues-closed-on-push", serde_json::json!({ "issues": closed }));
     }
 }
 

@@ -4436,7 +4436,7 @@ var __projectedTurnsLastCostMs = 0;
 // covers both with margin. Worst-case tick payload is bounded by turn
 // size, not session size.
 var __projectedTurnsTickWindow = 8;
-window.__bramRefetchProjectedTurns = function (reason) {
+window.__bramRefetchProjectedTurns = function (reason, forceFull) {
   if (typeof window.fetch !== "function") return;
   if (__projectedTurnsTimer) return; // trailing-edge coalesce
   var delayMs = Math.max(250, Math.min(4 * __projectedTurnsLastCostMs, 5000));
@@ -4445,7 +4445,11 @@ window.__bramRefetchProjectedTurns = function (reason) {
     var seq = ++__projectedTurnsSeq;
     var startedMs = Date.now();
     var prev = __projectedTurnsValue;
-    var windowed = !!(prev && prev.sid && prev.turns
+    // forceFull: the window-miss re-entry below must NOT re-window against the
+    // stale prev — on a session rotation prev still holds the old (>window)
+    // session, so a recomputed windowed=true would merge-miss forever. A full
+    // fetch converges (rotation or gap).
+    var windowed = !forceFull && !!(prev && prev.sid && prev.turns
       && prev.turns.length > __projectedTurnsTickWindow);
     var url = windowed
       ? "/__turns?latest=" + __projectedTurnsTickWindow
@@ -4459,8 +4463,10 @@ window.__bramRefetchProjectedTurns = function (reason) {
           : payload;
         if (!next) {
           // Rotation/compaction/gap: re-enter for a full fetch (the
-          // timer is clear, so this schedules normally).
-          window.__bramRefetchProjectedTurns((reason || "") + "-window-miss");
+          // timer is clear, so this schedules normally). forceFull=true so
+          // the re-entry ignores the stale prev and actually fetches full —
+          // otherwise it re-windows against the old session and loops.
+          window.__bramRefetchProjectedTurns((reason || "") + "-window-miss", true);
           return;
         }
         window.__bramBroadcastProjectedTurns(next);

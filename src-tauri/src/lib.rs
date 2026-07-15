@@ -14397,6 +14397,17 @@ fn st_tool_summary(name: &str, input: &serde_json::Value) -> String {
 
 fn st_codex_tool_name(payload: &serde_json::Value) -> String {
     let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    // codex-exec-wrapped-apply-patch-diff: an exec call that only wraps
+    // tools.apply_patch is an apply_patch as far as rendering is concerned;
+    // normalize the name so the existing name-gated diff paths handle it.
+    if name == "exec" {
+        let input = st_codex_tool_input(payload);
+        if let Some(script) = input.as_str() {
+            if exec_wrapped_apply_patch(script).is_some() {
+                return "apply_patch".to_string();
+            }
+        }
+    }
     if let Some(ns) = payload.get("namespace").and_then(|v| v.as_str()) {
         let stripped = ns.strip_prefix("mcp__").unwrap_or(ns);
         format!("{}.{}", stripped, name)
@@ -14490,6 +14501,73 @@ fn st_codex_exec_cmds(input: &str) -> Vec<String> {
     out
 }
 
+// codex-exec-wrapped-apply-patch-diff: Codex unified-exec expresses an
+// apply_patch as a JS script that assigns a "*** Begin Patch…" string literal
+// and calls tools.apply_patch(...). Extract and JS-unescape that patch literal
+// so the existing apply_patch rendering path can show a diff. Returns None for
+// any exec script that isn't an apply_patch wrapper (real shell exec, or a
+// patch shape we don't recognize) — the caller keeps its current behavior.
+fn exec_wrapped_apply_patch(script: &str) -> Option<String> {
+    if !script.contains("tools.apply_patch(") {
+        return None;
+    }
+    let chars: Vec<char> = script.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '"' {
+            i += 1;
+            continue;
+        }
+        // Decode a double-quoted JS string literal starting at i.
+        let mut val = String::new();
+        let mut j = i + 1;
+        let mut closed = false;
+        while j < chars.len() {
+            match chars[j] {
+                '\\' => {
+                    j += 1;
+                    let Some(&esc) = chars.get(j) else { break };
+                    match esc {
+                        'n' => val.push('\n'),
+                        't' => val.push('\t'),
+                        'r' => val.push('\r'),
+                        '"' => val.push('"'),
+                        '\\' => val.push('\\'),
+                        '/' => val.push('/'),
+                        'b' => val.push('\u{0008}'),
+                        'f' => val.push('\u{000C}'),
+                        'u' => {
+                            let hex: String =
+                                chars.get(j + 1..j + 5).map(|s| s.iter().collect())?;
+                            if let Ok(cp) = u32::from_str_radix(&hex, 16) {
+                                if let Some(ch) = char::from_u32(cp) {
+                                    val.push(ch);
+                                }
+                            }
+                            j += 4;
+                        }
+                        other => val.push(other),
+                    }
+                    j += 1;
+                }
+                '"' => {
+                    closed = true;
+                    break;
+                }
+                c => {
+                    val.push(c);
+                    j += 1;
+                }
+            }
+        }
+        if closed && val.trim_start().starts_with("*** Begin Patch") {
+            return Some(val);
+        }
+        i = if closed { j + 1 } else { chars.len() };
+    }
+    None
+}
+
 fn st_codex_tool_summary(payload: &serde_json::Value) -> String {
     let raw_name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let full_name = st_codex_tool_name(payload);
@@ -14507,6 +14585,22 @@ fn st_codex_tool_summary(payload: &serde_json::Value) -> String {
     // first non-empty script line as a fallback), truncated like above.
     if raw_name == "exec" {
         if let Some(script) = input.as_str() {
+            // codex-exec-wrapped-apply-patch-diff: summarize a wrapped
+            // apply_patch by its target file, like the direct apply_patch case.
+            if let Some(patch) = exec_wrapped_apply_patch(script) {
+                for line in patch.lines() {
+                    if let Some(rest) = line.strip_prefix("*** Add File: ") {
+                        return format!("{} patch", rest);
+                    }
+                    if let Some(rest) = line.strip_prefix("*** Update File: ") {
+                        return format!("{} patch", rest);
+                    }
+                    if let Some(rest) = line.strip_prefix("*** Delete File: ") {
+                        return format!("{} patch", rest);
+                    }
+                }
+                return "patch".to_string();
+            }
             let first = st_codex_exec_cmds(script).into_iter().next().or_else(|| {
                 script
                     .lines()
@@ -14870,11 +14964,35 @@ mod apply_patch_diff_tests {
 #[cfg(test)]
 mod codex_unified_exec_tests {
     use super::{
-        st_codex_exec_cmds, st_codex_tool_command_display, st_codex_tool_output, st_codex_tool_summary,
+        st_codex_exec_cmds, st_codex_tool_command_display, st_codex_tool_name, st_codex_tool_output,
+        st_codex_tool_summary,
     };
 
     fn exec_call(input: &str) -> serde_json::Value {
         serde_json::json!({ "type": "custom_tool_call", "name": "exec", "input": input })
+    }
+
+    #[test]
+    fn exec_wrapped_apply_patch_renders_as_diff() {
+        let call = exec_call(
+            "const patch = \"*** Begin Patch\\n*** Update File: app/Main.xmlui\\n@@\\n-old\\n+new\\n*** End Patch\";\ntext(await tools.apply_patch(patch));",
+        );
+        // Normalized so the existing name-gated DiffView path renders it.
+        assert_eq!(st_codex_tool_name(&call), "apply_patch");
+        assert_eq!(st_codex_tool_summary(&call), "app/Main.xmlui patch");
+        let display = st_codex_tool_command_display(&call);
+        assert!(display.contains("app/Main.xmlui"), "display: {display}");
+        assert!(display.contains("-old") && display.contains("+new"), "display: {display}");
+    }
+
+    #[test]
+    fn exec_without_apply_patch_is_unchanged() {
+        let call = exec_call("await tools.web_search({query:\"hi\"});");
+        assert_eq!(st_codex_tool_name(&call), "exec");
+        assert_eq!(
+            st_codex_tool_command_display(&call),
+            "await tools.web_search({query:\"hi\"});"
+        );
     }
 
     #[test]
@@ -14953,6 +15071,11 @@ fn st_codex_tool_command_display(payload: &serde_json::Value) -> String {
     // finds none, so nothing is ever silently dropped.
     if name == "exec" {
         if let Some(script) = input.as_str() {
+            // codex-exec-wrapped-apply-patch-diff: render a wrapped apply_patch
+            // as a unified diff, same as the direct apply_patch case above.
+            if let Some(patch) = exec_wrapped_apply_patch(script) {
+                return st_apply_patch_to_unified_diff(&patch);
+            }
             let cmds = st_codex_exec_cmds(script);
             if !cmds.is_empty() {
                 return cmds.join("\n");

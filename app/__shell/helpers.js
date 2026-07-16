@@ -4644,6 +4644,32 @@ window.__bramSupabaseSqlTable = function (text) {
   }
 };
 
+// transcript-wrap-freeform-feedback: a Read of an iterate feedback draft
+// (resources/feedback-drafts/<ref>.md) is our own freeform prose — no
+// alignment to preserve, so it renders wrapped instead of as a scrolling
+// code block. Substring match covers absolute and repo-relative hints.
+window.__bramIsFeedbackDraftRead = function (toolName, hint) {
+  return String(toolName || "") === "Read" &&
+    String(hint || "").indexOf("/feedback-drafts/") >= 0;
+};
+
+// Overflow mode for a transcript tool-result Markdown: feedback-draft prose
+// wraps ('flow'); everything else keeps horizontal scroll.
+window.__bramFreeformResultMode = function (item) {
+  return item && window.__bramIsFeedbackDraftRead(item.name, item.summary)
+    ? "flow" : "scroll";
+};
+
+// Whether the expanded tool row shows the command/summary block. apply_patch
+// renders its command as a DiffView instead; a feedback-draft Read's command
+// is just the path already shown in the row header, so the wrapped content
+// stands alone in its place.
+window.__bramShowToolCommand = function (item) {
+  if (!item || !(item.commandDisplay || item.summary)) return false;
+  if (item.name === "apply_patch" && item.commandDisplay) return false;
+  return !window.__bramIsFeedbackDraftRead(item.name, item.summary);
+};
+
 window.__bramFormatToolResult = function (result, toolName, hint) {
   if (result == null) return "";
   var text = String(result);
@@ -4680,6 +4706,26 @@ window.__bramFormatToolResult = function (result, toolName, hint) {
   // Strip ANSI escape sequences so raw \x1b[...m bytes don't render literally.
   text = text.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, "");
 
+  var MAX_RENDER = 16000;
+
+  // Feedback-draft Reads: strip the cat -n line-number gutter and return
+  // unfenced prose; the Transcript pairs this with overflowMode="flow" via
+  // __bramFreeformResultMode so it wraps.
+  if (window.__bramIsFeedbackDraftRead(toolName, hint)) {
+    var prose = text.replace(/^\s*\d+\t/gm, "");
+    if (prose.length > MAX_RENDER) {
+      prose = prose.slice(0, MAX_RENDER) +
+        "\n… (+" + (prose.length - MAX_RENDER) + " more chars — full output in the session JSONL)";
+    }
+    if (bracketBig) {
+      window.__bramIframeTrace("tool-format", {
+        stage: "end", tool: String(toolName || ""),
+        ms: Math.round(performance.now() - bracketT0), outChars: prose.length,
+      });
+    }
+    return prose;
+  }
+
   var lang = "";
   var body = text;
   var trimmed = text.trim();
@@ -4712,7 +4758,6 @@ window.__bramFormatToolResult = function (result, toolName, hint) {
   // in the webview is the recurring codex-session killer, so bound the
   // rendered block; the full output remains in the session JSONL
   // (Sessions tab / /__tool-detail).
-  var MAX_RENDER = 16000;
   if (body.length > MAX_RENDER) {
     body =
       body.slice(0, MAX_RENDER) +

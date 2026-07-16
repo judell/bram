@@ -189,8 +189,11 @@
               when="{$item.commandDisplay &amp;&amp; $item.name === 'apply_patch'}"
               compact="true"
               text="{$item.commandDisplay}" />
+            <!-- Command/summary block: hidden for feedback-draft Reads (the
+                 path already heads the row; the wrapped content stands alone).
+                 The ternary guards a hot-reload against pre-rebuild helpers.js. -->
             <Markdown
-              when="{($item.commandDisplay || $item.summary) &amp;&amp; ($item.name !== 'apply_patch' || !$item.commandDisplay)}"
+              when="{window.__bramShowToolCommand ? window.__bramShowToolCommand($item) : (($item.commandDisplay || $item.summary) &amp;&amp; ($item.name !== 'apply_patch' || !$item.commandDisplay))}"
               overflowMode="scroll"
               content="{window.__bramFormatToolCommand($item.commandDisplay || $item.summary, $item.description)}" />
             <DiffView
@@ -200,10 +203,13 @@
             <!-- Tool result: typed Markdown code-fence when the formatter
                  helper is live (after a rebuild), else the prior raw Text so a
                  hot-reload never blanks or markdown-mangles the expansion.
-                 Errors always use the red raw Text. -->
+                 Errors always use the red raw Text. Feedback-draft Reads wrap
+                 as prose (flow); everything else keeps horizontal scroll. The
+                 ternary guards a hot-reload against pre-rebuild helpers.js. -->
             <Markdown
               when="{$item.result &amp;&amp; !$item.isError &amp;&amp; window.__bramFormatToolResult}"
-              overflowMode="scroll"
+              overflowMode="{window.__bramFreeformResultMode ? window.__bramFreeformResultMode($item) : 'scroll'}"
+              breakMode="word"
               content="{window.__bramFormatToolResult($item.result, $item.name, $item.summary)}" />
             <Text
               when="{$item.result &amp;&amp; ($item.isError || !window.__bramFormatToolResult)}"

@@ -39,6 +39,8 @@ Bram has opinions. It thinks versioning and collaboration are well-handled by gi
 
 <a href="https://blog.jonudell.net/2026/07/08/dont-infer-behavior-from-code-observe-it-in-logs/">Don’t infer behavior from code, observe it in logs</a>
 
+<a href="https://blog.jonudell.net/2026/07/16/talking-to-claude-code-and-codex/">Talking to Claude Code and Codex</a>
+
 ### Elsewhere
 
 <a href="https://waltzweb.wordpress.com/2026/07/02/github-for-todays-hybrid-teams/">Technical or not, human or AI – could Bram be the missing link?</a>

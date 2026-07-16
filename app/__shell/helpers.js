@@ -494,6 +494,24 @@ window.sendIterateWithFeedbackDraft = function (items, selectedId, text) {
   });
 };
 
+// issue-221-skill-launcher: build and submit a `/skill args` turn from the
+// Skills launcher — straight to the agent via toTurn. One trace line per launch.
+window.__bramRunSkill = function (name, argsRaw) {
+  if (!name) return;
+  var args = String(argsRaw || "").trim();
+  var cmd = args ? "/" + name + " " + args : "/" + name;
+  try {
+    window.logToHost({
+      kind: "iframe-trace",
+      subkind: "skill-invoke",
+      name: name,
+      args_len: args.length,
+      at: new Date().toISOString(),
+    });
+  } catch (e) {}
+  window.toTurn(cmd);
+};
+
 window.toShell = function (text) {
   var s = String(text);
   // Trace the entry so #86's "click swallowed" diagnostic flow can

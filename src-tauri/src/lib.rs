@@ -18861,6 +18861,114 @@ fn collect_context_files<R: tauri::Runtime>(
 
 // Group the flat ContextFile list into category buckets for the Context tab's
 // left-pane list.
+// issue-221-skill-launcher: one project skill (`.claude/skills/<name>/SKILL.md`).
+#[derive(serde::Serialize)]
+struct SkillInfo {
+    name: String,
+    description: String,
+    #[serde(rename = "argHint")]
+    arg_hint: String,
+    path: String,
+}
+
+// Pull name / description / argument-hint from a SKILL.md's leading `---`
+// YAML frontmatter block. Line-based (the three scalar keys we need), so no
+// YAML dependency; returns ("", "", "") when there's no frontmatter.
+fn parse_skill_frontmatter(content: &str) -> (String, String, String) {
+    let mut lines = content.lines();
+    if lines.next().map(str::trim) != Some("---") {
+        return (String::new(), String::new(), String::new());
+    }
+    let unquote = |s: &str| -> String {
+        let s = s.trim();
+        let bytes = s.as_bytes();
+        if s.len() >= 2
+            && ((bytes[0] == b'"' && bytes[s.len() - 1] == b'"')
+                || (bytes[0] == b'\'' && bytes[s.len() - 1] == b'\''))
+        {
+            s[1..s.len() - 1].to_string()
+        } else {
+            s.to_string()
+        }
+    };
+    let (mut name, mut desc, mut hint) = (String::new(), String::new(), String::new());
+    for line in lines {
+        let t = line.trim();
+        if t == "---" {
+            break;
+        }
+        if let Some(v) = t.strip_prefix("name:") {
+            name = unquote(v);
+        } else if let Some(v) = t.strip_prefix("description:") {
+            desc = unquote(v);
+        } else if let Some(v) = t.strip_prefix("argument-hint:") {
+            hint = unquote(v);
+        }
+    }
+    (name, desc, hint)
+}
+
+// Scan <root>/.claude/skills/*/SKILL.md, sorted by name. Falls back to the
+// directory name when frontmatter omits `name`.
+fn collect_claude_skills<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<SkillInfo> {
+    let Some(root) = project_root(Some(app)) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(root.join(".claude").join("skills")) else {
+        return Vec::new();
+    };
+    let mut out: Vec<SkillInfo> = Vec::new();
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let skill_md = dir.join("SKILL.md");
+        let Ok(content) = std::fs::read_to_string(&skill_md) else {
+            continue;
+        };
+        let (fm_name, description, arg_hint) = parse_skill_frontmatter(&content);
+        let name = if fm_name.is_empty() {
+            dir.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default()
+        } else {
+            fm_name
+        };
+        if name.is_empty() {
+            continue;
+        }
+        out.push(SkillInfo {
+            name,
+            description,
+            arg_hint,
+            path: skill_md.to_string_lossy().to_string(),
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+#[cfg(test)]
+mod skill_frontmatter_tests {
+    use super::parse_skill_frontmatter;
+
+    #[test]
+    fn parses_name_description_and_hint() {
+        let md = "---\nname: capture-chat\ndescription: \"distill the session's idea thread\"\nargument-hint: idea name\n---\n# body\n";
+        let (n, d, h) = parse_skill_frontmatter(md);
+        assert_eq!(n, "capture-chat");
+        assert_eq!(d, "distill the session's idea thread");
+        assert_eq!(h, "idea name");
+    }
+
+    #[test]
+    fn no_frontmatter_returns_empty() {
+        let (n, d, h) = parse_skill_frontmatter("# just a heading\nno fm\n");
+        assert!(n.is_empty() && d.is_empty() && h.is_empty());
+    }
+}
+
 fn context_list<R: tauri::Runtime>(
     app: &AppHandle<R>,
     preferred: Option<SessionProvider>,
@@ -27051,6 +27159,16 @@ fn route_request<R: tauri::Runtime>(
         return (200, "application/json; charset=utf-8", body);
     }
 
+    if path == "__context/skills" {
+        // issue-221-skill-launcher: project skills from .claude/skills/*/SKILL.md.
+        let body = serde_json::to_vec(&serde_json::json!({
+            "provider": current_provider(app).map(session_provider_label),
+            "skills": collect_claude_skills(app),
+        }))
+        .unwrap_or_default();
+        return (200, "application/json; charset=utf-8", body);
+    }
+
     if path == "__context/search" {
         let mut q = String::new();
         let mut provider: Option<SessionProvider> = None;
@@ -31625,6 +31743,10 @@ pub fn run() {
                                 && (name == "settings.json"
                                     || name == "settings.local.json"
                                     || name == "worklist-guard.py"))
+                            // issue-221-skill-launcher: refresh the Skills list
+                            // when a .claude/skills/**/SKILL.md changes.
+                            || (in_claude_dir
+                                && p.components().any(|c| c.as_os_str() == "skills"))
                             || in_current_agent
                             || in_bram_dir
                     });

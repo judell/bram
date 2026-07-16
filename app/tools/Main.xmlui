@@ -44,6 +44,9 @@
     onDidChange="() => { const s = rightPaneSizeEvt.value || null; rightPaneSize = s ? (s.width + ' × ' + s.height) : '(measuring…)'; }" />
   <DataSource id="enhanceStatus" url="/__enhance/status" />
   <DataSource id="rpInfo" url="/__right-pane-info" />
+  <!-- issue-221-skill-launcher: project skills from .claude/skills/*/SKILL.md.
+       Refetched on open and when enhance-status-changed fires. -->
+  <DataSource id="skillsList" url="/__context/skills" />
   <!-- App-scope read of the inflight worklist claim, so the header can show
        "Approving/Iterating/Dropping <item>" even when you've left the Worklist tab. -->
   <DataSource id="headerInflightClaim" url="/__inflight?t={headerInflightTick}" />
@@ -206,6 +209,62 @@
       </VStack>
     </VStack>
   </ModalDialog>
+
+  <!-- issue-221-skill-launcher: pick a project skill, add an optional argument,
+       and submit it as a /skill turn. Claude-only (the launch button is gated
+       on activeProvider). 85% of the available width so the table has room. -->
+  <Theme maxWidth-ModalDialog="85%">
+  <ModalDialog id="skillsDialog" title="Run a skill">
+    <VStack gap="$space-3" padding="$space-2">
+      <Text
+        when="{!(skillsList.value &amp;&amp; skillsList.value.skills &amp;&amp; skillsList.value.skills.length > 0)}"
+        color="$textColor-secondary">
+        No project skills found in .claude/skills/.
+      </Text>
+      <VStack
+        gap="$space-2"
+        when="{skillsList.value &amp;&amp; skillsList.value.skills &amp;&amp; skillsList.value.skills.length > 0}">
+        <TextArea
+          id="skillArgsBox"
+          placeholder="optional — freeform text passed to the skill (a path, a name, an instruction…)"
+          autoComplete="off"
+          autoCorrect="{false}"
+          spellCheck="{false}"
+          autoCapitalize="off"
+          minRows="1"
+          maxRows="4"
+          width="100%" />
+        <!-- Table with a custom Link cell for the clickable skill name; the
+             description column wraps on its own. Pattern:
+             https://docs.xmlui.org/howto/render-a-custom-cell-with-components -->
+        <Table data="{skillsList.value.skills}">
+          <!-- Star sizing: skill 1 share (1/4), description 3 shares (3/4).
+               https://docs.xmlui.org/components/Column#width -->
+          <Column header="Skill" width="*">
+            <Link
+              onClick="window.__bramRunSkill($item.name, skillArgsBox &amp;&amp; skillArgsBox.value); skillsDialog.close()"
+              noIndicator="true">
+              <Text
+                value="{$item.name}"
+                fontFamily="$fontFamily-monospace"
+                fontWeight="$fontWeight-bold"
+                whiteSpace="nowrap" />
+            </Link>
+          </Column>
+          <!-- Text cell wraps; a bare bindTo column truncates with an ellipsis.
+               https://docs.xmlui.org/howto/modify-a-value-reported-in-a-column -->
+          <Column header="Description" width="3*">
+            <Text
+              value="{$item.description}"
+              fontSize="$fontSize-sm"
+              overflowMode="flow"
+              breakMode="word" />
+          </Column>
+        </Table>
+      </VStack>
+    </VStack>
+  </ModalDialog>
+  </Theme>
 
   <ModalDialog id="urlInfoDialog" title="Target app info">
     <VStack gap="$space-3">
@@ -507,6 +566,13 @@
               size="xs"
               tooltip="Send the Escape key"
               onClick="escToolbarClick()" />
+            <Button
+              when="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider === 'claude'}"
+              label="skills"
+              variant="ghost"
+              size="xs"
+              tooltip="Launch a project skill (.claude/skills)"
+              onClick="skillsList.refetch(); skillsDialog.open()" />
           </VStack>
         </HStack>
       </Form>

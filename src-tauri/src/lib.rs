@@ -14530,6 +14530,15 @@ fn st_extract_tool_result(block: &serde_json::Value, cap: usize) -> serde_json::
     st_extract_lines(&text, cap).unwrap_or(serde_json::Value::Null)
 }
 
+fn st_clip_80(s: &str) -> String {
+    if s.chars().count() > 80 {
+        let truncated: String = s.chars().take(80).collect();
+        format!("{}…", truncated)
+    } else {
+        s.to_string()
+    }
+}
+
 fn st_tool_summary(name: &str, input: &serde_json::Value) -> String {
     let obj = match input.as_object() {
         Some(o) => o,
@@ -14552,15 +14561,7 @@ fn st_tool_summary(name: &str, input: &serde_json::Value) -> String {
                 if lines == 1 { "" } else { "s" }
             )
         }
-        "Bash" => {
-            let cmd = get_str("command");
-            if cmd.chars().count() > 80 {
-                let truncated: String = cmd.chars().take(80).collect();
-                format!("{}…", truncated)
-            } else {
-                cmd.to_string()
-            }
-        }
+        "Bash" => st_clip_80(get_str("command")),
         "Read" => {
             let mut s = get_str("file_path").to_string();
             let offset = obj.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -14593,6 +14594,48 @@ fn st_tool_summary(name: &str, input: &serde_json::Value) -> String {
             } else {
                 format!("{} — {}", typ, desc)
             }
+        }
+        // claude-tool-input-summaries: carry the input in the row summary
+        // instead of the bare tool name (the row header already names the
+        // tool). Parallels the Codex-side filesystem./xmlui. arms.
+        "WebFetch" => {
+            let url = get_str("url");
+            if url.is_empty() {
+                name.to_string()
+            } else {
+                st_clip_80(url)
+            }
+        }
+        "WebSearch" | "ToolSearch" => {
+            let q = get_str("query");
+            if q.is_empty() {
+                name.to_string()
+            } else {
+                st_clip_80(q)
+            }
+        }
+        "Skill" => {
+            let skill = get_str("skill");
+            let args = get_str("args");
+            if skill.is_empty() {
+                name.to_string()
+            } else if args.is_empty() {
+                skill.to_string()
+            } else {
+                st_clip_80(&format!("{} {}", skill, args))
+            }
+        }
+        // Generic MCP arm: first present string field from a small candidate
+        // list, so future MCP servers get useful summaries without
+        // per-server arms.
+        n if n.starts_with("mcp__") => {
+            for k in &["query", "path", "file_path", "component", "pattern", "url"] {
+                let v = get_str(k);
+                if !v.is_empty() {
+                    return st_clip_80(v);
+                }
+            }
+            name.to_string()
         }
         _ => name.to_string(),
     }

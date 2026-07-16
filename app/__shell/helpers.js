@@ -4660,13 +4660,14 @@ window.__bramFreeformResultMode = function (item) {
     ? "flow" : "scroll";
 };
 
-// Whether the expanded tool row shows the command/summary block. apply_patch
-// renders its command as a DiffView instead; a feedback-draft Read's command
-// is just the path already shown in the row header, so the wrapped content
-// stands alone in its place.
+// Whether the expanded tool row shows the command/summary block. Only when
+// commandDisplay adds something beyond the header: the summary-only fallback
+// (MCP tools, Read, Grep, …) would just repeat the summary the row header
+// already shows. apply_patch renders its command as a DiffView instead; a
+// feedback-draft Read's wrapped content stands alone in the command's place.
 window.__bramShowToolCommand = function (item) {
-  if (!item || !(item.commandDisplay || item.summary)) return false;
-  if (item.name === "apply_patch" && item.commandDisplay) return false;
+  if (!item || !item.commandDisplay) return false;
+  if (item.name === "apply_patch") return false;
   return !window.__bramIsFeedbackDraftRead(item.name, item.summary);
 };
 

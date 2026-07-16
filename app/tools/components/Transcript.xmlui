@@ -176,7 +176,7 @@
           <Link noIndicator="true" onClick="expanded = window.__bramExpandTool(expanded, $item)">
             <HStack gap="$space-1" verticalAlignment="center">
               <Text fontSize="$fontSize-sm" fontWeight="bold" value="{((expanded || []).includes($item.id) ? '▾' : '▸') + '  🔧 ' + $item.name}" />
-              <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{$item.summary}" />
+              <Text when="{$item.summary &amp;&amp; $item.summary !== $item.name}" fontSize="$fontSize-sm" color="$textColor-secondary" value="{$item.summary}" />
             </HStack>
           </Link>
           <VStack

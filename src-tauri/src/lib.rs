@@ -14895,6 +14895,21 @@ fn st_tool_command_display(name: &str, input: &serde_json::Value) -> String {
             return st_line_oriented_command_display(cmd);
         }
     }
+    // render-supabase-execute-sql: pretty-print the SQL and show it as a fenced
+    // code block (the client's __bramFormatToolCommand passes an already-fenced
+    // block through verbatim). Empty otherwise = no command box.
+    if name == "mcp__supabase__execute_sql" {
+        if let Some(q) = input.get("query").and_then(|v| v.as_str()) {
+            if !q.trim().is_empty() {
+                let pretty = sqlformat::format(
+                    q,
+                    &sqlformat::QueryParams::None,
+                    &sqlformat::FormatOptions::default(),
+                );
+                return format!("```sql\n{}\n```", pretty);
+            }
+        }
+    }
     String::new()
 }
 

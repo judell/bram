@@ -1818,6 +1818,13 @@ window.__bramFormatToolCommand = function (command, description) {
   if (command == null) return "";
   var body = String(command);
   if (!body) return "";
+  // render-supabase-execute-sql: a commandDisplay that is already a fenced code
+  // block (the host emits ```sql for execute_sql) passes through verbatim so it
+  // isn't re-wrapped in a bash fence.
+  var fencedTrim = body.trim();
+  if (fencedTrim.slice(0, 3) === "```" && fencedTrim.slice(-3) === "```") {
+    return fencedTrim;
+  }
   // Multi-line commands (heredocs, scripts) keep their own layout;
   // splitting/wrapping is for the single-line compound case.
   var display = body.indexOf("\n") >= 0
@@ -4566,10 +4573,67 @@ window.__bramLangFromHint = function (hint) {
 // string: detect JSON / diff / file-by-extension and wrap in a fence-safe code
 // block so <Markdown overflowMode="scroll"> renders monospace with preserved
 // structure and horizontal scroll. Pure, no side effects.
+// render-supabase-execute-sql: turn a Supabase execute_sql result into a
+// Markdown table, or null if it doesn't look like rows (DDL, no rows, parse
+// failure) so the caller falls back to generic formatting. The rows are a JSON
+// array inside the tool's `{"result": "…<untrusted-data-…>[rows]</…>…"}` shape.
+window.__bramSupabaseSqlTable = function (text) {
+  try {
+    var inner = String(text);
+    var t = inner.trim();
+    if (t.charAt(0) === "{") {
+      try {
+        var obj = JSON.parse(t);
+        if (obj && typeof obj.result === "string") inner = obj.result;
+      } catch (e) {}
+    }
+    // The rows are the one JSON array in the result. Extract first "[" to last
+    // "]"; the preamble/postamble are prose (they even mention the
+    // <untrusted-data-…> tag, so keying on that tag mis-captures the prose).
+    var lb = inner.indexOf("["), rb = inner.lastIndexOf("]");
+    if (lb < 0 || rb <= lb) return null;
+    var arrText = inner.slice(lb, rb + 1);
+    var rows = JSON.parse(arrText);
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    var cols = [];
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      if (!r || typeof r !== "object" || Array.isArray(r)) return null;
+      for (var k in r) {
+        if (Object.prototype.hasOwnProperty.call(r, k) && cols.indexOf(k) < 0) cols.push(k);
+      }
+    }
+    if (cols.length === 0) return null;
+    var esc = function (v) {
+      if (v === null || v === undefined) return "";
+      var s = typeof v === "object" ? JSON.stringify(v) : String(v);
+      return s.replace(/\|/g, "\\|").replace(/[\r\n]+/g, " ");
+    };
+    var CAP = 50;
+    var out = "| " + cols.map(esc).join(" | ") + " |\n";
+    out += "| " + cols.map(function () { return "---"; }).join(" | ") + " |\n";
+    var n = Math.min(rows.length, CAP);
+    for (var j = 0; j < n; j++) {
+      var row = rows[j];
+      out += "| " + cols.map(function (c) { return esc(row[c]); }).join(" | ") + " |\n";
+    }
+    if (rows.length > CAP) out += "\n_+" + (rows.length - CAP) + " more rows_\n";
+    return out;
+  } catch (e) {
+    return null;
+  }
+};
+
 window.__bramFormatToolResult = function (result, toolName, hint) {
   if (result == null) return "";
   var text = String(result);
   if (text.trim() === "") return text;
+  // render-supabase-execute-sql: render rows as a Markdown table; fall through
+  // to generic formatting when it isn't tabular.
+  if (String(toolName || "") === "mcp__supabase__execute_sql") {
+    var sqlTable = window.__bramSupabaseSqlTable(text);
+    if (sqlTable) return sqlTable;
+  }
   // tool-format sync bracket (variant-B expansion freeze, 2026-07-11
   // 22:48Z): the freeze lives somewhere in formatter → Markdown → WebKit
   // layout of a large expanded row, with the click handler exonerated by

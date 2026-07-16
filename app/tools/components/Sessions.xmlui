@@ -73,6 +73,16 @@
     name="selectedSession"
     value="{!expandedId ? null : (displayedSessions.find(s => s.id === expandedId &amp;&amp; s.provider === expandedProvider) || (sessionsSource || []).find(s => s.id === expandedId &amp;&amp; s.provider === expandedProvider))}" />
 
+  <!-- sessions-delete-pending-self-heal: pendingDeletes is grow-only, so a
+       row that's grayed "delete pending" but still present (delete didn't
+       stick / session re-created) stays grayed forever with its buttons
+       disabled. On each list change, drop pending ids that are still in the
+       list — un-graying them so the user can retry; ids of genuinely-gone
+       sessions stay (harmless, no row). -->
+  <ChangeListener
+    listenTo="{displayedSessions}"
+    onDidChange="pendingDeletes = pendingDeletes.filter(id => !(displayedSessions || []).some(s => s.id === id)); savePendingSessionDeletes(pendingDeletes)" />
+
   <SearchHitModal
     id="searchHitModalRef"
     query="{query}" />

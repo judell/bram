@@ -15016,12 +15016,63 @@ fn st_line_oriented_command_display(command: &str) -> String {
     out
 }
 
+// write-tool-show-content-hifi: fence a body for the transcript command box —
+// line/byte capped with a truncation footer, fence longer than any backtick
+// run in the body so an embedded ``` (e.g. a written Markdown file) can't
+// break out. The client's __bramFormatToolCommand passes any leading-```
+// block through verbatim.
+fn st_fenced_code_block(lang: &str, content: &str) -> String {
+    const MAX_LINES: usize = 200;
+    const MAX_BYTES: usize = 16_000;
+    let all: Vec<&str> = content.lines().collect();
+    let shown = all.len().min(MAX_LINES);
+    let mut body = all[..shown].join("\n");
+    let mut footer = String::new();
+    if body.len() > MAX_BYTES {
+        let mut cut = MAX_BYTES;
+        while cut > 0 && !body.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        body.truncate(cut);
+        footer = "\n… (truncated)".to_string();
+    } else if all.len() > shown {
+        footer = format!("\n… ({} more lines)", all.len() - shown);
+    }
+    let mut longest = 0usize;
+    let mut run = 0usize;
+    for ch in body.chars() {
+        if ch == '`' {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    let fence = "`".repeat((longest + 1).max(3));
+    format!("{}{}\n{}{}\n{}", fence, lang, body, footer, fence)
+}
+
 // Full command text for the Transcript's tool expansion (vs. the truncated
 // summary). Only Bash-style tools have one. Mirrors __bramToolCommandDisplay.
 fn st_tool_command_display(name: &str, input: &serde_json::Value) -> String {
     if name == "Bash" {
         if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
             return st_line_oriented_command_display(cmd);
+        }
+    }
+    // write-tool-show-content-hifi: show what got written as a syntax-
+    // highlighted fenced code block (same host-emits-fence path execute_sql
+    // uses below). Language inferred from the file extension.
+    if name == "Write" {
+        if let Some(content) = input.get("content").and_then(|v| v.as_str()) {
+            if !content.trim().is_empty() {
+                let path = input
+                    .get("file_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let lang = local_file_preview_language(std::path::Path::new(path));
+                return st_fenced_code_block(lang, content);
+            }
         }
     }
     // render-supabase-execute-sql: pretty-print the SQL and show it as a fenced

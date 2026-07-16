@@ -14474,7 +14474,7 @@ fn st_rewrite_xmlui_doc_urls(text: &str) -> String {
     .replace("https://docs.xmlui.org/", "https://www.xmlui.org/docs/")
 }
 
-fn st_tool_result_text(content: &serde_json::Value) -> String {
+fn st_raw_tool_result_text(content: &serde_json::Value) -> String {
     if let Some(s) = content.as_str() {
         return s.to_string();
     }
@@ -14492,6 +14492,163 @@ fn st_tool_result_text(content: &serde_json::Value) -> String {
     String::new()
 }
 
+fn st_structured_value_text(value: &serde_json::Value) -> String {
+    value
+        .as_str()
+        .map(String::from)
+        .unwrap_or_else(|| serde_json::to_string_pretty(value).unwrap_or_default())
+}
+
+fn st_codex_truncation_parts(raw: &str) -> Option<(&str, &str)> {
+    let header_end = raw.find("\n\n")?;
+    let preamble = raw.get(..header_end + 2)?;
+    let mut lines = raw.get(..header_end)?.lines();
+    let token_count = lines
+        .next()?
+        .strip_prefix("Warning: truncated output (original token count: ")?
+        .strip_suffix(')')?;
+    let output_lines = lines.next()?.strip_prefix("Total output lines: ")?;
+    if lines.next().is_some()
+        || token_count.parse::<usize>().is_err()
+        || output_lines.parse::<usize>().is_err()
+    {
+        return None;
+    }
+    Some((preamble, raw.get(header_end + 2..)?))
+}
+
+fn st_structured_json_values(raw: &str) -> Option<Vec<serde_json::Value>> {
+    let first = raw.chars().next()?;
+    if first != '{' && first != '[' {
+        return None;
+    }
+    let mut values = Vec::new();
+    for value in serde_json::Deserializer::from_str(raw).into_iter::<serde_json::Value>() {
+        let value = value.ok()?;
+        if !value.is_object() && !value.is_array() {
+            return None;
+        }
+        values.push(value);
+    }
+    (!values.is_empty()).then_some(values)
+}
+
+fn st_normalize_structured_tool_result(raw: &str) -> (String, bool, bool) {
+    let mut body = raw;
+    let mut errored = raw.starts_with("Script failed\n");
+    if (raw.starts_with("Script completed\n") || errored) && raw.contains("\nOutput:\n") {
+        body = raw.split_once("\nOutput:\n").map(|(_, v)| v).unwrap_or(raw);
+    }
+
+    let (preamble, structured_body) = st_codex_truncation_parts(body).unwrap_or(("", body));
+    let with_preamble = |text: String| {
+        if preamble.is_empty() {
+            text
+        } else {
+            format!("{preamble}{text}")
+        }
+    };
+    let trimmed = structured_body.trim();
+    let Some(mut parsed_values) = st_structured_json_values(trimmed) else {
+        return (body.to_string(), errored, false);
+    };
+    if parsed_values.len() > 1 {
+        let mut normalized = Vec::new();
+        for value in parsed_values {
+            let encoded = serde_json::to_string(&value).unwrap_or_default();
+            let (text, nested_error, _) = st_normalize_structured_tool_result(&encoded);
+            if !text.is_empty() {
+                normalized.push(text);
+            }
+            errored |= nested_error;
+        }
+        return (with_preamble(normalized.join("\n")), errored, true);
+    }
+    let parsed = parsed_values.pop().unwrap_or(serde_json::Value::Null);
+
+    if let Some(obj) = parsed.as_object() {
+        errored |= obj
+            .get("isError")
+            .or_else(|| obj.get("is_error"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let exit_code = obj.get("exit_code").and_then(|v| v.as_i64()).or_else(|| {
+            obj.get("metadata")
+                .and_then(|m| m.get("exit_code"))
+                .and_then(|v| v.as_i64())
+        });
+        errored |= matches!(exit_code, Some(code) if code != 0);
+
+        let is_exec_envelope = obj.contains_key("output")
+            && [
+                "chunk_id",
+                "wall_time_seconds",
+                "exit_code",
+                "original_token_count",
+                "session_id",
+                "metadata",
+            ]
+            .iter()
+            .any(|key| obj.contains_key(*key));
+        if is_exec_envelope {
+            let output = obj.get("output").unwrap_or(&serde_json::Value::Null);
+            if output.as_str().is_some_and(|value| value.is_empty()) {
+                if let Some(stderr) = obj.get("stderr") {
+                    let (text, nested_error) = stderr
+                        .as_str()
+                        .map(|value| {
+                            let (text, errored, _) = st_normalize_structured_tool_result(value);
+                            (text, errored)
+                        })
+                        .unwrap_or_else(|| (st_structured_value_text(stderr), false));
+                    return (with_preamble(text), errored || nested_error, true);
+                }
+            }
+            let (text, nested_error) = output
+                .as_str()
+                .map(|value| {
+                    let (text, errored, _) = st_normalize_structured_tool_result(value);
+                    (text, errored)
+                })
+                .unwrap_or_else(|| (st_structured_value_text(output), false));
+            return (with_preamble(text), errored || nested_error, true);
+        }
+
+        if let Some(content) = obj.get("content").and_then(|v| v.as_array()) {
+            let mut text_parts = Vec::new();
+            let all_text = !content.is_empty()
+                && content.iter().all(|part| {
+                    matches!(
+                        part.get("type").and_then(|v| v.as_str()),
+                        Some("text" | "input_text" | "output_text")
+                    ) && part.get("text").and_then(|v| v.as_str()).is_some()
+                });
+            if all_text {
+                for part in content {
+                    if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+                        text_parts.push(text);
+                    }
+                }
+                let (text, nested_error, _) =
+                    st_normalize_structured_tool_result(&text_parts.join("\n"));
+                return (with_preamble(text), errored || nested_error, true);
+            }
+        }
+    }
+
+    (
+        with_preamble(
+            serde_json::to_string_pretty(&parsed).unwrap_or_else(|_| trimmed.to_string()),
+        ),
+        errored,
+        true,
+    )
+}
+
+fn st_tool_result_text(content: &serde_json::Value) -> String {
+    st_normalize_structured_tool_result(&st_raw_tool_result_text(content)).0
+}
+
 fn st_is_error_result(block: &serde_json::Value) -> bool {
     if block
         .get("is_error")
@@ -14504,8 +14661,9 @@ fn st_is_error_result(block: &serde_json::Value) -> bool {
         .get("content")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
-    let text = st_tool_result_text(&content);
-    text.starts_with("Error:") || text.starts_with("<tool_use_error>")
+    let (text, structured_error, _) =
+        st_normalize_structured_tool_result(&st_raw_tool_result_text(&content));
+    structured_error || text.starts_with("Error:") || text.starts_with("<tool_use_error>")
 }
 
 fn st_extract_lines(text: &str, cap: usize) -> Option<serde_json::Value> {
@@ -14641,6 +14799,75 @@ fn st_tool_summary(name: &str, input: &serde_json::Value) -> String {
     }
 }
 
+fn st_codex_exec_nested_mcp_name(script: &str) -> Option<String> {
+    let marker = "tools.mcp__";
+    let mut names = Vec::new();
+    for (start, _) in script.match_indices(marker) {
+        let name_start = start + "tools.".len();
+        let rest = script.get(name_start..)?;
+        let len = rest
+            .bytes()
+            .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            .count();
+        let name = rest.get(..len)?;
+        if !name.is_empty() {
+            names.push(name.to_string());
+        }
+    }
+    if names.len() == 1 {
+        names.pop()
+    } else {
+        None
+    }
+}
+
+fn st_mcp_display_name(name: &str) -> Option<String> {
+    let (server, tool) = name.strip_prefix("mcp__")?.split_once("__")?;
+    Some(format!("{}.{}", server, tool))
+}
+
+fn st_codex_exec_string_field(script: &str, key: &str) -> Option<String> {
+    let marker = format!("{}:", key);
+    let mut offset = 0usize;
+    while let Some(found) = script.get(offset..)?.find(&marker) {
+        let mut index = offset + found + marker.len();
+        while script
+            .as_bytes()
+            .get(index)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            index += 1;
+        }
+        let quote = *script.as_bytes().get(index)?;
+        if quote != b'"' && quote != b'\'' {
+            offset = index;
+            continue;
+        }
+        index += 1;
+        let mut value = String::new();
+        let mut escaped = false;
+        for character in script.get(index..)?.chars() {
+            if escaped {
+                value.push(match character {
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    other => other,
+                });
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == quote as char {
+                return Some(value);
+            } else {
+                value.push(character);
+            }
+        }
+        return None;
+    }
+    None
+}
+
 fn st_codex_tool_name(payload: &serde_json::Value) -> String {
     let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
     // codex-exec-wrapped-apply-patch-diff: an exec call that only wraps
@@ -14651,6 +14878,9 @@ fn st_codex_tool_name(payload: &serde_json::Value) -> String {
         if let Some(script) = input.as_str() {
             if exec_wrapped_apply_patch(script).is_some() {
                 return "apply_patch".to_string();
+            }
+            if let Some(name) = st_codex_exec_nested_mcp_name(script) {
+                return st_mcp_display_name(&name).unwrap_or(name);
             }
         }
     }
@@ -14847,6 +15077,16 @@ fn st_codex_tool_summary(payload: &serde_json::Value) -> String {
                 }
                 return "patch".to_string();
             }
+            if let Some(name) = st_codex_exec_nested_mcp_name(script) {
+                for key in &["query", "path", "file_path", "component", "pattern", "url"] {
+                    if let Some(value) = st_codex_exec_string_field(script, key) {
+                        if !value.is_empty() {
+                            return st_clip_80(&value);
+                        }
+                    }
+                }
+                return st_mcp_display_name(&name).unwrap_or(name);
+            }
             let first = st_codex_exec_cmds(script).into_iter().next().or_else(|| {
                 script
                     .lines()
@@ -14921,7 +15161,7 @@ fn st_codex_tool_summary(payload: &serde_json::Value) -> String {
     full_name
 }
 
-fn st_codex_tool_output(payload: &serde_json::Value) -> Option<(String, bool)> {
+fn st_codex_tool_output(payload: &serde_json::Value) -> Option<(String, bool, bool)> {
     let typ = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
     if typ != "function_call_output" && typ != "custom_tool_call_output" {
         return None;
@@ -14941,38 +15181,18 @@ fn st_codex_tool_output(payload: &serde_json::Value) -> Option<(String, bool)> {
             .join("");
         &joined_array
     } else {
-        return Some((String::new(), false));
+        return Some((String::new(), false, false));
     };
-    if let Some(parsed) = st_parse_json_string(raw) {
-        if parsed.is_object() {
-            let text = parsed
-                .get("output")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .or_else(|| {
-                    parsed
-                        .get("stderr")
-                        .and_then(|v| v.as_str())
-                        .map(String::from)
-                })
-                .unwrap_or_else(|| raw.to_string());
-            let exit_code = parsed
-                .get("metadata")
-                .and_then(|m| m.get("exit_code"))
-                .and_then(|v| v.as_i64());
-            let errored = matches!(exit_code, Some(n) if n != 0);
-            return Some((text, errored));
-        }
-    }
+    let (text, structured_error, structured) = st_normalize_structured_tool_result(raw);
     // Fallback: look for the "Process exited with code N" pattern.
-    let errored = raw
+    let process_error = raw
         .lines()
         .find_map(|l| l.strip_prefix("Process exited with code "))
         .and_then(|s| s.split_whitespace().next())
         .and_then(|s| s.parse::<i64>().ok())
         .map(|n| n != 0)
         .unwrap_or(false);
-    Some((raw.to_string(), errored))
+    Some((text, structured_error || process_error, structured))
 }
 
 // Cap a string at `cap` characters (not bytes) for inline tool results.
@@ -15276,8 +15496,8 @@ mod apply_patch_diff_tests {
 #[cfg(test)]
 mod codex_unified_exec_tests {
     use super::{
-        st_codex_exec_cmds, st_codex_tool_command_display, st_codex_tool_name, st_codex_tool_output,
-        st_codex_tool_summary,
+        st_codex_exec_cmds, st_codex_tool_command_display, st_codex_tool_name,
+        st_codex_tool_output, st_codex_tool_summary, st_parse_lines_to_turns,
     };
 
     fn exec_call(input: &str) -> serde_json::Value {
@@ -15305,6 +15525,33 @@ mod codex_unified_exec_tests {
             st_codex_tool_command_display(&call),
             "await tools.web_search({query:\"hi\"});"
         );
+    }
+
+    #[test]
+    fn direct_nested_mcp_exec_uses_server_tool_label_and_input_summary() {
+        let call = exec_call(
+            "const r = await tools.mcp__xmlui__xmlui_search_howto({query:\"react to data changes\"});\ntext(r);",
+        );
+        assert_eq!(st_codex_tool_name(&call), "xmlui.xmlui_search_howto");
+        assert_eq!(st_codex_tool_summary(&call), "react to data changes");
+        assert_eq!(st_codex_tool_command_display(&call), "");
+    }
+
+    #[test]
+    fn nested_mcp_summary_preserves_unicode() {
+        let call = exec_call(
+            "const r = await tools.mcp__xmlui__xmlui_search_howto({query:\"réagir aux données\"});\ntext(r);",
+        );
+        assert_eq!(st_codex_tool_summary(&call), "réagir aux données");
+    }
+
+    #[test]
+    fn multiple_nested_mcp_calls_remain_generic_exec() {
+        let call = exec_call(
+            "await tools.mcp__xmlui__xmlui_list_components({});\nawait tools.mcp__xmlui__xmlui_list_howto({});",
+        );
+        assert_eq!(st_codex_tool_name(&call), "exec");
+        assert!(st_codex_tool_command_display(&call).contains("list_components"));
     }
 
     #[test]
@@ -15349,8 +15596,198 @@ mod codex_unified_exec_tests {
                 { "type": "input_text", "text": "hello world" }
             ]
         });
-        let (text, errored) = st_codex_tool_output(&out).expect("array output parses");
+        let (text, errored, _) = st_codex_tool_output(&out).expect("array output parses");
         assert_eq!(text, "Script completed\nhello world");
+        assert!(!errored);
+    }
+
+    #[test]
+    fn unified_exec_result_envelope_renders_only_command_output() {
+        let out = serde_json::json!({
+            "type": "custom_tool_call_output",
+            "output": [
+                { "type": "input_text", "text": "Script completed\nWall time 0.4 seconds\nOutput:\n" },
+                { "type": "input_text", "text": r#"{"chunk_id":"abc","wall_time_seconds":0.1,"exit_code":0,"output":"one\ntwo"}"# }
+            ]
+        });
+        let (text, errored, structured) = st_codex_tool_output(&out).expect("exec envelope parses");
+        assert_eq!(text, "one\ntwo");
+        assert!(!errored);
+        assert!(structured);
+    }
+
+    #[test]
+    fn wait_result_envelope_renders_only_nested_output() {
+        let out = serde_json::json!({
+            "type": "custom_tool_call_output",
+            "output": r#"{"cmd":"80cceb","exit_code":0,"output":"Compiling bram\nFinished"}"#
+        });
+        let (text, errored, _) = st_codex_tool_output(&out).expect("wait envelope parses");
+        assert_eq!(text, "Compiling bram\nFinished");
+        assert!(!errored);
+    }
+
+    #[test]
+    fn wait_result_array_normalizes_each_adjacent_envelope() {
+        let out = serde_json::json!({
+            "type": "function_call_output",
+            "output": [
+                { "type": "input_text", "text": "Script completed\nWall time 10.8 seconds\nOutput:\n" },
+                { "type": "input_text", "text": r#"{"cmd":"80cceb","exit_code":0,"output":"Compiling bram\nFinished"}"# },
+                { "type": "input_text", "text": r#"{"cmd":"9cfefd","exit_code":0,"output":""}"# },
+                { "type": "input_text", "text": r#"{"cmd":"c2b51e","exit_code":0,"output":""}"# }
+            ]
+        });
+        let (text, errored, structured) =
+            st_codex_tool_output(&out).expect("wait result sequence parses");
+        assert_eq!(text, "Compiling bram\nFinished");
+        assert!(!errored);
+        assert!(structured);
+    }
+
+    #[test]
+    fn projected_wait_entry_carries_normalized_batch_and_flow_signal() {
+        let call = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "call_id": "call_wait",
+                "name": "wait",
+                "arguments": "{\"cell_id\":\"19\"}"
+            }
+        });
+        let output = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_wait",
+                "output": [
+                    { "type": "input_text", "text": "Script completed\nWall time 10.8 seconds\nOutput:\n" },
+                    { "type": "input_text", "text": r#"{"cmd":"80cceb","exit_code":0,"output":"Compiling bram\nFinished"}"# },
+                    { "type": "input_text", "text": r#"{"cmd":"9cfefd","exit_code":0,"output":""}"# }
+                ]
+            }
+        });
+        let turns = st_parse_lines_to_turns(&format!("{call}\n{output}"));
+        let entry = turns
+            .iter()
+            .flat_map(|turn| {
+                turn.get("entries")
+                    .and_then(|value| value.as_array())
+                    .into_iter()
+                    .flatten()
+            })
+            .find(|entry| entry.get("id").and_then(|value| value.as_str()) == Some("call_wait"))
+            .expect("projected wait entry");
+        assert_eq!(entry["result"], "Compiling bram\nFinished");
+        assert_eq!(entry["resultStructured"], true);
+        assert_eq!(entry["isError"], false);
+    }
+
+    #[test]
+    fn generic_exec_result_array_normalizes_each_adjacent_envelope() {
+        let out = serde_json::json!({
+            "type": "custom_tool_call_output",
+            "output": [
+                { "type": "input_text", "text": "Script completed\nWall time 3.8 seconds\nOutput:\n" },
+                { "type": "input_text", "text": r#"{"chunk_id":"16ac4a","exit_code":0,"output":"{\"number\":219,\"state\":\"CLOSED\"}\n"}"# },
+                { "type": "input_text", "text": r#"{"chunk_id":"396e21","exit_code":0,"output":"{\"number\":220,\"state\":\"CLOSED\"}\n"}"# }
+            ]
+        });
+        let (text, errored, structured) =
+            st_codex_tool_output(&out).expect("exec result sequence parses");
+        assert!(text.contains("\"number\": 219"), "text: {text}");
+        assert!(text.contains("\"number\": 220"), "text: {text}");
+        assert!(!text.contains("chunk_id"), "text: {text}");
+        assert!(!errored);
+        assert!(structured);
+    }
+
+    #[test]
+    fn unified_exec_top_level_exit_code_marks_error() {
+        let out = serde_json::json!({
+            "type": "custom_tool_call_output",
+            "output": r#"{"chunk_id":"abc","exit_code":7,"output":"failed"}"#
+        });
+        let (text, errored, _) = st_codex_tool_output(&out).expect("exec envelope parses");
+        assert_eq!(text, "failed");
+        assert!(errored);
+    }
+
+    #[test]
+    fn standard_mcp_text_envelope_renders_text_payload() {
+        let out = serde_json::json!({
+            "type": "custom_tool_call_output",
+            "output": [
+                { "type": "input_text", "text": "Script completed\nWall time 0.3 seconds\nOutput:\n" },
+                { "type": "input_text", "text": r##"{"content":[{"type":"text","text":"# Docs\n\nUseful text"}]}"## }
+            ]
+        });
+        let (text, errored, _) = st_codex_tool_output(&out).expect("MCP envelope parses");
+        assert_eq!(text, "# Docs\n\nUseful text");
+        assert!(!errored);
+    }
+
+    #[test]
+    fn truncated_mcp_envelope_preserves_warning_and_renders_text_payload() {
+        let out = serde_json::json!({
+            "type": "custom_tool_call_output",
+            "output": [
+                { "type": "input_text", "text": "Script completed\nWall time 0.3 seconds\nOutput:\n" },
+                { "type": "input_text", "text": "Warning: truncated output (original token count: 18769)\nTotal output lines: 1\n\n{\"content\":[{\"type\":\"text\",\"text\":\"# Markdown\\n\\nUseful text\"}]}" }
+            ]
+        });
+        let (text, errored, _) = st_codex_tool_output(&out).expect("truncated MCP parses");
+        assert_eq!(
+            text,
+            "Warning: truncated output (original token count: 18769)\nTotal output lines: 1\n\n# Markdown\n\nUseful text"
+        );
+        assert!(!errored);
+    }
+
+    #[test]
+    fn malformed_truncated_payload_is_preserved_verbatim() {
+        let raw = "Warning: truncated output (original token count: 80)\nTotal output lines: 1\n\n{not json";
+        let out = serde_json::json!({
+            "type": "custom_tool_call_output",
+            "output": raw
+        });
+        let (text, errored, _) = st_codex_tool_output(&out).expect("malformed result survives");
+        assert_eq!(text, raw);
+        assert!(!errored);
+    }
+
+    #[test]
+    fn mixed_mcp_content_is_preserved_as_pretty_json() {
+        let out = serde_json::json!({
+            "type": "custom_tool_call_output",
+            "output": r#"{"content":[{"type":"text","text":"caption"},{"type":"image","data":"abc"}]}"#
+        });
+        let (text, errored, _) = st_codex_tool_output(&out).expect("mixed MCP envelope parses");
+        assert!(text.contains("\"type\": \"text\""), "text: {text}");
+        assert!(text.contains("\"type\": \"image\""), "text: {text}");
+        assert!(!errored);
+    }
+
+    #[test]
+    fn arbitrary_json_array_is_pretty_printed() {
+        let out = serde_json::json!({
+            "type": "custom_tool_call_output",
+            "output": r#"[{"id":1},{"id":2}]"#
+        });
+        let (text, errored, _) = st_codex_tool_output(&out).expect("JSON array parses");
+        assert!(text.contains("\n  {"), "text: {text}");
+        assert!(!errored);
+    }
+
+    #[test]
+    fn malformed_nested_json_keeps_body_without_transport_header() {
+        let out = serde_json::json!({
+            "type": "custom_tool_call_output",
+            "output": "Script completed\nWall time 0.2 seconds\nOutput:\n{not json"
+        });
+        let (text, errored, _) = st_codex_tool_output(&out).expect("malformed body survives");
+        assert_eq!(text, "{not json");
         assert!(!errored);
     }
 
@@ -15360,7 +15797,7 @@ mod codex_unified_exec_tests {
             "type": "function_call_output",
             "output": "plain legacy output"
         });
-        let (text, _) = st_codex_tool_output(&out).expect("string output parses");
+        let (text, _, _) = st_codex_tool_output(&out).expect("string output parses");
         assert_eq!(text, "plain legacy output");
     }
 }
@@ -15387,6 +15824,9 @@ fn st_codex_tool_command_display(payload: &serde_json::Value) -> String {
             // as a unified diff, same as the direct apply_patch case above.
             if let Some(patch) = exec_wrapped_apply_patch(script) {
                 return st_apply_patch_to_unified_diff(&patch);
+            }
+            if st_codex_exec_nested_mcp_name(script).is_some() {
+                return String::new();
             }
             let cmds = st_codex_exec_cmds(script);
             if !cmds.is_empty() {
@@ -15731,7 +16171,7 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
                 } else if p_typ == "function_call_output" || p_typ == "custom_tool_call_output" {
                     let id = p.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
                     if let Some((turn_idx, entry_idx)) = tool_entry_locations.get(id).copied() {
-                        if let Some((text, errored)) = st_codex_tool_output(p) {
+                        if let Some((text, errored, structured)) = st_codex_tool_output(p) {
                             let first_line = text
                                 .split('\n')
                                 .next()
@@ -15756,6 +16196,10 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
                                         entry_obj.insert(
                                             "isError".to_string(),
                                             serde_json::Value::Bool(errored),
+                                        );
+                                        entry_obj.insert(
+                                            "resultStructured".to_string(),
+                                            serde_json::Value::Bool(structured),
                                         );
                                         if errored {
                                             entry_obj.insert(
@@ -18164,7 +18608,7 @@ fn read_tool_detail<R: tauri::Runtime>(
                 } else if (p_typ == "function_call_output" || p_typ == "custom_tool_call_output")
                     && call_id == tool_id
                 {
-                    if let Some((text, _errored)) = st_codex_tool_output(p) {
+                    if let Some((text, _errored, _structured)) = st_codex_tool_output(p) {
                         result =
                             Some(st_extract_lines(&text, 20).unwrap_or(serde_json::Value::Null));
                     }

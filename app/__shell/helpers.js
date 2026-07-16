@@ -4331,7 +4331,7 @@ window.onProjectedTurnsChange = function (fn) {
 };
 
 // Loose per-turn equality for reference preservation. Includes result
-// length + isError because tool results stream onto entries that
+// value + error/layout flags because tool results stream onto entries that
 // otherwise look unchanged.
 window.__bramProjectedTurnEqual = function (a, b) {
   if (!a || !b) return false;
@@ -4355,7 +4355,8 @@ window.__bramProjectedTurnEqual = function (a, b) {
         // description line appeared").
         (x.description || "") !== (y.description || "") ||
         x.result !== y.result ||
-        !!x.isError !== !!y.isError
+        !!x.isError !== !!y.isError ||
+        !!x.resultStructured !== !!y.resultStructured
       ) return false;
       if ((x.agentId || "") !== (y.agentId || "")) return false;
     } else if (x.text !== y.text) {
@@ -4653,11 +4654,147 @@ window.__bramIsFeedbackDraftRead = function (toolName, hint) {
     String(hint || "").indexOf("/feedback-drafts/") >= 0;
 };
 
+// Normalize nested structured results from Codex unified exec and standard
+// MCP CallToolResult envelopes. The Rust projection performs the same
+// normalization for current sessions; this provider-neutral client fallback
+// also covers Claude records and hot-loaded transcripts projected by an older
+// host binary. Mixed MCP blocks stay as complete JSON so no content is lost.
+window.__bramParseStructuredJsonSequence = function (value) {
+  var source = String(value == null ? "" : value).trim();
+  if (source.charAt(0) !== "{" && source.charAt(0) !== "[") return null;
+  var values = [];
+  var start = -1, depth = 0, quote = false, escaped = false;
+  for (var i = 0; i < source.length; i++) {
+    var ch = source.charAt(i);
+    if (start < 0) {
+      if (/\s/.test(ch)) continue;
+      if (ch !== "{" && ch !== "[") return null;
+      start = i;
+      depth = 1;
+      continue;
+    }
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === "\"") quote = false;
+      continue;
+    }
+    if (ch === "\"") quote = true;
+    else if (ch === "{" || ch === "[") depth++;
+    else if (ch === "}" || ch === "]") {
+      depth--;
+      if (depth < 0) return null;
+      if (depth === 0) {
+        try { values.push(JSON.parse(source.slice(start, i + 1))); }
+        catch (e) { return null; }
+        start = -1;
+      }
+    }
+  }
+  return start < 0 && values.length > 0 ? values : null;
+};
+
+window.__bramNormalizeStructuredToolResult = function (result) {
+  var text = String(result == null ? "" : result);
+  var failed = text.indexOf("Script failed\n") === 0;
+  if (text.indexOf("Script completed\n") === 0 || failed) {
+    var outputAt = text.indexOf("\nOutput:\n");
+    if (outputAt >= 0) text = text.slice(outputAt + "\nOutput:\n".length);
+  }
+
+  var preamble = "";
+  var truncated = text.match(/^(Warning: truncated output \(original token count: \d+\)\nTotal output lines: \d+\n\n)([\s\S]*)$/);
+  if (truncated) {
+    preamble = truncated[1];
+    text = truncated[2];
+  }
+  function withPreamble(value) { return preamble + value; }
+
+  var trimmed = text.trim();
+  if (trimmed.charAt(0) !== "{" && trimmed.charAt(0) !== "[") {
+    return withPreamble(text);
+  }
+  var parsedValues = window.__bramParseStructuredJsonSequence(trimmed);
+  if (!parsedValues) return withPreamble(text);
+  if (parsedValues.length > 1) {
+    var normalizedValues = parsedValues.map(function (value) {
+      return window.__bramNormalizeStructuredToolResult(JSON.stringify(value));
+    }).filter(function (value) { return value !== ""; });
+    return withPreamble(normalizedValues.join("\n"));
+  }
+  var parsed = parsedValues[0];
+  try {
+
+    if (!Array.isArray(parsed)) {
+      var execKeys = [
+        "chunk_id", "wall_time_seconds", "exit_code",
+        "original_token_count", "session_id", "metadata"
+      ];
+      var isExecEnvelope = Object.prototype.hasOwnProperty.call(parsed, "output") &&
+        execKeys.some(function (key) {
+          return Object.prototype.hasOwnProperty.call(parsed, key);
+        });
+      if (isExecEnvelope) {
+        var useful = parsed.output;
+        if ((useful === "" || useful == null) && parsed.stderr != null) useful = parsed.stderr;
+        if (typeof useful === "string") {
+          return withPreamble(window.__bramNormalizeStructuredToolResult(useful));
+        }
+        return withPreamble(JSON.stringify(useful, null, 2));
+      }
+
+      if (Array.isArray(parsed.content) && parsed.content.length > 0) {
+        var allText = parsed.content.every(function (part) {
+          return part &&
+            /^(text|input_text|output_text)$/.test(String(part.type || "")) &&
+            typeof part.text === "string";
+        });
+        if (allText) {
+          return withPreamble(window.__bramNormalizeStructuredToolResult(
+            parsed.content.map(function (part) { return part.text; }).join("\n")
+          ));
+        }
+      }
+    }
+    return withPreamble(JSON.stringify(parsed, null, 2));
+  } catch (e) {
+    return withPreamble(text);
+  }
+};
+
+window.__bramIsMcpToolName = function (name) {
+  var text = String(name || "");
+  return /^mcp__.+__.+$/.test(text) || /^[A-Za-z0-9_-]+\.[A-Za-z0-9_.-]+$/.test(text);
+};
+
+window.__bramToolResultIsStructuredJson = function (result) {
+  var raw = String(result == null ? "" : result);
+  if (raw.indexOf("Script completed\n") === 0 || raw.indexOf("Script failed\n") === 0) {
+    var outputAt = raw.indexOf("\nOutput:\n");
+    if (outputAt >= 0) raw = raw.slice(outputAt + "\nOutput:\n".length);
+  }
+  raw = raw.replace(
+    /^Warning: truncated output \(original token count: \d+\)\nTotal output lines: \d+\n\n/,
+    ""
+  ).trim();
+  if (window.__bramParseStructuredJsonSequence(raw)) return true;
+
+  var text = window.__bramNormalizeStructuredToolResult(result).trim();
+  text = text.replace(
+    /^Warning: truncated output \(original token count: \d+\)\nTotal output lines: \d+\n\n/,
+    ""
+  ).trim();
+  return !!window.__bramParseStructuredJsonSequence(text);
+};
+
 // Overflow mode for a transcript tool-result Markdown: feedback-draft prose
-// wraps ('flow'); everything else keeps horizontal scroll.
+// and structured JSON wrap ('flow'); everything else keeps horizontal scroll.
 window.__bramFreeformResultMode = function (item) {
-  return item && window.__bramIsFeedbackDraftRead(item.name, item.summary)
-    ? "flow" : "scroll";
+  if (!item) return "scroll";
+  if (window.__bramIsFeedbackDraftRead(item.name, item.summary)) return "flow";
+  if (window.__bramIsMcpToolName(item.name)) return "flow";
+  if (item.resultStructured) return "flow";
+  return window.__bramToolResultIsStructuredJson(item.result) ? "flow" : "scroll";
 };
 
 // Whether the expanded tool row shows the command/summary block. Only when
@@ -4706,6 +4843,7 @@ window.__bramFormatToolResult = function (result, toolName, hint) {
   }
   // Strip ANSI escape sequences so raw \x1b[...m bytes don't render literally.
   text = text.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, "");
+  text = window.__bramNormalizeStructuredToolResult(text);
 
   var MAX_RENDER = 16000;
 
@@ -4886,6 +5024,7 @@ window.__bramTranscriptEventsFromTurns = function (payload, menu) {
               commandDisplay: e.commandDisplay || "",
               description: e.description || "",
               result: e.result || "",
+              resultStructured: !!e.resultStructured,
               // Edit/MultiEdit reconstructed diff from the host projection
               // (claude-edit-tool-result-diff-preview). Transcript.xmlui
               // renders it via DiffView when present; the adapter must pass

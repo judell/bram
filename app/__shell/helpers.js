@@ -774,6 +774,26 @@ window.__bramReloadAgentSession = function (provider, sessionId) {
     throw e;
   });
 };
+// sessions-new-named-session: start a fresh session for the current provider,
+// optionally naming it. The host kills+relaunches the agent without --continue
+// and applies the name when the new session's JSONL surfaces.
+window.__bramCreateNewSession = function (provider, title) {
+  var key = String(provider || "").toLowerCase() === "codex" ? "codex" : "claude";
+  var invoke = getTauriInvoke();
+  if (!invoke) return Promise.reject(new Error("Tauri IPC unavailable"));
+  return window.__bramWithAgentCommandTimeout(
+    invoke("create_new_session", { provider: key, title: String(title || "") }),
+    "new session"
+  );
+};
+window.__bramCreateNewSessionClick = function (provider, name, toastApi) {
+  if (typeof toastApi === "function") toastApi("Starting a new session…");
+  window.__bramCreateNewSession(provider, name).catch(function (e) {
+    if (toastApi && typeof toastApi.error === "function") {
+      toastApi.error("Could not create session: " + String((e && e.message) || e));
+    }
+  });
+};
 window.__bramReloadAgentSessionClick = function (provider, sessionId, toastApi) {
   var key = String(provider || "").toLowerCase() === "codex" ? "codex" : "claude";
   var id = String(sessionId || "");

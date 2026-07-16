@@ -1195,23 +1195,24 @@ fn emit_talk_session_changed_for_provider<R: tauri::Runtime>(
                 "source": "push",
             }),
         );
-        // session-rotation-self-diagnose: fire once when this provider's active
-        // sid actually changes, capturing the terminal tail + pre-rotation
-        // silence so the rotation names its own cause. Runs on every JSONL
-        // write but is a no-op except at a real change.
-        if bram_trace_enabled() {
-            let provider_label = session_provider_label(provider).to_string();
-            let rotated_from = {
-                let mut last = match last_talk_session_sid_cell().lock() {
-                    Ok(g) => g,
-                    Err(e) => e.into_inner(),
-                };
-                let prev = last.get(&provider_label).cloned().unwrap_or_default();
-                let changed = !prev.is_empty() && !sid.is_empty() && prev != sid;
-                last.insert(provider_label.clone(), sid.clone());
-                if changed { Some(prev) } else { None }
+        // Detect a genuine rotation (this provider's active sid changed). Runs
+        // on every JSONL write but is a no-op except at a real change. Always
+        // maintained (not trace-gated) because it also drives the
+        // sessions-new-named-session pending-title apply below.
+        let provider_label = session_provider_label(provider).to_string();
+        let rotated_from = {
+            let mut last = match last_talk_session_sid_cell().lock() {
+                Ok(g) => g,
+                Err(e) => e.into_inner(),
             };
-            if let Some(prev) = rotated_from {
+            let prev = last.get(&provider_label).cloned().unwrap_or_default();
+            let changed = !prev.is_empty() && !sid.is_empty() && prev != sid;
+            last.insert(provider_label.clone(), sid.clone());
+            if changed { Some(prev) } else { None }
+        };
+        if let Some(prev) = rotated_from {
+            // session-rotation-self-diagnose: name the rotation's cause.
+            if bram_trace_enabled() {
                 let last_out = LAST_PTY_OUTPUT_MS.load(std::sync::atomic::Ordering::Relaxed);
                 let silence_ms = if last_out > 0 { at_host_ms - last_out } else { -1 };
                 append_bram_trace_line(
@@ -1227,6 +1228,8 @@ fn emit_talk_session_changed_for_provider<R: tauri::Runtime>(
                     ),
                 );
             }
+            // sessions-new-named-session: apply a queued title to the new session.
+            apply_pending_session_title(app, provider, &sid);
         }
         // menu-stack-pty-inflight-prose probe: on each Claude session-JSONL
         // write, correlate the latest assistant-record timestamp against the
@@ -8989,6 +8992,9 @@ fn inject_turn_payload<R: tauri::Runtime>(
 
 const AGENT_INTERRUPT_GAP_MS: u64 = 150;
 const AGENT_RELAUNCH_SETTLE_MS: u64 = 1200;
+// sessions-new-named-session: wait for the freshly-launched agent's TUI to be
+// ready for input before seeding it with the session title as the first message.
+const NEW_SESSION_SEED_DELAY_MS: u64 = 2500;
 const AGENT_SESSION_REFRESH_MS: u64 = 3000;
 // Delay, measured from writing the launch command, before typing the
 // configured first command into the freshly-started agent's TUI. Gives the
@@ -9377,6 +9383,129 @@ fn reload_agent_session(
         // caches re-derive cleanly instead of staying stale on the old provider.
         schedule_cross_provider_pane_reload(app.clone());
     }
+    Ok(())
+}
+
+// sessions-new-named-session: a title queued for the NEXT new session of a
+// provider. The session id doesn't exist until the agent writes its first
+// JSONL, so the name is stashed here and applied when the new session surfaces
+// (apply_pending_session_title, from emit_talk_session_changed_for_provider).
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingSessionTitle {
+    provider: String,
+    title: String,
+    created_at_ms: i64,
+}
+
+fn pending_session_title_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    project_resource_path(app, ".pending-session-title.json")
+}
+
+fn write_pending_session_title<R: tauri::Runtime>(app: &AppHandle<R>, provider: &str, title: &str) {
+    let Some(path) = pending_session_title_file(app) else {
+        return;
+    };
+    let rec = PendingSessionTitle {
+        provider: provider.to_string(),
+        title: title.to_string(),
+        created_at_ms: unix_now_ms(),
+    };
+    if let Ok(bytes) = serde_json::to_vec(&rec) {
+        let _ = std::fs::write(&path, bytes);
+    }
+}
+
+// Apply a queued title to a just-surfaced session. Called at a live-session-id
+// change. Same-provider + fresh (<30s) → rename and clear; stale → drop;
+// wrong provider → leave queued for its own provider's next session.
+fn apply_pending_session_title<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    provider: SessionProvider,
+    new_sid: &str,
+) {
+    let Some(path) = pending_session_title_file(app) else {
+        return;
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return;
+    };
+    let Ok(rec) = serde_json::from_slice::<PendingSessionTitle>(&bytes) else {
+        let _ = std::fs::remove_file(&path);
+        return;
+    };
+    let want = session_provider_label(provider);
+    // Claude Code doesn't write a fresh session's JSONL until the first message,
+    // so the new session can surface minutes after the launch. Keep the queued
+    // title alive long enough to cover a slow first message (10 min) — the guard
+    // is only to stop it attaching to an unrelated much-later rotation.
+    let stale = unix_now_ms() - rec.created_at_ms > 600_000;
+    if rec.provider == want && !stale {
+        let _ = rename_session(app, new_sid, Some(provider), &rec.title);
+        let _ = std::fs::remove_file(&path);
+        emit_replayable_signal(app, "sessions-list-changed");
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "session-new",
+                &format!("op=named provider={} sid={} title={}", want, new_sid, rec.title),
+            );
+        }
+    } else if stale {
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+// sessions-new-named-session: start a fresh agent session (kill + relaunch
+// WITHOUT --continue) and, if a title is given, queue it to be applied when the
+// new session's JSONL surfaces. The fresh session is newest → current.
+#[tauri::command]
+fn create_new_session(
+    app: AppHandle,
+    provider: String,
+    title: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let provider_key = match provider.trim().to_ascii_lowercase().as_str() {
+        "codex" => "codex",
+        "claude" | "claud" => "claude",
+        other => return Err(format!("unknown agent provider: {}", other)),
+    };
+    let command = agent_launch_command(provider_key).ok_or("unknown agent provider")?;
+    let trimmed = title.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("session name is required".to_string());
+    }
+    // Queue the title so the new session (which may materialize a moment after
+    // its first message) is renamed to the exact name via rename_session.
+    write_pending_session_title(&app, provider_key, &trimmed);
+    if bram_trace_enabled() {
+        append_bram_trace_line(&app, "session-new", &format!("op=create provider={}", provider_key));
+    }
+    // Same kill sequence as reload_agent_session, then a FRESH launch.
+    clear_stale_terminal_input_for_switch(&app, &state, "agent-new-session");
+    pty_write_internal(&app, &state, "\x1b", "agent-new-escape")?;
+    std::thread::sleep(std::time::Duration::from_millis(AGENT_INTERRUPT_GAP_MS));
+    pty_write_internal(&app, &state, "\x03", "agent-new-interrupt-1")?;
+    std::thread::sleep(std::time::Duration::from_millis(AGENT_INTERRUPT_GAP_MS));
+    pty_write_internal(&app, &state, "\x03", "agent-new-interrupt-2")?;
+    std::thread::sleep(std::time::Duration::from_millis(AGENT_RELAUNCH_SETTLE_MS));
+    pty_write_internal(&app, &state, &format!("{}\r", command), "agent-new-launch")?;
+    schedule_agent_switch_refresh(app.clone(), provider_key, "new-session");
+    // Seed the fresh agent with the title as its first message once its TUI is
+    // ready — Claude is lazy about writing a session JSONL until first input, so
+    // this creates the session immediately (no switch gap) and starts it on the
+    // named topic. Off-thread so the command returns promptly.
+    let app_seed = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(NEW_SESSION_SEED_DELAY_MS));
+        let state = app_seed.state::<AppState>();
+        // Submit via the same bracketed-paste + CR path as toTurn so it lands as
+        // a sent turn on BOTH providers. A plain "{text}\r" submits in Claude's
+        // Ink input but only strands the text in Codex's readline composer
+        // (needs a manual Enter) — that's the codex-seed-strand.
+        let _ = inject_turn_payload(&app_seed, &state, &trimmed);
+    });
     Ok(())
 }
 
@@ -31004,6 +31133,7 @@ pub fn run() {
             pty_write,
             switch_agent,
             reload_agent_session,
+            create_new_session,
             queue_pty_intent,
             queue_feedback_draft,
             record_worklist_action_authorization,

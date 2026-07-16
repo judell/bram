@@ -10,6 +10,8 @@
   var.selectedSnippet="{false}"
   var.renamingSession="{null}"
   var.renameDraft=""
+  var.newSessionOpen="{false}"
+  var.newSessionDraft=""
   var.pendingDeletes="{loadPendingSessionDeletes()}"
   var.pendingRenames="{loadPendingSessionRenames()}"
   var.lastDeleteId="{null}"
@@ -133,6 +135,36 @@
     </VStack>
   </ModalDialog>
 
+  <!-- sessions-new-named-session: start a fresh session, optionally named. -->
+  <ModalDialog
+    id="newSessionDialog"
+    when="{newSessionOpen}"
+    onClose="newSessionOpen = false; newSessionDraft = ''"
+    title="New session">
+    <VStack gap="$space-3" padding="$space-4">
+      <TextBox
+        id="newSessionBox"
+        width="*"
+        placeholder="Session name"
+        autoComplete="off"
+        autoCorrect="{false}"
+        spellCheck="{false}"
+        autoCapitalize="off"
+        onDidChange="(v) => newSessionDraft = v" />
+      <Text
+        color="$textColor-secondary"
+        fontSize="$fontSize-sm"
+        value="Stops the running agent and starts a fresh one, then sends this name as the first message so the new session is created and becomes current right away. The prior session stays in the list, resumable." />
+      <HStack horizontalAlignment="end" gap="$space-2">
+        <Button label="Cancel" variant="outlined" onClick="newSessionOpen = false; newSessionDraft = ''" />
+        <Button
+          label="Create"
+          enabled="{newSessionDraft &amp;&amp; newSessionDraft.trim().length > 0}"
+          onClick="let name = newSessionDraft; newSessionOpen = false; newSessionDraft = ''; window.__bramCreateNewSessionClick(currentProvider, name, toast)" />
+      </HStack>
+    </VStack>
+  </ModalDialog>
+
   <PushSource
     id="sessionsListChangedEvt"
     initial="{null}"
@@ -147,6 +179,12 @@
     <VStack padding="$space-4" gap="$space-3" overflowY="auto">
       <HStack gap="$space-3" verticalAlignment="center">
         <Heading level="h2">Sessions</Heading>
+        <Button
+          label="+ New session"
+          variant="solid"
+          size="sm"
+          tooltip="Start a fresh session and make it current"
+          onClick="newSessionDraft = ''; newSessionOpen = true" />
         <SpaceFiller />
         <SearchBox
           placeholder="Search user/assistant text…"

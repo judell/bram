@@ -766,7 +766,10 @@
                         fullWidthSummary="true">
                         <VStack gap="$space-1">
                           <Items data="{window.__bramWorklistItemFiles($item)}">
-                            <Text value="{$item}" variant="code" fontSize="$fontSize-sm" />
+                            <Link
+                              to="{$item}">
+                              <Text value="{$item}" variant="code" fontSize="$fontSize-sm" />
+                            </Link>
                           </Items>
                         </VStack>
                       </ExpandableItem>

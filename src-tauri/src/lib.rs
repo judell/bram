@@ -20349,10 +20349,16 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
         // setup so a bundle text change does not leave Codex permanently
         // marked stale until the user knows to force refresh.
         let migrate = existing_agents.contains(ENHANCE_LEGACY_MARKER_START);
+        // setup-marker-append-existing-agents-md: a file with no marker at all
+        // gets a pure append — user content is preserved verbatim and the Run
+        // Setup click is the consent — so a first-time install into a
+        // pre-existing AGENTS.md must not be silently skipped (it left the
+        // Setup banner permanently stuck for Codex).
+        let no_marker = !migrate && !existing_agents.contains(ENHANCE_MARKER_START);
         write_template_if_safe(
             &codex_agents_path,
             new_agents.as_bytes(),
-            force || migrate || existing_agents.contains(ENHANCE_MARKER_START),
+            force || migrate || existing_agents.contains(ENHANCE_MARKER_START) || no_marker,
             &mut wrote,
             &mut skipped,
         )?;
@@ -20461,10 +20467,15 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
         // Setup-managed marker rename and the @-import path swap onto the
         // new sidecar file, not a user edit. Issue #173.
         let migrate = existing.contains(ENHANCE_LEGACY_MARKER_START);
+        // setup-marker-append-existing-agents-md: same first-time-append rule
+        // as the AGENTS.md arm — no marker on disk means the write is a pure
+        // append that preserves user content, so don't skip it. A present
+        // marker with diverged content still requires force.
+        let no_marker = !migrate && !existing.contains(ENHANCE_MARKER_START);
         write_template_if_safe(
             &claude_md_path,
             new_content.as_bytes(),
-            force || migrate,
+            force || migrate || no_marker,
             &mut wrote,
             &mut skipped,
         )?;

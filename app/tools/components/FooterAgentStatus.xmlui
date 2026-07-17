@@ -18,12 +18,35 @@
       id="agentStatus"
       initial="{null}"
       subscribe="{window.bramSubscribeAgentStatusRaw()}" />
+    <PushSource
+      id="suspiciousSilence"
+      initial="{null}"
+      subscribe="{window.bramSubscribeTerminalSuspiciousSilence()}" />
     <!-- Remember the last non-empty verb so the finished label can name it even
          after the status push clears verb. Mirrors the former App-scope
          lastSeenAgentVerb listener, now local to the isolated component. -->
     <ChangeListener
       listenTo="{agentStatus.value &amp;&amp; agentStatus.value.verb}"
       onDidChange="(c) => { if (c.newValue) { lastSeenVerb = c.newValue; } }" />
+    <HStack
+      when="{suspiciousSilence.value &amp;&amp; suspiciousSilence.value.active}"
+      gap="$space-2"
+      verticalAlignment="center"
+      paddingHorizontal="$space-2"
+      paddingVertical="$space-1"
+      backgroundColor="$color-warn-50"
+      border="1px solid $color-warn-200"
+      borderRadius="$borderRadius">
+      <Text
+        fontSize="$fontSize-sm"
+        color="$color-warn-700"
+        value="The terminal is suspiciously silent and might need attention." />
+      <Button
+        label="Open terminal"
+        variant="outlined"
+        size="xs"
+        onClick="window.__bramOpenTerminalForSuspiciousSilence()" />
+    </HStack>
     <Text
       when="{window.shouldShowIdleProvider(agentStatus.value, $props.enhanceStatus)}"
       fontSize="$fontSize-lg"

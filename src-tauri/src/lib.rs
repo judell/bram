@@ -2395,6 +2395,395 @@ fn pty_throughput_bytes() -> &'static std::sync::atomic::AtomicUsize {
     C.get_or_init(|| std::sync::atomic::AtomicUsize::new(0))
 }
 
+const REVEAL_FLOOR_TICK_MS: i64 = 300;
+const REVEAL_FLOOR_MIN_SILENT_MS: i64 = 3_000;
+const REVEAL_FLOOR_GAP_MULTIPLE: i64 = 8;
+const REVEAL_FLOOR_MAX_GAPS: usize = 64;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RevealFloorEpisodeState {
+    Ready,
+    Warned,
+    Suppressed,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum RevealFloorTransition {
+    Armed,
+    Warn,
+    Suppressed(&'static str),
+    Cleared {
+        reason: &'static str,
+        was_warned: bool,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct RevealFloorInputs {
+    provider: String,
+    turn_stamp: String,
+    identity: String,
+    authoritative_open: bool,
+    menu_displayed: bool,
+    post_escape: bool,
+    cancelled: bool,
+    bytes: usize,
+    now_ms: i64,
+}
+
+#[derive(Debug)]
+struct RevealFloorTracker {
+    identity: String,
+    gaps: Vec<i64>,
+    last_activity_ms: i64,
+    silent_ms: i64,
+    armed: bool,
+    state: RevealFloorEpisodeState,
+    episode_seq: u64,
+}
+
+impl RevealFloorTracker {
+    fn new() -> Self {
+        Self {
+            identity: String::new(),
+            gaps: Vec::new(),
+            last_activity_ms: 0,
+            silent_ms: 0,
+            armed: false,
+            state: RevealFloorEpisodeState::Ready,
+            episode_seq: 0,
+        }
+    }
+
+    fn gap_p95_ms(&self) -> i64 {
+        if self.gaps.is_empty() {
+            return 0;
+        }
+        let mut sorted = self.gaps.clone();
+        sorted.sort_unstable();
+        sorted[(sorted.len() * 95 / 100).min(sorted.len() - 1)]
+    }
+
+    fn threshold_ms(&self) -> i64 {
+        REVEAL_FLOOR_MIN_SILENT_MS.max(REVEAL_FLOOR_GAP_MULTIPLE * self.gap_p95_ms())
+    }
+
+    fn episode_id(&self) -> String {
+        format!("{}:{}", self.identity, self.episode_seq)
+    }
+
+    fn reset_episode(&mut self) {
+        self.gaps.clear();
+        self.last_activity_ms = 0;
+        self.silent_ms = 0;
+        self.armed = false;
+        self.state = RevealFloorEpisodeState::Ready;
+        self.episode_seq = 0;
+    }
+
+    fn step(&mut self, input: &RevealFloorInputs) -> Vec<RevealFloorTransition> {
+        let mut out = Vec::new();
+        if self.identity != input.identity {
+            if self.state != RevealFloorEpisodeState::Ready {
+                out.push(RevealFloorTransition::Cleared {
+                    reason: "turn-changed",
+                    was_warned: self.state == RevealFloorEpisodeState::Warned,
+                });
+            }
+            self.reset_episode();
+            self.identity = input.identity.clone();
+        }
+
+        if !input.authoritative_open {
+            if self.state != RevealFloorEpisodeState::Ready {
+                out.push(RevealFloorTransition::Cleared {
+                    reason: "turn-closed",
+                    was_warned: self.state == RevealFloorEpisodeState::Warned,
+                });
+            }
+            self.reset_episode();
+            return out;
+        }
+
+        if input.bytes > 0 {
+            if self.last_activity_ms > 0 {
+                self.gaps
+                    .push(input.now_ms.saturating_sub(self.last_activity_ms));
+                if self.gaps.len() > REVEAL_FLOOR_MAX_GAPS {
+                    self.gaps.remove(0);
+                }
+            }
+            self.last_activity_ms = input.now_ms;
+            self.silent_ms = 0;
+            let rearming = self.state != RevealFloorEpisodeState::Ready;
+            if rearming {
+                out.push(RevealFloorTransition::Cleared {
+                    reason: "activity",
+                    was_warned: self.state == RevealFloorEpisodeState::Warned,
+                });
+                self.state = RevealFloorEpisodeState::Ready;
+            }
+            if !self.armed || rearming {
+                self.armed = true;
+                out.push(RevealFloorTransition::Armed);
+            }
+            return out;
+        }
+
+        if !self.armed {
+            return out;
+        }
+
+        self.silent_ms += REVEAL_FLOOR_TICK_MS;
+        let suppression = if input.menu_displayed {
+            Some("menu-displayed")
+        } else if input.cancelled {
+            Some("cancelled-turn")
+        } else if input.post_escape {
+            Some("post-escape")
+        } else {
+            None
+        };
+
+        if self.state == RevealFloorEpisodeState::Warned {
+            if let Some(reason) = suppression {
+                out.push(RevealFloorTransition::Cleared {
+                    reason,
+                    was_warned: true,
+                });
+                self.state = RevealFloorEpisodeState::Suppressed;
+                out.push(RevealFloorTransition::Suppressed(reason));
+            }
+            return out;
+        }
+        if self.state == RevealFloorEpisodeState::Suppressed {
+            return out;
+        }
+        if self.silent_ms < self.threshold_ms() {
+            return out;
+        }
+
+        self.episode_seq = self.episode_seq.saturating_add(1);
+        if let Some(reason) = suppression {
+            self.state = RevealFloorEpisodeState::Suppressed;
+            out.push(RevealFloorTransition::Suppressed(reason));
+        } else {
+            self.state = RevealFloorEpisodeState::Warned;
+            out.push(RevealFloorTransition::Warn);
+        }
+        out
+    }
+}
+
+fn trace_reveal_floor_transition<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    transition: &RevealFloorTransition,
+    tracker: &RevealFloorTracker,
+    input: &RevealFloorInputs,
+) {
+    if !bram_trace_enabled() {
+        return;
+    }
+    let (op, reason) = match transition {
+        RevealFloorTransition::Armed => ("armed", "activity"),
+        RevealFloorTransition::Warn => ("warn", "adaptive-threshold"),
+        RevealFloorTransition::Suppressed(reason) => ("suppressed", *reason),
+        RevealFloorTransition::Cleared { reason, .. } => ("cleared", *reason),
+    };
+    append_bram_trace_line(
+        app,
+        "reveal-floor",
+        &format!(
+            "op={} reason={} provider={} turn={} silence_ms={} threshold_ms={} gap_p95_ms={} gaps_n={} menu={} post_escape={} cancelled={} authoritative_open={} terminal_visibility=iframe-gated",
+            op,
+            reason,
+            input.provider,
+            input.turn_stamp,
+            tracker.silent_ms,
+            tracker.threshold_ms(),
+            tracker.gap_p95_ms(),
+            tracker.gaps.len(),
+            input.menu_displayed,
+            input.post_escape,
+            input.cancelled,
+            input.authoritative_open,
+        ),
+    );
+}
+
+fn emit_terminal_suspicious_silence<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    active: bool,
+    reason: &str,
+    tracker: &RevealFloorTracker,
+    input: &RevealFloorInputs,
+) {
+    emit_replayable_payload(
+        app,
+        "terminal-suspicious-silence",
+        serde_json::json!({
+            "active": active,
+            "reason": reason,
+            "episodeId": tracker.episode_id(),
+            "provider": input.provider,
+            "turnStamp": input.turn_stamp,
+            "silenceMs": tracker.silent_ms,
+            "thresholdMs": tracker.threshold_ms(),
+            "gapP95Ms": tracker.gap_p95_ms(),
+            "gapsN": tracker.gaps.len(),
+            "menuDisplayed": input.menu_displayed,
+            "postEscape": input.post_escape,
+            "cancelled": input.cancelled,
+            "authoritativeOpen": input.authoritative_open,
+            "atMs": input.now_ms,
+        }),
+    );
+}
+
+#[cfg(test)]
+mod reveal_floor_tests {
+    use super::{
+        RevealFloorInputs, RevealFloorTracker, RevealFloorTransition, REVEAL_FLOOR_TICK_MS,
+    };
+
+    fn input(identity: &str, bytes: usize, now_ms: i64) -> RevealFloorInputs {
+        RevealFloorInputs {
+            provider: "codex".to_string(),
+            turn_stamp: identity.to_string(),
+            identity: format!("codex:{identity}"),
+            authoritative_open: true,
+            menu_displayed: false,
+            post_escape: false,
+            cancelled: false,
+            bytes,
+            now_ms,
+        }
+    }
+
+    fn quiet(
+        tracker: &mut RevealFloorTracker,
+        identity: &str,
+        ticks: usize,
+        start_ms: i64,
+    ) -> Vec<RevealFloorTransition> {
+        let mut transitions = Vec::new();
+        for i in 0..ticks {
+            transitions.extend(tracker.step(&input(
+                identity,
+                0,
+                start_ms + (i as i64 * REVEAL_FLOOR_TICK_MS),
+            )));
+        }
+        transitions
+    }
+
+    #[test]
+    fn cold_gap_window_warns_at_three_second_floor() {
+        let mut tracker = RevealFloorTracker::new();
+        assert_eq!(
+            tracker.step(&input("1", 1, 1_000)),
+            vec![RevealFloorTransition::Armed]
+        );
+        assert!(!quiet(&mut tracker, "1", 9, 1_300).contains(&RevealFloorTransition::Warn));
+        assert_eq!(
+            quiet(&mut tracker, "1", 1, 4_000),
+            vec![RevealFloorTransition::Warn]
+        );
+    }
+
+    #[test]
+    fn learned_gap_p95_raises_threshold() {
+        let mut tracker = RevealFloorTracker::new();
+        tracker.step(&input("1", 1, 1_000));
+        tracker.step(&input("1", 1, 1_500));
+        assert_eq!(tracker.gap_p95_ms(), 500);
+        assert_eq!(tracker.threshold_ms(), 4_000);
+        assert!(!quiet(&mut tracker, "1", 13, 1_800).contains(&RevealFloorTransition::Warn));
+        assert_eq!(
+            quiet(&mut tracker, "1", 1, 5_700),
+            vec![RevealFloorTransition::Warn]
+        );
+    }
+
+    #[test]
+    fn menu_and_cancel_gates_suppress_warning() {
+        let mut menu_tracker = RevealFloorTracker::new();
+        menu_tracker.step(&input("1", 1, 1_000));
+        let mut menu_quiet = input("1", 0, 1_300);
+        menu_quiet.menu_displayed = true;
+        let mut menu_transitions = Vec::new();
+        for i in 0..10 {
+            menu_quiet.now_ms = 1_300 + i * REVEAL_FLOOR_TICK_MS;
+            menu_transitions.extend(menu_tracker.step(&menu_quiet));
+        }
+        assert!(menu_transitions.contains(&RevealFloorTransition::Suppressed("menu-displayed")));
+        assert!(!menu_transitions.contains(&RevealFloorTransition::Warn));
+
+        let mut cancel_tracker = RevealFloorTracker::new();
+        cancel_tracker.step(&input("2", 1, 1_000));
+        let mut cancel_quiet = input("2", 0, 1_300);
+        cancel_quiet.cancelled = true;
+        let mut cancel_transitions = Vec::new();
+        for i in 0..10 {
+            cancel_quiet.now_ms = 1_300 + i * REVEAL_FLOOR_TICK_MS;
+            cancel_transitions.extend(cancel_tracker.step(&cancel_quiet));
+        }
+        assert!(cancel_transitions.contains(&RevealFloorTransition::Suppressed("cancelled-turn")));
+        assert!(!cancel_transitions.contains(&RevealFloorTransition::Warn));
+    }
+
+    #[test]
+    fn activity_clears_and_rearms_before_another_warning() {
+        let mut tracker = RevealFloorTracker::new();
+        tracker.step(&input("1", 1, 1_000));
+        assert!(quiet(&mut tracker, "1", 10, 1_300).contains(&RevealFloorTransition::Warn));
+        assert!(quiet(&mut tracker, "1", 10, 4_300).is_empty());
+        let rearmed = tracker.step(&input("1", 5, 7_300));
+        assert_eq!(
+            rearmed,
+            vec![
+                RevealFloorTransition::Cleared {
+                    reason: "activity",
+                    was_warned: true,
+                },
+                RevealFloorTransition::Armed,
+            ]
+        );
+        // Preserve the Phase-0 adaptive behavior: the just-ended 6.3s gap is
+        // learned, so the next episode uses 8 × 6.3s rather than the 3s floor.
+        assert_eq!(tracker.threshold_ms(), 50_400);
+        assert!(!quiet(&mut tracker, "1", 167, 7_600).contains(&RevealFloorTransition::Warn));
+        assert!(quiet(&mut tracker, "1", 1, 57_700).contains(&RevealFloorTransition::Warn));
+    }
+
+    #[test]
+    fn finality_and_turn_change_clear_without_false_rearm() {
+        let mut tracker = RevealFloorTracker::new();
+        tracker.step(&input("1", 1, 1_000));
+        quiet(&mut tracker, "1", 10, 1_300);
+        let mut closed = input("1", 0, 4_300);
+        closed.authoritative_open = false;
+        assert_eq!(
+            tracker.step(&closed),
+            vec![RevealFloorTransition::Cleared {
+                reason: "turn-closed",
+                was_warned: true,
+            }]
+        );
+        assert!(quiet(&mut tracker, "1", 20, 4_600).is_empty());
+
+        tracker.step(&input("2", 1, 11_000));
+        quiet(&mut tracker, "2", 10, 11_300);
+        assert_eq!(
+            tracker.step(&input("3", 0, 14_300)),
+            vec![RevealFloorTransition::Cleared {
+                reason: "turn-changed",
+                was_warned: true,
+            }]
+        );
+    }
+}
+
 // Cached snapshot of the Claude PTY's rotating status line ("Meandering…
 // (1m 53s · ↓ 5.8k tokens)"). Surfaced via /__agent-status and the
 // `agent-status-changed` Tauri event so the Worklist tab can render a
@@ -8133,7 +8522,7 @@ fn pty_spawn(
         let app_for_throughput = app.clone();
         thread::spawn(move || {
             use std::sync::atomic::Ordering;
-            const TICK_MS: u64 = 300;
+            const TICK_MS: u64 = REVEAL_FLOOR_TICK_MS as u64;
             // Log scale for the activity dots. Measured PTY throughput spans a
             // ~300x range (idle ~0, light thinking ~0.5 KB/s, output bursts
             // >100 KB/s), so a linear map pins everything near 1 dot. KNEE_BPS
@@ -8143,32 +8532,13 @@ fn pty_spawn(
             const FULL_SCALE_BPS: f64 = 32768.0;
             let full_ln = (1.0 + FULL_SCALE_BPS / KNEE_BPS).ln();
             let mut last_emitted: f64 = -1.0;
-            // Reveal-floor observer (terminal-reveal-floor-observe,
-            // Phase 0, observe-only): true byte silence during an open
-            // turn, discriminated by pane-menu-displayed state. The
-            // trace backtest over sampled [pty-in] lines over-fired on
-            // mid-turn quiet stretches; this runs on the ticker's real
-            // 300 ms byte counts, where a thinking agent's spinner
-            // trickle should register as activity. Threshold adapts to
-            // the CURRENT turn's observed inter-activity gaps; the
-            // multiple and minimum floor are the Phase-0 tunables the
-            // soak exists to fit. Emits latched trace lines only — no
-            // UI behavior.
-            const RF_MIN_SILENT_MS: i64 = 3_000;
-            const RF_GAP_MULTIPLE: i64 = 8;
-            let mut rf_gaps: Vec<i64> = Vec::new();
-            let mut rf_last_activity_ms: i64 = 0;
-            let mut rf_silent_ms: i64 = 0;
-            let mut rf_latched = false;
-            let mut rf_turn_stamp: Option<String> = None;
-            let rf_p95 = |gaps: &Vec<i64>| -> i64 {
-                if gaps.is_empty() {
-                    return 0;
-                }
-                let mut sorted = gaps.clone();
-                sorted.sort_unstable();
-                sorted[(sorted.len() * 95 / 100).min(sorted.len() - 1)]
-            };
+            // Reveal-floor state machine: true PTY-byte silence during an
+            // authoritatively non-final turn. The adaptive predicate is the
+            // Phase-0 observer unchanged (max(3s, 8 × current-turn gap p95));
+            // it now emits a replayable warning state for the tools pane.
+            // Terminal visibility remains parent-window truth and gates the
+            // warning in helpers.js, so this host loop never polls WebView DOM.
+            let mut reveal_floor = RevealFloorTracker::new();
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(TICK_MS));
                 let bytes = pty_throughput_bytes().swap(0, Ordering::Relaxed);
@@ -8185,88 +8555,67 @@ fn pty_spawn(
                     last_emitted = q;
                 }
                 let now_ms = unix_now_ms();
-                let (turn_open, turn_stamp) = turn_state_cell()
+                let turn = turn_state_cell()
                     .lock()
-                    .map(|s| {
-                        (
-                            s.phase == "working" || s.phase == "waiting-for-permission",
-                            s.turn_stamp.clone(),
-                        )
-                    })
-                    .unwrap_or((false, None));
-                if turn_stamp != rf_turn_stamp {
-                    // New turn: its gap distribution starts fresh.
-                    if rf_latched && bram_trace_enabled() {
-                        append_bram_trace_line(
+                    .map(|s| s.clone())
+                    .unwrap_or_else(|_| TurnState::idle());
+                let provider = turn.provider.clone().unwrap_or_default();
+                let turn_stamp = turn.turn_stamp.clone().unwrap_or_default();
+                let phase_open = turn.phase == "working" || turn.phase == "waiting-for-permission";
+                // last_jsonl_activity_at_ms is advanced only by the provider's
+                // non-final JSONL path. A completion cursor at or after it
+                // closes this gate even if stale PTY chrome still says working.
+                let authoritative_open = phase_open
+                    && !turn_stamp.is_empty()
+                    && turn.last_jsonl_activity_at_ms > turn.last_completion_at_ms;
+                let killed_ts = last_killed_user_ts_ms_cell()
+                    .lock()
+                    .map(|g| *g)
+                    .unwrap_or(0);
+                let turn_ts = turn_stamp.parse::<i64>().unwrap_or(0);
+                let cancelled = killed_ts > 0 && turn_ts > 0 && turn_ts <= killed_ts;
+                let last_escape = last_pty_escape_ms_cell().lock().map(|g| *g).unwrap_or(0);
+                let post_escape = last_escape > 0
+                    && now_ms.saturating_sub(last_escape) < POST_ESCAPE_NO_KILL_WINDOW_MS;
+                let input = RevealFloorInputs {
+                    provider: provider.clone(),
+                    turn_stamp: turn_stamp.clone(),
+                    identity: format!("{}:{}", provider, turn_stamp),
+                    authoritative_open,
+                    menu_displayed: turn.pending_menu.is_some()
+                        || PANE_MENU_DISPLAYED.load(Ordering::Relaxed),
+                    post_escape,
+                    cancelled,
+                    bytes,
+                    now_ms,
+                };
+                for transition in reveal_floor.step(&input) {
+                    trace_reveal_floor_transition(
+                        &app_for_throughput,
+                        &transition,
+                        &reveal_floor,
+                        &input,
+                    );
+                    match transition {
+                        RevealFloorTransition::Warn => emit_terminal_suspicious_silence(
                             &app_for_throughput,
-                            "reveal-floor",
-                            &format!("op=reset reason=turn-changed silence_ms={}", rf_silent_ms),
-                        );
+                            true,
+                            "adaptive-threshold",
+                            &reveal_floor,
+                            &input,
+                        ),
+                        RevealFloorTransition::Cleared {
+                            reason,
+                            was_warned: true,
+                        } => emit_terminal_suspicious_silence(
+                            &app_for_throughput,
+                            false,
+                            reason,
+                            &reveal_floor,
+                            &input,
+                        ),
+                        _ => {}
                     }
-                    rf_turn_stamp = turn_stamp;
-                    rf_gaps.clear();
-                    rf_silent_ms = 0;
-                    rf_latched = false;
-                }
-                if bytes > 0 {
-                    if rf_last_activity_ms > 0 {
-                        let gap = now_ms - rf_last_activity_ms;
-                        rf_gaps.push(gap);
-                        if rf_gaps.len() > 64 {
-                            rf_gaps.remove(0);
-                        }
-                    }
-                    rf_last_activity_ms = now_ms;
-                    if rf_latched {
-                        if bram_trace_enabled() {
-                            append_bram_trace_line(
-                                &app_for_throughput,
-                                "reveal-floor",
-                                &format!("op=reset reason=activity silence_ms={}", rf_silent_ms),
-                            );
-                        }
-                        rf_latched = false;
-                    }
-                    rf_silent_ms = 0;
-                } else if turn_open {
-                    rf_silent_ms += TICK_MS as i64;
-                    if !rf_latched && rf_silent_ms >= RF_MIN_SILENT_MS {
-                        let p95 = rf_p95(&rf_gaps);
-                        let threshold = RF_MIN_SILENT_MS.max(RF_GAP_MULTIPLE * p95);
-                        if rf_silent_ms >= threshold {
-                            rf_latched = true;
-                            if bram_trace_enabled() {
-                                let menu_displayed =
-                                    PANE_MENU_DISPLAYED.load(std::sync::atomic::Ordering::Relaxed);
-                                let line = if menu_displayed {
-                                    format!(
-                                        "op=reveal-suppressed reason=menu-displayed silence_ms={} gap_p95_ms={} gaps_n={}",
-                                        rf_silent_ms, p95, rf_gaps.len()
-                                    )
-                                } else {
-                                    format!(
-                                        "op=would-reveal silence_ms={} gap_p95_ms={} gaps_n={}",
-                                        rf_silent_ms,
-                                        p95,
-                                        rf_gaps.len()
-                                    )
-                                };
-                                append_bram_trace_line(&app_for_throughput, "reveal-floor", &line);
-                            }
-                        }
-                    }
-                } else {
-                    if rf_latched {
-                        if bram_trace_enabled() {
-                            append_bram_trace_line(
-                                &app_for_throughput,
-                                "reveal-floor",
-                                &format!("op=reset reason=turn-closed silence_ms={}", rf_silent_ms),
-                            );
-                        }
-                        rf_latched = false;
-                    }
-                    rf_silent_ms = 0;
                 }
             }
         });

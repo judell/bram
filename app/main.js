@@ -506,12 +506,74 @@ document
   const LEGACY_TERMINAL_HIDDEN_KEY = "xmlui-desktop.terminal.hidden";
   const btn = document.getElementById("toggle-terminal");
   if (!btn) return;
+  let dismissedSuspiciousEpisode = "";
 
-  const apply = (hidden) => {
+  const postTerminalVisibility = (source) => {
+    const tools = document.getElementById("tools-pane");
+    if (!tools || !tools.contentWindow) return;
+    tools.contentWindow.postMessage(
+      {
+        type: "bram-terminal-visibility",
+        hidden: document.body.classList.contains("terminal-hidden"),
+        dismissedEpisode: dismissedSuspiciousEpisode,
+        source: source || "parent",
+        at: Date.now(),
+      },
+      "*",
+    );
+  };
+
+  const postSuspiciousSilenceSelfTest = () => {
+    const tools = document.getElementById("tools-pane");
+    if (!tools || !tools.contentWindow) return;
+    const at = Date.now();
+    const episodeId = `self-test:${at}`;
+    invoke("log_from_right_pane", {
+      payload: {
+        kind: "iframe-trace",
+        subkind: "terminal-suspicious-silence",
+        context: "parent",
+        op: "self-test-dispatched",
+        episode: episodeId,
+      },
+    }).catch(() => {});
+    tools.contentWindow.postMessage(
+      {
+        type: "bram-terminal-suspicious-silence-test",
+        episodeId,
+        silenceMs: 3000,
+        thresholdMs: 3000,
+        gapP95Ms: 0,
+        gapsN: 0,
+        at,
+      },
+      "*",
+    );
+  };
+
+  const apply = (hidden, source, persist) => {
+    const wasHidden = document.body.classList.contains("terminal-hidden");
     document.body.classList.toggle("terminal-hidden", hidden);
     if (!hidden) {
       // Re-measure xterm.js once the layout settles.
       scheduleTerminalFit();
+    }
+    if (persist) {
+      try {
+        localStorage.setItem(TERMINAL_HIDDEN_KEY, hidden ? "1" : "0");
+      } catch {}
+    }
+    postTerminalVisibility(source);
+    if (wasHidden !== hidden) {
+      invoke("log_from_right_pane", {
+        payload: {
+          kind: "iframe-trace",
+          subkind: "terminal-visibility",
+          context: "parent",
+          op: hidden ? "closed" : "opened",
+          source: source || "parent",
+        },
+      }).catch(() => {});
     }
   };
 
@@ -521,17 +583,45 @@ document
       (localStorage.getItem(TERMINAL_HIDDEN_KEY) ??
         localStorage.getItem(LEGACY_TERMINAL_HIDDEN_KEY)) === "1";
   } catch {}
-  apply(initial);
+  apply(initial, "startup", false);
   if (!initial) {
     scheduleStartupTerminalFit();
   }
 
-  btn.addEventListener("click", () => {
+  btn.addEventListener("click", (event) => {
     const hidden = !document.body.classList.contains("terminal-hidden");
-    apply(hidden);
-    try {
-      localStorage.setItem(TERMINAL_HIDDEN_KEY, hidden ? "1" : "0");
-    } catch {}
+    apply(hidden, "toolbar-toggle", true);
+    // A deliberate, inert self-test for the closed-terminal recovery path.
+    // It exercises the parent/tools bridge and real footer action without
+    // modifying the live turn or weakening the host detector.
+    if (hidden && event.shiftKey) {
+      postSuspiciousSilenceSelfTest();
+    }
+  });
+
+  window.addEventListener("message", (event) => {
+    const data = event && event.data;
+    if (!data || (
+      data.type !== "bram-terminal-visibility-request" &&
+      data.type !== "bram-open-terminal" &&
+      data.type !== "bram-terminal-silence-dismissed"
+    )) {
+      return;
+    }
+    const tools = document.getElementById("tools-pane");
+    if (!tools || !tools.contentWindow || event.source !== tools.contentWindow) {
+      return;
+    }
+    if (data.type === "bram-terminal-visibility-request") {
+      postTerminalVisibility("tools-request");
+      return;
+    }
+    if (data.episodeId) dismissedSuspiciousEpisode = String(data.episodeId);
+    if (data.type === "bram-terminal-silence-dismissed") {
+      postTerminalVisibility("silence-dismissed");
+      return;
+    }
+    apply(false, "suspicious-silence-button", true);
   });
 })();
 

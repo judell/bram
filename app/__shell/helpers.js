@@ -3672,6 +3672,140 @@ window.subscribeTauriEvent("__bramNativeToolbarPtyMenuUnsub",
   window.bramSubscribeAgentStatusRaw = makeFactory(rawSubs);
 })();
 
+// Host suspicious-silence + parent terminal-visibility join. The Rust host
+// owns the adaptive PTY/turn predicate; main.js owns terminal visibility.
+// This isolated bridge exposes only the derived warning state to the footer.
+(function () {
+  var subscribers = new Set();
+  var hostValue = null;
+  var terminalHidden = null;
+  var lastTerminalHidden = null;
+  var suppressedEpisode = "";
+  var lastValue = { active: false, terminalHidden: null };
+  var lastSignature = "";
+  var hostSubscribed = false;
+
+  var episodeOf = function (value) {
+    return value && value.episodeId ? String(value.episodeId) : "";
+  };
+  var derivedValue = function () {
+    var episode = episodeOf(hostValue);
+    var active = !!(hostValue && hostValue.active && terminalHidden === true &&
+      (!suppressedEpisode || suppressedEpisode !== episode));
+    return Object.assign({}, hostValue || {}, {
+      active: active,
+      terminalHidden: terminalHidden,
+    });
+  };
+  var notify = function (reason) {
+    var next = derivedValue();
+    var signature = JSON.stringify(next);
+    if (signature === lastSignature) return;
+    var wasActive = !!(lastValue && lastValue.active);
+    lastSignature = signature;
+    lastValue = next;
+    if (wasActive !== !!next.active) {
+      window.__bramIframeTrace("terminal-suspicious-silence", {
+        op: next.active ? "warn" : "cleared",
+        reason: reason || next.reason || "state-change",
+        terminalHidden: terminalHidden,
+        provider: next.provider || "",
+        turn: next.turnStamp || "",
+        episode: next.episodeId || "",
+        silence_ms: next.silenceMs || 0,
+        threshold_ms: next.thresholdMs || 0,
+        gap_p95_ms: next.gapP95Ms || 0,
+        gaps_n: next.gapsN || 0,
+        test_mode: !!next.testMode,
+      });
+    }
+    subscribers.forEach(function (fn) {
+      try { fn(); } catch (e) { console.error("[bram] suspicious-silence subscriber threw:", e); }
+    });
+  };
+
+  window.addEventListener("message", function (event) {
+    var data = event && event.data;
+    if (!data || event.source !== window.parent) return;
+    if (data.type === "bram-terminal-suspicious-silence-test") {
+      var testEpisode = data.episodeId ? String(data.episodeId) : "self-test:" + Date.now();
+      if (suppressedEpisode !== testEpisode) suppressedEpisode = "";
+      hostValue = {
+        active: true,
+        reason: "self-test",
+        episodeId: testEpisode,
+        provider: "self-test",
+        turnStamp: "",
+        silenceMs: Number(data.silenceMs) || 3000,
+        thresholdMs: Number(data.thresholdMs) || 3000,
+        gapP95Ms: Number(data.gapP95Ms) || 0,
+        gapsN: Number(data.gapsN) || 0,
+        testMode: true,
+        at: Number(data.at) || Date.now(),
+      };
+      notify("self-test");
+      return;
+    }
+    if (data.type !== "bram-terminal-visibility") return;
+    var nextHidden = !!data.hidden;
+    if (data.dismissedEpisode) suppressedEpisode = String(data.dismissedEpisode);
+    if (lastTerminalHidden === true && nextHidden === false && hostValue && hostValue.active) {
+      // Reopening the terminal dismisses this episode. Hiding it again must
+      // not re-warn until real PTY activity rearms the host detector.
+      suppressedEpisode = episodeOf(hostValue);
+      window.parent.postMessage({
+        type: "bram-terminal-silence-dismissed",
+        episodeId: suppressedEpisode,
+      }, "*");
+    }
+    lastTerminalHidden = nextHidden;
+    terminalHidden = nextHidden;
+    notify(nextHidden ? "terminal-closed" : "terminal-opened");
+  });
+
+  var ensureHostSubscribed = function () {
+    if (hostSubscribed) return;
+    hostSubscribed = true;
+    window.subscribeTauriEvent(
+      "__bramTerminalSuspiciousSilenceUnsub",
+      "terminal-suspicious-silence",
+      function (event) {
+        hostValue = (event && event.payload) || null;
+        if (!hostValue || !hostValue.active) suppressedEpisode = "";
+        notify((hostValue && hostValue.reason) || "host-state");
+      }
+    );
+  };
+
+  window.bramSubscribeTerminalSuspiciousSilence = (function () {
+    var factory;
+    return function () {
+      if (factory) return factory;
+      ensureHostSubscribed();
+      factory = function (emit) {
+        var fire = function () { emit(lastValue); };
+        subscribers.add(fire);
+        fire();
+        return function () { subscribers.delete(fire); };
+      };
+      return factory;
+    };
+  })();
+
+  window.__bramOpenTerminalForSuspiciousSilence = function () {
+    if (hostValue && hostValue.active) {
+      suppressedEpisode = episodeOf(hostValue);
+      notify("open-terminal-click");
+    }
+    window.parent.postMessage({
+      type: "bram-open-terminal",
+      episodeId: episodeOf(hostValue),
+    }, "*");
+  };
+
+  window.parent.postMessage({ type: "bram-terminal-visibility-request" }, "*");
+})();
+
 // External-driven PTY-throughput bridge (transcript-nav-activity-sparkline).
 // The host emits `pty-throughput` a few times/sec with a 0..1 intensity
 // derived from the byte rate flowing through the PTY reader loop. Subscribers

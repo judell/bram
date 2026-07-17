@@ -15315,11 +15315,138 @@ fn st_fenced_code_block(lang: &str, content: &str) -> String {
     format!("{}{}\n{}{}\n{}", fence, lang, body, footer, fence)
 }
 
+fn st_capped_markdown(content: &str) -> String {
+    const MAX_LINES: usize = 200;
+    const MAX_BYTES: usize = 16_000;
+    let all: Vec<&str> = content.lines().collect();
+    let shown = all.len().min(MAX_LINES);
+    let mut body = all[..shown].join("\n");
+    if body.len() > MAX_BYTES {
+        let mut cut = MAX_BYTES;
+        while cut > 0 && !body.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        body.truncate(cut);
+        body.push_str("\n\n… (truncated)");
+    } else if all.len() > shown {
+        body.push_str(&format!("\n\n… ({} more lines)", all.len() - shown));
+    }
+    body
+}
+
+// A shell heredoc is known to be Markdown when its opening command names a
+// `.md` target. Split that body from the shell envelope so the Transcript can
+// render the payload as Markdown without treating the surrounding command as
+// prose. The display keeps an explicit placeholder between the delimiters.
+fn st_bash_markdown_heredoc(command: &str) -> Option<(String, String)> {
+    fn markdown_path_hint(line: &str) -> bool {
+        let lower = line.to_ascii_lowercase();
+        let bytes = lower.as_bytes();
+        let mut from = 0usize;
+        while let Some(found) = lower[from..].find(".md") {
+            let after = from + found + 3;
+            if after == bytes.len()
+                || (!bytes[after].is_ascii_alphanumeric() && bytes[after] != b'_')
+            {
+                return true;
+            }
+            from = after;
+        }
+        false
+    }
+
+    fn delimiter(line: &str) -> Option<(String, bool)> {
+        let marker = line.find("<<")?;
+        let mut rest = &line[marker + 2..];
+        if rest.starts_with('<') {
+            return None;
+        }
+        let strip_tabs = rest.starts_with('-');
+        if strip_tabs {
+            rest = &rest[1..];
+        }
+        rest = rest.trim_start();
+        let first = rest.chars().next()?;
+        if first == '\'' || first == '"' {
+            let quoted = &rest[first.len_utf8()..];
+            let end = quoted.find(first)?;
+            let value = &quoted[..end];
+            return (!value.is_empty()).then(|| (value.to_string(), strip_tabs));
+        }
+        let value = rest
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+            .collect::<String>();
+        (!value.is_empty()).then(|| (value, strip_tabs))
+    }
+
+    let normalized = command.replace("\r\n", "\n").replace('\r', "\n");
+    let lines: Vec<&str> = normalized.split('\n').collect();
+    for start in 0..lines.len() {
+        if !markdown_path_hint(lines[start]) {
+            continue;
+        }
+        let Some((end_marker, strip_tabs)) = delimiter(lines[start]) else {
+            continue;
+        };
+        let Some(end) = ((start + 1)..lines.len()).find(|idx| {
+            let candidate = if strip_tabs {
+                lines[*idx].trim_start_matches('\t')
+            } else {
+                lines[*idx]
+            };
+            candidate == end_marker
+        }) else {
+            continue;
+        };
+        let markdown = lines[start + 1..end].join("\n");
+        if markdown.trim().is_empty() {
+            continue;
+        }
+        let mut display = Vec::with_capacity(lines.len() - (end - start) + 1);
+        display.extend(lines[..=start].iter().map(|line| (*line).to_string()));
+        display.push("# Markdown body rendered below".to_string());
+        display.extend(lines[end..].iter().map(|line| (*line).to_string()));
+        return Some((
+            display.join("\n"),
+            st_capped_markdown(markdown.trim_matches('\n')),
+        ));
+    }
+    None
+}
+
+fn st_tool_command_markdown(name: &str, input: &serde_json::Value) -> String {
+    if name == "Bash" {
+        if let Some(command) = input.get("command").and_then(|v| v.as_str()) {
+            if let Some((_, markdown)) = st_bash_markdown_heredoc(command) {
+                return markdown;
+            }
+        }
+    }
+    if name == "Write" {
+        let path = input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if local_file_preview_language(std::path::Path::new(path)) == "markdown" {
+            if let Some(content) = input.get("content").and_then(|v| v.as_str()) {
+                if !content.trim().is_empty() {
+                    return st_capped_markdown(content.trim_matches('\n'));
+                }
+            }
+        }
+    }
+    String::new()
+}
+
 // Full command text for the Transcript's tool expansion (vs. the truncated
 // summary). Only Bash-style tools have one. Mirrors __bramToolCommandDisplay.
 fn st_tool_command_display(name: &str, input: &serde_json::Value) -> String {
     if name == "Bash" {
         if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
+            if let Some((display, _)) = st_bash_markdown_heredoc(cmd) {
+                return display;
+            }
             return st_line_oriented_command_display(cmd);
         }
     }
@@ -15334,6 +15461,9 @@ fn st_tool_command_display(name: &str, input: &serde_json::Value) -> String {
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 let lang = local_file_preview_language(std::path::Path::new(path));
+                if lang == "markdown" {
+                    return String::new();
+                }
                 return st_fenced_code_block(lang, content);
             }
         }
@@ -15354,6 +15484,60 @@ fn st_tool_command_display(name: &str, input: &serde_json::Value) -> String {
         }
     }
     String::new()
+}
+
+#[cfg(test)]
+mod tool_command_markdown_tests {
+    use super::{st_parse_lines_to_turns, st_tool_command_display, st_tool_command_markdown};
+    use serde_json::json;
+
+    #[test]
+    fn markdown_heredoc_is_split_from_shell_envelope() {
+        let input = json!({
+            "command": "cd /tmp && cat >> issue4-body.md <<'EOF'\n\n## ETL hardening\n\n- **pytest** fixtures\nEOF\ngh issue edit 4 --body-file issue4-body.md"
+        });
+        assert_eq!(
+            st_tool_command_markdown("Bash", &input),
+            "## ETL hardening\n\n- **pytest** fixtures"
+        );
+        let display = st_tool_command_display("Bash", &input);
+        assert!(
+            display.contains("cat >> issue4-body.md <<'EOF'"),
+            "{display}"
+        );
+        assert!(
+            display.contains("# Markdown body rendered below"),
+            "{display}"
+        );
+        assert!(display.contains("gh issue edit 4"), "{display}");
+        assert!(!display.contains("## ETL hardening"), "{display}");
+    }
+
+    #[test]
+    fn non_markdown_heredoc_remains_shell_content() {
+        let input = json!({
+            "command": "cat > data.txt <<'EOF'\n# literal text\nEOF"
+        });
+        assert!(st_tool_command_markdown("Bash", &input).is_empty());
+        assert!(st_tool_command_display("Bash", &input).contains("# literal text"));
+    }
+
+    #[test]
+    fn markdown_write_projects_renderable_payload() {
+        let record = json!({
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "tool_use",
+                "id": "toolu_md",
+                "name": "Write",
+                "input": {"file_path": "notes.md", "content": "# Notes\n\n**Ready**"}
+            }]}
+        });
+        let turns = st_parse_lines_to_turns(&record.to_string());
+        let entry = &turns[0]["entries"][0];
+        assert_eq!(entry["commandMarkdown"], "# Notes\n\n**Ready**");
+        assert_eq!(entry["commandDisplay"], "");
+    }
 }
 
 fn st_edit_tool_diff(name: &str, input: &serde_json::Value) -> String {
@@ -15807,6 +15991,9 @@ fn st_codex_tool_command_display(payload: &serde_json::Value) -> String {
     let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
     if name == "exec_command" {
         if let Some(cmd) = input.get("cmd").and_then(|v| v.as_str()) {
+            if let Some((display, _)) = st_bash_markdown_heredoc(cmd) {
+                return display;
+            }
             return st_line_oriented_command_display(cmd);
         }
     }
@@ -15830,7 +16017,15 @@ fn st_codex_tool_command_display(payload: &serde_json::Value) -> String {
             }
             let cmds = st_codex_exec_cmds(script);
             if !cmds.is_empty() {
-                return cmds.join("\n");
+                return cmds
+                    .iter()
+                    .map(|cmd| {
+                        st_bash_markdown_heredoc(cmd)
+                            .map(|(display, _)| display)
+                            .unwrap_or_else(|| cmd.to_string())
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
             }
             return script.to_string();
         }
@@ -15842,6 +16037,35 @@ fn st_codex_tool_command_display(payload: &serde_json::Value) -> String {
             name.to_string()
         };
         return st_tool_command_display(&display_name, &input);
+    }
+    String::new()
+}
+
+fn st_codex_tool_command_markdown(payload: &serde_json::Value) -> String {
+    let input = st_codex_tool_input(payload);
+    let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    if name == "exec_command" {
+        return input
+            .get("cmd")
+            .and_then(|v| v.as_str())
+            .and_then(|cmd| st_bash_markdown_heredoc(cmd).map(|(_, markdown)| markdown))
+            .unwrap_or_default();
+    }
+    if name == "exec" {
+        if let Some(script) = input.as_str() {
+            return st_codex_exec_cmds(script)
+                .iter()
+                .find_map(|cmd| st_bash_markdown_heredoc(cmd).map(|(_, markdown)| markdown))
+                .unwrap_or_default();
+        }
+    }
+    if input.is_object() {
+        let display_name = if name.is_empty() {
+            st_codex_tool_name(payload)
+        } else {
+            name.to_string()
+        };
+        return st_tool_command_markdown(&display_name, &input);
     }
     String::new()
 }
@@ -15995,6 +16219,7 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
                             "name": name,
                             "summary": summary,
                             "commandDisplay": st_tool_command_display(name, input),
+                            "commandMarkdown": st_tool_command_markdown(name, input),
                             // The agent-authored intent sentence (Claude's Bash
                             // tool requires it; other tools/providers may lack
                             // it). Rendered above the command in the Transcript
@@ -16162,6 +16387,7 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
                         "name": name,
                         "summary": summary,
                         "commandDisplay": st_codex_tool_command_display(p),
+                        "commandMarkdown": st_codex_tool_command_markdown(p),
                     });
                     let entry_idx = entries.len();
                     entries.push(entry);

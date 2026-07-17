@@ -196,6 +196,10 @@
               when="{window.__bramShowToolCommand ? window.__bramShowToolCommand($item) : (($item.commandDisplay || $item.summary) &amp;&amp; ($item.name !== 'apply_patch' || !$item.commandDisplay))}"
               overflowMode="scroll"
               content="{window.__bramFormatToolCommand($item.commandDisplay || $item.summary, $item.description)}" />
+            <Markdown
+              when="{$item.commandMarkdown}"
+              overflowMode="flow"
+              content="{$item.commandMarkdown}" />
             <DiffView
               when="{$item.diff}"
               compact="true"

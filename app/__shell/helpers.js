@@ -4349,6 +4349,7 @@ window.__bramProjectedTurnEqual = function (a, b) {
         x.name !== y.name ||
         x.summary !== y.summary ||
         x.commandDisplay !== y.commandDisplay ||
+        x.commandMarkdown !== y.commandMarkdown ||
         // description participates: the ai-describe overlay changes ONLY
         // this field, and an "equal" verdict would reuse the stale turn
         // reference and silently drop the new header (2026-07-08 "no
@@ -5022,6 +5023,7 @@ window.__bramTranscriptEventsFromTurns = function (payload, menu) {
               name: e.name || "Tool",
               summary: e.summary || "",
               commandDisplay: e.commandDisplay || "",
+              commandMarkdown: e.commandMarkdown || "",
               description: e.description || "",
               result: e.result || "",
               resultStructured: !!e.resultStructured,

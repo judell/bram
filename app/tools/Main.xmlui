@@ -29,7 +29,7 @@
     subscribe="{window.bramSubscribeVoiceBusy()}" />
   <ChangeListener
     listenTo="{whisperNotice.value &amp;&amp; whisperNotice.value.at}"
-    onDidChange="(c) => { if (c.newValue) { toast.error('Whisper server is not running and could not be started automatically. Start it manually — see the README Voice input section: https://github.com/judell/bram#voice-input'); } }" />
+    onDidChange="() => window.__bramToastWhisperNotice(whisperNotice.value, toast)" />
   <ChangeListener
     listenTo="{voiceBusyNotice.value &amp;&amp; voiceBusyNotice.value.at}"
     onDidChange="(c) => { if (c.newValue) { toast('A voice recording is already in progress. Return to that recording to stop it.'); } }" />

@@ -2082,19 +2082,27 @@ listen("pty-send-sent", (e) => {
     return { ready: false, reason: "timeout" };
   };
 
-  // When voice can't start because whisper-server is neither running nor
-  // auto-startable (binary missing, or it never became ready), notify the
-  // agent-pane iframe (same-origin tools-pane) so it can surface a toast
-  // pointing the user at the README. This covers every mic origin —
-  // toolbar, agent pane, and any target-app iframe — because the notice
-  // always lands in Bram's own pane, which always renders the toast.
-  const notifyWhisperUnavailable = (reason) => {
-    voiceLog("whisper-unavailable-notice", { reason: String(reason || "") });
+  // Send startup and transcription failures to the agent-pane iframe
+  // (same-origin tools-pane), which owns the toast surface. This covers every
+  // mic origin — toolbar, agent pane, and any target-app iframe. Startup
+  // failures retain the original reason-only payload; post-recording failures
+  // add a kind and server detail so the toast can explain what broke.
+  const notifyWhisperUnavailable = (reason, kind, detail) => {
+    voiceLog("whisper-unavailable-notice", {
+      reason: String(reason || ""),
+      kind: String(kind || ""),
+      detail: String(detail || ""),
+    });
     try {
       const tools = document.getElementById("tools-pane");
       if (tools && tools.contentWindow) {
+        const notice = { type: "bram-whisper-unavailable", reason: String(reason || "") };
+        // Preserve the original server-not-running message shape. Typed fields
+        // are added only for failures after recording has already succeeded.
+        if (kind) notice.kind = String(kind);
+        if (detail) notice.detail = String(detail);
         tools.contentWindow.postMessage(
-          { type: "bram-whisper-unavailable", reason: String(reason || "") },
+          notice,
           "*",
         );
       }
@@ -2406,7 +2414,20 @@ listen("pty-send-sent", (e) => {
           const data = await res.json();
           transcript = (data.text || "").trim();
         } else {
-          console.error("transcribe HTTP", res.status, res.statusText);
+          let responseBody = "";
+          let serverError = "";
+          try {
+            responseBody = await res.text();
+            const parsed = JSON.parse(responseBody);
+            if (parsed && typeof parsed.error === "string") {
+              serverError = parsed.error.trim();
+            }
+          } catch (_) {
+            // A non-JSON or unreadable body still produces the useful status.
+          }
+          const detail = `HTTP ${res.status}${serverError ? `: ${serverError}` : ""}`;
+          console.error("transcribe HTTP", detail);
+          notifyWhisperUnavailable("transcription-failed", "transcription-failed", detail);
         }
         voiceLog("whisper-response", {
           requestId: reqId,
@@ -2420,6 +2441,7 @@ listen("pty-send-sent", (e) => {
         });
       } catch (e) {
         console.error("transcribe", e);
+        notifyWhisperUnavailable("transcription-failed", "transcription-failed", String(e));
         voiceLog("whisper-error", {
           requestId: reqId,
           error: String(e),

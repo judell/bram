@@ -3869,18 +3869,23 @@ window.bramSubscribeVoiceArrival = (function () {
   };
 })();
 
-// Parent → agent-pane bridge for "whisper-server unavailable" notices.
-// main.js posts { type: "bram-whisper-unavailable", reason } to the
-// tools-pane iframe when voice recording can't start because the whisper
-// server is neither running nor auto-startable. Re-dispatch as a window
-// CustomEvent that the External below observes, giving XMLUI markup a path
-// to toast. Same indirection as __bramSetLatestVoiceState / voice-arrival.
+// Parent → agent-pane bridge for whisper-server failure notices.
+// main.js posts { type: "bram-whisper-unavailable", reason, kind?, detail? }
+// to the tools-pane iframe when voice cannot start or transcription fails.
+// Re-dispatch as a window CustomEvent that the External below observes,
+// giving XMLUI markup a path to toast. Same indirection as
+// __bramSetLatestVoiceState / voice-arrival.
 window.addEventListener("message", function (event) {
   var data = event && event.data;
   if (!data || data.type !== "bram-whisper-unavailable") return;
   try {
     window.dispatchEvent(new CustomEvent("bram:whisper-unavailable", {
-      detail: { reason: String(data.reason || ""), at: Date.now() },
+      detail: {
+        reason: String(data.reason || ""),
+        kind: String(data.kind || ""),
+        detail: String(data.detail || ""),
+        at: Date.now(),
+      },
     }));
   } catch (e) {
     console.error("[bram] whisper-unavailable dispatch failed:", e);
@@ -3929,6 +3934,22 @@ window.bramSubscribeWhisperUnavailable = (function () {
     return factory;
   };
 })();
+
+window.__bramToastWhisperNotice = function (notice, toastApi) {
+  if (!notice || !toastApi || typeof toastApi.error !== "function") return;
+  if (notice.kind === "transcription-failed") {
+    toastApi.error(
+      "Voice transcription failed (" + String(notice.detail || "unknown error") +
+      "). Recording worked; the whisper server could not transcribe it."
+    );
+    return;
+  }
+  toastApi.error(
+    "Whisper server is not running and could not be started automatically. " +
+    "Start it manually — see the README Voice input section: " +
+    "https://github.com/judell/bram#voice-input"
+  );
+};
 
 window.bramSubscribeVoiceBusy = (function () {
   var factory;

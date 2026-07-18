@@ -22,9 +22,42 @@
 #
 # Installed copy lives at .claude/hooks/permission-menu-hook.py and is refreshed
 # from this canonical source by Setup / build.rs. Do not edit the installed copy.
-import sys, os, json, urllib.request
+import sys, os, json, time, urllib.request
 
 PORT_REL = os.path.join("resources", ".bram-port")
+
+# Observe-only event breadcrumb (command-substitution-menu-shape): one line
+# per hook invocation so a pane miss self-classifies — a breadcrumb with no
+# host-side op=permission means the POST was lost; no breadcrumb means
+# Claude Code fired no event and the grid path is the designed fallback.
+# Fail-silent; capped so it can't grow unbounded.
+_EVENTS_LOG_CAP_BYTES = 5 * 1024 * 1024
+
+
+def _breadcrumb(root, event, tool):
+    try:
+        d = os.path.join(root, "resources", "bram-traces")
+        if not os.path.isdir(os.path.join(root, "resources")):
+            return
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, "hook-events.log")
+        try:
+            if os.path.getsize(path) > _EVENTS_LOG_CAP_BYTES:
+                return
+        except OSError:
+            pass
+        with open(path, "a") as f:
+            f.write(
+                "%s claude %s %s\n"
+                % (
+                    time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+                    + (".%03dZ" % (int(time.time() * 1000) % 1000)),
+                    event or "?",
+                    tool or "?",
+                )
+            )
+    except Exception:
+        pass
 
 
 def _project_root(payload):
@@ -75,6 +108,7 @@ def main():
         payload = {}
     event = payload.get("hook_event_name") or ""
     root = _project_root(payload)
+    _breadcrumb(root, event, payload.get("tool_name"))
     port = _port(root)
     if not port:
         return

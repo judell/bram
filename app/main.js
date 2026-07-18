@@ -1025,63 +1025,66 @@ function __gridDetectMenu(rows) {
     }
   }
   if (opts.length < 2) return null;
-  // Trailing consecutive run starting at option 1 = the live menu.
-  let start = -1;
-  for (let i = opts.length - 1; i >= 0; i--) {
-    if (opts[i].n === 1) {
-      start = i;
-      break;
-    }
-  }
-  if (start < 0) return null;
-  const menu = [opts[start]];
-  for (let i = start + 1; i < opts.length; i++) {
-    if (opts[i].n === menu.length + 1) menu.push(opts[i]);
-    else break;
-  }
-  if (menu.length < 2) return null;
-
-  const hasCursor = menu.some((o) => o.selected);
-  const blockTop = menu[0].row;
-  const blockBottom = menu[menu.length - 1].row;
-  const aboveRows = rows.slice(Math.max(0, blockTop - 8), blockTop);
-  const belowText = rows
-    .slice(blockBottom + 1, blockBottom + 4)
-    .map((r) => r.text)
-    .join(" ");
-  const labels = menu.map((o) => o.label).join(" ");
+  // Candidate runs bottom-most first, validating EACH — not just the last.
+  // The agent's own prose renders numbered markdown lists into the terminal
+  // ("1. **Claims arrive without…**"); a stale such line below the live menu
+  // used to become the sole trailing run, fail validation, and null the whole
+  // detect while a valid menu sat above (2026-07-18 20:16 jq-prompt miss:
+  // 90+ s displayed, zero reports). A poisoned fragment now costs one
+  // iteration instead of the menu.
   const headerRe = /Do you want to|requires approval|Would you like to run/i;
-  const headerSignal = aboveRows.some((r) => headerRe.test(r.text));
-  const footerSignal =
-    /Esc to cancel|esc to cancel|Press enter to confirm/i.test(belowText);
-  const codexSignal =
-    /\((y|p|esc)\)/.test(labels) ||
-    /tell Codex/.test(labels) ||
-    /Yes, proceed/.test(labels) ||
-    /Press enter to confirm/i.test(belowText);
-  // KEY discriminator from the agent's OWN prose: a permission menu's first
-  // option is always "Yes" (Claude: "Yes"; Codex: "Yes, proceed (y)"). Prose
-  // can contain numbered lists + menu-ish words ((esc) / Esc to cancel / tell
-  // Codex) and otherwise false-trigger here, rendering a bogus menu. Requiring
-  // option 1 == "Yes…" excludes prose while accepting both providers, so we no
-  // longer need the (cursor-or-codex) relaxation that let prose through.
-  if (!/^\s*Yes\b/i.test(menu[0].label)) return null;
-  if (!(headerSignal || footerSignal || codexSignal)) return null;
+  const starts = [];
+  for (let i = 0; i < opts.length; i++) if (opts[i].n === 1) starts.push(i);
+  for (let s = starts.length - 1; s >= 0; s--) {
+    const start = starts[s];
+    const menu = [opts[start]];
+    for (let i = start + 1; i < opts.length; i++) {
+      if (opts[i].n === menu.length + 1) menu.push(opts[i]);
+      else break;
+    }
+    if (menu.length < 2) continue;
 
-  const headerRow = aboveRows
-    .slice()
-    .reverse()
-    .find((r) => headerRe.test(r.text));
-  const above = rows
-    .slice(Math.max(0, blockTop - 12), blockTop)
-    .map((r) => r.text.replace(/^[⏺⎿\s]+/, "").trimEnd())
-    .filter((s) => s.trim());
-  return {
-    header: headerRow ? headerRow.text.trim() : "",
-    options: menu.map((o) => ({ n: o.n, label: o.label, selected: o.selected })),
-    above,
-    blockTop,
-  };
+    const blockTop = menu[0].row;
+    const blockBottom = menu[menu.length - 1].row;
+    const aboveRows = rows.slice(Math.max(0, blockTop - 8), blockTop);
+    const belowText = rows
+      .slice(blockBottom + 1, blockBottom + 4)
+      .map((r) => r.text)
+      .join(" ");
+    const labels = menu.map((o) => o.label).join(" ");
+    const headerSignal = aboveRows.some((r) => headerRe.test(r.text));
+    const footerSignal =
+      /Esc to cancel|esc to cancel|Press enter to confirm/i.test(belowText);
+    const codexSignal =
+      /\((y|p|esc)\)/.test(labels) ||
+      /tell Codex/.test(labels) ||
+      /Yes, proceed/.test(labels) ||
+      /Press enter to confirm/i.test(belowText);
+    // KEY discriminator from the agent's OWN prose: a permission menu's first
+    // option is always "Yes" (Claude: "Yes"; Codex: "Yes, proceed (y)"). Prose
+    // can contain numbered lists + menu-ish words ((esc) / Esc to cancel / tell
+    // Codex) and otherwise false-trigger here, rendering a bogus menu.
+    // Requiring option 1 == "Yes…" excludes prose while accepting both
+    // providers.
+    if (!/^\s*Yes\b/i.test(menu[0].label)) continue;
+    if (!(headerSignal || footerSignal || codexSignal)) continue;
+
+    const headerRow = aboveRows
+      .slice()
+      .reverse()
+      .find((r) => headerRe.test(r.text));
+    const above = rows
+      .slice(Math.max(0, blockTop - 12), blockTop)
+      .map((r) => r.text.replace(/^[⏺⎿\s]+/, "").trimEnd())
+      .filter((s) => s.trim());
+    return {
+      header: headerRow ? headerRow.text.trim() : "",
+      options: menu.map((o) => ({ n: o.n, label: o.label, selected: o.selected })),
+      above,
+      blockTop,
+    };
+  }
+  return null;
 }
 
 // Extract the in-flight turn's assistant prose from the grid for the
@@ -1262,6 +1265,10 @@ function __gridShadowCheck() {
       }
       return;
     }
+    // A successful detect ends any miss episode: re-arm the miss diagnostic
+    // so the NEXT miss can capture (the old never-reset key logged a
+    // persistent miss at most once ever — the 20:16 episode logged nothing).
+    __gridMissKey = null;
     const key =
       menu.header + "|" + menu.options.map((o) => o.n + o.label).join("|");
     if (key === __gridLastMenuKey) return;

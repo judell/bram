@@ -17706,6 +17706,11 @@ struct SendLedgerEntry {
     cause: &'static str,
     payload: String,
     retried: bool,
+    // strand-scene-forensics: injection-time scene, recorded so a later
+    // strand can discriminate its cause (menu up at inject? CLI mid-render
+    // burst?). -1 = no PTY output had been seen yet.
+    menu_at_inject: bool,
+    ms_since_pty_out_at_inject: i64,
 }
 
 const SEND_LEDGER_CAP: usize = 50;
@@ -18044,6 +18049,49 @@ fn send_ledger_line_delivers(line: &str) -> Option<bool> {
     }
 }
 
+// strand-scene-forensics: always-on send forensics, deliberately NOT gated
+// by traces.enabled. Strands are rare and are exactly the events remote
+// diagnosis hinges on (Eric's 2026-07-17 occurrence left zero evidence on a
+// default-settings install). One line per send at injection and one at
+// resolution; an inject with no resolution line is itself the strand
+// signal — detectable post-hoc, across restarts, on any machine. Volume is
+// one short line per pane send, so unbounded append is acceptable.
+fn append_strand_forensics_line<R: tauri::Runtime>(app: &AppHandle<R>, body: &str) {
+    let Some(root) = project_root(Some(app)) else {
+        return;
+    };
+    let dir = root.join("resources").join("bram-traces");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("strand-forensics.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(
+            f,
+            "[{}] [send-forensics] {}",
+            format_iso_utc_ms(unix_now_ms()),
+            body
+        );
+    }
+}
+
+fn turn_state_provider_str() -> String {
+    turn_state_cell()
+        .lock()
+        .ok()
+        .and_then(|t| t.provider.clone())
+        .unwrap_or_default()
+}
+
+fn turn_state_menu_present() -> bool {
+    turn_state_cell()
+        .lock()
+        .map(|t| t.pending_menu.is_some())
+        .unwrap_or(false)
+}
+
 // Record a send at injection time (called from write_pty_turn_intent with
 // the exact PTY payload).
 fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
@@ -18063,6 +18111,10 @@ fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
         Some(rest) => ("skip-worklist", rest.trim_start()),
         None => ("", trimmed),
     };
+    // strand-scene-forensics: injection-time scene.
+    let last_out = LAST_PTY_OUTPUT_MS.load(std::sync::atomic::Ordering::Relaxed);
+    let ms_since_pty_out = if last_out > 0 { now - last_out } else { -1 };
+    let menu_at_inject = turn_state_menu_present();
     let entry = match outbound_turn_id_from_frame(payload) {
         Some(id) => SendLedgerEntry {
             id,
@@ -18079,6 +18131,8 @@ fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
             cause: "",
             payload: payload.to_string(),
             retried: false,
+            menu_at_inject,
+            ms_since_pty_out_at_inject: ms_since_pty_out,
         },
         None => SendLedgerEntry {
             id: format!("{}-inline", now),
@@ -18095,6 +18149,8 @@ fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
             cause: "",
             payload: payload.to_string(),
             retried: false,
+            menu_at_inject,
+            ms_since_pty_out_at_inject: ms_since_pty_out,
         },
     };
     if bram_trace_enabled() {
@@ -18111,6 +18167,23 @@ fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
             ),
         );
     }
+    // Always-on inject breadcrumb: pairs with a resolution line; an inject
+    // with no resolution is itself the strand signal.
+    append_strand_forensics_line(
+        app,
+        &format!(
+            "op=inject id={} kind={} mode={} bytes={} provider={} menu_at_inject={} ms_since_pty_out={} stale_input={} preview=\"{}\"",
+            entry.id,
+            entry.kind,
+            entry.mode,
+            payload.len(),
+            turn_state_provider_str(),
+            menu_at_inject,
+            ms_since_pty_out,
+            stale_terminal_input(),
+            bram_trace_preview(&entry.preview, 60),
+        ),
+    );
     if let Ok(mut ledger) = send_ledger_cell().lock() {
         ledger.push(entry);
         if ledger.len() > SEND_LEDGER_CAP {
@@ -18203,6 +18276,9 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
     let mut current_session_full_text: Option<String> = None;
     let mut actions: Vec<SendLedgerAction> = Vec::new();
     let mut transitions: Vec<String> = Vec::new();
+    // strand-scene-forensics: resolution lines for the always-on forensics
+    // file, flushed outside the traces.enabled gate.
+    let mut forensics: Vec<String> = Vec::new();
     let mut user_strand_hit = false;
     if let Ok(mut ledger) = send_ledger_cell().lock() {
         for entry in ledger.iter_mut() {
@@ -18273,6 +18349,13 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                     entry.via_queue,
                     now - entry.injected_at_ms,
                 ));
+                forensics.push(format!(
+                    "op=landed id={} via_queue={} elapsed_ms={} cross_session={}",
+                    entry.id,
+                    entry.via_queue,
+                    now - entry.injected_at_ms,
+                    sid_changed,
+                ));
                 // The send landed in a DIFFERENT session than it was injected
                 // against — the false-strand case (send-ledger-observe-sid-
                 // switch-strand's pa11 specimen) now resolves correctly instead
@@ -18302,6 +18385,44 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                     entry.cause,
                     now - entry.injected_at_ms,
                 ));
+                // Scene capture: the strand names its own cause. The
+                // decisive bit is payload_in_tail — true means the text is
+                // sitting in the CLI composer with the submitting CR never
+                // taken (the observed live stranding shape); false means
+                // the injection was swallowed entirely.
+                {
+                    let tail = pty_tail_snippet(400);
+                    let frag: String = entry
+                        .preview
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .replace('"', "'")
+                        .chars()
+                        .take(24)
+                        .collect();
+                    let payload_in_tail = !frag.trim().is_empty() && tail.contains(frag.trim());
+                    let last_out =
+                        LAST_PTY_OUTPUT_MS.load(std::sync::atomic::Ordering::Relaxed);
+                    let silence_ms = if last_out > 0 { now - last_out } else { -1 };
+                    forensics.push(format!(
+                        "op=stranded id={} cause={} elapsed_ms={} payload_in_tail={} silence_ms={} menu_now={} menu_at_inject={} ms_since_pty_out_at_inject={} provider={} stale_input={} via_queue={} retried={} cross_session={} tail=\"{}\"",
+                        entry.id,
+                        entry.cause,
+                        now - entry.injected_at_ms,
+                        payload_in_tail,
+                        silence_ms,
+                        turn_state_menu_present(),
+                        entry.menu_at_inject,
+                        entry.ms_since_pty_out_at_inject,
+                        turn_state_provider_str(),
+                        stale_terminal_input(),
+                        entry.via_queue,
+                        entry.retried,
+                        sid_changed,
+                        tail,
+                    ));
+                }
                 // A mechanical strand that survives DESPITE the cross-session
                 // re-anchor above (sid changed, yet the send was found in
                 // neither the inject session nor the current one) is a genuine
@@ -18332,6 +18453,7 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                     entry.resolved_at_ms = 0;
                     entry.injected_at_ms = now;
                     entry.jsonl_offset_at_inject = session_text.len() as u64;
+                    forensics.push(format!("op=auto-resend id={}", entry.id));
                     actions.push(SendLedgerAction::AutoResend {
                         id: entry.id.clone(),
                         payload: entry.payload.clone(),
@@ -18443,6 +18565,10 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                 }
             }
         }
+    }
+    // Always-on: resolution forensics write regardless of traces.enabled.
+    for line in &forensics {
+        append_strand_forensics_line(app, line);
     }
     if !transitions.is_empty() || !actions.is_empty() {
         if bram_trace_enabled() {
@@ -25771,6 +25897,8 @@ mod session_turn_tests {
             cause: "",
             payload: String::new(),
             retried: false,
+            menu_at_inject: false,
+            ms_since_pty_out_at_inject: -1,
         };
         assert_eq!(
             super::send_ledger_needle(&framed),

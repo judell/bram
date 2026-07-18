@@ -5346,6 +5346,17 @@ fn note_grid_menu_sighting(labels_fp: &str) {
     }
 }
 
+// surface-gap-restamp-on-dismissal: the sighting stamp dies with the menu
+// it belongs to. Post-surface grid reports of a displayed menu keep a
+// stamp alive; without this clear, a same-fingerprint successor menu
+// inherits it and its surface-gap absorbs the user's dwell time on the
+// dismissed menu (the 2026-07-18 spurious 2.9–67 s captures).
+fn clear_grid_menu_sighting() {
+    if let Ok(mut cell) = menu_first_sighting_cell().lock() {
+        *cell = None;
+    }
+}
+
 // Compact fingerprint of a menu's option labels — the identity available at
 // both the grid-report and surface sites.
 fn menu_labels_fingerprint<'a, I: IntoIterator<Item = &'a str>>(labels: I) -> String {
@@ -6848,6 +6859,7 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
         // has nothing to clear. Refs #77 tighten-pty-menu-emit-cadence.
         if tool == PENDING_TOOL {
             eprintln!("[pty-menu] cleared by user input (pending menu — shown emit was deferred)");
+            clear_grid_menu_sighting();
             if clears_inflight {
                 clear_active_sentinel_with_reason(app, "pty-menu-pending-user-reject");
                 invalidate_worklist_authorization(app, "pty-menu-pending-user-reject");
@@ -6881,6 +6893,7 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
                 answered_id,
             });
         }
+        clear_grid_menu_sighting();
         if clears_inflight {
             clear_active_sentinel_with_reason(app, "pty-menu-user-reject");
             invalidate_worklist_authorization(app, "pty-menu-user-reject");

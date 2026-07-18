@@ -659,6 +659,69 @@ fn set_menu_hook_owner(now_ms: Option<i64>) {
     MENU_HOOK_OWNER_MS.store(now_ms.unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
 }
 
+// hook-claim-stale-grid-defer: identity of the current hook claim, so grid
+// deferral can causally test staleness against the session JSONL instead of
+// waiting out the 300s owner timeout. Set on each /__menu/permission POST;
+// cleared with the owner.
+#[derive(Clone)]
+struct HookMenuClaim {
+    tool: String,
+    tool_use_id: Option<String>,
+    signature: Option<String>,
+}
+static MENU_HOOK_CLAIM: OnceLock<Mutex<Option<HookMenuClaim>>> = OnceLock::new();
+fn menu_hook_claim_cell() -> &'static Mutex<Option<HookMenuClaim>> {
+    MENU_HOOK_CLAIM.get_or_init(|| Mutex::new(None))
+}
+
+fn clear_menu_hook_claim() {
+    if let Ok(mut c) = menu_hook_claim_cell().lock() {
+        *c = None;
+    }
+}
+
+// A hook claim is about one specific tool call; when the grid sees a live
+// menu while the slot is hook-owned, the claim is causally stale if its
+// call is no longer the pending one in the session JSONL (the claim's
+// PostToolUse clear was lost — 2026-07-18 specimens: three 16–23s
+// pane-blind windows until the 300s backstop). Release and let the grid
+// emit; no clocks — convergence rides the grid's own re-detection cadence.
+// Keys on tool_use identity with tool/signature fallback, the
+// answered_call_still_pending pattern (flush-lag and identical-retry safe).
+fn release_stale_hook_claim<R: tauri::Runtime>(app: &AppHandle<R>, context: &str) -> bool {
+    let claim = menu_hook_claim_cell().lock().ok().and_then(|c| c.clone());
+    let Some(claim) = claim else {
+        return false;
+    };
+    let lookup = lookup_pending_tool_call(app);
+    let still_pending = answered_call_still_pending(
+        claim.tool_use_id.as_deref(),
+        &claim.tool,
+        claim.signature.as_deref(),
+        lookup.tool_use_id.as_deref(),
+        lookup.signature.as_deref(),
+    );
+    if still_pending {
+        return false;
+    }
+    set_menu_hook_owner(None);
+    clear_menu_hook_claim();
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "hook-menu",
+            &format!(
+                "op=grid-defer-stale-claim context={} tool={} claimed_id={} pending_id={}",
+                context,
+                claim.tool,
+                claim.tool_use_id.as_deref().unwrap_or("none"),
+                lookup.tool_use_id.as_deref().unwrap_or("none"),
+            ),
+        );
+    }
+    true
+}
+
 // True iff a hook menu currently owns the slot and the safety timeout has not
 // elapsed. Past the timeout it clears the stale owner and returns false so the
 // grid can reclaim.
@@ -3001,15 +3064,27 @@ fn turn_state_set_menu<R: tauri::Runtime>(
     // (the hook never takes ownership), so grid behavior is unchanged then.
     if source == "hook-permission" {
         set_menu_hook_owner(menu.as_ref().map(|_| unix_now_ms()));
-    } else if menu_hook_owns_slot() {
-        if bram_trace_enabled() {
-            append_bram_trace_line(
-                app,
-                "hook-menu",
-                &format!("op=grid-deferred source={} reason={}", source, reason),
-            );
+        if menu.is_none() {
+            clear_menu_hook_claim();
         }
-        return;
+    } else if menu_hook_owns_slot() {
+        // hook-claim-stale-grid-defer: a live grid menu contesting a
+        // hook-owned slot triggers the causal staleness test — if the
+        // claim's call is no longer pending in the JSONL, the claim's
+        // clear was lost; release and let this menu proceed. Grid clears
+        // (menu=None) never release: a clear is not evidence of a new
+        // prompt, and the hook menu may still be legitimate.
+        let released = menu.is_some() && release_stale_hook_claim(app, source);
+        if !released {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "hook-menu",
+                    &format!("op=grid-deferred source={} reason={}", source, reason),
+                );
+            }
+            return;
+        }
     }
     if let Some(m) = menu.as_mut() {
         m.cache_source = Some(
@@ -3702,6 +3777,18 @@ fn handle_permission_menu<R: tauri::Runtime>(
     }
     attach_hook_edit_diff(app, &value, &mut menu);
     retire_dismissed_menu_on_hook_claim(app, &menu);
+    // hook-claim-stale-grid-defer: record the claim's identity so grid
+    // deferral can later test it against the JSONL's pending tool call.
+    if let Ok(mut c) = menu_hook_claim_cell().lock() {
+        *c = Some(HookMenuClaim {
+            tool: menu.tool.clone(),
+            tool_use_id: value
+                .get("tool_use_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            signature: menu.tool_call_signature.clone(),
+        });
+    }
     let payload = Some(menu);
     turn_state_set_menu(app, payload.clone(), "hook-permission", "detected");
     emit_pty_menu_with_prose(app, &payload);
@@ -5883,6 +5970,7 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                                 // demonstrably live on screen — release the stale
                                 // ownership so turn_state_set_menu can surface it.
                                 set_menu_hook_owner(None);
+                                clear_menu_hook_claim();
                             }
                             retire_suppressor = true;
                             if bram_trace_enabled() {

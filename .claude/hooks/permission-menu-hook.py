@@ -28,8 +28,13 @@ PORT_REL = os.path.join("resources", ".bram-port")
 
 
 def _project_root(payload):
-    # Prefer the hook-provided cwd; fall back to CLAUDE_PROJECT_DIR.
-    return payload.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    # CLAUDE_PROJECT_DIR first: it is pinned to the session's project root.
+    # The payload cwd tracks the shell's persistent `cd`, so a session
+    # working outside the repo (e.g. a scratchpad) resolved a root with no
+    # resources/.bram-port and every POST — claims AND clears — silently
+    # vanished. A stale claim then muzzled grid menus for its 300s timeout
+    # (2026-07-18 pane-blind windows; hook-claim-stale-grid-defer).
+    return os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or os.getcwd()
 
 
 def _port(root):

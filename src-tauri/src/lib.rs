@@ -823,10 +823,20 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
     // yet. With exactly one claim and nothing displayed, show it now (the
     // single-prompt behavior Bram has always had); the join corrects it
     // within a grid-report cycle if the terminal disagrees.
+    // claim-optimism-only-at-add: optimism is justified ONLY at the
+    // claim-add moment. A failed command gets no PostToolUse (2026-07-18
+    // soak: exit-1 scutil left an orphan claim), and clear-remove /
+    // grid-report reselection re-displayed the orphan, which the no-grid
+    // hold branch then pinned across turns. Reselection requires grid
+    // corroboration; orphans stay inert until the TTL sweeps them.
     let displayed: Option<String> = menu_hook_displayed_cell().lock().ok().and_then(|d| d.clone());
     let (target, how): (Option<&HookMenuClaim>, &'static str) = match joined {
         Some((c, how)) => (Some(c), how),
-        None if grid_labels.is_none() && claims.len() == 1 && displayed.is_none() => {
+        None if cause == "claim-add"
+            && grid_labels.is_none()
+            && claims.len() == 1
+            && displayed.is_none() =>
+        {
             (claims.first(), "optimistic-single")
         }
         None if grid_labels.is_none() => {

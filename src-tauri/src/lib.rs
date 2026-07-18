@@ -659,67 +659,227 @@ fn set_menu_hook_owner(now_ms: Option<i64>) {
     MENU_HOOK_OWNER_MS.store(now_ms.unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
 }
 
-// hook-claim-stale-grid-defer: identity of the current hook claim, so grid
-// deferral can causally test staleness against the session JSONL instead of
-// waiting out the 300s owner timeout. Set on each /__menu/permission POST;
-// cleared with the owner.
+// parallel-menu-claim-queue: hook claims are a QUEUE keyed by tool_use_id,
+// not a last-writer-wins slot. Under parallel subagent prompts several
+// claims are live at once while the terminal displays one prompt at a
+// time; the pane must mirror the terminal's own display (the labels join
+// in select_hook_claim_display), or a pane answer keystrokes the wrong
+// menu (2026-07-18 19:48 specimen: pane showed dig, terminal showed mkdir).
 #[derive(Clone)]
 struct HookMenuClaim {
-    tool: String,
+    // tool_use_id when the hook payload carried one (PermissionRequest
+    // events omit it — 2026-07-18 soak); else the tool_input signature.
+    // Replacement key for re-posts.
+    id_key: String,
     tool_use_id: Option<String>,
+    // Canonical `Tool(args)` signature computed from the claim payload's
+    // tool_input — the join key against the grid scene, and the removal
+    // key for clears (whose PostToolUse payloads carry tool_input too).
     signature: Option<String>,
+    menu: PtyMenu,
+    at_ms: i64,
 }
-static MENU_HOOK_CLAIM: OnceLock<Mutex<Option<HookMenuClaim>>> = OnceLock::new();
-fn menu_hook_claim_cell() -> &'static Mutex<Option<HookMenuClaim>> {
-    MENU_HOOK_CLAIM.get_or_init(|| Mutex::new(None))
+// TTL backstop for claims whose clears were lost; a queued-but-undisplayed
+// claim is inert (it only surfaces when the grid shows its labels), so the
+// generous window is safe.
+const MENU_HOOK_CLAIM_TTL_MS: i64 = 300_000;
+static MENU_HOOK_CLAIMS: OnceLock<Mutex<Vec<HookMenuClaim>>> = OnceLock::new();
+fn menu_hook_claims_cell() -> &'static Mutex<Vec<HookMenuClaim>> {
+    MENU_HOOK_CLAIMS.get_or_init(|| Mutex::new(Vec::new()))
+}
+// id_key of the claim currently displayed in the pane, if any.
+static MENU_HOOK_DISPLAYED: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+fn menu_hook_displayed_cell() -> &'static Mutex<Option<String>> {
+    MENU_HOOK_DISPLAYED.get_or_init(|| Mutex::new(None))
 }
 
-fn clear_menu_hook_claim() {
-    if let Ok(mut c) = menu_hook_claim_cell().lock() {
-        *c = None;
-    }
+fn menu_hook_claims_empty() -> bool {
+    menu_hook_claims_cell()
+        .lock()
+        .map(|q| q.is_empty())
+        .unwrap_or(true)
 }
 
-// A hook claim is about one specific tool call; when the grid sees a live
-// menu while the slot is hook-owned, the claim is causally stale if its
-// call is no longer the pending one in the session JSONL (the claim's
-// PostToolUse clear was lost — 2026-07-18 specimens: three 16–23s
-// pane-blind windows until the 300s backstop). Release and let the grid
-// emit; no clocks — convergence rides the grid's own re-detection cadence.
-// Keys on tool_use identity with tool/signature fallback, the
-// answered_call_still_pending pattern (flush-lag and identical-retry safe).
-fn release_stale_hook_claim<R: tauri::Runtime>(app: &AppHandle<R>, context: &str) -> bool {
-    let claim = menu_hook_claim_cell().lock().ok().and_then(|c| c.clone());
-    let Some(claim) = claim else {
+// Normalize a menu option label for the hook↔grid join: whitespace
+// collapse (grid wrapping), typographic apostrophes (TUI renders ’ where
+// hook payloads carry '), case.
+fn normalized_menu_label(s: &str) -> String {
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('\u{2019}', "'")
+        .to_lowercase()
+}
+
+// Signature join (primary): the claim's command text found in the grid
+// scene (header + context lines above the options). Bram synthesizes hook
+// option labels ("Yes, and allow …") while CC's terminal phrases its own
+// ("Yes, and always allow access to …"), so labels routinely can't match —
+// but the command text is shared verbatim by both sides. A 40-char
+// normalized prefix survives grid wrapping/truncation; the ≥8-char guard
+// keeps trivial commands from cross-joining.
+fn claim_signature_join(claim: &HookMenuClaim, grid_scene: &str) -> bool {
+    let Some(sig) = claim.signature.as_deref() else {
         return false;
     };
-    let lookup = lookup_pending_tool_call(app);
-    let still_pending = answered_call_still_pending(
-        claim.tool_use_id.as_deref(),
-        &claim.tool,
-        claim.signature.as_deref(),
-        lookup.tool_use_id.as_deref(),
-        lookup.signature.as_deref(),
-    );
-    if still_pending {
-        return false;
+    let inner = sig
+        .split_once('(')
+        .map(|(_, r)| r.trim_end_matches(')'))
+        .unwrap_or(sig);
+    let frag: String = normalized_menu_label(inner).chars().take(40).collect();
+    frag.chars().count() >= 8 && grid_scene.contains(frag.as_str())
+}
+
+// How a claim joins the grid's displayed labels: exact normalized set
+// ("labels"), distinctive-option containment ("fallback"), or not at all.
+fn claim_label_join(claim: &HookMenuClaim, grid_labels: &[String]) -> Option<&'static str> {
+    let claim_labels: Vec<String> = claim
+        .menu
+        .options
+        .iter()
+        .map(|o| normalized_menu_label(&o.label))
+        .collect();
+    if claim_labels.len() == grid_labels.len()
+        && grid_labels.iter().all(|g| claim_labels.contains(g))
+    {
+        return Some("labels");
     }
-    set_menu_hook_owner(None);
-    clear_menu_hook_claim();
-    if bram_trace_enabled() {
-        append_bram_trace_line(
-            app,
-            "hook-menu",
-            &format!(
-                "op=grid-defer-stale-claim context={} tool={} claimed_id={} pending_id={}",
-                context,
-                claim.tool,
-                claim.tool_use_id.as_deref().unwrap_or("none"),
-                lookup.tool_use_id.as_deref().unwrap_or("none"),
-            ),
-        );
+    // Containment fallback: the longest sufficiently-distinctive claim
+    // label appearing inside (or containing) a grid label — covers grid
+    // truncation and hook/grid phrasing drift.
+    if let Some(distinctive) = claim_labels
+        .iter()
+        .filter(|l| l.chars().count() >= 16)
+        .max_by_key(|l| l.chars().count())
+    {
+        // Both sides must be distinctive: "yes, and allow …" trivially
+        // contains the bare "yes" grid label, which would cross-join
+        // every prompt pair (caught by unit test).
+        if grid_labels.iter().any(|g| {
+            g.contains(distinctive.as_str())
+                || (g.chars().count() >= 16 && distinctive.contains(g.as_str()))
+        }) {
+            return Some("fallback");
+        }
     }
-    true
+    None
+}
+
+// Freshness bound for the grid snapshot used as the join selector. Grid
+// reports arrive ~1/s while a menu is displayed, so a stale snapshot means
+// no menu is on screen (or the terminal is mid-repaint) — hold rather than
+// guess.
+const CLAIM_JOIN_GRID_FRESH_MS: u128 = 2_500;
+
+// Reconcile the pane's displayed hook menu with the terminal's own
+// display. Called from the grid-report intake (the selector's event
+// source), after claim add, and after keyed clears. The pane shows the
+// queued claim whose labels match what the terminal shows — so a pane
+// answer keystrokes the prompt it displays, by construction.
+fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str) {
+    if !bram_menus_hook_driven_enabled() {
+        return;
+    }
+    let now = unix_now_ms();
+    let claims: Vec<HookMenuClaim> = {
+        let Ok(mut q) = menu_hook_claims_cell().lock() else {
+            return;
+        };
+        q.retain(|c| now - c.at_ms < MENU_HOOK_CLAIM_TTL_MS);
+        q.clone()
+    };
+    // Grid labels + scene text (header and context lines), both normalized.
+    let grid_view: Option<(Vec<String>, String)> = latest_grid_menu_cell().lock().ok().and_then(|g| {
+        g.as_ref()
+            .filter(|s| (unix_now_ms() as u128).saturating_sub(s.ts_ms) < CLAIM_JOIN_GRID_FRESH_MS)
+            .map(|s| {
+                let labels: Vec<String> = s
+                    .options
+                    .iter()
+                    .map(|o| normalized_menu_label(&o.label))
+                    .collect();
+                let scene = normalized_menu_label(&format!(
+                    "{} {}",
+                    s.header,
+                    s.above.join(" ")
+                ));
+                (labels, scene)
+            })
+    });
+    let joined: Option<(&HookMenuClaim, &'static str)> = grid_view.as_ref().and_then(|(gl, scene)| {
+        claims
+            .iter()
+            .find_map(|c| {
+                if claim_signature_join(c, scene) {
+                    Some((c, "signature"))
+                } else {
+                    claim_label_join(c, gl).map(|how| (c, how))
+                }
+            })
+    });
+    let grid_labels = grid_view.as_ref().map(|(gl, _)| gl);
+    // Optimistic single-claim display: PermissionRequest fires BEFORE the
+    // prompt renders, so the grid can't corroborate the very first claim
+    // yet. With exactly one claim and nothing displayed, show it now (the
+    // single-prompt behavior Bram has always had); the join corrects it
+    // within a grid-report cycle if the terminal disagrees.
+    let displayed: Option<String> = menu_hook_displayed_cell().lock().ok().and_then(|d| d.clone());
+    let (target, how): (Option<&HookMenuClaim>, &'static str) = match joined {
+        Some((c, how)) => (Some(c), how),
+        None if grid_labels.is_none() && claims.len() == 1 && displayed.is_none() => {
+            (claims.first(), "optimistic-single")
+        }
+        None if grid_labels.is_none() => {
+            // No fresh grid display to arbitrate: hold what's shown.
+            return;
+        }
+        None => (None, "none"),
+    };
+    match target {
+        Some(claim) if displayed.as_deref() != Some(claim.id_key.as_str()) => {
+            if let Ok(mut d) = menu_hook_displayed_cell().lock() {
+                *d = Some(claim.id_key.clone());
+            }
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "hook-menu",
+                    &format!(
+                        "op=claim-queue-select joined={} cause={} tool={} id={} depth={}",
+                        how,
+                        cause,
+                        claim.menu.tool,
+                        claim.tool_use_id.as_deref().unwrap_or("none"),
+                        claims.len(),
+                    ),
+                );
+            }
+            let payload = Some(claim.menu.clone());
+            turn_state_set_menu(app, payload.clone(), "hook-permission", "detected");
+            emit_pty_menu_with_prose(app, &payload);
+        }
+        Some(_) => {}
+        None => {
+            if displayed.is_some() {
+                if let Ok(mut d) = menu_hook_displayed_cell().lock() {
+                    *d = None;
+                }
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        app,
+                        "hook-menu",
+                        &format!(
+                            "op=claim-queue-select joined=none cause={} depth={}",
+                            cause,
+                            claims.len(),
+                        ),
+                    );
+                }
+                turn_state_set_menu(app, None, "hook-permission", "dismissed");
+                emit_pty_menu_with_prose(app, &None);
+            }
+        }
+    }
 }
 
 // True iff a hook menu currently owns the slot and the safety timeout has not
@@ -742,7 +902,84 @@ fn clear_hook_permission_menu<R: tauri::Runtime>(
     provider: &str,
     tool: &str,
     reason: &str,
+    tool_use_id: Option<&str>,
+    clear_signature: Option<&str>,
 ) {
+    // parallel-menu-claim-queue: a keyed clear resolves ONE call and must
+    // not blank a different pending prompt (2026-07-18 19:48:53 specimen:
+    // one subagent's clear dismissed another's live menu). Remove only the
+    // matching claim — by tool_use_id when both sides have one, else by
+    // tool_input signature (claims from PermissionRequest lack ids; clears
+    // from PostToolUse have them, so the signature is the shared key).
+    // Dismiss the pane display only if it was showing a removed claim,
+    // then re-run selection so the next matching claim surfaces. Unkeyed
+    // clears (Codex PTY cancel, legacy hook installs) fall through to the
+    // full clear below, draining the queue.
+    let id = tool_use_id.filter(|s| !s.is_empty());
+    let sig = clear_signature.filter(|s| !s.is_empty());
+    if id.is_some() || sig.is_some() {
+        let matches = |c: &HookMenuClaim| -> bool {
+            (id.is_some() && c.tool_use_id.as_deref() == id)
+                || (sig.is_some() && c.signature.as_deref() == sig)
+        };
+        let (removed_keys, depth) = {
+            let Ok(mut q) = menu_hook_claims_cell().lock() else {
+                return;
+            };
+            let removed: Vec<String> = q
+                .iter()
+                .filter(|c| matches(c))
+                .map(|c| c.id_key.clone())
+                .collect();
+            q.retain(|c| !matches(c));
+            (removed, q.len())
+        };
+        let displayed_removed = menu_hook_displayed_cell()
+            .lock()
+            .ok()
+            .and_then(|d| d.clone())
+            .map(|d| removed_keys.contains(&d))
+            .unwrap_or(false);
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "hook-menu",
+                &format!(
+                    "op=claim-queue-remove reason={} id={} sig_present={} removed={} displayed_removed={} depth={}",
+                    reason,
+                    id.unwrap_or("none"),
+                    sig.is_some(),
+                    removed_keys.len(),
+                    displayed_removed,
+                    depth,
+                ),
+            );
+        }
+        if !displayed_removed {
+            // Either the removed claim was queued-but-hidden, or the id
+            // matched nothing (already expired) — the pane display is
+            // about a different prompt and stays.
+            return;
+        }
+        clear_hook_permission_menu_display(app, provider, tool, reason);
+        select_hook_claim_display(app, "clear-remove");
+        return;
+    }
+    if let Ok(mut q) = menu_hook_claims_cell().lock() {
+        q.clear();
+    }
+    clear_hook_permission_menu_display(app, provider, tool, reason);
+}
+
+fn clear_hook_permission_menu_display<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    provider: &str,
+    tool: &str,
+    reason: &str,
+) {
+    if let Ok(mut d) = menu_hook_displayed_cell().lock() {
+        *d = None;
+    }
     if bram_trace_enabled() {
         // Disambiguation instrumentation (instrument-hook-clear-vs-held-menu):
         // this hook-clear emits pty-menu-changed=null and can blank the pane
@@ -1878,6 +2115,87 @@ fn fence_decision(
 }
 
 #[cfg(test)]
+mod claim_label_join_tests {
+    use super::{claim_label_join, normalized_menu_label, HookMenuClaim};
+
+    fn claim_with_labels(labels: &[&str]) -> HookMenuClaim {
+        HookMenuClaim {
+            id_key: "t1".to_string(),
+            tool_use_id: Some("t1".to_string()),
+            signature: None,
+            menu: super::PtyMenu {
+                options: labels
+                    .iter()
+                    .map(|l| super::MenuOption {
+                        key: "1".to_string(),
+                        label: l.to_string(),
+                        description: None,
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+            at_ms: 0,
+        }
+    }
+
+    fn grid(labels: &[&str]) -> Vec<String> {
+        labels.iter().map(|l| normalized_menu_label(l)).collect()
+    }
+
+    // The 2026-07-18 19:48 specimen shape: pane claim (dig) vs terminal
+    // display (mkdir) must NOT join; the matching claim must.
+    #[test]
+    fn join_is_labels_exact_and_rejects_cross_prompt() {
+        let mkdir_labels = [
+            "Yes",
+            "Yes, and always allow access to tmp/ from this project",
+            "No",
+        ];
+        let dig = claim_with_labels(&["Yes", "Yes, and allow dig +short example.com", "No"]);
+        let mkdir = claim_with_labels(&mkdir_labels);
+        let g = grid(&mkdir_labels);
+        assert_eq!(claim_label_join(&dig, &g), None);
+        assert_eq!(claim_label_join(&mkdir, &g), Some("labels"));
+    }
+
+    // The signature join (primary): claim command text found in the grid
+    // scene; different commands must not join; trivial commands abstain.
+    #[test]
+    fn signature_join_matches_scene_and_respects_guard() {
+        let mut c = claim_with_labels(&["Yes", "No"]);
+        c.signature = Some("Bash(touch /tmp/menu-stress/solo-a.txt)".to_string());
+        let scene = normalized_menu_label(
+            "Bash command touch /tmp/menu-stress/solo-a.txt Do you want to proceed?",
+        );
+        assert!(super::claim_signature_join(&c, &scene));
+        let other =
+            normalized_menu_label("Bash command scutil --get ComputerName Do you want to proceed?");
+        assert!(!super::claim_signature_join(&c, &other));
+        c.signature = Some("Bash(ls)".to_string());
+        assert!(!super::claim_signature_join(&c, &scene));
+    }
+
+    // Grid wrapping and typographic apostrophes must not break the join;
+    // truncation falls back to distinctive-option containment.
+    #[test]
+    fn join_survives_wrapping_glyphs_and_truncation() {
+        let claim = claim_with_labels(&[
+            "Yes",
+            "Yes, and don't ask again for: cargo build in this project",
+            "No",
+        ]);
+        let wrapped = grid(&[
+            "Yes",
+            "Yes, and don\u{2019}t ask again for:   cargo build in this project",
+            "No",
+        ]);
+        assert_eq!(claim_label_join(&claim, &wrapped), Some("labels"));
+        let truncated = grid(&["Yes", "Yes, and don't ask again for: cargo build in", "No", "Extra"]);
+        assert_eq!(claim_label_join(&claim, &truncated), Some("fallback"));
+    }
+}
+
+#[cfg(test)]
 mod fence_decision_tests {
     use super::{answered_call_still_pending, fence_decision, FenceDecision};
 
@@ -2153,7 +2471,7 @@ struct MenuOption {
     description: Option<String>,
 }
 
-#[derive(serde::Serialize, Clone, Debug)]
+#[derive(serde::Serialize, Clone, Debug, Default)]
 struct PtyMenu {
     tool: String,
     text: String,
@@ -3064,27 +3382,21 @@ fn turn_state_set_menu<R: tauri::Runtime>(
     // (the hook never takes ownership), so grid behavior is unchanged then.
     if source == "hook-permission" {
         set_menu_hook_owner(menu.as_ref().map(|_| unix_now_ms()));
-        if menu.is_none() {
-            clear_menu_hook_claim();
-        }
     } else if menu_hook_owns_slot() {
-        // hook-claim-stale-grid-defer: a live grid menu contesting a
-        // hook-owned slot triggers the causal staleness test — if the
-        // claim's call is no longer pending in the JSONL, the claim's
-        // clear was lost; release and let this menu proceed. Grid clears
-        // (menu=None) never release: a clear is not evidence of a new
-        // prompt, and the hook menu may still be legitimate.
-        let released = menu.is_some() && release_stale_hook_claim(app, source);
-        if !released {
-            if bram_trace_enabled() {
-                append_bram_trace_line(
-                    app,
-                    "hook-menu",
-                    &format!("op=grid-deferred source={} reason={}", source, reason),
-                );
-            }
-            return;
+        // parallel-menu-claim-queue: the labels join at the grid-report
+        // intake (select_hook_claim_display) reconciles the pane display
+        // with the terminal BEFORE this grid-path update runs — an armed
+        // owner here means the displayed hook menu matches the terminal's
+        // current prompt, so the grid version defers. When no claim joins,
+        // selection clears the owner and the grid proceeds normally.
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "hook-menu",
+                &format!("op=grid-deferred source={} reason={}", source, reason),
+            );
         }
+        return;
     }
     if let Some(m) = menu.as_mut() {
         m.cache_source = Some(
@@ -3713,6 +4025,22 @@ fn handle_permission_menu<R: tauri::Runtime>(
     if clear {
         let value: serde_json::Value =
             serde_json::from_slice(body).unwrap_or(serde_json::Value::Null);
+        // Same canonical signature the claim path computes, so keyed
+        // removal matches when tool_use_id can't (PermissionRequest claims
+        // carry no id; PostToolUse clears do — signature is the shared key).
+        let clear_signature = value
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .filter(|t| !t.is_empty() && *t != "?")
+            .and_then(|tool_name| {
+                value.get("tool_input").filter(|v| v.is_object()).map(|input| {
+                    format_pending_tool_call(&PendingToolCall {
+                        name: tool_name.to_string(),
+                        input: input.clone(),
+                        id: String::new(),
+                    })
+                })
+            });
         clear_hook_permission_menu(
             app,
             value
@@ -3724,6 +4052,8 @@ fn handle_permission_menu<R: tauri::Runtime>(
                 .and_then(|v| v.as_str())
                 .unwrap_or("?"),
             "hook-clear",
+            value.get("tool_use_id").and_then(|v| v.as_str()),
+            clear_signature.as_deref(),
         );
         return (
             200,
@@ -3777,21 +4107,59 @@ fn handle_permission_menu<R: tauri::Runtime>(
     }
     attach_hook_edit_diff(app, &value, &mut menu);
     retire_dismissed_menu_on_hook_claim(app, &menu);
-    // hook-claim-stale-grid-defer: record the claim's identity so grid
-    // deferral can later test it against the JSONL's pending tool call.
-    if let Ok(mut c) = menu_hook_claim_cell().lock() {
-        *c = Some(HookMenuClaim {
-            tool: menu.tool.clone(),
-            tool_use_id: value
-                .get("tool_use_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-            signature: menu.tool_call_signature.clone(),
+    // parallel-menu-claim-queue: enqueue (replace on same key), then let
+    // the labels join decide what the pane displays. Display is no longer
+    // last-writer-wins — under parallel subagent prompts the terminal's
+    // own display arbitrates.
+    let tool_use_id = value
+        .get("tool_use_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    // Canonical signature from the claim payload's tool_input. Doubles as
+    // the id_key when the event carried no tool_use_id (PermissionRequest
+    // omits it — 2026-07-18 soak showed every claim degenerating to a
+    // colliding "Bash|" key without this).
+    let claim_signature = value
+        .get("tool_input")
+        .filter(|v| v.is_object())
+        .map(|input| {
+            format_pending_tool_call(&PendingToolCall {
+                name: menu.tool.clone(),
+                input: input.clone(),
+                id: String::new(),
+            })
         });
+    let id_key = tool_use_id
+        .clone()
+        .or_else(|| claim_signature.clone().map(|s| format!("sig:{}", s)))
+        .unwrap_or_else(|| format!("{}|", menu.tool));
+    let depth = {
+        let Ok(mut q) = menu_hook_claims_cell().lock() else {
+            return (
+                500,
+                "text/plain; charset=utf-8",
+                b"claim queue poisoned".to_vec(),
+            );
+        };
+        q.retain(|c| c.id_key != id_key);
+        q.push(HookMenuClaim {
+            id_key: id_key.clone(),
+            tool_use_id,
+            signature: claim_signature,
+            menu,
+            at_ms: unix_now_ms(),
+        });
+        q.len()
+    };
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "hook-menu",
+            &format!("op=claim-queue-add id_key={} depth={}", id_key, depth),
+        );
     }
-    let payload = Some(menu);
-    turn_state_set_menu(app, payload.clone(), "hook-permission", "detected");
-    emit_pty_menu_with_prose(app, &payload);
+    select_hook_claim_display(app, "claim-add");
     (
         200,
         "application/json; charset=utf-8",
@@ -5403,6 +5771,11 @@ fn report_grid_menu(app: AppHandle, payload: serde_json::Value) {
             });
         }
     }
+    // parallel-menu-claim-queue: the grid report is the labels-join
+    // selector's event source — reconcile the pane's displayed hook claim
+    // with the terminal's own display before the detect/emit cycle below
+    // consults ownership.
+    select_hook_claim_display(&app, "grid-report");
     // Force a detect/emit cycle now so the grid report is applied immediately
     // instead of waiting for the next PTY chunk — the PTY goes quiet while a
     // menu is shown, which is why the override otherwise missed (the host had
@@ -5981,8 +6354,12 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                                 // A hook claimed/cleared the slot but the menu is
                                 // demonstrably live on screen — release the stale
                                 // ownership so turn_state_set_menu can surface it.
+                                // The claim queue keeps its entries (inert until
+                                // the labels join re-selects one).
                                 set_menu_hook_owner(None);
-                                clear_menu_hook_claim();
+                                if let Ok(mut d) = menu_hook_displayed_cell().lock() {
+                                    *d = None;
+                                }
                             }
                             retire_suppressor = true;
                             if bram_trace_enabled() {
@@ -6260,12 +6637,7 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                 // while later ones claimed normally — this marker plus
                 // subagent spawn timing decides lost vs late vs never-fired
                 // on the next stress run.
-                if bram_menus_hook_driven_enabled()
-                    && menu_hook_claim_cell()
-                        .lock()
-                        .map(|c| c.is_none())
-                        .unwrap_or(false)
-                {
+                if bram_menus_hook_driven_enabled() && menu_hook_claims_empty() {
                     append_bram_trace_line(
                         app,
                         "hook-menu",
@@ -8878,11 +9250,15 @@ fn pty_spawn(
                             Some(SessionProvider::Codex)
                         ) {
                             if menu_hook_owns_slot() {
+                                // Unkeyed: the user cancelled the whole
+                                // turn — drain the claim queue.
                                 clear_hook_permission_menu(
                                     &app_for_thread,
                                     "codex",
                                     "?",
                                     "pty-output-user-cancel",
+                                    None,
+                                    None,
                                 );
                             }
                             kill_current_codex_turn_from_pty_cancel(&app_for_thread);

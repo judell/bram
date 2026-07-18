@@ -97,8 +97,13 @@ def main():
     elif event in ("PostToolUse", "PermissionDenied"):
         # Answered (PostToolUse) or declined via No/Esc (PermissionDenied) —
         # either way the prompt is resolved, so clear any surfaced menu.
+        # tool_name + tool_input let the host key the removal by signature:
+        # PermissionRequest claims carry no tool_use_id, so id-only clears
+        # matched nothing (parallel-menu-claim-queue soak, 2026-07-18).
         _post(port, "/__menu/permission/clear", {
             "tool_use_id": payload.get("tool_use_id"),
+            "tool_name": payload.get("tool_name"),
+            "tool_input": payload.get("tool_input") or {},
         })
 
 

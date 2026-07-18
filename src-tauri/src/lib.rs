@@ -5936,7 +5936,19 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                             .unwrap_or_else(|| "none".to_string()),
                         d.at_offset,
                     );
-                    if sig_match || labels_match {
+                    // menu-identity-labels-primary: the option-label set is
+                    // ground truth read from the grid; the signature is a
+                    // JSONL lookup that under parallel pending calls
+                    // (subagent fanouts) binds by guess. The 2026-07-18
+                    // specimen: a subagent mkdir menu and the just-dismissed
+                    // tee record were both stamped with a third agent's dig
+                    // signature — sig_match alone routed a plainly different
+                    // menu into the absence fence, which then never released
+                    // (the new menu replaced the old pixels in place, so
+                    // absence was never observed). Labels must match for the
+                    // suppression path to engage; sig_match is corroborative
+                    // only and is traced on the mismatch branch.
+                    if labels_match {
                         // Flicker guard (flicker-robust-absence-fence): a
                         // mid-repaint frame can set the absence fence while
                         // the answered menu's pixels are still coming back —
@@ -6019,15 +6031,19 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                             detected = None;
                         }
                     } else if bram_trace_enabled() {
-                        // Same tool but the fingerprint differs: a genuinely
+                        // Same tool but the label set differs: a genuinely
                         // new menu, not a stale re-read. Let it through
-                        // (this is the #193 over-fire the old tool-only key hit).
+                        // (this is the #193 over-fire the old tool-only key
+                        // hit). sig_match=true here means the signature
+                        // binding disagreed with the screen — the parallel-
+                        // pending misattribution signature.
                         append_bram_trace_line(
                             app,
                             "pty-menu",
                             &format!(
-                                "state=shown tool={} reason=post-dismiss-fingerprint-mismatch elapsed_ms={} new_options=[{}]{}{}",
+                                "state=shown tool={} reason=post-dismiss-fingerprint-mismatch sig_match={} elapsed_ms={} new_options=[{}]{}{}",
                                 new_menu.tool,
+                                sig_match,
                                 d.when.elapsed().as_millis(),
                                 option_summary,
                                 signature_summary,
@@ -6238,6 +6254,28 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                         fp,
                     ),
                 );
+                // menu-identity-labels-primary (observe-only): a grid menu
+                // surfacing with NO hook claim on file. The 2026-07-18
+                // fanout showed the FIRST subagent prompt arriving hookless
+                // while later ones claimed normally — this marker plus
+                // subagent spawn timing decides lost vs late vs never-fired
+                // on the next stress run.
+                if bram_menus_hook_driven_enabled()
+                    && menu_hook_claim_cell()
+                        .lock()
+                        .map(|c| c.is_none())
+                        .unwrap_or(false)
+                {
+                    append_bram_trace_line(
+                        app,
+                        "hook-menu",
+                        &format!(
+                            "op=grid-menu-without-claim tool={} sig_present={}",
+                            nm.tool,
+                            nm.tool_call_signature.is_some(),
+                        ),
+                    );
+                }
             }
         }
 
@@ -13713,9 +13751,17 @@ fn build_batch_rollup_diff<R: tauri::Runtime>(
 // prompt only surfaces while the main turn is blocked on it, so that
 // ordering is also the correct priority). Most-recently-modified first;
 // finished agents are skipped without a full read.
-fn sweep_subagents_for_pending_call(session_path: &Path) -> Option<PendingToolCall> {
-    let dir = st_session_subagents_dir(session_path)?;
-    let rd = std::fs::read_dir(&dir).ok()?;
+// Returns the newest live subagent's pending call plus the count of live
+// (unfinished) subagent transcripts. menu-identity-labels-primary: with two
+// or more live subagents the menu↔call binding is a guess — the caller
+// marks the lookup ambiguous so identity decisions can discount it.
+fn sweep_subagents_for_pending_call(session_path: &Path) -> (Option<PendingToolCall>, usize) {
+    let Some(dir) = st_session_subagents_dir(session_path) else {
+        return (None, 0);
+    };
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return (None, 0);
+    };
     let mut candidates: Vec<(std::time::SystemTime, std::path::PathBuf)> = Vec::new();
     for entry in rd.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
@@ -13727,22 +13773,25 @@ fn sweep_subagents_for_pending_call(session_path: &Path) -> Option<PendingToolCa
         candidates.push((mtime, entry.path()));
     }
     candidates.sort_by(|a, b| b.0.cmp(&a.0));
-    for (_, p) in candidates {
-        // A finished agent has no pending prompt; tail-line check is far
-        // cheaper than the full extraction read.
-        if st_subagent_finished(&p) {
-            continue;
-        }
+    // A finished agent has no pending prompt; tail-line check is far
+    // cheaper than the full extraction read.
+    let live: Vec<&std::path::PathBuf> = candidates
+        .iter()
+        .map(|(_, p)| p)
+        .filter(|p| !st_subagent_finished(p))
+        .collect();
+    let live_count = live.len();
+    for p in live {
         // Same 4 MB budget as the main-session scan: subagent transcripts
         // accumulate the same file-history-snapshot bloat (#170).
-        let Some(text) = st_read_tail(&p, 4 * 1024 * 1024) else {
+        let Some(text) = st_read_tail(p, 4 * 1024 * 1024) else {
             continue;
         };
         if let Some(call) = extract_pending_tool_call_from_jsonl(&text) {
-            return Some(call);
+            return (Some(call), live_count);
         }
     }
-    None
+    (None, live_count)
 }
 
 fn lookup_pending_tool_call<R: tauri::Runtime>(app: &AppHandle<R>) -> PendingToolCallLookup {
@@ -13861,7 +13910,8 @@ fn lookup_pending_tool_call<R: tauri::Runtime>(app: &AppHandle<R>) -> PendingToo
             // "subagent-found" (vs "no-unmatched-tool-use") also keeps
             // the jsonl-resolved janitor from voiding a live held
             // subagent menu.
-            if let Some(call) = sweep_subagents_for_pending_call(&path) {
+            let (subagent_call, live_count) = sweep_subagents_for_pending_call(&path);
+            if let Some(call) = subagent_call {
                 let content = if call.name == "Write" {
                     call.input
                         .get("content")
@@ -13875,7 +13925,14 @@ fn lookup_pending_tool_call<R: tauri::Runtime>(app: &AppHandle<R>) -> PendingToo
                     tool_use_id: Some(call.id.clone()),
                     diff: pending_tool_call_diff(&call, app),
                     content,
-                    reason: "subagent-found",
+                    // menu-identity-labels-primary: ≥2 live subagents means
+                    // this call is one guess among several — flows into
+                    // signature_reason traces via the existing plumbing.
+                    reason: if live_count >= 2 {
+                        "subagent-found-ambiguous"
+                    } else {
+                        "subagent-found"
+                    },
                     tail_bytes,
                 };
             }

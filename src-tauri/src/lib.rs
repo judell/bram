@@ -771,6 +771,61 @@ fn claim_label_join(claim: &HookMenuClaim, grid_labels: &[String]) -> Option<&'s
 // guess.
 const CLAIM_JOIN_GRID_FRESH_MS: u128 = 2_500;
 
+// claim-id-resolution (upstream ask #1 implemented locally):
+// PermissionRequest omits tool_use_id, but by the time the prompt renders
+// the call's tool_use record is usually flushed to the main-session or a
+// subagent transcript. Match the claim's signature against unresolved
+// calls; exactly one winner gives the claim its real id — closing the id
+// asymmetry with clears (which DO carry the id) and making janitor
+// matching exact. Zero or multiple matches keep signature keying and are
+// traced.
+fn resolve_claim_tool_use_id<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    sig: &str,
+) -> (Option<String>, &'static str) {
+    let Some(path) = latest_claude_session_path(app).ok().flatten() else {
+        return (None, "no-session");
+    };
+    let mut matches: Vec<String> = Vec::new();
+    if let Some(text) = st_read_tail(&path, 4 * 1024 * 1024) {
+        for call in extract_pending_tool_cluster_from_jsonl(&text) {
+            if !call.id.is_empty() && format_pending_tool_call(&call) == sig {
+                matches.push(call.id.clone());
+            }
+        }
+    }
+    if matches.is_empty() {
+        if let Some(dir) = st_session_subagents_dir(&path) {
+            if let Ok(rd) = std::fs::read_dir(&dir) {
+                for entry in rd.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if !(name.starts_with("agent-") && name.ends_with(".jsonl")) {
+                        continue;
+                    }
+                    let p = entry.path();
+                    if st_subagent_finished(&p) {
+                        continue;
+                    }
+                    let Some(text) = st_read_tail(&p, 4 * 1024 * 1024) else {
+                        continue;
+                    };
+                    for call in extract_pending_tool_cluster_from_jsonl(&text) {
+                        if !call.id.is_empty() && format_pending_tool_call(&call) == sig {
+                            matches.push(call.id.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    matches.dedup();
+    match matches.len() {
+        0 => (None, "none"),
+        1 => (Some(matches.remove(0)), "resolved"),
+        _ => (None, "ambiguous"),
+    }
+}
+
 // upstream-posttooluse-on-failure (implemented locally): Claude Code
 // fires no PostToolUse for a command that runs and fails, so a failed
 // call's claim never receives its hook clear. The transcript knows
@@ -4287,10 +4342,21 @@ fn handle_permission_menu<R: tauri::Runtime>(
                 id: String::new(),
             })
         });
+    // claim-id-resolution: adopt the transcript's tool_use_id when the
+    // event omitted it and the signature matches exactly one unresolved
+    // call.
+    let (tool_use_id, resolution) = match (tool_use_id, claim_signature.as_deref()) {
+        (Some(id), _) => (Some(id), "from-event"),
+        (None, Some(sig)) => resolve_claim_tool_use_id(app, sig),
+        (None, None) => (None, "no-signature"),
+    };
     let id_key = tool_use_id
         .clone()
         .or_else(|| claim_signature.clone().map(|s| format!("sig:{}", s)))
         .unwrap_or_else(|| format!("{}|", menu.tool));
+    let resolved_trace = tool_use_id
+        .clone()
+        .unwrap_or_else(|| resolution.to_string());
     let depth = {
         let Ok(mut q) = menu_hook_claims_cell().lock() else {
             return (
@@ -4313,7 +4379,10 @@ fn handle_permission_menu<R: tauri::Runtime>(
         append_bram_trace_line(
             app,
             "hook-menu",
-            &format!("op=claim-queue-add id_key={} depth={}", id_key, depth),
+            &format!(
+                "op=claim-queue-add id_key={} resolved_id={} depth={}",
+                id_key, resolved_trace, depth
+            ),
         );
     }
     select_hook_claim_display(app, "claim-add");

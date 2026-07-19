@@ -771,6 +771,150 @@ fn claim_label_join(claim: &HookMenuClaim, grid_labels: &[String]) -> Option<&'s
 // guess.
 const CLAIM_JOIN_GRID_FRESH_MS: u128 = 2_500;
 
+// upstream-prompt-lifecycle-events (upstream ask #3 implemented locally):
+// Bram emits the PromptShown/PromptResolved pair itself — the
+// formalization of the state machine the detectors already implement.
+// One prompt is open at a time (matching the terminal); a shown for a
+// different prompt supersedes the open one; resolved fires exactly once
+// per shown. No new detection — only unification, recorded to a bounded
+// history (served on /__prompt-lifecycle) and the [prompt-lifecycle]
+// trace category. If Claude Code ever ships real lifecycle events, the
+// producer swaps and consumers keep their shape.
+struct OpenPrompt {
+    prompt_id: String,
+    tool: String,
+    tool_use_id: Option<String>,
+    labels: Vec<String>,
+    source: &'static str,
+    shown_at_ms: i64,
+}
+static PROMPT_OPEN: OnceLock<Mutex<Option<OpenPrompt>>> = OnceLock::new();
+fn prompt_open_cell() -> &'static Mutex<Option<OpenPrompt>> {
+    PROMPT_OPEN.get_or_init(|| Mutex::new(None))
+}
+static PROMPT_HISTORY: OnceLock<Mutex<Vec<serde_json::Value>>> = OnceLock::new();
+fn prompt_history_cell() -> &'static Mutex<Vec<serde_json::Value>> {
+    PROMPT_HISTORY.get_or_init(|| Mutex::new(Vec::new()))
+}
+static PROMPT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+const PROMPT_HISTORY_CAP: usize = 200;
+
+fn prompt_history_push(rec: serde_json::Value) {
+    if let Ok(mut h) = prompt_history_cell().lock() {
+        h.push(rec);
+        if h.len() > PROMPT_HISTORY_CAP {
+            let drop_n = h.len() - PROMPT_HISTORY_CAP;
+            h.drain(0..drop_n);
+        }
+    }
+}
+
+fn prompt_shown<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    tool: &str,
+    tool_use_id: Option<&str>,
+    labels: Vec<String>,
+    source: &'static str,
+) {
+    {
+        let Ok(mut open) = prompt_open_cell().lock() else {
+            return;
+        };
+        if let Some(o) = open.as_mut() {
+            if o.tool == tool && o.labels == labels {
+                // Same prompt re-emitted (enrichment, redetect). Adopt a
+                // newly-known id; no lifecycle event.
+                if o.tool_use_id.is_none() {
+                    o.tool_use_id = tool_use_id.map(|s| s.to_string());
+                }
+                return;
+            }
+        }
+    }
+    // A different prompt: the open one is superseded first.
+    prompt_resolved(app, "superseded", source);
+    let seq = PROMPT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let now = unix_now_ms();
+    let prompt_id = format!("p{}-{}", now, seq);
+    let rec = serde_json::json!({
+        "event": "prompt-shown",
+        "promptId": prompt_id,
+        "tool": tool,
+        "toolUseId": tool_use_id,
+        "labels": labels,
+        "source": source,
+        "atMs": now,
+    });
+    prompt_history_push(rec);
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "prompt-lifecycle",
+            &format!(
+                "op=shown id={} tool={} source={} tool_use_id={} labels=[{}]",
+                prompt_id,
+                tool,
+                source,
+                tool_use_id.unwrap_or("none"),
+                labels_preview(&labels),
+            ),
+        );
+    }
+    if let Ok(mut open) = prompt_open_cell().lock() {
+        *open = Some(OpenPrompt {
+            prompt_id,
+            tool: tool.to_string(),
+            tool_use_id: tool_use_id.map(|s| s.to_string()),
+            labels,
+            source,
+            shown_at_ms: now,
+        });
+    }
+}
+
+fn labels_preview(labels: &[String]) -> String {
+    labels
+        .iter()
+        .map(|l| l.chars().take(30).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn prompt_resolved<R: tauri::Runtime>(app: &AppHandle<R>, outcome: &str, detail: &str) {
+    let open = prompt_open_cell().lock().ok().and_then(|mut o| o.take());
+    let Some(o) = open else {
+        return;
+    };
+    let now = unix_now_ms();
+    let rec = serde_json::json!({
+        "event": "prompt-resolved",
+        "promptId": o.prompt_id,
+        "tool": o.tool,
+        "toolUseId": o.tool_use_id,
+        "source": o.source,
+        "outcome": outcome,
+        "detail": detail,
+        "shownAtMs": o.shown_at_ms,
+        "atMs": now,
+        "openMs": now - o.shown_at_ms,
+    });
+    prompt_history_push(rec);
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "prompt-lifecycle",
+            &format!(
+                "op=resolved id={} tool={} outcome={} detail={} open_ms={}",
+                o.prompt_id,
+                o.tool,
+                outcome,
+                detail,
+                now - o.shown_at_ms,
+            ),
+        );
+    }
+}
+
 // claim-id-resolution (upstream ask #1 implemented locally):
 // PermissionRequest omits tool_use_id, but by the time the prompt renders
 // the call's tool_use record is usually flushed to the main-session or a
@@ -1066,6 +1210,13 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
                     ),
                 );
             }
+            prompt_shown(
+                app,
+                &claim.menu.tool,
+                claim.tool_use_id.as_deref(),
+                claim.menu.options.iter().map(|o| o.label.clone()).collect(),
+                "hook",
+            );
             let payload = Some(claim.menu.clone());
             turn_state_set_menu(app, payload.clone(), "hook-permission", "detected");
             emit_pty_menu_with_prose(app, &payload);
@@ -1087,6 +1238,7 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
                         ),
                     );
                 }
+                prompt_resolved(app, "superseded", "joined-none");
                 turn_state_set_menu(app, None, "hook-permission", "dismissed");
                 emit_pty_menu_with_prose(app, &None);
             }
@@ -1192,6 +1344,17 @@ fn clear_hook_permission_menu_display<R: tauri::Runtime>(
     if let Ok(mut d) = menu_hook_displayed_cell().lock() {
         *d = None;
     }
+    // prompt-lifecycle: a user cancel is an interruption; every other
+    // clear is the guarded call resolving (hook clear, jsonl-resolved).
+    prompt_resolved(
+        app,
+        if reason == "pty-output-user-cancel" {
+            "interrupted"
+        } else {
+            "resolved"
+        },
+        reason,
+    );
     if bram_trace_enabled() {
         // Disambiguation instrumentation (instrument-hook-clear-vs-held-menu):
         // this hook-clear emits pty-menu-changed=null and can blank the pane
@@ -1742,6 +1905,9 @@ fn emit_talk_session_changed_for_provider<R: tauri::Runtime>(
             }
             // sessions-new-named-session: apply a queued title to the new session.
             apply_pending_session_title(app, provider, &sid);
+            // prompt-lifecycle: a rotation orphans any open prompt — the
+            // session that asked it is gone.
+            prompt_resolved(app, "session-ended", &provider_label);
         }
         // menu-stack-pty-inflight-prose probe: on each Claude session-JSONL
         // write, correlate the latest assistant-record timestamp against the
@@ -6991,6 +7157,15 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                     "op=grid-emit-allowed source=pty-menu reason=owner-no-pending-menu",
                 );
             }
+            if let Some(nm) = payload.as_ref() {
+                prompt_shown(
+                    app,
+                    &nm.tool,
+                    None,
+                    nm.options.iter().map(|o| o.label.clone()).collect(),
+                    "grid",
+                );
+            }
             emit_pty_menu_with_prose(app, &payload);
         }
         trace_pty_menu_options(app, &payload);
@@ -7583,6 +7758,7 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
         // has nothing to clear. Refs #77 tighten-pty-menu-emit-cadence.
         if tool == PENDING_TOOL {
             eprintln!("[pty-menu] cleared by user input (pending menu — shown emit was deferred)");
+            prompt_resolved(app, "answered", "pending-menu");
             clear_grid_menu_sighting();
             if clears_inflight {
                 clear_active_sentinel_with_reason(app, "pty-menu-pending-user-reject");
@@ -7602,6 +7778,7 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
             );
         }
         menu_prose_probe_record_dismiss(app, &tool, "user-input");
+        prompt_resolved(app, "answered", &tool);
         // Capture the answered call's identity while it is still the
         // oldest unresolved tool_use (one 4MB-tail read; dismissals are
         // user-paced). May be None under record-flush lag.
@@ -29983,6 +30160,40 @@ fn route_request<R: tauri::Runtime>(
     // [{role, text, entries[], images[]}] shape Transcript renders against.
     // Send-ledger snapshot (esc/resend redesign phase 3): drives the
     // passive banner. Pure read; no state transitions happen here.
+    // upstream-prompt-lifecycle-events: the shown/resolved ledger, for the
+    // Status tab and forensics. `open` is the currently-displayed prompt
+    // (null when none); `history` is the bounded event stream.
+    if path == "__prompt-lifecycle" {
+        let open = prompt_open_cell()
+            .lock()
+            .ok()
+            .and_then(|o| {
+                o.as_ref().map(|p| {
+                    serde_json::json!({
+                        "promptId": p.prompt_id,
+                        "tool": p.tool,
+                        "toolUseId": p.tool_use_id,
+                        "labels": p.labels,
+                        "source": p.source,
+                        "shownAtMs": p.shown_at_ms,
+                    })
+                })
+            })
+            .unwrap_or(serde_json::Value::Null);
+        let history: Vec<serde_json::Value> = prompt_history_cell()
+            .lock()
+            .map(|h| h.clone())
+            .unwrap_or_default();
+        let body = serde_json::json!({
+            "open": open,
+            "history": history,
+            "nowMs": unix_now_ms(),
+        });
+        return match serde_json::to_vec(&body) {
+            Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
+            Err(e) => (500, "text/plain; charset=utf-8", e.to_string().into_bytes()),
+        };
+    }
     if path == "__send-ledger" {
         let entries: Vec<serde_json::Value> = send_ledger_cell()
             .lock()

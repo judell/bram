@@ -482,6 +482,20 @@ file / event reference.
   `[iframe] subkind=listener-fired context=inflight-claim-changed`
   downstream.
 
+## 12. Prompt lifecycle
+
+- **`GET /__prompt-lifecycle`** — Bram's locally-implemented
+  PromptShown/PromptResolved ledger (upstream-prompt-lifecycle-events;
+  rationale in `docs/upstream-asks.md` #3). Returns
+  `{ open, history, nowMs }`: `open` is the currently-displayed prompt
+  (`promptId`, `tool`, `toolUseId`, `labels`, `source: hook|grid`,
+  `shownAtMs`) or null; `history` is the bounded (200) event stream of
+  `prompt-shown` / `prompt-resolved` records, the latter carrying
+  `outcome: answered|resolved|interrupted|superseded|session-ended`,
+  `detail`, and `openMs`. Read-only; producers are the existing menu
+  transition points in `lib.rs`. Trace mirror: the `[prompt-lifecycle]`
+  category.
+
 ## Drift policy
 
 Code under `src-tauri/src/lib.rs` is authoritative. This catalog is the

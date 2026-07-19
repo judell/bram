@@ -16,8 +16,8 @@ is the `signature_source` field (`grid` | `jsonl` | `hook`).
 
 So there is no byte-pattern layer to delete. There are two paths:
 
-- **Hook** — `app/__shell/permission-menu-hook.py` (Claude) /
-  `app/shell/codex-permission-menu-hook.py` (Codex) POST to
+- **Hook** — `app/provider-hooks/claude-permission-menu-hook.py` (Claude) /
+  `app/provider-hooks/codex-permission-menu-hook.py` (Codex) POST to
   `/__menu/permission[/clear]`; host `handle_permission_menu`
   (`lib.rs:3119`). Authoritative: claims the slot via
   `set_menu_hook_owner` (`lib.rs:2528`), and is causal on **both** show

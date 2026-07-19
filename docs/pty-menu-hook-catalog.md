@@ -6,7 +6,7 @@ axes: `cursor` / `header` / `1./2. pair` / `footer` / `keyword guard`). This
 doc catalogs the same menus by their *structured hook payload* — what a Claude
 Code `PreToolUse` / `PermissionRequest` hook sees at pose-time, before the
 prompt renders. The hook-driven permission-menu surfacing (`menus.hookDriven`,
-`app/__shell/permission-menu-hook.py`, `/__menu/permission`) builds the
+`app/provider-hooks/claude-permission-menu-hook.py`, `/__menu/permission`) builds the
 agent-pane menu from these fields instead of scraping the grid.
 
 **Claude and Codex.** Claude contributes permission prompts plus
@@ -143,7 +143,7 @@ normal work accumulates real payloads; periodically we grep the log for new
 *Frontier* into *Confirmed*. Remove the hook (and this section) once the union
 is settled.
 
-Codex capture is built into `app/shell/codex-permission-menu-hook.py`: every
+Codex capture is built into `app/provider-hooks/codex-permission-menu-hook.py`: every
 `PermissionRequest` appends a compact shape record to
 `resources/codex-permission-hook-capture.jsonl` while also forwarding the menu
 payload to Bram.

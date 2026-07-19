@@ -7,8 +7,8 @@ including:
 - `~/.bram/codex-permission-menu-hook.py`
 - `~/.codex/config.toml` Bram hook and `developer_instructions` blocks
 - `{project}/.claude/bram-conventions.md`
-- `{project}/.claude/hooks/worklist-guard.py`
-- `{project}/.claude/hooks/permission-menu-hook.py`
+- `{project}/.claude/hooks/claude-worklist-guard.py`
+- `{project}/.claude/hooks/claude-permission-menu-hook.py`
 
 Changing any installed artifact's contents should produce one Agent
 Coordination setup or refresh banner. Codex has one extra step after setup:
@@ -20,7 +20,7 @@ not enough.
 ## Claude First
 
 1. Make a harmless content edit to one Codex artifact, for example `~/.bram/codex-worklist-guard.py` or `~/.bram/codex-permission-menu-hook.py`.
-2. Make a harmless content edit to one Claude artifact, for example `{project}/.claude/bram-conventions.md` or `{project}/.claude/hooks/permission-menu-hook.py`.
+2. Make a harmless content edit to one Claude artifact, for example `{project}/.claude/bram-conventions.md` or `{project}/.claude/hooks/claude-permission-menu-hook.py`.
 3. Start Claude in the project.
 4. Expect one Agent Coordination setup or refresh banner.
 5. Click setup or refresh.
@@ -36,7 +36,7 @@ not enough.
 ## Codex First
 
 1. Make a harmless content edit to one Codex artifact, for example `~/.bram/codex-worklist-guard.py` or `~/.bram/codex-permission-menu-hook.py`.
-2. Make a harmless content edit to one Claude artifact, for example `{project}/.claude/bram-conventions.md` or `{project}/.claude/hooks/permission-menu-hook.py`.
+2. Make a harmless content edit to one Claude artifact, for example `{project}/.claude/bram-conventions.md` or `{project}/.claude/hooks/claude-permission-menu-hook.py`.
 3. Start Codex in the project.
 4. Expect one Agent Coordination setup or refresh banner.
 5. Click setup or refresh.

@@ -1653,7 +1653,7 @@ fn append_bram_trace_line<R: tauri::Runtime>(app: &AppHandle<R>, category: &str,
     // PTY read loop responsive under heavy TUI animation. Refs #82.
     //
     // Append mode is load-bearing: subprocess hooks (e.g. .claude/hooks/
-    // worklist-guard.py) also append to this file via plain open("a").
+    // claude-worklist-guard.py) also append to this file via plain open("a").
     // Without O_APPEND on the host's cached fd, the host's position-
     // tracked writeln! would silently overwrite hook bytes appended
     // since the host's last write. That was the root cause of #69
@@ -9484,7 +9484,7 @@ fn pty_spawn(
     // it, so an agent running OUTSIDE Bram can't POST menus into this pane.
     command.env("BRAM_MENU_TOKEN", menu_session_token());
     // Propagate trace toggle + log path into the PTY child so hook
-    // scripts (worklist-guard.py for Claude, worklist-guard-codex.py
+    // scripts (claude-worklist-guard.py for Claude, codex-worklist-guard.py
     // for Codex) can write [hook] records into the same trace file as
     // the host. See trace-category-hook.
     if bram_trace_enabled() {
@@ -20482,18 +20482,18 @@ const ENHANCE_SIDECAR_REL: &str = ".claude/bram-conventions.md";
 const ENHANCE_SIDECAR_LEGACY_REL: &str = ".claude/xmlui-desktop-conventions.md";
 const ENHANCE_CODEX_AGENTS_REL: &str = "AGENTS.md";
 const ENHANCE_CODEX_BUNDLE_REL: &str = "shell/codex-startup-instructions.md";
-const ENHANCE_HOOK_SCRIPT_REL: &str = ".claude/hooks/worklist-guard.py";
+const ENHANCE_HOOK_SCRIPT_REL: &str = ".claude/hooks/claude-worklist-guard.py";
 const ENHANCE_SETTINGS_REL: &str = ".claude/settings.json";
-const ENHANCE_HOOK_BUNDLE_REL: &str = "__shell/worklist-guard.py";
+const ENHANCE_HOOK_BUNDLE_REL: &str = "provider-hooks/claude-worklist-guard.py";
 // Codex's worklist guard runs as a PreToolUse hook in codex's user-global
 // config. The bundle ships with Bram and is copied to
 // ~/.bram/codex-worklist-guard.py the first time setup runs in any
 // project; the hook config registration in ~/.codex/config.toml is identical
 // across projects because the script self-detects whether the active cwd is
 // Bram-managed (presence of resources/.worklist-authorization.json).
-const ENHANCE_CODEX_HOOK_BUNDLE_REL: &str = "shell/worklist-guard-codex.py";
+const ENHANCE_CODEX_HOOK_BUNDLE_REL: &str = "provider-hooks/codex-worklist-guard.py";
 const ENHANCE_CODEX_HOOK_INSTALL_REL: &str = ".bram/codex-worklist-guard.py";
-const ENHANCE_CODEX_MENU_HOOK_BUNDLE_REL: &str = "shell/codex-permission-menu-hook.py";
+const ENHANCE_CODEX_MENU_HOOK_BUNDLE_REL: &str = "provider-hooks/codex-permission-menu-hook.py";
 const ENHANCE_CODEX_MENU_HOOK_INSTALL_REL: &str = ".bram/codex-permission-menu-hook.py";
 const ENHANCE_CODEX_CONFIG_REL: &str = ".codex/config.toml";
 const ENHANCE_CODEX_TRUST_ACK_LEGACY_REL: &str = ".bram/codex-trust-ack";
@@ -20564,21 +20564,21 @@ const PTY_INTENT_REL: &str = "resources/.pty-intent.jsonl";
 // `py` launcher — it ships with the python.org installer and resolves
 // Python via the registry, independent of PATH.
 #[cfg(windows)]
-const ENHANCE_HOOK_COMMAND: &str = "py -3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/worklist-guard.py\"";
+const ENHANCE_HOOK_COMMAND: &str = "py -3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-worklist-guard.py\"";
 #[cfg(not(windows))]
-const ENHANCE_HOOK_COMMAND: &str = "$CLAUDE_PROJECT_DIR/.claude/hooks/worklist-guard.py";
+const ENHANCE_HOOK_COMMAND: &str = "$CLAUDE_PROJECT_DIR/.claude/hooks/claude-worklist-guard.py";
 // Permission-menu surfacing hook (menus.hookDriven). Installed and registered
 // the same way as the worklist guard: bundle copied to
-// .claude/hooks/permission-menu-hook.py, registered as PermissionRequest +
+// .claude/hooks/claude-permission-menu-hook.py, registered as PermissionRequest +
 // PostToolUse hooks. Observe-only (never blocks); canonical source is
-// app/__shell/permission-menu-hook.py.
-const ENHANCE_MENU_HOOK_SCRIPT_REL: &str = ".claude/hooks/permission-menu-hook.py";
-const ENHANCE_MENU_HOOK_BUNDLE_REL: &str = "__shell/permission-menu-hook.py";
+// app/provider-hooks/claude-permission-menu-hook.py.
+const ENHANCE_MENU_HOOK_SCRIPT_REL: &str = ".claude/hooks/claude-permission-menu-hook.py";
+const ENHANCE_MENU_HOOK_BUNDLE_REL: &str = "provider-hooks/claude-permission-menu-hook.py";
 #[cfg(windows)]
 const ENHANCE_MENU_HOOK_COMMAND: &str =
-    "py -3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/permission-menu-hook.py\"";
+    "py -3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-permission-menu-hook.py\"";
 #[cfg(not(windows))]
-const ENHANCE_MENU_HOOK_COMMAND: &str = "$CLAUDE_PROJECT_DIR/.claude/hooks/permission-menu-hook.py";
+const ENHANCE_MENU_HOOK_COMMAND: &str = "$CLAUDE_PROJECT_DIR/.claude/hooks/claude-permission-menu-hook.py";
 // Presence of this file in the project root means the project IS the Bram
 // source repo (it bundles the conventions). enhance_status treats it as a
 // valid sidecar location; run_enhance skips the parts that would otherwise
@@ -20607,7 +20607,7 @@ fn settings_has_worklist_guard_hook(settings_path: &Path) -> bool {
                         hs.iter().any(|h| {
                             h.get("command")
                                 .and_then(|c| c.as_str())
-                                .map(|s| s.contains("worklist-guard.py"))
+                                .map(|s| s.contains("claude-worklist-guard.py"))
                                 .unwrap_or(false)
                         })
                     })
@@ -20622,6 +20622,35 @@ fn settings_has_worklist_guard_hook(settings_path: &Path) -> bool {
 // and PreToolUse (AskUserQuestion surface). Mirrors
 // settings_has_worklist_guard_hook; requiring the full set means a partial or
 // pre-cutover (2-event) install is correctly flagged as still needing Setup.
+// issue-217: prune legacy generic-name installed Claude hooks once
+// settings.json no longer references them. Runs at Bram startup — before
+// any Claude session this Bram spawns, so no hook snapshot from a
+// Bram-managed session can still point at the pruned paths. (A session
+// launched outside Bram against a half-migrated project is the accepted
+// residual edge; re-running Setup restores the transitional copy.)
+// Containment is exact: the new commands contain "hooks/claude-…", which
+// does not match the legacy "hooks/worklist-guard.py" needles.
+fn prune_legacy_claude_hooks(proj: &Path) {
+    let settings_text =
+        std::fs::read_to_string(proj.join(ENHANCE_SETTINGS_REL)).unwrap_or_default();
+    for (legacy_rel, needle) in [
+        (
+            ".claude/hooks/worklist-guard.py",
+            "hooks/worklist-guard.py",
+        ),
+        (
+            ".claude/hooks/permission-menu-hook.py",
+            "hooks/permission-menu-hook.py",
+        ),
+    ] {
+        let path = proj.join(legacy_rel);
+        if !settings_text.contains(needle) && path.exists() {
+            let _ = std::fs::remove_file(&path);
+            eprintln!("[bram] pruned legacy hook {} (#217 migration)", legacy_rel);
+        }
+    }
+}
+
 fn settings_has_permission_menu_hook(settings_path: &Path) -> bool {
     let content = match std::fs::read_to_string(settings_path) {
         Ok(s) => s,
@@ -20645,7 +20674,7 @@ fn settings_has_permission_menu_hook(settings_path: &Path) -> bool {
                             hs.iter().any(|h| {
                                 h.get("command")
                                     .and_then(|c| c.as_str())
-                                    .map(|s| s.contains("permission-menu-hook.py"))
+                                    .map(|s| s.contains("claude-permission-menu-hook.py"))
                                     .unwrap_or(false)
                             })
                         })
@@ -21747,8 +21776,8 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
     let claude_sidecar_current = is_source_repo
         || (sidecar.exists() && hook_matches_bundle(app, &sidecar, "__shell/conventions.md"));
     let hook_script_exists = hook_script.exists();
-    // The source repo edits the hook in `app/__shell/worklist-guard.py`;
-    // `.claude/hooks/worklist-guard.py` is only the installed runtime copy.
+    // The source repo edits the hook in `app/provider-hooks/claude-worklist-guard.py`;
+    // `.claude/hooks/claude-worklist-guard.py` is only the installed runtime copy.
     // Keep comparing it against the bundle even in the source repo so setup
     // status flags drift instead of hiding stale installed hooks.
     let hook_script_current =
@@ -22093,7 +22122,7 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
     // every release that touches the bundle. Issue #173. chmod still runs only
     // after an actual write — preserves the user's mode if we skipped.
     let (hook_bytes, _mime) = serve_app_file(Some(app), ENHANCE_HOOK_BUNDLE_REL)
-        .ok_or_else(|| "worklist-guard.py bundle not found".to_string())?;
+        .ok_or_else(|| "claude-worklist-guard.py bundle not found".to_string())?;
     let hook_path = proj.join(ENHANCE_HOOK_SCRIPT_REL);
     if let Some(parent) = hook_path.parent() {
         std::fs::create_dir_all(parent)
@@ -22130,7 +22159,7 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
     // guard above (copy bundle, chmod on unix). force||!is_source_repo so bundle
     // bumps always land outside the source repo (#173).
     let (menu_hook_bytes, _mime) = serve_app_file(Some(app), ENHANCE_MENU_HOOK_BUNDLE_REL)
-        .ok_or_else(|| "permission-menu-hook.py bundle not found".to_string())?;
+        .ok_or_else(|| "claude-permission-menu-hook.py bundle not found".to_string())?;
     let menu_hook_path = proj.join(ENHANCE_MENU_HOOK_SCRIPT_REL);
     if let Some(parent) = menu_hook_path.parent() {
         std::fs::create_dir_all(parent)
@@ -22164,6 +22193,25 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
     // Pre-rename leftover script (bc3ee31). Idempotent: NotFound is fine.
     let old_hook_path = proj.join(".claude/hooks/proposal-guard.py");
     let _ = std::fs::remove_file(&old_hook_path);
+
+    // issue-217 transition: while legacy generic-name hook copies remain on
+    // disk, keep them content-identical to the new provider-named installs —
+    // live Claude sessions snapshot hook config at startup and keep invoking
+    // the legacy paths until restart. Bram startup prunes the legacy files
+    // once settings.json no longer references them
+    // (prune_legacy_claude_hooks).
+    for (legacy_rel, new_rel) in [
+        (".claude/hooks/worklist-guard.py", ENHANCE_HOOK_SCRIPT_REL),
+        (
+            ".claude/hooks/permission-menu-hook.py",
+            ENHANCE_MENU_HOOK_SCRIPT_REL,
+        ),
+    ] {
+        let legacy = proj.join(legacy_rel);
+        if legacy.exists() {
+            let _ = std::fs::copy(proj.join(new_rel), &legacy);
+        }
+    }
 
     // Register hook in settings.json (idempotent merge). Prune any
     // pre-rename proposal-guard.py PreToolUse entries first so upgraded
@@ -24818,9 +24866,9 @@ fn agent_coordination_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_j
             "level": if registered { "ok" } else { "warn" },
             "state": if registered { "registered" } else if exists { "not-registered" } else { "missing" },
             "detail": if registered {
-                "worklist-guard.py registered as PreToolUse hook for Write|Edit"
+                "claude-worklist-guard.py registered as PreToolUse hook for Write|Edit"
             } else if exists {
-                "settings.json present but worklist-guard.py is not registered"
+                "settings.json present but claude-worklist-guard.py (Claude worklist guard) is not registered"
             } else {
                 "settings.json not present"
             },
@@ -31463,12 +31511,12 @@ fn worklist_commit_files_for_ids(
 // the artifact only travels with its source.
 const INSTALLED_TWIN_PAIRS: &[(&str, &str)] = &[
     (
-        "app/__shell/worklist-guard.py",
-        ".claude/hooks/worklist-guard.py",
+        "app/provider-hooks/claude-worklist-guard.py",
+        ".claude/hooks/claude-worklist-guard.py",
     ),
     (
-        "app/__shell/permission-menu-hook.py",
-        ".claude/hooks/permission-menu-hook.py",
+        "app/provider-hooks/claude-permission-menu-hook.py",
+        ".claude/hooks/claude-permission-menu-hook.py",
     ),
 ];
 
@@ -32247,10 +32295,10 @@ mod worklist_authorization_tests {
 
     #[test]
     fn installed_twin_follows_its_canonical() {
-        let files = vec!["app/__shell/worklist-guard.py".to_string()];
+        let files = vec!["app/provider-hooks/claude-worklist-guard.py".to_string()];
         assert_eq!(
             installed_twins_for(&files),
-            vec![".claude/hooks/worklist-guard.py".to_string()]
+            vec![".claude/hooks/claude-worklist-guard.py".to_string()]
         );
     }
 
@@ -32262,8 +32310,8 @@ mod worklist_authorization_tests {
         assert!(installed_twins_for(&files).is_empty());
         // Twin already listed explicitly → not duplicated.
         let files = vec![
-            "app/__shell/worklist-guard.py".to_string(),
-            ".claude/hooks/worklist-guard.py".to_string(),
+            "app/provider-hooks/claude-worklist-guard.py".to_string(),
+            ".claude/hooks/claude-worklist-guard.py".to_string(),
         ];
         assert!(installed_twins_for(&files).is_empty());
     }
@@ -33503,6 +33551,9 @@ pub fn run() {
             eprintln!("[bram] loopback port={} sticky={}", port, sticky);
             if let Some(proj) = startup_project_root.as_ref() {
                 remove_bram_port_files(proj);
+                // issue-217: startup is the safe cutover point for the
+                // hook rename — no Bram-spawned session exists yet.
+                prune_legacy_claude_hooks(proj);
             }
             prepare_bram_trace_log(app.handle());
             trace_whisper_env(app.handle());
@@ -33835,11 +33886,11 @@ pub fn run() {
                 let mut hook_fingerprints: HashMap<String, String> = HashMap::new();
                 for (rel, path) in [
                     (
-                        "app/__shell/worklist-guard.py",
-                        proj_root_path.join("app/__shell/worklist-guard.py"),
+                        "app/provider-hooks/claude-worklist-guard.py",
+                        proj_root_path.join("app/provider-hooks/claude-worklist-guard.py"),
                     ),
                     (
-                        ".claude/hooks/worklist-guard.py",
+                        ".claude/hooks/claude-worklist-guard.py",
                         proj_root_path.join(ENHANCE_HOOK_SCRIPT_REL),
                     ),
                     (
@@ -34199,6 +34250,9 @@ pub fn run() {
                             || (in_claude_dir
                                 && (name == "settings.json"
                                     || name == "settings.local.json"
+                                    || name == "claude-worklist-guard.py"
+                                    // legacy generic name: still watched
+                                    // through the #217 transition.
                                     || name == "worklist-guard.py"))
                             // issue-221-skill-launcher: refresh the Skills list
                             // when a .claude/skills/**/SKILL.md changes.

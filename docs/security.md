@@ -53,7 +53,7 @@ independent bugs. Fixing the roots collapses the majority of the findings.
    the PTY can forge a worklist `approved:` record.
 4. **The Claude PreToolUse guard does not gate the `Bash` write surface.** For
    `tool_name == "Bash"` the guard checks only one `gh --body @` antipattern and
-   then `sys.exit(0)` (`app/__shell/worklist-guard.py:492`). Redirections,
+   then `sys.exit(0)` (`app/provider-hooks/claude-worklist-guard.py:492`). Redirections,
    `tee`, `sed -i`, `python -c`, and `git commit/push`/`gh issue close` all
    bypass the worklist. Codex gates these; Claude does not.
 
@@ -77,7 +77,7 @@ the tracking issues.
 |---|---------|----------|-------|--------|
 | H1 | Bracketed-paste framing does not neutralize `\x1b[201~` in the payload; a payload containing the paste-end sequence + `\r` escapes the frame and auto-submits smuggled terminal input. | `lib.rs:8907` | #112 | S |
 | H2 | Worklist authorization is forged from PTY input: relayed `toShell`/`toTurn`/`sendKeys` text of the form `approved: {...}` writes an auth record → injection self-authorizes repo mutations. | `lib.rs:8483`, `24187`, `8831` | #112 #109 | M |
-| H3 | Claude guard exits 0 for all `Bash`; `>`, `tee`, `sed -i`, `python -c`, `git commit/push`, `gh issue close` bypass worklist coverage entirely. Codex's `_BASH_WRITE_PATTERNS` already implements the fix. | `worklist-guard.py:492`; `worklist-guard-codex.py:280` | #119 #118 | M |
+| H3 | Claude guard exits 0 for all `Bash`; `>`, `tee`, `sed -i`, `python -c`, `git commit/push`, `gh issue close` bypass worklist coverage entirely. Codex's `_BASH_WRITE_PATTERNS` already implements the fix. | `worklist-guard.py:492`; `codex-worklist-guard.py:280` | #119 #118 | M |
 | H4 | **DONE** (security-h4-auth-fail-closed-on-interrupt). Interrupt/cancel now marks the active auth record `interruptedAtMs` via `invalidate_worklist_authorization` at every interrupt sentinel-clear site (Esc, menu-reject, Codex cancel); `validate_worklist_mutate_authorization` + `ensure_worklist_commit_authorized` reject an interrupted record or one past `WORKLIST_AUTH_TTL_MS` (5 min ≈ "same turn"). `consumedAtMs` stays ignored so the same-turn drop flow (resolve consumes on read → prune) still works — the regression guard test covers it. | `lib.rs` | #120 | ~~M~~ done |
 | H5 | **DONE** (close-on-push-automatic). Root fix: the agent-reachable `/__issue/close` route (and `push_before_close`) is **removed**. Closing is now a host consequence of two explicit user actions — you tick issues in the commit-gate dialog, then you Push — after which the host auto-closes each issue whose commit is visible on origin. No agent close path, no push-as-a-side-effect-of-close, no grants. An earlier over-scoped attempt (24h-TTL grant subsystem + manual "Close queued issues") was reverted as the cure-worse-than-disease. | `lib.rs` | #118 #121 | ~~M~~ done |
 | H6 | `Access-Control-Allow-Origin: *` on every loopback response amplifies the read + mutation routes to any local browser tab or process that learns the port. | `lib.rs:28906` | #110 #113 #121 | M |
@@ -90,7 +90,7 @@ the tracking issues.
 | M2 | Terminal I/O previews (`pty-in` / `pty-out`) land verbatim in the agent-readable, default-on, unbounded trace log with no redaction. | `lib.rs:8254`, `8441`, `903` | #114 #111 | M |
 | M3 | The PTY child inherits the full host environment including `ANTHROPIC_API_KEY` / `GITHUB_TOKEN`; the agent can `echo` them into its own context. | `lib.rs:7993` | #114 #111 | M |
 | M4 | Auditability gap: a successful worklist commit emits no trace line (no sha/ids/files); the approval trail is gated on tracing being enabled and is otherwise ephemeral. | `lib.rs:27925`, `24247` | #114 #111 | M |
-| M5 | Codex Bash gate is path-blind: any live proposed/applied item authorizes a Bash write to any *other* file. | `worklist-guard-codex.py:1049` | #119 | M |
+| M5 | Codex Bash gate is path-blind: any live proposed/applied item authorizes a Bash write to any *other* file. | `codex-worklist-guard.py:1049` | #119 | M |
 | M6 | `open_url` routes `file://` URLs to `open_path`, opening any local file in its default app; scheme is not validated. | `lib.rs:11021`; `helpers.js:2434` | #113 #110 #121 | S |
 | M7 | Issues-tab close/comment buttons call the host routes directly with only the frontend `enabled` binding as the gate; the routes have no independent auth check. | `Issues.xmlui:80`, `494`; `lib.rs:26270` | #121 | S |
 | M8 | Inspector trace tap forwards agent-pane XMLUI entries verbatim, bypassing the `__bramTraceSafeValue` sanitizer; captures input values keystroke-by-keystroke. Off by default. | `helpers.js:5280`, `742` | #114 #111 | S–M |
@@ -104,7 +104,7 @@ the tracking issues.
 | L2 | `/__worklist-history/snapshot` joins a caller `ts` into a filename with no `..` guard (constrained to `.json` targets). | `lib.rs:27099` | #110 | S |
 | L3 | `session_path_for_id` joins a caller session id into a path; constrained by the `.jsonl` suffix and `.exists()`, and the result feeds a session reload rather than an HTTP body (no exfil channel). | `lib.rs:9028` | #110 | S |
 | L4 | No `mcp__*` matcher in `.claude/settings.json` PreToolUse; if a Claude session ever gains a filesystem MCP server, its writes would be ungated. Latent given current server inventory. | `.claude/settings.json` | #119 | S–M |
-| L5 | Guard doc/path drift: `CLAUDE.md` / `conventions.md` cite `app/__shell/worklist-guard-codex.py`, but the real canonical path is `app/shell/worklist-guard-codex.py`. | `conventions.md` | #119 | S |
+| L5 | Guard doc/path drift: `CLAUDE.md` / `conventions.md` cite `app/__shell/codex-worklist-guard.py`, but the real canonical path is `app/provider-hooks/codex-worklist-guard.py`. | `conventions.md` | #119 | S |
 | L6 | `ai-describe` ships the command text, preceding agent prose, and command-output head to `api.anthropic.com`. Key handling is correct (never logged), but a secret in a command line is sent to the API. | `lib.rs:28654` | #114 | S |
 
 ## Recommended sequence

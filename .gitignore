@@ -75,3 +75,9 @@ resources/codex-permission-hook-capture.jsonl
 
 # Local editor/settings backups.
 *.bak
+
+# issue-217 transition: legacy generic hook names, kept on disk so live
+# Claude sessions (which snapshot hook config at startup) survive the
+# rename until restart; pruned by Bram startup once unregistered.
+.claude/hooks/worklist-guard.py
+.claude/hooks/permission-menu-hook.py

@@ -31,16 +31,33 @@ is XMLUI.
 
 ### Guard source of truth
 
-When editing Bram's Claude worklist guard in this source repo,
-`app/__shell/worklist-guard.py` is canonical. The runtime copy at
-`.claude/hooks/worklist-guard.py` is an installed artifact that Setup
-and `src-tauri/build.rs` refresh from that canonical source. Do not
-make functional edits in `.claude/hooks/worklist-guard.py`; they will
-either be reported as setup drift or overwritten by the next sync.
+Provider hook adapters live under `app/provider-hooks/` with
+provider-prefixed names (#217). When editing Bram's Claude worklist
+guard in this source repo, `app/provider-hooks/claude-worklist-guard.py`
+is canonical. The runtime copy at
+`.claude/hooks/claude-worklist-guard.py` is an installed artifact that
+Setup and `src-tauri/build.rs` refresh from that canonical source. Do
+not make functional edits in the installed copy; it will either be
+reported as setup drift or overwritten by the next sync. The Claude
+permission-menu hook follows the same split:
+`app/provider-hooks/claude-permission-menu-hook.py` canonical,
+`.claude/hooks/claude-permission-menu-hook.py` installed.
 
-The Codex guard has a separate source/installed split:
-`app/shell/worklist-guard-codex.py` is canonical, while
-`~/.bram/codex-worklist-guard.py` is the installed runtime copy.
+The Codex guard has the same source/installed split:
+`app/provider-hooks/codex-worklist-guard.py` is canonical, while
+`~/.bram/codex-worklist-guard.py` is the installed runtime copy (the
+Codex permission-menu hook mirrors it:
+`app/provider-hooks/codex-permission-menu-hook.py` →
+`~/.bram/codex-permission-menu-hook.py`).
+
+`app/shell/` holds shell-launch support only (`claude-code-shellrc`,
+`claude-code-profile.ps1` configure the shell that launches the agent
+CLI; `codex-startup-instructions.md` is startup text injected into Codex
+sessions) — no hook adapters. Legacy generic installed names
+(`.claude/hooks/worklist-guard.py`, `.claude/hooks/permission-menu-hook.py`)
+survive transiently after upgrade so live sessions' hook snapshots keep
+working; Bram startup prunes them once settings.json no longer
+references them.
 
 ### XMLUI lookup order
 

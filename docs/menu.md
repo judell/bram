@@ -34,7 +34,7 @@ assessment, see `docs/menu-interventions-catalog.md`.
 | 1 — JSONL | `lookup_pending_tool_call` (reads the `⏺ Tool(…)` signature from the session jsonl) | Attaches a tool signature to grid/PTY-detected menus; redundant once the hook supplies the tool directly. |
 | 2 — PTY scan | `pty_menu_update` (detector); forensic scaffolding `pty_scan_anchor_ranges`, `pty_scan_raw_anchor_ranges`, `pty_menu_scan_excerpt`, `pty_menu_scan_diagnostic`, `pty_menu_anchor_pos` — **deleted tranche 2, #214** | Fallback + oracle. The forensic scaffolding was deleted after gate-evidence confirmed zero use across the heaviest menu-forensics week. |
 | 3 — grid | `report_grid_menu` (iframe→host bridge), classifiers `grid_menu_is_bash_command_box` / `grid_menu_is_codex_permission_box` / `grid_menu_command_preview`; plus the iframe-side xterm scrape that feeds it | Fallback + oracle; the deferring half of the coordination (`op=grid-deferred` while the hook owns the slot). |
-| 4 — hook | `handle_permission_menu`, `permission_request_to_menu`, `codex_permission_request_to_menu`, `askuserquestion_to_menu` + the hook scripts (`app/__shell/permission-menu-hook.py`, `app/shell/codex-permission-menu-hook.py`) | **Primary.** `menus.hookDriven` default-on. |
+| 4 — hook | `handle_permission_menu`, `permission_request_to_menu`, `codex_permission_request_to_menu`, `askuserquestion_to_menu` + the hook scripts (`app/provider-hooks/claude-permission-menu-hook.py`, `app/provider-hooks/codex-permission-menu-hook.py`) | **Primary.** `menus.hookDriven` default-on. |
 
 ## Cleanup
 

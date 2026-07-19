@@ -284,7 +284,7 @@ of one giant rename patch.
    because it needs explicit migration or a deliberate compatibility
    break.
    Likely files: `src-tauri/tauri.conf.json`, `app/main.js`,
-   `app/__shell/helpers.js`, `app/shell/worklist-guard-codex.py`,
+   `app/__shell/helpers.js`, `app/provider-hooks/codex-worklist-guard.py`,
    `app/__shell/conventions.md`, `src-tauri/src/lib.rs`.
 
 That gives you a workable sequence:

@@ -1,10 +1,11 @@
 use std::path::PathBuf;
 
 // Sync an installed .claude/hooks/<name> copy from its canonical
-// app/__shell/<name> source on every build, so editing the canonical source
-// resyncs the runtime copy (the source repo's installed hook never goes stale).
+// app/provider-hooks/<name> source on every build, so editing the canonical
+// source resyncs the runtime copy (the source repo's installed hook never
+// goes stale). Provider hook adapters carry provider-prefixed names (#217).
 fn sync_hook(manifest_dir: &str, name: &str) {
-    let canonical: PathBuf = [manifest_dir, "..", "app", "__shell", name]
+    let canonical: PathBuf = [manifest_dir, "..", "app", "provider-hooks", name]
         .iter()
         .collect();
     let installed: PathBuf = [manifest_dir, "..", ".claude", "hooks", name]
@@ -40,13 +41,13 @@ fn sync_hook(manifest_dir: &str, name: &str) {
             let _ = std::fs::set_permissions(&installed, perms);
         }
     }
-    println!("cargo:rerun-if-changed=../app/__shell/{}", name);
+    println!("cargo:rerun-if-changed=../app/provider-hooks/{}", name);
 }
 
 fn main() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
-    sync_hook(&manifest_dir, "worklist-guard.py");
-    sync_hook(&manifest_dir, "permission-menu-hook.py");
+    sync_hook(&manifest_dir, "claude-worklist-guard.py");
+    sync_hook(&manifest_dir, "claude-permission-menu-hook.py");
 
     tauri_build::build()
 }

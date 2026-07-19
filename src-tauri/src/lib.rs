@@ -771,6 +771,153 @@ fn claim_label_join(claim: &HookMenuClaim, grid_labels: &[String]) -> Option<&'s
 // guess.
 const CLAIM_JOIN_GRID_FRESH_MS: u128 = 2_500;
 
+// upstream-posttooluse-on-failure (implemented locally): Claude Code
+// fires no PostToolUse for a command that runs and fails, so a failed
+// call's claim never receives its hook clear. The transcript knows
+// better — the call's tool_result (error or not) lands within moments.
+// Scan a transcript tail for resolution state: ids with a tool_result,
+// plus the signatures of resolved and still-unresolved tool_use records.
+fn st_tool_resolution_state(
+    text: &str,
+    resolved_ids: &mut std::collections::HashSet<String>,
+    resolved_sigs: &mut Vec<String>,
+    unresolved_sigs: &mut Vec<String>,
+) {
+    let mut calls: Vec<(String, String)> = Vec::new();
+    for line in text.lines() {
+        let Ok(rec) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        let typ = rec.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let Some(content) = rec
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+        else {
+            continue;
+        };
+        for c in content {
+            let ctyp = c.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if typ == "user" && ctyp == "tool_result" {
+                if let Some(id) = c.get("tool_use_id").and_then(|v| v.as_str()) {
+                    resolved_ids.insert(id.to_string());
+                }
+            } else if typ == "assistant" && ctyp == "tool_use" {
+                let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                if id.is_empty() || name.is_empty() {
+                    continue;
+                }
+                let input = c.get("input").cloned().unwrap_or(serde_json::Value::Null);
+                let sig = format_pending_tool_call(&PendingToolCall {
+                    name: name.to_string(),
+                    input,
+                    id: id.to_string(),
+                });
+                calls.push((id.to_string(), sig));
+            }
+        }
+    }
+    for (id, sig) in calls {
+        if resolved_ids.contains(&id) {
+            resolved_sigs.push(sig);
+        } else {
+            unresolved_sigs.push(sig);
+        }
+    }
+}
+
+// The synthesized terminal event: on transcript change, remove any claim
+// whose call is now resolved — by tool_use_id when the claim has one,
+// else by signature, requiring no unresolved same-signature call so an
+// identical retry keeps its claim. Event-driven off the JSONL watcher
+// (resolution becomes knowable exactly when the transcript changes);
+// runs only while claims are queued. Scans the main session plus live
+// subagent tails (the same set the pending sweep reads).
+fn janitor_resolved_claims<R: tauri::Runtime>(app: &AppHandle<R>) {
+    if menu_hook_claims_empty() {
+        return;
+    }
+    let Some(path) = latest_claude_session_path(app).ok().flatten() else {
+        return;
+    };
+    let mut resolved_ids: std::collections::HashSet<String> = Default::default();
+    let mut resolved_sigs: Vec<String> = Vec::new();
+    let mut unresolved_sigs: Vec<String> = Vec::new();
+    if let Some(text) = st_read_tail(&path, 4 * 1024 * 1024) {
+        st_tool_resolution_state(&text, &mut resolved_ids, &mut resolved_sigs, &mut unresolved_sigs);
+    }
+    if let Some(dir) = st_session_subagents_dir(&path) {
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for entry in rd.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !(name.starts_with("agent-") && name.ends_with(".jsonl")) {
+                    continue;
+                }
+                let p = entry.path();
+                if st_subagent_finished(&p) {
+                    continue;
+                }
+                if let Some(text) = st_read_tail(&p, 4 * 1024 * 1024) {
+                    st_tool_resolution_state(
+                        &text,
+                        &mut resolved_ids,
+                        &mut resolved_sigs,
+                        &mut unresolved_sigs,
+                    );
+                }
+            }
+        }
+    }
+    let claim_resolved = |c: &HookMenuClaim| -> bool {
+        if let Some(id) = c.tool_use_id.as_deref() {
+            return resolved_ids.contains(id);
+        }
+        if let Some(sig) = c.signature.as_deref() {
+            return resolved_sigs.iter().any(|s| s == sig)
+                && !unresolved_sigs.iter().any(|s| s == sig);
+        }
+        false
+    };
+    let (removed_keys, depth) = {
+        let Ok(mut q) = menu_hook_claims_cell().lock() else {
+            return;
+        };
+        let removed: Vec<String> = q
+            .iter()
+            .filter(|c| claim_resolved(c))
+            .map(|c| c.id_key.clone())
+            .collect();
+        if removed.is_empty() {
+            return;
+        }
+        q.retain(|c| !claim_resolved(c));
+        (removed, q.len())
+    };
+    let displayed_removed = menu_hook_displayed_cell()
+        .lock()
+        .ok()
+        .and_then(|d| d.clone())
+        .map(|d| removed_keys.contains(&d))
+        .unwrap_or(false);
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "hook-menu",
+            &format!(
+                "op=claim-queue-remove reason=jsonl-resolved removed={} displayed_removed={} depth={}",
+                removed_keys.len(),
+                displayed_removed,
+                depth,
+            ),
+        );
+    }
+    if displayed_removed {
+        clear_hook_permission_menu_display(app, "claude", "?", "jsonl-resolved");
+        select_hook_claim_display(app, "clear-remove");
+    }
+}
+
 // Reconcile the pane's displayed hook menu with the terminal's own
 // display. Called from the grid-report intake (the selector's event
 // source), after claim add, and after keyed clears. The pane shows the
@@ -33645,6 +33792,12 @@ pub fn run() {
                                 // write; piggyback on that here for a
                                 // dynamic retry the moment the file changes.
                                 try_signature_recheck_on_jsonl_change(&app_handle);
+                                // upstream-posttooluse-on-failure: a failed
+                                // command's tool_result is the terminal
+                                // event CC never sends as a hook — sweep
+                                // resolved claims now (no-op when the
+                                // queue is empty).
+                                janitor_resolved_claims(&app_handle);
                             }
                         }
                         // Removed the 100ms leading-edge debounce: it

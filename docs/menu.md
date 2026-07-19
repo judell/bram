@@ -5,6 +5,8 @@ into the agent pane. Four detection generations were built in sequence. The
 newest (hooks) is primary; the older three survive as fallback, oracle, and
 forensic scaffolding. This doc maps what each left behind and what cleanup is
 open — it is the starting point for that conversation, not an exhaustive tour.
+For the intervention history, failure buckets, and the ratchet/limit
+assessment, see `docs/menu-interventions-catalog.md`.
 
 ## The four generations (brief)
 

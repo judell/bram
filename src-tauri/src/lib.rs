@@ -1135,6 +1135,29 @@ fn janitor_resolved_claims<R: tauri::Runtime>(app: &AppHandle<R>) {
 // source), after claim add, and after keyed clears. The pane shows the
 // queued claim whose labels match what the terminal shows — so a pane
 // answer keystrokes the prompt it displays, by construction.
+// grid-rescue anti-ghost: a menu the user just answered is briefly still
+// grid-reported (stale pixels) before it goes absent. Never re-surface a
+// grid menu whose labels match the post-dismiss suppressor.
+fn grid_menu_recently_dismissed(grid_labels: Option<&Vec<String>>) -> bool {
+    let Some(gl) = grid_labels else {
+        return false;
+    };
+    pty_menu_suppressed_cell()
+        .lock()
+        .ok()
+        .and_then(|s| {
+            s.as_ref().map(|d| {
+                let dl: Vec<String> = d
+                    .option_labels
+                    .iter()
+                    .map(|l| normalized_menu_label(l))
+                    .collect();
+                dl.len() == gl.len() && gl.iter().all(|g| dl.contains(g))
+            })
+        })
+        .unwrap_or(false)
+}
+
 fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str) {
     if !bram_menus_hook_driven_enabled() {
         return;
@@ -1196,48 +1219,125 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
     // corroboration; orphans stay inert until the TTL sweeps them.
     let displayed: Option<(String, Vec<String>)> =
         menu_hook_displayed_cell().lock().ok().and_then(|d| d.clone());
-    let (target, how): (Option<&HookMenuClaim>, &'static str) = match joined {
-        Some((c, how)) => (Some(c), how),
-        None if cause == "claim-add"
-            && grid_labels.is_none()
-            && claims.len() == 1
-            && displayed.is_none() =>
-        {
-            (claims.first(), "optimistic-single")
-        }
-        None if grid_labels.is_none() => {
-            // No fresh grid display to arbitrate: hold what's shown.
+
+    // Keep a still-correct display: if the pane already shows the terminal's
+    // current menu (same normalized labels), there's nothing to do. Prevents
+    // churn/dismiss on the ~1 Hz grid-report stream while a menu stays up.
+    if let (Some((_, shown)), Some(gl)) = (displayed.as_ref(), grid_labels) {
+        if shown == gl {
             return;
         }
-        None => (None, "none"),
+    }
+
+    // What to display, in preference order:
+    //  1. a queued claim that JOINS the terminal's current menu (right prompt
+    //     plus enrichment);
+    //  2. else the newest queued claim (its prompt is live — the hook just
+    //     claimed it; a compound/odd-shape command whose signature can't join
+    //     still needs to show, 2026-07-19 cc misses);
+    //  3. else the grid menu itself, when the terminal shows a menu no claim
+    //     matches. `menus.parseAndDisplay` is off by default, so
+    //     `pty_menu_update` will NOT surface it — the claim queue is the only
+    //     path, and without this the pane goes blank.
+    enum Show<'a> {
+        Claim(&'a HookMenuClaim, &'static str),
+        Grid,
+        Nothing,
+    }
+    let show = match joined {
+        Some((c, how)) => Show::Claim(c, how),
+        None if !claims.is_empty() => {
+            Show::Claim(claims.iter().max_by_key(|c| c.at_ms).unwrap(), "unjoined")
+        }
+        None if grid_view.is_some() && !grid_menu_recently_dismissed(grid_labels) => Show::Grid,
+        None => Show::Nothing,
     };
-    // adopt-grid-labels-on-join: when the grid corroborates the claim, its
-    // option phrasing replaces the hook-synthesized labels (the terminal
-    // text is what the keystroke actually grants). Hook enrichments (diff,
-    // content, signature) stay on the menu.
-    let overlay = |claim: &HookMenuClaim| -> (PtyMenu, bool) {
-        let mut menu = claim.menu.clone();
-        if how != "optimistic-single" {
+
+    // When the grid shows a menu, its options are ground truth (exact count +
+    // wording — safe to keystroke); a claim supplies the tool + enrichment.
+    // Without a grid, a lone claim's own synthesized menu is shown.
+    let built: Option<(PtyMenu, Vec<String>, String, &'static str, Option<String>)> = match show {
+        Show::Nothing => None,
+        Show::Claim(claim, how) => {
+            let mut menu = claim.menu.clone();
             if let Some((_, _, raw)) = grid_view.as_ref() {
-                let grid_texts: Vec<String> = raw.iter().map(|o| o.label.clone()).collect();
-                let menu_texts: Vec<String> =
-                    menu.options.iter().map(|o| o.label.clone()).collect();
-                if grid_texts != menu_texts {
-                    menu.options = raw.clone();
-                    return (menu, true);
+                menu.options = raw.clone();
+            }
+            let labels: Vec<String> = menu
+                .options
+                .iter()
+                .map(|o| normalized_menu_label(&o.label))
+                .collect();
+            Some((menu, labels, claim.id_key.clone(), how, claim.tool_use_id.clone()))
+        }
+        Show::Grid => {
+            let (_, _, raw) = grid_view.as_ref().unwrap();
+            let menu = PtyMenu {
+                tool: "Bash".to_string(),
+                text: String::new(),
+                options: raw.clone(),
+                tool_call_signature: None,
+                tool_call_diff: None,
+                tool_call_content: None,
+                cache_source: Some("grid-rescue".to_string()),
+                at_host_ms: Some(now),
+                signature_source: Some("grid"),
+            };
+            let labels: Vec<String> = menu
+                .options
+                .iter()
+                .map(|o| normalized_menu_label(&o.label))
+                .collect();
+            let key = format!("grid-rescue:{}", labels.join("|"));
+            Some((menu, labels, key, "grid-rescue", None))
+        }
+    };
+
+    match built {
+        None => {
+            // Nothing joins and no grid to surface: dismiss any stale display.
+            if displayed.is_some() {
+                if let Ok(mut d) = menu_hook_displayed_cell().lock() {
+                    *d = None;
                 }
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        app,
+                        "hook-menu",
+                        &format!(
+                            "op=claim-queue-select joined=none cause={} depth={}",
+                            cause,
+                            claims.len(),
+                        ),
+                    );
+                }
+                prompt_resolved(app, "superseded", "no-menu");
+                turn_state_set_menu(app, None, "hook-permission", "dismissed");
+                emit_pty_menu_with_prose(app, &None);
             }
         }
-        (menu, false)
-    };
-    match target {
-        Some(claim) if displayed.as_ref().map(|(k, _)| k.as_str()) != Some(claim.id_key.as_str()) => {
-            let (menu, adopted) = overlay(claim);
-            let emitted_labels: Vec<String> =
-                menu.options.iter().map(|o| o.label.clone()).collect();
-            if let Ok(mut d) = menu_hook_displayed_cell().lock() {
-                *d = Some((claim.id_key.clone(), emitted_labels.clone()));
+        Some((menu, labels, id_key, how, tool_use_id)) => {
+            // Dedup: already showing this exact menu.
+            if displayed
+                .as_ref()
+                .map(|(k, l)| k == &id_key && l == &labels)
+                .unwrap_or(false)
+            {
+                return;
             }
+            let relabel_same = displayed.as_ref().map(|(k, _)| k == &id_key).unwrap_or(false);
+            if let Ok(mut d) = menu_hook_displayed_cell().lock() {
+                *d = Some((id_key.clone(), labels.clone()));
+            }
+            // A grid-rescue is grid-sourced, not hook-owned; a claim display
+            // owns the slot. Clear the owner before a grid surface so a stale
+            // owner can't make turn_state_set_menu defer it.
+            let (source, life_source) = if how == "grid-rescue" {
+                set_menu_hook_owner(None);
+                ("pty-menu", "grid")
+            } else {
+                ("hook-permission", "hook")
+            };
             if bram_trace_enabled() {
                 append_bram_trace_line(
                     app,
@@ -1247,114 +1347,19 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
                         how,
                         cause,
                         menu.tool,
-                        claim.tool_use_id.as_deref().unwrap_or("none"),
+                        tool_use_id.as_deref().unwrap_or("none"),
                         claims.len(),
                     ),
                 );
-                if adopted {
-                    append_bram_trace_line(
-                        app,
-                        "hook-menu",
-                        &format!("op=claim-labels-adopted joined={} tool={}", how, menu.tool),
-                    );
-                }
             }
-            prompt_shown(
-                app,
-                &menu.tool,
-                claim.tool_use_id.as_deref(),
-                emitted_labels,
-                "hook",
-            );
+            if relabel_same {
+                prompt_labels_updated(labels);
+            } else {
+                prompt_shown(app, &menu.tool, tool_use_id.as_deref(), labels, life_source);
+            }
             let payload = Some(menu);
-            turn_state_set_menu(app, payload.clone(), "hook-permission", "detected");
+            turn_state_set_menu(app, payload.clone(), source, "detected");
             emit_pty_menu_with_prose(app, &payload);
-        }
-        Some(claim) => {
-            // Same claim already displayed: upgrade synthesized labels to
-            // the grid's phrasing once corroborated (the optimistic-single
-            // display shows before the grid renders). Re-emit only on an
-            // actual change; the lifecycle open prompt updates in place —
-            // same prompt, no new shown.
-            let (menu, adopted) = overlay(claim);
-            if adopted {
-                let emitted_labels: Vec<String> =
-                    menu.options.iter().map(|o| o.label.clone()).collect();
-                let changed = displayed
-                    .as_ref()
-                    .map(|(_, l)| l != &emitted_labels)
-                    .unwrap_or(true);
-                if changed {
-                    if let Ok(mut d) = menu_hook_displayed_cell().lock() {
-                        *d = Some((claim.id_key.clone(), emitted_labels.clone()));
-                    }
-                    if bram_trace_enabled() {
-                        append_bram_trace_line(
-                            app,
-                            "hook-menu",
-                            &format!(
-                                "op=claim-labels-adopted joined={} tool={}",
-                                how, menu.tool
-                            ),
-                        );
-                    }
-                    prompt_labels_updated(emitted_labels);
-                    let payload = Some(menu);
-                    turn_state_set_menu(app, payload.clone(), "hook-permission", "detected");
-                    emit_pty_menu_with_prose(app, &payload);
-                }
-            }
-        }
-        None => {
-            // grid-rescue-unjoinable-claim: we're in the grid-present arm, so
-            // a fresh grid menu is on screen but NO queued claim joins it (the
-            // 2026-07-19 cc specimen: a compound `jq … && curl …/commit` claim
-            // whose signature/labels can't match the tmp/-access menu the
-            // terminal rendered). Pre-fix this was a SILENT no-op when nothing
-            // was displayed — the hook owned the slot so the grid path
-            // deferred, yet the claim couldn't display: a menu on the terminal,
-            // nothing in the pane. Now: clear any stale hook display, then
-            // RELEASE the owner so pty_menu_update (called right after this on
-            // the grid-report path, absence-fence protected) surfaces the
-            // terminal's own menu. The unjoinable claim stays queued and can
-            // still upgrade the display if it later joins.
-            let was_displayed = displayed.is_some();
-            if was_displayed {
-                if let Ok(mut d) = menu_hook_displayed_cell().lock() {
-                    *d = None;
-                }
-                prompt_resolved(app, "superseded", "joined-none");
-                turn_state_set_menu(app, None, "hook-permission", "dismissed");
-                emit_pty_menu_with_prose(app, &None);
-            }
-            // Release once, on the grid-report that finds no match while the
-            // hook still owns the slot; guarded so the ~1 Hz report stream
-            // doesn't re-fire this every second.
-            if cause == "grid-report" && menu_hook_owns_slot() {
-                set_menu_hook_owner(None);
-                if bram_trace_enabled() {
-                    append_bram_trace_line(
-                        app,
-                        "hook-menu",
-                        &format!(
-                            "op=grid-rescue cause={} depth={} was_displayed={} reason=no-claim-joins-grid",
-                            cause,
-                            claims.len(),
-                            was_displayed,
-                        ),
-                    );
-                }
-            } else if was_displayed && bram_trace_enabled() {
-                append_bram_trace_line(
-                    app,
-                    "hook-menu",
-                    &format!(
-                        "op=claim-queue-select joined=none cause={} depth={}",
-                        cause,
-                        claims.len(),
-                    ),
-                );
-            }
         }
     }
 }

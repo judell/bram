@@ -77,8 +77,8 @@ stay closed.
 - **The upstream ask**: hook-lifecycle completeness — `tool_use_id` on
   `PermissionRequest`, a guaranteed terminal event on every tool outcome,
   and ideally an explicit `PromptShown`/`PromptResolved{outcome}` pair —
-  would collapse buckets 3–5 into event-following. Filed upstream;
-  cross-reference the issue numbers here when assigned.
+  would collapse buckets 3–5 into event-following. Recorded locally in
+  `docs/upstream-asks.md` (deliberately not filed externally).
 - **Parked observations** (instrumented, awaiting specimens): intermittent
   missing PermissionRequest (`grid-menu-without-claim` +
   `hook-events.log` classify it passively); menu-answer keystrokes landing

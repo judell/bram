@@ -687,9 +687,11 @@ static MENU_HOOK_CLAIMS: OnceLock<Mutex<Vec<HookMenuClaim>>> = OnceLock::new();
 fn menu_hook_claims_cell() -> &'static Mutex<Vec<HookMenuClaim>> {
     MENU_HOOK_CLAIMS.get_or_init(|| Mutex::new(Vec::new()))
 }
-// id_key of the claim currently displayed in the pane, if any.
-static MENU_HOOK_DISPLAYED: OnceLock<Mutex<Option<String>>> = OnceLock::new();
-fn menu_hook_displayed_cell() -> &'static Mutex<Option<String>> {
+// id_key of the claim currently displayed in the pane plus the option
+// labels it was last emitted with (adopt-grid-labels-on-join: the labels
+// may be upgraded in place from synthesized to the grid's own phrasing).
+static MENU_HOOK_DISPLAYED: OnceLock<Mutex<Option<(String, Vec<String>)>>> = OnceLock::new();
+fn menu_hook_displayed_cell() -> &'static Mutex<Option<(String, Vec<String>)>> {
     MENU_HOOK_DISPLAYED.get_or_init(|| Mutex::new(None))
 }
 
@@ -869,6 +871,17 @@ fn prompt_shown<R: tauri::Runtime>(
             source,
             shown_at_ms: now,
         });
+    }
+}
+
+// adopt-grid-labels-on-join: a label upgrade of the displayed prompt is
+// the SAME prompt — update the open record in place so the shown/resolved
+// pairing stays one-to-one.
+fn prompt_labels_updated(labels: Vec<String>) {
+    if let Ok(mut open) = prompt_open_cell().lock() {
+        if let Some(o) = open.as_mut() {
+            o.labels = labels;
+        }
     }
 }
 
@@ -1097,7 +1110,7 @@ fn janitor_resolved_claims<R: tauri::Runtime>(app: &AppHandle<R>) {
         .lock()
         .ok()
         .and_then(|d| d.clone())
-        .map(|d| removed_keys.contains(&d))
+        .map(|(k, _)| removed_keys.contains(&k))
         .unwrap_or(false);
     if bram_trace_enabled() {
         append_bram_trace_line(
@@ -1134,36 +1147,42 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
         q.retain(|c| now - c.at_ms < MENU_HOOK_CLAIM_TTL_MS);
         q.clone()
     };
-    // Grid labels + scene text (header and context lines), both normalized.
-    let grid_view: Option<(Vec<String>, String)> = latest_grid_menu_cell().lock().ok().and_then(|g| {
-        g.as_ref()
-            .filter(|s| (unix_now_ms() as u128).saturating_sub(s.ts_ms) < CLAIM_JOIN_GRID_FRESH_MS)
-            .map(|s| {
-                let labels: Vec<String> = s
-                    .options
-                    .iter()
-                    .map(|o| normalized_menu_label(&o.label))
-                    .collect();
-                let scene = normalized_menu_label(&format!(
-                    "{} {}",
-                    s.header,
-                    s.above.join(" ")
-                ));
-                (labels, scene)
-            })
-    });
-    let joined: Option<(&HookMenuClaim, &'static str)> = grid_view.as_ref().and_then(|(gl, scene)| {
-        claims
-            .iter()
-            .find_map(|c| {
+    // Grid labels + scene text (header and context lines), normalized for
+    // the join, plus the raw options for label adoption
+    // (adopt-grid-labels-on-join: the grid's own phrasing is authoritative
+    // for what an option grants; Bram's synthesized labels can understate
+    // rule scope — 2026-07-19 pmset specimen).
+    let grid_view: Option<(Vec<String>, String, Vec<MenuOption>)> =
+        latest_grid_menu_cell().lock().ok().and_then(|g| {
+            g.as_ref()
+                .filter(|s| {
+                    (unix_now_ms() as u128).saturating_sub(s.ts_ms) < CLAIM_JOIN_GRID_FRESH_MS
+                })
+                .map(|s| {
+                    let labels: Vec<String> = s
+                        .options
+                        .iter()
+                        .map(|o| normalized_menu_label(&o.label))
+                        .collect();
+                    let scene = normalized_menu_label(&format!(
+                        "{} {}",
+                        s.header,
+                        s.above.join(" ")
+                    ));
+                    (labels, scene, s.options.clone())
+                })
+        });
+    let joined: Option<(&HookMenuClaim, &'static str)> =
+        grid_view.as_ref().and_then(|(gl, scene, _)| {
+            claims.iter().find_map(|c| {
                 if claim_signature_join(c, scene) {
                     Some((c, "signature"))
                 } else {
                     claim_label_join(c, gl).map(|how| (c, how))
                 }
             })
-    });
-    let grid_labels = grid_view.as_ref().map(|(gl, _)| gl);
+        });
+    let grid_labels = grid_view.as_ref().map(|(gl, _, _)| gl);
     // Optimistic single-claim display: PermissionRequest fires BEFORE the
     // prompt renders, so the grid can't corroborate the very first claim
     // yet. With exactly one claim and nothing displayed, show it now (the
@@ -1175,7 +1194,8 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
     // grid-report reselection re-displayed the orphan, which the no-grid
     // hold branch then pinned across turns. Reselection requires grid
     // corroboration; orphans stay inert until the TTL sweeps them.
-    let displayed: Option<String> = menu_hook_displayed_cell().lock().ok().and_then(|d| d.clone());
+    let displayed: Option<(String, Vec<String>)> =
+        menu_hook_displayed_cell().lock().ok().and_then(|d| d.clone());
     let (target, how): (Option<&HookMenuClaim>, &'static str) = match joined {
         Some((c, how)) => (Some(c), how),
         None if cause == "claim-add"
@@ -1191,10 +1211,32 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
         }
         None => (None, "none"),
     };
+    // adopt-grid-labels-on-join: when the grid corroborates the claim, its
+    // option phrasing replaces the hook-synthesized labels (the terminal
+    // text is what the keystroke actually grants). Hook enrichments (diff,
+    // content, signature) stay on the menu.
+    let overlay = |claim: &HookMenuClaim| -> (PtyMenu, bool) {
+        let mut menu = claim.menu.clone();
+        if how != "optimistic-single" {
+            if let Some((_, _, raw)) = grid_view.as_ref() {
+                let grid_texts: Vec<String> = raw.iter().map(|o| o.label.clone()).collect();
+                let menu_texts: Vec<String> =
+                    menu.options.iter().map(|o| o.label.clone()).collect();
+                if grid_texts != menu_texts {
+                    menu.options = raw.clone();
+                    return (menu, true);
+                }
+            }
+        }
+        (menu, false)
+    };
     match target {
-        Some(claim) if displayed.as_deref() != Some(claim.id_key.as_str()) => {
+        Some(claim) if displayed.as_ref().map(|(k, _)| k.as_str()) != Some(claim.id_key.as_str()) => {
+            let (menu, adopted) = overlay(claim);
+            let emitted_labels: Vec<String> =
+                menu.options.iter().map(|o| o.label.clone()).collect();
             if let Ok(mut d) = menu_hook_displayed_cell().lock() {
-                *d = Some(claim.id_key.clone());
+                *d = Some((claim.id_key.clone(), emitted_labels.clone()));
             }
             if bram_trace_enabled() {
                 append_bram_trace_line(
@@ -1204,24 +1246,65 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
                         "op=claim-queue-select joined={} cause={} tool={} id={} depth={}",
                         how,
                         cause,
-                        claim.menu.tool,
+                        menu.tool,
                         claim.tool_use_id.as_deref().unwrap_or("none"),
                         claims.len(),
                     ),
                 );
+                if adopted {
+                    append_bram_trace_line(
+                        app,
+                        "hook-menu",
+                        &format!("op=claim-labels-adopted joined={} tool={}", how, menu.tool),
+                    );
+                }
             }
             prompt_shown(
                 app,
-                &claim.menu.tool,
+                &menu.tool,
                 claim.tool_use_id.as_deref(),
-                claim.menu.options.iter().map(|o| o.label.clone()).collect(),
+                emitted_labels,
                 "hook",
             );
-            let payload = Some(claim.menu.clone());
+            let payload = Some(menu);
             turn_state_set_menu(app, payload.clone(), "hook-permission", "detected");
             emit_pty_menu_with_prose(app, &payload);
         }
-        Some(_) => {}
+        Some(claim) => {
+            // Same claim already displayed: upgrade synthesized labels to
+            // the grid's phrasing once corroborated (the optimistic-single
+            // display shows before the grid renders). Re-emit only on an
+            // actual change; the lifecycle open prompt updates in place —
+            // same prompt, no new shown.
+            let (menu, adopted) = overlay(claim);
+            if adopted {
+                let emitted_labels: Vec<String> =
+                    menu.options.iter().map(|o| o.label.clone()).collect();
+                let changed = displayed
+                    .as_ref()
+                    .map(|(_, l)| l != &emitted_labels)
+                    .unwrap_or(true);
+                if changed {
+                    if let Ok(mut d) = menu_hook_displayed_cell().lock() {
+                        *d = Some((claim.id_key.clone(), emitted_labels.clone()));
+                    }
+                    if bram_trace_enabled() {
+                        append_bram_trace_line(
+                            app,
+                            "hook-menu",
+                            &format!(
+                                "op=claim-labels-adopted joined={} tool={}",
+                                how, menu.tool
+                            ),
+                        );
+                    }
+                    prompt_labels_updated(emitted_labels);
+                    let payload = Some(menu);
+                    turn_state_set_menu(app, payload.clone(), "hook-permission", "detected");
+                    emit_pty_menu_with_prose(app, &payload);
+                }
+            }
+        }
         None => {
             if displayed.is_some() {
                 if let Ok(mut d) = menu_hook_displayed_cell().lock() {
@@ -1302,7 +1385,7 @@ fn clear_hook_permission_menu<R: tauri::Runtime>(
             .lock()
             .ok()
             .and_then(|d| d.clone())
-            .map(|d| removed_keys.contains(&d))
+            .map(|(k, _)| removed_keys.contains(&k))
             .unwrap_or(false);
         if bram_trace_enabled() {
             append_bram_trace_line(

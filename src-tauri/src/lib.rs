@@ -1306,24 +1306,54 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
             }
         }
         None => {
-            if displayed.is_some() {
+            // grid-rescue-unjoinable-claim: we're in the grid-present arm, so
+            // a fresh grid menu is on screen but NO queued claim joins it (the
+            // 2026-07-19 cc specimen: a compound `jq … && curl …/commit` claim
+            // whose signature/labels can't match the tmp/-access menu the
+            // terminal rendered). Pre-fix this was a SILENT no-op when nothing
+            // was displayed — the hook owned the slot so the grid path
+            // deferred, yet the claim couldn't display: a menu on the terminal,
+            // nothing in the pane. Now: clear any stale hook display, then
+            // RELEASE the owner so pty_menu_update (called right after this on
+            // the grid-report path, absence-fence protected) surfaces the
+            // terminal's own menu. The unjoinable claim stays queued and can
+            // still upgrade the display if it later joins.
+            let was_displayed = displayed.is_some();
+            if was_displayed {
                 if let Ok(mut d) = menu_hook_displayed_cell().lock() {
                     *d = None;
                 }
+                prompt_resolved(app, "superseded", "joined-none");
+                turn_state_set_menu(app, None, "hook-permission", "dismissed");
+                emit_pty_menu_with_prose(app, &None);
+            }
+            // Release once, on the grid-report that finds no match while the
+            // hook still owns the slot; guarded so the ~1 Hz report stream
+            // doesn't re-fire this every second.
+            if cause == "grid-report" && menu_hook_owns_slot() {
+                set_menu_hook_owner(None);
                 if bram_trace_enabled() {
                     append_bram_trace_line(
                         app,
                         "hook-menu",
                         &format!(
-                            "op=claim-queue-select joined=none cause={} depth={}",
+                            "op=grid-rescue cause={} depth={} was_displayed={} reason=no-claim-joins-grid",
                             cause,
                             claims.len(),
+                            was_displayed,
                         ),
                     );
                 }
-                prompt_resolved(app, "superseded", "joined-none");
-                turn_state_set_menu(app, None, "hook-permission", "dismissed");
-                emit_pty_menu_with_prose(app, &None);
+            } else if was_displayed && bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "hook-menu",
+                    &format!(
+                        "op=claim-queue-select joined=none cause={} depth={}",
+                        cause,
+                        claims.len(),
+                    ),
+                );
             }
         }
     }
@@ -2634,6 +2664,39 @@ mod claim_label_join_tests {
         assert!(!super::claim_signature_join(&c, &other));
         c.signature = Some("Bash(ls)".to_string());
         assert!(!super::claim_signature_join(&c, &scene));
+    }
+
+    // grid-rescue-unjoinable-claim: the 2026-07-19 community-calendar
+    // specimen, reproduced deterministically. A compound
+    // `jq … > /tmp/body.json && curl …/__worklist/commit` command claims
+    // with the jq-prefix signature, but the terminal renders a tmp/-access
+    // permission menu whose grid scene shows the curl TAIL (the long jq
+    // head scrolled out) and whose option wording is CC's own. Both joins
+    // fail → the claim can never surface → the miss. This documents the
+    // repro permanently; the fix adds a grid-rescue when this happens.
+    #[test]
+    fn specimen_compound_commit_menu_does_not_join() {
+        let mut claim = claim_with_labels(&["Yes", "Yes, and allow access to /tmp", "No"]);
+        claim.signature = Some(
+            "Bash(jq -n --arg msg \"Fix Visit Santa Rosa timezone: relabel fake-UTC epochs\" \
+             '{ids:[\"x\"],message:$msg}' > /tmp/body.json && curl -sS --data @/tmp/body.json \
+             http://127.0.0.1:61666/__worklist/commit)"
+                .to_string(),
+        );
+        let grid = grid(&[
+            "Yes",
+            "Yes, and always allow access to tmp/ from this project",
+            "No",
+        ]);
+        // Grid scene shows only the visible tail — the jq head scrolled out.
+        let scene = normalized_menu_label(
+            "curl -sS --data @/tmp/body.json http://127.0.0.1:61666/__worklist/commit \
+             Do you want to proceed?",
+        );
+        assert!(!super::claim_signature_join(&claim, &scene));
+        assert_eq!(super::claim_label_join(&claim, &grid), None);
+        // Both None ⇒ no queued claim joins the visible grid menu ⇒ the
+        // pre-fix silent miss.
     }
 
     // Grid wrapping and typographic apostrophes must not break the join;

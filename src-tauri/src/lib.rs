@@ -20602,10 +20602,16 @@ are blocked by a PreToolUse hook installed under ~/.bram. On approved:, drop:, \
 or iterate: turns, drive the Bram lifecycle through the filesystem channel: \
 write resources/.worklist-intent.json ({nonce, route, body}) and read the \
 host's reply from resources/.worklist-result.json, matching your nonce. Do \
-not silently continue after a missing result or an ok:false reply. The exact \
-routes, intent/result shapes, opt-out, and transition rules are canonical in \
-app/__shell/conventions.md. Do not duplicate or guess those details from this \
-abbreviated instruction.";
+not silently continue after a missing result or an ok:false reply. The gate is \
+two-stage: an approved: on a proposed (TO APPLY) item means make the edits, \
+then advance via route worklist-mutate with body {op:advance, ids, \
+status:applied}. An approved: on an applied (TO COMMIT) item means commit via \
+route worklist-commit with body {ids, message}; the host stages only those \
+items files, commits, AND prunes them, so do not run raw git add/commit and do \
+not prune by hand. The exact routes, intent/result shapes, opt-out, and \
+transition rules are canonical in .claude/bram-conventions.md (relative to the \
+project root). Do not duplicate or guess those details from this abbreviated \
+instruction.";
 const WORKLIST_AUTH_REL: &str = "resources/.worklist-authorization.json";
 // Codex filesystem lifecycle channel (#130). Codex writes the intent file;
 // the host watcher drains it and writes the result file. Coordination

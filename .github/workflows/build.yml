@@ -17,8 +17,12 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - name: Worklist-guard bundle in sync with canonical
-        run: diff -q .claude/hooks/worklist-guard.py app/__shell/worklist-guard.py
+      - name: Provider-hook installed copies in sync with canonical
+        run: |
+          diff -q .claude/hooks/claude-worklist-guard.py \
+                  app/provider-hooks/claude-worklist-guard.py
+          diff -q .claude/hooks/claude-permission-menu-hook.py \
+                  app/provider-hooks/claude-permission-menu-hook.py
 
   create-release:
     needs: verify

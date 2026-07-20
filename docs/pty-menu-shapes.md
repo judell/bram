@@ -35,6 +35,8 @@ vocabulary in `bram-trace.log`
   (carries `tool=<Edit|Write|Bash|…>`).
 - `op=build-claude-nosig` — signature-less build of a **Bash** menu from the
   grid (records-stacked / manual-approval / compound cases).
+- `op=build-picker` — build of a grid-classified **picker** (Family C
+  session-resume-picker et al): no pending tool call, `tool=Picker`.
 - `op=hold-nosig` — a signature-less frame that is **not** a Bash menu
   (Edit/Write awaiting their signature, or a phantom prose / tool-bullet
   frame); held so the signature path classifies it. See *Signature-less
@@ -181,7 +183,9 @@ instead. First specimen:
 
 ## Family C — other
 
-Empty. Add rows as specimens surface unknown shapes.
+| Shape | Header fragment | cursor | header | 1./2. pair | footer | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| session-resume-picker | "This session is … old and … tokens." (free prose — no permission header) | ✓ | ✗ | ✓ | ✓ strict ("Enter to confirm · Esc to cancel") | Claude Code CLI-level picker, not a tool approval — no hook fires and no pending tool_use exists. Option 1 is not "Yes…", so the permission Yes-gate excludes it; admitted by the picker rule instead (strict footer — BOTH "Enter to confirm" AND "Esc to cancel" below the block — plus a rendered cursor). Surfaces as `tool=Picker` (`[grid-menu] op=build-picker`, or grid-rescue on default settings) and arms the send-gate hold. Undetected it eats pasted sends and the CR confirms option 1 (Eric 2026-07-19 20:08 strand). Specimen: `docs/pty-menu-specimens/2026-07-19-claude-session-resume-picker.md`. Structural twins expected: trust dialog, `/resume` session list. |
 
 ## Known edge — option label blends with the command box (narrow column)
 

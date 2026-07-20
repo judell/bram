@@ -1066,22 +1066,48 @@ function __gridDetectMenu(rows) {
     // Codex) and otherwise false-trigger here, rendering a bogus menu.
     // Requiring option 1 == "Yes…" excludes prose while accepting both
     // providers.
-    if (!/^\s*Yes\b/i.test(menu[0].label)) continue;
-    if (!(headerSignal || footerSignal || codexSignal)) continue;
+    const isYesMenu = /^\s*Yes\b/i.test(menu[0].label);
+    // Picker family (detect-session-resume-picker): Claude Code's numbered
+    // pickers — session resume ("1. Resume from summary…") and structural
+    // twins — have no "Yes" first option, so the gate above would drop them
+    // (Eric 2026-07-19 20:08: first send pasted into the undetected resume
+    // picker, CR confirmed option 1, message stranded). Admit them only on
+    // the strict picker footer — BOTH "Enter to confirm" AND "Esc to cancel"
+    // in the rows directly below the block — plus a rendered cursor on one
+    // option, so prose that merely quotes menu phrases still fails.
+    const pickerSignal =
+      /Enter to confirm/i.test(belowText) &&
+      /Esc to cancel/i.test(belowText) &&
+      menu.some((o) => o.selected);
+    if (isYesMenu) {
+      if (!(headerSignal || footerSignal || codexSignal)) continue;
+    } else if (!pickerSignal) continue;
 
     const headerRow = aboveRows
       .slice()
       .reverse()
       .find((r) => headerRe.test(r.text));
+    let headerText = headerRow ? headerRow.text.trim() : "";
+    if (!headerText && !isYesMenu) {
+      // Pickers have no "Do you want to…" header; carry the nearest
+      // non-empty banner row so the pane shows why the picker is up
+      // ("This session is 1d 2h old and 383.2k tokens.").
+      const near = aboveRows
+        .slice()
+        .reverse()
+        .find((r) => r.text.trim());
+      headerText = near ? near.text.trim() : "";
+    }
     const above = rows
       .slice(Math.max(0, blockTop - 12), blockTop)
       .map((r) => r.text.replace(/^[⏺⎿\s]+/, "").trimEnd())
       .filter((s) => s.trim());
     return {
-      header: headerRow ? headerRow.text.trim() : "",
+      header: headerText,
       options: menu.map((o) => ({ n: o.n, label: o.label, selected: o.selected })),
       above,
       blockTop,
+      picker: !isYesMenu,
     };
   }
   return null;
@@ -1292,6 +1318,7 @@ function __gridShadowCheck() {
       header: menu.header,
       options: menu.options,
       above: menu.above,
+      picker: !!menu.picker,
       prose: inflightProse,
       // Provenance travels WITH the snapshot: the keep-alive interval
       // below re-sends this capture-time offset, not a fresh one — the
@@ -1311,6 +1338,7 @@ function __gridShadowCheck() {
         header: menu.header,
         options: menu.options,
         above: menu.above,
+        picker: !!menu.picker,
         prose: inflightProse,
         // Provenance stamp: the PTY output offset this frame was parsed
         // from (causal-menu-staleness).
@@ -1353,6 +1381,7 @@ setInterval(() => {
         header: __gridLastMenu.header,
         options: __gridLastMenu.options,
         above: __gridLastMenu.above,
+        picker: !!__gridLastMenu.picker,
         prose: __gridLastMenu.prose,
         parsedOffset: __gridLastMenu.parsedOffset,
       },

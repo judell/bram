@@ -1175,7 +1175,7 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
     // (adopt-grid-labels-on-join: the grid's own phrasing is authoritative
     // for what an option grants; Bram's synthesized labels can understate
     // rule scope — 2026-07-19 pmset specimen).
-    let grid_view: Option<(Vec<String>, String, Vec<MenuOption>)> =
+    let grid_view: Option<(Vec<String>, String, Vec<MenuOption>, bool)> =
         latest_grid_menu_cell().lock().ok().and_then(|g| {
             g.as_ref()
                 .filter(|s| {
@@ -1192,11 +1192,11 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
                         s.header,
                         s.above.join(" ")
                     ));
-                    (labels, scene, s.options.clone())
+                    (labels, scene, s.options.clone(), s.picker)
                 })
         });
     let joined: Option<(&HookMenuClaim, &'static str)> =
-        grid_view.as_ref().and_then(|(gl, scene, _)| {
+        grid_view.as_ref().and_then(|(gl, scene, _, _)| {
             claims.iter().find_map(|c| {
                 if claim_signature_join(c, scene) {
                     Some((c, "signature"))
@@ -1205,7 +1205,7 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
                 }
             })
         });
-    let grid_labels = grid_view.as_ref().map(|(gl, _, _)| gl);
+    let grid_labels = grid_view.as_ref().map(|(gl, _, _, _)| gl);
     // Optimistic single-claim display: PermissionRequest fires BEFORE the
     // prompt renders, so the grid can't corroborate the very first claim
     // yet. With exactly one claim and nothing displayed, show it now (the
@@ -1260,7 +1260,7 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
         Show::Nothing => None,
         Show::Claim(claim, how) => {
             let mut menu = claim.menu.clone();
-            if let Some((_, _, raw)) = grid_view.as_ref() {
+            if let Some((_, _, raw, _)) = grid_view.as_ref() {
                 menu.options = raw.clone();
             }
             let labels: Vec<String> = menu
@@ -1271,9 +1271,14 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
             Some((menu, labels, claim.id_key.clone(), how, claim.tool_use_id.clone()))
         }
         Show::Grid => {
-            let (_, _, raw) = grid_view.as_ref().unwrap();
+            let (_, _, raw, is_picker) = grid_view.as_ref().unwrap();
             let menu = PtyMenu {
-                tool: "Bash".to_string(),
+                // detect-session-resume-picker: a grid-classified picker
+                // (session resume et al) is a CLI prompt, not a tool
+                // approval — label it Picker so the pane and the
+                // send-gate's hold trace name it truthfully instead of
+                // the grid-rescue "Bash" default.
+                tool: if *is_picker { "Picker" } else { "Bash" }.to_string(),
                 text: String::new(),
                 options: raw.clone(),
                 tool_call_signature: None,
@@ -6093,6 +6098,11 @@ struct GridMenuSnapshot {
     // extracted from the grid by main.js (fail-silent — None when ambiguous).
     // Injected into the pty-menu-changed payload at emit time.
     prose: Option<String>,
+    // detect-session-resume-picker: the grid classified this as a numbered
+    // picker (no "Yes" first option; strict "Enter to confirm … Esc to
+    // cancel" footer) rather than a permission menu. Builds as tool=Picker
+    // with no tool-call lookup — pickers have no pending tool_use.
+    picker: bool,
     ts_ms: u128,
     // Frame provenance (causal-menu-staleness): the cumulative PTY output
     // offset the parent's xterm had PARSED when this snapshot was read —
@@ -6309,6 +6319,10 @@ fn report_grid_menu(app: AppHandle, payload: serde_json::Value) {
                 header,
                 above,
                 prose,
+                picker: payload
+                    .get("picker")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
                 ts_ms: unix_now_ms() as u128,
                 parsed_offset: payload.get("parsedOffset").and_then(|v| v.as_u64()),
             });
@@ -6503,6 +6517,7 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
         header: grid_header,
         above: grid_above,
         prose: _,
+        picker: grid_picker,
         ts_ms: ts,
         parsed_offset: grid_parsed_offset,
     }) = grid_snapshot
@@ -6617,6 +6632,39 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                                 ),
                             );
                         }
+                    } else if grid_picker {
+                        // detect-session-resume-picker: a numbered picker
+                        // (session resume, or a structural twin with the
+                        // "Enter to confirm · Esc to cancel" footer). No
+                        // pending tool call exists — the CLI itself is
+                        // prompting — so build straight from the grid.
+                        // What matters most is pending_menu going present:
+                        // the send-gate then holds pane sends instead of
+                        // pasting them into the picker (Eric 2026-07-19
+                        // 20:08 strand).
+                        if bram_trace_enabled() {
+                            append_bram_trace_line(
+                                app,
+                                "grid-menu",
+                                &format!(
+                                    "op=build-picker grid_count={} header={:?} grid=[{}]",
+                                    grid_opts.len(),
+                                    grid_header,
+                                    grid_labels()
+                                ),
+                            );
+                        }
+                        detected = Some(PtyMenu {
+                            tool: "Picker".to_string(),
+                            text: grid_header.trim().to_string(),
+                            options: grid_opts,
+                            tool_call_signature: None,
+                            tool_call_diff: None,
+                            tool_call_content: None,
+                            cache_source: None,
+                            at_host_ms: None,
+                            signature_source: Some("grid"),
+                        });
                     } else {
                         // Host missed the menu box. Only build when there's a LIVE
                         // pending tool call (signature present) — that's what makes

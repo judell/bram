@@ -23506,6 +23506,16 @@ fn claude_jsonl_completion_decision(content: &str) -> JsonlCompletionDecision {
 // boundary. Content is a plain string, or an array with a text block and no
 // tool_result block.
 fn claude_jsonl_is_genuine_user_message(entry: &serde_json::Value) -> bool {
+    // isMeta records are CLI machinery, not human input. The 2026-07-20
+    // audit of 33 would-end fires found 9 false fires, all the same class:
+    // Read-tool image results write an `isMeta:true` companion user record
+    // with STRING content ("[Image: original 3212x704, displayed at…]"),
+    // which the string arm below would otherwise accept. Every true
+    // positive in the audit (interrupts, typed messages, approvals,
+    // continuation summaries) has isMeta unset.
+    if entry.get("isMeta").and_then(|v| v.as_bool()) == Some(true) {
+        return false;
+    }
     match entry.get("message").and_then(|m| m.get("content")) {
         Some(serde_json::Value::String(_)) => true,
         Some(serde_json::Value::Array(blocks)) => {
@@ -23931,8 +23941,14 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
             // jsonl-turn-end-user-after-permission (observe-only): flag the
             // interrupt signature — a real user message trailing the non-final
             // assistant — where a future fix would end the turn and clear the
-            // pinned menu. No behavior change yet.
-            if bram_trace_enabled() && claude_jsonl_user_after_nonfinal_assistant(&content) {
+            // pinned menu. No behavior change yet. Subagent transcripts
+            // (agent-*.jsonl) are excluded: no human types into them, so the
+            // takeover signature is meaningless there (3 of the 2026-07-20
+            // audit's 33 fires were this class).
+            if bram_trace_enabled()
+                && !basename.starts_with("agent-")
+                && claude_jsonl_user_after_nonfinal_assistant(&content)
+            {
                 append_bram_trace_line(
                     app,
                     "jsonl-turn-end",
@@ -26702,6 +26718,23 @@ mod turn_completion_tests {
         // live turns).
         let content = concat!(
             r#"{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use"}]}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#,
+            "\n",
+        );
+        assert!(!claude_jsonl_user_after_nonfinal_assistant(content));
+    }
+
+    #[test]
+    fn ismeta_image_companion_after_assistant_is_not_flagged() {
+        // The 2026-07-20 audit's false-positive class: a Read-tool image
+        // result writes an isMeta:true user record with STRING content
+        // beside the tool_result. String content would pass the genuine
+        // check; the isMeta exclusion must reject it.
+        let content = concat!(
+            r#"{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use"}]}}"#,
+            "\n",
+            r#"{"type":"user","isMeta":true,"message":{"content":"[Image: original 3212x704, displayed at 2000x438.]"}}"#,
             "\n",
             r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#,
             "\n",

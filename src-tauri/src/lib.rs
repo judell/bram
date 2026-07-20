@@ -17056,7 +17056,13 @@ fn st_tool_command_display(name: &str, input: &serde_json::Value) -> String {
     // render-supabase-execute-sql: pretty-print the SQL and show it as a fenced
     // code block (the client's __bramFormatToolCommand passes an already-fenced
     // block through verbatim). Empty otherwise = no command box.
-    if name == "mcp__supabase__execute_sql" {
+    // Matched by suffix, not exact name: Claude Code names MCP tools
+    // mcp__<server>__<tool> and the server segment is registration-dependent —
+    // a local .mcp.json says "supabase", the claude.ai connector says
+    // "claude_ai_Supabase" (Eric's v0.2.23 field report: neither SQL nor
+    // formatted results rendered because the exact match missed his connector
+    // name). The input.query string gate below keeps the loose match safe.
+    if name.starts_with("mcp__") && name.ends_with("__execute_sql") {
         if let Some(q) = input.get("query").and_then(|v| v.as_str()) {
             if !q.trim().is_empty() {
                 let pretty = sqlformat::format(
@@ -17122,6 +17128,27 @@ mod tool_command_markdown_tests {
         let entry = &turns[0]["entries"][0];
         assert_eq!(entry["commandMarkdown"], "# Notes\n\n**Ready**");
         assert_eq!(entry["commandDisplay"], "");
+    }
+
+    #[test]
+    fn execute_sql_renders_for_any_server_name() {
+        // The MCP server segment is registration-dependent: local
+        // "supabase" vs the claude.ai connector's "claude_ai_Supabase"
+        // (Eric's v0.2.23 field report — exact-name match missed his
+        // connector, so neither SQL nor results rendered).
+        let input = json!({ "query": "select 1 from t" });
+        for name in [
+            "mcp__supabase__execute_sql",
+            "mcp__claude_ai_Supabase__execute_sql",
+        ] {
+            let display = st_tool_command_display(name, &input);
+            assert!(display.starts_with("```sql\n"), "{name} should render sql");
+        }
+        // Suffix-only lookalike without a query string stays unrendered.
+        assert_eq!(
+            st_tool_command_display("mcp__other__execute_sql", &json!({})),
+            ""
+        );
     }
 
     #[test]

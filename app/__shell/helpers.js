@@ -5026,8 +5026,12 @@ window.__bramFormatToolResult = function (result, toolName, hint) {
   var text = String(result);
   if (text.trim() === "") return text;
   // render-supabase-execute-sql: render rows as a Markdown table; fall through
-  // to generic formatting when it isn't tabular.
-  if (String(toolName || "") === "mcp__supabase__execute_sql") {
+  // to generic formatting when it isn't tabular. Suffix match, not exact:
+  // the MCP server segment is registration-dependent (local "supabase" vs
+  // the claude.ai connector's "claude_ai_Supabase" — Eric's v0.2.23 field
+  // report). __bramSupabaseSqlTable's rows-shape parse keeps this safe.
+  var __toolNameStr = String(toolName || "");
+  if (__toolNameStr.indexOf("mcp__") === 0 && /__execute_sql$/.test(__toolNameStr)) {
     var sqlTable = window.__bramSupabaseSqlTable(text);
     if (sqlTable) return sqlTable;
   }

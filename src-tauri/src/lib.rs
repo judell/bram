@@ -1246,7 +1246,16 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
     }
     let show = match joined {
         Some((c, how)) => Show::Claim(c, how),
-        None if !claims.is_empty() => {
+        // Unjoined optimism ONLY at the claim-add moment: PermissionRequest
+        // fires before the prompt renders, so a fresh claim can't be grid-
+        // corroborated yet (the 2026-07-19 compound-command misses). On
+        // RESELECTION (grid-report / clear-remove) an unjoined claim must
+        // not display — after a user-input dismissal the answered prompt's
+        // claim stays queued until its PostToolUse (the command's whole
+        // runtime), and re-displaying it resurrects the answered prompt as
+        // a ghost the send-gate then honors (2026-07-20 18:04:51 specimen,
+        // open_ms=18101; unjoined-claim-respects-user-dismissal).
+        None if cause == "claim-add" && !claims.is_empty() => {
             Show::Claim(claims.iter().max_by_key(|c| c.at_ms).unwrap(), "unjoined")
         }
         None if grid_view.is_some() && !grid_menu_recently_dismissed(grid_labels) => Show::Grid,

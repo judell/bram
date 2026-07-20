@@ -4807,20 +4807,71 @@ window.__bramLangFromHint = function (hint) {
 // string: detect JSON / diff / file-by-extension and wrap in a fence-safe code
 // block so <Markdown overflowMode="scroll"> renders monospace with preserved
 // structure and horizontal scroll. Pure, no side effects.
+// execute-sql-long-string-cells: resolve the working text for the
+// execute_sql formatters. Unwraps (a) the MCP content-block array
+// (`[{"type":"text","text":"…"}]` — older-host transcripts and hot loads
+// reach the client un-normalized, and parsing the wrapper as rows
+// rendered a nonsense |type|text| table) and (b) the `{"result":"…"}`
+// envelope. Returns the innermost prose+rows text.
+window.__bramExecuteSqlInnerText = function (text) {
+  var inner = String(text == null ? "" : text);
+  var t = inner.trim();
+  if (t.charAt(0) === "[") {
+    try {
+      var blocks = JSON.parse(t);
+      if (
+        Array.isArray(blocks) && blocks.length > 0 &&
+        blocks.every(function (b) {
+          return b && b.type === "text" && typeof b.text === "string";
+        })
+      ) {
+        inner = blocks.map(function (b) { return b.text; }).join("\n");
+        t = inner.trim();
+      }
+    } catch (e) {}
+  }
+  if (t.charAt(0) === "{") {
+    try {
+      var obj = JSON.parse(t);
+      if (obj && typeof obj.result === "string") inner = obj.result;
+    } catch (e) {}
+  }
+  return inner;
+};
+
+// execute-sql-long-string-cells: single-row rendering when a value is a
+// whole document (pg_get_viewdef's view definition et al). Short values
+// render as `key: value` lines; long strings as fenced code blocks —
+// `sql` when the text looks like SQL; nested objects as fenced JSON.
+window.__bramExecuteSqlRowSections = function (row) {
+  var LONG = 300, CAP = 16384;
+  var parts = [];
+  var keys = Object.keys(row);
+  for (var i = 0; i < keys.length; i++) {
+    var k = keys[i], v = row[k];
+    if (typeof v === "string" && v.length > LONG) {
+      var s = v;
+      if (s.length > CAP) s = s.slice(0, CAP) + "\n… (truncated)";
+      var lang = /^\s*(with|select|create|alter|insert|update|delete)\b/i.test(s) ? "sql" : "";
+      parts.push("**" + k + "**:\n\n```" + lang + "\n" + s + "\n```");
+    } else if (v !== null && typeof v === "object") {
+      var js = JSON.stringify(v, null, 2);
+      if (js.length > CAP) js = js.slice(0, CAP) + "\n… (truncated)";
+      parts.push("**" + k + "**:\n\n```json\n" + js + "\n```");
+    } else {
+      parts.push("**" + k + "**: " + (v === null || v === undefined ? "" : String(v)));
+    }
+  }
+  return parts.join("\n\n");
+};
+
 // render-supabase-execute-sql: turn a Supabase execute_sql result into a
 // Markdown table, or null if it doesn't look like rows (DDL, no rows, parse
 // failure) so the caller falls back to generic formatting. The rows are a JSON
 // array inside the tool's `{"result": "…<untrusted-data-…>[rows]</…>…"}` shape.
 window.__bramSupabaseSqlTable = function (text) {
   try {
-    var inner = String(text);
-    var t = inner.trim();
-    if (t.charAt(0) === "{") {
-      try {
-        var obj = JSON.parse(t);
-        if (obj && typeof obj.result === "string") inner = obj.result;
-      } catch (e) {}
-    }
+    var inner = window.__bramExecuteSqlInnerText(text);
     // The rows are the one JSON array in the result. Extract first "[" to last
     // "]"; the preamble/postamble are prose (they even mention the
     // <untrusted-data-…> tag, so keying on that tag mis-captures the prose).
@@ -4845,6 +4896,22 @@ window.__bramSupabaseSqlTable = function (text) {
     if (rows.length === 1 && cols.length === 1) {
       var only = rows[0][cols[0]];
       if (only && typeof only === "object") return null;
+    }
+    // execute-sql-long-string-cells: tables are for scannable values. A
+    // cell holding a whole document (pg_get_viewdef's view definition)
+    // is unreadable newline-collapsed and Markdown-mangles its * and _
+    // (count(*) rendered as italic count()). Decline so the caller's
+    // long-string section renderer takes it.
+    var LONG_CELL = 300;
+    for (var ri = 0; ri < rows.length; ri++) {
+      for (var rk in rows[ri]) {
+        if (!Object.prototype.hasOwnProperty.call(rows[ri], rk)) continue;
+        var rv = rows[ri][rk];
+        var rs = rv === null || rv === undefined
+          ? ""
+          : typeof rv === "object" ? JSON.stringify(rv) : String(rv);
+        if (rs.length > LONG_CELL) return null;
+      }
     }
     var esc = function (v) {
       if (v === null || v === undefined) return "";
@@ -4873,14 +4940,7 @@ window.__bramSupabaseSqlTable = function (text) {
 // caller falls back to generic formatting.
 window.__bramSupabaseSqlJson = function (text) {
   try {
-    var inner = String(text);
-    var t = inner.trim();
-    if (t.charAt(0) === "{") {
-      try {
-        var obj = JSON.parse(t);
-        if (obj && typeof obj.result === "string") inner = obj.result;
-      } catch (e) {}
-    }
+    var inner = window.__bramExecuteSqlInnerText(text);
     var payload = null;
     var lb = inner.indexOf("["), rb = inner.lastIndexOf("]");
     if (lb >= 0 && rb > lb) {
@@ -4895,6 +4955,24 @@ window.__bramSupabaseSqlJson = function (text) {
     if (payload == null || typeof payload !== "object") return null;
     var value = payload;
     if (Array.isArray(payload)) {
+      // execute-sql-long-string-cells: rows carrying document-sized
+      // strings (view definitions) get the section renderer — the table
+      // declined them, and pretty JSON would flatten the document into
+      // one escaped line. Bounded to a few rows; larger long-string
+      // result sets fall through to generic formatting.
+      var objRows = payload.length > 0 && payload.every(function (r) {
+        return r && typeof r === "object" && !Array.isArray(r);
+      });
+      if (objRows) {
+        var anyLong = payload.some(function (r) {
+          return Object.keys(r).some(function (k) {
+            return typeof r[k] === "string" && r[k].length > 300;
+          });
+        });
+        if (anyLong && payload.length <= 5) {
+          return payload.map(window.__bramExecuteSqlRowSections).join("\n\n---\n\n");
+        }
+      }
       if (payload.length !== 1) return null;
       value = payload[0];
       if (value && typeof value === "object" && !Array.isArray(value)) {

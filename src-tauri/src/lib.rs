@@ -17114,6 +17114,26 @@ mod tool_command_markdown_tests {
         assert_eq!(entry["commandMarkdown"], "# Notes\n\n**Ready**");
         assert_eq!(entry["commandDisplay"], "");
     }
+
+    #[test]
+    fn ismeta_user_record_is_not_a_turn() {
+        // Read-tool image companion: an isMeta:true user record with string
+        // content beside the tool_result. Claude Code's UI hides isMeta
+        // records; the projection must too, or the Transcript grows fake
+        // "You" turns (transcript-skip-ismeta-user-records).
+        let meta = json!({
+            "type": "user",
+            "isMeta": true,
+            "message": {"content": "[Image: original 3212x704, displayed at 2000x438.]"}
+        });
+        let real = json!({
+            "type": "user",
+            "message": {"content": "a real typed message"}
+        });
+        let turns = st_parse_lines_to_turns(&format!("{meta}\n{real}"));
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0]["entries"][0]["text"], "a real typed message");
+    }
 }
 
 fn st_edit_tool_diff(name: &str, input: &serde_json::Value) -> String {
@@ -17760,6 +17780,14 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
             continue;
         };
         let typ = r.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        // isMeta user records are CLI machinery, not user turns — e.g. the
+        // Read-tool image companion ("[Image: original 3212x704, displayed
+        // at…]") written beside every image tool_result. Claude Code's own
+        // UI hides isMeta records; rendering them here put fake "You" turns
+        // in the Transcript (transcript-skip-ismeta-user-records).
+        if typ == "user" && r.get("isMeta").and_then(|v| v.as_bool()) == Some(true) {
+            continue;
+        }
         let mut role: Option<&str> = None;
         let mut entries: Vec<serde_json::Value> = Vec::new();
         let mut inline_images: Vec<String> = Vec::new();

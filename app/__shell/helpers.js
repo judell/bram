@@ -4838,6 +4838,14 @@ window.__bramSupabaseSqlTable = function (text) {
       }
     }
     if (cols.length === 0) return null;
+    // execute-sql-json-result-fenced: a single row whose sole value is a
+    // nested object/array makes a useless 1x1 table (the whole JSON blob
+    // newline-collapsed into one cell — the pa11 STATE specimen). Decline
+    // so the caller's JSON formatter pretty-prints it instead.
+    if (rows.length === 1 && cols.length === 1) {
+      var only = rows[0][cols[0]];
+      if (only && typeof only === "object") return null;
+    }
     var esc = function (v) {
       if (v === null || v === undefined) return "";
       var s = typeof v === "object" ? JSON.stringify(v) : String(v);
@@ -4853,6 +4861,58 @@ window.__bramSupabaseSqlTable = function (text) {
     }
     if (rows.length > CAP) out += "\n_+" + (rows.length - CAP) + " more rows_\n";
     return out;
+  } catch (e) {
+    return null;
+  }
+};
+
+// execute-sql-json-result-fenced: pretty-print an execute_sql result that is
+// JSON but not tabular — a lone object, or a single row whose sole value is
+// a nested object/array (the case __bramSupabaseSqlTable declines). Same
+// payload extraction as the table formatter; null on anything else so the
+// caller falls back to generic formatting.
+window.__bramSupabaseSqlJson = function (text) {
+  try {
+    var inner = String(text);
+    var t = inner.trim();
+    if (t.charAt(0) === "{") {
+      try {
+        var obj = JSON.parse(t);
+        if (obj && typeof obj.result === "string") inner = obj.result;
+      } catch (e) {}
+    }
+    var payload = null;
+    var lb = inner.indexOf("["), rb = inner.lastIndexOf("]");
+    if (lb >= 0 && rb > lb) {
+      try { payload = JSON.parse(inner.slice(lb, rb + 1)); } catch (e) {}
+    }
+    if (payload == null) {
+      var lbo = inner.indexOf("{"), rbo = inner.lastIndexOf("}");
+      if (lbo >= 0 && rbo > lbo) {
+        try { payload = JSON.parse(inner.slice(lbo, rbo + 1)); } catch (e) {}
+      }
+    }
+    if (payload == null || typeof payload !== "object") return null;
+    var value = payload;
+    if (Array.isArray(payload)) {
+      if (payload.length !== 1) return null;
+      value = payload[0];
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        var keys = Object.keys(value);
+        if (keys.length === 1 && keys[0] && value[keys[0]] && typeof value[keys[0]] === "object") {
+          value = value[keys[0]];
+        }
+      }
+    }
+    if (!value || typeof value !== "object") return null;
+    var pretty = JSON.stringify(value, null, 2);
+    if (!pretty) return null;
+    // Same size discipline as the generic formatter's cap: an enormous
+    // result stays useful without freezing layout (tool-format lineage).
+    if (pretty.length > 16384) {
+      pretty = pretty.slice(0, 16384) + "\n… (truncated)";
+    }
+    return "```json\n" + pretty + "\n```";
   } catch (e) {
     return null;
   }
@@ -5034,6 +5094,10 @@ window.__bramFormatToolResult = function (result, toolName, hint) {
   if (__toolNameStr.indexOf("mcp__") === 0 && /__execute_sql$/.test(__toolNameStr)) {
     var sqlTable = window.__bramSupabaseSqlTable(text);
     if (sqlTable) return sqlTable;
+    // execute-sql-json-result-fenced: JSON-but-not-tabular results (lone
+    // object, single row wrapping a nested object) render as pretty JSON.
+    var sqlJson = window.__bramSupabaseSqlJson(text);
+    if (sqlJson) return sqlJson;
   }
   // tool-format sync bracket (variant-B expansion freeze, 2026-07-11
   // 22:48Z): the freeze lives somewhere in formatter → Markdown → WebKit

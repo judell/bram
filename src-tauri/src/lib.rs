@@ -9654,6 +9654,48 @@ fn pty_spawn(
                     bytes,
                     now_ms,
                 };
+                // send-gate: flush pane sends held behind a menu once it
+                // clears — evidence-based release only, no timeout. Runs
+                // on this ticker rather than at the menu-clear sites so
+                // the drain never re-enters pty_intent_lock from inside a
+                // PTY write path (menu clears fire within
+                // pty_write_internal's pipeline). A stale hold warns once
+                // (trace + always-on strand-forensics) and keeps holding:
+                // if the menu is real the user will answer it; if it's a
+                // ghost, the bug to fix is menu eviction, not the gate.
+                let gate_held_since = SEND_GATE_HELD_SINCE_MS.load(Ordering::Relaxed);
+                if gate_held_since > 0 {
+                    match send_gate_blocking_menu_tool() {
+                        None => {
+                            let state = app_for_throughput.state::<AppState>();
+                            if let Ok(_drain_guard) = pty_intent_lock().lock() {
+                                let _ = drain_pty_intents(&app_for_throughput, &state);
+                            }
+                        }
+                        Some(tool) => {
+                            let held_ms = now_ms.saturating_sub(gate_held_since);
+                            if held_ms >= SEND_GATE_STALE_WARN_MS
+                                && SEND_GATE_STALE_WARNED_MS.swap(gate_held_since, Ordering::Relaxed)
+                                    != gate_held_since
+                            {
+                                if bram_trace_enabled() {
+                                    append_bram_trace_line(
+                                        &app_for_throughput,
+                                        "send-gate",
+                                        &format!("op=hold-stale held_ms={} tool={}", held_ms, tool),
+                                    );
+                                }
+                                append_strand_forensics_line(
+                                    &app_for_throughput,
+                                    &format!(
+                                        "op=send-gate-hold-stale held_ms={} tool={}",
+                                        held_ms, tool
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
                 for transition in reveal_floor.step(&input) {
                     trace_reveal_floor_transition(
                         &app_for_throughput,
@@ -10146,6 +10188,9 @@ fn drain_pty_intents<R: tauri::Runtime>(
     };
     if content.trim().is_empty() {
         let _ = std::fs::remove_file(&path);
+        // No intents left, so nothing can be held — clear any stale
+        // send-gate hold epoch (e.g. queue file removed externally).
+        SEND_GATE_HELD_SINCE_MS.store(0, std::sync::atomic::Ordering::Relaxed);
         if bram_trace_enabled() {
             append_bram_trace_line(app, "pty-intent", "op=drain-empty");
         }
@@ -10155,6 +10200,15 @@ fn drain_pty_intents<R: tauri::Runtime>(
     let mut wrote: usize = 0;
     let mut remaining: Vec<String> = Vec::new();
     let mut drain_error: Option<String> = None;
+
+    // send-gate: hold toShell/toTurn intents while a blocking menu is
+    // displayed (sendKeys always passes — pane menu answers ride it, and
+    // answering the menu is what releases the hold). No operational
+    // timeout: a long hold warns (`op=hold-stale`, from the ticker) but
+    // only menu-clear evidence releases the sends.
+    let held_since = SEND_GATE_HELD_SINCE_MS.load(std::sync::atomic::Ordering::Relaxed);
+    let blocking_tool = send_gate_blocking_menu_tool();
+    let mut held: usize = 0;
 
     for line in content.lines() {
         if line.is_empty() {
@@ -10170,6 +10224,11 @@ fn drain_pty_intents<R: tauri::Runtime>(
         };
         let kind = intent.get("kind").and_then(|v| v.as_str()).unwrap_or("");
         let data = intent.get("data").and_then(|v| v.as_str()).unwrap_or("");
+        if blocking_tool.is_some() && matches!(kind, "toShell" | "toTurn") {
+            held += 1;
+            remaining.push(line.to_string());
+            continue;
+        }
         let write_result = match kind {
             "toShell" => {
                 let wrapped = format!("{}\n", data);
@@ -10187,6 +10246,38 @@ fn drain_pty_intents<R: tauri::Runtime>(
                 drain_error = Some(e);
                 remaining.push(line.to_string());
             }
+        }
+    }
+
+    if held > 0 {
+        // Keep the original hold start across repeated drains so the
+        // bounded hold measures from the first held intent.
+        let _ = SEND_GATE_HELD_SINCE_MS.compare_exchange(
+            0,
+            unix_now_ms(),
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "send-gate",
+                &format!(
+                    "op=hold count={} reason=menu-present tool={}",
+                    held,
+                    blocking_tool.as_deref().unwrap_or("")
+                ),
+            );
+        }
+    } else if held_since > 0 {
+        SEND_GATE_HELD_SINCE_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+        if bram_trace_enabled() {
+            let held_ms = unix_now_ms().saturating_sub(held_since);
+            append_bram_trace_line(
+                app,
+                "send-gate",
+                &format!("op=flush wrote={} held_ms={}", wrote, held_ms),
+            );
         }
     }
 
@@ -19178,6 +19269,42 @@ fn turn_state_menu_present() -> bool {
         .lock()
         .map(|t| t.pending_menu.is_some())
         .unwrap_or(false)
+}
+
+// send-gate-hold-while-menu-open: pane sends (`toShell` / `toTurn`)
+// injected while a permission menu or picker is displayed get swallowed
+// by the menu instead of reaching the composer (Eric 2026-07-19
+// 21:04:44: an iterate payload pasted into an open Bash permission menu
+// stranded with `menu_at_inject=true`). Held intents stay in the
+// pty-intent queue file; the pty-throughput ticker flushes them when the
+// menu clears or the bounded hold expires.
+static SEND_GATE_HELD_SINCE_MS: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+// Diagnostic only — never operational. Release is evidence-based (the
+// menu clears / the user answers it); a hold this old emits a one-shot
+// `op=hold-stale` warning (trace + strand-forensics) but keeps holding.
+// Force-flushing into a still-open menu would recreate the strand and
+// could keystroke-answer a permission prompt.
+const SEND_GATE_STALE_WARN_MS: i64 = 120_000;
+// held_since epoch already warned about; != HELD_SINCE means unwarned.
+static SEND_GATE_STALE_WARNED_MS: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+
+// The menu tool currently blocking pane sends, or None when sends may
+// flow. AskUserQuestion is exempt: Claude Code's composer accepts typed
+// input while a question is displayed and typing over it is a
+// legitimate answer path (2026-07-19 22:04:50 landed in <1s with the
+// question open); permission menus and pickers swallow pasted input.
+fn send_gate_blocking_menu_tool() -> Option<String> {
+    turn_state_cell().lock().ok().and_then(|t| {
+        t.pending_menu.as_ref().and_then(|m| {
+            if m.tool == "AskUserQuestion" {
+                None
+            } else {
+                Some(m.tool.clone())
+            }
+        })
+    })
 }
 
 // Record a send at injection time (called from write_pty_turn_intent with

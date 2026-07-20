@@ -992,6 +992,31 @@ try {
   }
 } catch (e) { /* longtask unsupported: instrument absent, not broken */ }
 
+// backgrounded-pane-menu-paint-observer: pane visibility transitions.
+// One line per transition; pairs with the menu-paint marker (see
+// __bramApplyAgentMenu) to prove/refute that a backgrounded window
+// starves the menu paint until refocus (2026-07-19: a Write menu sat
+// 28.8s, answered only after the focus-in escape). Observe-only.
+// __bramPaneLastVisibleMs is the correlation timestamp: a menu-paint
+// whose paint lands after this refocus instant is the specimen.
+window.__bramPaneLastVisibleMs = 0;
+try {
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) window.__bramPaneLastVisibleMs = Date.now();
+    window.__bramIframeTrace("pane-visibility", {
+      state: document.hidden ? "hidden" : "visible",
+      via: "visibilitychange",
+    });
+  });
+  window.addEventListener("blur", function () {
+    window.__bramIframeTrace("pane-visibility", { state: "blur", via: "window" });
+  });
+  window.addEventListener("focus", function () {
+    window.__bramPaneLastVisibleMs = Date.now();
+    window.__bramIframeTrace("pane-visibility", { state: "focus", via: "window" });
+  });
+} catch (e) { /* observe-only: absent, not broken */ }
+
 // Cascade-diagnosis instrumentation (refs #93). Emits a helper-call
 // record when a hot JSONL-walking helper exceeds the threshold. Cheap
 // paths (no-op early returns, cache hits) don't log because their _t0
@@ -2576,6 +2601,38 @@ window.__bramApplyAgentMenu = function (menu, suppressFallback, source) {
         window.__bramMenuRowTraceLastKey = __menuRowKey;
         window.__bramTraceMenuRow(window.bramAgentMenu, "source");
       }
+    }
+  } catch (e) {}
+  // backgrounded-pane-menu-paint-observer: receive-vs-paint marker.
+  // Double-rAF is the paint proxy — the second callback runs only after
+  // a real frame, and rAF stalls while the webview is hidden/throttled,
+  // so a menu received hidden that paints only on refocus shows up as
+  // receive_to_paint_ms spanning the hidden period with
+  // painted_after_refocus=true (paired with the pane-visibility lines
+  // and the host's prompt-lifecycle op=shown). Gated to the agent pane;
+  // observe-only, one probe per applied menu.
+  try {
+    if (menu && window.location.pathname.indexOf("/tools/") !== -1) {
+      var __paintReceiveMs = Date.now();
+      var __paintHiddenAtReceive = !!document.hidden;
+      var __paintFocusedAtReceive = !!(document.hasFocus && document.hasFocus());
+      var __paintTool = menu.tool || "";
+      var __paintMenuId = window.__bramMenuIdentity ? window.__bramMenuIdentity(menu) : __paintTool;
+      requestAnimationFrame(function () {
+        requestAnimationFrame(function () {
+          var __paintMs = Date.now();
+          window.__bramIframeTrace("menu-paint", {
+            tool: __paintTool,
+            menuId: __paintMenuId,
+            hidden_at_receive: __paintHiddenAtReceive,
+            focused_at_receive: __paintFocusedAtReceive,
+            receive_to_paint_ms: __paintMs - __paintReceiveMs,
+            painted_after_refocus:
+              __paintHiddenAtReceive &&
+              (window.__bramPaneLastVisibleMs || 0) > __paintReceiveMs,
+          });
+        });
+      });
     }
   } catch (e) {}
   window.bramAgentMenuSuppressFallback = suppressFallback;

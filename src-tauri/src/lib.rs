@@ -32297,14 +32297,21 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         message.to_string(),
         "--".to_string(),
     ];
-    // Scope the commit pathspec to files staging actually acted on —
-    // `git commit -- <path>` fails on a nothing-matching path exactly
-    // like `git add` does, one step downstream (caught by the
-    // verify-stage-deletions fixture on first exercise).
+    // Scope the commit pathspec to what is actually STAGED for the item,
+    // not `files − skipped_unmatched`. A deletion staged before this call
+    // (the apply did `git rm`) makes `git add -A -- <path>` report "did
+    // not match any files" — the path landed in skipped_unmatched and was
+    // dropped from the commit, leaving the staged deletion behind to block
+    // the NEXT commit as an unrelated staged file (pa elections field
+    // report, worklist-commit-omits-staged-deletions). `staged_after`
+    // lists staged deletions, so intersecting with it includes them; a
+    // truly-unmatched path (never tracked, gone) is absent from it and
+    // stays excluded, and `git commit -- <path>` never sees a
+    // nothing-matching pathspec.
     commit_args.extend(
         files
             .iter()
-            .filter(|f| !skipped_unmatched.contains(f))
+            .filter(|f| staged_after.contains(f))
             .cloned(),
     );
     if let Err(e) = git_run_owned(app, &commit_args) {

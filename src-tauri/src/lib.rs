@@ -952,25 +952,16 @@ fn resolve_claim_tool_use_id<R: tauri::Runtime>(
         }
     }
     if matches.is_empty() {
-        if let Some(dir) = st_session_subagents_dir(&path) {
-            if let Ok(rd) = std::fs::read_dir(&dir) {
-                for entry in rd.flatten() {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if !(name.starts_with("agent-") && name.ends_with(".jsonl")) {
-                        continue;
-                    }
-                    let p = entry.path();
-                    if st_subagent_finished(&p) {
-                        continue;
-                    }
-                    let Some(text) = st_read_tail(&p, 4 * 1024 * 1024) else {
-                        continue;
-                    };
-                    for call in extract_pending_tool_cluster_from_jsonl(&text) {
-                        if !call.id.is_empty() && format_pending_tool_call(&call) == sig {
-                            matches.push(call.id.clone());
-                        }
-                    }
+        for sf in st_subagent_files(&path) {
+            if st_subagent_finished(&sf.jsonl_path) {
+                continue;
+            }
+            let Some(text) = st_read_tail(&sf.jsonl_path, 4 * 1024 * 1024) else {
+                continue;
+            };
+            for call in extract_pending_tool_cluster_from_jsonl(&text) {
+                if !call.id.is_empty() && format_pending_tool_call(&call) == sig {
+                    matches.push(call.id.clone());
                 }
             }
         }
@@ -1059,26 +1050,17 @@ fn janitor_resolved_claims<R: tauri::Runtime>(app: &AppHandle<R>) {
     if let Some(text) = st_read_tail(&path, 4 * 1024 * 1024) {
         st_tool_resolution_state(&text, &mut resolved_ids, &mut resolved_sigs, &mut unresolved_sigs);
     }
-    if let Some(dir) = st_session_subagents_dir(&path) {
-        if let Ok(rd) = std::fs::read_dir(&dir) {
-            for entry in rd.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if !(name.starts_with("agent-") && name.ends_with(".jsonl")) {
-                    continue;
-                }
-                let p = entry.path();
-                if st_subagent_finished(&p) {
-                    continue;
-                }
-                if let Some(text) = st_read_tail(&p, 4 * 1024 * 1024) {
-                    st_tool_resolution_state(
-                        &text,
-                        &mut resolved_ids,
-                        &mut resolved_sigs,
-                        &mut unresolved_sigs,
-                    );
-                }
-            }
+    for sf in st_subagent_files(&path) {
+        if st_subagent_finished(&sf.jsonl_path) {
+            continue;
+        }
+        if let Some(text) = st_read_tail(&sf.jsonl_path, 4 * 1024 * 1024) {
+            st_tool_resolution_state(
+                &text,
+                &mut resolved_ids,
+                &mut resolved_sigs,
+                &mut unresolved_sigs,
+            );
         }
     }
     let claim_resolved = |c: &HookMenuClaim| -> bool {
@@ -15110,21 +15092,13 @@ fn build_batch_rollup_diff<R: tauri::Runtime>(
 // or more live subagents the menu↔call binding is a guess — the caller
 // marks the lookup ambiguous so identity decisions can discount it.
 fn sweep_subagents_for_pending_call(session_path: &Path) -> (Option<PendingToolCall>, usize) {
-    let Some(dir) = st_session_subagents_dir(session_path) else {
-        return (None, 0);
-    };
-    let Ok(rd) = std::fs::read_dir(&dir) else {
-        return (None, 0);
-    };
     let mut candidates: Vec<(std::time::SystemTime, std::path::PathBuf)> = Vec::new();
-    for entry in rd.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !(name.starts_with("agent-") && name.ends_with(".jsonl")) {
+    for sf in st_subagent_files(session_path) {
+        let Ok(md) = std::fs::metadata(&sf.jsonl_path) else {
             continue;
-        }
-        let Ok(md) = entry.metadata() else { continue };
+        };
         let mtime = md.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        candidates.push((mtime, entry.path()));
+        candidates.push((mtime, sf.jsonl_path));
     }
     candidates.sort_by(|a, b| b.0.cmp(&a.0));
     // A finished agent has no pending prompt; tail-line check is far
@@ -18541,6 +18515,176 @@ fn st_session_subagents_dir(session_path: &Path) -> Option<PathBuf> {
     Some(session_path.parent()?.join(stem).join("subagents"))
 }
 
+// subagent-discovery-workflow-dirs: every agent transcript under the
+// session's sidecar tree, wherever it nests. Task subagents live flat at
+// <sid>/subagents/agent-<id>.jsonl (CC >= 2.1.170); Workflow runs (first
+// seen 2026-07-20, CC 2.1.205) add
+// <sid>/subagents/workflows/<wf_id>/agent-<id>.jsonl. Directory names are
+// NOT load-bearing — the stable contract is agent-<id>.jsonl plus its
+// agent-<id>.meta.json sidecar — so this walks a bounded depth collecting
+// by filename pattern; the next layout addition is picked up without code
+// changes, and the op=orphan instrument reports anything still missed.
+struct SubagentFile {
+    agent_id: String,
+    jsonl_path: PathBuf,
+    dir: PathBuf,
+    // Nearest ancestor directory named wf_* (a Workflow run id), if any.
+    workflow_id: Option<String>,
+}
+
+fn st_subagent_files(session_path: &Path) -> Vec<SubagentFile> {
+    fn walk(dir: &Path, depth: usize, wf: Option<&str>, out: &mut Vec<SubagentFile>) {
+        if depth > 3 {
+            return;
+        }
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let p = entry.path();
+            if p.is_dir() {
+                let wf_here = if name.starts_with("wf_") {
+                    Some(name.clone())
+                } else {
+                    None
+                };
+                walk(&p, depth + 1, wf_here.as_deref().or(wf), out);
+            } else if let Some(agent_id) = name
+                .strip_prefix("agent-")
+                .and_then(|s| s.strip_suffix(".jsonl"))
+            {
+                out.push(SubagentFile {
+                    agent_id: agent_id.to_string(),
+                    jsonl_path: p.clone(),
+                    dir: dir.to_path_buf(),
+                    workflow_id: wf.map(|s| s.to_string()),
+                });
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if let Some(root) = st_session_subagents_dir(session_path) {
+        walk(&root, 0, None, &mut out);
+    }
+    out
+}
+
+// Claude Code version stamped in the session's early records; carried on
+// the op=orphan line so a future layout change correlates with the CC
+// release that introduced it in one grep.
+fn st_session_cc_version(session_path: &Path) -> String {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(session_path) else {
+        return String::new();
+    };
+    let mut buf = vec![0u8; 16384];
+    let n = f.read(&mut buf).unwrap_or(0);
+    let text = String::from_utf8_lossy(&buf[..n]);
+    for line in text.lines() {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            if let Some(ver) = v.get("version").and_then(|x| x.as_str()) {
+                return ver.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+#[cfg(test)]
+mod subagent_discovery_tests {
+    use super::st_subagent_files;
+
+    #[test]
+    fn discovers_flat_and_workflow_nested_agents() {
+        let base = std::env::temp_dir().join(format!("bram-subagent-test-{}", std::process::id()));
+        let sid_dir = base.join("abc123").join("subagents");
+        let wf_dir = sid_dir.join("workflows").join("wf_test-run");
+        std::fs::create_dir_all(&wf_dir).unwrap();
+        std::fs::write(sid_dir.join("agent-a1.jsonl"), b"{}").unwrap();
+        std::fs::write(sid_dir.join("agent-a1.meta.json"), b"{}").unwrap();
+        std::fs::write(wf_dir.join("agent-b2.jsonl"), b"{}").unwrap();
+        std::fs::write(wf_dir.join("agent-b2.meta.json"), b"{}").unwrap();
+        std::fs::write(wf_dir.join("journal.jsonl"), b"{}").unwrap();
+        let session_path = base.join("abc123.jsonl");
+        let mut files = st_subagent_files(&session_path);
+        files.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+        let ids: Vec<&str> = files.iter().map(|f| f.agent_id.as_str()).collect();
+        // journal.jsonl and meta sidecars are not agent transcripts.
+        assert_eq!(ids, vec!["a1", "b2"]);
+        assert_eq!(files[0].workflow_id, None);
+        assert_eq!(files[1].workflow_id.as_deref(), Some("wf_test-run"));
+        assert!(files[1].dir.ends_with("workflows/wf_test-run"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+// subagent-discovery-workflow-dirs: coverage-gap instrument. The main
+// transcript names every dispatched agent (task-notification turns carry
+// taskId); a referenced agent with no discoverable transcript means a
+// layout change or cleanup we can't see through. One op=orphan line per
+// (session, agent) — the next Claude Code layout shift names itself in
+// the trace instead of rendering a silently empty pane. Same doctrine as
+// the grid detector's op=gap coverage signal.
+fn st_report_orphan_subagents<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    session_path: &Path,
+    turns: &[serde_json::Value],
+) {
+    if !bram_trace_enabled() {
+        return;
+    }
+    let mut referenced: Vec<(String, String)> = Vec::new();
+    for t in turns {
+        if t.get("notification").and_then(|v| v.as_bool()) != Some(true) {
+            continue;
+        }
+        let tid = t.get("taskId").and_then(|v| v.as_str()).unwrap_or("");
+        if tid.is_empty() {
+            continue;
+        }
+        let id = tid.strip_prefix("agent-").unwrap_or(tid).to_string();
+        let tu = t
+            .get("toolUseId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        referenced.push((id, tu));
+    }
+    if referenced.is_empty() {
+        return;
+    }
+    let discovered: std::collections::HashSet<String> = st_subagent_files(session_path)
+        .into_iter()
+        .map(|f| f.agent_id)
+        .collect();
+    static REPORTED: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    let reported = REPORTED.get_or_init(|| Mutex::new(Default::default()));
+    let sid = session_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    for (id, tu) in referenced {
+        if discovered.contains(&id) {
+            continue;
+        }
+        let key = format!("{}:{}", sid, id);
+        if let Ok(mut g) = reported.lock() {
+            if !g.insert(key) {
+                continue;
+            }
+        }
+        append_bram_trace_line(
+            app,
+            "subagents",
+            &format!(
+                "op=orphan agent_id={} tool_use_id={} cc_version={}",
+                id,
+                tu,
+                st_session_cc_version(session_path)
+            ),
+        );
+    }
+}
+
 fn st_valid_agent_id(agent_id: &str) -> bool {
     !agent_id.is_empty()
         && agent_id
@@ -18687,25 +18831,12 @@ fn st_subagent_model(jsonl_path: &Path) -> String {
 // toolUseId. Tool entries with an agentId gain the pane's subagent
 // affordances (inline peek, footer chip focus).
 fn st_tag_agent_tool_entries(session_path: &Path, turns: &mut [serde_json::Value]) {
-    let Some(dir) = st_session_subagents_dir(session_path) else {
-        return;
-    };
-    let Ok(rd) = std::fs::read_dir(&dir) else {
-        return;
-    };
     let mut by_tool_use: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
-    for entry in rd.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        let Some(agent_id) = name
-            .strip_prefix("agent-")
-            .and_then(|s| s.strip_suffix(".meta.json"))
-        else {
-            continue;
-        };
-        if let Some(meta) = st_read_subagent_meta(&dir, agent_id) {
+    for sf in st_subagent_files(session_path) {
+        if let Some(meta) = st_read_subagent_meta(&sf.dir, &sf.agent_id) {
             if let Some(tid) = meta.get("toolUseId").and_then(|v| v.as_str()) {
-                by_tool_use.insert(tid.to_string(), agent_id.to_string());
+                by_tool_use.insert(tid.to_string(), sf.agent_id.clone());
             }
         }
     }
@@ -18756,10 +18887,15 @@ fn read_subagent_turns<R: tauri::Runtime>(
     let Some(session_path) = active_session_path(app)? else {
         return empty();
     };
-    let Some(dir) = st_session_subagents_dir(&session_path) else {
+    // subagent-discovery-workflow-dirs: resolve the agent id across both
+    // layouts (flat Task subagents and nested Workflow run dirs).
+    let Some(sf) = st_subagent_files(&session_path)
+        .into_iter()
+        .find(|f| f.agent_id == agent_id)
+    else {
         return empty();
     };
-    let jsonl_path = dir.join(format!("agent-{}.jsonl", agent_id));
+    let (jsonl_path, dir) = (sf.jsonl_path, sf.dir);
     let Ok(text) = std::fs::read_to_string(&jsonl_path) else {
         return empty();
     };
@@ -18847,38 +18983,32 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
         }))
         .map_err(|e| e.to_string())
     };
-    let Some(dir) = st_session_subagents_dir(&session_path) else {
-        return empty_session();
-    };
-    let Ok(rd) = std::fs::read_dir(&dir) else {
-        return empty_session();
-    };
     let to_ms = |t: std::time::SystemTime| -> i64 {
         t.duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0)
     };
+    let files = st_subagent_files(&session_path);
+    if files.is_empty() {
+        return empty_session();
+    }
     let mut agents: Vec<serde_json::Value> = Vec::new();
-    for entry in rd.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        let Some(agent_id) = name
-            .strip_prefix("agent-")
-            .and_then(|s| s.strip_suffix(".jsonl"))
-        else {
+    for sf in files {
+        let Ok(md) = std::fs::metadata(&sf.jsonl_path) else {
             continue;
         };
-        let path = entry.path();
-        let Ok(md) = entry.metadata() else { continue };
         let updated_at_ms = md.modified().map(to_ms).unwrap_or(0);
         let started_at_ms = md.created().map(to_ms).unwrap_or(updated_at_ms);
-        let meta = st_read_subagent_meta(&dir, agent_id).unwrap_or(serde_json::Value::Null);
+        let meta = st_read_subagent_meta(&sf.dir, &sf.agent_id).unwrap_or(serde_json::Value::Null);
         agents.push(serde_json::json!({
-            "agentId": agent_id,
+            "agentId": sf.agent_id,
             "agentType": meta.get("agentType").and_then(|v| v.as_str()).unwrap_or(""),
             "description": meta.get("description").and_then(|v| v.as_str()).unwrap_or(""),
             "toolUseId": meta.get("toolUseId").and_then(|v| v.as_str()).unwrap_or(""),
-            "model": st_subagent_model(&path),
-            "finished": st_subagent_finished(&path),
+            // Workflow membership (the wf_… run dir), for pane grouping.
+            "workflowId": sf.workflow_id.as_deref().unwrap_or(""),
+            "model": st_subagent_model(&sf.jsonl_path),
+            "finished": st_subagent_finished(&sf.jsonl_path),
             "startedAtMs": started_at_ms,
             "updatedAtMs": updated_at_ms,
         }));
@@ -20687,6 +20817,7 @@ fn try_incremental_projected_turns<R: tauri::Runtime>(
     let mut tail_turns = st_parse_lines_to_turns(&text);
     project_user_turns(app, &mut tail_turns);
     st_tag_agent_tool_entries(path, &mut tail_turns);
+    st_report_orphan_subagents(app, path, &tail_turns);
     let Some(merged) = merge_projected_turn_tail(&entry.turns, tail_turns) else {
         return None;
     };
@@ -20835,6 +20966,7 @@ fn read_projected_turns<R: tauri::Runtime>(
     let project_started = std::time::Instant::now();
     project_user_turns(app, &mut turns);
     st_tag_agent_tool_entries(&path, &mut turns);
+    st_report_orphan_subagents(app, &path, &turns);
     let project_ms = project_started.elapsed().as_millis();
     let turn_count = turns.len();
     let sid = path

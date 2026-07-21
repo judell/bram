@@ -612,6 +612,14 @@
                         size="xs"
                         tooltip="{($item.status || 'proposed') === 'applied' || ($item.status || 'proposed') === 'proposed' ? 'What does this badge mean?' : 'Why is this status invalid?'}"
                         onClick="($item.status || 'proposed') === 'applied' ? statusAppliedHelpDialog.open() : (($item.status || 'proposed') === 'proposed' ? statusProposedHelpDialog.open() : statusInvalidHelpDialog.open())" />
+                      <!-- issue-223: a live, unconsumed authorization is otherwise invisible -->
+                      <Text
+                        when="{!!$item.activeAuthorization}"
+                        value="{($item.activeAuthorization === 'drop' ? 'DROP' : 'APPROVED') + ' · awaiting agent'}"
+                        fontSize="$fontSize-xs"
+                        fontWeight="$fontWeight-bold"
+                        color="$color-warn-700"
+                        tooltip="{'An unconsumed ' + $item.activeAuthorization + ' authorization from ' + Math.round(($item.authorizationAgeMs || 0) / 60000) + ' min ago covers this item. The agent has not advanced it yet; re-clicking the button refreshes the authorization.'}" />
                     </HStack>
                   </Theme>
                   <Text value="{$item.id}" fontWeight="$fontWeight-bold" />

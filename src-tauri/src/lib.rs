@@ -28445,11 +28445,55 @@ fn record_worklist_action_authorization<R: tauri::Runtime>(
     if !record.ids.is_empty() {
         write_inflight_claim_sentinel(&app, &record.ids, &record.kind);
     }
+    // issue-223-surface-unconsumed-approval: the record just became the
+    // covered items' activeAuthorization state — refresh the Worklist tab
+    // now, not on its next poll.
+    emit_replayable_signal(&app, "worklist-changed");
     Ok(serde_json::json!({
         "ok": true,
         "kind": record.kind,
         "ids": record.ids,
     }))
+}
+
+// issue-223-surface-unconsumed-approval: the authorization state the
+// enforcement machinery will honor, summarized for the Worklist tab. A
+// record counts only while unconsumed AND fresh (same
+// worklist_auth_freshness_ok the mutate path applies — interrupted or
+// TTL-expired records are invisible here exactly as they are
+// unenforceable there), and only for the ids it covers. Returns
+// (kind, age_ms, covered ids).
+fn worklist_active_authorization_summary<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Option<(String, i64, std::collections::HashSet<String>)> {
+    let path = worklist_auth_file(app)?;
+    let auth: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
+    if auth.get("consumedAtMs").and_then(|v| v.as_i64()).is_some() {
+        return None;
+    }
+    let now = unix_now_ms();
+    if worklist_auth_freshness_ok(&auth, now).is_err() {
+        return None;
+    }
+    let kind = auth.get("kind").and_then(|v| v.as_str())?;
+    if kind != "approved" && kind != "drop" {
+        return None;
+    }
+    let ids: std::collections::HashSet<String> = auth
+        .get("ids")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    if ids.is_empty() {
+        return None;
+    }
+    let issued = auth.get("issuedAtMs").and_then(|v| v.as_i64()).unwrap_or(0);
+    Some((kind.to_string(), now.saturating_sub(issued), ids))
 }
 
 fn record_codex_direct_edit_authorization<R: tauri::Runtime>(app: &AppHandle<R>, turn_text: &str) {
@@ -31398,6 +31442,29 @@ fn route_request<R: tauri::Runtime>(
     // surface their pending diff inline.
     if path == "__worklist" {
         let mut doc = worklist_doc(app);
+        // issue-223-surface-unconsumed-approval: annotate items covered by
+        // a live, unconsumed authorization so the tab can show that state
+        // (an approved-but-not-advanced row otherwise renders identically
+        // to a never-approved one).
+        if let Some((kind, age_ms, covered)) = worklist_active_authorization_summary(app) {
+            if let Some(items) = doc.get_mut("items").and_then(|v| v.as_array_mut()) {
+                for item in items {
+                    let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    if !id.is_empty() && covered.contains(id) {
+                        if let Some(obj) = item.as_object_mut() {
+                            obj.insert(
+                                "activeAuthorization".to_string(),
+                                serde_json::Value::String(kind.clone()),
+                            );
+                            obj.insert(
+                                "authorizationAgeMs".to_string(),
+                                serde_json::Value::from(age_ms),
+                            );
+                        }
+                    }
+                }
+            }
+        }
         if let Some(items) = doc.get_mut("items").and_then(|v| v.as_array_mut()) {
             for item in items {
                 let status = item

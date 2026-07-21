@@ -4865,6 +4865,42 @@ window.__bramExecuteSqlRowSections = function (row) {
   return parts.join("\n\n");
 };
 
+// mcp-sql-shape-driven-rendering: does this MCP tool result carry a
+// SQL-shaped payload? Two positive signatures, no tool-name list:
+// - the `<untrusted-data-…>` boundary tag — the Supabase MCP wrapper's
+//   own prompt-injection fence, stamped on every SQL-backed result
+//   (execute_sql, get_logs, get_advisors, …) and never on prose;
+// - the result parses WHOLESALE as a JSON rows-array or object
+//   (bare-rows servers like the postgres MCP) — wholesale, so a JSON
+//   array merely embedded in prose can't false-fire.
+// Content-block arrays (elements with an MCP `type` tag) are excluded:
+// they are transport wrapper, not rows — a wrapped SQL payload is
+// caught by the boundary-tag arm after unwrap instead.
+window.__bramMcpSqlShaped = function (text) {
+  try {
+    var inner = window.__bramExecuteSqlInnerText(text);
+    if (inner.indexOf("<untrusted-data-") >= 0) return true;
+    var t = inner.trim();
+    if (t.charAt(0) !== "[" && t.charAt(0) !== "{") return false;
+    var parsed = JSON.parse(t);
+    if (Array.isArray(parsed)) {
+      if (parsed.length === 0) return false;
+      var blockTypes = { text: 1, image: 1, audio: 1, resource: 1, resource_link: 1, tool_use: 1, tool_result: 1 };
+      var allObjects = parsed.every(function (r) {
+        return r && typeof r === "object" && !Array.isArray(r);
+      });
+      if (!allObjects) return false;
+      var contentBlocks = parsed.every(function (r) {
+        return typeof r.type === "string" && blockTypes[r.type] === 1;
+      });
+      return !contentBlocks;
+    }
+    return parsed !== null && typeof parsed === "object";
+  } catch (e) {
+    return false;
+  }
+};
+
 // render-supabase-execute-sql: turn a Supabase execute_sql result into a
 // Markdown table, or null if it doesn't look like rows (DDL, no rows, parse
 // failure) so the caller falls back to generic formatting. The rows are a JSON
@@ -4898,11 +4934,19 @@ window.__bramSupabaseSqlTable = function (text) {
       if (only && typeof only === "object") return null;
     }
     // execute-sql-long-string-cells: tables are for scannable values. A
-    // cell holding a whole document (pg_get_viewdef's view definition)
-    // is unreadable newline-collapsed and Markdown-mangles its * and _
-    // (count(*) rendered as italic count()). Decline so the caller's
-    // long-string section renderer takes it.
-    var LONG_CELL = 300;
+    // cell holding a whole DOCUMENT (pg_get_viewdef's view definition,
+    // 900-2300 chars in the pa11 specimens) is unreadable
+    // newline-collapsed and Markdown-mangles its * and _ (count(*)
+    // rendered as italic count()) — decline so the caller's section
+    // renderer takes it. Merely long-ish cells (a 313-char log
+    // event_message across 21 rows — the get_logs specimen) keep the
+    // table and truncate below; declining them dropped a genuinely
+    // tabular result to the generic envelope blob.
+    // Single-row results are document-shaped as soon as any value runs
+    // long (a lone view definition deserves a code block, not a cell);
+    // multi-row results stay tables up to a document-sized cell, with
+    // truncation below keeping them scannable.
+    var DOC_CELL = rows.length === 1 ? 300 : 1000;
     for (var ri = 0; ri < rows.length; ri++) {
       for (var rk in rows[ri]) {
         if (!Object.prototype.hasOwnProperty.call(rows[ri], rk)) continue;
@@ -4910,12 +4954,13 @@ window.__bramSupabaseSqlTable = function (text) {
         var rs = rv === null || rv === undefined
           ? ""
           : typeof rv === "object" ? JSON.stringify(rv) : String(rv);
-        if (rs.length > LONG_CELL) return null;
+        if (rs.length > DOC_CELL) return null;
       }
     }
     var esc = function (v) {
       if (v === null || v === undefined) return "";
       var s = typeof v === "object" ? JSON.stringify(v) : String(v);
+      if (s.length > 300) s = s.slice(0, 297) + "…";
       return s.replace(/\|/g, "\\|").replace(/[\r\n]+/g, " ");
     };
     var CAP = 50;
@@ -5163,13 +5208,15 @@ window.__bramFormatToolResult = function (result, toolName, hint) {
   if (result == null) return "";
   var text = String(result);
   if (text.trim() === "") return text;
-  // render-supabase-execute-sql: render rows as a Markdown table; fall through
-  // to generic formatting when it isn't tabular. Suffix match, not exact:
-  // the MCP server segment is registration-dependent (local "supabase" vs
-  // the claude.ai connector's "claude_ai_Supabase" — Eric's v0.2.23 field
-  // report). __bramSupabaseSqlTable's rows-shape parse keeps this safe.
+  // mcp-sql-shape-driven-rendering: render SQL-shaped MCP results as a
+  // Markdown table / pretty JSON / long-string sections, recognized by
+  // result SHAPE (boundary tag or wholesale rows JSON), not tool name —
+  // name gates missed twice in one day (the claude.ai connector's server
+  // segment, then mcp__supabase__get_logs returning the same envelope).
+  // The pipeline self-declines back to generic formatting on anything
+  // non-tabular/non-JSON.
   var __toolNameStr = String(toolName || "");
-  if (__toolNameStr.indexOf("mcp__") === 0 && /__execute_sql$/.test(__toolNameStr)) {
+  if (__toolNameStr.indexOf("mcp__") === 0 && window.__bramMcpSqlShaped(text)) {
     var sqlTable = window.__bramSupabaseSqlTable(text);
     if (sqlTable) return sqlTable;
     // execute-sql-json-result-fenced: JSON-but-not-tabular results (lone

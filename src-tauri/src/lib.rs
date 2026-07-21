@@ -17053,24 +17053,37 @@ fn st_tool_command_display(name: &str, input: &serde_json::Value) -> String {
             }
         }
     }
-    // render-supabase-execute-sql: pretty-print the SQL and show it as a fenced
-    // code block (the client's __bramFormatToolCommand passes an already-fenced
-    // block through verbatim). Empty otherwise = no command box.
-    // Matched by suffix, not exact name: Claude Code names MCP tools
-    // mcp__<server>__<tool> and the server segment is registration-dependent —
-    // a local .mcp.json says "supabase", the claude.ai connector says
-    // "claude_ai_Supabase" (Eric's v0.2.23 field report: neither SQL nor
-    // formatted results rendered because the exact match missed his connector
-    // name). The input.query string gate below keeps the loose match safe.
-    if name.starts_with("mcp__") && name.ends_with("__execute_sql") {
-        if let Some(q) = input.get("query").and_then(|v| v.as_str()) {
-            if !q.trim().is_empty() {
-                let pretty = sqlformat::format(
-                    q,
-                    &sqlformat::QueryParams::None,
-                    &sqlformat::FormatOptions::default(),
-                );
-                return format!("```sql\n{}\n```", pretty);
+    // mcp-sql-shape-driven-rendering: pretty-print SQL inputs as a fenced
+    // code block (the client's __bramFormatToolCommand passes an
+    // already-fenced block through verbatim). Recognized by input shape,
+    // not a tool-name list: any mcp__<server>__<tool> whose input carries
+    // a string field named query/sql/statement that looks like SQL. The
+    // __execute_sql suffix stays unconditional (its query field is SQL by
+    // contract, whatever it starts with); other tools need the SQL-looking
+    // prefix so e.g. a search tool's freeform `query` stays untouched.
+    if name.starts_with("mcp__") {
+        let unconditional = name.ends_with("__execute_sql");
+        for key in ["query", "sql", "statement"] {
+            if let Some(q) = input.get(key).and_then(|v| v.as_str()) {
+                if q.trim().is_empty() {
+                    continue;
+                }
+                let head = q.trim_start().to_ascii_uppercase();
+                let looks_sql = [
+                    "SELECT", "WITH", "CREATE", "INSERT", "UPDATE", "DELETE", "ALTER",
+                    "DROP", "TRUNCATE", "GRANT", "REVOKE", "EXPLAIN", "VACUUM",
+                    "ANALYZE", "BEGIN", "COMMENT", "DO ", "SET ",
+                ]
+                .iter()
+                .any(|k| head.starts_with(k));
+                if unconditional || looks_sql {
+                    let pretty = sqlformat::format(
+                        q,
+                        &sqlformat::QueryParams::None,
+                        &sqlformat::FormatOptions::default(),
+                    );
+                    return format!("```sql\n{}\n```", pretty);
+                }
             }
         }
     }
@@ -17147,6 +17160,20 @@ mod tool_command_markdown_tests {
         // Suffix-only lookalike without a query string stays unrendered.
         assert_eq!(
             st_tool_command_display("mcp__other__execute_sql", &json!({})),
+            ""
+        );
+        // mcp-sql-shape-driven-rendering: any mcp tool with a SQL-looking
+        // sql/query/statement field renders; a freeform query does not.
+        assert!(st_tool_command_display(
+            "mcp__postgres__run",
+            &json!({ "sql": "with x as (select 1) select * from x" })
+        )
+        .starts_with("```sql\n"));
+        assert_eq!(
+            st_tool_command_display(
+                "mcp__search__find",
+                &json!({ "query": "how do I reset my password" })
+            ),
             ""
         );
     }

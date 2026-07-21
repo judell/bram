@@ -8377,7 +8377,9 @@ fn git_log_recent<R: tauri::Runtime>(app: &AppHandle<R>, count: usize) -> Result
         .unwrap_or_default()
         .trim()
         .to_string();
-    let local_login: Option<String> = project_root(Some(app)).and_then(|root| {
+    let local_login: Option<String> = project_root(Some(app))
+        .filter(|_| project_forge(app) == Forge::GitHub)
+        .and_then(|root| {
         std::process::Command::new("gh")
             .current_dir(&root)
             .args(&["api", "/user", "--jq", ".login"])
@@ -8607,46 +8609,17 @@ const GH_ISSUE_LIST_LIMIT: usize = 500;
 fn gh_issues_list<R: tauri::Runtime>(app: &AppHandle<R>, limit: usize) -> Result<Vec<u8>, String> {
     let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
     let repo_slug = repo_owner_name(app);
-    let limit = limit.clamp(1, GH_ISSUE_LIST_LIMIT).to_string();
-    let out = std::process::Command::new("gh")
-        .current_dir(&root)
-        .args(&[
-            "issue",
-            "list",
-            "--json",
-            "number,title,state,author,createdAt,updatedAt,labels,url,comments",
-            "--limit",
-            &limit,
-            "--state",
-            "all",
-        ])
-        .output();
-    match out {
-        Ok(out) if out.status.success() => {
-            let mut issues: Vec<serde_json::Value> = match serde_json::from_slice(&out.stdout) {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("[gh issue list] parse: {}", e);
-                    return Ok(b"[]".to_vec());
-                }
-            };
-            for issue in &mut issues {
-                enrich_issue_activity(app, issue, repo_slug.as_deref());
-            }
-            serde_json::to_vec(&issues).map_err(|e| e.to_string())
-        }
-        Ok(out) => {
-            eprintln!(
-                "[gh issue list] non-zero exit: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            Ok(b"[]".to_vec())
-        }
+    let mut issues = match forge_adapter(app).issues_list(&root, limit) {
+        Ok(v) => v,
         Err(e) => {
-            eprintln!("[gh issue list] failed to spawn: {}", e);
-            Ok(b"[]".to_vec())
+            eprintln!("{}", e);
+            return Ok(b"[]".to_vec());
         }
+    };
+    for issue in &mut issues {
+        enrich_issue_activity(app, issue, repo_slug.as_deref());
     }
+    serde_json::to_vec(&issues).map_err(|e| e.to_string())
 }
 
 // Issue search: shells out to `gh issue list --search "<q>"`, then for each
@@ -8666,42 +8639,23 @@ fn gh_issues_search<R: tauri::Runtime>(app: &AppHandle<R>, query: &str) -> Resul
 
     let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
     let repo_slug = repo_owner_name(app);
-    let full_limit = GH_ISSUE_LIST_LIMIT.to_string();
-    // Fetch the same issue window as gh_issues_list (shared
-    // GH_ISSUE_LIST_LIMIT, no --search flag); local grep over title + body
-    // + comment bodies. One gh call; latency scales with the actual issue
-    // count, gaining comment-text search for free without doubling it.
-    let out = std::process::Command::new("gh")
-        .current_dir(&root)
-        .args(&[
-            "issue",
-            "list",
-            "--json",
-            "number,title,state,author,createdAt,updatedAt,labels,url,body,comments",
-            "--limit",
-            &full_limit,
-            "--state",
-            "all",
-        ])
-        .output();
-    let stdout = match out {
-        Ok(out) if out.status.success() => out.stdout,
-        Ok(out) => {
-            eprintln!(
-                "[gh issue list] non-zero exit: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            return Ok(b"{\"results\":[],\"truncated\":false}".to_vec());
+    // Fetch strategy is the adapter's call: LocalGrep forges hand back
+    // the full window (body + comments) and the pipeline below computes
+    // per-line hits; ServerFiltered forges searched server-side and the
+    // results wrap with empty hit lists.
+    let issues = match forge_adapter(app).issues_search_fetch(&root, q) {
+        Ok(SearchFetch::LocalGrep(issues)) => issues,
+        Ok(SearchFetch::ServerFiltered(mut issues)) => {
+            for issue in issues.iter_mut() {
+                if let Some(obj) = issue.as_object_mut() {
+                    obj.insert("hits".into(), serde_json::Value::Array(vec![]));
+                }
+            }
+            return serde_json::to_vec(&json!({ "results": issues, "truncated": false }))
+                .map_err(|e| e.to_string());
         }
         Err(e) => {
-            eprintln!("[gh issue list] failed to spawn: {}", e);
-            return Ok(b"{\"results\":[],\"truncated\":false}".to_vec());
-        }
-    };
-    let issues: Vec<serde_json::Value> = match serde_json::from_slice(&stdout) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("[gh issue list] parse: {}", e);
+            eprintln!("{}", e);
             return Ok(b"{\"results\":[],\"truncated\":false}".to_vec());
         }
     };
@@ -8897,60 +8851,34 @@ mod issue_search_tests {
 // error so the frontend can render something rather than 500.
 fn gh_issue_view<R: tauri::Runtime>(app: &AppHandle<R>, number: u64) -> Result<Vec<u8>, String> {
     let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
-    let n = number.to_string();
-    let out = std::process::Command::new("gh")
-        .current_dir(&root)
-        .args(&[
-            "issue",
-            "view",
-            &n,
-            "--json",
-            "number,title,body,state,author,createdAt,updatedAt,labels,url,comments",
-        ])
-        .output();
-    match out {
-        Ok(out) if out.status.success() => {
-            let mut issue: serde_json::Value = match serde_json::from_slice(&out.stdout) {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("[gh issue view {}] parse: {}", n, e);
-                    return Ok(b"{}".to_vec());
-                }
-            };
-            enrich_issue_activity(app, &mut issue, None);
-            let cross_refs = gh_issue_cross_references(app, number);
-            let is_closed = issue.get("state").and_then(|v| v.as_str()) == Some("CLOSED");
-            let closed_event = if is_closed {
-                repo_owner_name(app)
-                    .and_then(|slug| gh_issue_closed_event_actor(app, &slug, number))
-            } else {
-                None
-            };
-            if let Some(obj) = issue.as_object_mut() {
-                obj.insert(
-                    "crossReferences".to_string(),
-                    serde_json::Value::Array(cross_refs),
-                );
-                if let Some((by, by_at)) = closed_event {
-                    obj.insert("closedBy".to_string(), serde_json::Value::String(by));
-                    obj.insert("closedByAt".to_string(), serde_json::Value::String(by_at));
-                }
-            }
-            serde_json::to_vec(&issue).map_err(|e| e.to_string())
-        }
-        Ok(out) => {
-            eprintln!(
-                "[gh issue view {}] non-zero exit: {}",
-                n,
-                String::from_utf8_lossy(&out.stderr)
-            );
-            Ok(b"{}".to_vec())
-        }
+    let adapter = forge_adapter(app);
+    let mut issue = match adapter.issue_view(&root, number) {
+        Ok(v) => v,
         Err(e) => {
-            eprintln!("[gh issue view {}] failed to spawn: {}", n, e);
-            Ok(b"{}".to_vec())
+            eprintln!("{}", e);
+            return Ok(b"{}".to_vec());
+        }
+    };
+    enrich_issue_activity(app, &mut issue, None);
+    let cross_refs = adapter.cross_references(&root, number);
+    let is_closed = issue.get("state").and_then(|v| v.as_str()) == Some("CLOSED");
+    let closed_event = if is_closed {
+        // GitHub-only enrichment: repo_owner_name is None off GitHub.
+        repo_owner_name(app).and_then(|slug| gh_issue_closed_event_actor(app, &slug, number))
+    } else {
+        None
+    };
+    if let Some(obj) = issue.as_object_mut() {
+        obj.insert(
+            "crossReferences".to_string(),
+            serde_json::Value::Array(cross_refs),
+        );
+        if let Some((by, by_at)) = closed_event {
+            obj.insert("closedBy".to_string(), serde_json::Value::String(by));
+            obj.insert("closedByAt".to_string(), serde_json::Value::String(by_at));
         }
     }
+    serde_json::to_vec(&issue).map_err(|e| e.to_string())
 }
 
 // Fetch issues that cross-reference the given issue, via the GitHub timeline
@@ -8958,42 +8886,6 @@ fn gh_issue_view<R: tauri::Runtime>(app: &AppHandle<R>, number: u64) -> Result<V
 // normalized to uppercase to match the rest of the issue payload. Empty on any
 // failure — the cross-reference list is an enhancement, not a hard
 // requirement, so quiet degradation is the right behavior.
-fn gh_issue_cross_references<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    number: u64,
-) -> Vec<serde_json::Value> {
-    let Some(root) = project_root(Some(app)) else {
-        return vec![];
-    };
-    let n = number.to_string();
-    let endpoint = format!("repos/:owner/:repo/issues/{}/timeline", n);
-    let out = std::process::Command::new("gh")
-        .current_dir(&root)
-        .args(&[
-            "api",
-            &endpoint,
-            "--jq",
-            r#"[.[] | select(.event == "cross-referenced" and .source.issue) | {number: .source.issue.number, title: .source.issue.title, state: (.source.issue.state | ascii_upcase)}]"#,
-        ])
-        .output();
-    match out {
-        Ok(out) if out.status.success() => {
-            serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout).unwrap_or_default()
-        }
-        Ok(out) => {
-            eprintln!(
-                "[gh api .../issues/{}/timeline] non-zero exit: {}",
-                n,
-                String::from_utf8_lossy(&out.stderr)
-            );
-            vec![]
-        }
-        Err(e) => {
-            eprintln!("[gh api .../issues/{}/timeline] failed to spawn: {}", n, e);
-            vec![]
-        }
-    }
-}
 
 // Post a comment to a GitHub issue via `gh issue comment <n> --body "..."`.
 // Returns `{"ok":true}` on success; on failure returns the gh stderr as the
@@ -9009,19 +8901,13 @@ fn gh_issue_comment<R: tauri::Runtime>(
         return Err("empty comment body".to_string());
     }
     let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
-    let n = number.to_string();
-    let out = std::process::Command::new("gh")
-        .current_dir(&root)
-        .args(&["issue", "comment", &n, "--body", trimmed])
-        .output()
-        .map_err(|e| format!("failed to spawn gh: {}", e))?;
-    if out.status.success() {
-        Ok(b"{\"ok\":true}".to_vec())
-    } else {
-        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        eprintln!("[gh issue comment {}] non-zero exit: {}", n, stderr);
-        Err(stderr)
-    }
+    forge_adapter(app)
+        .issue_comment(&root, number, trimmed)
+        .map(|_| b"{\"ok\":true}".to_vec())
+        .map_err(|e| {
+            eprintln!("[forge issue comment {}] {}", number, e);
+            e
+        })
 }
 
 // Close a GitHub issue via `gh issue close <n>`, optionally with a comment.
@@ -9033,29 +8919,25 @@ fn gh_issue_close<R: tauri::Runtime>(
     comment: &str,
 ) -> Result<Vec<u8>, String> {
     let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
-    let n = number.to_string();
-    let mut args: Vec<&str> = vec!["issue", "close", &n];
-    let trimmed = comment.trim();
-    if !trimmed.is_empty() {
-        args.push("-c");
-        args.push(trimmed);
-    }
-    let out = std::process::Command::new("gh")
-        .current_dir(&root)
-        .args(&args)
-        .output()
-        .map_err(|e| format!("failed to spawn gh: {}", e))?;
-    if out.status.success() {
-        Ok(b"{\"ok\":true}".to_vec())
-    } else {
-        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        eprintln!("[gh issue close {}] non-zero exit: {}", n, stderr);
-        Err(stderr)
-    }
+    forge_adapter(app)
+        .issue_close(&root, number, comment.trim())
+        .map(|_| b"{\"ok\":true}".to_vec())
+        .map_err(|e| {
+            eprintln!("[forge issue close {}] {}", number, e);
+            e
+        })
 }
 
-fn close_issue_commit_comment(repo_slug: &str, full_sha: &str, subject: &str) -> String {
-    let commit_url = format!("https://github.com/{}/commit/{}", repo_slug, full_sha);
+// issue-222-forge-adapter: html_base is origin's https base
+// (https://<host>/<owner>/<repo>); the commit path segment is the one
+// URL shape the forges don't share (adapter.commit_url decides).
+fn close_issue_commit_comment(
+    adapter: &dyn ForgeAdapter,
+    html_base: &str,
+    full_sha: &str,
+    subject: &str,
+) -> String {
+    let commit_url = adapter.commit_url(html_base, full_sha);
     let trimmed_subject = subject.trim();
     if trimmed_subject.is_empty() {
         format!("Closed by {}", commit_url)
@@ -9086,23 +8968,7 @@ fn gh_commit_visible<R: tauri::Runtime>(
     full_sha: &str,
 ) -> Result<bool, String> {
     let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
-    let path = format!("repos/{}/commits/{}", repo_slug, full_sha);
-    let out = std::process::Command::new("gh")
-        .current_dir(&root)
-        .args(["api", &path])
-        .output()
-        .map_err(|e| format!("failed to spawn gh: {}", e))?;
-    if out.status.success() {
-        Ok(true)
-    } else {
-        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        eprintln!("[gh commit visible {}] non-zero exit: {}", full_sha, stderr);
-        if gh_commit_missing_stderr(&stderr) {
-            Ok(false)
-        } else {
-            Err(stderr)
-        }
-    }
+    forge_adapter(app).commit_visible(&root, repo_slug, full_sha)
 }
 
 fn gh_commit_missing_stderr(stderr: &str) -> bool {
@@ -9114,12 +8980,13 @@ fn gh_commit_missing_stderr(stderr: &str) -> bool {
 
 #[cfg(test)]
 mod issue_close_tests {
-    use super::{close_issue_commit_comment, gh_commit_missing_stderr};
+    use super::{close_issue_commit_comment, gh_commit_missing_stderr, GitHubForge, GitLabForge};
 
     #[test]
     fn generated_commit_close_comment_uses_full_url_without_trailing_period() {
         let comment = close_issue_commit_comment(
-            "judell/bram",
+            &GitHubForge,
+            "https://github.com/judell/bram",
             "8b7c4407c0ffee00000000000000000000000000",
             "Fix draft-backed worklist history",
         );
@@ -9132,9 +8999,24 @@ mod issue_close_tests {
     }
 
     #[test]
+    fn gitlab_close_comment_uses_dash_commit_path() {
+        let comment = close_issue_commit_comment(
+            &GitLabForge,
+            "https://gitlab.com/someone/proj",
+            "8b7c4407c0ffee00000000000000000000000000",
+            "",
+        );
+        assert_eq!(
+            comment,
+            "Closed by https://gitlab.com/someone/proj/-/commit/8b7c4407c0ffee00000000000000000000000000"
+        );
+    }
+
+    #[test]
     fn generated_commit_close_comment_tolerates_missing_subject() {
         let comment = close_issue_commit_comment(
-            "judell/bram",
+            &GitHubForge,
+            "https://github.com/judell/bram",
             "8b7c4407c0ffee00000000000000000000000000",
             "",
         );
@@ -9181,6 +9063,377 @@ fn repo_owner_name<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<String> {
         None
     } else {
         Some(slug.to_string())
+    }
+}
+
+// issue-222-forge-adapter: which forge hosts the user's project. The
+// adapter is CLI-shaped — gh and glab have broadly parallel command
+// surfaces — so each arm shells out to its forge's own CLI and inherits
+// its auth, exactly how Bram has always integrated GitHub. See
+// docs/forge-adapter.md for the design note and phase boundaries.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Forge {
+    GitHub,
+    GitLab,
+}
+
+// Explicit override for ambiguous self-hosted remotes: `"forge":
+// "gitlab"` (or "github") at the top level of the project's .bram.json.
+fn bram_config_forge<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<Forge> {
+    let root = project_root(Some(app))?;
+    let text = std::fs::read_to_string(root.join(".bram.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    match v.get("forge").and_then(|f| f.as_str())? {
+        "gitlab" => Some(Forge::GitLab),
+        "github" => Some(Forge::GitHub),
+        _ => None,
+    }
+}
+
+fn project_forge<R: tauri::Runtime>(app: &AppHandle<R>) -> Forge {
+    if let Some(f) = bram_config_forge(app) {
+        return f;
+    }
+    let url = git_run(app, &["remote", "get-url", "origin"]).unwrap_or_default();
+    if url.trim().to_ascii_lowercase().contains("gitlab") {
+        Forge::GitLab
+    } else {
+        Forge::GitHub
+    }
+}
+
+// https://<host>/<owner>/<repo> for origin, forge-neutral (remote_to_html
+// already normalizes ssh and https remote forms).
+fn forge_html_base<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<String> {
+    let remote_url = git_run(app, &["remote", "get-url", "origin"]).ok()?;
+    let base = remote_to_html(remote_url.trim());
+    if base.is_empty() {
+        None
+    } else {
+        Some(base)
+    }
+}
+
+// Normalize one glab issue object to the gh --json shape the pane
+// consumes. glab: iid / state "opened"|"closed" / author.username /
+// created_at / updated_at / labels [string] / web_url / description.
+// Comments ride as an empty array in phase 1 (glab exposes notes via a
+// separate surface); the count is preserved as commentsCount when
+// user_notes_count is present.
+fn glab_issue_to_gh_shape(v: &serde_json::Value) -> serde_json::Value {
+    let state = match v.get("state").and_then(|s| s.as_str()).unwrap_or("") {
+        "closed" => "CLOSED",
+        _ => "OPEN",
+    };
+    let labels: Vec<serde_json::Value> = v
+        .get("labels")
+        .and_then(|l| l.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str())
+                .map(|name| serde_json::json!({ "name": name }))
+                .collect()
+        })
+        .unwrap_or_default();
+    serde_json::json!({
+        "number": v.get("iid").cloned().unwrap_or(serde_json::Value::Null),
+        "title": v.get("title").cloned().unwrap_or(serde_json::Value::Null),
+        "state": state,
+        "body": v.get("description").cloned().unwrap_or(serde_json::Value::Null),
+        "author": { "login": v.get("author").and_then(|a| a.get("username")).and_then(|u| u.as_str()).unwrap_or("") },
+        "createdAt": v.get("created_at").cloned().unwrap_or(serde_json::Value::Null),
+        "updatedAt": v.get("updated_at").cloned().unwrap_or(serde_json::Value::Null),
+        "labels": labels,
+        "url": v.get("web_url").cloned().unwrap_or(serde_json::Value::Null),
+        "comments": [],
+        "commentsCount": v.get("user_notes_count").cloned().unwrap_or(serde_json::Value::Null),
+    })
+}
+
+fn glab_run(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    let out = std::process::Command::new("glab")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .map_err(|e| format!("failed to spawn glab: {}", e))?;
+    if out.status.success() {
+        Ok(out.stdout)
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+    }
+}
+
+// GitLab arms of the issue surface, normalized to the gh shapes the pane
+// already renders. Missing glab degrades exactly like missing gh: the
+// route returns its empty envelope and logs to stderr. Phase-1 bounds
+// (single page of 100, comments not expanded) are documented in
+// docs/forge-adapter.md.
+fn glab_issues_list_bytes(root: &Path, search: Option<&str>) -> Result<Vec<u8>, String> {
+    let mut args = vec!["issue", "list", "--all", "--output", "json", "--per-page", "100"];
+    if let Some(q) = search {
+        args.push("--search");
+        args.push(q);
+    }
+    let stdout = glab_run(root, &args)?;
+    let issues: Vec<serde_json::Value> =
+        serde_json::from_slice(&stdout).map_err(|e| format!("glab issue list parse: {}", e))?;
+    let mapped: Vec<serde_json::Value> = issues.iter().map(glab_issue_to_gh_shape).collect();
+    serde_json::to_vec(&mapped).map_err(|e| e.to_string())
+}
+
+fn glab_issue_view_bytes(root: &Path, number: u64) -> Result<Vec<u8>, String> {
+    let n = number.to_string();
+    let stdout = glab_run(root, &["issue", "view", &n, "--output", "json"])?;
+    let issue: serde_json::Value =
+        serde_json::from_slice(&stdout).map_err(|e| format!("glab issue view parse: {}", e))?;
+    serde_json::to_vec(&glab_issue_to_gh_shape(&issue)).map_err(|e| e.to_string())
+}
+
+// issue-222-forge-adapter (trait consolidation): the per-forge seam.
+// One impl per forge; call sites go through forge_adapter() and never
+// branch on a forge again. Every method speaks the internal issue
+// schema (gh's --json shape — each forge maps INTO it). Adding a forge
+// (e.g. Codeberg/Forgejo) = a detection entry in project_forge, one
+// impl below, and a docs/forge-adapter.md column; wrapper orchestration
+// (activity enrichment, the local-grep search pipeline, close-authority
+// policy) is forge-neutral and stays above this trait.
+enum SearchFetch {
+    // Full issues (body + comments included): the wrapper runs the
+    // local grep pipeline with per-line hit highlighting.
+    LocalGrep(Vec<serde_json::Value>),
+    // The forge filtered server-side: the wrapper wraps results with
+    // empty hit lists.
+    ServerFiltered(Vec<serde_json::Value>),
+}
+
+trait ForgeAdapter: Sync {
+    fn label(&self) -> &'static str;
+    // The forge's CLI binary name, for user-facing hints ("glab is not
+    // installed / authenticated") — not for dispatch.
+    fn cli(&self) -> &'static str;
+    fn issues_list(&self, root: &Path, limit: usize) -> Result<Vec<serde_json::Value>, String>;
+    fn issues_search_fetch(&self, root: &Path, query: &str) -> Result<SearchFetch, String>;
+    fn issue_view(&self, root: &Path, number: u64) -> Result<serde_json::Value, String>;
+    fn issue_comment(&self, root: &Path, number: u64, body: &str) -> Result<(), String>;
+    fn issue_close(&self, root: &Path, number: u64, comment: &str) -> Result<(), String>;
+    fn cross_references(&self, root: &Path, number: u64) -> Vec<serde_json::Value> {
+        let _ = (root, number);
+        Vec::new()
+    }
+    fn commit_url(&self, html_base: &str, full_sha: &str) -> String {
+        format!("{}/commit/{}", html_base, full_sha)
+    }
+    fn commit_visible(&self, root: &Path, repo_slug: &str, full_sha: &str) -> Result<bool, String> {
+        // Default: git-level. After a push, the local remote-tracking
+        // refs contain the commit — forge-independent, no network.
+        // Forges with a stronger origin-truth API check override.
+        let _ = repo_slug;
+        let out = std::process::Command::new("git")
+            .current_dir(root)
+            .args(["branch", "-r", "--contains", full_sha])
+            .output()
+            .map_err(|e| e.to_string())?;
+        Ok(out.status.success() && !String::from_utf8_lossy(&out.stdout).trim().is_empty())
+    }
+}
+
+struct GitHubForge;
+struct GitLabForge;
+
+fn forge_adapter<R: tauri::Runtime>(app: &AppHandle<R>) -> &'static dyn ForgeAdapter {
+    match project_forge(app) {
+        Forge::GitHub => &GitHubForge,
+        Forge::GitLab => &GitLabForge,
+    }
+}
+
+fn gh_json_out(root: &Path, args: &[&str], context: &str) -> Result<Vec<u8>, String> {
+    let out = std::process::Command::new("gh")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .map_err(|e| format!("[{}] failed to spawn gh: {}", context, e))?;
+    if out.status.success() {
+        Ok(out.stdout)
+    } else {
+        Err(format!(
+            "[{}] non-zero exit: {}",
+            context,
+            String::from_utf8_lossy(&out.stderr)
+        ))
+    }
+}
+
+impl ForgeAdapter for GitHubForge {
+    fn label(&self) -> &'static str {
+        "github"
+    }
+
+    fn cli(&self) -> &'static str {
+        "gh"
+    }
+
+    fn issues_list(&self, root: &Path, limit: usize) -> Result<Vec<serde_json::Value>, String> {
+        let limit = limit.clamp(1, GH_ISSUE_LIST_LIMIT).to_string();
+        let stdout = gh_json_out(
+            root,
+            &[
+                "issue",
+                "list",
+                "--json",
+                "number,title,state,author,createdAt,updatedAt,labels,url,comments",
+                "--limit",
+                &limit,
+                "--state",
+                "all",
+            ],
+            "gh issue list",
+        )?;
+        serde_json::from_slice(&stdout).map_err(|e| format!("[gh issue list] parse: {}", e))
+    }
+
+    fn issues_search_fetch(&self, root: &Path, query: &str) -> Result<SearchFetch, String> {
+        let _ = query; // full fetch; the wrapper greps locally
+        let full_limit = GH_ISSUE_LIST_LIMIT.to_string();
+        let stdout = gh_json_out(
+            root,
+            &[
+                "issue",
+                "list",
+                "--json",
+                "number,title,state,author,createdAt,updatedAt,labels,url,body,comments",
+                "--limit",
+                &full_limit,
+                "--state",
+                "all",
+            ],
+            "gh issue list",
+        )?;
+        let issues = serde_json::from_slice(&stdout)
+            .map_err(|e| format!("[gh issue list] parse: {}", e))?;
+        Ok(SearchFetch::LocalGrep(issues))
+    }
+
+    fn issue_view(&self, root: &Path, number: u64) -> Result<serde_json::Value, String> {
+        let n = number.to_string();
+        let stdout = gh_json_out(
+            root,
+            &[
+                "issue",
+                "view",
+                &n,
+                "--json",
+                "number,title,body,state,author,createdAt,updatedAt,labels,url,comments",
+            ],
+            "gh issue view",
+        )?;
+        serde_json::from_slice(&stdout).map_err(|e| format!("[gh issue view {}] parse: {}", n, e))
+    }
+
+    fn issue_comment(&self, root: &Path, number: u64, body: &str) -> Result<(), String> {
+        let n = number.to_string();
+        gh_json_out(root, &["issue", "comment", &n, "--body", body], "gh issue comment")
+            .map(|_| ())
+    }
+
+    fn issue_close(&self, root: &Path, number: u64, comment: &str) -> Result<(), String> {
+        let n = number.to_string();
+        let mut args: Vec<&str> = vec!["issue", "close", &n];
+        if !comment.is_empty() {
+            args.push("-c");
+            args.push(comment);
+        }
+        gh_json_out(root, &args, "gh issue close").map(|_| ())
+    }
+
+    fn cross_references(&self, root: &Path, number: u64) -> Vec<serde_json::Value> {
+        let n = number.to_string();
+        let endpoint = format!("repos/:owner/:repo/issues/{}/timeline", n);
+        match gh_json_out(
+            root,
+            &[
+                "api",
+                &endpoint,
+                "--jq",
+                r#"[.[] | select(.event == "cross-referenced" and .source.issue) | {number: .source.issue.number, title: .source.issue.title, state: (.source.issue.state | ascii_upcase)}]"#,
+            ],
+            "gh api issue timeline",
+        ) {
+            Ok(stdout) => serde_json::from_slice(&stdout).unwrap_or_default(),
+            Err(e) => {
+                eprintln!("{}", e);
+                vec![]
+            }
+        }
+    }
+
+    fn commit_visible(&self, root: &Path, repo_slug: &str, full_sha: &str) -> Result<bool, String> {
+        let path = format!("repos/{}/commits/{}", repo_slug, full_sha);
+        let out = std::process::Command::new("gh")
+            .current_dir(root)
+            .args(["api", &path])
+            .output()
+            .map_err(|e| format!("failed to spawn gh: {}", e))?;
+        if out.status.success() {
+            Ok(true)
+        } else {
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            eprintln!("[gh commit visible {}] non-zero exit: {}", full_sha, stderr);
+            if gh_commit_missing_stderr(&stderr) {
+                Ok(false)
+            } else {
+                Err(stderr)
+            }
+        }
+    }
+}
+
+impl ForgeAdapter for GitLabForge {
+    fn label(&self) -> &'static str {
+        "gitlab"
+    }
+
+    fn cli(&self) -> &'static str {
+        "glab"
+    }
+
+    fn issues_list(&self, root: &Path, _limit: usize) -> Result<Vec<serde_json::Value>, String> {
+        let bytes = glab_issues_list_bytes(root, None)?;
+        serde_json::from_slice(&bytes).map_err(|e| format!("[glab issue list] parse: {}", e))
+    }
+
+    fn issues_search_fetch(&self, root: &Path, query: &str) -> Result<SearchFetch, String> {
+        let bytes = glab_issues_list_bytes(root, Some(query))?;
+        let issues = serde_json::from_slice(&bytes)
+            .map_err(|e| format!("[glab issue search] parse: {}", e))?;
+        Ok(SearchFetch::ServerFiltered(issues))
+    }
+
+    fn issue_view(&self, root: &Path, number: u64) -> Result<serde_json::Value, String> {
+        let bytes = glab_issue_view_bytes(root, number)?;
+        serde_json::from_slice(&bytes).map_err(|e| format!("[glab issue view] parse: {}", e))
+    }
+
+    fn issue_comment(&self, root: &Path, number: u64, body: &str) -> Result<(), String> {
+        let n = number.to_string();
+        glab_run(root, &["issue", "note", &n, "-m", body]).map(|_| ())
+    }
+
+    fn issue_close(&self, root: &Path, number: u64, comment: &str) -> Result<(), String> {
+        // glab issue close has no comment flag: post the note first,
+        // then close. A failed note still proceeds to the close (the
+        // close is the user-visible contract; the note is provenance).
+        let n = number.to_string();
+        if !comment.is_empty() {
+            if let Err(e) = glab_run(root, &["issue", "note", &n, "-m", comment]) {
+                eprintln!("[glab issue note {}] {}", n, e);
+            }
+        }
+        glab_run(root, &["issue", "close", &n]).map(|_| ())
+    }
+
+    fn commit_url(&self, html_base: &str, full_sha: &str) -> String {
+        format!("{}/-/commit/{}", html_base, full_sha)
     }
 }
 
@@ -9395,21 +9648,44 @@ fn repo_origin_info<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, St
     } else {
         format!("{}/issues/new", html_base)
     };
+    let adapter = forge_adapter(app);
     let info = serde_json::json!({
         "remoteUrl": remote_url,
         "htmlBase": html_base,
         "issuesUrl": issues_url,
         "issuesNewUrl": issues_new_url,
+        // issue-222-forge-adapter: for forge-aware UI copy in the pane.
+        "forge": adapter.label(),
+        "cli": adapter.cli(),
     });
     serde_json::to_vec(&info).map_err(|e| e.to_string())
 }
 
+// issue-222-forge-adapter: forge-neutral. This was GitHub-only (empty
+// for any other host), which silently gated the Issues tab ("No GitHub
+// remote detected" on a GitLab clone) AND blanked forge_html_base, so
+// GitLab close-on-push could never fire. Any ssh/https remote now
+// normalizes to its https base; consumers that are genuinely
+// GitHub-only (repo_owner_name) still filter by host themselves.
 fn remote_to_html(remote: &str) -> String {
     let r = remote.trim().trim_end_matches(".git");
-    if let Some(rest) = r.strip_prefix("git@github.com:") {
-        return format!("https://github.com/{}", rest);
+    if let Some(rest) = r.strip_prefix("git@") {
+        if let Some((host, path)) = rest.split_once(':') {
+            if !host.is_empty() && !path.is_empty() {
+                return format!("https://{}/{}", host, path);
+            }
+        }
+        return String::new();
     }
-    if r.starts_with("https://github.com/") || r.starts_with("http://github.com/") {
+    if let Some(rest) = r.strip_prefix("ssh://git@") {
+        if let Some((host, path)) = rest.split_once('/') {
+            if !host.is_empty() && !path.is_empty() {
+                return format!("https://{}/{}", host, path);
+            }
+        }
+        return String::new();
+    }
+    if r.starts_with("https://") || r.starts_with("http://") {
         return r.to_string();
     }
     String::new()
@@ -29187,9 +29463,15 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>) {
     if records.is_empty() {
         return;
     }
-    let Some(repo_slug) = repo_owner_name(app) else {
+    // issue-222-forge-adapter: forge-neutral gate. repo_owner_name is
+    // GitHub-only (it strips the github.com prefix), which silently
+    // disabled close-on-push for any other origin; the html base works
+    // for both forges and the visibility check dispatches internally.
+    let adapter = forge_adapter(app);
+    let Some(html_base) = forge_html_base(app) else {
         return;
     };
+    let repo_slug = repo_owner_name(app).unwrap_or_default();
     let mut remaining: Vec<PendingIssueClose> = Vec::new();
     let mut closed: Vec<u64> = Vec::new();
     for record in records {
@@ -29198,7 +29480,8 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>) {
                 let full_sha = git_full_commit_sha(app, &record.commit_sha)
                     .unwrap_or_else(|_| record.commit_sha.clone());
                 let subject = git_commit_subject(app, &full_sha).unwrap_or_default();
-                let mut comment = close_issue_commit_comment(&repo_slug, &full_sha, &subject);
+                let mut comment =
+                    close_issue_commit_comment(adapter, &html_base, &full_sha, &subject);
                 if let Some(user) = record.comment.as_deref().filter(|s| !s.is_empty()) {
                     comment = format!("{}\n\n{}", user, comment);
                 }
@@ -30183,7 +30466,16 @@ fn route_request<R: tauri::Runtime>(
 
     if path == "__app-info" {
         let info = get_app_info();
-        let body = serde_json::to_vec(&info).unwrap_or_default();
+        let mut v = serde_json::to_value(&info).unwrap_or_default();
+        if let Some(obj) = v.as_object_mut() {
+            // issue-222-forge-adapter: detected forge for the Status
+            // surface (origin remote, .bram.json "forge" override wins).
+            obj.insert(
+                "forge".to_string(),
+                serde_json::Value::String(forge_adapter(app).label().to_string()),
+            );
+        }
+        let body = serde_json::to_vec(&v).unwrap_or_default();
         return (200, "application/json; charset=utf-8", body);
     }
 
@@ -31916,6 +32208,83 @@ fn worklist_commit_add_args(files: &[String]) -> Vec<String> {
     args
 }
 
+// close-authority-dialog-only: detect a forge closing keyword followed
+// by an issue reference ("Closes #1", "fixes: #22"). Token-adjacency
+// matches how GitHub/GitLab keyword automation works; any issue number
+// counts — keywords close whatever they reference, not just this item's
+// closesIssues. Returns the offending "keyword #N" phrase.
+fn commit_message_closing_keyword(message: &str) -> Option<String> {
+    const KEYWORDS: [&str; 9] = [
+        "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved",
+    ];
+    let tokens: Vec<&str> = message.split_whitespace().collect();
+    for pair in tokens.windows(2) {
+        let word = pair[0]
+            .trim_end_matches(|c: char| c == ':' || c == ',')
+            .to_ascii_lowercase();
+        if !KEYWORDS.contains(&word.as_str()) {
+            continue;
+        }
+        let target = pair[1].trim_end_matches(|c: char| !c.is_ascii_digit());
+        if let Some(num) = target.strip_prefix('#') {
+            if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()) {
+                return Some(format!("{} #{}", pair[0], num));
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod remote_to_html_tests {
+    use super::remote_to_html;
+
+    #[test]
+    fn normalizes_github_and_gitlab_remote_forms() {
+        assert_eq!(
+            remote_to_html("git@github.com:judell/bram.git"),
+            "https://github.com/judell/bram"
+        );
+        assert_eq!(
+            remote_to_html("git@gitlab.com:judell/demo.git"),
+            "https://gitlab.com/judell/demo"
+        );
+        assert_eq!(
+            remote_to_html("https://gitlab.com/judell/demo.git"),
+            "https://gitlab.com/judell/demo"
+        );
+        assert_eq!(
+            remote_to_html("ssh://git@gitlab.example.org/team/proj.git"),
+            "https://gitlab.example.org/team/proj"
+        );
+        assert_eq!(remote_to_html(""), "");
+        assert_eq!(remote_to_html("/local/path/repo"), "");
+    }
+}
+
+#[cfg(test)]
+mod closing_keyword_tests {
+    use super::commit_message_closing_keyword;
+
+    #[test]
+    fn closing_keywords_with_issue_refs_are_detected() {
+        assert!(commit_message_closing_keyword("Add issue1.txt\n\nCloses #1").is_some());
+        assert!(commit_message_closing_keyword("fixes #22 in the parser").is_some());
+        assert!(commit_message_closing_keyword("Resolved: #7").is_some());
+        assert!(commit_message_closing_keyword("fix #3.").is_some());
+    }
+
+    #[test]
+    fn non_closing_references_pass() {
+        assert!(commit_message_closing_keyword("Refs #214 forge adapter").is_none());
+        assert!(commit_message_closing_keyword("addresses #5 partially").is_none());
+        assert!(commit_message_closing_keyword("closes the gap between panes").is_none());
+        assert!(commit_message_closing_keyword("see #217 for lineage").is_none());
+        assert!(commit_message_closing_keyword("bare #217 mention").is_none());
+        assert!(commit_message_closing_keyword("prefix-fixes #9 hyphenated").is_none());
+    }
+}
+
 fn ensure_no_unrelated_staged_files(
     staged: &[String],
     approved_files: &[String],
@@ -32265,6 +32634,22 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         .trim();
     if message.is_empty() {
         return worklist_json_error(400, "message required");
+    }
+    // close-authority-dialog-only: forge closing keywords in a commit
+    // message auto-close the referenced issue at push time on BOTH
+    // forges, bypassing the close-on-commit dialog's explicit user
+    // consent (gitlab-demo 2026-07-21: "Closes #1" closed the issue
+    // before Bram's flush ever ran). Closing is the dialog's exclusive
+    // authority; reject here, before the commit exists, so the agent
+    // rephrases ("Refs #N") and retries.
+    if let Some(phrase) = commit_message_closing_keyword(message) {
+        return worklist_json_error(
+            400,
+            format!(
+                "commit message contains the forge closing keyword \"{}\" — the forge would auto-close that issue at push, bypassing the close-on-commit dialog. Rephrase as \"Refs #N\" (closing is decided in the dialog) and retry.",
+                phrase
+            ),
+        );
     }
 
     let Some(auth_path) = worklist_auth_file(app) else {

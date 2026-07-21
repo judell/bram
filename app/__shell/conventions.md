@@ -243,12 +243,13 @@ change is "small":
   edits keep the loop tight. Once the draft is committed, fresh
   edits become change requests and route through the worklist.
 
-- **Issue-only `gh` work with no repo diff.** If the user asks you to
-  create, edit, comment on, close, or reopen a GitHub issue, and the
+- **Issue-only forge work with no repo diff.** If the user asks you to
+  create, edit, comment on, close, or reopen a forge issue, and the
   task will not modify tracked files in the repo and will not produce a
-  commit, skip the worklist and do it directly. If the issue request is
-  paired with repo changes, the repo changes still go through the
-  worklist.
+  commit, skip the worklist and do it directly — using the project's
+  detected forge CLI (`gh` on GitHub, `glab` on GitLab; see *Updating
+  forge issues via gh / glab*). If the issue request is paired with
+  repo changes, the repo changes still go through the worklist.
 
 ### What worklist items represent (and when to drop)
 
@@ -938,7 +939,17 @@ start a manual rebase, resolve, and push.
 ### Commit messages
 
 Summarize the worklist item that drove the commit. Use
-multiline. Reference the driving issue if there is one.
+multiline. Reference the driving issue if there is one — in
+**non-closing phrasing**: "Refs #N", "see #N", or bare "#N" in prose.
+Never use forge closing keywords (`close/closes/closed`,
+`fix/fixes/fixed`, `resolve/resolves/resolved` followed by `#N`): both
+GitHub and GitLab auto-close the referenced issue when such a commit
+reaches the default branch, bypassing the close-on-commit dialog's
+explicit user consent (first live occurrence: gitlab-demo 2026-07-21,
+where `Closes #1` closed the issue before Bram's close-on-push ran).
+Closing is the dialog's exclusive authority on every forge; the
+`worklist-commit` gate rejects messages containing closing keywords so
+they can be rephrased before the commit exists.
 
 ### Close-on-commit confirm dialog
 
@@ -1080,14 +1091,22 @@ a build followed by relaunching that wrong binary, still runs stale code.
 Don't suggest `cargo run`; the user prefers rebuild + restart, and the
 incremental build is fast.
 
-### Updating GitHub issues via gh
+### Updating forge issues via gh / glab
 
-Use `gh` directly — the Issues tab polls every 30s, so updates surface
-without a restart:
+Use the project's forge CLI directly — the Issues tab polls every 30s,
+so updates surface without a restart. The forge is detected from the
+`origin` remote (`.bram.json` `"forge"` override for ambiguous
+self-hosted remotes; `GET /__app-info` reports the detection — see
+`docs/forge-adapter.md`). On GitHub projects:
 
 - `gh issue edit <n> --title "…" --body "…"`
 - `gh issue comment <n> --body "…"`
 - `gh issue close <n>` / `gh issue reopen <n>`
+
+On GitLab projects the parallel `glab` commands apply (`glab issue
+note <n> -m "…"` for comments). The worklist contract around issues
+(`closesIssues`, `issue-<N>-` ids, close-on-push-automatic) is
+forge-agnostic and identical on both.
 
 
 ## Log-first development

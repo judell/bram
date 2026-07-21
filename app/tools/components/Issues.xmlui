@@ -155,7 +155,7 @@
           <Button
             label="Send"
             enabled="{!newIssueSubmitting &amp;&amp; newIssueText &amp;&amp; newIssueText.trim().length > 0}"
-            onClick="newIssueStartSig = lastIssuesSig; newIssueTurnEnded = false; newIssueSubmitting = true; toTurn('File a GitHub issue: ' + (newIssueText || '').trim()); showNewIssueHint = false; newIssueText = ''; newIssueVoiceRecording = false; setWorklistVoiceTarget('message-agent')" />
+            onClick="newIssueStartSig = lastIssuesSig; newIssueTurnEnded = false; newIssueSubmitting = true; toTurn('File an issue (forge CLI: ' + ((repoOrigin.value &amp;&amp; repoOrigin.value.cli) || 'gh') + '): ' + (newIssueText || '').trim()); showNewIssueHint = false; newIssueText = ''; newIssueVoiceRecording = false; setWorklistVoiceTarget('message-agent')" />
           <Button
             label="Cancel"
             variant="ghost"
@@ -204,13 +204,13 @@
       <Text
         when="{!repoOrigin.value || !repoOrigin.value.htmlBase}"
         color="$textColor-secondary">
-        No GitHub remote detected for this project. Add an origin remote (or run `gh repo set-default`) to populate this tab.
+        No forge remote detected for this project. Add an origin remote (GitHub or GitLab) to populate this tab.
       </Text>
 
       <Text
         when="{(!query || query.trim().length &lt; 2) &amp;&amp; repoOrigin.value &amp;&amp; repoOrigin.value.htmlBase &amp;&amp; issuesFirstPage.loaded &amp;&amp; !issuesFirstPage.inProgress &amp;&amp; (!issuesSource || issuesSource.length === 0)}"
         color="$textColor-secondary">
-        No issues found. (Either the repo has none, or `gh` is not installed / authenticated.)
+        No issues found. (Either the repo has none, or `{(repoOrigin.value &amp;&amp; repoOrigin.value.cli) || 'gh'}` is not installed / authenticated.)
       </Text>
 
       <Text

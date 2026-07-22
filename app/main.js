@@ -1032,7 +1032,7 @@ function __gridDetectMenu(rows) {
   // detect while a valid menu sat above (2026-07-18 20:16 jq-prompt miss:
   // 90+ s displayed, zero reports). A poisoned fragment now costs one
   // iteration instead of the menu.
-  const headerRe = /Do you want to|requires approval|Would you like to run/i;
+  const headerRe = /Do you want to|requires approval|Would you like to run|wants to/i;
   const starts = [];
   for (let i = 0; i < opts.length; i++) if (opts[i].n === 1) starts.push(i);
   for (let s = starts.length - 1; s >= 0; s--) {
@@ -1067,6 +1067,16 @@ function __gridDetectMenu(rows) {
     // Requiring option 1 == "Yes…" excludes prose while accepting both
     // providers.
     const isYesMenu = /^\s*Yes\b/i.test(menu[0].label);
+    // grid-detect-allow-deny-dialog: the claude-in-chrome connection
+    // dialog ("Claude in Chrome wants to create a browser window…" /
+    // ❯ 1. Allow / 2. Deny (esc)) has no Yes-first option, so the gate
+    // above dropped it — the grid never reported, claim reconciliation
+    // never re-ran, and the pane froze on a hook-synthesized menu that
+    // disagreed with the terminal (pa11 2026-07-21). Admit the Allow
+    // family only with a rendered cursor (prose lists lack ❯); Deny's
+    // "(esc)" hint satisfies codexSignal below.
+    const isAllowMenu =
+      !isYesMenu && /^\s*Allow\b/i.test(menu[0].label) && menu.some((o) => o.selected);
     // Picker family (detect-session-resume-picker): Claude Code's numbered
     // pickers — session resume ("1. Resume from summary…") and structural
     // twins — have no "Yes" first option, so the gate above would drop them
@@ -1079,7 +1089,7 @@ function __gridDetectMenu(rows) {
       /Enter to confirm/i.test(belowText) &&
       /Esc to cancel/i.test(belowText) &&
       menu.some((o) => o.selected);
-    if (isYesMenu) {
+    if (isYesMenu || isAllowMenu) {
       if (!(headerSignal || footerSignal || codexSignal)) continue;
     } else if (!pickerSignal) continue;
 
@@ -1088,7 +1098,7 @@ function __gridDetectMenu(rows) {
       .reverse()
       .find((r) => headerRe.test(r.text));
     let headerText = headerRow ? headerRow.text.trim() : "";
-    if (!headerText && !isYesMenu) {
+    if (!headerText && !isYesMenu && !isAllowMenu) {
       // Pickers have no "Do you want to…" header; carry the nearest
       // non-empty banner row so the pane shows why the picker is up
       // ("This session is 1d 2h old and 383.2k tokens.").
@@ -1107,7 +1117,7 @@ function __gridDetectMenu(rows) {
       options: menu.map((o) => ({ n: o.n, label: o.label, selected: o.selected })),
       above,
       blockTop,
-      picker: !isYesMenu,
+      picker: !isYesMenu && !isAllowMenu,
     };
   }
   return null;

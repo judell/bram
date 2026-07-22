@@ -10011,6 +10011,9 @@ fn pty_spawn(
                         }
                     }
                 }
+                // split-paste-cr-and-submit-nudge: composer-stuck self-heal
+                // rides the same ticker as the send-gate flush.
+                maybe_submit_nudge(&app_for_throughput);
                 for transition in reveal_floor.step(&input) {
                     trace_reveal_floor_transition(
                         &app_for_throughput,
@@ -10787,8 +10790,14 @@ fn sanitize_pty_turn_payload(data: &str) -> String {
         .collect()
 }
 
+// split-paste-cr-and-submit-nudge: NO trailing CR here. The paste
+// (with terminator) and the submitting CR ride separate PTY writes —
+// a single burst let the CLI's paste parser coalesce the CR into paste
+// handling instead of treating it as submit (live capture 2026-07-22:
+// the payload sat rendered-but-unsubmitted in the composer for 61s
+// until a manual Enter; Knorrasaurus/pa11-campaign-app#7).
 fn bracketed_paste_turn_payload(data: &str) -> String {
-    format!("\x1b\x15\x1b[200~{}\x1b[201~\r", data)
+    format!("\x1b\x15\x1b[200~{}\x1b[201~", data)
 }
 
 // The raw PTY injection for a turn payload. Shared by the normal send
@@ -10810,7 +10819,9 @@ fn inject_turn_payload<R: tauri::Runtime>(
         // text typed into CC's input doesn't get concatenated with our
         // bracketed paste.
         let wrapped = bracketed_paste_turn_payload(data);
-        pty_write_internal(app, state, &wrapped, "pty-intent-toTurn")
+        pty_write_internal(app, state, &wrapped, "pty-intent-toTurn")?;
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        pty_write_internal(app, state, "\r", "pty-intent-toTurn-submit")
     }
 }
 
@@ -19435,6 +19446,9 @@ struct SendLedgerEntry {
     // burst?). -1 = no PTY output had been seen yet.
     menu_at_inject: bool,
     ms_since_pty_out_at_inject: i64,
+    // split-paste-cr-and-submit-nudge: one CR nudge per entry when the
+    // composer-stuck signature is seen (unlanded + payload in tail).
+    nudged: bool,
 }
 
 const SEND_LEDGER_CAP: usize = 50;
@@ -19852,6 +19866,71 @@ fn send_gate_blocking_menu_tool() -> Option<String> {
     })
 }
 
+// split-paste-cr-and-submit-nudge: self-heal the composer-stuck send.
+// When a ledger entry sits unlanded past the dwell window AND its payload
+// is visible in the PTY tail (the confirmed stuck signature — text
+// rendered in the CLI composer, submitting CR never taken), write a lone
+// CR. Safe by construction: the send-gate check guarantees no menu or
+// picker is displayed, and the tail check proves the composer holds our
+// own payload — the CR can only submit what we already sent. For an
+// entry that is merely queued behind an open turn, the composer is empty
+// and a stray CR is a no-op; one nudge per entry regardless.
+const SUBMIT_NUDGE_AFTER_MS: i64 = 5_000;
+
+fn maybe_submit_nudge<R: tauri::Runtime>(app: &AppHandle<R>) {
+    if send_gate_blocking_menu_tool().is_some() {
+        return;
+    }
+    let now = unix_now_ms();
+    let candidate: Option<(String, i64, String)> = send_ledger_cell().lock().ok().and_then(|l| {
+        l.iter()
+            .find(|e| {
+                e.state == "injected" && !e.nudged && now - e.injected_at_ms >= SUBMIT_NUDGE_AFTER_MS
+            })
+            .map(|e| (e.id.clone(), e.injected_at_ms, e.preview.clone()))
+    });
+    let Some((id, injected_at_ms, preview)) = candidate else {
+        return;
+    };
+    // Same composer-stuck fragment check the strand scene capture uses.
+    let tail = pty_tail_snippet(400);
+    let frag: String = preview
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('"', "'")
+        .chars()
+        .take(24)
+        .collect();
+    if frag.trim().is_empty() || !tail.contains(frag.trim()) {
+        return;
+    }
+    // Latch BEFORE writing so a failing write can't loop the nudge.
+    if let Ok(mut l) = send_ledger_cell().lock() {
+        if let Some(e) = l.iter_mut().find(|e| e.id == id) {
+            if e.nudged {
+                return;
+            }
+            e.nudged = true;
+        }
+    }
+    let state = app.state::<AppState>();
+    let dwell_ms = now - injected_at_ms;
+    if pty_write_internal(app, &state, "\r", "send-ledger-submit-nudge").is_ok() {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "send-ledger",
+                &format!("op=submit-nudge id={} dwell_ms={}", id, dwell_ms),
+            );
+        }
+        append_strand_forensics_line(
+            app,
+            &format!("op=submit-nudge id={} dwell_ms={}", id, dwell_ms),
+        );
+    }
+}
+
 // Record a send at injection time (called from write_pty_turn_intent with
 // the exact PTY payload).
 fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
@@ -19893,6 +19972,7 @@ fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
             retried: false,
             menu_at_inject,
             ms_since_pty_out_at_inject: ms_since_pty_out,
+            nudged: false,
         },
         None => SendLedgerEntry {
             id: format!("{}-inline", now),
@@ -19911,6 +19991,7 @@ fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
             retried: false,
             menu_at_inject,
             ms_since_pty_out_at_inject: ms_since_pty_out,
+            nudged: false,
         },
     };
     if bram_trace_enabled() {
@@ -27626,7 +27707,7 @@ mod session_turn_tests {
     fn sanitized_turn_payload_cannot_close_bracketed_paste_early() {
         let payload = sanitize_pty_turn_payload("safe\x1b[201~\rmalicious");
         let wrapped = bracketed_paste_turn_payload(&payload);
-        let inner = &wrapped["\x1b\x15\x1b[200~".len()..wrapped.len() - "\x1b[201~\r".len()];
+        let inner = &wrapped["\x1b\x15\x1b[200~".len()..wrapped.len() - "\x1b[201~".len()];
 
         assert!(!inner.contains("\x1b[201~"));
         assert_eq!(wrapped.matches("\x1b[201~").count(), 1);
@@ -27748,6 +27829,7 @@ mod session_turn_tests {
             retried: false,
             menu_at_inject: false,
             ms_since_pty_out_at_inject: -1,
+            nudged: false,
         };
         assert_eq!(
             super::send_ledger_needle(&framed),

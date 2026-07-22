@@ -19449,6 +19449,12 @@ struct SendLedgerEntry {
     // split-paste-cr-and-submit-nudge: one CR nudge per entry when the
     // composer-stuck signature is seen (unlanded + payload in tail).
     nudged: bool,
+    // strand-forensics-queue-wait-accounting: was a turn open at inject?
+    // True means the CLI will queue this send until the turn ends — its
+    // landed line then reports queue_wait_ms so honest queue-wait latency
+    // is distinguishable from delivery trouble (pa11 #7: 8 "slow landings"
+    // were all queue waits behind a genuinely open prior turn).
+    turn_open_at_inject: bool,
 }
 
 const SEND_LEDGER_CAP: usize = 50;
@@ -19954,6 +19960,10 @@ fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
     let last_out = LAST_PTY_OUTPUT_MS.load(std::sync::atomic::Ordering::Relaxed);
     let ms_since_pty_out = if last_out > 0 { now - last_out } else { -1 };
     let menu_at_inject = turn_state_menu_present();
+    let turn_open_at_inject = turn_state_cell()
+        .lock()
+        .map(|t| t.phase == "working" || t.phase == "waiting-for-permission")
+        .unwrap_or(false);
     let entry = match outbound_turn_id_from_frame(payload) {
         Some(id) => SendLedgerEntry {
             id,
@@ -19973,6 +19983,7 @@ fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
             menu_at_inject,
             ms_since_pty_out_at_inject: ms_since_pty_out,
             nudged: false,
+            turn_open_at_inject,
         },
         None => SendLedgerEntry {
             id: format!("{}-inline", now),
@@ -19992,6 +20003,7 @@ fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
             menu_at_inject,
             ms_since_pty_out_at_inject: ms_since_pty_out,
             nudged: false,
+            turn_open_at_inject,
         },
     };
     if bram_trace_enabled() {
@@ -20013,13 +20025,14 @@ fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
     append_strand_forensics_line(
         app,
         &format!(
-            "op=inject id={} kind={} mode={} bytes={} provider={} menu_at_inject={} ms_since_pty_out={} stale_input={} preview=\"{}\"",
+            "op=inject id={} kind={} mode={} bytes={} provider={} menu_at_inject={} turn_open_at_inject={} ms_since_pty_out={} stale_input={} preview=\"{}\"",
             entry.id,
             entry.kind,
             entry.mode,
             payload.len(),
             turn_state_provider_str(),
             menu_at_inject,
+            turn_open_at_inject,
             ms_since_pty_out,
             stale_terminal_input(),
             bram_trace_preview(&entry.preview, 60),
@@ -20190,12 +20203,33 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                     entry.via_queue,
                     now - entry.injected_at_ms,
                 ));
+                // strand-forensics-queue-wait-accounting: how much of
+                // elapsed_ms was spent queued behind the prior open turn
+                // (inject time to that turn's detected completion). -1 =
+                // no open turn at inject, or no completion observed yet —
+                // a slow landing with queue_wait_ms=-1 is a genuine
+                // delivery suspect.
+                let queue_wait_ms = if entry.turn_open_at_inject {
+                    let comp = turn_state_cell()
+                        .lock()
+                        .map(|t| t.last_completion_at_ms)
+                        .unwrap_or(0);
+                    if comp > entry.injected_at_ms {
+                        comp - entry.injected_at_ms
+                    } else {
+                        -1
+                    }
+                } else {
+                    -1
+                };
                 forensics.push(format!(
-                    "op=landed id={} via_queue={} elapsed_ms={} cross_session={}",
+                    "op=landed id={} via_queue={} elapsed_ms={} cross_session={} turn_open_at_inject={} queue_wait_ms={}",
                     entry.id,
                     entry.via_queue,
                     now - entry.injected_at_ms,
                     sid_changed,
+                    entry.turn_open_at_inject,
+                    queue_wait_ms,
                 ));
                 // The send landed in a DIFFERENT session than it was injected
                 // against — the false-strand case (send-ledger-observe-sid-
@@ -27830,6 +27864,7 @@ mod session_turn_tests {
             menu_at_inject: false,
             ms_since_pty_out_at_inject: -1,
             nudged: false,
+            turn_open_at_inject: false,
         };
         assert_eq!(
             super::send_ledger_needle(&framed),

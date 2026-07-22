@@ -110,7 +110,8 @@
       id="transcriptList"
       height="*"
       data="{events}"
-      onScroll="(ev) => { if (atBottom !== ev.atEnd) window.__bramIframeTrace('transcript-follow', {atBottom: ev.atEnd, agentId: $props.agentId || 'main'}); atBottom = ev.atEnd }">
+      onScroll="(ev) => { if (atBottom !== ev.atEnd) window.__bramIframeTrace('transcript-follow', {atBottom: ev.atEnd, agentId: $props.agentId || 'main'}); atBottom = ev.atEnd }"
+      onVisibleRangeDidChange="(range) => window.__bramSetVisibleRange(range)">
       <property name="emptyListTemplate"><Fragment/></property>
       <VStack gap="$space-1" paddingVertical="$space-1">
         <!-- user message -->
@@ -175,8 +176,30 @@
                intent header via /__describe-command (no-op otherwise). -->
           <Link noIndicator="true" onClick="expanded = window.__bramExpandTool(expanded, $item)">
             <HStack gap="$space-1" verticalAlignment="center">
-              <Text fontSize="$fontSize-sm" fontWeight="bold" value="{((expanded || []).includes($item.id) ? '▾' : '▸') + '  🔧 ' + $item.name}" />
-              <Text when="{$item.summary &amp;&amp; $item.summary !== $item.name}" fontSize="$fontSize-sm" color="$textColor-secondary" value="{$item.summary}" />
+              <!-- promote-tool-descriptions-to-row (inverted): the row leads
+                   with the Haiku-resolved intent (aiDescription, requested
+                   eagerly as rows arrive); hover shows the RAW command line —
+                   the opposite of the original command-first, describe-on-
+                   expand arrangement. Summary fills in until the description
+                   resolves. -->
+              <Text
+                fontSize="$fontSize-sm"
+                fontWeight="bold"
+                tooltip="{($item.commandDisplay || $item.summary || '').slice(0, 500)}"
+                value="{((expanded || []).includes($item.id) ? '▾' : '▸') + '  🔧 ' + $item.name + ($item.nameDetail ? ' (' + $item.nameDetail + ')' : '')}" />
+              <Text
+                when="{$item.aiDescription}"
+                fontSize="$fontSize-sm"
+                color="$textColor-secondary"
+                maxLines="1"
+                tooltip="{($item.commandDisplay || $item.summary || '').slice(0, 500)}"
+                value="{'— ' + $item.aiDescription}" />
+              <Text
+                when="{!$item.aiDescription &amp;&amp; $item.summary &amp;&amp; $item.summary !== $item.name}"
+                fontSize="$fontSize-sm"
+                color="$textColor-secondary"
+                tooltip="{($item.commandDisplay || $item.summary || '').slice(0, 500)}"
+                value="{$item.summary}" />
             </HStack>
           </Link>
           <VStack
@@ -195,7 +218,7 @@
             <Markdown
               when="{window.__bramShowToolCommand ? window.__bramShowToolCommand($item) : (($item.commandDisplay || $item.summary) &amp;&amp; ($item.name !== 'apply_patch' || !$item.commandDisplay))}"
               overflowMode="scroll"
-              content="{window.__bramFormatToolCommand($item.commandDisplay || $item.summary, $item.description)}" />
+              content="{window.__bramFormatToolCommand($item.commandDisplay || $item.summary, $item.aiDescription || $item.description)}" />
             <Markdown
               when="{$item.commandMarkdown}"
               overflowMode="flow"

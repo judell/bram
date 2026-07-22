@@ -1017,6 +1017,50 @@ try {
   });
 } catch (e) { /* observe-only: absent, not broken */ }
 
+// asset-probe (promote-tool-descriptions-to-row forensics): the pane
+// rendered pre-feature markup while the host provably served enriched
+// projections, and a full WebKit cache clear did not change it. Every
+// layer was verified EXCEPT the bytes the webview receives for the
+// component markup itself — so observe them. 3s after boot in the
+// tools pane, fetch our own Transcript.xmlui through the same origin
+// the component loader uses, cached and no-store, and trace size +
+// whether the new bindings are present. One grep then names the stale
+// layer: cached==old & no-store==new -> cache; both old -> the serving
+// store is stale (embedded assets); both new -> the loader itself.
+try {
+  if (window.location.pathname.indexOf("/tools/") !== -1) {
+    setTimeout(function () {
+      ["default", "no-store"].forEach(function (mode) {
+        try {
+          window
+            .fetch("components/Transcript.xmlui", mode === "no-store" ? { cache: "no-store" } : {})
+            .then(function (r) {
+              return r.text().then(function (t) {
+                window.__bramIframeTrace("asset-probe", {
+                  path: "components/Transcript.xmlui",
+                  mode: mode,
+                  status: r.status,
+                  bytes: t.length,
+                  hasNameDetail: t.indexOf("nameDetail") >= 0,
+                  hasAiDescription: t.indexOf("aiDescription") >= 0,
+                  hasEagerComment: t.indexOf("inverted") >= 0,
+                  origin: String(window.location.origin || ""),
+                });
+              });
+            })
+            .catch(function (e) {
+              window.__bramIframeTrace("asset-probe", {
+                path: "components/Transcript.xmlui",
+                mode: mode,
+                error: String(e),
+              });
+            });
+        } catch (e) {}
+      });
+    }, 3000);
+  }
+} catch (e) { /* observe-only */ }
+
 // Cascade-diagnosis instrumentation (refs #93). Emits a helper-call
 // record when a hot JSONL-walking helper exceeds the threshold. Cheap
 // paths (no-op early returns, cache hits) don't log because their _t0
@@ -4567,6 +4611,11 @@ window.__bramProjectedTurnEqual = function (a, b) {
         // reference and silently drop the new header (2026-07-08 "no
         // description line appeared").
         (x.description || "") !== (y.description || "") ||
+        // aiDescription participates for the same reason description does:
+        // the eager/expand describe patch changes ONLY this field, and an
+        // equality check that ignores it discards the splice on rebroadcast
+        // (2026-07-22, the second field-whitelist bite in one day).
+        (x.aiDescription || "") !== (y.aiDescription || "") ||
         x.result !== y.result ||
         !!x.isError !== !!y.isError ||
         !!x.resultStructured !== !!y.resultStructured
@@ -4597,7 +4646,107 @@ window.__bramBroadcastProjectedTurns = function (payload) {
   for (var j = 0; j < n; j++) {
     try { __projectedTurnsSubscribers[j](payload); } catch (e) {}
   }
+  __bramEagerDescribe(payload);
 };
+
+// promote-tool-descriptions-to-row (eager): request descriptions as
+// command-bearing rows ARRIVE instead of waiting for a click-expand —
+// the row leads with intent, hover shows the raw command. Bounded to
+// the newest turns so loading a large session cannot fire a historical
+// describe burst; per-id dedupe (plus the host cache) keeps re-broadcasts
+// free, and the unavailable latch (set on a disabled/no-key answer)
+// stops eager re-POST churn on installs with the feature off — a manual
+// expand still tries, and any success clears the latch.
+// Full-transcript coverage, NEWEST FIRST: what the user sees at the
+// bottom adjusts immediately; backscroll fills in as the queue drains.
+// Cost is accepted (per 2026-07-22 direction); responsiveness is
+// protected by pacing — a bounded-concurrency queue instead of firing
+// hundreds of requests (and hundreds of full re-renders) at once on a
+// large session. The queue is rebuilt per broadcast; per-id dedupe and
+// the host result cache make that free.
+var __bramDescribeQueue = [];
+var __bramDescribeInFlight = 0;
+var __BRAM_DESCRIBE_CONCURRENCY = 3;
+// The List is virtualized: only near-viewport rows exist in the DOM,
+// so mounted rows (virtua data-index wrappers) ARE the visibility
+// signal. Re-partition on every pump — scrolling re-prioritizes a
+// draining queue with no extra listeners.
+// Primary signal: the List's visibleRangeDidChange event (first-class API,
+// added upstream in xmlui feat/list-visible-range). The [data-index] DOM
+// scrape remains as fallback for the window before the first event lands.
+window.__bramSetVisibleRange = function (range) {
+  window.__bramVisibleRange = range || null;
+  try { __bramPumpDescribeQueue(); } catch (e) {}
+};
+function __bramVisibleToolIds() {
+  var ids = {};
+  try {
+    var evs = window.__bramLastTranscriptEvents || [];
+    var r = window.__bramVisibleRange;
+    if (r && r.startIndex >= 0) {
+      for (var j = r.startIndex; j <= r.endIndex && j < evs.length; j++) {
+        var ev = evs[j];
+        if (ev && ev.kind === "tool" && ev.id) ids[ev.id] = true;
+      }
+      return ids;
+    }
+    var nodes = document.querySelectorAll("[data-index]");
+    for (var i = 0; i < nodes.length; i++) {
+      var idx = parseInt(nodes[i].getAttribute("data-index"), 10);
+      var e = evs[idx];
+      if (e && e.kind === "tool" && e.id) ids[e.id] = true;
+    }
+  } catch (e) {}
+  return ids;
+}
+function __bramPumpDescribeQueue() {
+  try {
+    var vis = __bramVisibleToolIds();
+    if (__bramDescribeQueue.length > 1) {
+      var front = [], rest = [];
+      for (var qi = 0; qi < __bramDescribeQueue.length; qi++) {
+        (vis[__bramDescribeQueue[qi].id] ? front : rest).push(__bramDescribeQueue[qi]);
+      }
+      __bramDescribeQueue = front.concat(rest);
+    }
+  } catch (e) {}
+  while (__bramDescribeInFlight < __BRAM_DESCRIBE_CONCURRENCY && __bramDescribeQueue.length) {
+    var e = __bramDescribeQueue.shift();
+    if (!e || !e.id || window.__bramDescribeRequested[e.id]) continue;
+    __bramDescribeInFlight++;
+    window.__bramRequestCommandDescription(e, function () {
+      __bramDescribeInFlight--;
+      __bramPumpDescribeQueue();
+    });
+  }
+}
+setInterval(function () {
+  if (__bramDescribeQueue.length && !window.__bramDescribeUnavailable) {
+    __bramPumpDescribeQueue();
+  }
+}, 1500);
+function __bramEagerDescribe(payload) {
+  try {
+    if (window.__bramDescribeUnavailable) return;
+    if (!payload || !payload.turns) return;
+    if (window.location.pathname.indexOf("/tools/") === -1) return;
+    var turns = payload.turns;
+    var queue = [];
+    for (var i = turns.length - 1; i >= 0; i--) {
+      var entries = (turns[i] && turns[i].entries) || [];
+      for (var k = entries.length - 1; k >= 0; k--) {
+        var e = entries[k];
+        if (!e || e.kind !== "tool" || !e.id) continue;
+        if (e.aiDescription) continue;
+        if (!e.commandDisplay || e.name === "apply_patch") continue;
+        if (window.__bramDescribeRequested[e.id]) continue;
+        queue.push(e);
+      }
+    }
+    __bramDescribeQueue = queue;
+    __bramPumpDescribeQueue();
+  } catch (err) {}
+}
 
 // Splice a latest=N window onto the accumulated full projection
 // (bound-turns-projection-and-gate-edit-hints). Returns null when the
@@ -4638,9 +4787,13 @@ window.__bramPatchProjectedToolDescription = function (toolId, description) {
     for (var k = 0; k < entries.length; k++) {
       var e = entries[k];
       if (e && e.kind === "tool" && e.id === toolId) {
-        if ((e.description || "") === description) return true;
+        // promote-tool-descriptions-to-row: Haiku results live in
+        // aiDescription — the ONLY field the collapsed row displays, so
+        // nothing shows until the resolved/improved version exists. The
+        // agent-authored `description` is untouched (expansion fallback).
+        if ((e.aiDescription || "") === description) return true;
         var newEntries = entries.slice();
-        newEntries[k] = Object.assign({}, e, { description: description });
+        newEntries[k] = Object.assign({}, e, { aiDescription: description });
         var newTurns = turns.slice();
         newTurns[i] = Object.assign({}, turns[i], { entries: newEntries });
         // Observe-only (describe-freeze recurrence, 2026-07-11): the
@@ -5387,6 +5540,9 @@ window.__bramAppendMenuEvents = function (events, menu) {
 // re-mount them.
 window.__bramProjectedEventCache = (typeof WeakMap === "function") ? new WeakMap() : null;
 window.__bramTranscriptEventsFromTurns = function (payload, menu) {
+  // viewport-priority describe: the pump maps mounted rows' data-index
+  // back to entries through this snapshot of the adapter's last output.
+
   var turns = (payload && payload.turns) || [];
   var events = [];
   for (var ti = 0; ti < turns.length; ti++) {
@@ -5421,7 +5577,14 @@ window.__bramTranscriptEventsFromTurns = function (payload, menu) {
           } else if (e.kind === "thinking") {
             slice.push({ id: eid, kind: "thinking", text: e.text || "" });
           } else if (e.kind === "tool") {
-            slice.push({
+            // Spread-through, not whitelist: this copy used to enumerate
+            // fields, which silently stripped any NEW projection field
+            // before the List rendered (the 2026-07-22 "feature does not
+            // exist" hunt: host, serving, caches, and markup were all
+            // current; this adapter dropped nameDetail/aiDescription).
+            // All of e passes through; the explicit keys below only pin
+            // defaults and identity.
+            slice.push(Object.assign({}, e, {
               id: e.id || eid,
               kind: "tool",
               toolId: e.id || "",
@@ -5430,6 +5593,8 @@ window.__bramTranscriptEventsFromTurns = function (payload, menu) {
               commandDisplay: e.commandDisplay || "",
               commandMarkdown: e.commandMarkdown || "",
               description: e.description || "",
+              nameDetail: e.nameDetail || "",
+              aiDescription: e.aiDescription || "",
               result: e.result || "",
               resultStructured: !!e.resultStructured,
               // Edit/MultiEdit reconstructed diff from the host projection
@@ -5440,7 +5605,7 @@ window.__bramTranscriptEventsFromTurns = function (payload, menu) {
               diff: e.diff || "",
               isError: !!e.isError,
               agentId: e.agentId || "",
-            });
+            }));
           }
         }
       }
@@ -5450,6 +5615,7 @@ window.__bramTranscriptEventsFromTurns = function (payload, menu) {
       if (window.__bramProjectedEventCache) window.__bramProjectedEventCache.set(t, slice);
     }
     for (var si = 0; si < slice.length; si++) events.push(slice[si]);
+  window.__bramLastTranscriptEvents = events;
   }
   return window.__bramAppendMenuEvents(events, menu);
 };
@@ -5854,9 +6020,10 @@ window.__bramDescribeContextForTool = function (toolId) {
   return "";
 };
 
-window.__bramRequestCommandDescription = function (item) {
+window.__bramRequestCommandDescription = function (item, onDone) {
   var id = item && item.id;
-  if (!id || window.__bramDescribeRequested[id]) return;
+  var done = function () { try { if (onDone) onDone(); } catch (e) {} };
+  if (!id || window.__bramDescribeRequested[id]) { done(); return; }
   window.__bramDescribeRequested[id] = true;
   window
     .fetch("/__describe-command", {
@@ -5878,6 +6045,7 @@ window.__bramRequestCommandDescription = function (item) {
     .then(function (r) { return r.json(); })
     .then(function (res) {
       if (res && res.ok && res.description) {
+        window.__bramDescribeUnavailable = false;
         // Direct splice into the accumulated projection — see
         // __bramPatchProjectedToolDescription for why a refetch can't
         // deliver this. Patch misses (subagent view: the entry isn't in
@@ -5886,12 +6054,19 @@ window.__bramRequestCommandDescription = function (item) {
         // with the overlay applied.
         window.__bramPatchProjectedToolDescription(id, res.description);
       } else {
+        // Feature off: latch so the eager scan stops re-POSTing every
+        // broadcast; a manual expand bypasses the latch and can revive.
+        if (res && (res.reason === "disabled" || res.reason === "no-key")) {
+          window.__bramDescribeUnavailable = true;
+        }
         // Allow a retry on a later expand (disabled/no-key/error).
         delete window.__bramDescribeRequested[id];
       }
+      done();
     })
     .catch(function () {
       delete window.__bramDescribeRequested[id];
+      done();
     });
 };
 // Slim change-signal tick (issue-214 candidate #5). The latest-tail

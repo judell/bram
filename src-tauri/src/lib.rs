@@ -17906,6 +17906,28 @@ mod codex_unified_exec_tests {
     }
 }
 
+// promote-tool-descriptions-to-row iterate: Codex analog of the Bash
+// nameDetail — command words for exec_command (input.cmd) and for
+// unified exec (the shell commands embedded in the JS script).
+fn st_codex_name_detail(payload: &serde_json::Value) -> String {
+    let input = st_codex_tool_input(payload);
+    let raw_name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    if raw_name == "exec_command" {
+        if let Some(cmd) = input.get("cmd").and_then(|v| v.as_str()) {
+            return st_bash_command_words(cmd);
+        }
+    }
+    if raw_name == "exec" {
+        if let Some(script) = input.as_str() {
+            let cmds = st_codex_exec_cmds(script);
+            if !cmds.is_empty() {
+                return st_bash_command_words(&cmds.join("\n"));
+            }
+        }
+    }
+    String::new()
+}
+
 fn st_codex_tool_command_display(payload: &serde_json::Value) -> String {
     let input = st_codex_tool_input(payload);
     let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -18087,8 +18109,207 @@ fn st_notification_turn(text_joined: &str) -> Option<serde_json::Value> {
     }))
 }
 
-// Walk JSONL lines and build the structured turn array. Mirrors
-// `_parseLinesToTurns` in Globals.xs.
+// promote-tool-descriptions-to-row: the distinct leading command words of
+// a Bash invocation ("cargo, jq, curl"), for the collapsed row's
+// Bash (…) detail. Heuristic, not a shell parser: split into segments on
+// newlines / && / || / ; / |, take each segment's first token after
+// skipping env assignments and wrapper prefixes, basename it, dedupe,
+// cap at 4. Heredoc bodies are skipped wholesale (a commit-message
+// heredoc's prose lines are not commands).
+fn st_bash_command_words(cmd: &str) -> String {
+    // Prefixes skipped to reach the real command word.
+    const WRAPPERS: [&str; 8] = ["sudo", "env", "nohup", "time", "command", "do", "then", "else"];
+    // Segment openers whose following tokens are variables/conditions,
+    // not commands — the whole segment is dropped.
+    const DROPPERS: [&str; 12] = [
+        "cd", "export", "set", "exit", "for", "while", "until", "if", "fi", "done", "esac",
+        "case",
+    ];
+    // Quote-aware segmentation: split on | ; && || and newlines only
+    // OUTSIDE single/double quotes, so a pipe inside a grep pattern
+    // ("a\|b") can never start a phantom segment (the (grep,
+    // nameDetail", head, kind:) specimen, 2026-07-22).
+    let mut segments: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    let mut heredoc_end: Option<String> = None;
+    for line in cmd.lines() {
+        if let Some(end) = &heredoc_end {
+            if line.trim() == end.as_str() {
+                heredoc_end = None;
+            }
+            continue;
+        }
+        for ch in line.chars() {
+            if escaped {
+                cur.push(ch);
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' if !in_single => {
+                    escaped = true;
+                    cur.push(ch);
+                }
+                '\'' if !in_double => {
+                    in_single = !in_single;
+                    cur.push(ch);
+                }
+                '"' if !in_single => {
+                    in_double = !in_double;
+                    cur.push(ch);
+                }
+                '|' | ';' | '&' if !in_single && !in_double => {
+                    if !cur.trim().is_empty() {
+                        segments.push(cur.clone());
+                    }
+                    cur.clear();
+                }
+                _ => cur.push(ch),
+            }
+        }
+        // Line boundary ends a segment (outside quotes).
+        if !in_single && !in_double {
+            if !cur.trim().is_empty() {
+                segments.push(cur.clone());
+            }
+            cur.clear();
+        }
+        if let Some(pos) = line.find("<<") {
+            let marker = line[pos + 2..]
+                .trim_start_matches(['-', ' '])
+                .trim()
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_matches(['\'', '"'])
+                .to_string();
+            if !marker.is_empty() && marker.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                heredoc_end = Some(marker);
+            }
+        }
+    }
+    if !cur.trim().is_empty() {
+        segments.push(cur);
+    }
+    let mut words: Vec<String> = Vec::new();
+    for segment in &segments {
+        let mut tokens = segment.split_whitespace().peekable();
+        if let Some(first) = tokens.peek() {
+            if DROPPERS.contains(&first.trim_start_matches(['(', '{']).trim_end_matches(';')) {
+                continue;
+            }
+        }
+        while let Some(tok) = tokens.peek() {
+            let t = tok.trim_start_matches(['(', '{', '$']);
+            if t.is_empty()
+                || WRAPPERS.contains(&t)
+                || (t.contains('=')
+                    && t.split('=').next().is_some_and(|k| {
+                        !k.is_empty()
+                            && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    }))
+            {
+                tokens.next();
+                continue;
+            }
+            break;
+        }
+        let Some(first) = tokens.next() else { continue };
+        let word = first
+            .trim_start_matches(['(', '{'])
+            .rsplit('/')
+            .next()
+            .unwrap_or("")
+            .trim_end_matches([')', '}'])
+            .to_string();
+        // Bare tool names only: alphabetic start, then [alnum . _ + -].
+        // Anything carrying quotes, colons, or pattern debris is not a
+        // command word.
+        let bare = word.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            && word
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'));
+        if !bare || DROPPERS.contains(&word.as_str()) {
+            continue;
+        }
+        if !words.contains(&word) {
+            words.push(word);
+        }
+    }
+    words.truncate(4);
+    words.join(", ")
+}
+
+#[cfg(test)]
+mod bash_command_words_tests {
+    use super::st_bash_command_words;
+
+    #[test]
+    fn extracts_pipeline_and_compound_commands() {
+        assert_eq!(st_bash_command_words("grep -n foo bar.txt"), "grep");
+        assert_eq!(
+            st_bash_command_words("cd /x && cargo build 2>&1 | tail -1"),
+            "cargo, tail"
+        );
+        assert_eq!(
+            st_bash_command_words("RUST_LOG=debug /usr/bin/python3 x.py; rg pat | sed s/a/b/"),
+            "python3, rg, sed"
+        );
+    }
+
+    #[test]
+    fn heredoc_bodies_are_not_commands() {
+        let cmd = "cat > /tmp/msg.txt <<'EOF'\nSplit the paste and submit writes\n\nprose line here\nEOF\njq -n '{}' > /tmp/b.json && curl -sS http://x";
+        assert_eq!(st_bash_command_words(cmd), "cat, jq, curl");
+    }
+
+    #[test]
+    fn quoted_pipes_and_debris_do_not_become_commands() {
+        // Live specimen 2026-07-22: pipes inside grep patterns split
+        // phantom segments; debris tokens leaked into the parens.
+        let cmd = "grep -n \"_parse\\|nameDetail\" f.xs | head -8; grep -c \"kind: 'tool'\\|kind: \\\"tool\\\"\" f.xs";
+        assert_eq!(st_bash_command_words(cmd), "grep, head");
+        assert_eq!(
+            st_bash_command_words("for pid in $(pgrep -f x); do ps -p $pid; done"),
+            "ps"
+        );
+    }
+
+    #[test]
+    fn dedupes_and_caps() {
+        assert_eq!(st_bash_command_words("grep a; grep b; grep c"), "grep");
+        assert_eq!(
+            st_bash_command_words("a1 && b2 && c3 && d4 && e5 && f6"),
+            "a1, b2, c3, d4"
+        );
+    }
+
+    #[test]
+    fn codex_exec_variants_carry_detail() {
+        use super::st_codex_name_detail;
+        let call = serde_json::json!({
+            "type": "function_call",
+            "name": "exec_command",
+            "arguments": "{\"cmd\": \"rg -n foo | sed s/a/b/\"}"
+        });
+        assert_eq!(st_codex_name_detail(&call), "rg, sed");
+        let unified = serde_json::json!({
+            "type": "custom_tool_call",
+            "name": "exec",
+            "input": "await tools.exec_command({cmd:\"git status --short\"});\ntools.exec_command({cmd:\"ls -la\"});"
+        });
+        assert_eq!(st_codex_name_detail(&unified), "git, ls");
+    }
+}
+
+// Walk JSONL lines and build the structured turn array. (A historical
+// comment said this "mirrors _parseLinesToTurns in Globals.xs" — that
+// client-side parser is long gone; parsing is host-only and the
+// Transcript is a pure consumer. The comment cost real time in the
+// 2026-07-22 field-stripping hunt; don't resurrect it.)
 fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
     let mut turns: Vec<serde_json::Value> = Vec::new();
     // tool_entry_locations maps tool_use_id → (turn_idx, entry_idx) so
@@ -18148,6 +18369,19 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
                             "summary": summary,
                             "commandDisplay": st_tool_command_display(name, input),
                             "commandMarkdown": st_tool_command_markdown(name, input),
+                            // promote-tool-descriptions-to-row iterate: the
+                            // command words behind a Bash call ("grep" /
+                            // "rg, sed, grep"), so the row reads
+                            // Bash (cargo, jq) instead of bare Bash.
+                            "nameDetail": if name == "Bash" {
+                                input
+                                    .get("command")
+                                    .and_then(|v| v.as_str())
+                                    .map(st_bash_command_words)
+                                    .unwrap_or_default()
+                            } else {
+                                String::new()
+                            },
                             // The agent-authored intent sentence (Claude's Bash
                             // tool requires it; other tools/providers may lack
                             // it). Rendered above the command in the Transcript
@@ -18316,6 +18550,7 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
                         "summary": summary,
                         "commandDisplay": st_codex_tool_command_display(p),
                         "commandMarkdown": st_codex_tool_command_markdown(p),
+                        "nameDetail": st_codex_name_detail(p),
                     });
                     let entry_idx = entries.len();
                     entries.push(entry);
@@ -20868,9 +21103,15 @@ fn apply_describe_overlay(
             else {
                 continue;
             };
+            // promote-tool-descriptions-to-row: Haiku results land in
+            // aiDescription — the only field the collapsed row displays.
+            // Nothing shows until the resolved (Codex) or improved
+            // (Claude) version exists; the agent-authored `description`
+            // stays untouched as the expansion fallback, so the row never
+            // flips from one text to another mid-read.
             if let Some(obj) = entry.as_object_mut() {
                 obj.insert(
-                    "description".to_string(),
+                    "aiDescription".to_string(),
                     serde_json::Value::String(desc.clone()),
                 );
             }

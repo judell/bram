@@ -77,7 +77,7 @@
     height="100%"
     padding="$space-4"
     gap="$space-2"
-    onInit="window.__bramTranscriptMount()"
+    onInit="repinArmed = true; window.__bramRegisterTranscriptScroll(() => { atBottom = false; transcriptList.scrollToTop(); }, () => { atBottom = true; transcriptList.scrollToBottom(); }); window.__bramTranscriptMount()"
     onCleanup="window.__bramSetTranscriptMounted(false)"
     var.events="{window.__bramTranscriptEventsFromTurns($props.agentId ? subagentTurns.value : turnsEvt.value, null)}"
     var.eventsVersion="{($props.agentId ? (subagentTurns.value &amp;&amp; subagentTurns.value.total) : (turnsEvt.value &amp;&amp; turnsEvt.value.revision)) || events.length}"

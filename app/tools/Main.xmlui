@@ -574,6 +574,32 @@
               tooltip="Launch a project skill (.claude/skills)"
               onClick="skillsList.refetch(); skillsDialog.open()" />
           </VStack>
+          <!-- transcript-scroll-gestures: quick top/bottom jumps, shown only
+               on the Transcript page ($pathname per
+               https://docs.xmlui.org/howto/add-a-skip-link-to-main-content).
+               Up at the stack's top corner, down at its bottom corner. Down
+               re-arms follow; up jumps without re-arming so new arrivals do
+               not yank the view back while reading the start. Dispatch rides
+               the mount-registered closures in helpers.js because the footer
+               cannot reach the Transcript's list id directly. -->
+          <VStack
+            when="{$pathname === '/transcript'}"
+            width="2rem"
+            gap="$space-1"
+            horizontalAlignment="center">
+            <Button
+              label="▲"
+              variant="ghost"
+              size="xs"
+              tooltip="Scroll transcript to top"
+              onClick="window.__bramTranscriptScroll('top')" />
+            <Button
+              label="▼"
+              variant="ghost"
+              size="xs"
+              tooltip="Scroll transcript to bottom"
+              onClick="window.__bramTranscriptScroll('bottom')" />
+          </VStack>
         </HStack>
       </Form>
       <PastedImageStrip target="message-agent" />

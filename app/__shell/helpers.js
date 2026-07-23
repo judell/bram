@@ -4950,6 +4950,24 @@ window.bramSubscribeProjectedTurns = (function () {
   };
 })();
 
+// transcript-scroll-gestures: the footer's transcript-only jump arrows live
+// in Main.xmlui and cannot reach the Transcript component's transcriptList id
+// directly, so the Transcript registers its scroll closures at mount. The
+// closures capture xs scope (atBottom, transcriptList); this shim only stores
+// and dispatches them. Mount-time re-registration overwrites stale closures
+// from a prior mount, so no unregister step is needed.
+window.__bramRegisterTranscriptScroll = function (goTop, goBottom) {
+  window.__bramTranscriptScrollActions = { top: goTop, bottom: goBottom };
+};
+window.__bramTranscriptScroll = function (dir) {
+  var a = window.__bramTranscriptScrollActions;
+  if (!a) return;
+  try {
+    if (dir === "top" && a.top) a.top();
+    else if (a.bottom) a.bottom();
+  } catch (e) {}
+};
+
 window.__bramTranscriptMount = function () {
   if (window.__bramSetTranscriptMounted) window.__bramSetTranscriptMounted(true);
   if (window.__bramRefetchProjectedTurns) window.__bramRefetchProjectedTurns("transcript-mount");

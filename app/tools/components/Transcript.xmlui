@@ -84,6 +84,7 @@
     var.expanded="{[]}"
     var.atBottom="{true}"
     var.repinArmed="{false}"
+    var.settleArmed="{false}"
     var.currentSession="{((transcriptSessions.value || []).find(s => s.current)) || ((transcriptSessions.value || [])[0])}">
     <HStack verticalAlignment="center" gap="$space-2">
       <Heading level="h2">Transcript</Heading>
@@ -261,7 +262,18 @@
          RO-driven re-stick to loop or yank the viewport. -->
     <ChangeListener
       listenTo="{events.length + ':' + eventsVersion}"
-      onDidChange="() => { if (atBottom) { transcriptList.scrollToBottom(); window.__bramIframeTrace('transcript-repin', {events: events.length, agentId: $props.agentId || 'main'}); } }" />
+      onDidChange="() => { if (atBottom) { transcriptList.scrollToBottom(); settleArmed = true; window.__bramIframeTrace('transcript-repin', {events: events.length, agentId: $props.agentId || 'main'}); } }" />
+    <!-- Settle re-assert: content keeps growing for a beat after the repin
+         (async Markdown layout, eager tool descriptions splicing in), so one
+         delayed re-scroll pins the true bottom once measurements settle.
+         Guarded by atBottom, so a user who scrolled up is never yanked down.
+         Same one-shot Timer pattern as subagent-switch-repin below (a
+         delay()-suspended handler outliving a remount trips the engine's
+         async-unmount lifecycle violation; the Timer disposes cleanly). -->
+    <Timer
+      interval="200"
+      enabled="{settleArmed}"
+      onTick="() => { settleArmed = false; if (atBottom) { transcriptList.scrollToBottom(); window.__bramIframeTrace('transcript-settle-repin', {events: events.length, agentId: $props.agentId || 'main'}); } }" />
     <!-- Viewport switch (chip click: Main ↔ subagent) always lands at the
          bottom: re-arm follow mode so the async refetch's events swap
          re-pins via the listener above, and pin immediately for the

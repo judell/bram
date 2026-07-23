@@ -4778,62 +4778,85 @@ window.__bramMergeProjectedTurnsWindow = function (prev, payload) {
 // already carries the description, so this is a pure client-side splice:
 // clone the turn/entry (never mutate — the broadcast's reference
 // preservation depends on prev staying pristine) and re-push.
+// describe-rebroadcast-coalesce (perf audit 2026-07-22): completions are
+// ENQUEUED and flushed in one rebroadcast per ~400ms window, not one per
+// result. The full-backscroll eager describe made 524 calls on an 18MB /
+// 1200-turn session, and a fan-out per completion (each subscriber re-runs
+// the events adapter) degraded heartbeat drift to avg 277ms / max 4.1s and
+// a tab-switch subscribe refetch to 3.1s. Cache-hit boots are denser still
+// (no Haiku latency between completions), so per-result broadcasting gets
+// WORSE after first backfill. setTimeout is fine here (helpers.js is real
+// JS, outside the XMLUI expression engine).
+var __describePendingPatches = {};
+var __describeFlushArmed = false;
 window.__bramPatchProjectedToolDescription = function (toolId, description) {
+  if (!toolId || !description) return false;
+  __describePendingPatches[toolId] = description;
+  if (!__describeFlushArmed) {
+    __describeFlushArmed = true;
+    setTimeout(function () { window.__bramFlushDescribePatches(); }, 400);
+  }
+  return true;
+};
+window.__bramFlushDescribePatches = function () {
+  __describeFlushArmed = false;
+  var pending = __describePendingPatches;
+  __describePendingPatches = {};
+  var ids = Object.keys(pending);
+  if (!ids.length) return;
   var prev = __projectedTurnsValue;
-  if (!prev || !prev.turns || !toolId || !description) return false;
+  if (!prev || !prev.turns) return;
   var turns = prev.turns;
+  var newTurns = null;
+  var applied = 0;
   for (var i = 0; i < turns.length; i++) {
     var entries = (turns[i] && turns[i].entries) || [];
+    var newEntries = null;
     for (var k = 0; k < entries.length; k++) {
       var e = entries[k];
-      if (e && e.kind === "tool" && e.id === toolId) {
-        // promote-tool-descriptions-to-row: Haiku results live in
-        // aiDescription — the ONLY field the collapsed row displays, so
-        // nothing shows until the resolved/improved version exists. The
-        // agent-authored `description` is untouched (expansion fallback).
-        if ((e.aiDescription || "") === description) return true;
-        var newEntries = entries.slice();
-        newEntries[k] = Object.assign({}, e, { aiDescription: description });
-        var newTurns = turns.slice();
-        newTurns[i] = Object.assign({}, turns[i], { entries: newEntries });
-        // Observe-only (describe-freeze recurrence, 2026-07-11): the
-        // full-projection rebroadcast below re-renders the entire transcript
-        // and is the suspected hard-freeze on large Codex sessions. Log BEFORE
-        // it via logToHost -> invoke (synchronous IPC dispatch), so the host
-        // records the attempt even if the iframe main thread freezes in the
-        // broadcast. A `begin` with no matching `end` names the culprit and its
-        // size. Tracing must never break the patch, hence the try/catch.
-        try {
-          window.__bramIframeTrace("describe-patch", {
-            stage: "begin",
-            toolId: toolId,
-            provider: prev.provider || "",
-            name: e.name || "",
-            turns: turns.length,
-            resultChars: String(e.result || "").length,
-            descChars: String(description || "").length,
-          });
-        } catch (traceErr) { /* ignore */ }
-        var __describePatchT0 = Date.now();
-        window.__bramBroadcastProjectedTurns({
-          sid: prev.sid,
-          provider: prev.provider,
-          turns: newTurns,
-        });
-        try {
-          window.__bramIframeTrace("describe-patch", {
-            stage: "end",
-            toolId: toolId,
-            provider: prev.provider || "",
-            turns: turns.length,
-            ms: Date.now() - __describePatchT0,
-          });
-        } catch (traceErr2) { /* ignore */ }
-        return true;
-      }
+      if (!e || e.kind !== "tool" || !e.id) continue;
+      var desc = pending[e.id];
+      if (!desc || (e.aiDescription || "") === desc) continue;
+      // Clone, never mutate — the broadcast's per-turn reference
+      // preservation depends on prev staying pristine.
+      if (!newEntries) newEntries = entries.slice();
+      newEntries[k] = Object.assign({}, e, { aiDescription: desc });
+      applied++;
+    }
+    if (newEntries) {
+      if (!newTurns) newTurns = turns.slice();
+      newTurns[i] = Object.assign({}, turns[i], { entries: newEntries });
     }
   }
-  return false;
+  if (!newTurns) return;
+  // Observe-only bracket (describe-freeze lineage, 2026-07-11): begin rides
+  // logToHost -> invoke so the host records the attempt even if the iframe
+  // freezes inside the broadcast; a begin with no end names the culprit.
+  // The bracket now measures the real unit of work: one flush of N patches.
+  try {
+    window.__bramIframeTrace("describe-patch", {
+      stage: "begin",
+      patches: applied,
+      queued: ids.length,
+      provider: prev.provider || "",
+      turns: turns.length,
+    });
+  } catch (traceErr) { /* ignore */ }
+  var __describePatchT0 = Date.now();
+  window.__bramBroadcastProjectedTurns({
+    sid: prev.sid,
+    provider: prev.provider,
+    turns: newTurns,
+  });
+  try {
+    window.__bramIframeTrace("describe-patch", {
+      stage: "end",
+      patches: applied,
+      provider: prev.provider || "",
+      turns: turns.length,
+      ms: Date.now() - __describePatchT0,
+    });
+  } catch (traceErr2) { /* ignore */ }
 };
 
 // Adaptive coalesce (2026-07-07 codex esc wedge): one full /__turns

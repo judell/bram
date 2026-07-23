@@ -21730,33 +21730,112 @@ fn settings_has_worklist_guard_hook(settings_path: &Path) -> bool {
 // and PreToolUse (AskUserQuestion surface). Mirrors
 // settings_has_worklist_guard_hook; requiring the full set means a partial or
 // pre-cutover (2-event) install is correctly flagged as still needing Setup.
-// issue-217: prune legacy generic-name installed Claude hooks once
-// settings.json no longer references them. Runs at Bram startup — before
-// any Claude session this Bram spawns, so no hook snapshot from a
+// issue-217: prune legacy generic-name installed Claude hooks once no
+// settings source references them. Runs at Bram startup — before any
+// Claude session this Bram spawns, so no hook snapshot from a
 // Bram-managed session can still point at the pruned paths. (A session
 // launched outside Bram against a half-migrated project is the accepted
 // residual edge; re-running Setup restores the transitional copy.)
 // Containment is exact: the new commands contain "hooks/claude-…", which
 // does not match the legacy "hooks/worklist-guard.py" needles.
+//
+// issue-227: Claude Code merges hook config from THREE sources — the
+// project settings.json, the project settings.local.json, and the
+// user-global ~/.claude/settings.json — and a legacy reference in ANY of
+// them keeps the shim load-bearing. Andrew's 2.24→2.26 upgrade proved the
+// failure mode: a pre-#217 entry in his global file, satisfied by the shim
+// for weeks, then a prune keyed off the project file alone deleted the
+// shim and every Write/Edit in every project was blocked by hook spawn
+// failure. Bram never rewrites the global or local file (not ours), so a
+// stale non-project reference holds the prune back and is surfaced as a
+// named drift warning instead (stderr here; Setup result via
+// stale_legacy_hook_reference_warnings).
+
+const LEGACY_CLAUDE_HOOKS: [(&str, &str); 2] = [
+    (".claude/hooks/worklist-guard.py", "hooks/worklist-guard.py"),
+    (
+        ".claude/hooks/permission-menu-hook.py",
+        "hooks/permission-menu-hook.py",
+    ),
+];
+
+// The three settings sources Claude Code merges hook config from, as
+// (display label, path). Label doubles as the user-facing name in drift
+// warnings, so keep it recognizable as a file path.
+fn claude_settings_sources(proj: &Path) -> Vec<(String, PathBuf)> {
+    let mut v = vec![
+        (
+            format!("{}/{}", proj.display(), ENHANCE_SETTINGS_REL),
+            proj.join(ENHANCE_SETTINGS_REL),
+        ),
+        (
+            format!("{}/.claude/settings.local.json", proj.display()),
+            proj.join(".claude/settings.local.json"),
+        ),
+    ];
+    if let Some(home) = home_dir() {
+        v.push((
+            "~/.claude/settings.json".to_string(),
+            home.join(".claude").join("settings.json"),
+        ));
+    }
+    v
+}
+
+// Pure core, testable without a filesystem: which source labels reference
+// the needle?
+fn legacy_hook_referencing_sources(sources: &[(String, String)], needle: &str) -> Vec<String> {
+    sources
+        .iter()
+        .filter(|(_, text)| text.contains(needle))
+        .map(|(label, _)| label.clone())
+        .collect()
+}
+
 fn prune_legacy_claude_hooks(proj: &Path) {
-    let settings_text =
-        std::fs::read_to_string(proj.join(ENHANCE_SETTINGS_REL)).unwrap_or_default();
-    for (legacy_rel, needle) in [
-        (
-            ".claude/hooks/worklist-guard.py",
-            "hooks/worklist-guard.py",
-        ),
-        (
-            ".claude/hooks/permission-menu-hook.py",
-            "hooks/permission-menu-hook.py",
-        ),
-    ] {
+    let sources: Vec<(String, String)> = claude_settings_sources(proj)
+        .into_iter()
+        .map(|(label, path)| (label, std::fs::read_to_string(&path).unwrap_or_default()))
+        .collect();
+    for (legacy_rel, needle) in LEGACY_CLAUDE_HOOKS {
         let path = proj.join(legacy_rel);
-        if !settings_text.contains(needle) && path.exists() {
+        if !path.exists() {
+            continue;
+        }
+        let referencing = legacy_hook_referencing_sources(&sources, needle);
+        if referencing.is_empty() {
             let _ = std::fs::remove_file(&path);
             eprintln!("[bram] pruned legacy hook {} (#217 migration)", legacy_rel);
+        } else {
+            eprintln!(
+                "[bram] kept legacy hook {} — still referenced by {} (#227); update or remove that hook entry, then the shim can be pruned",
+                legacy_rel,
+                referencing.join(", ")
+            );
         }
     }
+}
+
+// Setup-result drift warnings (issue-227): name every settings source Bram
+// does not own that still references a retired legacy hook. The project
+// settings.json is excluded — Setup itself migrates that file, so a stale
+// reference there is fixed by the very Setup run that would report it.
+fn stale_legacy_hook_reference_warnings(proj: &Path) -> Vec<String> {
+    let sources: Vec<(String, String)> = claude_settings_sources(proj)
+        .into_iter()
+        .skip(1) // project settings.json is Setup-managed, not drift
+        .map(|(label, path)| (label, std::fs::read_to_string(&path).unwrap_or_default()))
+        .collect();
+    let mut warnings = Vec::new();
+    for (_, needle) in LEGACY_CLAUDE_HOOKS {
+        for label in legacy_hook_referencing_sources(&sources, needle) {
+            warnings.push(format!(
+                "{} references {} (retired in #217) — update or remove that hook entry; the legacy shim stays until then",
+                label, needle
+            ));
+        }
+    }
+    warnings
 }
 
 fn settings_has_permission_menu_hook(settings_path: &Path) -> bool {
@@ -23458,6 +23537,13 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
     // the gate prose. Replaced the per-turn UserPromptSubmit injection after
     // verifying developer-role context is salient enough on its own.
     install_codex_developer_instructions()?;
+
+    // issue-227: surface stale legacy-hook references in settings files Bram
+    // does not own (user-global, settings.local.json). These block the #217
+    // shim prune; Setup cannot fix them, only name them.
+    for warning in stale_legacy_hook_reference_warnings(&proj) {
+        skipped.push(warning);
+    }
 
     let body = serde_json::json!({
         "enhanced": true,
@@ -34005,8 +34091,8 @@ mod worklist_authorization_tests {
 #[cfg(test)]
 mod project_config_tests {
     use super::{
-        project_config_batch_commit_actions, project_config_mirror_worklist_lifecycle_to_issue,
-        ProjectConfig,
+        legacy_hook_referencing_sources, project_config_batch_commit_actions,
+        project_config_mirror_worklist_lifecycle_to_issue, ProjectConfig,
     };
 
     fn flag(json: &str) -> bool {
@@ -34038,6 +34124,49 @@ mod project_config_tests {
             serde_json::from_str::<ProjectConfig>(r#"{}"#).ok()
         ));
         assert!(!project_config_mirror_worklist_lifecycle_to_issue(None));
+    }
+
+    // issue-227: the legacy-shim prune must respect every settings source
+    // Claude Code merges, not just the project settings.json.
+    #[test]
+    fn legacy_hook_prune_held_by_any_source_reference() {
+        let needle = "hooks/worklist-guard.py";
+        let sources = vec![
+            ("project settings.json".to_string(), r#"{"hooks":{"PreToolUse":[{"hooks":[{"command":"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-worklist-guard.py"}]}]}}"#.to_string()),
+            ("settings.local.json".to_string(), String::new()),
+            ("~/.claude/settings.json".to_string(), r#"{"hooks":{"PreToolUse":[{"hooks":[{"command":"$CLAUDE_PROJECT_DIR/.claude/hooks/worklist-guard.py"}]}]}}"#.to_string()),
+        ];
+        // The global reference holds the prune back — and containment is
+        // exact: the new claude- prefixed command in the project file does
+        // NOT match the legacy needle.
+        assert_eq!(
+            legacy_hook_referencing_sources(&sources, needle),
+            vec!["~/.claude/settings.json".to_string()]
+        );
+    }
+
+    #[test]
+    fn legacy_hook_prune_proceeds_when_no_source_references() {
+        let needle = "hooks/worklist-guard.py";
+        let sources = vec![
+            ("project settings.json".to_string(), r#"{"hooks":{"PreToolUse":[{"hooks":[{"command":"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-worklist-guard.py"}]}]}}"#.to_string()),
+            ("settings.local.json".to_string(), String::new()),
+            ("~/.claude/settings.json".to_string(), r#"{"model":"claude-fable-5"}"#.to_string()),
+        ];
+        assert!(legacy_hook_referencing_sources(&sources, needle).is_empty());
+    }
+
+    #[test]
+    fn legacy_hook_prune_missing_sources_read_as_empty() {
+        // Missing files arrive as empty strings (read_to_string fallback):
+        // never a reference, never a crash.
+        let sources = vec![
+            ("project settings.json".to_string(), String::new()),
+            ("settings.local.json".to_string(), String::new()),
+        ];
+        assert!(
+            legacy_hook_referencing_sources(&sources, "hooks/worklist-guard.py").is_empty()
+        );
     }
 }
 

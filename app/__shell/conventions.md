@@ -56,8 +56,13 @@ CLI; `codex-startup-instructions.md` is startup text injected into Codex
 sessions) — no hook adapters. Legacy generic installed names
 (`.claude/hooks/worklist-guard.py`, `.claude/hooks/permission-menu-hook.py`)
 survive transiently after upgrade so live sessions' hook snapshots keep
-working; Bram startup prunes them once settings.json no longer
-references them.
+working; Bram startup prunes them once **no settings source** references
+them — project `settings.json`, project `settings.local.json`, or the
+user-global `~/.claude/settings.json` (Claude Code merges hook config
+from all three; a stale reference in any of them keeps the shim
+load-bearing — #227). Bram never rewrites the global or local file: a
+stale reference there holds the prune back and surfaces as a named
+drift warning in the Setup result instead.
 
 **Bram-bundled skills** follow the same canonical/installed split:
 `app/skills/<name>/SKILL.md` is canonical; Setup seeds it into each

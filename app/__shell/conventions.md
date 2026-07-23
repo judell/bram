@@ -768,6 +768,21 @@ user's question, no trailing summary of what you just did unless it's
 load-bearing. The Worklist tab shows the items, the diff shows the
 code; chat is for what those surfaces can't show.
 
+### Narrate as you reach for tools
+
+Before a tool call (or a batch of them), say in a sentence what you
+are about to do and why — "rebuilding the engine to pick up the
+tooltip fix", "rerunning the one failing spec before the full suite".
+When a result changes your plan, say so before acting on the new plan.
+Long-running work (builds, test suites, background tasks) gets a
+status line when it starts and when it lands, not silence until a
+final summary.
+
+This does not conflict with *Match terseness to the question* — the
+audit trail in worklist drafts and commit messages still carries the
+full story; narration is the live, one-line version so the user can
+follow (and redirect) work in flight.
+
 
 ## Host-managed inflight sentinel
 

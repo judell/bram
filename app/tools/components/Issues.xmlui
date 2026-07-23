@@ -4,6 +4,7 @@
   var.fullscreenImage="{null}"
   var.showNewIssueHint="{false}"
   var.newIssueSubmitting="{false}"
+  var.closingIssue="{false}"
   var.newIssueStartSig="{''}"
   var.newIssueTurnEnded="{false}"
   var.newIssueText="{''}"
@@ -77,13 +78,11 @@
     queryParams="{{ q: query }}"
     when="{!!query &amp;&amp; query.trim().length >= 2}" />
 
-  <APICall
-    id="closeIssueCall"
-    url="/__issue/close"
-    method="post"
-    queryParams="{{ number: $param.number, comment: $param.comment }}"
-    completedNotificationMessage="Issue closed."
-    onSuccess="closeCommentBox.setValue(''); issueDetail.refetch(); issuesFirstPage.refetch(); issuesFull.refetch()" />
+  <!-- issues-tab-close-via-invoke: manual close rides the issue_close_manual
+       Tauri invoke (window.__bramCloseIssue), not an HTTP route -- the
+       /__issue/close route was removed in the H5 close-authority work
+       (user-clicked button stays possible; no agent-reachable channel
+       returns). The old APICall kept calling the dead route and 404ed. -->
 
   <APICall
     id="commentIssueCall"
@@ -483,23 +482,23 @@
           minRows="2"
           maxRows="12"
           width="*"
-          enabled="{!commentIssueCall.inProgress &amp;&amp; !closeIssueCall.inProgress}" />
+          enabled="{!commentIssueCall.inProgress &amp;&amp; !closingIssue}" />
         <HStack gap="$space-2">
           <Button
             label="Comment"
             variant="outlined"
             size="sm"
-            enabled="{!commentIssueCall.inProgress &amp;&amp; !closeIssueCall.inProgress &amp;&amp; closeCommentBox.value &amp;&amp; closeCommentBox.value.trim().length > 0}"
+            enabled="{!commentIssueCall.inProgress &amp;&amp; !closingIssue &amp;&amp; closeCommentBox.value &amp;&amp; closeCommentBox.value.trim().length > 0}"
             onClick="commentIssueCall.execute({ number: selectedIssue.number, body: closeCommentBox.value })" />
           <Button
             when="{selectedIssue.state === 'OPEN'}"
             label="Close issue"
             variant="outlined"
             size="sm"
-            enabled="{!commentIssueCall.inProgress &amp;&amp; !closeIssueCall.inProgress}"
-            onClick="closeIssueCall.execute({ number: selectedIssue.number, comment: closeCommentBox.value || '' })" />
+            enabled="{!commentIssueCall.inProgress &amp;&amp; !closingIssue}"
+            onClick="closingIssue = true; window.__bramCloseIssue(selectedIssue.number, closeCommentBox.value || '', () => { closingIssue = false; closeCommentBox.setValue(''); issueDetail.refetch(); issuesFirstPage.refetch(); issuesFull.refetch(); }, () => { closingIssue = false; })" />
           <Theme size-Spinner="16px">
-            <Spinner when="{commentIssueCall.inProgress || closeIssueCall.inProgress}" />
+            <Spinner when="{commentIssueCall.inProgress || closingIssue}" />
           </Theme>
         </HStack>
       </VStack>

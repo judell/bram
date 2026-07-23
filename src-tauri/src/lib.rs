@@ -12414,6 +12414,17 @@ fn open_devtools(window: tauri::WebviewWindow) {
     let _ = window;
 }
 
+// issues-tab-close-via-invoke: manual close for the Issues tab button.
+// Deliberately a Tauri invoke command, NOT an HTTP route: invokes are
+// reachable only from Bram's same-origin agent pane (loopback curl and the
+// C1-isolated target pane cannot call them), so the H5 close-authority
+// contract survives — this restores the user's clicked-button close without
+// recreating the agent-reachable /__issue/close channel removed in that work.
+#[tauri::command]
+fn issue_close_manual(app: AppHandle, number: u64, comment: Option<String>) -> Result<(), String> {
+    gh_issue_close(&app, number, comment.as_deref().unwrap_or("")).map(|_| ())
+}
+
 #[tauri::command]
 fn git_push(app: AppHandle, branch: Option<String>) -> Result<(), String> {
     let current = git_current_branch(&app)?;
@@ -35216,6 +35227,7 @@ pub fn run() {
             save_trace_export,
             capture_screenshot,
             git_push,
+            issue_close_manual,
             get_right_pane_url,
             get_tools_pane_url,
             whisper_start,

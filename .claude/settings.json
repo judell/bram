@@ -41,7 +41,7 @@
             "type": "command"
           }
         ],
-        "matcher": "Write|Edit|Bash"
+        "matcher": "Write|Edit"
       },
       {
         "hooks": [

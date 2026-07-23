@@ -6194,6 +6194,24 @@ window.gitPush = function (commitsDs, statusDs, branch, onError) {
       if (typeof onError === "function") onError(String(e));
     });
 };
+// issues-tab-close-via-invoke: manual Close-issue for the Issues tab.
+// Rides the issue_close_manual Tauri invoke, NOT an HTTP route — invokes
+// are reachable only from Bram's same-origin agent pane (loopback curl and
+// the C1-isolated target pane cannot call them), so the H5 close-authority
+// contract holds: a clicked button, never an agent channel.
+window.__bramCloseIssue = function (number, comment, onDone, onError) {
+  var invoke = getTauriInvoke();
+  if (!invoke) return;
+  invoke("issue_close_manual", { number: number, comment: comment || "" })
+    .then(function () {
+      if (typeof onDone === "function") onDone();
+    })
+    .catch(function (e) {
+      window.logToHost({ kind: "issue-close-manual", phase: "err", error: String(e) });
+      if (typeof onError === "function") onError(String(e));
+    });
+};
+
 // Sessions tab: pending-delete and pending-rename ids persist across
 // iframe reloads, so the dim+disable state survives until the user
 // explicitly clears it (or the JSONL stops resolving to the same id).

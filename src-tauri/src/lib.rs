@@ -158,6 +158,14 @@ struct PendingIssueClose {
     commit_sha: String,
     #[serde(default)]
     comment: Option<String>,
+    // issue-close-queue-survives-rebase: stable patch-id recorded at the
+    // commit gate. The Push button's auto-rebase rewrites SHAs (live
+    // occurrence 2026-07-23: #227's bc881b8 became d0f184f and the queued
+    // close silently deferred forever), so the flush re-anchors an
+    // absent-SHA record to the origin commit with the same patch-id —
+    // content-derived and rebase-stable. Optional for legacy records.
+    #[serde(default)]
+    patch_id: Option<String>,
     created_at_ms: i64,
 }
 
@@ -8962,7 +8970,48 @@ fn gh_commit_missing_stderr(stderr: &str) -> bool {
 
 #[cfg(test)]
 mod issue_close_tests {
-    use super::{close_issue_commit_comment, gh_commit_missing_stderr, GitHubForge, GitLabForge};
+    use super::{
+        close_issue_commit_comment, find_origin_commit_by_patch_id, gh_commit_missing_stderr,
+        git_commit_patch_id, GitHubForge, GitLabForge, PendingIssueClose,
+    };
+
+    // issue-close-queue-survives-rebase: legacy queue records (no patch_id
+    // field) must deserialize with None, not fail the whole queue read.
+    #[test]
+    fn legacy_pending_close_record_deserializes_without_patch_id() {
+        let legacy = r#"[{"issue":227,"commitSha":"bc881b8","comment":null,"createdAtMs":1}]"#;
+        let records: Vec<PendingIssueClose> = serde_json::from_str(legacy).unwrap();
+        assert_eq!(records[0].issue, 227);
+        assert!(records[0].patch_id.is_none());
+    }
+
+    // Patch-id is deterministic and re-anchoring finds a commit by it in
+    // origin history. Uses this repo's own origin/main; skips silently when
+    // the environment lacks that ref (fresh clone without fetch, CI sandbox).
+    #[test]
+    fn patch_id_reanchors_to_origin_commit() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let head = std::process::Command::new("git")
+            .current_dir(&root)
+            .args(["rev-parse", "origin/main"])
+            .output();
+        let Ok(out) = head else { return };
+        if !out.status.success() {
+            return;
+        }
+        let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let Some(pid) = git_commit_patch_id(&root, &sha) else {
+            // Content-less commit at origin tip (merge/empty): nothing to pin.
+            return;
+        };
+        // Deterministic across invocations…
+        assert_eq!(git_commit_patch_id(&root, &sha).as_deref(), Some(pid.as_str()));
+        // …and the origin scan re-anchors that patch-id to the same commit.
+        assert_eq!(
+            find_origin_commit_by_patch_id(&root, "main", &pid, 50).as_deref(),
+            Some(sha.as_str())
+        );
+    }
 
     #[test]
     fn generated_commit_close_comment_uses_full_url_without_trailing_period() {
@@ -30069,6 +30118,71 @@ fn issue_close_queue_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathB
     project_resource_path(app, ".worklist-issue-close.json")
 }
 
+// Stable patch-id for a commit: `git show <sha> | git patch-id --stable`.
+// Content-derived, so it survives the SHA rewrite of a rebase.
+fn git_commit_patch_id(root: &Path, sha: &str) -> Option<String> {
+    let show = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["show", sha])
+        .output()
+        .ok()?;
+    if !show.status.success() {
+        return None;
+    }
+    let mut child = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["patch-id", "--stable"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    {
+        use std::io::Write;
+        child.stdin.take()?.write_all(&show.stdout).ok()?;
+    }
+    let out = child.wait_with_output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // Output shape: "<patch-id> <sha>\n"; empty for content-less commits.
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .map(|s| s.to_string())
+}
+
+// Find the commit in recent origin/<branch> history whose patch-id matches.
+// Bounded scan; patch-ids computed lazily, first match wins (git log is
+// newest-first, and a rebased twin is expected near the tip).
+fn find_origin_commit_by_patch_id(
+    root: &Path,
+    branch: &str,
+    patch_id: &str,
+    limit: usize,
+) -> Option<String> {
+    let range = format!("origin/{}", branch);
+    let out = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["log", &range, &format!("-n{}", limit), "--format=%H"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    for sha in stdout.lines() {
+        let sha = sha.trim();
+        if sha.is_empty() {
+            continue;
+        }
+        if git_commit_patch_id(root, sha).as_deref() == Some(patch_id) {
+            return Some(sha.to_string());
+        }
+    }
+    None
+}
+
 fn read_pending_issue_closes(path: &Path) -> Vec<PendingIssueClose> {
     std::fs::read_to_string(path)
         .ok()
@@ -30144,6 +30258,9 @@ fn enqueue_issue_closes_from_auth<R: tauri::Runtime>(
     let Some(items) = auth.get("items").and_then(|v| v.as_array()) else {
         return;
     };
+    // Recorded once per commit: the rebase-stable identity the flush falls
+    // back to when the Push button's auto-rebase rewrites this SHA.
+    let patch_id = project_root(Some(app)).and_then(|root| git_commit_patch_id(&root, commit_sha));
     for item in items {
         let Some(feedback) = item.get("feedback").and_then(|v| v.as_str()) else {
             continue;
@@ -30153,6 +30270,7 @@ fn enqueue_issue_closes_from_auth<R: tauri::Runtime>(
                 issue,
                 commit_sha: commit_sha.to_string(),
                 comment,
+                patch_id: patch_id.clone(),
                 created_at_ms: unix_now_ms(),
             };
             if let Err(e) = enqueue_pending_issue_close_path(&path, record) {
@@ -30185,9 +30303,61 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>) {
     let repo_slug = repo_owner_name(app).unwrap_or_default();
     let mut remaining: Vec<PendingIssueClose> = Vec::new();
     let mut closed: Vec<u64> = Vec::new();
-    for record in records {
-        match gh_commit_visible(app, &repo_slug, &record.commit_sha) {
-            Ok(true) => {
+    for mut record in records {
+        // issue-close-queue-survives-rebase: a SHA absent from origin may be
+        // a rebase-rewritten twin. Re-anchor by patch-id over recent origin
+        // history and adopt the new SHA; if nothing matches, defer as before
+        // but say so — the silent-forever case is what hid the #227 miss.
+        let mut visible =
+            matches!(gh_commit_visible(app, &repo_slug, &record.commit_sha), Ok(true));
+        if !visible {
+            let reanchored = record.patch_id.as_deref().and_then(|pid| {
+                let root = project_root(Some(app))?;
+                let branch = git_current_branch(app).ok()?;
+                find_origin_commit_by_patch_id(&root, &branch, pid, 50)
+            });
+            match reanchored {
+                Some(new_sha) if new_sha != record.commit_sha => {
+                    eprintln!(
+                        "[issue-close-queue] op=re-anchored issue={} {} -> {} (patch-id)",
+                        record.issue, record.commit_sha, new_sha
+                    );
+                    if bram_trace_enabled() {
+                        append_bram_trace_line(
+                            app,
+                            "issue-close-queue",
+                            &format!(
+                                "op=re-anchored issue={} old={} new={}",
+                                record.issue, record.commit_sha, new_sha
+                            ),
+                        );
+                    }
+                    record.commit_sha = new_sha;
+                    visible = matches!(
+                        gh_commit_visible(app, &repo_slug, &record.commit_sha),
+                        Ok(true)
+                    );
+                }
+                _ => {
+                    eprintln!(
+                        "[issue-close-queue] op=orphaned issue={} sha={} (not on origin, no patch-id match; will retry next push)",
+                        record.issue, record.commit_sha
+                    );
+                    if bram_trace_enabled() {
+                        append_bram_trace_line(
+                            app,
+                            "issue-close-queue",
+                            &format!(
+                                "op=orphaned issue={} sha={}",
+                                record.issue, record.commit_sha
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+        if visible {
+            {
                 let full_sha = git_full_commit_sha(app, &record.commit_sha)
                     .unwrap_or_else(|_| record.commit_sha.clone());
                 let subject = git_commit_subject(app, &full_sha).unwrap_or_default();
@@ -30213,7 +30383,8 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>) {
                     }
                 }
             }
-            Ok(false) | Err(_) => remaining.push(record),
+        } else {
+            remaining.push(record);
         }
     }
     if let Err(e) = write_pending_issue_closes(&path, &remaining) {
@@ -30259,6 +30430,7 @@ mod close_on_push_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(".worklist-issue-close.json");
         let rec = |c: Option<&str>| PendingIssueClose {
+            patch_id: None,
             issue: 7,
             commit_sha: "abc123".to_string(),
             comment: c.map(String::from),
@@ -30270,6 +30442,7 @@ mod close_on_push_tests {
         enqueue_pending_issue_close_path(
             &path,
             PendingIssueClose {
+                patch_id: None,
                 issue: 7,
                 commit_sha: "def456".to_string(),
                 comment: None,

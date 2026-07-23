@@ -12069,6 +12069,20 @@ fn whisper_start(
     app: AppHandle,
     state: State<'_, WhisperState>,
 ) -> Result<u32, String> {
+    // Keep whisper-server's transcoded WAV temp files outside the
+    // watched project tree (otherwise the watcher fires right-pane-reload
+    // mid-recording). Re-assert the dir BEFORE the already-running guard:
+    // the server outlives Bram relaunches, so this is the only point that
+    // can heal the dir after an external Caches purge deletes it out from
+    // under a long-lived server (2026-07-22: every transcription 500'd
+    // with "FFmpeg conversion failed" and no relaunch could fix it).
+    let tmp_dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("no cache dir: {}", e))?
+        .join("whisper");
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
+    let tmp_dir_str = tmp_dir.to_string_lossy().to_string();
     let mut guard = state.0.lock().unwrap();
     if let Some(child) = guard.as_mut() {
         match child.try_wait() {
@@ -12086,16 +12100,6 @@ fn whisper_start(
             first_nonempty_env(&["BRAM_WSL_DISTRO"]).unwrap_or_else(|| "(default)".to_string())
         ),
     );
-    // Keep whisper-server's transcoded WAV temp files outside the
-    // watched project tree (otherwise the watcher fires right-pane-reload
-    // mid-recording).
-    let tmp_dir = app
-        .path()
-        .app_cache_dir()
-        .map_err(|e| format!("no cache dir: {}", e))?
-        .join("whisper");
-    std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
-    let tmp_dir_str = tmp_dir.to_string_lossy().to_string();
     let mut candidates: Vec<(String, std::process::Command)> = Vec::new();
     if cfg!(target_os = "windows") {
         let wsl_tmp_dir = "/tmp/bram-whisper";

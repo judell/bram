@@ -14,6 +14,17 @@ Changing any installed artifact's contents should produce one Agent
 Coordination setup or refresh banner. Codex has one extra step after setup:
 the Codex terminal may ask you to review and approve the hook.
 
+**Bram-bundled skills are the deliberate exception to banner gating.**
+Setup also seeds `{project}/.claude/skills/<name>/SKILL.md` from the
+`app/skills/` bundle (`loose-ends` first), but skill staleness never
+raises the banner — the install/refresh is best-effort at Setup time.
+Refresh only touches files carrying the `<!-- bram-managed -->` marker;
+a same-named user-owned skill is preserved and reported as skipped.
+To verify: run Setup in a managed project, confirm
+`.claude/skills/loose-ends/SKILL.md` appears and the Skills launcher
+lists it; place a marker-less skill of the same name and confirm a
+second Setup leaves it untouched.
+
 Use harmless content edits for this test. A save that does not change bytes is
 not enough.
 

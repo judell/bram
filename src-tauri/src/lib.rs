@@ -23011,6 +23011,52 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
 ///   - disk missing       → write, push to `wrote`, returns Ok(true).
 ///   - disk differs && force → write, push to `wrote`, returns Ok(true).
 ///   - disk differs && !force → preserve, push to `skipped`, returns Ok(false).
+// Ownership marker for Bram-bundled skills (bram-bundled-skills). A
+// .claude/skills/<name>/SKILL.md carrying this substring is Setup-managed
+// and safe to refresh from the app/skills/ bundle; without it the file is
+// user-owned and never touched.
+const BRAM_SKILL_MARKER: &str = "<!-- bram-managed";
+
+// Enumerate the bundled skill set: subdirectories of app/skills/ that carry
+// a SKILL.md. Reads the resolved app root in dev (like serve_app_file), the
+// EMBEDDED_APP dir in a packaged build. Sorted for deterministic install
+// order and stable trace/report output.
+fn bundled_skill_names<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<String> {
+    if let Some(root) = resolve_app_root(Some(app)) {
+        let mut v: Vec<String> = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(root.join("skills")) {
+            for entry in rd.flatten() {
+                if entry.path().join("SKILL.md").exists() {
+                    if let Ok(name) = entry.file_name().into_string() {
+                        v.push(name);
+                    }
+                }
+            }
+        }
+        v.sort();
+        return v;
+    }
+    let mut v: Vec<String> = EMBEDDED_APP
+        .get_dir("skills")
+        .map(|d| {
+            d.dirs()
+                .filter(|sd| {
+                    sd.files()
+                        .any(|f| f.path().file_name().is_some_and(|n| n == "SKILL.md"))
+                })
+                .filter_map(|sd| {
+                    sd.path()
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|s| s.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort();
+    v
+}
+
 fn write_template_if_safe(
     path: &Path,
     new_content: &[u8],
@@ -23184,6 +23230,47 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
         // wasn't there, or already migrated).
         let legacy_sidecar = proj.join(ENHANCE_SIDECAR_LEGACY_REL);
         let _ = std::fs::remove_file(&legacy_sidecar);
+    }
+
+    // Bram-bundled skills (bram-bundled-skills): seed each app/skills/<name>/
+    // SKILL.md into <proj>/.claude/skills/<name>/SKILL.md. Claude-only surface
+    // (Codex has no skills concept). Ownership is marker-based: Setup
+    // writes/refreshes only files carrying BRAM_SKILL_MARKER; a same-named
+    // user skill without the marker is preserved and reported in `skipped`.
+    // Best-effort by design — skill staleness never flips providerNeedsSetup;
+    // the Skills launcher's file read picks up refreshed content live.
+    // Skipped on the source repo like the sidecar: build.rs syncs bram's own
+    // installed copy so the source repo dogfoods the same layout.
+    if !is_source_repo {
+        for name in bundled_skill_names(app) {
+            let bundle_rel = format!("skills/{}/SKILL.md", name);
+            let Some((bytes, _mime)) = serve_app_file(Some(app), &bundle_rel) else {
+                continue;
+            };
+            let dest_dir = proj.join(".claude").join("skills").join(&name);
+            let dest = dest_dir.join("SKILL.md");
+            match std::fs::read(&dest) {
+                Ok(existing) if existing == bytes => {}
+                Ok(existing) => {
+                    if String::from_utf8_lossy(&existing).contains(BRAM_SKILL_MARKER) {
+                        std::fs::write(&dest, &bytes)
+                            .map_err(|e| format!("write {}: {}", dest.display(), e))?;
+                        wrote.push(dest.display().to_string());
+                    } else {
+                        // Name collision with a user-owned skill: never clobber.
+                        skipped.push(dest.display().to_string());
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::create_dir_all(&dest_dir)
+                        .map_err(|e2| format!("create {}: {}", dest_dir.display(), e2))?;
+                    std::fs::write(&dest, &bytes)
+                        .map_err(|e2| format!("write {}: {}", dest.display(), e2))?;
+                    wrote.push(dest.display().to_string());
+                }
+                Err(e) => return Err(format!("read {}: {}", dest.display(), e)),
+            }
+        }
     }
 
     // AGENTS.md marker block — skipped on the source repo (its AGENTS.md is

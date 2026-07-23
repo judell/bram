@@ -59,6 +59,20 @@ survive transiently after upgrade so live sessions' hook snapshots keep
 working; Bram startup prunes them once settings.json no longer
 references them.
 
+**Bram-bundled skills** follow the same canonical/installed split:
+`app/skills/<name>/SKILL.md` is canonical; Setup seeds it into each
+managed project's `.claude/skills/<name>/SKILL.md`, and `build.rs`
+syncs the source repo's own installed copy (`loose-ends` is the first
+member; new Bram-blessed skills drop into `app/skills/` and ride the
+same path). Ownership is marker-based: Setup refreshes only files
+carrying the `<!-- bram-managed -->` marker line — a same-named skill
+without it is user-owned, never clobbered, and reported as skipped in
+the Setup result. Skill staleness is deliberately NOT part of the
+needs-setup banner; refresh is best-effort at Setup time. This is a
+Claude-only surface (Codex has no skills concept). Do not make
+functional edits in an installed `.claude/skills/` copy of a bundled
+skill; edit `app/skills/<name>/SKILL.md`.
+
 ### XMLUI lookup order
 
 When you are figuring out how to do a thing in XMLUI, ask the XMLUI

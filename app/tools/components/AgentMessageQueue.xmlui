@@ -58,18 +58,24 @@
       color="$textColor-secondary"
       value="No queued notes." />
 
-    <List
+    <!-- Non-virtualized Items in a scrollable VStack, not List: the queue is
+         a small set, and List memoizes its virtualized rows so their direct
+         bindings don't re-evaluate on a push-source delivery (the data,
+         `entries`, is unchanged) — Send stranded dimmed-while-ready /
+         undimmed-while-working, and refreshOn didn't reliably force it.
+         Items re-renders every reactive cycle, so the row's live readiness
+         binding tracks agent status + menu the way the header badge does.
+         Same pattern as Workspace's worklist rows.
+         https://www.xmlui.org/docs/reference/components/Items -->
+    <VStack
       when="{(entries || []).length > 0}"
-      data="{entries || []}"
-      height="*">
+      height="*"
+      overflowY="auto">
+      <Items data="{entries || []}">
       <HStack
         gap="$space-2"
         verticalAlignment="start"
-        paddingVertical="$space-5"
-        var.rowReady="{window.__bramQueueReady(queueAgentStatus.value, queueMenuEvt.value)}">
-        <ChangeListener
-          listenTo="{window.__bramQueueReady(queueAgentStatus.value, queueMenuEvt.value)}"
-          onDidChange="(c) => rowReady = c.newValue" />
+        paddingVertical="$space-5">
         <VStack width="*" gap="$space-0_5">
           <TextArea
             initialValue="{$item.text}"
@@ -104,13 +110,20 @@
           </HStack>
         </VStack>
         <VStack width="5rem" gap="$space-1">
+          <!-- Readiness binds LIVE off the push sources, exactly like the
+               header badge above — do NOT route it through a cached var +
+               ChangeListener. That bridge strands: it seeds at one instant
+               and only updates on a transition, so a mount that straddles
+               the PushSource replay leaves it stuck (dimmed-while-ready, or
+               undimmed-while-working). A direct binding recomputes every
+               render and can't strand. -->
           <VStack
-            opacity="{rowReady ? 1 : 0.45}"
+            opacity="{window.__bramQueueReady(queueAgentStatus.value, queueMenuEvt.value) ? 1 : 0.45}"
             width="100%">
             <Button
               label="Send"
               size="xs"
-              enabled="{window.__bramQueueCanSendWhenReady($item, rowReady, (queueWorklist.value &amp;&amp; queueWorklist.value.items) || [])}"
+              enabled="{window.__bramQueueCanSendWhenReady($item, window.__bramQueueReady(queueAgentStatus.value, queueMenuEvt.value), (queueWorklist.value &amp;&amp; queueWorklist.value.items) || [])}"
               tooltip="Send this note to the agent as a fresh turn"
               onClick="entries = window.__bramQueueSend(entries, $itemIndex, (queueWorklist.value &amp;&amp; queueWorklist.value.items) || [])" />
           </VStack>
@@ -121,7 +134,8 @@
             onClick="entries = window.__bramQueueRemove(entries, $itemIndex)" />
         </VStack>
       </HStack>
-    </List>
+      </Items>
+    </VStack>
 
   </VStack>
 </Component>

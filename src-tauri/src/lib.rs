@@ -901,11 +901,16 @@ fn labels_preview(labels: &[String]) -> String {
         .join("|")
 }
 
-fn prompt_resolved<R: tauri::Runtime>(app: &AppHandle<R>, outcome: &str, detail: &str) {
+// Returns the consumed OpenPrompt so answered-outcome callers can reach
+// its tool_use_id (transcript-render-menu-answers); all other callers
+// ignore the return.
+fn prompt_resolved<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    outcome: &str,
+    detail: &str,
+) -> Option<OpenPrompt> {
     let open = prompt_open_cell().lock().ok().and_then(|mut o| o.take());
-    let Some(o) = open else {
-        return;
-    };
+    let o = open?;
     let now = unix_now_ms();
     let rec = serde_json::json!({
         "event": "prompt-resolved",
@@ -934,6 +939,7 @@ fn prompt_resolved<R: tauri::Runtime>(app: &AppHandle<R>, outcome: &str, detail:
             ),
         );
     }
+    Some(o)
 }
 
 // claim-id-resolution (upstream ask #1 implemented locally):
@@ -7889,32 +7895,49 @@ fn pty_output_clears_inflight(output: &[u8]) -> bool {
 // re-fire when the next PTY chunk arrives (the dismissed text is still
 // in the rolling buffer).
 fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
-    let dismissed: Option<(String, Vec<String>, Option<String>, Option<String>)> =
-        match pty_menu_cell().lock() {
-            Ok(mut menu) => {
-                let fp = menu.as_ref().map(|m| {
-                    (
-                        m.tool.clone(),
-                        m.options
-                            .iter()
-                            .map(|o| o.label.clone())
-                            .collect::<Vec<_>>(),
-                        m.tool_call_signature.clone(),
-                        // The rejection option's key (the "No" answer),
-                        // derived from the menu rather than hardcoded —
-                        // 2-option safety prompts put No at 2, standard
-                        // menus at 3 (menu-rejection-soft-turn-end).
-                        m.options
-                            .iter()
-                            .find(|o| o.label.trim_start().starts_with("No"))
-                            .map(|o| o.key.clone()),
-                    )
-                });
-                *menu = None;
-                fp
-            }
-            Err(_) => None,
-        };
+    let dismissed: Option<(
+        String,
+        Vec<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = match pty_menu_cell().lock() {
+        Ok(mut menu) => {
+            let fp = menu.as_ref().map(|m| {
+                (
+                    m.tool.clone(),
+                    m.options
+                        .iter()
+                        .map(|o| o.label.clone())
+                        .collect::<Vec<_>>(),
+                    m.tool_call_signature.clone(),
+                    // The rejection option's key (the "No" answer),
+                    // derived from the menu rather than hardcoded —
+                    // 2-option safety prompts put No at 2, standard
+                    // menus at 3 (menu-rejection-soft-turn-end).
+                    m.options
+                        .iter()
+                        .find(|o| o.label.trim_start().starts_with("No"))
+                        .map(|o| o.key.clone()),
+                    // transcript-render-menu-answers: the option this input
+                    // selects, matched while the menu is still in hand. Pane
+                    // buttons send "<key>\r"; a terminal digit press arrives
+                    // bare. Arrow-highlight + Enter sends only "\r" and stays
+                    // unknown — no answer is recorded then.
+                    m.options
+                        .iter()
+                        .find(|o| {
+                            !o.key.is_empty()
+                                && input.trim_matches(|c| c == '\r' || c == '\n') == o.key
+                        })
+                        .map(|o| o.label.trim().to_string()),
+                )
+            });
+            *menu = None;
+            fp
+        }
+        Err(_) => None,
+    };
     // Drain PTY_TAIL so the dismissed menu's bytes can't trigger a stale
     // re-detection once PTY_MENU_SUPPRESSED expires. Only genuinely new
     // PTY output can re-fire the detector after this point.
@@ -7925,7 +7948,7 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
     if let Ok(mut held) = pty_menu_held_cell().lock() {
         *held = None;
     }
-    if let Some((tool, option_labels, signature, rejection_key)) = dismissed {
+    if let Some((tool, option_labels, signature, rejection_key, chosen_label)) = dismissed {
         let clears_inflight = pty_menu_input_clears_inflight(input);
         // A "No" answer is an Esc wearing a menu costume: Claude Code
         // enters its post-rejection wait with no end_turn record, so the
@@ -7956,7 +7979,15 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
         // has nothing to clear. Refs #77 tighten-pty-menu-emit-cadence.
         if tool == PENDING_TOOL {
             eprintln!("[pty-menu] cleared by user input (pending menu — shown emit was deferred)");
-            prompt_resolved(app, "answered", "pending-menu");
+            let resolved = prompt_resolved(app, "answered", "pending-menu");
+            if let Some(label) = chosen_label.as_deref() {
+                let id = resolved
+                    .and_then(|o| o.tool_use_id)
+                    .or_else(|| lookup_pending_tool_call(app).tool_use_id);
+                if let Some(id) = id {
+                    record_menu_answer(app, &id, label);
+                }
+            }
             clear_grid_menu_sighting();
             if clears_inflight {
                 clear_active_sentinel_with_reason(app, "pty-menu-pending-user-reject");
@@ -7976,11 +8007,23 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
             );
         }
         menu_prose_probe_record_dismiss(app, &tool, "user-input");
-        prompt_resolved(app, "answered", &tool);
+        let resolved = prompt_resolved(app, "answered", &tool);
         // Capture the answered call's identity while it is still the
         // oldest unresolved tool_use (one 4MB-tail read; dismissals are
         // user-paced). May be None under record-flush lag.
         let answered_id = lookup_pending_tool_call(app).tool_use_id;
+        // transcript-render-menu-answers: bind the chosen label to the
+        // answered call. Prefer the pending-call lookup (matches the
+        // suppressor's identity); a hook-claimed prompt's own id is the
+        // fallback under record-flush lag.
+        if let Some(label) = chosen_label.as_deref() {
+            let id = answered_id
+                .clone()
+                .or_else(|| resolved.and_then(|o| o.tool_use_id));
+            if let Some(id) = id {
+                record_menu_answer(app, &id, label);
+            }
+        }
         if let Ok(mut s) = pty_menu_suppressed_cell().lock() {
             *s = Some(DismissedMenu {
                 tool,
@@ -8034,6 +8077,10 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
             // to the composer within seconds, not the 120 s grace.
             schedule_send_ledger_escape_sweep(app, now);
         }
+    } else {
+        // No grid menu to dismiss: the answer may target a hook-displayed
+        // menu the grid never corroborated (transcript-render-menu-answers).
+        record_hook_menu_answer(app, input);
     }
 }
 
@@ -19212,6 +19259,7 @@ fn read_subagent_turns<R: tauri::Runtime>(
     let mut turns = st_parse_lines_to_turns(&text);
     project_user_turns(app, &mut turns);
     apply_describe_overlay(&mut turns, &describe_overlay_snapshot());
+    apply_menu_answer_overlay(&mut turns, &menu_answer_overlay_snapshot());
     let sid = session_path
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
@@ -21141,6 +21189,199 @@ fn describe_overlay_snapshot() -> std::collections::HashMap<String, String> {
         .unwrap_or_default()
 }
 
+// menu-answer overlay (transcript-render-menu-answers): the label the
+// user chose when answering a pane/terminal menu, keyed by the answered
+// call's tool_use id. Recorded at user-input dismissal (pty_menu_clear),
+// served as a `menuAnswer` field on matching tool entries at projection
+// body-build time — the describe overlay's channel, for the same reason:
+// an answer doesn't touch the JSONL, so the parsed cache stays valid.
+// In-memory only; a restart loses answer rows, acceptable display state.
+static MENU_ANSWERS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+const MENU_ANSWERS_CAP: usize = 200;
+
+fn record_menu_answer<R: tauri::Runtime>(app: &AppHandle<R>, tool_use_id: &str, label: &str) {
+    if tool_use_id.is_empty() || label.is_empty() {
+        return;
+    }
+    if let Ok(mut answers) = MENU_ANSWERS.lock() {
+        answers.retain(|(id, _)| id != tool_use_id);
+        answers.push((tool_use_id.to_string(), label.to_string()));
+        if answers.len() > MENU_ANSWERS_CAP {
+            let drop_n = answers.len() - MENU_ANSWERS_CAP;
+            answers.drain(0..drop_n);
+        }
+    }
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "prompt-lifecycle",
+            &format!("op=answer id={} label={}", tool_use_id, label),
+        );
+    }
+}
+
+// transcript-render-menu-answers gap (2026-07-24, first live test): an
+// unjoined hook-displayed menu (AskUserQuestion, a permission prompt
+// answered before grid corroboration) never occupies the grid cell, so
+// pty_menu_clear found `dismissed=None` and the pane answer went
+// unrecorded (op=resolved detail=jsonl-resolved, no op=answer). Match
+// the input against the DISPLAYED claim's own options instead; hook
+// payloads carry the exact tool_use_id. Display/dismissal mechanics
+// stay untouched — the claim still clears via hook-clear/jsonl-resolved.
+fn record_hook_menu_answer<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
+    let key_input = input.trim_matches(|c| c == '\r' || c == '\n');
+    if key_input.is_empty() || key_input.len() > 3 {
+        return;
+    }
+    let displayed_key = menu_hook_displayed_cell()
+        .lock()
+        .ok()
+        .and_then(|d| d.as_ref().map(|(k, _)| k.clone()));
+    let Some(displayed_key) = displayed_key else {
+        return;
+    };
+    // First live miss (2026-07-24 round two): the displayed claim was the
+    // sig-keyed PermissionRequest re-post (tool_use_id:null, id-resolution
+    // `none`) while the PreToolUse claim carrying the real id sat queued
+    // under a different id_key — same prompt, two claims. So: match the
+    // key against the displayed claim's options, then take the id from ANY
+    // queued claim with identical option labels before falling back to the
+    // pending-call lookup. Every early-out traces an answer-miss reason so
+    // the next gap names itself.
+    let hit: Option<(Option<String>, String, Vec<String>)> =
+        menu_hook_claims_cell().lock().ok().and_then(|q| {
+            let c = q.iter().find(|c| c.id_key == displayed_key)?;
+            let labels: Vec<String> = c.menu.options.iter().map(|o| o.label.clone()).collect();
+            let opt = c
+                .menu
+                .options
+                .iter()
+                .find(|o| !o.key.is_empty() && key_input == o.key)
+                .map(|o| (c.tool_use_id.clone(), o.label.trim().to_string(), labels));
+            if opt.is_none() {
+                return Some((None, String::new(), Vec::new()));
+            }
+            opt
+        });
+    let Some((id_opt, label, labels)) = hit else {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "prompt-lifecycle",
+                &format!("op=answer-miss reason=no-displayed-claim key={}", key_input),
+            );
+        }
+        return;
+    };
+    if label.is_empty() {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "prompt-lifecycle",
+                &format!("op=answer-miss reason=no-key-match key={}", key_input),
+            );
+        }
+        return;
+    }
+    let id = id_opt
+        .or_else(|| {
+            // Same-prompt sibling claim that did carry the id.
+            menu_hook_claims_cell().lock().ok().and_then(|q| {
+                q.iter()
+                    .find(|c| {
+                        c.tool_use_id.is_some()
+                            && c.menu
+                                .options
+                                .iter()
+                                .map(|o| o.label.clone())
+                                .collect::<Vec<_>>()
+                                == labels
+                    })
+                    .and_then(|c| c.tool_use_id.clone())
+            })
+        })
+        .or_else(|| lookup_pending_tool_call(app).tool_use_id);
+    let Some(id) = id else {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "prompt-lifecycle",
+                &format!("op=answer-miss reason=no-tool-use-id label={}", label),
+            );
+        }
+        return;
+    };
+    record_menu_answer(app, &id, &label);
+}
+
+fn menu_answer_overlay_snapshot() -> std::collections::HashMap<String, String> {
+    MENU_ANSWERS
+        .lock()
+        .map(|v| v.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
+// Set `menuAnswer` on tool entries whose id has a recorded answer. Only
+// real answers exist in the map (interrupted/superseded/session-ended
+// prompts record nothing), so presence of the field IS the render gate.
+fn apply_menu_answer_overlay(
+    turns: &mut [serde_json::Value],
+    answers: &std::collections::HashMap<String, String>,
+) {
+    if answers.is_empty() {
+        return;
+    }
+    for turn in turns.iter_mut() {
+        let Some(entries) = turn.get_mut("entries").and_then(|e| e.as_array_mut()) else {
+            continue;
+        };
+        for entry in entries.iter_mut() {
+            if entry.get("kind").and_then(|v| v.as_str()) != Some("tool") {
+                continue;
+            }
+            let Some(label) = entry
+                .get("id")
+                .and_then(|v| v.as_str())
+                .and_then(|id| answers.get(id))
+            else {
+                continue;
+            };
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert(
+                    "menuAnswer".to_string(),
+                    serde_json::Value::String(label.clone()),
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod menu_answer_overlay_tests {
+    use super::apply_menu_answer_overlay;
+
+    #[test]
+    fn sets_menu_answer_on_matching_tool_entries_only() {
+        let mut turns = vec![serde_json::json!({
+            "role": "assistant",
+            "entries": [
+                {"kind": "tool", "id": "toolu_yes", "name": "Bash"},
+                {"kind": "tool", "id": "toolu_other", "name": "Bash"},
+                {"kind": "text", "id": "toolu_yes", "text": "not a tool"},
+            ]
+        })];
+        let answers = std::collections::HashMap::from([(
+            "toolu_yes".to_string(),
+            "Yes".to_string(),
+        )]);
+        apply_menu_answer_overlay(&mut turns, &answers);
+        let entries = turns[0]["entries"].as_array().unwrap();
+        assert_eq!(entries[0]["menuAnswer"], "Yes");
+        assert!(entries[1].get("menuAnswer").is_none());
+        assert!(entries[2].get("menuAnswer").is_none());
+    }
+}
+
 // Overwrite tool-entry descriptions in place from the describe cache.
 // Applies to any provider's projection: entries are matched by tool_use
 // id, and a cache hit wins over an agent-authored description (the cache
@@ -21287,15 +21528,18 @@ fn projected_turns_body(
 ) -> Result<Vec<u8>, String> {
     let total = turns.len();
     let window_start = latest.map(|n| total.saturating_sub(n.max(1))).unwrap_or(0);
-    // ai-describe overlay: served at body-build time (not parse time)
-    // because a describe completion doesn't touch the JSONL, so the
-    // parsed-projection cache stays valid. The clone only happens when
-    // something has been described this run; otherwise the zero-copy
-    // slice path below serializes as before.
+    // ai-describe + menu-answer overlays: served at body-build time (not
+    // parse time) because a describe completion or a menu answer doesn't
+    // touch the JSONL, so the parsed-projection cache stays valid. The
+    // clone only happens when something has been described or answered
+    // this run; otherwise the zero-copy slice path below serializes as
+    // before.
     let overlay = describe_overlay_snapshot();
-    if !overlay.is_empty() {
+    let answers = menu_answer_overlay_snapshot();
+    if !overlay.is_empty() || !answers.is_empty() {
         let mut window: Vec<serde_json::Value> = turns[window_start..].to_vec();
         apply_describe_overlay(&mut window, &overlay);
+        apply_menu_answer_overlay(&mut window, &answers);
         let body = serde_json::json!({
             "sid": sid,
             "provider": provider_label,

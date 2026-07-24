@@ -4620,6 +4620,9 @@ window.__bramProjectedTurnEqual = function (a, b) {
         // equality check that ignores it discards the splice on rebroadcast
         // (2026-07-22, the second field-whitelist bite in one day).
         (x.aiDescription || "") !== (y.aiDescription || "") ||
+        // menuAnswer participates for the same reason: the menu-answer
+        // overlay changes ONLY this field on an otherwise-unchanged turn.
+        (x.menuAnswer || "") !== (y.menuAnswer || "") ||
         x.result !== y.result ||
         !!x.isError !== !!y.isError ||
         !!x.resultStructured !== !!y.resultStructured
@@ -5381,12 +5384,29 @@ window.__bramToolResultIsStructuredJson = function (result) {
   return !!window.__bramParseStructuredJsonSequence(text);
 };
 
+// transcript-render-menu-answers iterate: AskUserQuestion results arrive as
+// a quoted sentence — `Your questions have been answered: "Q"="A", ...` —
+// which read as a scrolling monospace blob. Parse the "Q"="A" pairs into
+// question/answer prose; null on parse miss so the caller self-declines to
+// the generic fence.
+window.__bramAskUserQuestionQA = function (text) {
+  var pairs = String(text || "").match(/"[^"]+"="[^"]*"/g);
+  if (!pairs || !pairs.length) return null;
+  var out = [];
+  for (var i = 0; i < pairs.length; i++) {
+    var mm = /"([^"]+)"="([^"]*)"/.exec(pairs[i]);
+    if (mm) out.push("**" + mm[1] + "**\n\n✔ " + mm[2]);
+  }
+  return out.length ? out.join("\n\n") : null;
+};
+
 // Overflow mode for a transcript tool-result Markdown: feedback-draft prose
 // and structured JSON wrap ('flow'); everything else keeps horizontal scroll.
 window.__bramFreeformResultMode = function (item) {
   if (!item) return "scroll";
   if (window.__bramIsFeedbackDraftRead(item.name, item.summary)) return "flow";
   if (window.__bramIsMcpToolName(item.name)) return "flow";
+  if (item.name === "AskUserQuestion") return "flow";
   if (item.resultStructured) return "flow";
   return window.__bramToolResultIsStructuredJson(item.result) ? "flow" : "scroll";
 };
@@ -5421,6 +5441,12 @@ window.__bramFormatToolResult = function (result, toolName, hint) {
     // object, single row wrapping a nested object) render as pretty JSON.
     var sqlJson = window.__bramSupabaseSqlJson(text);
     if (sqlJson) return sqlJson;
+  }
+  // AskUserQuestion: question/answer prose instead of a code fence
+  // (transcript-render-menu-answers iterate); generic path on parse miss.
+  if (__toolNameStr === "AskUserQuestion") {
+    var qa = window.__bramAskUserQuestionQA(text);
+    if (qa) return qa;
   }
   // tool-format sync bracket (variant-B expansion freeze, 2026-07-11
   // 22:48Z): the freeze lives somewhere in formatter → Markdown → WebKit
@@ -5640,6 +5666,7 @@ window.__bramTranscriptEventsFromTurns = function (payload, menu) {
               description: e.description || "",
               nameDetail: e.nameDetail || "",
               aiDescription: e.aiDescription || "",
+              menuAnswer: e.menuAnswer || "",
               result: e.result || "",
               resultStructured: !!e.resultStructured,
               // Edit/MultiEdit reconstructed diff from the host projection

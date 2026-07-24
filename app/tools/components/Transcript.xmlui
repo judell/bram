@@ -203,6 +203,19 @@
                 value="{$item.summary}" />
             </HStack>
           </Link>
+          <!-- transcript-render-menu-answers: the user's menu answer (host
+               menu-answer overlay, keyed by tool_use id). User-authored
+               affordance: same primary color as the You label. Only real
+               answers carry the field; other prompt outcomes render nothing.
+               AskUserQuestion hides it while expanded — the expansion's Q/A
+               prose already shows the same answer. -->
+          <Text
+            when="{$item.menuAnswer &amp;&amp; !($item.name === 'AskUserQuestion' &amp;&amp; (expanded || []).includes($item.id))}"
+            fontSize="$fontSize-sm"
+            fontWeight="bold"
+            color="$color-primary-600"
+            tooltip="Your answer to this permission menu"
+            value="{'✔ ' + $item.menuAnswer}" />
           <VStack
             when="{(expanded || []).includes($item.id)}"
             gap="$space-1"

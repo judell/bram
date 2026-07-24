@@ -242,7 +242,7 @@
                https://docs.xmlui.org/components/Column#width -->
           <Column header="Skill" width="*">
             <Link
-              onClick="window.__bramRunSkill($item.name, skillArgsBox &amp;&amp; skillArgsBox.value); skillsDialog.close()"
+              onClick="window.__bramRunSkill($item.name, skillArgsBox &amp;&amp; skillArgsBox.value); skillsDialog.close(); navigate('/transcript')"
               noIndicator="true">
               <Text
                 value="{$item.name}"

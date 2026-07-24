@@ -87,25 +87,25 @@ the tracking issues.
 | # | Finding | Evidence | Issue | Effort |
 |---|---------|----------|-------|--------|
 | M1 | Guard fails **open** when Python is missing (Claude Code treats a failed PreToolUse hook as non-blocking); no host-side backstop for arbitrary-file writes. | `README.md:206`; `lib.rs:22045` | #119 | M (S for Setup hard-fail) |
-| M2 | Terminal I/O previews (`pty-in` / `pty-out`) land verbatim in the agent-readable, default-on, unbounded trace log with no redaction. | `lib.rs:8254`, `8441`, `903` | #114 #111 | M |
+| M2 | **DONE** (`issue-114-secret-safe-observability`). Terminal I/O previews now pass through the shared host redactor before escaping/truncation. Tracing remains opt-in unless `BRAM_TRACE` explicitly overrides it. Credential detection is provided by the pinned `loomweave-scanner` Rust crate; Bram expands its byte-range findings to whole private-key blocks and applies narrow structural masking to Authorization and secret-shaped assignment values. | `lib.rs`, `Cargo.toml` | #114 #111 | ~~M~~ done |
 | M3 | The PTY child inherits the full host environment including `ANTHROPIC_API_KEY` / `GITHUB_TOKEN`; the agent can `echo` them into its own context. | `lib.rs:7993` | #114 #111 | M |
 | M4 | Auditability gap: a successful worklist commit emits no trace line (no sha/ids/files); the approval trail is gated on tracing being enabled and is otherwise ephemeral. | `lib.rs:27925`, `24247` | #114 #111 | M |
 | M5 | Codex Bash gate is path-blind: any live proposed/applied item authorizes a Bash write to any *other* file. | `codex-worklist-guard.py:1049` | #119 | M |
 | M6 | `open_url` routes `file://` URLs to `open_path`, opening any local file in its default app; scheme is not validated. | `lib.rs:11021`; `helpers.js:2434` | #113 #110 #121 | S |
 | M7 | Issues-tab close/comment buttons call the host routes directly with only the frontend `enabled` binding as the gate; the routes have no independent auth check. | `Issues.xmlui:80`, `494`; `lib.rs:26270` | #121 | S |
-| M8 | Inspector trace tap forwards agent-pane XMLUI entries verbatim, bypassing the `__bramTraceSafeValue` sanitizer; captures input values keystroke-by-keystroke. Off by default. | `helpers.js:5280`, `742` | #114 #111 | S–M |
+| M8 | **DONE** (`issue-114-secret-safe-observability`). Inspector-tap fields now pass through `__bramTraceSafeValue`; secret-shaped object keys and known credential patterns are masked before IPC. The host applies the crate-backed redactor to the serialized iframe payload again before persistence. The tap remains off by default. | `helpers.js`, `lib.rs` | #114 #111 | ~~S–M~~ done |
 | M9 | `drop` auth is written on resolve but consumed only later at `prune`; if prune never runs it lingers with no TTL and can drive a later prune. | `lib.rs:27242`, `27901` | #120 | S |
 
 ### Low
 
 | # | Finding | Evidence | Issue | Effort |
 |---|---------|----------|-------|--------|
-| L1 | Trace logs are unbounded and never pruned (~11 GB across 1087 files at audit time); amplifies M2. `*.log` is gitignored, so exposure is local-disk only. | `lib.rs:759` | #114 #111 | S |
+| L1 | **DONE** (`trace-retention-settings-prune-script`). At startup, raw Bram trace archives older than the user-configurable window (default 14 days) are streamed through the shared credential redactor into `.log.gz`. The raw source is removed only after its sanitized archive is synced and atomically installed; failures preserve it. Compressed history is retained indefinitely with no byte cap, so storage is intentionally unbounded. The active `bram-trace.log` is never an archive candidate during its session. | `lib.rs`, `Settings.xmlui` | #114 #111 | ~~S~~ done |
 | L2 | `/__worklist-history/snapshot` joins a caller `ts` into a filename with no `..` guard (constrained to `.json` targets). | `lib.rs:27099` | #110 | S |
 | L3 | `session_path_for_id` joins a caller session id into a path; constrained by the `.jsonl` suffix and `.exists()`, and the result feeds a session reload rather than an HTTP body (no exfil channel). | `lib.rs:9028` | #110 | S |
 | L4 | No `mcp__*` matcher in `.claude/settings.json` PreToolUse; if a Claude session ever gains a filesystem MCP server, its writes would be ungated. Latent given current server inventory. | `.claude/settings.json` | #119 | S–M |
 | L5 | Guard doc/path drift: `CLAUDE.md` / `conventions.md` cite `app/__shell/codex-worklist-guard.py`, but the real canonical path is `app/provider-hooks/codex-worklist-guard.py`. | `conventions.md` | #119 | S |
-| L6 | `ai-describe` ships the command text, preceding agent prose, and command-output head to `api.anthropic.com`. Key handling is correct (never logged), but a secret in a command line is sent to the API. | `lib.rs:28654` | #114 | S |
+| L6 | **DONE** (`issue-114-secret-safe-observability`). Tool Descriptions now require explicit `ai.describeCommands: true` plus `ANTHROPIC_API_KEY`; an API key alone no longer enables external processing. Command/diff/write/access material, agent context, result excerpts, and existing descriptions pass through the crate-backed host redactor before the request. The `[ai-describe]` trace records only sizes/counters, including `redactions=N`, never prompt content. Heuristic redaction is defense in depth, not a guarantee about arbitrary file contents; explicit opt-in remains the primary boundary. | `lib.rs`, `helpers.js`, `Cargo.toml` | #114 | ~~S~~ done |
 
 ## Recommended sequence
 
@@ -159,23 +159,22 @@ shrinks the reachability of much of the rest.
     host check then covers the agent-direct path too.
 
 - **Phase 5 — secrets and audit (M).**
-  - M2: add a redaction pass to `bram_trace_preview` matching known secret
-    shapes (`sk-ant-`, `ghp_` / `gho_` / `github_pat_`, `AKIA`, `Bearer`,
-    `token=`/`password=`/`secret=`), and/or a default-off flag to suppress
-    `pty-in` / `pty-out` previews while keeping byte-count metrics.
+  - M2: **done** — PTY previews use the shared `loomweave-scanner`-backed
+    redactor.
   - M3: pass the PTY child an env allowlist rather than `std::env::vars()`,
     gated behind an opt-in so it doesn't break `gh` / agent auth.
   - M4: emit a `worklist-commit op=commit sha=… ids=… files=…` line on
     success, and add a durable, always-on append-only audit record for
     commit / push / issue-close / approval that survives `traces.enabled:
     false`.
-  - L1: cap trace retention (age or total bytes) in
-    `prepare_bram_trace_log`.
-  - M8: route the Inspector tap through `__bramTraceSafeValue`; keep it off
-    when handling credentials.
-  - L4/L5/L6: add an `mcp__.*` matcher to `.claude/settings.json`; fix the
-    guard doc path references; optionally redact secret shapes from the
-    `ai-describe` prompt.
+  - L1: **done** — configurable raw window followed by sanitized gzip
+    archival; compressed history is retained indefinitely.
+  - M8: **done** — Inspector values are sanitized before IPC and again at
+    the host persistence boundary.
+  - L6: **done** — external Tool Descriptions are explicit opt-in and their
+    material is redacted before request construction.
+  - L4/L5: add an `mcp__.*` matcher to `.claude/settings.json`; fix the
+    guard doc path references.
 
 ## Per-issue map
 
@@ -188,10 +187,13 @@ shrinks the reachability of much of the rest.
   (git is root-scoped, writes are contained, `/__local-file-preview` already
   does the right thing). Exposure is C2, C3, and H6 plus L2/L3. **High** until
   the two arbitrary-read routes are contained.
-- **#111 / #114 — secrets hygiene and auditability (duplicates).** No secret is
-  committed, exposed in a response, or leaked to the iframe; `ANTHROPIC_API_KEY`
-  handling in `ai-describe` is correct. Residual risk is the local, default-on,
-  agent-readable trace log (M2, L1) and the auditability gap (M4). **Medium.**
+- **#111 / #114 — secrets hygiene and auditability (duplicates).** The
+  observability/external-processing tranche is complete: explicit Tool
+  Description opt-in, host + iframe redaction, and sanitized compressed trace history
+  resolve M2, M8, L1, and L6. Two intentionally separate risks remain: the PTY
+  child inherits the host environment (M3), and sensitive state transitions
+  lack a durable always-on audit ledger (M4). Heuristic redaction cannot prove
+  arbitrary content secret-free. **Medium until M3/M4 land.**
 - **#112 — PTY / shell injection.** H1 (paste-escape smuggling) and H2 (forged
   auth) are the sharp edges; both are reachable through the same-origin iframe
   (C1). **High.**

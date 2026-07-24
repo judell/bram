@@ -393,6 +393,8 @@ struct TracesConfig {
     enabled: Option<bool>,
     #[serde(default, rename = "inspectorTap")]
     inspector_tap: Option<bool>,
+    #[serde(default, rename = "archiveAfterDays")]
+    archive_after_days: Option<u32>,
 }
 
 // Optional menus block. `parseAndDisplay` gates PTY menu detection +
@@ -411,10 +413,10 @@ struct MenusConfig {
 // Optional ai block. `describeCommands` gates the /__describe-command
 // route (haiku-command-descriptions): Haiku-synthesized one-line intent
 // headers for tool expansions whose command lacks — or carries a weak —
-// agent-authored description. Default ON ("Tool Descriptions" in the
-// Settings tab); the effective gate is ANTHROPIC_API_KEY in the host
-// environment — key absent means the feature silently does nothing. The
-// key is never stored in .bram.json (it's a tracked file).
+// agent-authored description. Default OFF ("Tool Descriptions" in the
+// Settings tab): a project must explicitly opt in, and ANTHROPIC_API_KEY
+// must also be present. The key is never stored in .bram.json (it's a
+// tracked file).
 #[derive(Default, Clone, serde::Deserialize)]
 struct AiConfig {
     #[serde(default, rename = "describeCommands")]
@@ -1694,7 +1696,8 @@ fn bram_trace_log_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf>
 }
 
 fn is_bram_trace_archive_rel(rel: &str) -> bool {
-    rel.starts_with("resources/bram-traces/bram-trace-") && rel.ends_with(".log")
+    rel.starts_with("resources/bram-traces/bram-trace-")
+        && (rel.ends_with(".log") || rel.ends_with(".log.gz"))
 }
 
 fn bram_trace_date_stamp_local() -> String {
@@ -1750,13 +1753,371 @@ fn next_bram_trace_archive_path(active_path: &Path) -> Option<PathBuf> {
     None
 }
 
-fn prepare_bram_trace_log<R: tauri::Runtime>(app: &AppHandle<R>) {
-    if !bram_trace_enabled() {
-        return;
+#[derive(Clone, Debug)]
+struct BramTraceArchiveMeta {
+    path: PathBuf,
+    modified_ms: i64,
+}
+
+#[derive(Clone, Default, Debug)]
+struct BramTraceArchivalSummary {
+    candidate_files: usize,
+    archived_files: usize,
+    raw_bytes: u64,
+    compressed_bytes: u64,
+    redactions: usize,
+    failures: usize,
+    skipped_existing: usize,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BramTraceArchivalStatus {
+    state: String,
+    completed_at_ms: Option<i64>,
+    archive_after_days: u32,
+    candidate_files: usize,
+    archived_files: usize,
+    raw_bytes: u64,
+    compressed_bytes: u64,
+    redactions: usize,
+    failures: usize,
+    skipped_existing: usize,
+    elapsed_ms: u128,
+}
+
+impl BramTraceArchivalStatus {
+    fn not_run() -> Self {
+        Self {
+            state: "not-run".to_string(),
+            completed_at_ms: None,
+            archive_after_days: DEFAULT_TRACE_ARCHIVE_AFTER_DAYS,
+            candidate_files: 0,
+            archived_files: 0,
+            raw_bytes: 0,
+            compressed_bytes: 0,
+            redactions: 0,
+            failures: 0,
+            skipped_existing: 0,
+            elapsed_ms: 0,
+        }
     }
+
+    fn pending(archive_after_days: u32) -> Self {
+        Self {
+            state: "pending".to_string(),
+            archive_after_days,
+            ..Self::not_run()
+        }
+    }
+
+    fn completed(
+        archive_after_days: u32,
+        summary: &BramTraceArchivalSummary,
+        completed_at_ms: i64,
+        elapsed_ms: u128,
+    ) -> Self {
+        Self {
+            state: "completed".to_string(),
+            completed_at_ms: Some(completed_at_ms),
+            archive_after_days,
+            candidate_files: summary.candidate_files,
+            archived_files: summary.archived_files,
+            raw_bytes: summary.raw_bytes,
+            compressed_bytes: summary.compressed_bytes,
+            redactions: summary.redactions,
+            failures: summary.failures,
+            skipped_existing: summary.skipped_existing,
+            elapsed_ms,
+        }
+    }
+}
+
+fn bram_trace_archival_status_cell() -> &'static Mutex<BramTraceArchivalStatus> {
+    static CELL: OnceLock<Mutex<BramTraceArchivalStatus>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(BramTraceArchivalStatus::not_run()))
+}
+
+fn set_bram_trace_archival_status(status: BramTraceArchivalStatus) {
+    if let Ok(mut guard) = bram_trace_archival_status_cell().lock() {
+        *guard = status;
+    }
+}
+
+fn bram_trace_archival_status_view() -> BramTraceArchivalStatus {
+    bram_trace_archival_status_cell()
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_else(|error| error.into_inner().clone())
+}
+
+// Return raw archives old enough to sanitize and gzip, oldest first. Compressed
+// history is retained indefinitely; there is no byte-budget deletion pass.
+fn bram_trace_archival_plan(
+    mut archives: Vec<BramTraceArchiveMeta>,
+    now_ms: i64,
+    max_age_ms: i64,
+) -> Vec<PathBuf> {
+    archives.sort_by(|a, b| {
+        a.modified_ms
+            .cmp(&b.modified_ms)
+            .then_with(|| a.path.to_string_lossy().cmp(&b.path.to_string_lossy()))
+    });
+    archives
+        .into_iter()
+        .filter(|archive| now_ms.saturating_sub(archive.modified_ms) > max_age_ms)
+        .map(|archive| archive.path)
+        .collect()
+}
+
+fn bram_trace_gzip_path(raw_path: &Path) -> PathBuf {
+    let mut name = raw_path.as_os_str().to_os_string();
+    name.push(".gz");
+    PathBuf::from(name)
+}
+
+fn private_key_marker_line(line: &[u8], marker: &[u8]) -> bool {
+    let Some(start) = find_ascii_bytes(line, marker, 0) else {
+        return false;
+    };
+    line[start..]
+        .windows(b"PRIVATE KEY".len())
+        .any(|window| window == b"PRIVATE KEY")
+}
+
+// Sanitize one textual trace stream without loading the file into memory.
+// BufRead::read_until transparently carries a logical trace line across its
+// internal fixed-size chunks, so provider tokens split at a read boundary are
+// still presented to the scanner intact. Private-key state spans lines.
+fn sanitize_bram_trace_stream<R: BufRead, W: Write>(
+    mut reader: R,
+    mut writer: W,
+) -> std::io::Result<(u64, usize)> {
+    let mut line = Vec::new();
+    let mut bytes_read = 0u64;
+    let mut redactions = 0usize;
+    let mut in_private_key = false;
+    loop {
+        line.clear();
+        let read = reader.read_until(b'\n', &mut line)?;
+        if read == 0 {
+            break;
+        }
+        bytes_read = bytes_read.saturating_add(read as u64);
+        let ended_with_newline = line.last() == Some(&b'\n');
+
+        if in_private_key {
+            if private_key_marker_line(&line, b"-----END ") {
+                in_private_key = false;
+            }
+            continue;
+        }
+
+        let starts_private_key = private_key_marker_line(&line, b"-----BEGIN ");
+        let ends_private_key = private_key_marker_line(&line, b"-----END ");
+        let text = String::from_utf8_lossy(&line);
+        let (mut safe, count) = redact_sensitive_text(&text);
+        redactions = redactions.saturating_add(count);
+        if ended_with_newline && !safe.ends_with('\n') {
+            safe.push('\n');
+        }
+        writer.write_all(safe.as_bytes())?;
+        if starts_private_key && !ends_private_key {
+            in_private_key = true;
+        }
+    }
+    writer.flush()?;
+    Ok((bytes_read, redactions))
+}
+
+fn create_bram_trace_temp(final_path: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
+    let parent = final_path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("trace archive has no parent"))?;
+    let final_name = final_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("bram-trace.log.gz");
+    for attempt in 0..100u32 {
+        let temp_path = parent.join(format!(
+            ".{}.tmp-{}-{}",
+            final_name,
+            std::process::id(),
+            attempt
+        ));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+        {
+            Ok(file) => return Ok((temp_path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate trace archive temp file",
+    ))
+}
+
+fn archive_one_bram_trace(raw_path: &Path) -> std::io::Result<(u64, u64, usize)> {
+    let metadata = std::fs::symlink_metadata(raw_path)?;
+    if !metadata.file_type().is_file() {
+        return Err(std::io::Error::other(
+            "trace archive candidate is not a regular file",
+        ));
+    }
+    let final_path = bram_trace_gzip_path(raw_path);
+    if final_path.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "sanitized trace archive already exists",
+        ));
+    }
+
+    let input = std::fs::File::open(raw_path)?;
+    let (temp_path, temp_file) = create_bram_trace_temp(&final_path)?;
+    let result = (|| -> std::io::Result<(u64, u64, usize)> {
+        let mut encoder =
+            flate2::write::GzEncoder::new(temp_file, flate2::Compression::fast());
+        let (raw_bytes, redactions) =
+            sanitize_bram_trace_stream(BufReader::with_capacity(64 * 1024, input), &mut encoder)?;
+        let output = encoder.finish()?;
+        output.sync_all()?;
+        let compressed_bytes = output.metadata()?.len();
+        drop(output);
+
+        // hard_link is an atomic create-without-overwrite on the same
+        // filesystem. Unlike rename, it fails if the final path appeared
+        // between our existence check and installation.
+        std::fs::hard_link(&temp_path, &final_path)?;
+        std::fs::remove_file(&temp_path)?;
+        std::fs::remove_file(raw_path)?;
+        Ok((raw_bytes, compressed_bytes, redactions))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    result
+}
+
+fn archive_bram_trace_logs(
+    dir: &Path,
+    now_ms: i64,
+    archive_after_days: u32,
+) -> BramTraceArchivalSummary {
+    let mut archives = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !name.starts_with("bram-trace-") || !name.ends_with(".log") {
+                continue;
+            }
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if !metadata.file_type().is_file() {
+                continue;
+            }
+            let modified_ms = metadata
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            archives.push(BramTraceArchiveMeta {
+                path,
+                modified_ms,
+            });
+        }
+    }
+    let archive_after_ms = i64::from(archive_after_days)
+        .saturating_mul(24 * 60 * 60 * 1000);
+    let plan = bram_trace_archival_plan(
+        archives,
+        now_ms,
+        archive_after_ms,
+    );
+    let mut summary = BramTraceArchivalSummary {
+        candidate_files: plan.len(),
+        ..BramTraceArchivalSummary::default()
+    };
+    for path in plan {
+        match archive_one_bram_trace(&path) {
+            Ok((raw_bytes, compressed_bytes, redactions)) => {
+                summary.archived_files += 1;
+                summary.raw_bytes = summary.raw_bytes.saturating_add(raw_bytes);
+                summary.compressed_bytes =
+                    summary.compressed_bytes.saturating_add(compressed_bytes);
+                summary.redactions = summary.redactions.saturating_add(redactions);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                summary.skipped_existing += 1;
+            }
+            Err(_) => {
+                summary.failures += 1;
+            }
+        }
+    }
+    summary
+}
+
+fn schedule_bram_trace_archival<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    active_path: &Path,
+    archive_after_days: u32,
+) {
+    let Some(parent) = active_path.parent() else {
+        return;
+    };
+    let dir = parent.to_path_buf();
+    let app = app.clone();
+    set_bram_trace_archival_status(BramTraceArchivalStatus::pending(archive_after_days));
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let summary = archive_bram_trace_logs(&dir, unix_now_ms(), archive_after_days);
+        let elapsed_ms = started.elapsed().as_millis();
+        set_bram_trace_archival_status(BramTraceArchivalStatus::completed(
+            archive_after_days,
+            &summary,
+            unix_now_ms(),
+            elapsed_ms,
+        ));
+        let body = format!(
+            "op=archive candidates={} files={} raw_bytes={} compressed_bytes={} redactions={} failures={} skipped_existing={} archive_after_days={} ms={}",
+            summary.candidate_files,
+            summary.archived_files,
+            summary.raw_bytes,
+            summary.compressed_bytes,
+            summary.redactions,
+            summary.failures,
+            summary.skipped_existing,
+            archive_after_days,
+            elapsed_ms
+        );
+        eprintln!("[bram-trace] {}", body);
+        append_bram_trace_line(&app, "bram-trace", &body);
+    });
+}
+
+fn prepare_bram_trace_log<R: tauri::Runtime>(app: &AppHandle<R>) {
     let Some(active_path) = bram_trace_log_file(app) else {
         return;
     };
+    let config = project_root(Some(app)).and_then(|root| load_project_config(&root));
+    let archive_after_days = project_config_trace_archive_after_days(config.as_ref());
+    // Archival is maintenance, not tracing: sanitize and gzip old raw archives
+    // even when this run will not create a new active log. The existing active
+    // file is never an archive candidate and stays untouched while tracing is
+    // off.
+    if !bram_trace_enabled() {
+        schedule_bram_trace_archival(app, &active_path, archive_after_days);
+        return;
+    }
     if let Some(parent) = active_path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             eprintln!(
@@ -1816,6 +2177,7 @@ fn prepare_bram_trace_log<R: tauri::Runtime>(app: &AppHandle<R>) {
             e
         );
     }
+    schedule_bram_trace_archival(app, &active_path, archive_after_days);
 }
 
 // Single write API for every trace category. Format:
@@ -1888,17 +2250,223 @@ fn append_bram_trace_line<R: tauri::Runtime>(app: &AppHandle<R>, category: &str,
     }
 }
 
+const BRAM_REDACTED: &str = "[REDACTED]";
+
+fn find_ascii_bytes(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    if needle.is_empty() || from >= haystack.len() {
+        return None;
+    }
+    haystack[from..]
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .map(|i| i + from)
+}
+
+fn find_ascii_bytes_ci(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    if needle.is_empty() || from >= haystack.len() {
+        return None;
+    }
+    haystack[from..]
+        .windows(needle.len())
+        .position(|w| w.eq_ignore_ascii_case(needle))
+        .map(|i| i + from)
+}
+
+fn secret_token_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'+' | b'/' | b'=')
+}
+
+fn secret_key_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-')
+}
+
+fn sensitive_secret_key(key: &[u8]) -> bool {
+    let normalized = key
+        .iter()
+        .filter(|b| b.is_ascii_alphanumeric())
+        .map(|b| b.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    [
+        b"token".as_slice(),
+        b"password".as_slice(),
+        b"secret".as_slice(),
+        b"apikey".as_slice(),
+        b"accesskey".as_slice(),
+        b"privatekey".as_slice(),
+        b"credential".as_slice(),
+    ]
+    .iter()
+    .any(|needle| normalized == *needle || normalized.ends_with(needle))
+}
+
+fn add_secret_span(spans: &mut Vec<(usize, usize)>, start: usize, end: usize) {
+    if start < end {
+        spans.push((start, end));
+    }
+}
+
+fn bram_secret_scanner() -> &'static loomweave_scanner::Scanner {
+    static SCANNER: OnceLock<loomweave_scanner::Scanner> = OnceLock::new();
+    SCANNER.get_or_init(loomweave_scanner::Scanner::new)
+}
+
+fn private_key_span(bytes: &[u8], start: usize, header_end: usize) -> (usize, usize) {
+    let header_line_end = bytes[header_end.min(bytes.len())..]
+        .iter()
+        .position(|b| *b == b'\n')
+        .map(|i| header_end + i)
+        .unwrap_or(bytes.len());
+    if let Some(end_start) = find_ascii_bytes(bytes, b"-----END ", header_line_end) {
+        let end_line = bytes[end_start..]
+            .iter()
+            .position(|b| *b == b'\n')
+            .map(|i| end_start + i)
+            .unwrap_or(bytes.len());
+        if bytes[end_start..end_line]
+            .windows(b"PRIVATE KEY".len())
+            .any(|w| w == b"PRIVATE KEY")
+        {
+            return (start, end_line);
+        }
+    }
+    // A truncated key is still sensitive. Fail closed through the end of the
+    // payload when the scanner finds a private-key header without its footer.
+    (start, bytes.len())
+}
+
+// Defense-in-depth redaction for diagnostic and externally processed text.
+// Credential detection comes from loomweave-scanner, whose findings contain
+// byte ranges, rule ids, and hashes rather than secret literals. Bram adds only
+// structural expansion around those findings: complete PEM blocks, generic
+// Authorization values, and secret-shaped assignment values. The explicit Tool
+// Descriptions opt-in remains the primary boundary for external processing.
+fn redact_sensitive_text(data: &str) -> (String, usize) {
+    let bytes = data.as_bytes();
+    if bytes.is_empty() {
+        return (String::new(), 0);
+    }
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+
+    for finding in bram_secret_scanner().scan_bytes(bytes) {
+        let start = finding.byte_offset.min(bytes.len());
+        let end = start.saturating_add(finding.matched_len).min(bytes.len());
+        if finding.detect_secrets_type == loomweave_scanner::DetectSecretsRule::PrivateKey {
+            let (block_start, block_end) = private_key_span(bytes, start, end);
+            add_secret_span(&mut spans, block_start, block_end);
+        } else {
+            add_secret_span(&mut spans, start, end);
+        }
+    }
+
+    // Authorization headers: preserve the scheme, mask only the credential.
+    for scheme in [b"Bearer".as_slice(), b"Basic".as_slice()] {
+        let mut search = 0usize;
+        while let Some(start) = find_ascii_bytes_ci(bytes, scheme, search) {
+            let boundary_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+            let mut value_start = start + scheme.len();
+            if boundary_ok && value_start < bytes.len() && bytes[value_start].is_ascii_whitespace()
+            {
+                while value_start < bytes.len() && bytes[value_start].is_ascii_whitespace() {
+                    value_start += 1;
+                }
+                let mut end = value_start;
+                while end < bytes.len() && secret_token_byte(bytes[end]) {
+                    end += 1;
+                }
+                add_secret_span(&mut spans, value_start, end);
+                search = end.max(start + scheme.len());
+            } else {
+                search = start + scheme.len();
+            }
+        }
+    }
+
+    // Secret-shaped assignments, including JSON (`"api_key": "..."`) and
+    // shell/config (`TOKEN=...`) forms. Preserve key, separator, and quotes.
+    for (i, separator) in bytes.iter().enumerate() {
+        if !matches!(*separator, b'=' | b':') {
+            continue;
+        }
+        let mut key_end = i;
+        while key_end > 0
+            && (bytes[key_end - 1].is_ascii_whitespace()
+                || matches!(bytes[key_end - 1], b'"' | b'\''))
+        {
+            key_end -= 1;
+        }
+        let mut key_start = key_end;
+        while key_start > 0 && secret_key_byte(bytes[key_start - 1]) {
+            key_start -= 1;
+        }
+        if key_start == key_end || !sensitive_secret_key(&bytes[key_start..key_end]) {
+            continue;
+        }
+        let mut value_start = i + 1;
+        while value_start < bytes.len() && bytes[value_start].is_ascii_whitespace() {
+            value_start += 1;
+        }
+        let quote = bytes
+            .get(value_start)
+            .copied()
+            .filter(|b| matches!(b, b'"' | b'\''));
+        if quote.is_some() {
+            value_start += 1;
+        }
+        let mut end = value_start;
+        while end < bytes.len() {
+            if let Some(q) = quote {
+                if bytes[end] == q {
+                    break;
+                }
+            } else if bytes[end].is_ascii_whitespace()
+                || matches!(bytes[end], b',' | b';' | b'}' | b']')
+            {
+                break;
+            }
+            end += 1;
+        }
+        add_secret_span(&mut spans, value_start, end);
+    }
+
+    if spans.is_empty() {
+        return (data.to_string(), 0);
+    }
+    spans.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in spans {
+        if let Some(last) = merged.last_mut() {
+            if start <= last.1 {
+                last.1 = last.1.max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut cursor = 0usize;
+    for (start, end) in &merged {
+        out.extend_from_slice(&bytes[cursor..*start]);
+        out.extend_from_slice(BRAM_REDACTED.as_bytes());
+        cursor = *end;
+    }
+    out.extend_from_slice(&bytes[cursor..]);
+    (
+        String::from_utf8(out).unwrap_or_else(|_| BRAM_REDACTED.to_string()),
+        merged.len(),
+    )
+}
+
 // Render a short, single-line, escape-aware preview of `data` capped at
-// `max` chars. Shared by every trace category that surfaces raw bytes
-// (currently `[pty-out]`; future: `[pty-in]`, `[route]` request body).
-// Control characters render as `\xNN`, common whitespace gets the usual
-// escapes, and the output is double-quoted so a trailing space or
-// trailing escape doesn't get visually merged with adjacent text.
+// `max` chars. Shared by every trace category that surfaces raw bytes.
+// Redaction runs before truncation so a credential cannot be split across
+// the visible boundary. Control characters render as `\xNN`, common
+// whitespace gets the usual escapes, and the output is double-quoted.
 fn bram_trace_preview(data: &str, max: usize) -> String {
+    let (redacted, _) = redact_sensitive_text(data);
     let mut out = String::with_capacity(max + 8);
     out.push('"');
     let mut count = 0usize;
-    for ch in data.chars() {
+    for ch in redacted.chars() {
         if count >= max {
             out.push_str("...");
             break;
@@ -1917,6 +2485,291 @@ fn bram_trace_preview(data: &str, max: usize) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(test)]
+mod secret_observability_tests {
+    use super::{
+        archive_bram_trace_logs, archive_one_bram_trace, bram_trace_archival_plan,
+        bram_trace_gzip_path, bram_trace_preview, is_bram_trace_archive_rel,
+        project_config_trace_archive_after_days, redact_sensitive_text, sanitize_bram_trace_stream,
+        settings_view_from_config, BramTraceArchivalStatus, BramTraceArchiveMeta, ProjectConfig,
+        BRAM_REDACTED, DEFAULT_TRACE_ARCHIVE_AFTER_DAYS, MAX_TRACE_ARCHIVE_AFTER_DAYS,
+    };
+    use flate2::read::GzDecoder;
+    use std::io::{BufReader, Cursor, Read};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn temp_trace_dir(label: &str) -> PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "bram-trace-archive-test-{}-{}-{}",
+            label,
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn read_gzip(path: &Path) -> String {
+        let mut output = String::new();
+        GzDecoder::new(std::fs::File::open(path).unwrap())
+            .read_to_string(&mut output)
+            .unwrap();
+        output
+    }
+
+    #[test]
+    fn redacts_provider_tokens_assignments_headers_and_private_keys() {
+        let anthropic = format!("sk-ant-{}", "a".repeat(90));
+        let openai = format!("sk-proj-{}", "b".repeat(24));
+        let github = format!("ghp_{}", "c".repeat(36));
+        let input = format!(concat!(
+            "anthropic={anthropic} ",
+            "openai={openai} ",
+            "github={github} ",
+            "aws=AKIA1234567890ABCDEF ",
+            "Authorization: Bearer abc.def-123 ",
+            "\"api_key\": \"top-secret-value\"\n",
+            "-----BEGIN PRIVATE KEY-----\nabc123\n-----END PRIVATE KEY-----\n",
+        ), anthropic = anthropic, openai = openai, github = github);
+        let (safe, count) = redact_sensitive_text(&input);
+        assert!(count >= 7);
+        assert!(!safe.contains(&anthropic));
+        assert!(!safe.contains(&openai));
+        assert!(!safe.contains(&github));
+        assert!(!safe.contains("abc.def-123"));
+        assert!(!safe.contains("top-secret-value"));
+        assert!(!safe.contains("abc123"));
+        assert!(safe.matches(BRAM_REDACTED).count() >= 7);
+    }
+
+    #[test]
+    fn preserves_non_secret_lookalikes_and_unicode() {
+        let input = "token_count=3; sketch-ant-pattern; password policy; café";
+        let (safe, count) = redact_sensitive_text(input);
+        assert_eq!(count, 0);
+        assert_eq!(safe, input);
+    }
+
+    #[test]
+    fn trace_preview_redacts_before_truncating() {
+        let preview = bram_trace_preview(
+            "Authorization: Bearer abcdefghijklmnopqrstuvwxyz payload",
+            40,
+        );
+        assert!(preview.contains(BRAM_REDACTED));
+        assert!(!preview.contains("abcdefghijklmnopqrstuvwxyz"));
+    }
+
+    #[test]
+    fn trace_archive_days_default_override_and_clamp() {
+        assert_eq!(
+            project_config_trace_archive_after_days(None),
+            DEFAULT_TRACE_ARCHIVE_AFTER_DAYS
+        );
+        assert_eq!(
+            settings_view_from_config(None)["traces"]["archiveAfterDays"],
+            DEFAULT_TRACE_ARCHIVE_AFTER_DAYS
+        );
+        let configured =
+            serde_json::from_str::<ProjectConfig>(r#"{"traces":{"archiveAfterDays":30}}"#)
+                .unwrap();
+        assert_eq!(
+            project_config_trace_archive_after_days(Some(&configured)),
+            30
+        );
+        assert_eq!(
+            settings_view_from_config(Some(configured))["traces"]["archiveAfterDays"],
+            30
+        );
+        let too_large = serde_json::from_str::<ProjectConfig>(
+            r#"{"traces":{"archiveAfterDays":4294967295}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            project_config_trace_archive_after_days(Some(&too_large)),
+            MAX_TRACE_ARCHIVE_AFTER_DAYS
+        );
+    }
+
+    #[test]
+    fn raw_and_gzip_trace_archives_are_ignored_by_project_watchers() {
+        assert!(is_bram_trace_archive_rel(
+            "resources/bram-traces/bram-trace-2026-01-01.log"
+        ));
+        assert!(is_bram_trace_archive_rel(
+            "resources/bram-traces/bram-trace-2026-01-01.log.gz"
+        ));
+        assert!(!is_bram_trace_archive_rel(
+            "resources/bram-traces/bram-trace.log"
+        ));
+    }
+
+    #[test]
+    fn archival_plan_selects_only_raw_archives_past_the_age_boundary() {
+        let archives = vec![
+            BramTraceArchiveMeta {
+                path: PathBuf::from("old.log"),
+                modified_ms: 1_000,
+            },
+            BramTraceArchiveMeta {
+                path: PathBuf::from("boundary.log"),
+                modified_ms: 8_000,
+            },
+            BramTraceArchiveMeta {
+                path: PathBuf::from("new.log"),
+                modified_ms: 8_001,
+            },
+        ];
+        let plan = bram_trace_archival_plan(archives, 10_000, 2_000);
+        assert_eq!(plan, vec![PathBuf::from("old.log")]);
+    }
+
+    #[test]
+    fn archival_order_is_deterministic_for_equal_timestamps() {
+        let archives = vec![
+            BramTraceArchiveMeta {
+                path: PathBuf::from("b.log"),
+                modified_ms: 1_000,
+            },
+            BramTraceArchiveMeta {
+                path: PathBuf::from("a.log"),
+                modified_ms: 1_000,
+            },
+        ];
+        let plan = bram_trace_archival_plan(archives, 20_000, 10_000);
+        assert_eq!(
+            plan,
+            vec![PathBuf::from("a.log"), PathBuf::from("b.log")]
+        );
+    }
+
+    #[test]
+    fn stream_sanitizer_handles_small_read_buffers_and_multiline_private_keys() {
+        let token = format!("sk-proj-{}", "x".repeat(32));
+        let input = format!(
+            "before {token} after\n-----BEGIN PRIVATE KEY-----\nvery-secret-body\n-----END PRIVATE KEY-----\nclean\n"
+        );
+        let mut output = Vec::new();
+        let (bytes, redactions) = sanitize_bram_trace_stream(
+            BufReader::with_capacity(5, Cursor::new(input.as_bytes())),
+            &mut output,
+        )
+        .unwrap();
+        let safe = String::from_utf8(output).unwrap();
+        assert_eq!(bytes, input.len() as u64);
+        assert!(redactions >= 2);
+        assert!(!safe.contains(&token));
+        assert!(!safe.contains("very-secret-body"));
+        assert!(safe.contains(BRAM_REDACTED));
+        assert!(safe.ends_with("clean\n"));
+    }
+
+    #[test]
+    fn successful_archive_is_gzip_redacted_and_removes_raw_source() {
+        let dir = temp_trace_dir("success");
+        let raw = dir.join("bram-trace-2026-01-01.log");
+        let token = format!("ghp_{}", "y".repeat(36));
+        std::fs::write(&raw, format!("token={token}\nordinary line\n")).unwrap();
+
+        let (raw_bytes, compressed_bytes, redactions) = archive_one_bram_trace(&raw).unwrap();
+        let gzip = bram_trace_gzip_path(&raw);
+        assert_eq!(
+            raw_bytes,
+            format!("token={token}\nordinary line\n").len() as u64
+        );
+        assert!(compressed_bytes > 0);
+        assert!(redactions >= 1);
+        assert!(!raw.exists());
+        assert!(gzip.exists());
+        let safe = read_gzip(&gzip);
+        assert!(!safe.contains(&token));
+        assert!(safe.contains(BRAM_REDACTED));
+        assert!(safe.contains("ordinary line"));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn existing_destination_preserves_raw_and_is_not_overwritten() {
+        let dir = temp_trace_dir("existing");
+        let raw = dir.join("bram-trace-2026-01-01.log");
+        let gzip = bram_trace_gzip_path(&raw);
+        std::fs::write(&raw, b"raw source").unwrap();
+        std::fs::write(&gzip, b"existing archive").unwrap();
+
+        let error = archive_one_bram_trace(&raw).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&raw).unwrap(), b"raw source");
+        assert_eq!(std::fs::read(&gzip).unwrap(), b"existing archive");
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn archival_directory_pass_is_idempotent() {
+        let dir = temp_trace_dir("idempotent");
+        let raw = dir.join("bram-trace-2026-01-01.log");
+        std::fs::write(&raw, b"Authorization: Bearer abcdefghijklmnop\n").unwrap();
+        let far_future_ms = 4_000_000_000_000i64;
+
+        let first = archive_bram_trace_logs(&dir, far_future_ms, 1);
+        assert_eq!(first.candidate_files, 1);
+        assert_eq!(first.archived_files, 1);
+        assert_eq!(first.failures, 0);
+        assert!(!raw.exists());
+        assert!(bram_trace_gzip_path(&raw).exists());
+
+        let second = archive_bram_trace_logs(&dir, far_future_ms, 1);
+        assert_eq!(second.candidate_files, 0);
+        assert_eq!(second.archived_files, 0);
+        assert_eq!(second.failures, 0);
+        assert_eq!(second.skipped_existing, 0);
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn archival_status_serializes_bounded_aggregate_fields_only() {
+        let mut summary = super::BramTraceArchivalSummary::default();
+        summary.candidate_files = 3;
+        summary.archived_files = 2;
+        summary.raw_bytes = 1_000;
+        summary.compressed_bytes = 200;
+        summary.redactions = 4;
+        summary.failures = 1;
+        let status = BramTraceArchivalStatus::completed(7, &summary, 123_456, 19);
+        let value = serde_json::to_value(status).unwrap();
+
+        assert_eq!(value["state"], "completed");
+        assert_eq!(value["completedAtMs"], 123_456);
+        assert_eq!(value["archiveAfterDays"], 7);
+        assert_eq!(value["candidateFiles"], 3);
+        assert_eq!(value["archivedFiles"], 2);
+        assert_eq!(value["rawBytes"], 1_000);
+        assert_eq!(value["compressedBytes"], 200);
+        assert_eq!(value["redactions"], 4);
+        assert_eq!(value["failures"], 1);
+        assert_eq!(value["elapsedMs"], 19);
+        assert!(value.get("path").is_none());
+        assert!(value.get("matchedValue").is_none());
+    }
+
+    #[test]
+    fn archival_status_reports_a_completed_zero_candidate_pass() {
+        let summary = super::BramTraceArchivalSummary::default();
+        let status = BramTraceArchivalStatus::completed(14, &summary, 654_321, 2);
+        let value = serde_json::to_value(status).unwrap();
+
+        assert_eq!(value["state"], "completed");
+        assert_eq!(value["archiveAfterDays"], 14);
+        assert_eq!(value["candidateFiles"], 0);
+        assert_eq!(value["archivedFiles"], 0);
+        assert_eq!(value["failures"], 0);
+    }
 }
 
 fn bytes_fingerprint(bytes: &[u8]) -> String {
@@ -11883,19 +12736,34 @@ fn tools_pane_hot_reload_enabled<R: tauri::Runtime>(app: &AppHandle<R>) -> bool 
         .unwrap_or(false)
 }
 
+fn project_config_describe_commands(config: Option<ProjectConfig>) -> bool {
+    config
+        .as_ref()
+        .and_then(|c| c.ai.as_ref())
+        .and_then(|a| a.describe_commands)
+        .unwrap_or(false)
+}
+
+const DEFAULT_TRACE_ARCHIVE_AFTER_DAYS: u32 = 14;
+const MAX_TRACE_ARCHIVE_AFTER_DAYS: u32 = 3650;
+
+fn project_config_trace_archive_after_days(config: Option<&ProjectConfig>) -> u32 {
+    config
+        .and_then(|c| c.traces.as_ref())
+        .and_then(|t| t.archive_after_days)
+        .unwrap_or(DEFAULT_TRACE_ARCHIVE_AFTER_DAYS)
+        .clamp(1, MAX_TRACE_ARCHIVE_AFTER_DAYS)
+}
+
 // User-facing slice of .bram.json exposed to the Settings tab and the
 // parent shell. Always returns a populated value (false / empty string)
 // so the consumer never sees nulls; out-of-scope blocks like `server`
 // stay invisible — they're project infrastructure, not Settings knobs.
 fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value {
-    // Default ON — the Settings tab's "Tool Descriptions" switch; the
-    // effective gate is ANTHROPIC_API_KEY in the host env. Only an
-    // explicit `false` disables.
-    let describe_commands = config
-        .as_ref()
-        .and_then(|c| c.ai.as_ref())
-        .and_then(|a| a.describe_commands)
-        .unwrap_or(true);
+    // Default OFF: an API key in Bram's environment is not consent to send
+    // commands, diffs, written content, context, or result excerpts to an
+    // external model. Only an explicit project setting enables the route.
+    let describe_commands = project_config_describe_commands(config.clone());
     let (
         agent,
         args,
@@ -11906,6 +12774,7 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
         tools_pane_hot_reload,
         tracing_enabled,
         inspector_tap,
+        archive_after_days,
         menus_parse,
         mirror_worklist_lifecycle_to_issue,
     ) = match config {
@@ -11943,7 +12812,14 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
                 // Default OFF — only explicit `true` enables.
                 ui.and_then(|u| u.tools_pane_hot_reload).unwrap_or(false),
                 traces.as_ref().and_then(|t| t.enabled).unwrap_or(false),
-                traces.and_then(|t| t.inspector_tap).unwrap_or(false),
+                traces
+                    .as_ref()
+                    .and_then(|t| t.inspector_tap)
+                    .unwrap_or(false),
+                traces
+                    .and_then(|t| t.archive_after_days)
+                    .unwrap_or(DEFAULT_TRACE_ARCHIVE_AFTER_DAYS)
+                    .clamp(1, MAX_TRACE_ARCHIVE_AFTER_DAYS),
                 // Default OFF — menu parsing is opt-in.
                 menus.and_then(|m| m.parse_and_display).unwrap_or(false),
                 // Default OFF — external issue mirroring is opt-in.
@@ -11960,6 +12836,7 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
             false,
             false,
             false,
+            DEFAULT_TRACE_ARCHIVE_AFTER_DAYS,
             false,
             false,
         ),
@@ -11969,7 +12846,11 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
         "shell": { "agent": agent, "args": args, "firstCommand": first_command, "continueLast": continue_last },
         "worklist": { "batchCommitActions": batch },
         "ui": { "showTargetApp": show_target_app, "toolsPaneHotReload": tools_pane_hot_reload },
-        "traces": { "enabled": tracing_enabled, "inspectorTap": inspector_tap },
+        "traces": {
+            "enabled": tracing_enabled,
+            "inspectorTap": inspector_tap,
+            "archiveAfterDays": archive_after_days
+        },
         "menus": { "parseAndDisplay": menus_parse },
         "ai": { "describeCommands": describe_commands },
     })
@@ -12634,15 +13515,18 @@ fn log_from_right_pane(app: AppHandle, payload: serde_json::Value) {
             }
             let rest_str = serde_json::to_string(&serde_json::Value::Object(rest))
                 .unwrap_or_else(|_| "{}".to_string());
+            let (safe_label, _) = redact_sensitive_text(label);
+            let (safe_rest, _) = redact_sensitive_text(&rest_str);
             append_bram_trace_line(
                 &app,
                 category,
-                &format!("{}={} {}", label_key, label, rest_str),
+                &format!("{}={} {}", label_key, safe_label, safe_rest),
             );
         }
         return;
     }
-    eprintln!("[right-pane] {}", payload);
+    let (safe_payload, _) = redact_sensitive_text(&payload.to_string());
+    eprintln!("[right-pane] {}", safe_payload);
 }
 
 #[tauri::command]
@@ -13254,6 +14138,26 @@ fn handle_settings_post<R: tauri::Runtime>(
             );
         }
     };
+    if let Some(value) = update.pointer("/traces/archiveAfterDays") {
+        let Some(days) = value.as_u64() else {
+            return (
+                400,
+                "text/plain; charset=utf-8",
+                b"traces.archiveAfterDays must be an integer".to_vec(),
+            );
+        };
+        if !(1..=u64::from(MAX_TRACE_ARCHIVE_AFTER_DAYS)).contains(&days) {
+            return (
+                400,
+                "text/plain; charset=utf-8",
+                format!(
+                    "traces.archiveAfterDays must be between 1 and {}",
+                    MAX_TRACE_ARCHIVE_AFTER_DAYS
+                )
+                .into_bytes(),
+            );
+        }
+    }
     let root = match project_root(Some(app)) {
         Some(r) => r,
         None => {
@@ -32890,6 +33794,12 @@ fn route_request<R: tauri::Runtime>(
         return (200, "application/json; charset=utf-8", body);
     }
 
+    if path == "__trace-archive-status" {
+        let body =
+            serde_json::to_vec(&bram_trace_archival_status_view()).unwrap_or_else(|_| b"{}".to_vec());
+        return (200, "application/json; charset=utf-8", body);
+    }
+
     // /__worklist/resolve[?ids=foo,bar] — verified-authorization endpoint
     // the agent reads instead of parsing the `approved:` / `drop:` turn
     // line. Returns the current `.worklist-authorization.json` body, with
@@ -34935,7 +35845,8 @@ mod worklist_authorization_tests {
 mod project_config_tests {
     use super::{
         legacy_hook_referencing_sources, project_config_batch_commit_actions,
-        project_config_mirror_worklist_lifecycle_to_issue, ProjectConfig,
+        project_config_describe_commands, project_config_mirror_worklist_lifecycle_to_issue,
+        ProjectConfig,
     };
 
     fn flag(json: &str) -> bool {
@@ -34967,6 +35878,21 @@ mod project_config_tests {
             serde_json::from_str::<ProjectConfig>(r#"{}"#).ok()
         ));
         assert!(!project_config_mirror_worklist_lifecycle_to_issue(None));
+    }
+
+    #[test]
+    fn tool_descriptions_require_explicit_project_opt_in() {
+        let on =
+            serde_json::from_str::<ProjectConfig>(r#"{ "ai": { "describeCommands": true } }"#).ok();
+        let off =
+            serde_json::from_str::<ProjectConfig>(r#"{ "ai": { "describeCommands": false } }"#)
+                .ok();
+        assert!(project_config_describe_commands(on));
+        assert!(!project_config_describe_commands(off));
+        assert!(!project_config_describe_commands(
+            serde_json::from_str::<ProjectConfig>(r#"{}"#).ok()
+        ));
+        assert!(!project_config_describe_commands(None));
     }
 
     // issue-227: the legacy-shim prune must respect every settings source
@@ -35044,13 +35970,13 @@ fn handle_describe_command<R: tauri::Runtime>(
         }
     };
     let id = parsed.get("id").and_then(|v| v.as_str()).unwrap_or("");
-    let command = parsed.get("command").and_then(|v| v.as_str()).unwrap_or("");
-    let existing = parsed
+    let command_raw = parsed.get("command").and_then(|v| v.as_str()).unwrap_or("");
+    let existing_raw = parsed
         .get("description")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .trim();
-    if id.is_empty() || command.trim().is_empty() {
+    if id.is_empty() || command_raw.trim().is_empty() {
         return (
             400,
             JSON,
@@ -35058,14 +35984,9 @@ fn handle_describe_command<R: tauri::Runtime>(
         );
     }
     let config = project_root(Some(app)).and_then(|root| load_project_config(&root));
-    // Default ON — only an explicit `false` (the Settings tab's "Tool
-    // Descriptions" switch) disables. The key check below is the
-    // effective gate for users who never configured anything.
-    let enabled = config
-        .as_ref()
-        .and_then(|c| c.ai.as_ref())
-        .and_then(|a| a.describe_commands)
-        .unwrap_or(true);
+    // Default OFF. Presence of ANTHROPIC_API_KEY alone is not consent to
+    // send project material to an external model.
+    let enabled = project_config_describe_commands(config.clone());
     if !enabled {
         append_bram_trace_line(
             app,
@@ -35095,7 +36016,7 @@ fn handle_describe_command<R: tauri::Runtime>(
     // the payload stays bounded regardless of caller. Char-boundary-safe
     // truncation: context keeps its TAIL (the sentence nearest the call),
     // result keeps its HEAD.
-    let tool_name = parsed
+    let tool_name_raw = parsed
         .get("name")
         .and_then(|v| v.as_str())
         .unwrap_or("")
@@ -35105,12 +36026,12 @@ fn handle_describe_command<R: tauri::Runtime>(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .trim();
-    let context: String = {
+    let context_raw_capped: String = {
         let chars: Vec<char> = context_raw.chars().collect();
         let start = chars.len().saturating_sub(800);
         chars[start..].iter().collect()
     };
-    let result_head: String = parsed
+    let result_head_raw: String = parsed
         .get("result")
         .and_then(|v| v.as_str())
         .unwrap_or("")
@@ -35118,6 +36039,16 @@ fn handle_describe_command<R: tauri::Runtime>(
         .chars()
         .take(600)
         .collect();
+    let (command, command_redactions) = redact_sensitive_text(command_raw);
+    let (existing, existing_redactions) = redact_sensitive_text(existing_raw);
+    let (tool_name, tool_name_redactions) = redact_sensitive_text(tool_name_raw);
+    let (context, context_redactions) = redact_sensitive_text(&context_raw_capped);
+    let (result_head, result_redactions) = redact_sensitive_text(&result_head_raw);
+    let redactions = command_redactions
+        + existing_redactions
+        + tool_name_redactions
+        + context_redactions
+        + result_redactions;
     // Cache: id hit means this exact expansion was already described;
     // key hit means an identical payload (command + description + context
     // + result head) was described under another tool_use id — reuse
@@ -35292,7 +36223,7 @@ fn handle_describe_command<R: tauri::Runtime>(
         app,
         "ai-describe",
         &format!(
-            "op=call ms={} model={} input_tokens={} output_tokens={} upgraded={} ctx={} result={} id={}",
+            "op=call ms={} model={} input_tokens={} output_tokens={} upgraded={} ctx={} result={} redactions={} id={}",
             ms,
             model,
             input_tokens,
@@ -35300,6 +36231,7 @@ fn handle_describe_command<R: tauri::Runtime>(
             if existing.is_empty() { 0 } else { 1 },
             if context.is_empty() { 0 } else { 1 },
             if result_head.is_empty() { 0 } else { 1 },
+            redactions,
             id
         ),
     );

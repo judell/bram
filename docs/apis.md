@@ -312,13 +312,31 @@ providers, switched by the `provider=` query.
 | `/__current-turn-edits` | HTTP GET | — | `{ added, removed, filePath, kind, lastToolId }` for the current turn's edit aggregates. Same derive-at-the-boundary pattern: host parses the 64 KB tail once per request, iframe binds via DataSource instead of running `currentTurnEdits(lastJsonl)` on every fanout. | agent pane iframe (Workspace turn-edits hint) |
 | `/__waiting-for-assistant` | HTTP GET | — | `{ waiting: bool }` — true when the most recent meaningful JSONL record is a user message (`tool_result`-only records skipped). Mirror of the iframe `isWaitingForAssistant` helper. | agent pane iframe |
 | `/__tool-detail` | HTTP GET | `id=<toolId>` | `{ input, result }` or `null` for a single tool by id. Mirrors `getToolDetail(jsonlText, toolId)`. | agent pane iframe (Workspace in-flight edit detail / compatibility consumers) |
-| `/__describe-command` | HTTP POST | body `{ id, command, description? }` | `{ ok: true, description, cached? }` on success; `{ ok: false, reason: "disabled"\|"no-key"\|... }` when the opt-in gates are closed or the API call fails. Synthesizes (or upgrades) a one-line intent header for a tool expansion via the Anthropic Messages API (Haiku). On by default (`ai.describeCommands`, the Settings tab's "Tool Descriptions" switch — explicit `false` disables); the effective gate is `ANTHROPIC_API_KEY` in the host environment — no key, no calls. Results are cached in memory (by tool_use id and by command) and overlaid onto `/__turns` tool entries at serve time. Trace family: `[ai-describe]`. | agent pane iframe (Transcript tool expansion) |
+| `/__describe-command` | HTTP POST | body `{ id, command, description?, name?, context?, result? }` | `{ ok: true, description, cached? }` on success; `{ ok: false, reason: "disabled"\|"no-key"\|... }` when the opt-in gates are closed or the API call fails. Synthesizes (or upgrades) a one-line intent header for a tool expansion via the Anthropic Messages API (Haiku). Default off: the project must explicitly set `ai.describeCommands: true`, and `ANTHROPIC_API_KEY` must also be present in Bram's environment. Depending on the tool, `command` can carry command text, a diff or written content, or file/search material; `context` and `result` carry bounded excerpts. Every textual prompt field passes through the host credential redactor, backed by the pinned `loomweave-scanner` Rust crate, before request construction. Redaction is heuristic defense in depth, so explicit opt-in—not redaction—is the external-processing boundary. Results are cached in memory by redacted material and overlaid onto `/__turns` tool entries at serve time. `[ai-describe] op=call` records latency, token counts, presence flags, and `redactions=N`, never prompt content. | agent pane iframe (Transcript tool expansion) |
 
 - Provider directories: `~/.claude/projects/<encoded-cwd>/` for Claude
   Code (`claude_sessions_dir` at `lib.rs:1942`),
   `~/.codex/sessions/...` for Codex (`discover_codex_sessions` at
   `lib.rs:2224`). The encoding is the absolute project path with `/`
   → `-`.
+
+Trace persistence: when tracing is enabled, `resources/bram-traces/bram-trace.log`
+is the active file. A restart archives the prior active file. In a background
+startup pass, raw `bram-trace-*.log` archives older than
+`traces.archiveAfterDays` (default 14, allowed range 1–3650) are streamed
+through the host credential redactor into sibling `.log.gz` files. The raw
+source is removed only after the compressed archive has been fully written,
+synced, and atomically installed without overwriting an existing destination.
+Failures preserve the raw source. Compressed history is retained indefinitely;
+there is no byte cap, so trace storage is intentionally unbounded. The active
+file is never an archive candidate during its session.
+
+PTY previews, serialized iframe trace payloads, and the archival pass use the
+same host credential redactor; credential detection is supplied by the pinned
+`loomweave-scanner` Rust crate, with narrow structural expansion for complete
+PEM blocks and Authorization/assignment values. Inspector entries are also
+sanitized before IPC. These are high-confidence defenses, not proof that
+arbitrary diagnostic content is secret-free.
 
 ## 6. Git & repo
 

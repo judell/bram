@@ -901,12 +901,47 @@ window.logToHost = function (payload) {
   if (!invoke) return;
   invoke("log_from_right_pane", { payload: payload }).catch(function () {});
 };
+window.__bramSensitiveTraceKey = function (key) {
+  var normalized = String(key || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  return /(?:token|password|secret|apikey|accesskey|privatekey|credential)$/.test(normalized);
+};
+window.__bramRedactSensitiveText = function (value) {
+  var marker = "[REDACTED]";
+  var text = String(value == null ? "" : value);
+  text = text.replace(
+    /-----BEGIN [^\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^\r\n]*PRIVATE KEY-----/g,
+    marker
+  );
+  text = text.replace(/-----BEGIN [^\r\n]*PRIVATE KEY-----[\s\S]*$/g, marker);
+  text = text.replace(
+    /\b(?:sk-ant-|sk-proj-|github_pat_|gh[pousr]_)[A-Za-z0-9._+\-\/=]{12,}/g,
+    marker
+  );
+  text = text.replace(/\bsk-[A-Za-z0-9._+\-\/=]{20,}/g, marker);
+  text = text.replace(/\bAKIA[A-Z0-9]{16}\b/g, marker);
+  text = text.replace(
+    /\b(Bearer|Basic)(\s+)[A-Za-z0-9._~+\-\/=]+/gi,
+    function (_, scheme, space) { return scheme + space + marker; }
+  );
+  text = text.replace(
+    /(\b(?:token|password|secret|api[_-]?key|access[_-]?key|private[_-]?key|credential)\b\s*[:=]\s*)(["'])([\s\S]*?)\2/gi,
+    function (_, prefix, quote) { return prefix + quote + marker + quote; }
+  );
+  text = text.replace(
+    /(\b(?:token|password|secret|api[_-]?key|access[_-]?key|private[_-]?key|credential)\b\s*[:=]\s*)(?!["'\[])([^\s,;}\]]+)/gi,
+    function (_, prefix) { return prefix + marker; }
+  );
+  return text;
+};
 window.__bramTraceSafeValue = function (value, depth) {
   depth = depth || 0;
   if (value == null) return value;
   var t = typeof value;
   if (t === "string") {
-    return value.length > 500 ? value.slice(0, 500) + "...[truncated " + value.length + " chars]" : value;
+    var redacted = window.__bramRedactSensitiveText(value);
+    return redacted.length > 500
+      ? redacted.slice(0, 500) + "...[truncated " + redacted.length + " chars]"
+      : redacted;
   }
   if (t === "number" || t === "boolean") return value;
   if (t !== "object") return String(value);
@@ -926,7 +961,9 @@ window.__bramTraceSafeValue = function (value, depth) {
   var objectKeys = Object.keys(value);
   for (var i = 0; i < objectKeys.length && i < 20; i++) {
     var key = objectKeys[i];
-    out[key] = window.__bramTraceSafeValue(value[key], depth + 1);
+    out[key] = window.__bramSensitiveTraceKey(key)
+      ? "[REDACTED]"
+      : window.__bramTraceSafeValue(value[key], depth + 1);
   }
   if (objectKeys.length > 20) out.__truncatedKeys = objectKeys.length - 20;
   return out;
@@ -1395,15 +1432,20 @@ window.settingsInfoBodies = {
     "When a tool-use expansion in the Transcript shows a command with no " +
     "agent-authored intent sentence (or a weak one), Bram asks Claude Haiku " +
     "for a one-line description and renders it as a `#` header above the " +
-    "command. Requests fire only when you expand a row, results are cached, " +
-    "and each call is a fraction of a cent.\n\n" +
-    "On by default, but it only does anything when `ANTHROPIC_API_KEY` is " +
-    "set in the environment Bram was launched from — no key, no calls, no " +
-    "behavior change. The key is read from the environment only; it is " +
-    "never written to `.bram.json`.\n\n" +
-    "Note: with this on and a key present, expanded command text is sent " +
-    "to the Anthropic API. Turn this off if that's not acceptable for your " +
-    "project. Per-call cost is traced as `[ai-describe]` in " +
+    "command. Eligible visible rows are described eagerly; expanding a row " +
+    "can also request or improve its description. Results are cached, and " +
+    "each call is a fraction of a cent.\n\n" +
+    "Off by default. Turning it on is project-level consent to send the " +
+    "selected tool material to the Anthropic API when `ANTHROPIC_API_KEY` " +
+    "is set in Bram's environment. Depending on the row, that material can " +
+    "include command text, a file diff or written content, a file/search " +
+    "target, the agent's preceding context, and a result excerpt. Bram " +
+    "uses a Rust secret-scanning library to redact common credential shapes " +
+    "before sending, but heuristic " +
+    "redaction cannot guarantee arbitrary content contains no secrets. " +
+    "The key itself is read from the environment only and is never written " +
+    "to `.bram.json`.\n\n" +
+    "Per-call cost and redaction count are traced as `[ai-describe]` in " +
     "resources/bram-traces/bram-trace.log.\n\n" +
     "Persists in .bram.json under ai.describeCommands.",
   traces:
@@ -1421,10 +1463,18 @@ window.settingsInfoBodies = {
     "traces live (no Inspector export needed). Capped at 50 entries " +
     "per 200ms tick; overflow emits subkind=inspector-overflow. " +
     "Inspector traces are intentionally complete and noisy (one per " +
-    "keystroke, etc.); future work will add per-category filters. " +
+    "keystroke, etc.); values pass through Bram's trace sanitizer first. " +
     "Requires Tracing enabled above." +
     "\n\n" +
-    "Both persist in .bram.json under traces.*.",
+    "At startup, raw trace archives older than the configured window are " +
+    "sanitized with the host credential redactor and written as gzip files. " +
+    "The raw source is removed only after its sanitized archive is safely " +
+    "installed. Compressed history is retained indefinitely, so storage use " +
+    "is intentionally unbounded. The raw window defaults to 14 days and can " +
+    "be changed from 1 to 3650 days. Redaction is heuristic defense in depth, " +
+    "not proof that arbitrary trace content is secret-free.\n\n" +
+    "These settings persist in .bram.json under traces.enabled, " +
+    "traces.inspectorTap, and traces.archiveAfterDays.",
 };
 
 // "Claude Code" for the claude provider, Title-cased provider name
@@ -6648,9 +6698,9 @@ window.addEventListener("message", async (event) => {
 // XMLUI Inspector's window._xsLogs into bram-trace.log as
 // [iframe] subkind=inspector-event so they interleave with host traces
 // live. Polls at 200 ms with a per-tick cap; overflow emits
-// subkind=inspector-overflow. Forwards verbatim — selectivity (filter
-// by category, drop per-keystroke noise, etc.) is a follow-up; until
-// then the stream carries everything XMLUI logs.
+// subkind=inspector-overflow. Every field passes through
+// __bramTraceSafeValue before IPC; selectivity (filter by category,
+// drop per-keystroke noise, etc.) remains a follow-up.
 var __inspectorTap = {
   intervalId: null,
   highWater: 0,
@@ -6667,7 +6717,9 @@ function __inspectorTrace(subkind, fields) {
     if (fields && typeof fields === "object") {
       for (var k in fields) {
         if (Object.prototype.hasOwnProperty.call(fields, k)) {
-          payload[k] = fields[k];
+          payload[k] = window.__bramSensitiveTraceKey(k)
+            ? "[REDACTED]"
+            : window.__bramTraceSafeValue(fields[k], 0);
         }
       }
     }

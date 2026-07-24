@@ -4,13 +4,15 @@
   var.argsDraft="{''}"
   var.firstDraft="{''}"
   var.continueDraft="{false}"
+  var.archiveDaysDraft="{14}"
+  var.archiveDaysSaved="{14}"
   var.infoTitle="{''}"
   var.infoBody="{''}">
 
   <DataSource
     id="settingsConfig"
     url="/__settings"
-    onLoaded="(v) => { agentDraft = settingsAgent(v); argsDraft = settingsArgs(v); firstDraft = settingsFirstCommand(v); continueDraft = settingsContinueLast(v); }" />
+    onLoaded="(v) => { agentDraft = settingsAgent(v); argsDraft = settingsArgs(v); firstDraft = settingsFirstCommand(v); continueDraft = settingsContinueLast(v); const days = Number((v &amp;&amp; v.traces &amp;&amp; v.traces.archiveAfterDays) || 14); archiveDaysSaved = days; if (!saveArchiveSettings.inProgress) archiveDaysDraft = days; }" />
 
   <APICall
     id="saveSettings"
@@ -18,6 +20,17 @@
     url="/__settings"
     body="{$param}"
     onSuccess="settingsConfig.refetch()" />
+
+  <APICall
+    id="saveArchiveSettings"
+    method="post"
+    url="/__settings"
+    body="{$param}"
+    onSuccess="archiveDaysSaved = Number(archiveDaysDraft); settingsConfig.refetch()" />
+
+  <DataSource
+    id="traceArchiveStatus"
+    url="/__trace-archive-status" />
 
   <VStack
     padding="$space-6"
@@ -29,6 +42,10 @@
     <ChangeListener
       listenTo="{settingsChangedEvt.value &amp;&amp; settingsChangedEvt.value.tick}"
       onDidChange="() => { window.__bramIframeTrace('refetch-called', {context: 'settings-changed'}); settingsConfig.refetch(); }" />
+    <Timer
+      interval="500"
+      enabled="{traceArchiveStatus.value &amp;&amp; traceArchiveStatus.value.state === 'pending'}"
+      onTick="traceArchiveStatus.refetch()" />
 
     <Heading level="h2">Settings</Heading>
     <Text
@@ -162,6 +179,41 @@
           label="Inspector trace tap"
           initialValue="{settingsInspectorTap(settingsConfig.value)}"
           onDidChange="(v) => saveSettings.execute({ traces: { inspectorTap: v } })" />
+        <VStack gap="$space-2" width="12rem">
+          <NumberBox
+            label="Keep raw traces for (days)"
+            width="100%"
+            integersOnly="{true}"
+            minValue="{1}"
+            maxValue="{3650}"
+            initialValue="{settingsConfig.value.traces.archiveAfterDays || 14}"
+            onDidChange="(v) => archiveDaysDraft = v" />
+          <HStack>
+            <Button
+              label="Save"
+              enabled="{!saveArchiveSettings.inProgress &amp;&amp; Number.isInteger(Number(archiveDaysDraft)) &amp;&amp; Number(archiveDaysDraft) >= 1 &amp;&amp; Number(archiveDaysDraft) &lt;= 3650 &amp;&amp; Number(archiveDaysDraft) !== Number(archiveDaysSaved)}"
+              onClick="saveArchiveSettings.execute({ traces: { archiveAfterDays: Number(archiveDaysDraft) } })" />
+          </HStack>
+        </VStack>
+        <Text
+          fontSize="$fontSize-xs"
+          color="$textColor-secondary"
+          value="At startup, older raw archives are sanitized and compressed. Compressed history is retained indefinitely." />
+        <Text
+          when="{traceArchiveStatus.value &amp;&amp; traceArchiveStatus.value.state === 'not-run'}"
+          fontSize="$fontSize-xs"
+          color="$textColor-secondary"
+          value="Archival has not run in this host process." />
+        <Text
+          when="{traceArchiveStatus.value &amp;&amp; traceArchiveStatus.value.state === 'pending'}"
+          fontSize="$fontSize-xs"
+          color="$textColor-secondary"
+          value="Archival is running…" />
+        <Text
+          when="{traceArchiveStatus.value &amp;&amp; traceArchiveStatus.value.state === 'completed'}"
+          fontSize="$fontSize-xs"
+          color="{traceArchiveStatus.value &amp;&amp; traceArchiveStatus.value.failures ? '$color-danger-700' : '$textColor-secondary'}"
+          value="{'Last startup: ' + traceArchiveStatus.value.candidateFiles + ' candidate(s) older than ' + traceArchiveStatus.value.archiveAfterDays + ' days; ' + traceArchiveStatus.value.archivedFiles + ' archived, ' + traceArchiveStatus.value.failures + ' failed.'}" />
       </VStack>
 
     </VStack>

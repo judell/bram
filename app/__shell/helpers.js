@@ -4745,7 +4745,7 @@ function __bramEagerDescribe(payload) {
         var e = entries[k];
         if (!e || e.kind !== "tool" || !e.id) continue;
         if (e.aiDescription) continue;
-        if (!e.commandDisplay || e.name === "apply_patch") continue;
+        if (!window.__bramDescribeMaterial(e)) continue;
         if (window.__bramDescribeRequested[e.id]) continue;
         queue.push(e);
       }
@@ -6022,6 +6022,27 @@ window.__bramToggleInArray = function (arr, id) {
 // keeps a good description unchanged and upgrades a weak one (approval
 // feedback on haiku-command-descriptions).
 window.__bramDescribeRequested = {};
+// describe-edit-write-rows: the describable text per row. Bash/exec
+// (and apply_patch's patch) carry commandDisplay; Edit/MultiEdit carry
+// the host-reconstructed diff; a markdown Write carries its content in
+// commandMarkdown; other Writes fall back to the summary (tool + path
+// — with the agent-context rider, enough for an intent line). Non-edit
+// tools without a commandDisplay (Read, Grep, MCP) return "" and stay
+// undescribed — their rows are self-describing.
+window.__bramDescribeMaterial = function (item) {
+  if (!item) return "";
+  if (item.commandDisplay) return item.commandDisplay;
+  var editFamily = { Edit: 1, MultiEdit: 1, NotebookEdit: 1, Write: 1, apply_patch: 1 };
+  if (editFamily[item.name]) return item.diff || item.commandMarkdown || item.summary || "";
+  // describe-read-rows: Read/Grep/Glob carry their target — file path (+
+  // line range), search pattern — in the summary, which with the agent-
+  // context rider is enough for an intent line ("Read /etc/hosts" ->
+  // "Inspect the system hosts file"). Codex reads are shell cat/sed with a
+  // commandDisplay and are already covered by the branch above.
+  var readFamily = { Read: 1, Grep: 1, Glob: 1 };
+  if (readFamily[item.name]) return item.summary || "";
+  return "";
+};
 window.__bramExpandTool = function (arr, item) {
   // Arm the xmlui freeze-probe window (xmlui-eval-probe-vendor): for 1.5s
   // after an expansion click, the instrumented vendored engine emits
@@ -6032,8 +6053,7 @@ window.__bramExpandTool = function (arr, item) {
   var next = window.__bramToggleInArray(arr, item && item.id);
   try {
     var opening = item && item.id && (next || []).indexOf(item.id) >= 0;
-    var cmd = (item && item.commandDisplay) || "";
-    if (opening && cmd && item.name !== "apply_patch") {
+    if (opening && window.__bramDescribeMaterial(item)) {
       window.__bramRequestCommandDescription(item);
     }
   } catch (e) { /* expand must never fail on describe plumbing */ }
@@ -6104,7 +6124,10 @@ window.__bramRequestCommandDescription = function (item, onDone) {
       body: JSON.stringify({
         id: id,
         name: item.name || "",
-        command: item.commandDisplay || "",
+        // Material, not just commandDisplay (describe-edit-write-rows):
+        // diffs and patches can be large — cap client-side; the host
+        // caps context/result but not command.
+        command: (window.__bramDescribeMaterial(item) || "").slice(0, 4000),
         description: item.description || "",
         // Intent prose + result head (iterate 2026-07-08): the agent's
         // stated reason for the call and what it produced — Haiku

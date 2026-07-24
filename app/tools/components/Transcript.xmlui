@@ -175,7 +175,14 @@
           <!-- Expand toggles the fold; when the ai.describeCommands opt-in
                is on, opening a command-bearing row also requests a Haiku
                intent header via /__describe-command (no-op otherwise). -->
-          <Link noIndicator="true" onClick="expanded = window.__bramExpandTool(expanded, $item)">
+          <!-- Expanding a row is a read-pause gesture, like scrolling up:
+               clear atBottom so the describe-splice repin (and its settle
+               Timer) stop yanking the viewport to the absolute bottom while
+               the eager describe queue streams aiDescription lines into edit
+               rows (describe-edit-write-rows made every edit row a describe
+               target — 4 repins/1.5s on one expand, 2026-07-24 trace). Follow
+               resumes when the user scrolls back to the bottom. -->
+          <Link noIndicator="true" onClick="expanded = window.__bramExpandTool(expanded, $item); atBottom = false">
             <HStack gap="$space-1" verticalAlignment="center">
               <!-- promote-tool-descriptions-to-row (inverted): the row leads
                    with the Haiku-resolved intent (aiDescription, requested

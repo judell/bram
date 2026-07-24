@@ -35152,9 +35152,13 @@ fn handle_describe_command<R: tauri::Runtime>(
     // disambiguates what actually happened. The upgrade variant carries
     // the agent-authored sentence and asks for it back unchanged when
     // it's already good.
+    // describe-edit-write-rows / describe-read-rows: the payload may be a
+    // shell command, a file diff/patch, written content, or a file/search
+    // target (Read/Grep/Glob) — say so, so Haiku doesn't describe a diff
+    // or a path as a command.
     let mut prompt = String::from(
-        "You are writing the one-line intent header shown above a command in a \
-         developer-tool log.\n\n",
+        "You are writing the one-line intent header shown above a command, \
+         file change, or file access in a developer-tool log.\n\n",
     );
     if !tool_name.is_empty() {
         prompt.push_str(&format!("Tool: {}\n\n", tool_name));

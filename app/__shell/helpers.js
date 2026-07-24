@@ -6274,11 +6274,13 @@ function __bramQueueScheduleSave(entries) {
     })
       .then(function (response) {
         if (!response.ok) throw new Error("queue save returned " + response.status);
-        try {
-          if (sessionStorage.getItem(__BRAM_QUEUE_RECOVERY_KEY) === payload) {
-            sessionStorage.removeItem(__BRAM_QUEUE_RECOVERY_KEY);
-          }
-        } catch {}
+        // queue-remount-stale-hydration: do NOT clear the snapshot on save.
+        // It is the session-scoped source of truth (overwritten on every
+        // mutation); clearing it handed remount back to the /__queue
+        // DataSource's stale-while-revalidate cache, which reverted adds
+        // (item gone) and deletes (item back). The snapshot is cleared only
+        // by the browser session ending; the host /__queue is the
+        // cross-restart backstop, read when the snapshot is absent.
       })
       .catch(function (e) {
         window.logToHost({ kind: "queue-save", phase: "err", error: String(e) });
@@ -6295,7 +6297,12 @@ window.__bramQueueRestore = function (hostEntries) {
   try {
     var recovered = JSON.parse(raw);
     if (!recovered || !Array.isArray(recovered.entries)) throw new Error("invalid entries");
-    __bramQueueScheduleSave(recovered.entries);
+    // queue-remount-stale-hydration: the snapshot is now persistent, so
+    // reschedule the host write only when it is genuinely ahead of the
+    // host — otherwise every tab switch would emit a redundant save.
+    if (JSON.stringify(recovered.entries) !== JSON.stringify(fallback)) {
+      __bramQueueScheduleSave(recovered.entries);
+    }
     return recovered.entries;
   } catch (e) {
     try { sessionStorage.removeItem(__BRAM_QUEUE_RECOVERY_KEY); } catch {}

@@ -36289,6 +36289,19 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
     let route_start = std::time::Instant::now();
     trace_route_entry(app, &method, path, query, &route_correlation_id);
 
+    // issue-113-h6: the request Origin drives the CORS response. The agent
+    // pane's cross-origin fetches to the loopback send NO Origin (confirmed by
+    // soak: real pane traffic was 100% `(none)`), so those responses are not
+    // CORS-restricted; the old `*` was load-bearing only for a genuinely
+    // cross-origin browser caller (an attacker page). ACAO is now echoed only
+    // for the shell origin at the response builder below, via
+    // cors_allowed_origin.
+    let request_origin: Option<String> = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Origin"))
+        .map(|h| h.value.as_str().to_string());
+
     // POST-only routes (route_request is GET-only).
     let (status, content_type, body) = if path == "__queue/save" {
         if method != "POST" {
@@ -36394,13 +36407,10 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
         route_start.elapsed().as_millis(),
     );
 
-    let response = tiny_http::Response::from_data(body)
+    let mut response = tiny_http::Response::from_data(body)
         .with_status_code(status)
         .with_header(
             tiny_http::Header::from_bytes(&b"Content-Type"[..], content_type.as_bytes()).unwrap(),
-        )
-        .with_header(
-            tiny_http::Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap(),
         )
         .with_header(
             // Internal API endpoints serve live state (sessions JSONL, git
@@ -36411,6 +36421,22 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             )
             .unwrap(),
         );
+    // issue-113-h6: replace the wildcard ACAO (root cause #2). Echo the
+    // header only for the shell origin (the agent-pane webview); omit it for
+    // any other Origin and for no-Origin callers (the pane's own fetches and
+    // curl, which need no CORS grant — their responses are not
+    // CORS-restricted). A cross-origin browser page therefore cannot read the
+    // response, and the target pane's `bramapp://localhost` origin is excluded
+    // by not equalling SHELL_ORIGIN.
+    if let Some(allowed) = cors_allowed_origin(request_origin.as_deref()) {
+        response.add_header(
+            tiny_http::Header::from_bytes(
+                &b"Access-Control-Allow-Origin"[..],
+                allowed.as_bytes(),
+            )
+            .unwrap(),
+        );
+    }
     let _ = request.respond(response);
 }
 
@@ -36431,6 +36457,31 @@ const SHELL_ORIGIN: &str = "http://tauri.localhost";
 
 #[cfg(not(any(target_os = "windows", target_os = "android")))]
 const SHELL_ORIGIN: &str = "tauri://localhost";
+
+// issue-113-h6: the sole Origin that receives a CORS grant is the shell
+// (agent-pane) webview. No-Origin callers (the pane's own fetches, curl) and
+// every other cross-origin browser page get none, so a malicious page cannot
+// read loopback responses, and the target pane's bramapp:// origin is excluded
+// by not equalling SHELL_ORIGIN. Pure for unit testing.
+fn cors_allowed_origin(request_origin: Option<&str>) -> Option<&'static str> {
+    match request_origin {
+        Some(o) if o == SHELL_ORIGIN => Some(SHELL_ORIGIN),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod cors_origin_tests {
+    use super::{cors_allowed_origin, SHELL_ORIGIN};
+
+    #[test]
+    fn only_the_shell_origin_is_granted() {
+        assert_eq!(cors_allowed_origin(None), None);
+        assert_eq!(cors_allowed_origin(Some(SHELL_ORIGIN)), Some(SHELL_ORIGIN));
+        assert_eq!(cors_allowed_origin(Some("http://evil.com")), None);
+        assert_eq!(cors_allowed_origin(Some("bramapp://localhost")), None);
+    }
+}
 
 // Distinct origin for the target-app pane so same-origin policy isolates it
 // from the shell's `window.__TAURI__` and the loopback `/__*` routes

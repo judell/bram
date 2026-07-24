@@ -32,8 +32,9 @@ The actors that matter:
   cut off from `window.__TAURI__` and the dynamic host routes — display-only.
 - **Any other local process / browser tab.** The host serves a loopback HTTP
   API on `127.0.0.1`; co-resident software can reach it if it learns the port
-  (written to `resources/.bram-port`). **This is the main remaining exposure —
-  see H6.**
+  (written to `resources/.bram-port`). A cross-origin browser tab can no longer
+  *read* the responses (H6 — CORS restricted to the shell origin); a same-user
+  local process remains an accepted residual.
 
 ## Root causes
 
@@ -46,11 +47,11 @@ root remains.
    `bramapp://localhost` origin; cross-origin `getTauriInvoke()` returns null,
    the PTY-driving helpers no-op, and `handle_target_scheme` refuses the dynamic
    host routes. Untrusted page content no longer inherits the IPC/route surface.
-2. **The loopback server is unauthenticated with wildcard CORS.** No per-session
-   token, and every response still sets `Access-Control-Allow-Origin: *`
-   (`lib.rs:36403`). Any local caller that learns the port can drive the routes
-   and read the responses. **The sole remaining root — see H6.** The codebase
-   already has the pattern to copy: the `BRAM_MENU_TOKEN` guard (`lib.rs:5543`).
+2. ~~**The loopback server is unauthenticated with wildcard CORS.**~~ **FIXED
+   for the browser vector** (H6). The wildcard ACAO is replaced by a grant only
+   to the shell origin, so no cross-origin browser page can read loopback
+   responses. Residual: a same-user local process is not CORS-bound (accepted;
+   a per-session token was designed and dropped as low-value — see H6).
 3. ~~**Authorization is derived from PTY input bytes.**~~ **FIXED** (H2,
    `6d49edf`). Approve/drop authorization is host-owned; a forged `approved:`
    in relayed PTY input no longer writes an auth record.
@@ -81,7 +82,7 @@ day, **M** = half to two days, **L** = more than two days.
 | H3 | Claude guard exits 0 for all `Bash`; write ops bypass the worklist. | **DONE** — `_BASH_WRITE_PATTERNS` in the Claude guard (`claude-worklist-guard.py:113`). Root cause #4. |
 | H4 | Auth did not fail closed on interrupt. | **DONE** — `invalidate_worklist_authorization` at every interrupt site; `validate_*`/`ensure_*` reject an interrupted or past-TTL record (`d044b34`, `e75fea2`). |
 | H5 | Issue-close / push side effects ungated. | **DONE** — agent `/__issue/close` route removed; closing is a host consequence of the user's explicit Push (`8c64ef7`). |
-| **H6** | **Loopback is unauthenticated; `Access-Control-Allow-Origin: *` lets any local process/tab that learns the port drive routes and read responses.** | **OPEN — highest-leverage remaining item.** Add a per-session bearer token alongside `.bram-port`, require it on `/__*`, and tighten CORS from `*` to the shell origin. Copy `BRAM_MENU_TOKEN` (`lib.rs:5543`, `36403`). Effort **M**. Issue #113. |
+| H6 | Loopback wildcard CORS let any cross-origin browser page that learned the port read responses. | **DONE — browser vector** (`issue-113-h6-loopback-cors-and-token`). The blanket `Access-Control-Allow-Origin: *` is gone; ACAO is echoed only for the shell (agent-pane) origin and omitted for every other Origin and for no-Origin callers (`cors_allowed_origin`). Confirmed by soak that real pane traffic sends no Origin, so the change is transparent to it; a cross-origin browser page — and the target pane's `bramapp://` origin — can no longer read loopback responses. **Residual (accepted):** a same-user *local process* is not browser-CORS-bound; a per-session token was designed and deliberately dropped as low-value, since such a process could equally read the token (env via `ps eww`, or a port-adjacent file). |
 
 ### Medium
 
@@ -110,19 +111,17 @@ day, **M** = half to two days, **L** = more than two days.
 
 ## Live plan (what remains, ranked)
 
-The Phase 0/1 quick wins and root fix from the original plan have all landed
-(C1/C2/C3/H1/H2/H3/M6/L5). The remaining work, in priority order:
+The Phase 0/1 quick wins, the root fix, and H6 (CORS) have all landed
+(C1/C2/C3/H1/H2/H3/H6/M6/L5). The remaining work, in priority order:
 
-1. **H6 — loopback bearer token + tighten CORS.** The last unfixed root cause;
-   post-C1 it is the main structural exposure. Per-session token alongside
-   `.bram-port`, required on `/__*`; CORS from `*` to the shell origin. Also
-   covers M7 for the agent-direct path. (#113)
-2. **M3 — PTY child env allowlist**, behind an opt-in. (#114)
-3. **Confirm M5** (Codex path intersection) and **close M1** (Setup hard-fail on
+1. **M3 — PTY child env allowlist**, behind an opt-in. (#114)
+2. **Confirm M5** (Codex path intersection) and **close M1** (Setup hard-fail on
    missing Python). (#119)
-4. **M4 — durable audit ledger** — the remaining #114 auditability tranche;
+3. **M4 — durable audit ledger** — the remaining #114 auditability tranche;
    value scales with shared use / demonstrability. (#114)
-5. **Cleanups:** L2/L3 path-param guards, L4 `mcp__*` matcher. (#110, #119)
+4. **M7** — an independent host check on `/__issue/comment`. (#121)
+5. **Cleanups:** L2/L3 path-param guards, L4 `mcp__*` matcher, and per-command
+   trust-boundary docs in `docs/apis.md`. (#110, #119, #113)
 
 ## Per-issue map
 
@@ -138,9 +137,10 @@ The Phase 0/1 quick wins and root fix from the original plan have all landed
   remain: M3 (env) and M4 (audit ledger). Heuristic redaction cannot prove
   arbitrary content secret-free. **Medium until M3/M4 land.**
 - **#112 — PTY / shell injection (closed).** H1 and H2 resolved.
-- **#113 — host-side IPC scoping.** C1 (the structural fix) and C2 landed. **H6
-  is the lead remaining item and lives here**, plus per-command trust-boundary
-  documentation in `docs/apis.md`. **High until H6 lands.**
+- **#113 — host-side IPC scoping.** C1 (the structural fix), C2, and H6 (CORS
+  restricted to the shell origin) all landed; a same-user local process is the
+  accepted residual. Remaining: per-command trust-boundary documentation in
+  `docs/apis.md`. **Low.**
 - **#118 — commit/push/issue-close gating (closed).** H5 resolved.
 - **#119 — guard coverage across agents.** H3 and L5 landed. Residual: M1
   (fail-open without Python), M5 (confirm Codex path intersection), L4 (mcp

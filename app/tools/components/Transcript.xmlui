@@ -204,13 +204,15 @@
             </HStack>
           </Link>
           <!-- transcript-render-menu-answers: the user's menu answer (host
-               menu-answer overlay, keyed by tool_use id). User-authored
-               affordance: same primary color as the You label. Only real
-               answers carry the field; other prompt outcomes render nothing.
-               AskUserQuestion hides it while expanded — the expansion's Q/A
-               prose already shows the same answer. -->
+               menu-answer overlay, keyed by tool_use id). AskUserQuestion
+               rows only — a bare '✔ Yes' under a permission-prompted
+               Read/Bash row is clutter (2026-07-23 specimen); permission
+               answers stay captured host-side but render nothing. Hidden
+               while expanded — the expansion's Q/A prose shows the same
+               answer. User-authored affordance: same primary color as the
+               You label. -->
           <Text
-            when="{$item.menuAnswer &amp;&amp; !($item.name === 'AskUserQuestion' &amp;&amp; (expanded || []).includes($item.id))}"
+            when="{$item.menuAnswer &amp;&amp; $item.name === 'AskUserQuestion' &amp;&amp; !(expanded || []).includes($item.id)}"
             fontSize="$fontSize-sm"
             fontWeight="bold"
             color="$color-primary-600"

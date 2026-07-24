@@ -1277,7 +1277,7 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
         }
         Show::Grid => {
             let (_, _, raw, is_picker) = grid_view.as_ref().unwrap();
-            let menu = PtyMenu {
+            let mut menu = PtyMenu {
                 // detect-session-resume-picker: a grid-classified picker
                 // (session resume et al) is a CLI prompt, not a tool
                 // approval — label it Picker so the pane and the
@@ -1293,6 +1293,49 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
                 at_host_ms: Some(now),
                 signature_source: Some("grid"),
             };
+            // grid-rescue-menu-shows-pending-command (Andrew 2026-07-23):
+            // a rescued menu rendered content-free — "Agent wants to use
+            // Bash", bare Yes/No — while the queued claim held the full
+            // command (a 2-option compound-approval prompt can't label-join
+            // the 3-option synthesized claim). Borrow the descriptive
+            // fields from an unambiguous claim; options stay the grid's.
+            // Text (description + command) is preferred over the canonical
+            // signature — the pane renders one or the other.
+            if !*is_picker {
+                match grid_rescue_candidate(&claims, &menu.tool) {
+                    Ok(c) => {
+                        menu.text = c.menu.text.clone();
+                        if menu.text.is_empty() {
+                            menu.tool_call_signature = c.signature.clone();
+                        }
+                        menu.tool_call_diff = c.menu.tool_call_diff.clone();
+                        menu.tool_call_content = c.menu.tool_call_content.clone();
+                        if bram_trace_enabled() {
+                            append_bram_trace_line(
+                                app,
+                                "hook-menu",
+                                &format!(
+                                    "op=grid-rescue-enriched claim={} tool={}",
+                                    c.id_key, c.menu.tool
+                                ),
+                            );
+                        }
+                    }
+                    Err(reason) => {
+                        if bram_trace_enabled() {
+                            append_bram_trace_line(
+                                app,
+                                "hook-menu",
+                                &format!(
+                                    "op=grid-rescue-bare reason={} depth={}",
+                                    reason,
+                                    claims.len()
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
             let labels: Vec<String> = menu
                 .options
                 .iter()
@@ -1371,6 +1414,78 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
             turn_state_set_menu(app, payload.clone(), source, "detected");
             emit_pty_menu_with_prose(app, &payload);
         }
+    }
+}
+
+// grid-rescue-menu-shows-pending-command: pick the single queued claim
+// that can lend its command content to a grid-rescued display. Exactly
+// one claim, or exactly one whose tool matches the grid's inferred
+// tool; anything else is ambiguous and the rescue stays bare — options
+// are keystroke ground truth and are never borrowed, so a wrong guess
+// here could only mislabel the preview, and we don't guess.
+fn grid_rescue_candidate<'a>(
+    claims: &'a [HookMenuClaim],
+    tool: &str,
+) -> Result<&'a HookMenuClaim, &'static str> {
+    if claims.is_empty() {
+        return Err("no-claim");
+    }
+    if claims.len() == 1 {
+        return Ok(&claims[0]);
+    }
+    let mut same_tool = claims.iter().filter(|c| c.menu.tool == tool);
+    match (same_tool.next(), same_tool.next()) {
+        (Some(c), None) => Ok(c),
+        _ => Err("ambiguous"),
+    }
+}
+
+#[cfg(test)]
+mod grid_rescue_candidate_tests {
+    use super::*;
+
+    fn claim(id_key: &str, tool: &str) -> HookMenuClaim {
+        HookMenuClaim {
+            id_key: id_key.to_string(),
+            tool_use_id: None,
+            signature: None,
+            menu: PtyMenu {
+                tool: tool.to_string(),
+                text: String::new(),
+                options: Vec::new(),
+                tool_call_signature: None,
+                tool_call_diff: None,
+                tool_call_content: None,
+                cache_source: None,
+                at_host_ms: None,
+                signature_source: None,
+            },
+            at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn selection_rules() {
+        assert!(matches!(
+            grid_rescue_candidate(&[], "Bash"),
+            Err("no-claim")
+        ));
+        // Lone claim wins regardless of tool.
+        assert_eq!(
+            grid_rescue_candidate(&[claim("a", "Edit")], "Bash")
+                .unwrap()
+                .id_key,
+            "a"
+        );
+        // Multiple claims: exactly one matching the grid tool wins.
+        let mixed = [claim("a", "Edit"), claim("b", "Bash")];
+        assert_eq!(grid_rescue_candidate(&mixed, "Bash").unwrap().id_key, "b");
+        // Two same-tool claims: ambiguous, stay bare.
+        let dup = [claim("a", "Bash"), claim("b", "Bash")];
+        assert!(matches!(
+            grid_rescue_candidate(&dup, "Bash"),
+            Err("ambiguous")
+        ));
     }
 }
 
@@ -4319,10 +4434,19 @@ fn permission_request_to_menu(value: &serde_json::Value) -> Option<PtyMenu> {
         .or_else(|| ti.and_then(|t| t.get("file_path").and_then(|c| c.as_str())))
         .unwrap_or("")
         .to_string();
-    let text = if detail.is_empty() {
-        format!("Run {}?", tool)
-    } else {
-        format!("{}: {}", tool, detail)
+    // grid-rescue-menu-shows-pending-command: lead with the agent-authored
+    // description when the payload carries one — the same English line
+    // Claude Code prints above its own prompt ("Generate all 11 claims
+    // with Qwen 14B"), at zero API cost. The raw command follows it.
+    let description = ti
+        .and_then(|t| t.get("description").and_then(|d| d.as_str()))
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+    let text = match (description, detail.is_empty()) {
+        (Some(desc), false) => format!("{}\n{}: {}", desc, tool, detail),
+        (Some(desc), true) => format!("{}\nRun {}?", desc, tool),
+        (None, false) => format!("{}: {}", tool, detail),
+        (None, true) => format!("Run {}?", tool),
     };
     let mut options = vec![MenuOption {
         key: "1".to_string(),

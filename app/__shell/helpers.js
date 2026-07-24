@@ -5835,6 +5835,45 @@ window.__bramAgentChipTooltip = function (agent) {
   return s;
 };
 
+// Dismissible footer subagent chips (dismissible-subagent-chips): a
+// per-session set of dismissed agent ids so a finished subagent's chip can
+// be hidden from the footer strip without deleting anything host-side (the
+// roster keeps tracking it). sessionStorage scope is deliberate — a new
+// agent session gets a fresh roster, so a dismissal shouldn't outlive the
+// session. Stored as a JSON array of ids under one key.
+var __BRAM_DISMISSED_AGENTS_KEY = "bram.dismissedAgentIds";
+
+window.__bramRestoreDismissedAgents = function () {
+  var raw = __bramReadSS(__BRAM_DISMISSED_AGENTS_KEY, "");
+  if (!raw) return [];
+  try {
+    var arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : [];
+  } catch (e) { return []; }
+};
+
+// Append agentId to the dismissed set, persist, and return the new array
+// (the XMLUI caller assigns the result back to its var — same shape as
+// __bramDismissSendNotice).
+window.__bramDismissAgent = function (dismissed, agentId) {
+  var list = Array.isArray(dismissed) ? dismissed.slice() : [];
+  if (agentId && list.indexOf(agentId) === -1) list.push(agentId);
+  __bramWriteSS(__BRAM_DISMISSED_AGENTS_KEY, list.length ? JSON.stringify(list) : "");
+  return list;
+};
+
+// The footer roster minus dismissed ids. Drives the strip's when, the
+// top-3 Items, and the "+N more" dropdown so a dismissal promotes the next
+// agent up from overflow. Returns the raw agents array untouched when
+// nothing is dismissed.
+window.__bramVisibleFooterAgents = function (roster, dismissed) {
+  var agents = (roster && roster.agents) || [];
+  if (!dismissed || !dismissed.length) return agents;
+  return agents.filter(function (a) {
+    return dismissed.indexOf(a && a.agentId) === -1;
+  });
+};
+
 // Footer session-info line with the transcript viewport spliced in after
 // the provider token: "CLAUDE · Main · july5 · id …" or
 // "CLAUDE · subagent: <description> · july5 · id …". The viewport lives

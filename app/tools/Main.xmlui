@@ -1,4 +1,4 @@
-<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{''}" var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.footerVoiceRecording="{false}" var.headerInflightTick="{0}" var.agentSwitcherSelected="{'claude'}" var.agentSwitching="{false}" var.composerFocused="{false}" var.transcriptAgentId="{''}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}"
+<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{''}" var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.footerVoiceRecording="{false}" var.headerInflightTick="{0}" var.agentSwitcherSelected="{'claude'}" var.agentSwitching="{false}" var.composerFocused="{false}" var.transcriptAgentId="{''}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}" var.dismissedAgentIds="{window.__bramRestoreDismissedAgents()}"
   onInit="updateBannerDismissedVersion = readLocalStorage('bram.updateBannerDismissedVersion', ''); startBramLatestJsonlPush(() => (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || '')">
   <PushSource
     id="mainAgentStatus"
@@ -615,7 +615,7 @@
            can't crowd the footer. Tooltips carry type, description, and
            the model the subagent ran on. -->
       <HStack
-        when="{((footerAgents.value || {}).agents || []).length > 0}"
+        when="{window.__bramVisibleFooterAgents(footerAgents.value, dismissedAgentIds).length > 0}"
         gap="$space-1"
         paddingHorizontal="$space-1"
         verticalAlignment="center">
@@ -626,21 +626,33 @@
           tooltip="{window.__bramMainChipTooltip ? window.__bramMainChipTooltip(footerAgents.value) : 'Show the main conversation in the Transcript tab'}"
           onClick="transcriptAgentId = ''; navigate('/transcript')" />
         <!-- One continuous reverse-chron read: newest chip leftmost (after
-             Main), then the dropdown continues newest→oldest top-down. -->
-        <Items data="{((footerAgents.value || {}).agents || []).slice(-3).reverse()}">
-          <Button
-            label="{window.__bramAgentChipLabel($item)}"
-            size="xs"
-            variant="outlined"
-            tooltip="{(window.__bramAgentChipTooltip || window.__bramAgentChipLabel)($item)}"
-            onClick="transcriptAgentId = $item.agentId; navigate('/transcript')" />
+             Main), then the dropdown continues newest→oldest top-down. Each
+             chip pairs its label with a ghost ✕ that appends the agentId to
+             dismissedAgentIds (dismissible-subagent-chips); dismissing a
+             visible chip promotes the next agent up from the dropdown. The
+             Main chip is intentionally never dismissible. -->
+        <Items data="{window.__bramVisibleFooterAgents(footerAgents.value, dismissedAgentIds).slice(-3).reverse()}">
+          <HStack gap="0" verticalAlignment="center">
+            <Button
+              label="{window.__bramAgentChipLabel($item)}"
+              size="xs"
+              variant="outlined"
+              tooltip="{(window.__bramAgentChipTooltip || window.__bramAgentChipLabel)($item)}"
+              onClick="transcriptAgentId = $item.agentId; navigate('/transcript')" />
+            <Button
+              label="✕"
+              size="xs"
+              variant="ghost"
+              tooltip="Dismiss this subagent"
+              onClick="dismissedAgentIds = window.__bramDismissAgent(dismissedAgentIds, $item.agentId)" />
+          </HStack>
         </Items>
         <DropdownMenu
-          when="{((footerAgents.value || {}).agents || []).length > 3}"
-          label="{'+' + (((footerAgents.value || {}).agents || []).length - 3) + ' more'}"
+          when="{window.__bramVisibleFooterAgents(footerAgents.value, dismissedAgentIds).length > 3}"
+          label="{'+' + (window.__bramVisibleFooterAgents(footerAgents.value, dismissedAgentIds).length - 3) + ' more'}"
           alignment="end"
           triggerButtonVariant="outlined">
-          <Items data="{((footerAgents.value || {}).agents || []).slice(0, -3).reverse()}">
+          <Items data="{window.__bramVisibleFooterAgents(footerAgents.value, dismissedAgentIds).slice(0, -3).reverse()}">
             <MenuItem
               label="{window.__bramAgentChipLabel($item)}"
               tooltip="{(window.__bramAgentChipTooltip || window.__bramAgentChipLabel)($item)}"

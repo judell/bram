@@ -1219,8 +1219,17 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
     // Keep a still-correct display: if the pane already shows the terminal's
     // current menu (same normalized labels), there's nothing to do. Prevents
     // churn/dismiss on the ~1 Hz grid-report stream while a menu stays up.
-    if let (Some((_, shown)), Some(gl)) = (displayed.as_ref(), grid_labels) {
-        if shown == gl {
+    // tool-join iterate (2026-07-24 04:53 specimen): a bare grid-rescue
+    // matches the grid labels BY CONSTRUCTION, so this dedup blocked every
+    // reselection that would have upgraded it to a claim-backed display —
+    // the promotion was structurally unreachable (grid beats the hook by
+    // ~20ms, rescue displays first, dedup pins it). Let reselection run
+    // when the pane shows an anonymous rescue and a claim now exists;
+    // labels are identical either way, so the upgrade is visible only as
+    // the command text and real tool name appearing.
+    if let (Some((k, shown)), Some(gl)) = (displayed.as_ref(), grid_labels) {
+        let rescue_upgrade = k.starts_with("grid-rescue:") && !claims.is_empty();
+        if shown == gl && !rescue_upgrade {
             return;
         }
     }
@@ -1240,6 +1249,38 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
         Grid,
         Nothing,
     }
+    // tool-join-grid-corroborated-claim: when the terminal's live menu
+    // can't label-join any claim (Andrew's 2-option compound-approval
+    // prompt vs the 3-option synthesized claim — count mismatch defeats
+    // the labels join, bare Yes/No defeats the distinctive-containment
+    // fallback), promote the unambiguous candidate to a real join rather
+    // than surfacing an anonymous grid rescue. The claim arm adopts the
+    // grid's options (keystroke ground truth), so promotion changes
+    // identity — tool name, id_key, tool_use_id for the lifecycle and
+    // click-time answer capture, keyed-clear dismissal — never keys.
+    // Answered-claim guard: the just-answered claim sits queued until its
+    // PostToolUse (the command's whole runtime); promoting it would
+    // attribute the OLD call to a new prompt (the ghost class of
+    // 2026-07-20 unjoined-claim-respects-user-dismissal). Sequential
+    // same-tool prompts are structurally safe — prompt B's own claim
+    // arrives at pose time, making the queue ambiguous → bare.
+    let tool_join: Result<&HookMenuClaim, &'static str> = match grid_view.as_ref() {
+        Some((_, _, _, true)) => Err("picker"),
+        Some(_) => {
+            let answered_id: Option<String> = pty_menu_suppressed_cell()
+                .lock()
+                .ok()
+                .and_then(|s| s.as_ref().and_then(|d| d.answered_id.clone()));
+            grid_rescue_candidate(&claims, "Bash").and_then(|c| {
+                if c.tool_use_id.is_some() && c.tool_use_id == answered_id {
+                    Err("answered-claim")
+                } else {
+                    Ok(c)
+                }
+            })
+        }
+        None => Err("no-claim"),
+    };
     let show = match joined {
         Some((c, how)) => Show::Claim(c, how),
         // Unjoined optimism ONLY at the claim-add moment: PermissionRequest
@@ -1254,7 +1295,25 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
         None if cause == "claim-add" && !claims.is_empty() => {
             Show::Claim(claims.iter().max_by_key(|c| c.at_ms).unwrap(), "unjoined")
         }
-        None if grid_view.is_some() && !grid_menu_recently_dismissed(grid_labels) => Show::Grid,
+        None if grid_view.is_some() && !grid_menu_recently_dismissed(grid_labels) => {
+            match tool_join {
+                Ok(c) => Show::Claim(c, "tool-join"),
+                Err(reason) => {
+                    if bram_trace_enabled() {
+                        append_bram_trace_line(
+                            app,
+                            "hook-menu",
+                            &format!(
+                                "op=grid-rescue-bare reason={} depth={}",
+                                reason,
+                                claims.len()
+                            ),
+                        );
+                    }
+                    Show::Grid
+                }
+            }
+        }
         None => Show::Nothing,
     };
 
@@ -1277,7 +1336,10 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
         }
         Show::Grid => {
             let (_, _, raw, is_picker) = grid_view.as_ref().unwrap();
-            let mut menu = PtyMenu {
+            // A bare rescue: no claim could be promoted (tool-join handles
+            // the enriched case with full claim identity), so the grid's
+            // own options render alone under the inferred-tool header.
+            let menu = PtyMenu {
                 // detect-session-resume-picker: a grid-classified picker
                 // (session resume et al) is a CLI prompt, not a tool
                 // approval — label it Picker so the pane and the
@@ -1293,49 +1355,6 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
                 at_host_ms: Some(now),
                 signature_source: Some("grid"),
             };
-            // grid-rescue-menu-shows-pending-command (Andrew 2026-07-23):
-            // a rescued menu rendered content-free — "Agent wants to use
-            // Bash", bare Yes/No — while the queued claim held the full
-            // command (a 2-option compound-approval prompt can't label-join
-            // the 3-option synthesized claim). Borrow the descriptive
-            // fields from an unambiguous claim; options stay the grid's.
-            // Text (description + command) is preferred over the canonical
-            // signature — the pane renders one or the other.
-            if !*is_picker {
-                match grid_rescue_candidate(&claims, &menu.tool) {
-                    Ok(c) => {
-                        menu.text = c.menu.text.clone();
-                        if menu.text.is_empty() {
-                            menu.tool_call_signature = c.signature.clone();
-                        }
-                        menu.tool_call_diff = c.menu.tool_call_diff.clone();
-                        menu.tool_call_content = c.menu.tool_call_content.clone();
-                        if bram_trace_enabled() {
-                            append_bram_trace_line(
-                                app,
-                                "hook-menu",
-                                &format!(
-                                    "op=grid-rescue-enriched claim={} tool={}",
-                                    c.id_key, c.menu.tool
-                                ),
-                            );
-                        }
-                    }
-                    Err(reason) => {
-                        if bram_trace_enabled() {
-                            append_bram_trace_line(
-                                app,
-                                "hook-menu",
-                                &format!(
-                                    "op=grid-rescue-bare reason={} depth={}",
-                                    reason,
-                                    claims.len()
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
             let labels: Vec<String> = menu
                 .options
                 .iter()
@@ -1524,17 +1543,12 @@ fn clear_hook_permission_menu<R: tauri::Runtime>(
     // full clear below, draining the queue.
     let id = tool_use_id.filter(|s| !s.is_empty());
     let sig = clear_signature.filter(|s| !s.is_empty());
-    // menu-answer-deferred-id-binding: the clear carries the id the
-    // click-time capture couldn't get; bind a stashed answer to it.
-    if let Some(id) = id {
-        bind_pending_menu_answer(app, tool, id, sig);
-    }
     if id.is_some() || sig.is_some() {
         let matches = |c: &HookMenuClaim| -> bool {
             (id.is_some() && c.tool_use_id.as_deref() == id)
                 || (sig.is_some() && c.signature.as_deref() == sig)
         };
-        let (removed_keys, depth) = {
+        let (removed_keys, removed_ident, depth) = {
             let Ok(mut q) = menu_hook_claims_cell().lock() else {
                 return;
             };
@@ -1543,9 +1557,24 @@ fn clear_hook_permission_menu<R: tauri::Runtime>(
                 .filter(|c| matches(c))
                 .map(|c| c.id_key.clone())
                 .collect();
+            let removed_ident: Option<(String, Option<String>)> = q
+                .iter()
+                .find(|c| matches(c))
+                .map(|c| (c.menu.tool.clone(), c.signature.clone()));
             q.retain(|c| !matches(c));
-            (removed, q.len())
+            (removed, removed_ident, q.len())
         };
+        // menu-answer-deferred-id-binding: the clear carries the id the
+        // click-time capture couldn't get; bind a stashed answer to it —
+        // but ONLY when this clear resolved an actual claimed prompt, and
+        // under the removed claim's own identity. An allowlisted command's
+        // PostToolUse also clears here with no claim, and an ungated bind
+        // adopted a lingering stash onto a call that never showed a menu
+        // (test E 2026-07-24 05:12: the Read approval bound to the next
+        // grep's id).
+        if let (Some(id), Some((rt, rs))) = (id, removed_ident.as_ref()) {
+            bind_pending_menu_answer(app, rt, id, rs.as_deref());
+        }
         let displayed_removed = menu_hook_displayed_cell()
             .lock()
             .ok()
@@ -8163,13 +8192,34 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
                     .or_else(|| resolved.and_then(|o| o.tool_use_id));
                 match id {
                     Some(id) => record_menu_answer(app, &id, label, "click"),
-                    None => stash_pending_menu_answer(
-                        app,
-                        &tool,
-                        label,
-                        signature.as_deref(),
-                        "no-tool-use-id",
-                    ),
+                    None => {
+                        // Stash under the DISPLAYED CLAIM's identity when one
+                        // exists: the grid cell's tool is a guess ("Bash" for
+                        // a Read approval — test E 2026-07-24 05:12), and a
+                        // guessed tool can never match the keyed clear that
+                        // will deliver the id.
+                        let claim_ident: Option<(String, Option<String>)> =
+                            menu_hook_displayed_cell()
+                                .lock()
+                                .ok()
+                                .and_then(|d| d.as_ref().map(|(k, _)| k.clone()))
+                                .and_then(|k| {
+                                    menu_hook_claims_cell().lock().ok().and_then(|q| {
+                                        q.iter().find(|c| c.id_key == k).map(|c| {
+                                            (c.menu.tool.clone(), c.signature.clone())
+                                        })
+                                    })
+                                });
+                        let (stash_tool, stash_sig) =
+                            claim_ident.unwrap_or((tool.clone(), signature.clone()));
+                        stash_pending_menu_answer(
+                            app,
+                            &stash_tool,
+                            label,
+                            stash_sig.as_deref(),
+                            "no-tool-use-id",
+                        );
+                    }
                 }
             }
             None => {

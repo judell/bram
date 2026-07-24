@@ -1014,14 +1014,31 @@ function __gridDetectMenu(rows) {
     // the whole menu undetectable (the Claude menu-miss bug).
     const m = t.match(/^\s*([❯›>])?\s*(\d)\.\s*(.+)$/);
     if (m) {
-      opts.push({ n: Number(m[2]), label: m[3].trim(), selected: !!m[1], row: r });
+      opts.push({ n: Number(m[2]), label: m[3].trim(), selected: !!m[1], row: r, rowEnd: r });
       inOption = true;
     } else if (!t.trim()) {
       inOption = false;
     } else if (inOption) {
       if (/Esc to cancel|esc to cancel|Press enter to confirm/i.test(t))
         inOption = false;
-      else opts[opts.length - 1].label += " " + t.trim();
+      else {
+        // wrap-aware option parser (tool-join iterate): a row can only
+        // CONTINUE an option label if the row it extends actually filled
+        // the terminal width — soft wraps and ink's hard-wrapped layout
+        // both fill the row before spilling. A short anchor ("  3. No")
+        // cannot wrap, so an unnumbered row after it is stale frame
+        // debris; appending it corrupted the label to "Nommands"
+        // (2026-07-24 04:55 specimen, wrapped option 2 + repaint).
+        // Ignoring debris keeps inOption so a following numbered option
+        // still parses; worst case is a truncated label, never a blend.
+        const prev = opts[opts.length - 1];
+        const anchor = rows[prev.rowEnd] ? rows[prev.rowEnd].text : "";
+        const cols = (typeof term !== "undefined" && term && term.cols) || 80;
+        if (anchor.length >= cols - 2) {
+          prev.label += " " + t.trim();
+          prev.rowEnd = r;
+        }
+      }
     }
   }
   if (opts.length < 2) return null;

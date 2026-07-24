@@ -31619,6 +31619,17 @@ fn route_request<R: tauri::Runtime>(
         };
     }
 
+    // issue-90-q-page: durable scratch queue backing the Queue tab. GET
+    // returns the whole queue file (default empty); writes go through the
+    // POST /__queue/save route. Entry order is presentation order only.
+    if path == "__queue" {
+        let Some(qpath) = project_resource_path(app, ".bram-queue.json") else {
+            return (500, "text/plain; charset=utf-8", b"no project root".to_vec());
+        };
+        let bytes = std::fs::read(&qpath).unwrap_or_else(|_| b"{\"entries\":[]}\n".to_vec());
+        return (200, "application/json; charset=utf-8", bytes);
+    }
+
     if path == "__issues" {
         let mut limit = GH_ISSUE_LIST_LIMIT;
         for pair in query.split('&') {
@@ -32842,6 +32853,48 @@ fn drain_worklist_intent<R: tauri::Runtime>(app: &AppHandle<R>) {
 // routes this handler once also served were deleted (delete-phase
 // tranche 1, #214): the host writes and clears the iterate sentinel on
 // the toTurn path. Refs #84, #91.
+// issue-90-q-page: replace the queue file wholesale from the pane's working
+// copy. Body must be {"entries": [...]} — shape-checked, then persisted
+// pretty-printed for hand-inspection.
+fn handle_queue_save<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    body: &[u8],
+) -> (u16, &'static str, Vec<u8>) {
+    let v: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                400,
+                "application/json; charset=utf-8",
+                format!("{{\"error\":\"invalid JSON: {}\"}}", e).into_bytes(),
+            );
+        }
+    };
+    if !v.get("entries").map(|e| e.is_array()).unwrap_or(false) {
+        return (
+            400,
+            "application/json; charset=utf-8",
+            b"{\"error\":\"missing entries array\"}".to_vec(),
+        );
+    }
+    let Some(qpath) = project_resource_path(app, ".bram-queue.json") else {
+        return (500, "text/plain; charset=utf-8", b"no project root".to_vec());
+    };
+    let pretty = serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".to_string());
+    match std::fs::write(&qpath, format!("{}\n", pretty)) {
+        Ok(()) => (
+            200,
+            "application/json; charset=utf-8",
+            b"{\"ok\":true}".to_vec(),
+        ),
+        Err(e) => (
+            500,
+            "text/plain; charset=utf-8",
+            format!("write {}: {}", qpath.display(), e).into_bytes(),
+        ),
+    }
+}
+
 fn handle_iterate_end<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
@@ -34695,7 +34748,15 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
     trace_route_entry(app, &method, path, query, &route_correlation_id);
 
     // POST-only routes (route_request is GET-only).
-    let (status, content_type, body) = if path == "__worklist/mutate" {
+    let (status, content_type, body) = if path == "__queue/save" {
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            let mut buf = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut buf);
+            handle_queue_save(app, &buf)
+        }
+    } else if path == "__worklist/mutate" {
         if method != "POST" {
             (405, "text/plain; charset=utf-8", b"POST only".to_vec())
         } else {

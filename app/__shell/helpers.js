@@ -4351,8 +4351,12 @@ window.__bramLocalLinkRequestFromHref = function (href) {
   // remainder is a relative file link XMLUI prefixed with the current route
   // -> strip the route segment and preview the remainder. Absolute links
   // (/Users, /etc, ...) don't start with a known route and fall through.
+  // Keep this alternation in sync with Main.xmlui's NavLink routes — a nav
+  // route missing here gets intercepted as a local FILE link and the click
+  // opens a "File unavailable" preview instead of the page (the /queue
+  // launch bug, 2026-07-23).
   var routeMatch = raw.match(
-    /^\/(worklist|transcript|issues|commits|history|sessions|settings|status|context)(\/.*)?$/
+    /^\/(worklist|transcript|issues|commits|queue|history|sessions|settings|status|context)(\/.*)?$/
   );
   if (routeMatch) {
     var rest = routeMatch[2] ? routeMatch[2].slice(1) : "";
@@ -6194,6 +6198,173 @@ window.gitPush = function (commitsDs, statusDs, branch, onError) {
       if (typeof onError === "function") onError(String(e));
     });
 };
+// issue-90-q-page: Queue tab helpers. The entries array is the component's
+// working copy; every mutator returns a NEW array (xs reactivity needs the
+// identity change) and schedules a debounced host save to /__queue/save so
+// notes survive reloads and restarts. A synchronous sessionStorage mirror
+// closes the debounce window on iframe refresh: restore prefers that unsaved
+// snapshot, retries the host write, and clears it only after the matching
+// payload is acknowledged. Sends ride toTurn — send-gate, send ledger, and
+// strand forensics apply like any other pane send.
+var __BRAM_QUEUE_RECOVERY_KEY = "bram.agent-message-queue.unsaved";
+var __bramQueueSaveTimer = null;
+function __bramQueueScheduleSave(entries) {
+  var snapshot = entries || [];
+  var payload = JSON.stringify({ entries: snapshot });
+  try {
+    sessionStorage.setItem(__BRAM_QUEUE_RECOVERY_KEY, payload);
+  } catch {}
+  if (__bramQueueSaveTimer) clearTimeout(__bramQueueSaveTimer);
+  __bramQueueSaveTimer = setTimeout(function () {
+    __bramQueueSaveTimer = null;
+    fetch("/__queue/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: payload,
+    })
+      .then(function (response) {
+        if (!response.ok) throw new Error("queue save returned " + response.status);
+        try {
+          if (sessionStorage.getItem(__BRAM_QUEUE_RECOVERY_KEY) === payload) {
+            sessionStorage.removeItem(__BRAM_QUEUE_RECOVERY_KEY);
+          }
+        } catch {}
+      })
+      .catch(function (e) {
+        window.logToHost({ kind: "queue-save", phase: "err", error: String(e) });
+      });
+  }, 400);
+}
+window.__bramQueueRestore = function (hostEntries) {
+  var fallback = Array.isArray(hostEntries) ? hostEntries : [];
+  var raw = "";
+  try {
+    raw = sessionStorage.getItem(__BRAM_QUEUE_RECOVERY_KEY) || "";
+  } catch {}
+  if (!raw) return fallback;
+  try {
+    var recovered = JSON.parse(raw);
+    if (!recovered || !Array.isArray(recovered.entries)) throw new Error("invalid entries");
+    __bramQueueScheduleSave(recovered.entries);
+    return recovered.entries;
+  } catch (e) {
+    try { sessionStorage.removeItem(__BRAM_QUEUE_RECOVERY_KEY); } catch {}
+    window.logToHost({ kind: "queue-restore", phase: "err", error: String(e) });
+    return fallback;
+  }
+};
+window.__bramQueueUpdate = function (entries, idx, text) {
+  var next = (entries || []).slice();
+  if (!next[idx]) return entries;
+  next[idx] = Object.assign({}, next[idx], {
+    text: String(text == null ? "" : text),
+    updatedAtMs: Date.now(),
+  });
+  __bramQueueScheduleSave(next);
+  return next;
+};
+window.__bramQueueSendMode = function (entry) {
+  return entry && entry.sendMode === "iterate" ? "iterate" : "message";
+};
+window.__bramQueueSetSendMode = function (entries, idx, sendMode, worklistItems) {
+  var next = (entries || []).slice();
+  if (!next[idx]) return entries;
+  var mode = sendMode === "iterate" ? "iterate" : "message";
+  var targetItemId = String(next[idx].targetItemId || "");
+  var items = worklistItems || [];
+  if (mode === "iterate" && !items.some(function (item) { return item.id === targetItemId; })) {
+    targetItemId = items.length ? String(items[0].id || "") : "";
+  }
+  next[idx] = Object.assign({}, next[idx], {
+    sendMode: mode,
+    targetItemId: targetItemId,
+    updatedAtMs: Date.now(),
+  });
+  __bramQueueScheduleSave(next);
+  return next;
+};
+window.__bramQueueSetTargetItem = function (entries, idx, targetItemId) {
+  var next = (entries || []).slice();
+  if (!next[idx]) return entries;
+  next[idx] = Object.assign({}, next[idx], {
+    targetItemId: String(targetItemId || ""),
+    updatedAtMs: Date.now(),
+  });
+  __bramQueueScheduleSave(next);
+  return next;
+};
+window.__bramQueueAdd = function (entries) {
+  var next = (entries || []).slice();
+  var now = Date.now();
+  next.push({
+    id: "q-" + now + "-" + Math.floor(Math.random() * 1e6),
+    text: "",
+    sendMode: "message",
+    targetItemId: "",
+    updatedAtMs: now,
+  });
+  __bramQueueScheduleSave(next);
+  return next;
+};
+window.__bramQueueRemove = function (entries, idx) {
+  var next = (entries || []).slice();
+  next.splice(idx, 1);
+  __bramQueueScheduleSave(next);
+  return next;
+};
+window.__bramQueueCanSendWhenReady = function (entry, ready, worklistItems) {
+  if (!ready) return false;
+  if (!entry || !String(entry.text || "").trim()) return false;
+  if (window.__bramQueueSendMode(entry) !== "iterate") return true;
+  var targetItemId = String(entry.targetItemId || "");
+  return (worklistItems || []).some(function (item) { return item.id === targetItemId; });
+};
+window.__bramQueueCanSend = function (entry, status, menu, worklistItems) {
+  return window.__bramQueueCanSendWhenReady(
+    entry,
+    window.__bramQueueReady(status, menu),
+    worklistItems
+  );
+};
+window.__bramQueueSend = function (entries, idx, worklistItems) {
+  var entry = (entries || [])[idx];
+  var text = entry && String(entry.text || "").trim();
+  if (!text) return entries;
+  if (window.__bramQueueSendMode(entry) === "iterate") {
+    var targetItemId = String(entry.targetItemId || "");
+    var items = worklistItems || [];
+    if (!items.some(function (item) { return item.id === targetItemId; })) return entries;
+    window.sendIterateWithFeedbackDraft(items, targetItemId, text);
+  } else {
+    toTurn(text);
+  }
+  return window.__bramQueueRemove(entries, idx);
+};
+// Ready = no open turn (agent-status not "working") and no pending menu.
+// Advisory dimming only — the host send-gate remains the enforcement layer
+// for a menu racing in at click time.
+window.__bramQueueReady = function (status, menu) {
+  var working = !!(status && status.state === "working");
+  return !working && !menu;
+};
+window.__bramQueueReadyLabel = function (status, menu) {
+  if (menu) return "menu pending — hold";
+  if (status && status.state === "working") return "agent working — hold";
+  return "ready to send";
+};
+window.__bramQueueEditedLabel = function (updatedAtMs) {
+  var ms = Number(updatedAtMs) || 0;
+  if (!ms) return "Last edited —";
+  var edited = new Date(ms);
+  if (isNaN(edited.getTime())) return "Last edited —";
+  return "Last edited " + edited.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+};
+
 // issues-tab-close-via-invoke: manual Close-issue for the Issues tab.
 // Rides the issue_close_manual Tauri invoke, NOT an HTTP route — invokes
 // are reachable only from Bram's same-origin agent pane (loopback curl and

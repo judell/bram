@@ -39,8 +39,8 @@ external local service.
 Bram hosts two iframes inside the parent shell: the **target app** (the project
 under development; any web app served by the project's HTTP server) and the
 **agent pane** (Bram's own agent pane at `app/tools/`,
-providing Worklist, Commits, Issues, Sessions, History, Context, Status, and
-Settings tabs).
+providing Worklist, Commits, Issues, Queue, Sessions, History, Context, Status,
+and Settings tabs).
 These surfaces use several transports:
 
 - **Tauri scheme routing** loads shell pages, project content, bundled assets,
@@ -87,6 +87,8 @@ the source of truth; this is the announcement surface.
 | 9 | [Voice / transcription](#9-voice--transcription) | Whisper subprocess lifecycle | parent shell |
 | 10 | [Static & hot-reload](#10-static--hot-reload) | Files served from disk or embedded; iframe reload coupling | both iframes |
 | 11 | [Inflight sentinel](#11-inflight-sentinel) | Host-managed claim file driving the Worklist tab's spinner state | agent pane iframe, agent (curl) |
+| 12 | [Agent message queue](#12-agent-message-queue) | Durable, manually sent messages parked while an agent works | agent pane iframe |
+| 13 | [Prompt lifecycle](#13-prompt-lifecycle) | Locally implemented prompt shown/resolved ledger | agent pane iframe |
 
 ## 1. App & shell meta
 
@@ -482,7 +484,28 @@ file / event reference.
   `[iframe] subkind=listener-fired context=inflight-claim-changed`
   downstream.
 
-## 12. Prompt lifecycle
+## 12. Agent message queue
+
+The Queue tab persists unsent messages in
+`resources/.bram-queue.json`. Entries remain user-controlled: saving
+does not inject them into the terminal; the iframe calls the existing
+`toTurn` path only when the user clicks an item's **Send** button.
+Each edit also writes a synchronous `sessionStorage` recovery snapshot
+before the debounced host save. An iframe refresh restores that snapshot
+and retries `/__queue/save`; only acknowledgement of the identical
+payload clears it.
+
+| Surface | Kind | Query / params | Response | Consumer |
+| --- | --- | --- | --- | --- |
+| `/__queue` | HTTP GET | — | `{ entries: [{ id, text, sendMode, targetItemId, updatedAtMs }] }`; `sendMode` is `message` or `iterate`; missing file defaults to `{ entries: [] }` | agent pane iframe |
+| `/__queue/save` | HTTP POST | body `{ entries: [...] }` | `{ ok: true }`; validates that `entries` is an array, then replaces `resources/.bram-queue.json` | agent pane iframe |
+
+`sendMode:"message"` uses the footer-equivalent `toTurn` path.
+`sendMode:"iterate"` requires a current `targetItemId` and delegates to
+`sendIterateWithFeedbackDraft`, preserving the same feedback-draft and
+structured lifecycle path as a Worklist item's **Iterate** button.
+
+## 13. Prompt lifecycle
 
 - **`GET /__prompt-lifecycle`** — Bram's locally-implemented
   PromptShown/PromptResolved ledger (upstream-prompt-lifecycle-events;

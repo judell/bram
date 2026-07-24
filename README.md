@@ -52,7 +52,8 @@ Bram has opinions. It thinks versioning and collaboration are well-handled by gi
 
 ### Terminal (optional)
 
-A terminal where you run `claude` or `codex`. It can be hidden in favor of the agent pane's Worklist and Transcript views 
+A terminal where you run `claude` or `codex`. It can be hidden in favor of the
+agent pane's Worklist, Transcript, and Queue views.
 
 ### Agent pane
 
@@ -65,6 +66,8 @@ A terminal where you run `claude` or `codex`. It can be hidden in favor of the a
 - Issues: Tracks and searches GitHub issues for the repo Bram runs in.
 
 - Commits: Tracks and searches your commits.
+
+- Queue: Parks editable messages while the agent works and sends each one only when you choose.
 
 - Sessions: Lists your sessions; rename, delete, or switch between them.
 
@@ -80,6 +83,12 @@ A terminal where you run `claude` or `codex`. It can be hidden in favor of the a
 On the *Worklist* tab, create worklist items directly ("Hey agent, let's do x") or via the New Item button. Either way Bram proposes an item to be planned, built, iterated on, validated, committed, or maybe dropped along the way.
 
 On the *Issues* tab, use `+ New issue` to ask Bram to file a GitHub issue. 
+
+On the *Queue* tab, park thoughts that arrive while the agent is busy. Bram
+keeps them with the repo across reloads and restarts. Edit or delete them
+freely, choose whether each should become an ordinary *Message* or feedback
+that *Iterates* a selected worklist item, then use *Send* when it becomes
+ready. Queued messages are never sent automatically.
 
 An item on the worklist lives in one of three phases: *proposed* → *applied* → *committed*. The arrows between the phases are approval gates where you can dwell and iterate with your agent to:
 

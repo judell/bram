@@ -1,0 +1,127 @@
+<Component name="AgentMessageQueue"
+  var.entries="{null}">
+
+  <!-- issue-90-q-page: a durable scratch queue. Notes accumulate while the
+       agent works; each is re-editable in place and sent manually as a
+       fresh turn when the user judges the moment right. Send buttons dim
+       (disable) until the terminal is ready: no open turn per the
+       turn-completion detector, and no pending menu. Sends ride toTurn, so
+       the send-gate, send ledger, and strand forensics all apply. Entries
+       persist host-side in resources/.bram-queue.json via /__queue and
+       survive reloads and restarts. Order is presentation order only. -->
+
+  <DataSource
+    id="queueData"
+    url="/__queue" />
+  <DataSource
+    id="queueWorklist"
+    url="/__worklist" />
+  <PushSource
+    id="queueWorklistChanged"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('worklist-changed')}" />
+  <ChangeListener
+    listenTo="{queueWorklistChanged.value &amp;&amp; queueWorklistChanged.value.tick}"
+    onDidChange="() => queueWorklist.refetch()" />
+  <ChangeListener
+    listenTo="{queueData.value}"
+    onDidChange="() => { if (entries === null &amp;&amp; queueData.value) { entries = window.__bramQueueRestore(queueData.value.entries || []); } }" />
+
+  <PushSource
+    id="queueAgentStatus"
+    initial="{null}"
+    subscribe="{window.bramSubscribeAgentStatus()}" />
+  <PushSource
+    id="queueMenuEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeAgentMenu()}" />
+
+  <VStack gap="$space-3" padding="$space-2">
+    <HStack verticalAlignment="center" gap="$space-2">
+      <Heading level="h2">Queue</Heading>
+      <Button
+        label="+ New item"
+        size="xs"
+        onClick="entries = window.__bramQueueAdd(entries)" />
+      <Text
+        fontSize="$fontSize-sm"
+        color="$textColor-secondary"
+        value="{window.__bramQueueReadyLabel(queueAgentStatus.value, queueMenuEvt.value)}" />
+    </HStack>
+    <Text
+      fontSize="$fontSize-sm"
+      color="$textColor-secondary"
+      value="Park thoughts here while the agent works. Edit any note in place; Send delivers it as a fresh turn. Send stays dimmed until the terminal is quiet and no menu is pending." />
+
+    <Text
+      when="{(entries || []).length === 0}"
+      color="$textColor-secondary"
+      value="No queued notes." />
+
+    <List
+      when="{(entries || []).length > 0}"
+      data="{entries || []}"
+      height="*">
+      <HStack
+        gap="$space-2"
+        verticalAlignment="start"
+        paddingVertical="$space-5"
+        var.rowReady="{window.__bramQueueReady(queueAgentStatus.value, queueMenuEvt.value)}">
+        <ChangeListener
+          listenTo="{window.__bramQueueReady(queueAgentStatus.value, queueMenuEvt.value)}"
+          onDidChange="(c) => rowReady = c.newValue" />
+        <VStack width="*" gap="$space-0_5">
+          <TextArea
+            initialValue="{$item.text}"
+            resize="vertical"
+            minRows="2"
+            maxRows="16"
+            width="100%"
+            onDidChange="(v) => { entries = window.__bramQueueUpdate(entries, $itemIndex, v) }" />
+          <Text
+            fontSize="$fontSize-xs"
+            color="$textColor-secondary"
+            value="{window.__bramQueueEditedLabel($item.updatedAtMs)}" />
+          <HStack gap="$space-2" verticalAlignment="center">
+            <Text
+              fontSize="$fontSize-xs"
+              color="$textColor-secondary"
+              value="Send as" />
+            <Select
+              width="8rem"
+              initialValue="{window.__bramQueueSendMode($item)}"
+              onDidChange="(v) => { entries = window.__bramQueueSetSendMode(entries, $itemIndex, v, (queueWorklist.value &amp;&amp; queueWorklist.value.items) || []); }">
+              <Option value="message" label="Message" />
+              <Option value="iterate" label="Iterate" />
+            </Select>
+            <Select
+              when="{window.__bramQueueSendMode($item) === 'iterate'}"
+              width="*"
+              placeholder="Choose worklist item"
+              data="{((queueWorklist.value &amp;&amp; queueWorklist.value.items) || []).map(i => ({ value: i.id, label: i.id + ((i.status || 'proposed') === 'applied' ? ' (to commit)' : ' (to apply)') }))}"
+              initialValue="{$item.targetItemId || ''}"
+              onDidChange="(v) => { entries = window.__bramQueueSetTargetItem(entries, $itemIndex, v); }" />
+          </HStack>
+        </VStack>
+        <VStack width="5rem" gap="$space-1">
+          <VStack
+            opacity="{rowReady ? 1 : 0.45}"
+            width="100%">
+            <Button
+              label="Send"
+              size="xs"
+              enabled="{window.__bramQueueCanSendWhenReady($item, rowReady, (queueWorklist.value &amp;&amp; queueWorklist.value.items) || [])}"
+              tooltip="Send this note to the agent as a fresh turn"
+              onClick="entries = window.__bramQueueSend(entries, $itemIndex, (queueWorklist.value &amp;&amp; queueWorklist.value.items) || [])" />
+          </VStack>
+          <Button
+            label="Delete"
+            size="xs"
+            variant="ghost"
+            onClick="entries = window.__bramQueueRemove(entries, $itemIndex)" />
+        </VStack>
+      </HStack>
+    </List>
+
+  </VStack>
+</Component>

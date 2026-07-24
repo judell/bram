@@ -39,8 +39,7 @@ The actors that matter:
 ## Root causes
 
 The original assessment traced most Critical/High findings to four shared
-roots. **Three of the four are now fixed;** only the loopback authentication
-root remains.
+roots. All now fixed.
 
 1. ~~**The target-app iframe is same-origin with the shell.**~~ **FIXED** (C1,
    `c8c320c` + CSP `99591ce`). The pane is served at a distinct

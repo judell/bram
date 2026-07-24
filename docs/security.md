@@ -1,9 +1,12 @@
 # Bram security assessment and action plan
 
-Status: draft assessment, 2026-07-10. Source: a six-agent read-only audit,
-one agent per trust boundary, each citing `file:line` evidence against the
-real `src-tauri/src/lib.rs`, the provider guards, `app/__shell/helpers.js`,
-and the XMLUI surfaces. Tracks umbrella issue #108 and its children #109,
+Status: original assessment 2026-07-10; **verified re-review 2026-07-24**.
+Source: a six-agent read-only audit, one agent per trust boundary, each citing
+`file:line` evidence against the real `src-tauri/src/lib.rs`, the provider
+guards, `app/__shell/helpers.js`, and the XMLUI surfaces. The 2026-07-24
+re-review cross-referenced every finding against the commit record; findings
+marked **DONE** cite the landing commit or the current code location and are
+verifiable by `git show`. Tracks umbrella issue #108 and its children #109,
 #110, #111/#114, #112, #113, #118, #119, #120, #121.
 
 This document is the plan the child issues execute against. It is not itself a
@@ -25,195 +28,126 @@ The actors that matter:
   provider PreToolUse guard; its git/GitHub side effects are gated by the
   worklist authorization record.
 - **The target-app iframe** (optional, off by default). May host arbitrary web
-  content — vanilla HTML/JS, a third-party dev server, a compromised CDN
-  script. Should be treated as fully untrusted.
+  content. As of C1 it is served at a distinct `bramapp://localhost` origin,
+  cut off from `window.__TAURI__` and the dynamic host routes — display-only.
 - **Any other local process / browser tab.** The host serves a loopback HTTP
   API on `127.0.0.1`; co-resident software can reach it if it learns the port
-  (written to `resources/.bram-port`).
+  (written to `resources/.bram-port`). **This is the main remaining exposure —
+  see H6.**
 
 ## Root causes
 
-Most Critical/High findings are consequences of four shared roots, not twenty
-independent bugs. Fixing the roots collapses the majority of the findings.
+The original assessment traced most Critical/High findings to four shared
+roots. **Three of the four are now fixed;** only the loopback authentication
+root remains.
 
-1. **The target-app iframe is same-origin with the shell.** The project is
-   proxied through `tauri://localhost/__project/*` so it shares the shell's
-   origin (`lib.rs:28946`), `withGlobalTauri: true` exposes `window.__TAURI__`
-   to it, and `security.csp` is `null` (`tauri.conf.json`). Untrusted page
-   content therefore inherits the full Tauri IPC command surface and the full
-   loopback route surface.
+1. ~~**The target-app iframe is same-origin with the shell.**~~ **FIXED** (C1,
+   `c8c320c` + CSP `99591ce`). The pane is served at a distinct
+   `bramapp://localhost` origin; cross-origin `getTauriInvoke()` returns null,
+   the PTY-driving helpers no-op, and `handle_target_scheme` refuses the dynamic
+   host routes. Untrusted page content no longer inherits the IPC/route surface.
 2. **The loopback server is unauthenticated with wildcard CORS.** No per-session
-   token, and every response sets `Access-Control-Allow-Origin: *`
-   (`lib.rs:28906`). Any local caller that learns the port can drive the routes
-   and read the responses. The codebase already has the right pattern to copy —
-   the `BRAM_MENU_TOKEN` foreign-agent guard at `lib.rs:3107`.
-3. **Authorization is derived from PTY input bytes.**
-   `record_worklist_authorization_from_input` runs on every PTY write, including
-   relayed iframe intents (`lib.rs:8483` → `24187`). Anything that can write to
-   the PTY can forge a worklist `approved:` record.
-4. **The Claude PreToolUse guard does not gate the `Bash` write surface.** For
-   `tool_name == "Bash"` the guard checks only one `gh --body @` antipattern and
-   then `sys.exit(0)` (`app/provider-hooks/claude-worklist-guard.py:492`). Redirections,
-   `tee`, `sed -i`, `python -c`, and `git commit/push`/`gh issue close` all
-   bypass the worklist. Codex gates these; Claude does not.
+   token, and every response still sets `Access-Control-Allow-Origin: *`
+   (`lib.rs:36403`). Any local caller that learns the port can drive the routes
+   and read the responses. **The sole remaining root — see H6.** The codebase
+   already has the pattern to copy: the `BRAM_MENU_TOKEN` guard (`lib.rs:5543`).
+3. ~~**Authorization is derived from PTY input bytes.**~~ **FIXED** (H2,
+   `6d49edf`). Approve/drop authorization is host-owned; a forged `approved:`
+   in relayed PTY input no longer writes an auth record.
+4. ~~**The Claude PreToolUse guard does not gate the `Bash` write surface.**~~
+   **FIXED** (H3). The Claude guard now carries `_BASH_WRITE_PATTERNS`
+   (`claude-worklist-guard.py:113`) covering `>`, `tee`, `sed -i`, etc., at
+   parity with the Codex guard.
 
 ## Ranked action plan
 
 Severity is impact-weighted against the threat model. Effort: **S** = < half a
-day, **M** = half to two days, **L** = more than two days. Issue column maps to
-the tracking issues.
+day, **M** = half to two days, **L** = more than two days.
 
-### Critical
+### Critical — all resolved
 
-| # | Finding | Evidence | Issue | Effort |
-|---|---------|----------|-------|--------|
-| C1 | Same-origin iframe inherits Tauri IPC; `pty_write` / `queue_pty_intent` inject arbitrary bytes into the agent's stdin → arbitrary command execution with no user gesture. | `lib.rs:8397`, `8567`, `28946`; `tauri.conf.json` (`withGlobalTauri`, `csp:null`) | #113 #112 #121 | L (root) |
-| C2 | `/__file` reads any absolute path with no canonicalization or containment; returns raw bytes (e.g. `~/.ssh/id_rsa`). | `lib.rs:26351` | #110 #113 | S |
-| C3 | `/__context/file` reads any absolute path, returns content as JSON. Legitimate need (fixed home-dir config set) argues for an allowlist, not root containment. | `lib.rs:25836` | #110 | M |
+| # | Finding | Status |
+|---|---------|--------|
+| C1 | Same-origin iframe inherits Tauri IPC / PTY injection. | **DONE** — distinct `bramapp://` origin + CSP, display-only pane (`c8c320c`, `99591ce`). |
+| C2 | `/__file` read any absolute path. | **DONE** — contained to an allowlist of roots (`9ce3911`; `lib.rs:33262`). |
+| C3 | `/__context/file` read any absolute path. | **DONE** — contained to the enumerated Context set (`f2a9862`). |
 
 ### High
 
-| # | Finding | Evidence | Issue | Effort |
-|---|---------|----------|-------|--------|
-| H1 | Bracketed-paste framing does not neutralize `\x1b[201~` in the payload; a payload containing the paste-end sequence + `\r` escapes the frame and auto-submits smuggled terminal input. | `lib.rs:8907` | #112 | S |
-| H2 | Worklist authorization is forged from PTY input: relayed `toShell`/`toTurn`/`sendKeys` text of the form `approved: {...}` writes an auth record → injection self-authorizes repo mutations. | `lib.rs:8483`, `24187`, `8831` | #112 #109 | M |
-| H3 | Claude guard exits 0 for all `Bash`; `>`, `tee`, `sed -i`, `python -c`, `git commit/push`, `gh issue close` bypass worklist coverage entirely. Codex's `_BASH_WRITE_PATTERNS` already implements the fix. | `worklist-guard.py:492`; `codex-worklist-guard.py:280` | #119 #118 | M |
-| H4 | **DONE** (security-h4-auth-fail-closed-on-interrupt). Interrupt/cancel now marks the active auth record `interruptedAtMs` via `invalidate_worklist_authorization` at every interrupt sentinel-clear site (Esc, menu-reject, Codex cancel); `validate_worklist_mutate_authorization` + `ensure_worklist_commit_authorized` reject an interrupted record or one past `WORKLIST_AUTH_TTL_MS` (5 min ≈ "same turn"). `consumedAtMs` stays ignored so the same-turn drop flow (resolve consumes on read → prune) still works — the regression guard test covers it. | `lib.rs` | #120 | ~~M~~ done |
-| H5 | **DONE** (close-on-push-automatic). Root fix: the agent-reachable `/__issue/close` route (and `push_before_close`) is **removed**. Closing is now a host consequence of two explicit user actions — you tick issues in the commit-gate dialog, then you Push — after which the host auto-closes each issue whose commit is visible on origin. No agent close path, no push-as-a-side-effect-of-close, no grants. An earlier over-scoped attempt (24h-TTL grant subsystem + manual "Close queued issues") was reverted as the cure-worse-than-disease. | `lib.rs` | #118 #121 | ~~M~~ done |
-| H6 | `Access-Control-Allow-Origin: *` on every loopback response amplifies the read + mutation routes to any local browser tab or process that learns the port. | `lib.rs:28906` | #110 #113 #121 | M |
+| # | Finding | Status |
+|---|---------|--------|
+| H1 | Bracketed-paste `\x1b[201~` smuggling / auto-submit. | **DONE** — paste-end neutralized in outbound payloads (`6a13cde`). |
+| H2 | Worklist authorization forged from PTY input. | **DONE** — host-owned approve/drop auth (`6d49edf`). Root cause #3. |
+| H3 | Claude guard exits 0 for all `Bash`; write ops bypass the worklist. | **DONE** — `_BASH_WRITE_PATTERNS` in the Claude guard (`claude-worklist-guard.py:113`). Root cause #4. |
+| H4 | Auth did not fail closed on interrupt. | **DONE** — `invalidate_worklist_authorization` at every interrupt site; `validate_*`/`ensure_*` reject an interrupted or past-TTL record (`d044b34`, `e75fea2`). |
+| H5 | Issue-close / push side effects ungated. | **DONE** — agent `/__issue/close` route removed; closing is a host consequence of the user's explicit Push (`8c64ef7`). |
+| **H6** | **Loopback is unauthenticated; `Access-Control-Allow-Origin: *` lets any local process/tab that learns the port drive routes and read responses.** | **OPEN — highest-leverage remaining item.** Add a per-session bearer token alongside `.bram-port`, require it on `/__*`, and tighten CORS from `*` to the shell origin. Copy `BRAM_MENU_TOKEN` (`lib.rs:5543`, `36403`). Effort **M**. Issue #113. |
 
 ### Medium
 
-| # | Finding | Evidence | Issue | Effort |
-|---|---------|----------|-------|--------|
-| M1 | Guard fails **open** when Python is missing (Claude Code treats a failed PreToolUse hook as non-blocking); no host-side backstop for arbitrary-file writes. | `README.md:206`; `lib.rs:22045` | #119 | M (S for Setup hard-fail) |
-| M2 | **DONE** (`issue-114-secret-safe-observability`). Terminal I/O previews now pass through the shared host redactor before escaping/truncation. Tracing remains opt-in unless `BRAM_TRACE` explicitly overrides it. Credential detection is provided by the pinned `loomweave-scanner` Rust crate; Bram expands its byte-range findings to whole private-key blocks and applies narrow structural masking to Authorization and secret-shaped assignment values. | `lib.rs`, `Cargo.toml` | #114 #111 | ~~M~~ done |
-| M3 | The PTY child inherits the full host environment including `ANTHROPIC_API_KEY` / `GITHUB_TOKEN`; the agent can `echo` them into its own context. | `lib.rs:7993` | #114 #111 | M |
-| M4 | Auditability gap: a successful worklist commit emits no trace line (no sha/ids/files); the approval trail is gated on tracing being enabled and is otherwise ephemeral. | `lib.rs:27925`, `24247` | #114 #111 | M |
-| M5 | Codex Bash gate is path-blind: any live proposed/applied item authorizes a Bash write to any *other* file. | `codex-worklist-guard.py:1049` | #119 | M |
-| M6 | `open_url` routes `file://` URLs to `open_path`, opening any local file in its default app; scheme is not validated. | `lib.rs:11021`; `helpers.js:2434` | #113 #110 #121 | S |
-| M7 | Issues-tab close/comment buttons call the host routes directly with only the frontend `enabled` binding as the gate; the routes have no independent auth check. | `Issues.xmlui:80`, `494`; `lib.rs:26270` | #121 | S |
-| M8 | **DONE** (`issue-114-secret-safe-observability`). Inspector-tap fields now pass through `__bramTraceSafeValue`; secret-shaped object keys and known credential patterns are masked before IPC. The host applies the crate-backed redactor to the serialized iframe payload again before persistence. The tap remains off by default. | `helpers.js`, `lib.rs` | #114 #111 | ~~S–M~~ done |
-| M9 | `drop` auth is written on resolve but consumed only later at `prune`; if prune never runs it lingers with no TTL and can drive a later prune. | `lib.rs:27242`, `27901` | #120 | S |
+| # | Finding | Status |
+|---|---------|--------|
+| M1 | Guard fails **open** when Python is missing; Setup surfaces `python: missing` (`lib.rs:28122`) but does not hard-block. | **OPEN (partial).** Make Setup refuse to manage a repo when `python3` is absent. Effort S. #119. |
+| M2 | Terminal I/O previews leak secrets. | **DONE** (`issue-114-...`, `1801394`) — previews pass through the `loomweave-scanner`-backed host redactor before escaping/truncation. |
+| M3 | PTY child inherits the full host env (`ANTHROPIC_API_KEY`/`GITHUB_TOKEN`); the agent can `echo` them. | **OPEN.** Pass the child an env allowlist behind an opt-in so it doesn't break `gh`/agent auth. Effort M. #114. |
+| M4 | No durable, always-on record of commit/approval; a successful commit emits no trace line and the auth record is consumed-on-read. | **OPEN.** Append-only audit ledger for commit/push/issue-close/approval that survives `traces.enabled: false`. Effort M. #114. |
+| M5 | Codex Bash gate path-blindness. | **NEEDS CONFIRMATION.** The Codex guard now has both `covered_paths` (`codex-worklist-guard.py:202`) and `_BASH_WRITE_PATTERNS` (`:306`); whether it intersects write targets with covered paths (vs. "any coverage passes") is unverified. #119. |
+| M6 | `open_url` opened any `file://` in its default app. | **DONE** — `open_url` enforces a URL allowlist; `file://` is not permitted (`lib.rs:14205`). |
+| M7 | `/__issue/comment` posts directly with only the frontend `enabled` binding as the gate. | **OPEN.** Route has no independent host auth check (`lib.rs:33200`). (The close path was resolved by H5.) Effort S. #121. |
+| M8 | Inspector-tap fields forwarded unsanitized. | **DONE** (`1801394`) — fields pass through `__bramTraceSafeValue` before IPC; host redacts again before persistence. |
+| M9 | `drop` auth lingered with no TTL. | **DONE** — the auth record (drop included) is rejected once past `WORKLIST_AUTH_TTL_MS` (`lib.rs:137`, `34490`), via the H4 work. |
 
 ### Low
 
-| # | Finding | Evidence | Issue | Effort |
-|---|---------|----------|-------|--------|
-| L1 | **DONE** (`trace-retention-settings-prune-script`). At startup, raw Bram trace archives older than the user-configurable window (default 14 days) are streamed through the shared credential redactor into `.log.gz`. The raw source is removed only after its sanitized archive is synced and atomically installed; failures preserve it. Compressed history is retained indefinitely with no byte cap, so storage is intentionally unbounded. The active `bram-trace.log` is never an archive candidate during its session. | `lib.rs`, `Settings.xmlui` | #114 #111 | ~~S~~ done |
-| L2 | `/__worklist-history/snapshot` joins a caller `ts` into a filename with no `..` guard (constrained to `.json` targets). | `lib.rs:27099` | #110 | S |
-| L3 | `session_path_for_id` joins a caller session id into a path; constrained by the `.jsonl` suffix and `.exists()`, and the result feeds a session reload rather than an HTTP body (no exfil channel). | `lib.rs:9028` | #110 | S |
-| L4 | No `mcp__*` matcher in `.claude/settings.json` PreToolUse; if a Claude session ever gains a filesystem MCP server, its writes would be ungated. Latent given current server inventory. | `.claude/settings.json` | #119 | S–M |
-| L5 | Guard doc/path drift: `CLAUDE.md` / `conventions.md` cite `app/__shell/codex-worklist-guard.py`, but the real canonical path is `app/provider-hooks/codex-worklist-guard.py`. | `conventions.md` | #119 | S |
-| L6 | **DONE** (`issue-114-secret-safe-observability`). Tool Descriptions now require explicit `ai.describeCommands: true` plus `ANTHROPIC_API_KEY`; an API key alone no longer enables external processing. Command/diff/write/access material, agent context, result excerpts, and existing descriptions pass through the crate-backed host redactor before the request. The `[ai-describe]` trace records only sizes/counters, including `redactions=N`, never prompt content. Heuristic redaction is defense in depth, not a guarantee about arbitrary file contents; explicit opt-in remains the primary boundary. | `lib.rs`, `helpers.js`, `Cargo.toml` | #114 | ~~S~~ done |
+| # | Finding | Status |
+|---|---------|--------|
+| L1 | Unbounded trace retention. | **DONE** (`1801394`) — raw archives past a configurable window stream through the redactor into `.log.gz`, retained indefinitely; failures preserve the raw file. |
+| L2 | `/__worklist-history/snapshot` joins a caller `ts` into a filename (constrained to `.json`). | **OPEN (low).** Reject `..`/separators in the `ts` param. #110. |
+| L3 | `session_path_for_id` joins a caller id into a path (constrained by `.jsonl` + `.exists()`, feeds a reload not an HTTP body). | **OPEN (low, latent).** #110. |
+| L4 | No `mcp__*` matcher in `.claude/settings.json` PreToolUse. | **OPEN (latent).** Add the matcher before any filesystem MCP server is introduced. #119. |
+| L5 | Guard doc/path drift to `app/__shell/*-guard.py`. | **DONE** — canonical paths moved to `app/provider-hooks/` and docs updated (`#217`, `96636b3`). |
+| L6 | Tool Descriptions default-on with just an API key. | **DONE** (`1801394`) — explicit `ai.describeCommands` opt-in; material redacted before the request; trace records `redactions=N` only. |
 
-## Recommended sequence
+## Live plan (what remains, ranked)
 
-Ordered to buy the most risk reduction per unit effort. The Phase 0 wins are
-all small-effort and independently shippable; Phase 1 is the structural fix that
-shrinks the reachability of much of the rest.
+The Phase 0/1 quick wins and root fix from the original plan have all landed
+(C1/C2/C3/H1/H2/H3/M6/L5). The remaining work, in priority order:
 
-- **Phase 0 — quick wins (all S, ship first).**
-  - H1: strip / neutralize `\x1b[201~` (and ideally all `\x1b`) from outbound
-    payloads before the `format!` at `lib.rs:8907`; add a unit test with an
-    embedded paste-end.
-  - C2: add root/allowlist containment to `/__file`, reusing the
-    `canonicalize()` + `starts_with(root_canon)` guard already present in
-    `/__local-file-preview` (`lib.rs:25882`).
-  - M6: validate `open_url` schemes; drop or containment-check the `file://`
-    → `open_path` branch.
-  - L2/L3: reject `..` / path separators in the `ts` and `id` path parameters.
-
-- **Phase 1 — the root fix (L).**
-  - C1: cut the target-app iframe off from `window.__TAURI__` and from
-    `pty_write` / `queue_pty_intent` — a distinct webview/origin, an
-    `sandbox`ed iframe without `allow-same-origin`, or a capability scoped to
-    the tools origin only. Set a real CSP. This simultaneously shrinks H2 and
-    the *reachability* of C2, C3, H5, H6, M6.
-
-- **Phase 2 — guard parity + fail-closed (M).**
-  - H3: lift Codex's `_BASH_WRITE_PATTERNS` + coverage check into the Claude
-    guard's `Bash` branch; re-sync the installed copy.
-  - M1: have Setup refuse to manage a repo (hard Status error) when
-    `python3` is absent, so the file-write gate cannot silently fail open.
-  - M5: extract redirect / `tee` / `sed -i` / `cp` / `mv` targets from Bash
-    commands and intersect with covered paths instead of "any coverage passes."
-
-- **Phase 3 — auth lifecycle (M).**
-  - H4 + M9: call `consume_worklist_authorization` on every cancel/interrupt
-    path; add a freshness/TTL and an "interrupted" flag so
-    `validate_worklist_mutate_authorization` rejects a cancelled record and a
-    replay requires a fresh `approved:` payload. Narrow the
-    `mutate`-ignores-`consumedAtMs` invariant to "same turn as the resolve."
-
-- **Phase 4 — route hardening (M).**
-  - H5: **resolved by removal** (close-on-push-automatic) — rather than
-    hardening `/__issue/close`, the agent-reachable route was deleted and
-    closing became a host consequence of the user's explicit Push. See the
-    status table above.
-  - H6: add a per-session bearer token (write it alongside `.bram-port`,
-    require it on `/__*` routes) and tighten `Access-Control-Allow-Origin`
-    from `*` to the shell origin. Copy the `BRAM_MENU_TOKEN` pattern
-    (`lib.rs:3107`).
-  - M7: add a confirm step to the Issues-tab close/comment buttons; the H5
-    host check then covers the agent-direct path too.
-
-- **Phase 5 — secrets and audit (M).**
-  - M2: **done** — PTY previews use the shared `loomweave-scanner`-backed
-    redactor.
-  - M3: pass the PTY child an env allowlist rather than `std::env::vars()`,
-    gated behind an opt-in so it doesn't break `gh` / agent auth.
-  - M4: emit a `worklist-commit op=commit sha=… ids=… files=…` line on
-    success, and add a durable, always-on append-only audit record for
-    commit / push / issue-close / approval that survives `traces.enabled:
-    false`.
-  - L1: **done** — configurable raw window followed by sanitized gzip
-    archival; compressed history is retained indefinitely.
-  - M8: **done** — Inspector values are sanitized before IPC and again at
-    the host persistence boundary.
-  - L6: **done** — external Tool Descriptions are explicit opt-in and their
-    material is redacted before request construction.
-  - L4/L5: add an `mcp__.*` matcher to `.claude/settings.json`; fix the
-    guard doc path references.
+1. **H6 — loopback bearer token + tighten CORS.** The last unfixed root cause;
+   post-C1 it is the main structural exposure. Per-session token alongside
+   `.bram-port`, required on `/__*`; CORS from `*` to the shell origin. Also
+   covers M7 for the agent-direct path. (#113)
+2. **M3 — PTY child env allowlist**, behind an opt-in. (#114)
+3. **Confirm M5** (Codex path intersection) and **close M1** (Setup hard-fail on
+   missing Python). (#119)
+4. **M4 — durable audit ledger** — the remaining #114 auditability tranche;
+   value scales with shared use / demonstrability. (#114)
+5. **Cleanups:** L2/L3 path-param guards, L4 `mcp__*` matcher. (#110, #119)
 
 ## Per-issue map
 
-- **#109 — worklist / approval gates (umbrella for the below).** Core state
-  machine is sound: `/__worklist/mutate` and `/__worklist/commit` each
-  independently re-read the auth record and enforce `kind`, id membership,
-  `applied` status, and staged-file scoping. Residual risk is concentrated in
-  the children below.
-- **#110 — filesystem containment.** Repo-vs-host separation is otherwise good
-  (git is root-scoped, writes are contained, `/__local-file-preview` already
-  does the right thing). Exposure is C2, C3, and H6 plus L2/L3. **High** until
-  the two arbitrary-read routes are contained.
-- **#111 / #114 — secrets hygiene and auditability (duplicates).** The
-  observability/external-processing tranche is complete: explicit Tool
-  Description opt-in, host + iframe redaction, and sanitized compressed trace history
-  resolve M2, M8, L1, and L6. Two intentionally separate risks remain: the PTY
-  child inherits the host environment (M3), and sensitive state transitions
-  lack a durable always-on audit ledger (M4). Heuristic redaction cannot prove
+- **#108 — umbrella.** Open until the children below resolve.
+- **#109 — worklist / approval gates.** Core state machine sound; H2 and H4
+  landed and mutate/commit each independently re-verify the auth record. Direct
+  concerns resolved; residual coverage risk is delegated to #119. **Effectively
+  satisfied.**
+- **#110 — filesystem containment.** Both arbitrary-read routes contained (C2,
+  C3). Residual is L2/L3 only. **Effectively satisfied (Low residual).**
+- **#111 / #114 — secrets hygiene and auditability (duplicates; #111 closed).**
+  Observability/external-processing tranche complete (M2, M8, L1, L6). Two risks
+  remain: M3 (env) and M4 (audit ledger). Heuristic redaction cannot prove
   arbitrary content secret-free. **Medium until M3/M4 land.**
-- **#112 — PTY / shell injection.** H1 (paste-escape smuggling) and H2 (forged
-  auth) are the sharp edges; both are reachable through the same-origin iframe
-  (C1). **High.**
-- **#113 — host-side IPC scoping.** The functional authorization plumbing is
-  real, but the same-origin iframe design punches through it (C1) and `/__file`
-  lacks containment (C2). Also update `docs/apis.md` to state the trust boundary
-  per command/route explicitly. **High.**
-- **#118 — gate commit/push/issue-close on worklist state.** Commit and prune
-  are correctly gated; issue-close and push are not (H5), and Claude can bypass
-  commit/push via Bash (H3). Two of four side effects ungated. **Moderate–High.**
-- **#119 — guard coverage across agents.** Guards are in sync, executable, and
-  registered, but the Claude `Bash` surface is ungated (H3), the guard fails
-  open without Python (M1), and the Codex Bash gate is path-blind (M5).
-  **High.**
-- **#120 — inflight/interrupt fail-closed.** Sentinel lifecycle is well
-  instrumented and the spinner recovers, but the *authorization* half fails open
-  on interrupt (H4, M9). **High.**
-- **#121 — UI-only affordances must not be the policy authority.** Worklist
-  buttons correctly delegate to re-verifying host routes. `/__issue/close` (H5)
-  is now gone entirely — closing is host-driven off the user's Push — but
-  `/__issue/comment` and `open_url` are still gated only by frontend state or
-  bare reachability (M6, M7). Same-origin policy blocks the cross-origin-page
-  vector, keeping this from High. **Moderate.**
+- **#112 — PTY / shell injection (closed).** H1 and H2 resolved.
+- **#113 — host-side IPC scoping.** C1 (the structural fix) and C2 landed. **H6
+  is the lead remaining item and lives here**, plus per-command trust-boundary
+  documentation in `docs/apis.md`. **High until H6 lands.**
+- **#118 — commit/push/issue-close gating (closed).** H5 resolved.
+- **#119 — guard coverage across agents.** H3 and L5 landed. Residual: M1
+  (fail-open without Python), M5 (confirm Codex path intersection), L4 (mcp
+  matcher), and the self-test diagnostic. Note: the issue body still lists
+  pre-#217 guard paths. **Medium.**
+- **#120 — inflight/interrupt fail-closed (closed).** H4 and M9 resolved.
+- **#121 — UI affordances must not be policy authority.** `/__issue/close`
+  removed (H5); `open_url` allowlisted (M6). Residual is M7 (`/__issue/comment`
+  gated only by frontend state). Same-origin/loopback exposure now concentrated
+  in H6. **Effectively satisfied (M7 residual).**

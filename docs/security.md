@@ -89,25 +89,25 @@ day, **M** = half to two days, **L** = more than two days.
 | # | Finding | Status |
 |---|---------|--------|
 | M1 | Guard fails **open** when Python is missing; Setup surfaces `python: missing` (`lib.rs:28122`) but does not hard-block. | **OPEN (partial).** Make Setup refuse to manage a repo when `python3` is absent. Effort S. #119. |
-| M2 | Terminal I/O previews leak secrets. | **DONE** (`issue-114-...`, `1801394`) — previews pass through the `loomweave-scanner`-backed host redactor before escaping/truncation. |
+| M2 | Terminal I/O previews leak secrets. | **DONE** (`issue-114-secret-safe-observability`) — previews pass through the `loomweave-scanner`-backed host redactor before escaping/truncation. |
 | M3 | PTY child inherits the full host env (`ANTHROPIC_API_KEY`/`GITHUB_TOKEN`); the agent can `echo` them. | **OPEN.** Pass the child an env allowlist behind an opt-in so it doesn't break `gh`/agent auth. Effort M. #114. |
 | M4 | No durable, always-on record of commit/approval; a successful commit emits no trace line and the auth record is consumed-on-read. | **OPEN.** Append-only audit ledger for commit/push/issue-close/approval that survives `traces.enabled: false`. Effort M. #114. |
 | M5 | Codex Bash gate path-blindness. | **NEEDS CONFIRMATION.** The Codex guard now has both `covered_paths` (`codex-worklist-guard.py:202`) and `_BASH_WRITE_PATTERNS` (`:306`); whether it intersects write targets with covered paths (vs. "any coverage passes") is unverified. #119. |
 | M6 | `open_url` opened any `file://` in its default app. | **DONE** — `open_url` enforces a URL allowlist; `file://` is not permitted (`lib.rs:14205`). |
 | M7 | `/__issue/comment` posts directly with only the frontend `enabled` binding as the gate. | **OPEN.** Route has no independent host auth check (`lib.rs:33200`). (The close path was resolved by H5.) Effort S. #121. |
-| M8 | Inspector-tap fields forwarded unsanitized. | **DONE** (`1801394`) — fields pass through `__bramTraceSafeValue` before IPC; host redacts again before persistence. |
+| M8 | Inspector-tap fields forwarded unsanitized. | **DONE** (`issue-114-secret-safe-observability`) — fields pass through `__bramTraceSafeValue` before IPC; host redacts again before persistence. |
 | M9 | `drop` auth lingered with no TTL. | **DONE** — the auth record (drop included) is rejected once past `WORKLIST_AUTH_TTL_MS` (`lib.rs:137`, `34490`), via the H4 work. |
 
 ### Low
 
 | # | Finding | Status |
 |---|---------|--------|
-| L1 | Unbounded trace retention. | **DONE** (`1801394`) — raw archives past a configurable window stream through the redactor into `.log.gz`, retained indefinitely; failures preserve the raw file. |
+| L1 | Unbounded trace retention. | **DONE** (`issue-114-secret-safe-observability`) — raw archives past a configurable window stream through the redactor into `.log.gz`, retained indefinitely; failures preserve the raw file. |
 | L2 | `/__worklist-history/snapshot` joins a caller `ts` into a filename (constrained to `.json`). | **OPEN (low).** Reject `..`/separators in the `ts` param. #110. |
 | L3 | `session_path_for_id` joins a caller id into a path (constrained by `.jsonl` + `.exists()`, feeds a reload not an HTTP body). | **OPEN (low, latent).** #110. |
 | L4 | No `mcp__*` matcher in `.claude/settings.json` PreToolUse. | **OPEN (latent).** Add the matcher before any filesystem MCP server is introduced. #119. |
 | L5 | Guard doc/path drift to `app/__shell/*-guard.py`. | **DONE** — canonical paths moved to `app/provider-hooks/` and docs updated (`#217`, `96636b3`). |
-| L6 | Tool Descriptions default-on with just an API key. | **DONE** (`1801394`) — explicit `ai.describeCommands` opt-in; material redacted before the request; trace records `redactions=N` only. |
+| L6 | Tool Descriptions default-on with just an API key. | **DONE** (`issue-114-secret-safe-observability`) — explicit `ai.describeCommands` opt-in; material redacted before the request; trace records `redactions=N` only. |
 
 ## Live plan (what remains, ranked)
 

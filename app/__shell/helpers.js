@@ -1445,6 +1445,15 @@ window.settingsInfoBodies = {
     "redaction cannot guarantee arbitrary content contains no secrets. " +
     "The key itself is read from the environment only and is never written " +
     "to `.bram.json`.\n\n" +
+    "**Billing note.** Setting `ANTHROPIC_API_KEY` also affects Claude " +
+    "Code's own billing. If Claude Code prompts you to approve the key and " +
+    "you accept, it authenticates with that key and bills **per-token to " +
+    "your API account** instead of your Max/Pro subscription (an approved " +
+    "API key outranks subscription login). To keep Bram's descriptions on " +
+    "the key while leaving Claude Code on your subscription, run `/config` " +
+    "in the agent and turn OFF \"Use custom API key\" — that rejects the key " +
+    "for Claude Code only; Bram still reads it from the environment. Confirm " +
+    "with `/status`. Docs: https://code.claude.com/docs/en/authentication.md\n\n" +
     "Per-call cost and redaction count are traced as `[ai-describe]` in " +
     "resources/bram-traces/bram-trace.log.\n\n" +
     "Persists in .bram.json under ai.describeCommands.",

@@ -1524,6 +1524,11 @@ fn clear_hook_permission_menu<R: tauri::Runtime>(
     // full clear below, draining the queue.
     let id = tool_use_id.filter(|s| !s.is_empty());
     let sig = clear_signature.filter(|s| !s.is_empty());
+    // menu-answer-deferred-id-binding: the clear carries the id the
+    // click-time capture couldn't get; bind a stashed answer to it.
+    if let Some(id) = id {
+        bind_pending_menu_answer(app, tool, id, sig);
+    }
     if id.is_some() || sig.is_some() {
         let matches = |c: &HookMenuClaim| -> bool {
             (id.is_some() && c.tool_use_id.as_deref() == id)
@@ -8108,8 +8113,17 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
                 let id = resolved
                     .and_then(|o| o.tool_use_id)
                     .or_else(|| lookup_pending_tool_call(app).tool_use_id);
-                if let Some(id) = id {
-                    record_menu_answer(app, &id, label);
+                match id {
+                    Some(id) => record_menu_answer(app, &id, label, "click"),
+                    // Pending menus have no tool name; the stash binds by
+                    // signature alone (and misses, traced, without one).
+                    None => stash_pending_menu_answer(
+                        app,
+                        "",
+                        label,
+                        signature.as_deref(),
+                        "no-tool-use-id",
+                    ),
                 }
             }
             clear_grid_menu_sighting();
@@ -8139,13 +8153,33 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
         // transcript-render-menu-answers: bind the chosen label to the
         // answered call. Prefer the pending-call lookup (matches the
         // suppressor's identity); a hook-claimed prompt's own id is the
-        // fallback under record-flush lag.
-        if let Some(label) = chosen_label.as_deref() {
-            let id = answered_id
-                .clone()
-                .or_else(|| resolved.and_then(|o| o.tool_use_id));
-            if let Some(id) = id {
-                record_menu_answer(app, &id, label);
+        // fallback under record-flush lag. No id at all is the normal
+        // record-flush race (the tool_use lands only after approval) —
+        // stash for the hook-clear binding instead of dropping.
+        match chosen_label.as_deref() {
+            Some(label) => {
+                let id = answered_id
+                    .clone()
+                    .or_else(|| resolved.and_then(|o| o.tool_use_id));
+                match id {
+                    Some(id) => record_menu_answer(app, &id, label, "click"),
+                    None => stash_pending_menu_answer(
+                        app,
+                        &tool,
+                        label,
+                        signature.as_deref(),
+                        "no-tool-use-id",
+                    ),
+                }
+            }
+            None => {
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        app,
+                        "prompt-lifecycle",
+                        &format!("op=answer-miss reason=no-key-match tool={}", tool),
+                    );
+                }
             }
         }
         if let Ok(mut s) = pty_menu_suppressed_cell().lock() {
@@ -21323,7 +21357,12 @@ fn describe_overlay_snapshot() -> std::collections::HashMap<String, String> {
 static MENU_ANSWERS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
 const MENU_ANSWERS_CAP: usize = 200;
 
-fn record_menu_answer<R: tauri::Runtime>(app: &AppHandle<R>, tool_use_id: &str, label: &str) {
+fn record_menu_answer<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    tool_use_id: &str,
+    label: &str,
+    via: &str,
+) {
     if tool_use_id.is_empty() || label.is_empty() {
         return;
     }
@@ -21339,8 +21378,154 @@ fn record_menu_answer<R: tauri::Runtime>(app: &AppHandle<R>, tool_use_id: &str, 
         append_bram_trace_line(
             app,
             "prompt-lifecycle",
-            &format!("op=answer id={} label={}", tool_use_id, label),
+            &format!("op=answer id={} label={} via={}", tool_use_id, label, via),
         );
+    }
+}
+
+// menu-answer-deferred-id-binding: a pane answer whose call id is
+// unknowable at click time (Claude Code flushes the pending tool_use
+// record only AFTER approval, so the lookup finds nothing and a
+// grid-sourced prompt carries no id — 2026-07-24 04:37Z specimen).
+// The PostToolUse clear arrives ~400ms later WITH the id, so park the
+// matched label and bind it there. One slot: menu answers are
+// user-paced, and a new stash replaces a stale one.
+struct PendingMenuAnswer {
+    label: String,
+    tool: String,
+    signature: Option<String>,
+    at_ms: i64,
+}
+static PENDING_MENU_ANSWER: std::sync::Mutex<Option<PendingMenuAnswer>> =
+    std::sync::Mutex::new(None);
+const PENDING_MENU_ANSWER_TTL_MS: i64 = 60_000;
+
+fn stash_pending_menu_answer<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    tool: &str,
+    label: &str,
+    signature: Option<&str>,
+    reason: &str,
+) {
+    if label.is_empty() || (tool.is_empty() && signature.is_none()) {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "prompt-lifecycle",
+                &format!("op=answer-miss reason={} label={}", reason, label),
+            );
+        }
+        return;
+    }
+    if let Ok(mut p) = PENDING_MENU_ANSWER.lock() {
+        *p = Some(PendingMenuAnswer {
+            label: label.to_string(),
+            tool: tool.to_string(),
+            signature: signature.map(|s| s.to_string()),
+            at_ms: unix_now_ms(),
+        });
+    }
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "prompt-lifecycle",
+            &format!(
+                "op=answer-pending reason={} tool={} label={}",
+                reason, tool, label
+            ),
+        );
+    }
+}
+
+// Match rule, deliberately conservative: when both sides carry a
+// signature it must agree (and settles the match either way); otherwise
+// a non-empty tool name must agree. A stash with neither never binds
+// and ages out.
+fn pending_answer_matches(
+    p: &PendingMenuAnswer,
+    tool: &str,
+    signature: Option<&str>,
+    now_ms: i64,
+) -> bool {
+    if now_ms - p.at_ms > PENDING_MENU_ANSWER_TTL_MS {
+        return false;
+    }
+    match (p.signature.as_deref(), signature) {
+        (Some(a), Some(b)) => a == b,
+        _ => !p.tool.is_empty() && p.tool == tool,
+    }
+}
+
+#[cfg(test)]
+mod pending_menu_answer_tests {
+    use super::*;
+
+    fn pending(tool: &str, sig: Option<&str>, at_ms: i64) -> PendingMenuAnswer {
+        PendingMenuAnswer {
+            label: "Yes".to_string(),
+            tool: tool.to_string(),
+            signature: sig.map(|s| s.to_string()),
+            at_ms,
+        }
+    }
+
+    #[test]
+    fn match_rules() {
+        // Signature agreement settles the match either way.
+        assert!(pending_answer_matches(
+            &pending("Bash", Some("Bash(x)"), 0),
+            "Edit",
+            Some("Bash(x)"),
+            1
+        ));
+        assert!(!pending_answer_matches(
+            &pending("Bash", Some("Bash(x)"), 0),
+            "Bash",
+            Some("Bash(y)"),
+            1
+        ));
+        // Without both signatures, a non-empty tool must agree.
+        assert!(pending_answer_matches(
+            &pending("Bash", None, 0),
+            "Bash",
+            Some("Bash(x)"),
+            1
+        ));
+        assert!(!pending_answer_matches(&pending("Bash", None, 0), "Edit", None, 1));
+        // Empty tool and no shared signature never binds.
+        assert!(!pending_answer_matches(&pending("", None, 0), "Bash", None, 1));
+        // TTL.
+        assert!(!pending_answer_matches(
+            &pending("Bash", None, 0),
+            "Bash",
+            None,
+            PENDING_MENU_ANSWER_TTL_MS + 1
+        ));
+    }
+}
+
+fn bind_pending_menu_answer<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    tool: &str,
+    tool_use_id: &str,
+    signature: Option<&str>,
+) {
+    if tool_use_id.is_empty() {
+        return;
+    }
+    let taken = {
+        let Ok(mut p) = PENDING_MENU_ANSWER.lock() else {
+            return;
+        };
+        match p.as_ref() {
+            Some(pending) if pending_answer_matches(pending, tool, signature, unix_now_ms()) => {
+                p.take()
+            }
+            _ => None,
+        }
+    };
+    if let Some(pending) = taken {
+        record_menu_answer(app, tool_use_id, &pending.label, "hook-clear");
     }
 }
 
@@ -21372,7 +21557,7 @@ fn record_hook_menu_answer<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
     // queued claim with identical option labels before falling back to the
     // pending-call lookup. Every early-out traces an answer-miss reason so
     // the next gap names itself.
-    let hit: Option<(Option<String>, String, Vec<String>)> =
+    let hit: Option<(Option<String>, String, Vec<String>, String, Option<String>)> =
         menu_hook_claims_cell().lock().ok().and_then(|q| {
             let c = q.iter().find(|c| c.id_key == displayed_key)?;
             let labels: Vec<String> = c.menu.options.iter().map(|o| o.label.clone()).collect();
@@ -21381,13 +21566,21 @@ fn record_hook_menu_answer<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
                 .options
                 .iter()
                 .find(|o| !o.key.is_empty() && key_input == o.key)
-                .map(|o| (c.tool_use_id.clone(), o.label.trim().to_string(), labels));
+                .map(|o| {
+                    (
+                        c.tool_use_id.clone(),
+                        o.label.trim().to_string(),
+                        labels,
+                        c.menu.tool.clone(),
+                        c.signature.clone(),
+                    )
+                });
             if opt.is_none() {
-                return Some((None, String::new(), Vec::new()));
+                return Some((None, String::new(), Vec::new(), String::new(), None));
             }
             opt
         });
-    let Some((id_opt, label, labels)) = hit else {
+    let Some((id_opt, label, labels, claim_tool, claim_sig)) = hit else {
         if bram_trace_enabled() {
             append_bram_trace_line(
                 app,
@@ -21426,16 +21619,11 @@ fn record_hook_menu_answer<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
         })
         .or_else(|| lookup_pending_tool_call(app).tool_use_id);
     let Some(id) = id else {
-        if bram_trace_enabled() {
-            append_bram_trace_line(
-                app,
-                "prompt-lifecycle",
-                &format!("op=answer-miss reason=no-tool-use-id label={}", label),
-            );
-        }
+        // The record-flush race: stash for the hook-clear binding.
+        stash_pending_menu_answer(app, &claim_tool, &label, claim_sig.as_deref(), "no-tool-use-id");
         return;
     };
-    record_menu_answer(app, &id, &label);
+    record_menu_answer(app, &id, &label, "click");
 }
 
 fn menu_answer_overlay_snapshot() -> std::collections::HashMap<String, String> {

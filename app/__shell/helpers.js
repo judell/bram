@@ -6124,22 +6124,23 @@ window.__bramDescribeRequested = {};
 // (and apply_patch's patch) carry commandDisplay; Edit/MultiEdit carry
 // the host-reconstructed diff; a markdown Write carries its content in
 // commandMarkdown; other Writes fall back to the summary (tool + path
-// — with the agent-context rider, enough for an intent line). Non-edit
-// tools without a commandDisplay (Read, Grep, MCP) return "" and stay
-// undescribed — their rows are self-describing.
+// — with the agent-context rider, enough for an intent line).
+//
+// codex-tooluse-describe: everything else falls back to the row summary
+// GENERICALLY — no per-tool enumeration. The host summarizer (st_tool_summary)
+// probes a candidate arg-field list for unknown tools, so a Codex web/browse
+// call, a Task dispatch, a WebFetch, an MCP call, etc. carry real material
+// in `summary` instead of a bare name. Read/Grep/Glob are subsumed (their
+// summary already carries the target). The floor: skip when `summary` is just
+// the tool name (the host probe found nothing) — feeding Haiku a bare name
+// would spend a call on a useless line.
 window.__bramDescribeMaterial = function (item) {
   if (!item) return "";
   if (item.commandDisplay) return item.commandDisplay;
   var editFamily = { Edit: 1, MultiEdit: 1, NotebookEdit: 1, Write: 1, apply_patch: 1 };
   if (editFamily[item.name]) return item.diff || item.commandMarkdown || item.summary || "";
-  // describe-read-rows: Read/Grep/Glob carry their target — file path (+
-  // line range), search pattern — in the summary, which with the agent-
-  // context rider is enough for an intent line ("Read /etc/hosts" ->
-  // "Inspect the system hosts file"). Codex reads are shell cat/sed with a
-  // commandDisplay and are already covered by the branch above.
-  var readFamily = { Read: 1, Grep: 1, Glob: 1 };
-  if (readFamily[item.name]) return item.summary || "";
-  return "";
+  var summary = item.summary || "";
+  return summary && summary !== item.name ? summary : "";
 };
 window.__bramExpandTool = function (arr, item) {
   // Arm the xmlui freeze-probe window (xmlui-eval-probe-vendor): for 1.5s

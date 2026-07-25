@@ -17864,7 +17864,59 @@ fn st_tool_summary(name: &str, input: &serde_json::Value) -> String {
             }
             name.to_string()
         }
-        _ => name.to_string(),
+        // Generic fallback (codex-tooluse-describe): probe a candidate list
+        // of common argument fields, same idea as the mcp__ arm — an unknown
+        // tool (e.g. a Codex web/browse call) carries its arg material in the
+        // summary instead of collapsing to a bare name, which lets Tool
+        // Descriptions describe it without a per-tool arm. A tool whose args
+        // hide under an unusual/complex field name still falls back to the
+        // name (→ undescribed, the safe outcome).
+        _ => {
+            for k in &[
+                "query", "url", "prompt", "input", "text", "path", "file_path", "pattern",
+                "component",
+            ] {
+                let v = get_str(k);
+                if !v.is_empty() {
+                    return st_clip_80(v);
+                }
+            }
+            name.to_string()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tool_summary_generic_probe_tests {
+    use super::st_tool_summary;
+    use serde_json::json;
+
+    #[test]
+    fn probe_catches_a_query_field_on_an_unknown_tool() {
+        assert_eq!(
+            st_tool_summary("some_new_tool", &json!({ "query": "kubernetes ingress" })),
+            "kubernetes ingress"
+        );
+    }
+
+    #[test]
+    fn probe_catches_url_and_prompt() {
+        assert_eq!(
+            st_tool_summary("browse", &json!({ "url": "https://example.com/x" })),
+            "https://example.com/x"
+        );
+        assert_eq!(
+            st_tool_summary("gen", &json!({ "prompt": "draft a haiku" })),
+            "draft a haiku"
+        );
+    }
+
+    #[test]
+    fn no_probeable_field_falls_back_to_the_bare_name() {
+        // The client floor (summary === name) then leaves these undescribed —
+        // the safe outcome for a tool whose only args are non-probeable
+        // scalars we can't turn into intent material.
+        assert_eq!(st_tool_summary("wait", &json!({ "seconds": 5 })), "wait");
     }
 }
 

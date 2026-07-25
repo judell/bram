@@ -492,7 +492,7 @@
       <Page url="/"><Workspace activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}" /></Page>
       <Page url="/worklist"><Workspace activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}" /></Page>
       <Page url="/transcript"><Transcript agentId="{transcriptAgentId}" /></Page>
-      <Page url="/queue"><AgentMessageQueue /></Page>
+      <Page url="/queue"><AgentMessageQueue onSent="(target) => navigate(target)" /></Page>
       <Page url="/status"><Status /></Page>
       <Page url="/settings"><Settings /></Page>
       <Page url="/sessions"><Sessions /></Page>

@@ -8,7 +8,8 @@
 //! prior art's `quick_search_fts(id, source_type, all_text)` gating index
 //! (jonudell/xmlui-mastodon) to the #230 common schema.
 
-use rusqlite::{params, Connection, OptionalExtension, Result};
+use rusqlite::types::Value;
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Result};
 
 /// Bump when the on-disk schema shape changes. The index is a rebuildable
 /// cache, so a version mismatch just drops and recreates — no migration.
@@ -99,10 +100,11 @@ pub fn needs_index(conn: &Connection, path: &str, mtime: i64, size: i64) -> Resu
     })
 }
 
-/// Upsert one source file as a single index row (one row per session for now).
-/// Deletes the file's prior row (by stored rowid) before inserting, then
-/// records mtime/size so the next pass can skip it.
-pub fn index_session(conn: &Connection, row: &IndexRow, mtime: i64, size: i64) -> Result<()> {
+/// Upsert one document as a single index row, keyed by `row.file` (a generic
+/// doc key: a session file path, `commit:<sha>`, or `issue:<number>`). Deletes
+/// the key's prior row (by stored rowid) before inserting, then records the
+/// change token (`mtime`) + `size` so the next pass can skip it unchanged.
+pub fn index_doc(conn: &Connection, row: &IndexRow, mtime: i64, size: i64) -> Result<()> {
     let existing: Option<i64> = conn
         .query_row(
             "SELECT rowid_ref FROM indexed_files WHERE path = ?1",
@@ -132,18 +134,35 @@ pub fn row_count(conn: &Connection) -> Result<i64> {
     conn.query_row("SELECT count(*) FROM search_index", [], |r| r.get(0))
 }
 
-/// Full-text query across all buckets, `bm25`-ranked (best first), with a
+/// Full-text query across buckets, `bm25`-ranked (best first), with a
 /// highlighted `snippet()` of the matched `content` column (index 4). `q` must
-/// be a valid FTS5 MATCH expression — callers sanitize raw user input.
-pub fn query(conn: &Connection, q: &str, limit: usize) -> Result<Vec<Hit>> {
-    let mut stmt = conn.prepare(
+/// be a valid FTS5 MATCH expression — callers sanitize raw user input. When
+/// `types` is non-empty, results are restricted to those `type` values (the
+/// Search page's facet filter).
+pub fn query(conn: &Connection, q: &str, limit: usize, types: &[String]) -> Result<Vec<Hit>> {
+    let mut sql = String::from(
         "SELECT type, source, date, link, \
                 snippet(search_index, 4, '[', ']', '…', 10), \
                 bm25(search_index) \
-         FROM search_index WHERE search_index MATCH ?1 \
-         ORDER BY bm25(search_index) LIMIT ?2",
-    )?;
-    let rows = stmt.query_map(params![q, limit as i64], |r| {
+         FROM search_index WHERE search_index MATCH ?",
+    );
+    let mut args: Vec<Value> = vec![Value::Text(q.to_string())];
+    if !types.is_empty() {
+        sql.push_str(" AND type IN (");
+        for (i, t) in types.iter().enumerate() {
+            if i > 0 {
+                sql.push(',');
+            }
+            sql.push('?');
+            args.push(Value::Text(t.clone()));
+        }
+        sql.push(')');
+    }
+    sql.push_str(" ORDER BY bm25(search_index) LIMIT ?");
+    args.push(Value::Integer(limit as i64));
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(args.iter()), |r| {
         Ok(Hit {
             kind: r.get(0)?,
             source: r.get(1)?,
@@ -177,7 +196,7 @@ mod tests {
             ("commit", "/c/abc", "abc123", "Make queue items drag-reorderable via vendored xmlui-dnd-list"),
             ("issue", "/i/230", "#230", "unified full text search across sessions commits issues"),
         ] {
-            index_session(conn, &row(kind, file, source, content), 1, 1).unwrap();
+            index_doc(conn, &row(kind, file, source, content), 1, 1).unwrap();
         }
     }
 
@@ -188,21 +207,26 @@ mod tests {
         let conn = open_in_memory().expect("FTS5 must be compiled into bundled SQLite");
         seed(&conn);
 
-        let hits = query(&conn, "drag", 10).unwrap();
+        let hits = query(&conn, "drag", 10, &[]).unwrap();
         assert_eq!(hits.len(), 2, "two rows mention drag");
         assert!(hits.iter().all(|h| h.snippet.contains('[')), "snippet() highlights");
         let ranks: Vec<f64> = hits.iter().map(|h| h.rank).collect();
         assert!(ranks.windows(2).all(|w| w[0] <= w[1]), "bm25-ordered");
 
-        let issues = query(&conn, "unified", 10).unwrap();
+        let issues = query(&conn, "unified", 10, &[]).unwrap();
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].kind, "issue");
+
+        // Facet filter restricts to the requested types.
+        let only_commit = query(&conn, "queue", 10, &["commit".to_string()]).unwrap();
+        assert!(only_commit.iter().all(|h| h.kind == "commit"), "types filter applied");
+        assert!(!only_commit.is_empty(), "commit row matches 'queue'");
     }
 
     #[test]
     fn skip_unchanged_and_reindex_changed() {
         let conn = open_in_memory().unwrap();
-        index_session(&conn, &row("session", "/s/1.jsonl", "t", "alpha content"), 100, 10).unwrap();
+        index_doc(&conn, &row("session", "/s/1.jsonl", "t", "alpha content"), 100, 10).unwrap();
         assert_eq!(row_count(&conn).unwrap(), 1);
 
         // Same mtime/size → skip (no duplicate).
@@ -210,9 +234,9 @@ mod tests {
 
         // Changed mtime → reindex replaces the row, not duplicates it.
         assert!(needs_index(&conn, "/s/1.jsonl", 200, 12).unwrap());
-        index_session(&conn, &row("session", "/s/1.jsonl", "t", "beta content"), 200, 12).unwrap();
+        index_doc(&conn, &row("session", "/s/1.jsonl", "t", "beta content"), 200, 12).unwrap();
         assert_eq!(row_count(&conn).unwrap(), 1, "reindex replaces, not appends");
-        assert_eq!(query(&conn, "alpha", 10).unwrap().len(), 0, "old content gone");
-        assert_eq!(query(&conn, "beta", 10).unwrap().len(), 1, "new content present");
+        assert_eq!(query(&conn, "alpha", 10, &[]).unwrap().len(), 0, "old content gone");
+        assert_eq!(query(&conn, "beta", 10, &[]).unwrap().len(), 1, "new content present");
     }
 }

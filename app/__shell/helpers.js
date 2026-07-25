@@ -4435,6 +4435,17 @@ window.__bramLocalLinkRequestFromHref = function (href) {
   if (raw.indexOf("://") >= 0) return { skip: true, reason: "unknown-url", href: href, raw: raw };
   return { path: raw, line: line, href: href };
 };
+// issue-230 Search facets: add/remove a type from the selectedTypes array
+// (keeps array-mutation logic out of the Checkbox onDidChange attribute).
+window.__bramToggleType = function (types, t, on) {
+  var set = Array.isArray(types) ? types.slice() : [];
+  if (on) {
+    if (set.indexOf(t) < 0) set.push(t);
+  } else {
+    set = set.filter(function (x) { return x !== t; });
+  }
+  return set;
+};
 window.__bramOpenLocalLinkPreview = function (request) {
   if (!request || !request.path) return;
   var qs = "path=" + encodeURIComponent(request.path);

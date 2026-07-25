@@ -4,11 +4,12 @@
        are added incrementally. -->
   <variable name="typeColors"
     value="{{ session: 'blue', commit: 'green', issue: 'orange', 'worklist-history': 'purple' }}" />
+  <variable name="selectedTypes" value="{['session', 'commit', 'issue']}" />
 
   <DataSource
     id="searchResults"
     url="/__search"
-    queryParams="{{ q: query, limit: 100 }}"
+    queryParams="{{ q: query, limit: 100, types: selectedTypes.join(',') }}"
     when="{!!query &amp;&amp; query.trim().length >= 2}" />
 
   <SearchHitModal id="searchHitModalRef" query="{query}" />
@@ -18,10 +19,19 @@
       <Heading level="h2">Search</Heading>
       <SpaceFiller />
       <SearchBox
-        placeholder="Search across sessions…"
+        placeholder="Search sessions, commits, issues…"
         inProgress="{searchResults.inProgress}"
         onQueryChange="(q) => query = q"
         onClear="query = ''; searchHitModalRef.close()" />
+    </HStack>
+
+    <HStack gap="$space-3" verticalAlignment="center">
+      <Checkbox label="Sessions" initialValue="{true}"
+        onDidChange="(v) => selectedTypes = window.__bramToggleType(selectedTypes, 'session', v)" />
+      <Checkbox label="Commits" initialValue="{true}"
+        onDidChange="(v) => selectedTypes = window.__bramToggleType(selectedTypes, 'commit', v)" />
+      <Checkbox label="Issues" initialValue="{true}"
+        onDidChange="(v) => selectedTypes = window.__bramToggleType(selectedTypes, 'issue', v)" />
     </HStack>
 
     <Text when="{!query || query.trim().length &lt; 2}"

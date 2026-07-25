@@ -15241,48 +15241,198 @@ fn run_search_index_pass<R: tauri::Runtime>(
             file: path_str,
         };
         // Index even empty-content sessions so the next pass skips them.
-        search_index::index_session(&conn, &row, mtime, size).map_err(|e| e.to_string())?;
+        search_index::index_doc(&conn, &row, mtime, size).map_err(|e| e.to_string())?;
         indexed += 1;
     }
     let rows = search_index::row_count(&conn).unwrap_or(0);
     Ok((files, indexed, skipped, rows))
 }
 
+/// Parse an RFC3339 timestamp (gh's `updatedAt`) to epoch seconds.
+fn parse_iso_to_epoch(s: &str) -> Option<i64> {
+    time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
+        .ok()
+        .map(|dt| dt.unix_timestamp())
+}
+
+/// One pass over `git log` — index each commit (immutable, keyed by
+/// `commit:<sha>`, so seen shas skip). Returns (seen, indexed, skipped, rows).
+fn run_commit_index_pass<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<(usize, usize, usize, i64), String> {
+    let db = search_index_db_path(app).ok_or("no index db path")?;
+    let conn = search_index::open(&db.to_string_lossy()).map_err(|e| e.to_string())?;
+    let remote_url = git_run(app, &["remote", "get-url", "origin"])
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let html_base = remote_to_html(&remote_url);
+    // %at = author date as epoch seconds (avoids ISO parsing); %B last so
+    // multi-line bodies reassemble; %x1f fields, %x1e records.
+    let format = "--format=%H%x1f%at%x1f%an%x1f%B%x1e";
+    let log_out = git_run(app, &["log", "-n2000", format]).map_err(|e| e.to_string())?;
+    let (mut seen, mut indexed, mut skipped) = (0usize, 0usize, 0usize);
+    for record in log_out.split('\x1e') {
+        let record = record.trim_start_matches('\n');
+        if record.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = record.splitn(4, '\x1f').collect();
+        if parts.len() != 4 {
+            continue;
+        }
+        seen += 1;
+        let sha = parts[0];
+        let token = parts[1].parse::<i64>().unwrap_or(0);
+        let author = parts[2];
+        let body = parts[3].trim_end_matches('\n');
+        let subject = body.lines().next().unwrap_or("");
+        let key = format!("commit:{}", sha);
+        if !search_index::needs_index(&conn, &key, token, 0).unwrap_or(true) {
+            skipped += 1;
+            continue;
+        }
+        let short: String = sha.chars().take(9).collect();
+        let link = if html_base.is_empty() {
+            String::new()
+        } else {
+            format!("{}/commit/{}", html_base, sha)
+        };
+        let row = search_index::IndexRow {
+            kind: "commit".to_string(),
+            source: format!("{} {}", short, subject),
+            date: token.to_string(),
+            link,
+            content: format!("{}\n{}\n{}", subject, body, author),
+            file: key,
+        };
+        search_index::index_doc(&conn, &row, token, 0).map_err(|e| e.to_string())?;
+        indexed += 1;
+    }
+    let rows = search_index::row_count(&conn).unwrap_or(0);
+    Ok((seen, indexed, skipped, rows))
+}
+
+/// One pass over the forge's issues — index each issue keyed by
+/// `issue:<number>`, change-token = `updatedAt` epoch, so edited issues
+/// reindex. GitHub (LocalGrep) only; GitLab's server-filtered path is skipped
+/// until its list-all path is added. Returns (seen, indexed, skipped, rows).
+fn run_issue_index_pass<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<(usize, usize, usize, i64), String> {
+    let db = search_index_db_path(app).ok_or("no index db path")?;
+    let conn = search_index::open(&db.to_string_lossy()).map_err(|e| e.to_string())?;
+    let root = project_root(Some(app)).ok_or("no project root")?;
+    let issues = match forge_adapter(app).issues_search_fetch(&root, "") {
+        Ok(SearchFetch::LocalGrep(issues)) => issues,
+        Ok(SearchFetch::ServerFiltered(_)) => {
+            // GitLab: no list-all path here yet; leave issues unindexed.
+            return Ok((0, 0, 0, search_index::row_count(&conn).unwrap_or(0)));
+        }
+        Err(e) => return Err(e),
+    };
+    let (mut seen, mut indexed, mut skipped) = (0usize, 0usize, 0usize);
+    for issue in issues {
+        let Some(number) = issue.get("number").and_then(|v| v.as_i64()) else {
+            continue;
+        };
+        seen += 1;
+        let title = issue.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        let body = issue.get("body").and_then(|v| v.as_str()).unwrap_or("");
+        let url = issue
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let author = issue
+            .get("author")
+            .and_then(|v| v.get("login"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let token = issue
+            .get("updatedAt")
+            .and_then(|v| v.as_str())
+            .and_then(parse_iso_to_epoch)
+            .unwrap_or(0);
+        let key = format!("issue:{}", number);
+        if !search_index::needs_index(&conn, &key, token, 0).unwrap_or(true) {
+            skipped += 1;
+            continue;
+        }
+        let mut content = format!("{}\n{}\n{}", title, body, author);
+        if let Some(comments) = issue.get("comments").and_then(|v| v.as_array()) {
+            for c in comments {
+                if let Some(cb) = c.get("body").and_then(|v| v.as_str()) {
+                    content.push('\n');
+                    content.push_str(cb);
+                }
+            }
+        }
+        let row = search_index::IndexRow {
+            kind: "issue".to_string(),
+            source: format!("#{} {}", number, title),
+            date: token.to_string(),
+            link: url,
+            content,
+            file: key,
+        };
+        search_index::index_doc(&conn, &row, token, 0).map_err(|e| e.to_string())?;
+        indexed += 1;
+    }
+    let rows = search_index::row_count(&conn).unwrap_or(0);
+    Ok((seen, indexed, skipped, rows))
+}
+
+/// Run one bucket pass and trace its outcome. The pass runs even when tracing
+/// is off (indexing must happen regardless); only the trace line is gated.
+fn run_and_trace_index_pass<R, F>(app: &AppHandle<R>, bucket: &str, pass: F)
+where
+    R: tauri::Runtime,
+    F: Fn(&AppHandle<R>) -> Result<(usize, usize, usize, i64), String>,
+{
+    if !bram_trace_enabled() {
+        let _ = pass(app);
+        return;
+    }
+    let started = std::time::Instant::now();
+    match pass(app) {
+        Ok((files, indexed, skipped, rows)) => append_bram_trace_line(
+            app,
+            "search-index",
+            &format!(
+                "op=scan bucket={} files={} indexed={} skipped={} rows={} ms={}",
+                bucket,
+                files,
+                indexed,
+                skipped,
+                rows,
+                started.elapsed().as_millis()
+            ),
+        ),
+        Err(e) => append_bram_trace_line(
+            app,
+            "search-index",
+            &format!("op=scan-error bucket={} detail={}", bucket, e),
+        ),
+    }
+}
+
 /// Background indexer: an initial pass shortly after startup, then a periodic
-/// incremental rescan (poll by mtime/size). Watcher-driven refresh is a later
-/// refinement.
+/// incremental rescan (poll by change token). Sessions + commits run every
+/// pass (cheap: file mtimes / `git log`); issues run every 6th pass (~4.5 min)
+/// because they go through `gh` (network + rate limits). Watcher-driven
+/// refresh is a later refinement.
 fn start_search_indexer<R: tauri::Runtime>(app: AppHandle<R>) {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(2));
+        let mut iter: u64 = 0;
         loop {
-            let started = std::time::Instant::now();
-            match run_search_index_pass(&app) {
-                Ok((files, indexed, skipped, rows)) => {
-                    if bram_trace_enabled() {
-                        append_bram_trace_line(
-                            &app,
-                            "search-index",
-                            &format!(
-                                "op=scan bucket=claude files={} indexed={} skipped={} rows={} ms={}",
-                                files,
-                                indexed,
-                                skipped,
-                                rows,
-                                started.elapsed().as_millis()
-                            ),
-                        );
-                    }
-                }
-                Err(e) => {
-                    if bram_trace_enabled() {
-                        append_bram_trace_line(
-                            &app,
-                            "search-index",
-                            &format!("op=scan-error bucket=claude detail={}", e),
-                        );
-                    }
-                }
+            run_and_trace_index_pass(&app, "claude", run_search_index_pass);
+            run_and_trace_index_pass(&app, "commits", run_commit_index_pass);
+            if iter % 6 == 0 {
+                run_and_trace_index_pass(&app, "issues", run_issue_index_pass);
             }
+            iter = iter.wrapping_add(1);
             std::thread::sleep(std::time::Duration::from_secs(45));
         }
     });
@@ -32957,6 +33107,7 @@ fn route_request<R: tauri::Runtime>(
     if path == "__search" {
         let mut q = String::new();
         let mut limit = 50usize;
+        let mut types: Vec<String> = Vec::new();
         for pair in query.split('&') {
             if let Some(v) = pair.strip_prefix("q=") {
                 q = percent_decode(v);
@@ -32964,6 +33115,12 @@ fn route_request<R: tauri::Runtime>(
                 if let Ok(n) = percent_decode(v).parse::<usize>() {
                     limit = n.clamp(1, 500);
                 }
+            } else if let Some(v) = pair.strip_prefix("types=") {
+                types = percent_decode(v)
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
             }
         }
         let started = std::time::Instant::now();
@@ -32973,7 +33130,7 @@ fn route_request<R: tauri::Runtime>(
             search_index_db_path(app)
                 .and_then(|db| search_index::open(&db.to_string_lossy()).ok())
                 .map(|conn| {
-                    search_index::query(&conn, &fts5_phrase_query(q.trim()), limit)
+                    search_index::query(&conn, &fts5_phrase_query(q.trim()), limit, &types)
                         .unwrap_or_default()
                 })
                 .unwrap_or_default()

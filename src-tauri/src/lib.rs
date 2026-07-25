@@ -821,6 +821,12 @@ fn prompt_history_push(rec: serde_json::Value) {
     }
 }
 
+// instrument-menu-answer-latency (observe-only): timestamp of the most
+// recent superseded resolution, so op=answer-at-click can report how long
+// ago the grid→grid→hook churn last replaced a surface. A small
+// supersede_age_ms means a click may have raced the churn.
+static LAST_SUPERSEDE_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
 fn prompt_shown<R: tauri::Runtime>(
     app: &AppHandle<R>,
     tool: &str,
@@ -914,6 +920,9 @@ fn prompt_resolved<R: tauri::Runtime>(
     let open = prompt_open_cell().lock().ok().and_then(|mut o| o.take());
     let o = open?;
     let now = unix_now_ms();
+    if outcome == "superseded" {
+        LAST_SUPERSEDE_MS.store(now, std::sync::atomic::Ordering::Relaxed);
+    }
     let rec = serde_json::json!({
         "event": "prompt-resolved",
         "promptId": o.prompt_id,
@@ -8991,10 +9000,42 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
         if tool == PENDING_TOOL {
             eprintln!("[pty-menu] cleared by user input (pending menu — shown emit was deferred)");
             let resolved = prompt_resolved(app, "answered", "pending-menu");
+            // instrument-menu-answer-latency (observe-only)
+            let disp_source = resolved.as_ref().map(|o| o.source).unwrap_or("none");
+            let shown_age_ms = resolved
+                .as_ref()
+                .map(|o| unix_now_ms() - o.shown_at_ms)
+                .unwrap_or(-1);
+            let resolved_id = resolved.and_then(|o| o.tool_use_id);
+            let pending_lookup = lookup_pending_tool_call(app);
+            let looked_id = pending_lookup.tool_use_id.clone();
+            if bram_trace_enabled() {
+                let now = unix_now_ms();
+                let last_sup = LAST_SUPERSEDE_MS.load(std::sync::atomic::Ordering::Relaxed);
+                let supersede_age_ms = if last_sup > 0 { now - last_sup } else { -1 };
+                let id_source = if resolved_id.is_some() {
+                    "resolved"
+                } else if looked_id.is_some() {
+                    "pending-call"
+                } else {
+                    "none"
+                };
+                append_bram_trace_line(
+                    app,
+                    "prompt-lifecycle",
+                    &format!(
+                        "op=answer-at-click tool=pending id_source={} call_present={} lookup_reason={} displayed_source={} shown_age_ms={} supersede_age_ms={}",
+                        id_source,
+                        pending_lookup.signature.is_some(),
+                        pending_lookup.reason,
+                        disp_source,
+                        shown_age_ms,
+                        supersede_age_ms,
+                    ),
+                );
+            }
             if let Some(label) = chosen_label.as_deref() {
-                let id = resolved
-                    .and_then(|o| o.tool_use_id)
-                    .or_else(|| lookup_pending_tool_call(app).tool_use_id);
+                let id = resolved_id.or_else(|| looked_id.clone());
                 match id {
                     Some(id) => record_menu_answer(app, &id, label, "click"),
                     // Pending menus have no tool name; the stash binds by
@@ -9028,10 +9069,46 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
         }
         menu_prose_probe_record_dismiss(app, &tool, "user-input");
         let resolved = prompt_resolved(app, "answered", &tool);
+        // instrument-menu-answer-latency (observe-only): record the live
+        // surface + why the click can/can't bind the id, before `resolved`
+        // is consumed for its tool_use_id below.
+        let disp_source = resolved.as_ref().map(|o| o.source).unwrap_or("none");
+        let shown_age_ms = resolved
+            .as_ref()
+            .map(|o| unix_now_ms() - o.shown_at_ms)
+            .unwrap_or(-1);
+        let resolved_id = resolved.and_then(|o| o.tool_use_id);
         // Capture the answered call's identity while it is still the
         // oldest unresolved tool_use (one 4MB-tail read; dismissals are
         // user-paced). May be None under record-flush lag.
-        let answered_id = lookup_pending_tool_call(app).tool_use_id;
+        let pending_lookup = lookup_pending_tool_call(app);
+        let answered_id = pending_lookup.tool_use_id.clone();
+        if bram_trace_enabled() {
+            let now = unix_now_ms();
+            let last_sup = LAST_SUPERSEDE_MS.load(std::sync::atomic::Ordering::Relaxed);
+            let supersede_age_ms = if last_sup > 0 { now - last_sup } else { -1 };
+            let id_source = if answered_id.is_some() {
+                "pending-call"
+            } else if resolved_id.is_some() {
+                "resolved"
+            } else {
+                "none"
+            };
+            append_bram_trace_line(
+                app,
+                "prompt-lifecycle",
+                &format!(
+                    "op=answer-at-click tool={} id_source={} call_present={} lookup_reason={} displayed_source={} shown_age_ms={} supersede_age_ms={}",
+                    tool,
+                    id_source,
+                    pending_lookup.signature.is_some(),
+                    pending_lookup.reason,
+                    disp_source,
+                    shown_age_ms,
+                    supersede_age_ms,
+                ),
+            );
+        }
         // transcript-render-menu-answers: bind the chosen label to the
         // answered call. Prefer the pending-call lookup (matches the
         // suppressor's identity); a hook-claimed prompt's own id is the
@@ -9040,9 +9117,7 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
         // stash for the hook-clear binding instead of dropping.
         match chosen_label.as_deref() {
             Some(label) => {
-                let id = answered_id
-                    .clone()
-                    .or_else(|| resolved.and_then(|o| o.tool_use_id));
+                let id = answered_id.clone().or_else(|| resolved_id.clone());
                 match id {
                     Some(id) => record_menu_answer(app, &id, label, "click"),
                     None => {
@@ -22531,6 +22606,20 @@ fn bind_pending_menu_answer<R: tauri::Runtime>(
         }
     };
     if let Some(pending) = taken {
+        // instrument-menu-answer-latency (observe-only): the click→bind gap
+        // — how long the pane menu looked unanswered between the click stash
+        // and the PostToolUse clear that finally delivered the id.
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "prompt-lifecycle",
+                &format!(
+                    "op=answer-deferred-bind gap_ms={} tool={}",
+                    unix_now_ms() - pending.at_ms,
+                    tool
+                ),
+            );
+        }
         record_menu_answer(app, tool_use_id, &pending.label, "hook-clear");
     }
 }

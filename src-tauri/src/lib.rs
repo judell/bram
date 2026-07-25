@@ -4,6 +4,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 
+// issue-230-sqlite-fts-foundation: embedded SQLite + FTS5 search index.
+// Foundation only (schema + smoke test); not yet wired into the app.
+mod search_index;
+
 use include_dir::{include_dir, Dir};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use tauri::{http, ipc::Channel, AppHandle, Emitter, Manager, State};

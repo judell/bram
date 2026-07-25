@@ -33,3 +33,4 @@ similar = "2"
 sqlformat = "0.3"
 loomweave-scanner = "=1.4.0"
 flate2 = { version = "=1.1.9", default-features = false, features = ["miniz_oxide"] }
+rusqlite = { version = "0.40.1", features = ["bundled"] }

@@ -6415,6 +6415,10 @@ window.__bramQueueUpdate = function (entries, idx, text) {
     text: String(text == null ? "" : text),
     updatedAtMs: Date.now(),
   });
+  // queue-mutation-trace: length only, never content (queue prose is
+  // user-authored and can carry secrets — same discipline as the describe
+  // redaction and the send-forensics previews).
+  window.__bramIframeTrace("queue", { op: "update", id: next[idx].id || "", chars: String(next[idx].text || "").length });
   __bramQueueScheduleSave(next);
   return next;
 };
@@ -6458,11 +6462,19 @@ window.__bramQueueAdd = function (entries) {
     targetItemId: "",
     updatedAtMs: now,
   });
+  window.__bramIframeTrace("queue", { op: "add", id: next[next.length - 1].id, chars: 0 });
   __bramQueueScheduleSave(next);
   return next;
 };
-window.__bramQueueRemove = function (entries, idx) {
+// suppressTrace: set by __bramQueueSend so a send logs op=send, not a
+// second op=delete for the same removal. The Delete button calls with two
+// args, so a user delete always traces.
+window.__bramQueueRemove = function (entries, idx, suppressTrace) {
   var next = (entries || []).slice();
+  var removed = next[idx];
+  if (!suppressTrace) {
+    window.__bramIframeTrace("queue", { op: "delete", id: (removed && removed.id) || "", chars: String((removed && removed.text) || "").length });
+  }
   next.splice(idx, 1);
   __bramQueueScheduleSave(next);
   return next;
@@ -6485,7 +6497,8 @@ window.__bramQueueSend = function (entries, idx, worklistItems) {
   var entry = (entries || [])[idx];
   var text = entry && String(entry.text || "").trim();
   if (!text) return entries;
-  if (window.__bramQueueSendMode(entry) === "iterate") {
+  var mode = window.__bramQueueSendMode(entry);
+  if (mode === "iterate") {
     var targetItemId = String(entry.targetItemId || "");
     var items = worklistItems || [];
     if (!items.some(function (item) { return item.id === targetItemId; })) return entries;
@@ -6493,7 +6506,8 @@ window.__bramQueueSend = function (entries, idx, worklistItems) {
   } else {
     toTurn(text);
   }
-  return window.__bramQueueRemove(entries, idx);
+  window.__bramIframeTrace("queue", { op: "send", id: entry.id || "", mode: mode, chars: text.length });
+  return window.__bramQueueRemove(entries, idx, true);
 };
 // Ready = no open turn (agent-status not "working") and no pending menu.
 // Advisory dimming only — the host send-gate remains the enforcement layer

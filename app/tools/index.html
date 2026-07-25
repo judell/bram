@@ -40,6 +40,14 @@
       document.write('<script src="/__vendor/xmlui-standalone.umd.js?v=' + Date.now() + '"><\/script>');
     </script>
     <script>
+      // Vendored xmlui-dnd-list extension (DndItems). Must load AFTER
+      // xmlui-standalone, which sets window.xmlui + window.jsxRuntime that
+      // the extension UMD needs at load time; the UMD self-registers via
+      // window.xmlui.standalone.registerExtension. No jsx-runtime shim is
+      // needed — Bram's standalone bundle already exposes window.jsxRuntime.
+      document.write('<script src="/__vendor/xmlui-dnd-list.js?v=' + Date.now() + '"><\/script>');
+    </script>
+    <script>
       logToHost({ kind: "tools-boot", stage: "after-xmlui-load", at: new Date().toISOString() });
     </script>
     <style>

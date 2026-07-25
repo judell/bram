@@ -6480,6 +6480,17 @@ window.__bramQueueRemove = function (entries, idx, suppressTrace) {
   __bramQueueScheduleSave(next);
   return next;
 };
+// __bramQueueReorder: persist a drag-reordered entries array. newOrder comes
+// from DndItems' onReorder (the same entry objects, reordered), so we adopt it
+// as the new order and save it the same way every other queue mutation does.
+window.__bramQueueReorder = function (entries, newOrder) {
+  var next = Array.isArray(newOrder) ? newOrder.slice() : (entries || []).slice();
+  // queue-mutation-trace: op=reorder, count only — never content (queue prose
+  // is user-authored, kept secret-safe like the other queue ops).
+  window.__bramIframeTrace("queue", { op: "reorder", count: next.length });
+  __bramQueueScheduleSave(next);
+  return next;
+};
 window.__bramQueueCanSendWhenReady = function (entry, ready, worklistItems) {
   if (!ready) return false;
   if (!entry || !String(entry.text || "").trim()) return false;

@@ -71,7 +71,9 @@
       when="{(entries || []).length > 0}"
       height="*"
       overflowY="auto">
-      <Items data="{entries || []}">
+      <DndItems data="{entries || []}"
+        dragHandle="true"
+        onReorder="(newOrder) => { entries = window.__bramQueueReorder(entries, newOrder); }">
       <HStack
         gap="$space-2"
         verticalAlignment="start"
@@ -140,7 +142,7 @@
             onClick="entries = window.__bramQueueRemove(entries, $itemIndex)" />
         </VStack>
       </HStack>
-      </Items>
+      </DndItems>
     </VStack>
 
   </VStack>

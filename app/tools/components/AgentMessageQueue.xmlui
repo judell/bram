@@ -120,12 +120,18 @@
           <VStack
             opacity="{window.__bramQueueReady(queueAgentStatus.value, queueMenuEvt.value) ? 1 : 0.45}"
             width="100%">
+            <!-- On send, land on the surface where the result shows: a
+                 Message turn appears in Transcript, an Iterate targets a
+                 worklist item so it shows in Worklist. The enabled gate
+                 above blocks no-op sends, so navigating unconditionally on
+                 click is safe. Same navigate() pattern as the footer chips /
+                 skill launch (db29169). -->
             <Button
               label="Send"
               size="xs"
               enabled="{window.__bramQueueCanSendWhenReady($item, window.__bramQueueReady(queueAgentStatus.value, queueMenuEvt.value), (queueWorklist.value &amp;&amp; queueWorklist.value.items) || [])}"
               tooltip="Send this note to the agent as a fresh turn"
-              onClick="entries = window.__bramQueueSend(entries, $itemIndex, (queueWorklist.value &amp;&amp; queueWorklist.value.items) || [])" />
+              onClick="entries = window.__bramQueueSend(entries, $itemIndex, (queueWorklist.value &amp;&amp; queueWorklist.value.items) || []); navigate(window.__bramQueueSendMode($item) === 'iterate' ? '/worklist' : '/transcript')" />
           </VStack>
           <Button
             label="Delete"

@@ -1,0 +1,49 @@
+<Component name="Search" var.query="">
+  <!-- issue-230 unified search. v1 wires the Claude session bucket via the
+       /__search FTS5 route; commits/issues/history buckets and type facets
+       are added incrementally. -->
+  <variable name="typeColors"
+    value="{{ session: 'blue', commit: 'green', issue: 'orange', 'worklist-history': 'purple' }}" />
+
+  <DataSource
+    id="searchResults"
+    url="/__search"
+    queryParams="{{ q: query, limit: 100 }}"
+    when="{!!query &amp;&amp; query.trim().length >= 2}" />
+
+  <SearchHitModal id="searchHitModalRef" query="{query}" />
+
+  <VStack padding="$space-4" gap="$space-3" overflowY="auto">
+    <HStack gap="$space-3" verticalAlignment="center">
+      <Heading level="h2">Search</Heading>
+      <SpaceFiller />
+      <SearchBox
+        placeholder="Search across sessions…"
+        inProgress="{searchResults.inProgress}"
+        onQueryChange="(q) => query = q"
+        onClear="query = ''; searchHitModalRef.close()" />
+    </HStack>
+
+    <Text when="{!query || query.trim().length &lt; 2}"
+      color="$textColor-secondary"
+      value="Type at least 2 characters to search indexed sessions." />
+    <Text when="{query &amp;&amp; query.trim().length >= 2 &amp;&amp; searchResults.loaded &amp;&amp; (searchResults.value || []).length === 0}"
+      color="$textColor-secondary"
+      value="No matches." />
+
+    <Items data="{searchResults.value || []}">
+      <VStack gap="$space-1" paddingVertical="$space-2" borderBottom="1px solid $borderColor">
+        <HStack gap="$space-2" verticalAlignment="center">
+          <Badge value="{$item.type}" colorMap="{typeColors}" />
+          <Link width="*" noIndicator
+            onClick="searchHitModalRef.open($item.snippet, $item.source)">
+            <Text fontWeight="$fontWeight-bold" value="{$item.source}" />
+          </Link>
+          <Text fontSize="$fontSize-sm" color="$textColor-secondary"
+            value="{$item.date ? formatDateTime(new Date(Number($item.date) * 1000), 'yyyy-MM-dd HH:mm') : ''}" />
+        </HStack>
+        <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="…{$item.snippet}…" />
+      </VStack>
+    </Items>
+  </VStack>
+</Component>

@@ -423,6 +423,7 @@
     </property>
     <NavLink label="Worklist" to="/worklist" />
     <NavLink label="Transcript" to="/transcript" />
+    <NavLink label="Search" to="/search" />
     <NavLink label="Issues" to="/issues" />
     <NavLink label="Commits" to="/commits" />
     <NavLink label="Queue" to="/queue" />
@@ -492,6 +493,7 @@
       <Page url="/"><Workspace activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}" /></Page>
       <Page url="/worklist"><Workspace activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}" /></Page>
       <Page url="/transcript"><Transcript agentId="{transcriptAgentId}" /></Page>
+      <Page url="/search"><Search /></Page>
       <Page url="/queue"><AgentMessageQueue /></Page>
       <Page url="/status"><Status /></Page>
       <Page url="/settings"><Settings /></Page>

@@ -4415,7 +4415,7 @@ window.__bramLocalLinkRequestFromHref = function (href) {
   // opens a "File unavailable" preview instead of the page (the /queue
   // launch bug, 2026-07-23).
   var routeMatch = raw.match(
-    /^\/(worklist|transcript|issues|commits|queue|history|sessions|settings|status|context)(\/.*)?$/
+    /^\/(worklist|transcript|search|issues|commits|queue|history|sessions|settings|status|context)(\/.*)?$/
   );
   if (routeMatch) {
     var rest = routeMatch[2] ? routeMatch[2].slice(1) : "";

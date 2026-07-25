@@ -1,22 +1,22 @@
-//! issue-230-sqlite-fts-foundation: embedded SQLite (via `rusqlite` with the
-//! `bundled` feature, which statically links SQLite and compiles FTS5 in by
-//! default) plus the combined full-text index shape for the unified search in
-//! #230. This module is the load-bearing foundation ONLY — there is no
-//! background indexer, host route, or UI here yet; those are later #230
-//! phases. See resources/worklist-drafts/issue-230-sqlite-fts-foundation.md.
+//! issue-230 unified search: embedded SQLite (via `rusqlite` `bundled`, which
+//! statically links SQLite and compiles FTS5 in by default) + the combined
+//! full-text index for the unified search in #230.
 //!
-//! The combined table generalizes the "fast gating" index from the Go prior
-//! art (jonudell/xmlui-mastodon `quick_search_fts(id, source_type, all_text)`)
-//! to the #230 common schema: type / source / date / link / content.
+//! This module is the DB layer only: schema, per-file bookkeeping, upsert, and
+//! query. The indexer driver (session discovery + text extraction) and the
+//! `/__search` route live in `lib.rs`. The combined table generalizes the Go
+//! prior art's `quick_search_fts(id, source_type, all_text)` gating index
+//! (jonudell/xmlui-mastodon) to the #230 common schema.
 
-// The whole module is scaffolding until the indexer + route land in later
-// phases; unused-until-wired functions are expected.
-#![allow(dead_code)]
+use rusqlite::{params, Connection, OptionalExtension, Result};
 
-use rusqlite::{params, Connection, Result};
+/// Bump when the on-disk schema shape changes. The index is a rebuildable
+/// cache, so a version mismatch just drops and recreates — no migration.
+const SCHEMA_VERSION: i64 = 2;
 
-/// A row to index. `content` is the searchable text; the other fields are the
-/// common-schema display columns carried alongside it.
+/// A row to index. `content` is the searchable text; `file` is the source
+/// file's absolute path (the reindex key); the rest are the #230 common-schema
+/// display columns.
 #[derive(Debug, Clone)]
 pub struct IndexRow {
     /// The `type` column: session | commit | issue | worklist-history.
@@ -25,6 +25,7 @@ pub struct IndexRow {
     pub date: String,
     pub link: String,
     pub content: String,
+    pub file: String,
 }
 
 /// A unified search hit: the common-schema display columns plus the FTS5
@@ -39,48 +40,102 @@ pub struct Hit {
     pub rank: f64,
 }
 
-/// Open (or create) the index at `path` and ensure the schema exists. WAL so
-/// later indexing writes don't block concurrent reads.
+/// Open (or create) the index at `path`, in WAL mode, with the current schema.
 pub fn open(path: &str) -> Result<Connection> {
     let conn = Connection::open(path)?;
-    // journal_mode is a no-op for :memory:; only meaningful for a file db.
+    // WAL lets the future read route run while the indexer writes. No-op on
+    // :memory:, so we ignore the result.
     let _ = conn.pragma_update(None, "journal_mode", "WAL");
-    init_schema(&conn)?;
+    ensure_schema(&conn)?;
     Ok(conn)
 }
 
-/// In-memory index — used by the smoke test and handy for future unit tests.
+/// In-memory index — used by tests.
+#[cfg(test)]
 pub fn open_in_memory() -> Result<Connection> {
     let conn = Connection::open_in_memory()?;
-    init_schema(&conn)?;
+    ensure_schema(&conn)?;
     Ok(conn)
 }
 
-/// The combined FTS5 table on the #230 common schema. `CREATE VIRTUAL TABLE …
-/// USING fts5` fails unless FTS5 is compiled into the linked SQLite — which is
-/// exactly what the smoke test relies on to prove the bundled build.
-fn init_schema(conn: &Connection) -> Result<()> {
+/// Ensure the schema exists at the current version. On a version mismatch,
+/// drop and recreate (the index is a rebuildable cache).
+fn ensure_schema(conn: &Connection) -> Result<()> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version != SCHEMA_VERSION {
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS search_index; DROP TABLE IF EXISTS indexed_files;",
+        )?;
+    }
+    // `file` is UNINDEXED: stored (so we could show/debug it) but not
+    // tokenized. `CREATE VIRTUAL TABLE … USING fts5` fails unless FTS5 is
+    // compiled in — which the smoke test relies on.
     conn.execute_batch(
         "CREATE VIRTUAL TABLE IF NOT EXISTS search_index \
-         USING fts5(type, source, date, link, content, tokenize='unicode61');",
-    )
+           USING fts5(type, source, date, link, content, file UNINDEXED, tokenize='unicode61'); \
+         CREATE TABLE IF NOT EXISTS indexed_files( \
+           path TEXT PRIMARY KEY, mtime INTEGER, size INTEGER, \
+           rowid_ref INTEGER, indexed_at INTEGER);",
+    )?;
+    if version != SCHEMA_VERSION {
+        conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+    }
+    Ok(())
 }
 
-/// Insert one row into the index.
-pub fn insert(conn: &Connection, row: &IndexRow) -> Result<()> {
+/// Cheap check (no file read) — has this file changed since it was last
+/// indexed? True when unseen or when mtime/size differ.
+pub fn needs_index(conn: &Connection, path: &str, mtime: i64, size: i64) -> Result<bool> {
+    let seen: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT mtime, size FROM indexed_files WHERE path = ?1",
+            params![path],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(match seen {
+        Some((m, s)) => m != mtime || s != size,
+        None => true,
+    })
+}
+
+/// Upsert one source file as a single index row (one row per session for now).
+/// Deletes the file's prior row (by stored rowid) before inserting, then
+/// records mtime/size so the next pass can skip it.
+pub fn index_session(conn: &Connection, row: &IndexRow, mtime: i64, size: i64) -> Result<()> {
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT rowid_ref FROM indexed_files WHERE path = ?1",
+            params![row.file],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(old) = existing {
+        conn.execute("DELETE FROM search_index WHERE rowid = ?1", params![old])?;
+    }
     conn.execute(
-        "INSERT INTO search_index(type, source, date, link, content) \
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![row.kind, row.source, row.date, row.link, row.content],
+        "INSERT INTO search_index(type, source, date, link, content, file) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![row.kind, row.source, row.date, row.link, row.content, row.file],
+    )?;
+    let new_rowid = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT OR REPLACE INTO indexed_files(path, mtime, size, rowid_ref, indexed_at) \
+         VALUES (?1, ?2, ?3, ?4, CAST(strftime('%s','now') AS INTEGER))",
+        params![row.file, mtime, size, new_rowid],
     )?;
     Ok(())
 }
 
+/// Total indexed rows — for the scan trace.
+pub fn row_count(conn: &Connection) -> Result<i64> {
+    conn.query_row("SELECT count(*) FROM search_index", [], |r| r.get(0))
+}
+
 /// Full-text query across all buckets, `bm25`-ranked (best first), with a
-/// highlighted `snippet()` of the matched `content` column. This replaces the
-/// hand-rolled `find_snippets()` ±40-char windows once the indexer is wired.
+/// highlighted `snippet()` of the matched `content` column (index 4). `q` must
+/// be a valid FTS5 MATCH expression — callers sanitize raw user input.
 pub fn query(conn: &Connection, q: &str, limit: usize) -> Result<Vec<Hit>> {
-    // content is column index 4 (type=0, source=1, date=2, link=3, content=4).
     let mut stmt = conn.prepare(
         "SELECT type, source, date, link, \
                 snippet(search_index, 4, '[', ']', '…', 10), \
@@ -105,65 +160,59 @@ pub fn query(conn: &Connection, q: &str, limit: usize) -> Result<Vec<Hit>> {
 mod tests {
     use super::*;
 
+    fn row(kind: &str, file: &str, source: &str, content: &str) -> IndexRow {
+        IndexRow {
+            kind: kind.into(),
+            source: source.into(),
+            date: "2026-07-25".into(),
+            link: format!("/{kind}"),
+            content: content.into(),
+            file: file.into(),
+        }
+    }
+
     fn seed(conn: &Connection) {
-        for (kind, source, content) in [
-            (
-                "session",
-                "sess-1 Fix drag reorder",
-                "the queue items are now drag reorderable via the dnd-list extension",
-            ),
-            (
-                "commit",
-                "abc123",
-                "Make queue items drag-reorderable via vendored xmlui-dnd-list",
-            ),
-            (
-                "issue",
-                "#230 unified search",
-                "unified full text search across sessions commits issues and history",
-            ),
+        for (kind, file, source, content) in [
+            ("session", "/s/1.jsonl", "Fix drag reorder", "the queue items are now drag reorderable via dnd-list"),
+            ("commit", "/c/abc", "abc123", "Make queue items drag-reorderable via vendored xmlui-dnd-list"),
+            ("issue", "/i/230", "#230", "unified full text search across sessions commits issues"),
         ] {
-            insert(
-                conn,
-                &IndexRow {
-                    kind: kind.into(),
-                    source: source.into(),
-                    date: "2026-07-25".into(),
-                    link: format!("/{kind}"),
-                    content: content.into(),
-                },
-            )
-            .unwrap();
+            index_session(conn, &row(kind, file, source, content), 1, 1).unwrap();
         }
     }
 
     #[test]
     fn fts5_is_compiled_in_and_matches() {
-        // If FTS5 were not compiled into the bundled SQLite, open_in_memory()
-        // would error here on CREATE VIRTUAL TABLE … USING fts5 — so this line
-        // is the guardrail that the bundled build includes FTS5.
+        // CREATE VIRTUAL TABLE … USING fts5 in ensure_schema() fails unless
+        // FTS5 is compiled into the bundled SQLite — this is the guardrail.
         let conn = open_in_memory().expect("FTS5 must be compiled into bundled SQLite");
         seed(&conn);
 
-        // "drag" appears in the session and commit rows (unicode61 splits the
-        // hyphen in "drag-reorderable"), not the issue row.
         let hits = query(&conn, "drag", 10).unwrap();
         assert_eq!(hits.len(), 2, "two rows mention drag");
-        assert!(
-            hits.iter().all(|h| h.snippet.contains('[')),
-            "snippet() wraps the matched term"
-        );
-
-        // bm25 returns lower-is-better; ORDER BY bm25 yields ascending ranks.
+        assert!(hits.iter().all(|h| h.snippet.contains('[')), "snippet() highlights");
         let ranks: Vec<f64> = hits.iter().map(|h| h.rank).collect();
-        assert!(
-            ranks.windows(2).all(|w| w[0] <= w[1]),
-            "results are bm25-ordered"
-        );
+        assert!(ranks.windows(2).all(|w| w[0] <= w[1]), "bm25-ordered");
 
-        // The type discriminator supports faceting across buckets.
         let issues = query(&conn, "unified", 10).unwrap();
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].kind, "issue");
+    }
+
+    #[test]
+    fn skip_unchanged_and_reindex_changed() {
+        let conn = open_in_memory().unwrap();
+        index_session(&conn, &row("session", "/s/1.jsonl", "t", "alpha content"), 100, 10).unwrap();
+        assert_eq!(row_count(&conn).unwrap(), 1);
+
+        // Same mtime/size → skip (no duplicate).
+        assert!(!needs_index(&conn, "/s/1.jsonl", 100, 10).unwrap());
+
+        // Changed mtime → reindex replaces the row, not duplicates it.
+        assert!(needs_index(&conn, "/s/1.jsonl", 200, 12).unwrap());
+        index_session(&conn, &row("session", "/s/1.jsonl", "t", "beta content"), 200, 12).unwrap();
+        assert_eq!(row_count(&conn).unwrap(), 1, "reindex replaces, not appends");
+        assert_eq!(query(&conn, "alpha", 10).unwrap().len(), 0, "old content gone");
+        assert_eq!(query(&conn, "beta", 10).unwrap().len(), 1, "new content present");
     }
 }

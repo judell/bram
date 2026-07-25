@@ -15173,6 +15173,128 @@ fn search_sessions<R: tauri::Runtime>(
     Ok(results)
 }
 
+// ---------------------------------------------------------------------------
+// issue-230 unified search: Claude-session indexer driver.
+//
+// Reuses discover_claude_sessions() + claude_message_text() to feed the FTS5
+// index in search_index.rs. Claude-only for now; Codex is the next item
+// (same DB/API, add discover_codex_sessions() + codex_message_text() here).
+// ---------------------------------------------------------------------------
+
+/// The rebuildable index cache for the current project:
+/// `<app_cache_dir>/search-index/<project-key>.db`.
+fn search_index_db_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    let cache = app.path().app_cache_dir().ok()?;
+    let root = project_root(Some(app))?;
+    let dir = cache.join("search-index");
+    let _ = std::fs::create_dir_all(&dir);
+    Some(dir.join(format!("{}.db", encode_path_for_filename(&root))))
+}
+
+/// Concatenated user+assistant text of a Claude session JSONL — the same
+/// extraction search_sessions() does, factored for the indexer.
+fn claude_session_all_text(path: &Path) -> String {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
+    let mut all = String::new();
+    for line in content.lines() {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let role = record.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if role != "user" && role != "assistant" {
+            continue;
+        }
+        let text = claude_message_text(&record);
+        if !text.is_empty() {
+            all.push_str(&text);
+            all.push('\n');
+        }
+    }
+    all
+}
+
+/// One incremental pass over the current project's Claude sessions. Returns
+/// (files_seen, indexed, skipped, total_rows).
+fn run_search_index_pass<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<(usize, usize, usize, i64), String> {
+    let db = search_index_db_path(app).ok_or("no index db path")?;
+    let conn = search_index::open(&db.to_string_lossy()).map_err(|e| e.to_string())?;
+    let sessions = discover_claude_sessions(app, None)?;
+    let files = sessions.len();
+    let (mut indexed, mut skipped) = (0usize, 0usize);
+    for s in sessions {
+        let path_str = s.path.to_string_lossy().to_string();
+        let (mtime, size) = (s.mtime as i64, s.size as i64);
+        if !search_index::needs_index(&conn, &path_str, mtime, size).unwrap_or(true) {
+            skipped += 1;
+            continue;
+        }
+        let row = search_index::IndexRow {
+            kind: "session".to_string(),
+            source: s.title.clone().unwrap_or_else(|| s.id.clone()),
+            date: mtime.to_string(),
+            link: s.id.clone(),
+            content: claude_session_all_text(&s.path),
+            file: path_str,
+        };
+        // Index even empty-content sessions so the next pass skips them.
+        search_index::index_session(&conn, &row, mtime, size).map_err(|e| e.to_string())?;
+        indexed += 1;
+    }
+    let rows = search_index::row_count(&conn).unwrap_or(0);
+    Ok((files, indexed, skipped, rows))
+}
+
+/// Background indexer: an initial pass shortly after startup, then a periodic
+/// incremental rescan (poll by mtime/size). Watcher-driven refresh is a later
+/// refinement.
+fn start_search_indexer<R: tauri::Runtime>(app: AppHandle<R>) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        loop {
+            let started = std::time::Instant::now();
+            match run_search_index_pass(&app) {
+                Ok((files, indexed, skipped, rows)) => {
+                    if bram_trace_enabled() {
+                        append_bram_trace_line(
+                            &app,
+                            "search-index",
+                            &format!(
+                                "op=scan bucket=claude files={} indexed={} skipped={} rows={} ms={}",
+                                files,
+                                indexed,
+                                skipped,
+                                rows,
+                                started.elapsed().as_millis()
+                            ),
+                        );
+                    }
+                }
+                Err(e) => {
+                    if bram_trace_enabled() {
+                        append_bram_trace_line(
+                            &app,
+                            "search-index",
+                            &format!("op=scan-error bucket=claude detail={}", e),
+                        );
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_secs(45));
+        }
+    });
+}
+
+/// Wrap raw user text as a single quoted FTS5 phrase so arbitrary input is a
+/// valid MATCH expression (validation route; a richer query parser is a
+/// UI-phase concern).
+fn fts5_phrase_query(q: &str) -> String {
+    format!("\"{}\"", q.replace('"', "\"\""))
+}
+
 fn list_sessions<R: tauri::Runtime>(
     app: &AppHandle<R>,
     preferred: Option<SessionProvider>,
@@ -32829,6 +32951,64 @@ fn route_request<R: tauri::Runtime>(
         return (200, "application/json; charset=utf-8", body);
     }
 
+    // issue-230 unified search: validation-only query route over the FTS5
+    // index (JSON, no UI yet). The faceted route + unified Search.xmlui page
+    // are the next phase.
+    if path == "__search" {
+        let mut q = String::new();
+        let mut limit = 50usize;
+        for pair in query.split('&') {
+            if let Some(v) = pair.strip_prefix("q=") {
+                q = percent_decode(v);
+            } else if let Some(v) = pair.strip_prefix("limit=") {
+                if let Ok(n) = percent_decode(v).parse::<usize>() {
+                    limit = n.clamp(1, 500);
+                }
+            }
+        }
+        let started = std::time::Instant::now();
+        let hits = if q.trim().is_empty() {
+            Vec::new()
+        } else {
+            search_index_db_path(app)
+                .and_then(|db| search_index::open(&db.to_string_lossy()).ok())
+                .map(|conn| {
+                    search_index::query(&conn, &fts5_phrase_query(q.trim()), limit)
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default()
+        };
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "search-index",
+                &format!(
+                    "op=query chars={} hits={} ms={}",
+                    q.trim().len(),
+                    hits.len(),
+                    started.elapsed().as_millis()
+                ),
+            );
+        }
+        let body = serde_json::to_vec(
+            &hits
+                .iter()
+                .map(|h| {
+                    serde_json::json!({
+                        "type": h.kind,
+                        "source": h.source,
+                        "date": h.date,
+                        "link": h.link,
+                        "snippet": h.snippet,
+                        "rank": h.rank,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_default();
+        return (200, "application/json; charset=utf-8", body);
+    }
+
     if path == "__context/skills" {
         // issue-221-skill-launcher: project skills from .claude/skills/*/SKILL.md.
         let body = serde_json::to_vec(&serde_json::json!({
@@ -37083,6 +37263,8 @@ pub fn run() {
             }
             prepare_bram_trace_log(app.handle());
             trace_whisper_env(app.handle());
+            // issue-230 unified search: background Claude-session indexer.
+            start_search_indexer(app.handle().clone());
             if bram_trace_enabled() {
                 append_bram_trace_line(
                     app.handle(),

@@ -122,18 +122,16 @@
             width="100%">
             <!-- On send, land on the surface where the result shows: a
                  Message turn appears in Transcript, an Iterate targets a
-                 worklist item so it shows in Worklist. navigate() resolves
-                 only in App-root scope, not inside a Component (a bare
-                 unresolved identifier silently aborts the whole handler), so
-                 emit the target and let Main navigate — the SearchBox
-                 emitEvent pattern. The enabled gate blocks no-op sends, so
-                 the emit only fires on a real send. -->
+                 worklist item so it shows in Worklist. navigate() is called
+                 directly here (it resolves inside a component — verified with
+                 a faithful standalone repro). The enabled gate blocks no-op
+                 sends, so navigation only runs on a real send. -->
             <Button
               label="Send"
               size="xs"
               enabled="{window.__bramQueueCanSendWhenReady($item, window.__bramQueueReady(queueAgentStatus.value, queueMenuEvt.value), (queueWorklist.value &amp;&amp; queueWorklist.value.items) || [])}"
               tooltip="Send this note to the agent as a fresh turn"
-              onClick="entries = window.__bramQueueSend(entries, $itemIndex, (queueWorklist.value &amp;&amp; queueWorklist.value.items) || []); emitEvent('sent', window.__bramQueueSendMode($item) === 'iterate' ? '/worklist' : '/transcript')" />
+              onClick="entries = window.__bramQueueSend(entries, $itemIndex, (queueWorklist.value &amp;&amp; queueWorklist.value.items) || []); navigate(window.__bramQueueSendMode($item) === 'iterate' ? '/worklist' : '/transcript')" />
           </VStack>
           <Button
             label="Delete"

@@ -1,0 +1,24 @@
+<Component name="SessionDetail">
+  <!-- issue-230 shared detail: session transcript via projected turns.
+       Internal only — no external link. Props: sessionId, provider.
+       (Prop is `sessionId`, not `id` — `id` is XMLUI's reserved component
+       identifier and never arrives as a prop.) -->
+  <DataSource id="turns" url="/__turns"
+    queryParams="{{ id: $props.sessionId, provider: $props.provider }}" when="{!!$props.sessionId}" />
+  <VStack gap="$space-2" padding="$space-2">
+    <Text when="{turns.inProgress &amp;&amp; !turns.loaded}" color="$textColor-secondary" value="Loading…" />
+    <Items when="{turns.value}" data="{window.__bramProjectedSessionTurns(turns.value)}">
+      <VStack gap="$space-0_5" borderTop="1px solid $borderColor" paddingVertical="$space-1">
+        <Text fontSize="$fontSize-xs" fontWeight="$fontWeight-bold"
+          color="{$item.role === 'user' ? '$color-info-700' : '$color-success-700'}"
+          value="{$item.role}" />
+        <Markdown content="{$item.text}" />
+        <VStack gap="$space-2" when="{$item.images &amp;&amp; $item.images.length > 0}">
+          <Items data="{$item.images}">
+            <Image src="{window.imageSrcForPath($item)}" maxHeight="200px" fit="contain" />
+          </Items>
+        </VStack>
+      </VStack>
+    </Items>
+  </VStack>
+</Component>

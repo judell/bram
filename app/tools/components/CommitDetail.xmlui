@@ -1,0 +1,14 @@
+<Component name="CommitDetail">
+  <!-- issue-230 shared detail: full commit message, external forge link pinned
+       at the top. Props: sha (for /__commit), url (the html_url — /__commit
+       returns files/message/sha/stats but no url, so the caller passes it). -->
+  <DataSource id="commit" url="/__commit" queryParams="{{ sha: $props.sha }}" when="{!!$props.sha}" />
+  <VStack gap="$space-3" padding="$space-2">
+    <Link when="{$props.url}" noIndicator onClick="openExternal($props.url)">
+      <Text fontWeight="$fontWeight-bold"
+        value="{'Open commit on ' + (($props.url || '').includes('gitlab') ? 'GitLab' : 'GitHub') + ' ↗'}" />
+    </Link>
+    <Text when="{commit.inProgress &amp;&amp; !commit.loaded}" color="$textColor-secondary" value="Loading…" />
+    <Markdown when="{commit.value &amp;&amp; commit.value.message}" content="{commit.value.message}" />
+  </VStack>
+</Component>

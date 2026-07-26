@@ -1,0 +1,27 @@
+<Component name="IssueDetail">
+  <!-- issue-230 shared detail: full issue (body + comments), with the external
+       forge link pinned at the top. Prop: number. -->
+  <DataSource id="issue" url="/__issue" queryParams="{{ number: $props.number }}" when="{!!$props.number}" />
+  <VStack gap="$space-3" padding="$space-2">
+    <Link when="{issue.value &amp;&amp; issue.value.url}" noIndicator onClick="openExternal(issue.value.url)">
+      <Text fontWeight="$fontWeight-bold"
+        value="{'Open issue #' + issue.value.number + ' on ' + ((issue.value.url || '').includes('gitlab') ? 'GitLab' : 'GitHub') + ' ↗'}" />
+    </Link>
+    <Text when="{issue.value}" fontSize="$fontSize-sm"
+      color="{issue.value.state === 'OPEN' ? '$color-success-700' : '$textColor-secondary'}"
+      value="{(issue.value.state === 'OPEN' ? 'open' : 'closed') + ' · #' + issue.value.number + ' ' + issue.value.title}" />
+    <Text when="{issue.value &amp;&amp; issue.value.author}" fontSize="$fontSize-sm" color="$textColor-secondary"
+      value="{((issue.value.author.login || issue.value.author.name) || 'unknown') + ' opened ' + getDateUntilNow(issue.value.createdAt) + ' ago'}" />
+    <Text when="{issue.inProgress &amp;&amp; !issue.loaded}" color="$textColor-secondary" value="Loading…" />
+    <Markdown when="{issue.value &amp;&amp; issue.value.body}" content="{issue.value.body}" />
+    <VStack when="{issue.value &amp;&amp; issue.value.comments &amp;&amp; issue.value.comments.length > 0}" gap="$space-3">
+      <Items data="{issue.value.comments}">
+        <VStack gap="$space-1" paddingTop="$space-2" borderTop="1px solid $borderColor">
+          <Text fontSize="$fontSize-xs" color="$textColor-secondary"
+            value="{(($item.author &amp;&amp; ($item.author.login || $item.author.name)) || 'unknown')}" />
+          <Markdown content="{$item.body}" />
+        </VStack>
+      </Items>
+    </VStack>
+  </VStack>
+</Component>

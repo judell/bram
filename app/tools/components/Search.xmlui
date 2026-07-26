@@ -33,12 +33,6 @@
 
   <!-- Real per-type source for the single open row: sessions via /__turns
        (matching turns), everything else via the stored indexed content. -->
-  <DataSource id="docContent" url="/__search/doc"
-    queryParams="{{ key: expandedHit &amp;&amp; expandedHit.key }}"
-    when="{expandedHit &amp;&amp; (expandedHit.type === 'commit' || expandedHit.type === 'issue')}" />
-  <DataSource id="sessionTurns" url="/__turns"
-    queryParams="{{ id: expandedHit &amp;&amp; expandedHit.id, provider: 'claude' }}"
-    when="{expandedHit &amp;&amp; expandedHit.type === 'session'}" />
   <!-- History detail: look up the WorklistHistoryGroup by the item id parsed
        from the hit source ("id (summary)"). /search skips gh commit
        resolution, so it's fast; the raw commit URL still links. -->
@@ -114,31 +108,19 @@
           <!-- Inline expander: real per-type source + a footer link. -->
           <VStack when="{expandedHit &amp;&amp; expandedHit.key === $item.key}"
             gap="$space-2" paddingLeft="7rem" paddingTop="$space-1">
-            <VStack when="{$item.type === 'session'}" maxHeight="420px" overflowY="auto" gap="$space-2">
-              <Text when="{sessionTurns.inProgress}" color="$textColor-secondary" value="Loading…" />
-              <Items when="{sessionTurns.value}"
-                data="{window.__bramProjectedSessionTurns(sessionTurns.value).filter(t => (t.text || '').toLowerCase().includes(query.trim().toLowerCase()))}">
-                <VStack gap="$space-0_5" borderTop="1px solid $borderColor" paddingVertical="$space-1">
-                  <Text fontSize="$fontSize-xs" fontWeight="$fontWeight-bold"
-                    color="{$item.role === 'user' ? '$color-info-700' : '$color-success-700'}"
-                    value="{$item.role}" />
-                  <Markdown content="{paragraphsContaining($item.text, query)}" />
-                </VStack>
-              </Items>
+            <VStack when="{$item.type === 'session'}" maxHeight="420px" overflowY="auto">
+              <SessionDetail sessionId="{$item.id}" provider="claude" />
+            </VStack>
+            <VStack when="{$item.type === 'commit'}" maxHeight="420px" overflowY="auto">
+              <CommitDetail sha="{($item.key || '').split(':')[1]}" url="{$item.link}" />
+            </VStack>
+            <VStack when="{$item.type === 'issue'}" maxHeight="420px" overflowY="auto">
+              <IssueDetail number="{($item.key || '').split(':')[1]}" />
             </VStack>
             <VStack when="{$item.type === 'worklist-history'}" maxHeight="420px" overflowY="auto">
               <Text when="{historyGroups.inProgress}" color="$textColor-secondary" value="Loading…" />
               <HistoryDetail when="{historyGroup}" group="{historyGroup}" />
             </VStack>
-            <VStack when="{$item.type === 'commit' || $item.type === 'issue'}" maxHeight="420px" overflowY="auto">
-              <Text when="{docContent.inProgress}" color="$textColor-secondary" value="Loading…" />
-              <Markdown when="{docContent.value}" content="{docContent.value.content}" />
-            </VStack>
-            <Link when="{$item.link &amp;&amp; $item.type !== 'worklist-history'}"
-              onClick="$item.link.startsWith('http') ? openExternal($item.link) : navigate($item.link)">
-              <Text fontSize="$fontSize-sm"
-                value="{$item.link.startsWith('http') ? 'Open on GitHub ↗' : 'Open in Bram →'}" />
-            </Link>
           </VStack>
         </VStack>
       </Items>

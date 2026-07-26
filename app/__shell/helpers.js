@@ -4446,6 +4446,28 @@ window.__bramToggleType = function (types, t, on) {
   }
   return set;
 };
+// issue-230: measure the session-transcript render cost. Called on /__turns
+// load; a double-rAF waits through any synchronous render freeze, then logs the
+// paint delta + turn count as a `search-render` trace line (persistent, so we
+// always see render-to-paint vs. turn count).
+window.__bramMeasureTurnsRender = function (count) {
+  var now = function () {
+    return window.performance && performance.now ? performance.now() : Date.now();
+  };
+  var t0 = now();
+  var raf = window.requestAnimationFrame || function (f) { return setTimeout(f, 16); };
+  raf(function () {
+    raf(function () {
+      try {
+        window.__bramIframeTrace("search-render", {
+          op: "turns",
+          turns: count,
+          ms: Math.round(now() - t0),
+        });
+      } catch (e) {}
+    });
+  });
+};
 window.__bramOpenLocalLinkPreview = function (request) {
   if (!request || !request.path) return;
   var qs = "path=" + encodeURIComponent(request.path);

@@ -4,10 +4,14 @@
        (Prop is `sessionId`, not `id` — `id` is XMLUI's reserved component
        identifier and never arrives as a prop.) -->
   <DataSource id="turns" url="/__turns"
-    queryParams="{{ id: $props.sessionId, provider: $props.provider }}" when="{!!$props.sessionId}" />
+    queryParams="{{ id: $props.sessionId, provider: $props.provider }}" when="{!!$props.sessionId}"
+    onLoaded="(data) => window.__bramMeasureTurnsRender(window.__bramProjectedSessionTurns(data).length)" />
   <VStack gap="$space-2" padding="$space-2">
     <Text when="{turns.inProgress &amp;&amp; !turns.loaded}" color="$textColor-secondary" value="Loading…" />
-    <Items when="{turns.value}" data="{window.__bramProjectedSessionTurns(turns.value)}">
+    <!-- Virtualized: List (virtua-backed) renders only the visible turns, so a
+         big transcript no longer mounts thousands of Markdown blocks at once.
+         Needs a bounded height; 400px fits inside Search's expander wrapper. -->
+    <List when="{turns.value}" data="{window.__bramProjectedSessionTurns(turns.value)}" height="400px">
       <VStack gap="$space-0_5" borderTop="1px solid $borderColor" paddingVertical="$space-1">
         <Text fontSize="$fontSize-xs" fontWeight="$fontWeight-bold"
           color="{$item.role === 'user' ? '$color-info-700' : '$color-success-700'}"
@@ -19,6 +23,6 @@
           </Items>
         </VStack>
       </VStack>
-    </Items>
+    </List>
   </VStack>
 </Component>

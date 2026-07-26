@@ -9532,9 +9532,11 @@ fn get_app_info() -> AppInfo {
 
 fn git_log_recent<R: tauri::Runtime>(app: &AppHandle<R>, count: usize) -> Result<Vec<u8>, String> {
     use std::collections::HashSet;
-    // Determine which commits are ahead of the remote; treat the rest as pushed.
-    // If there's no upstream tracking, we just call everything "unpushed".
-    let unpushed: HashSet<String> = git_run(app, &["rev-list", "@{u}..HEAD"])
+    // Commits reachable from HEAD but not from any origin ref — exactly what a
+    // push would publish. Unlike `@{u}..HEAD`, this works on a branch with no
+    // upstream (that fatals -> empty -> everything wrongly "pushed", hiding the
+    // Push button) and still excludes commits already on origin/main.
+    let unpushed: HashSet<String> = git_run(app, &["rev-list", "HEAD", "--not", "--remotes=origin"])
         .unwrap_or_default()
         .lines()
         .map(|l| l.trim().to_string())

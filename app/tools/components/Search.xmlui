@@ -12,6 +12,8 @@
   <variable name="selectedTypes" value="{['session', 'commit', 'issue', 'worklist-history']}" />
   <variable name="ready" value="{!!query &amp;&amp; query.trim().length >= 2}" />
   <variable name="expandedHit" value="{null}" />
+  <!-- Selected date window [lo, hi] (epoch seconds); null = no date filter. -->
+  <variable name="dateFilter" value="{null}" />
 
   <DataSource id="rSession" url="/__search"
     queryParams="{{ q: query, limit: 100, types: 'session' }}" when="{ready}" />
@@ -22,13 +24,41 @@
   <DataSource id="rHistory" url="/__search"
     queryParams="{{ q: query, limit: 100, types: 'worklist-history' }}" when="{ready}" />
 
-  <variable name="displayed" value="{
+  <!-- Full relevance-ordered set of the selected buckets (no date filter) — the
+       stable domain the slider measures, so moving the handles never shifts it. -->
+  <variable name="merged" value="{
     [].concat(
       selectedTypes.includes('session') ? (rSession.value || []) : [],
       selectedTypes.includes('commit') ? (rCommit.value || []) : [],
       selectedTypes.includes('issue') ? (rIssue.value || []) : [],
       selectedTypes.includes('worklist-history') ? (rHistory.value || []) : []
-    ).sort((a, b) => a.rank - b.rank).slice(0, 100)
+    ).sort((a, b) => a.rank - b.rank)
+  }" />
+
+  <!-- Date-slider domain: [min, max] hit date across merged; widen by a day when
+       all hits share one date so the two thumbs aren't coincident. -->
+  <variable name="hitDates" value="{merged.map(h => Number(h.date)).filter(n => n > 0)}" />
+  <variable name="dateLo" value="{hitDates.length ? hitDates.reduce((a, b) => a &lt; b ? a : b) : null}" />
+  <variable name="dateHi" value="{hitDates.length ? hitDates.reduce((a, b) => a &gt; b ? a : b) : null}" />
+  <variable name="dateRange"
+    value="{dateLo === null ? null : [dateLo, dateHi > dateLo ? dateHi : dateLo + 86400]}" />
+
+  <!-- New query => new domain; reset the filter and snap the handles to the full
+       span (a stale window from the prior query would mis-narrow). Moving the
+       slider doesn't touch dateRange, so this never loops. Two listeners because
+       ChangeListener.onDidChange is a sync callback: it must be a single arrow
+       expression, not a statement block. -->
+  <ChangeListener
+    listenTo="{dateRange ? (dateRange[0] + '-' + dateRange[1]) : ''}"
+    onDidChange="() => dateFilter = null" />
+  <ChangeListener
+    listenTo="{dateRange ? (dateRange[0] + '-' + dateRange[1]) : ''}"
+    onDidChange="() => (dateSlider &amp;&amp; dateRange) ? dateSlider.setValue(dateRange) : null" />
+
+  <variable name="displayed" value="{
+    merged
+      .filter(h => !dateFilter || (Number(h.date) >= dateFilter[0] &amp;&amp; Number(h.date) &lt;= dateFilter[1]))
+      .slice(0, 100)
   }" />
 
   <!-- Real per-type source for the single open row: sessions via /__turns
@@ -51,6 +81,27 @@
         inProgress="{rSession.inProgress || rCommit.inProgress || rIssue.inProgress || rHistory.inProgress}"
         onQueryChange="(q) => query = q"
         onClear="query = ''; expandedHit = null" />
+      <!-- Two-handled date-range filter; fills the rest of the row. The dates
+           are shown as Text labels above the thumbs (top-level bindings) rather
+           than via the Slider's valueFormat, which is a sync render callback the
+           xs engine rejects for anything but a bare arrow expression. -->
+      <VStack when="{dateRange}" width="*" gap="$space-0">
+        <HStack>
+          <Text fontSize="$fontSize-xs" color="$textColor-secondary"
+            value="{formatDateTime(new Date((dateFilter ? dateFilter[0] : dateRange[0]) * 1000), 'yyyy-MM-dd')}" />
+          <SpaceFiller />
+          <Text fontSize="$fontSize-xs" color="$textColor-secondary"
+            value="{formatDateTime(new Date((dateFilter ? dateFilter[1] : dateRange[1]) * 1000), 'yyyy-MM-dd')}" />
+        </HStack>
+        <Slider
+          id="dateSlider"
+          minValue="{dateRange[0]}"
+          maxValue="{dateRange[1]}"
+          step="{86400}"
+          initialValue="{dateRange}"
+          showValues="false"
+          onDidChange="(v) => dateFilter = v" />
+      </VStack>
     </HStack>
 
     <HStack gap="$space-3" verticalAlignment="center">

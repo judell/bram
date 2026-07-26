@@ -1,16 +1,34 @@
 <Component name="Search" var.query="">
-  <!-- issue-230 unified search. v1 wires the Claude session bucket via the
-       /__search FTS5 route; commits/issues/history buckets and type facets
-       are added incrementally. -->
+  <!-- issue-230 unified search across the local FTS5 index (sessions,
+       commits, issues, worklist-history). Each type is queried INDEPENDENTLY
+       (its own top-100 by bm25) so a length-penalized bucket — whole-session
+       rows are huge and rank low — is never squeezed out of a global top-100
+       by shorter commit/issue/history rows. Each pill counts its own bucket;
+       the list merges the selected buckets, re-sorted by rank. -->
   <variable name="typeColors"
     value="{{ session: 'blue', commit: 'green', issue: 'orange', history: 'purple' }}" />
+  <variable name="facetColors"
+    value="{{ Sessions: 'blue', Commits: 'green', Issues: 'orange', History: 'purple' }}" />
   <variable name="selectedTypes" value="{['session', 'commit', 'issue', 'worklist-history']}" />
+  <variable name="ready" value="{!!query &amp;&amp; query.trim().length >= 2}" />
 
-  <DataSource
-    id="searchResults"
-    url="/__search"
-    queryParams="{{ q: query, limit: 100, types: selectedTypes.join(',') }}"
-    when="{!!query &amp;&amp; query.trim().length >= 2}" />
+  <DataSource id="rSession" url="/__search"
+    queryParams="{{ q: query, limit: 100, types: 'session' }}" when="{ready}" />
+  <DataSource id="rCommit" url="/__search"
+    queryParams="{{ q: query, limit: 100, types: 'commit' }}" when="{ready}" />
+  <DataSource id="rIssue" url="/__search"
+    queryParams="{{ q: query, limit: 100, types: 'issue' }}" when="{ready}" />
+  <DataSource id="rHistory" url="/__search"
+    queryParams="{{ q: query, limit: 100, types: 'worklist-history' }}" when="{ready}" />
+
+  <variable name="displayed" value="{
+    [].concat(
+      selectedTypes.includes('session') ? (rSession.value || []) : [],
+      selectedTypes.includes('commit') ? (rCommit.value || []) : [],
+      selectedTypes.includes('issue') ? (rIssue.value || []) : [],
+      selectedTypes.includes('worklist-history') ? (rHistory.value || []) : []
+    ).sort((a, b) => a.rank - b.rank).slice(0, 100)
+  }" />
 
   <SearchHitModal id="searchHitModalRef" query="{query}" />
 
@@ -19,32 +37,51 @@
       <Heading level="h2">Search</Heading>
       <SpaceFiller />
       <SearchBox
-        placeholder="Search sessions, commits, issues…"
-        inProgress="{searchResults.inProgress}"
+        placeholder="Search sessions, commits, issues, history…"
+        inProgress="{rSession.inProgress || rCommit.inProgress || rIssue.inProgress || rHistory.inProgress}"
         onQueryChange="(q) => query = q"
         onClear="query = ''; searchHitModalRef.close()" />
     </HStack>
 
+    <!-- Facet pills: colored type + count of that bucket's hits; click to
+         toggle inclusion. Each count is its own per-type query, so no bucket
+         is hidden by another's volume. -->
     <HStack gap="$space-3" verticalAlignment="center">
-      <Checkbox label="Sessions" initialValue="{true}"
-        onDidChange="(v) => selectedTypes = window.__bramToggleType(selectedTypes, 'session', v)" />
-      <Checkbox label="Commits" initialValue="{true}"
-        onDidChange="(v) => selectedTypes = window.__bramToggleType(selectedTypes, 'commit', v)" />
-      <Checkbox label="Issues" initialValue="{true}"
-        onDidChange="(v) => selectedTypes = window.__bramToggleType(selectedTypes, 'issue', v)" />
-      <Checkbox label="History" initialValue="{true}"
-        onDidChange="(v) => selectedTypes = window.__bramToggleType(selectedTypes, 'worklist-history', v)" />
+      <Link noIndicator onClick="selectedTypes = window.__bramToggleType(selectedTypes, 'session', !selectedTypes.includes('session'))">
+        <HStack gap="$space-1" verticalAlignment="center" opacity="{selectedTypes.includes('session') ? 1 : 0.4}">
+          <Badge value="Sessions" colorMap="{facetColors}" />
+          <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{(rSession.value || []).length}" />
+        </HStack>
+      </Link>
+      <Link noIndicator onClick="selectedTypes = window.__bramToggleType(selectedTypes, 'commit', !selectedTypes.includes('commit'))">
+        <HStack gap="$space-1" verticalAlignment="center" opacity="{selectedTypes.includes('commit') ? 1 : 0.4}">
+          <Badge value="Commits" colorMap="{facetColors}" />
+          <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{(rCommit.value || []).length}" />
+        </HStack>
+      </Link>
+      <Link noIndicator onClick="selectedTypes = window.__bramToggleType(selectedTypes, 'issue', !selectedTypes.includes('issue'))">
+        <HStack gap="$space-1" verticalAlignment="center" opacity="{selectedTypes.includes('issue') ? 1 : 0.4}">
+          <Badge value="Issues" colorMap="{facetColors}" />
+          <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{(rIssue.value || []).length}" />
+        </HStack>
+      </Link>
+      <Link noIndicator onClick="selectedTypes = window.__bramToggleType(selectedTypes, 'worklist-history', !selectedTypes.includes('worklist-history'))">
+        <HStack gap="$space-1" verticalAlignment="center" opacity="{selectedTypes.includes('worklist-history') ? 1 : 0.4}">
+          <Badge value="History" colorMap="{facetColors}" />
+          <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{(rHistory.value || []).length}" />
+        </HStack>
+      </Link>
     </HStack>
 
-    <Text when="{!query || query.trim().length &lt; 2}"
+    <Text when="{!ready}"
       color="$textColor-secondary"
-      value="Type at least 2 characters to search indexed sessions." />
-    <Text when="{query &amp;&amp; query.trim().length >= 2 &amp;&amp; searchResults.loaded &amp;&amp; (searchResults.value || []).length === 0}"
+      value="Type at least 2 characters to search the index." />
+    <Text when="{ready &amp;&amp; rSession.loaded &amp;&amp; rCommit.loaded &amp;&amp; rIssue.loaded &amp;&amp; rHistory.loaded &amp;&amp; displayed.length === 0}"
       color="$textColor-secondary"
       value="No matches." />
 
     <Theme fontSize-Badge="0.55em">
-      <Items data="{searchResults.value || []}">
+      <Items data="{displayed}">
         <HStack gap="$space-3" paddingVertical="$space-2" borderBottom="1px solid $borderColor" verticalAlignment="start">
           <VStack gap="$space-0_5" width="7rem">
             <Badge value="{$item.type === 'worklist-history' ? 'history' : $item.type}" colorMap="{typeColors}" />

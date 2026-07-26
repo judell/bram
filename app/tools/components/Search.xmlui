@@ -3,8 +3,8 @@
        /__search FTS5 route; commits/issues/history buckets and type facets
        are added incrementally. -->
   <variable name="typeColors"
-    value="{{ session: 'blue', commit: 'green', issue: 'orange', 'worklist-history': 'purple' }}" />
-  <variable name="selectedTypes" value="{['session', 'commit', 'issue']}" />
+    value="{{ session: 'blue', commit: 'green', issue: 'orange', history: 'purple' }}" />
+  <variable name="selectedTypes" value="{['session', 'commit', 'issue', 'worklist-history']}" />
 
   <DataSource
     id="searchResults"
@@ -32,6 +32,8 @@
         onDidChange="(v) => selectedTypes = window.__bramToggleType(selectedTypes, 'commit', v)" />
       <Checkbox label="Issues" initialValue="{true}"
         onDidChange="(v) => selectedTypes = window.__bramToggleType(selectedTypes, 'issue', v)" />
+      <Checkbox label="History" initialValue="{true}"
+        onDidChange="(v) => selectedTypes = window.__bramToggleType(selectedTypes, 'worklist-history', v)" />
     </HStack>
 
     <Text when="{!query || query.trim().length &lt; 2}"
@@ -41,19 +43,22 @@
       color="$textColor-secondary"
       value="No matches." />
 
-    <Items data="{searchResults.value || []}">
-      <VStack gap="$space-1" paddingVertical="$space-2" borderBottom="1px solid $borderColor">
-        <HStack gap="$space-2" verticalAlignment="center">
-          <Badge value="{$item.type}" colorMap="{typeColors}" />
-          <Link width="*" noIndicator
-            onClick="searchHitModalRef.open($item.snippet, $item.source)">
-            <Text fontWeight="$fontWeight-bold" value="{$item.source}" />
-          </Link>
-          <Text fontSize="$fontSize-sm" color="$textColor-secondary"
-            value="{$item.date ? formatDateTime(new Date(Number($item.date) * 1000), 'yyyy-MM-dd HH:mm') : ''}" />
+    <Theme fontSize-Badge="0.55em">
+      <Items data="{searchResults.value || []}">
+        <HStack gap="$space-3" paddingVertical="$space-2" borderBottom="1px solid $borderColor" verticalAlignment="start">
+          <VStack gap="$space-0_5" width="7rem">
+            <Badge value="{$item.type === 'worklist-history' ? 'history' : $item.type}" colorMap="{typeColors}" />
+            <Text fontSize="$fontSize-xs" color="$textColor-secondary"
+              value="{$item.date ? formatDateTime(new Date(Number($item.date) * 1000), 'yyyy-MM-dd HH:mm') : ''}" />
+          </VStack>
+          <VStack width="*" gap="$space-0_5">
+            <Link noIndicator onClick="searchHitModalRef.open($item.snippet, $item.source)">
+              <Text maxLines="1" fontWeight="$fontWeight-bold" value="{$item.source}" />
+            </Link>
+            <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="…{$item.snippet}…" />
+          </VStack>
         </HStack>
-        <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="…{$item.snippet}…" />
-      </VStack>
-    </Items>
+      </Items>
+    </Theme>
   </VStack>
 </Component>

@@ -15383,6 +15383,68 @@ fn run_issue_index_pass<R: tauri::Runtime>(
     Ok((seen, indexed, skipped, rows))
 }
 
+/// One pass over `resources/worklist-history/<ts>.json` (+ sibling `.md`
+/// changelog). Entries are written once and immutable, so the file mtime as
+/// change token means they index once then skip. Keyed `history:<ts>`.
+fn run_history_index_pass<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<(usize, usize, usize, i64), String> {
+    let db = search_index_db_path(app).ok_or("no index db path")?;
+    let conn = search_index::open(&db.to_string_lossy()).map_err(|e| e.to_string())?;
+    let Some(dir) = worklist_history_dir(app) else {
+        return Ok((0, 0, 0, search_index::row_count(&conn).unwrap_or(0)));
+    };
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return Ok((0, 0, 0, search_index::row_count(&conn).unwrap_or(0))),
+    };
+    let (mut seen, mut indexed, mut skipped) = (0usize, 0usize, 0usize);
+    for entry in entries.flatten() {
+        let json_path = entry.path();
+        if json_path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(stem) = json_path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if stem.parse::<i64>().is_err() {
+            continue; // history files are <unix-ms>.json
+        }
+        seen += 1;
+        let mtime = std::fs::metadata(&json_path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let key = format!("history:{}", stem);
+        if !search_index::needs_index(&conn, &key, mtime, 0).unwrap_or(true) {
+            skipped += 1;
+            continue;
+        }
+        let json_raw = std::fs::read_to_string(&json_path).unwrap_or_default();
+        let md = std::fs::read_to_string(json_path.with_extension("md")).unwrap_or_default();
+        let summary = worklist_history_summary(&md);
+        let source = if summary.trim().is_empty() {
+            format!("history {}", stem)
+        } else {
+            summary
+        };
+        let row = search_index::IndexRow {
+            kind: "worklist-history".to_string(),
+            source,
+            date: mtime.to_string(),
+            link: worklist_history_commit_url(&md),
+            content: format!("{}\n{}", md, json_raw),
+            file: key,
+        };
+        search_index::index_doc(&conn, &row, mtime, 0).map_err(|e| e.to_string())?;
+        indexed += 1;
+    }
+    let rows = search_index::row_count(&conn).unwrap_or(0);
+    Ok((seen, indexed, skipped, rows))
+}
+
 /// Run one bucket pass and trace its outcome. The pass runs even when tracing
 /// is off (indexing must happen regardless); only the trace line is gated.
 fn run_and_trace_index_pass<R, F>(app: &AppHandle<R>, bucket: &str, pass: F)
@@ -15429,6 +15491,7 @@ fn start_search_indexer<R: tauri::Runtime>(app: AppHandle<R>) {
         loop {
             run_and_trace_index_pass(&app, "claude", run_search_index_pass);
             run_and_trace_index_pass(&app, "commits", run_commit_index_pass);
+            run_and_trace_index_pass(&app, "worklist-history", run_history_index_pass);
             if iter % 6 == 0 {
                 run_and_trace_index_pass(&app, "issues", run_issue_index_pass);
             }

@@ -5789,6 +5789,32 @@ window.__bramProjectedSessionTurns = function (payload) {
   return (payload && payload.turns) || [];
 };
 
+// ---- In-view find (search-in-view-find) ----
+// Ordered indices of the projected turns whose text contains the needle
+// (case-insensitive). The index IS the List data index, so the caller can
+// List.scrollToIndex() straight to a match. Gated at >= 2 chars to skip the
+// noise scans of a single keystroke (mirrors the Search page's `ready` gate).
+window.__bramFindMatchingTurnIndices = function (turns, needle) {
+  var q = (needle == null ? "" : String(needle)).trim().toLowerCase();
+  if (q.length < 2 || !turns || !turns.length) return [];
+  var out = [];
+  for (var i = 0; i < turns.length; i++) {
+    var t = turns[i];
+    var text = t && t.text ? String(t.text).toLowerCase() : "";
+    if (text.indexOf(q) !== -1) out.push(i);
+  }
+  return out;
+};
+
+// Step a match cursor by `dir` (+1 / -1) with wraparound. Returns 0 when there
+// are no matches, so the caller never indexes an empty array.
+window.__bramFindStep = function (indices, cur, dir) {
+  var n = indices && indices.length ? indices.length : 0;
+  if (!n) return 0;
+  var c = Number(cur) || 0;
+  return (c + dir + n) % n;
+};
+
 window.__bramProjectedLastExchange = function (payload) {
   var turns = (payload && payload.turns) || [];
   var lastUser = null;

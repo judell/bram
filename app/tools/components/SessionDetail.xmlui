@@ -1,8 +1,18 @@
 <Component name="SessionDetail">
   <!-- issue-230 shared detail: session transcript via projected turns.
-       Internal only — no external link. Props: sessionId, provider.
-       (Prop is `sessionId`, not `id` — `id` is XMLUI's reserved component
-       identifier and never arrives as a prop.) -->
+       Internal only — no external link. Props: sessionId, provider, height,
+       query. (Prop is `sessionId`, not `id` — `id` is XMLUI's reserved
+       component identifier and never arrives as a prop.)
+
+       search-in-view-find: an in-view find toolbar highlights matches and
+       steps among them. The find box is seeded from the optional `query` prop
+       (the search term that produced the hit) but is editable, so the user can
+       also find a *different* term inside the opened session. Highlighting is a
+       first-class xmlui Markdown capability: `highlightText` wraps matches in
+       <mark> via a rehype plugin (works inside code/links), and `highlightActive`
+       makes the active turn's Markdown emphasize + scrollIntoView its match.
+       scrollToIndex first mounts the active turn (virtualization) so the
+       component can then center the exact match. -->
   <DataSource id="turns" url="/__turns"
     queryParams="{{ id: $props.sessionId, provider: $props.provider }}" when="{!!$props.sessionId}"
     onLoaded="(data) => window.__bramMeasureTurnsRender(window.__bramProjectedSessionTurns(data).length)" />
@@ -13,17 +23,76 @@
        turns.value changes. -->
   <variable name="projectedTurns"
     value="{turns.value ? window.__bramProjectedSessionTurns(turns.value) : []}" />
-  <VStack gap="$space-2" padding="$space-2">
+  <VStack gap="$space-2" padding="$space-2"
+    var.findText="{$props.query || ''}"
+    var.appliedNeedle="{$props.query || ''}"
+    var.matchIndices="{[]}"
+    var.currentMatch="{0}">
     <Text when="{turns.inProgress &amp;&amp; !turns.loaded}" color="$textColor-secondary" value="Loading…" />
+
+    <!-- Find-in-view toolbar. Two debounced ChangeListeners (not one block:
+         ChangeListener.onDidChange is a sync callback that must be a single
+         arrow expression — same rule the Search page follows) recompute the
+         match set and reset the cursor when the needle or the loaded turns
+         change. A third listener scrolls the virtualized List to the active
+         match whenever the cursor moves — the dateSlider.setValue pattern in
+         Search.xmlui. -->
+    <HStack when="{turns.value}" gap="$space-2" verticalAlignment="center">
+      <TextBox
+        width="16rem"
+        placeholder="Find in transcript…"
+        initialValue="{$props.query || ''}"
+        autoComplete="off"
+        autoCorrect="{false}"
+        spellCheck="{false}"
+        autoCapitalize="off"
+        onDidChange="(v) => findText = v" />
+      <Button size="xs" variant="outlined" label="▲"
+        enabled="{matchIndices.length > 0}"
+        tooltip="Previous match"
+        onClick="currentMatch = window.__bramFindStep(matchIndices, currentMatch, -1)" />
+      <Button size="xs" variant="outlined" label="▼"
+        enabled="{matchIndices.length > 0}"
+        tooltip="Next match"
+        onClick="currentMatch = window.__bramFindStep(matchIndices, currentMatch, 1)" />
+      <Text fontSize="$fontSize-sm" color="$textColor-secondary"
+        when="{appliedNeedle &amp;&amp; appliedNeedle.trim().length >= 2}"
+        value="{matchIndices.length ? ((currentMatch + 1) + ' / ' + matchIndices.length + ' matches') : 'No matches'}" />
+    </HStack>
+    <ChangeListener
+      listenTo="{findText + '|' + projectedTurns.length}"
+      debounceWaitInMs="200"
+      onDidChange="() => matchIndices = window.__bramFindMatchingTurnIndices(projectedTurns, findText)" />
+    <ChangeListener
+      listenTo="{findText + '|' + projectedTurns.length}"
+      debounceWaitInMs="200"
+      onDidChange="() => currentMatch = 0" />
+    <!-- Debounced mirror of the needle drives the <mark> paint, so a huge
+         visible turn isn't re-scanned on every keystroke — only after typing
+         settles, in lockstep with the match recompute above. -->
+    <ChangeListener
+      listenTo="{findText + '|' + projectedTurns.length}"
+      debounceWaitInMs="200"
+      onDidChange="() => appliedNeedle = findText" />
+    <ChangeListener
+      listenTo="{currentMatch}"
+      onDidChange="() => matchIndices.length ? detailList.scrollToIndex(matchIndices[currentMatch]) : null" />
+
     <!-- Virtualized: List (virtua-backed) renders only the visible turns, so a
          big transcript no longer mounts thousands of Markdown blocks at once.
-         Needs a bounded height; 400px fits inside Search's expander wrapper. -->
-    <List when="{turns.value}" data="{projectedTurns}" height="{$props.height || '400px'}">
+         Needs a bounded height; 400px fits inside Search's expander wrapper.
+         `id` lets the find toolbar drive scrollToIndex. -->
+    <List id="detailList" when="{turns.value}" data="{projectedTurns}" height="{$props.height || '400px'}">
       <VStack gap="$space-0_5" borderTop="1px solid $borderColor" paddingVertical="$space-1">
         <Text fontSize="$fontSize-xs" fontWeight="$fontWeight-bold"
           color="{$item.role === 'user' ? '$color-info-700' : '$color-success-700'}"
           value="{$item.role}" />
-        <Markdown content="{$item.text}" />
+        <!-- Native xmlui highlight: highlightText paints all matches in this
+             turn (debounced needle); highlightActive emphasizes + centers the
+             match on the active turn. -->
+        <Markdown content="{$item.text}"
+          highlightText="{appliedNeedle}"
+          highlightActive="{matchIndices[currentMatch] === $itemIndex}" />
         <VStack gap="$space-2" when="{$item.images &amp;&amp; $item.images.length > 0}">
           <Items data="{$item.images}">
             <Image src="{window.imageSrcForPath($item)}" maxHeight="200px" fit="contain" />

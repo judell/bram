@@ -61,16 +61,11 @@
       .slice(0, 100)
   }" />
 
-  <!-- Real per-type source for the single open row: sessions via /__turns
-       (matching turns), everything else via the stored indexed content. -->
-  <!-- History detail: look up the WorklistHistoryGroup by the item id parsed
-       from the hit source ("id (summary)"). /search skips gh commit
-       resolution, so it's fast; the raw commit URL still links. -->
-  <DataSource id="historyGroups" url="/__worklist-history/search"
-    queryParams="{{ q: (expandedHit &amp;&amp; expandedHit.source || '').split(' (')[0] }}"
-    when="{expandedHit &amp;&amp; expandedHit.type === 'worklist-history'}" />
+  <!-- History detail rides on the hit itself: /__search returns the full
+       WorklistHistoryGroup in `extra` (indexed once), so the expander renders it
+       directly — no recency-limited re-fetch that missed older items. -->
   <variable name="historyGroup"
-    value="{(expandedHit &amp;&amp; expandedHit.type === 'worklist-history' &amp;&amp; historyGroups.value &amp;&amp; historyGroups.value.results) ? (historyGroups.value.results.find(g => g.title === (expandedHit.source || '').split(' (')[0]) || null) : null}" />
+    value="{(expandedHit &amp;&amp; expandedHit.type === 'worklist-history') ? (expandedHit.extra || null) : null}" />
 
   <VStack padding="$space-4" gap="$space-3" overflowY="auto">
     <HStack gap="$space-3" verticalAlignment="center">
@@ -169,7 +164,6 @@
               <IssueDetail number="{($item.key || '').split(':')[1]}" />
             </VStack>
             <VStack when="{$item.type === 'worklist-history'}" maxHeight="420px" overflowY="auto">
-              <Text when="{historyGroups.inProgress}" color="$textColor-secondary" value="Loading…" />
               <HistoryDetail when="{historyGroup}" group="{historyGroup}" />
             </VStack>
           </VStack>

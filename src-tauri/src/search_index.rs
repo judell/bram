@@ -17,7 +17,10 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Result};
 // change token (mtime) doesn't — so unchanged docs re-index instead of keeping
 // stale values. v3: session/history `link` → internal tab routes. v4: history
 // `source` → descriptive item id(s) instead of the "1 applied" summary.
-const SCHEMA_VERSION: i64 = 7;
+// v8: add the `extra` column carrying a hit's self-contained structured detail
+// (the serialized WorklistHistoryGroup for history rows), so the expander needs
+// no recency-limited re-fetch.
+const SCHEMA_VERSION: i64 = 8;
 
 /// A row to index. `content` is the searchable text; `file` is the source
 /// file's absolute path (the reindex key); the rest are the #230 common-schema
@@ -31,6 +34,10 @@ pub struct IndexRow {
     pub link: String,
     pub content: String,
     pub file: String,
+    /// Self-contained structured detail for the hit (e.g. the serialized
+    /// WorklistHistoryGroup), so the expander needs no re-fetch. Empty for
+    /// buckets whose detail is fetched live.
+    pub extra: String,
 }
 
 /// A unified search hit: the common-schema display columns plus the FTS5
@@ -46,6 +53,9 @@ pub struct Hit {
     /// The doc key (the `file` column) — lets the inline expander fetch the
     /// full stored content via get_doc / the /__search/doc route.
     pub key: String,
+    /// Self-contained structured detail (serialized JSON), empty when the
+    /// bucket fetches detail live. History rows carry the WorklistHistoryGroup.
+    pub extra: String,
 }
 
 /// Open (or create) the index at `path`, in WAL mode, with the current schema.
@@ -80,7 +90,7 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
     // compiled in — which the smoke test relies on.
     conn.execute_batch(
         "CREATE VIRTUAL TABLE IF NOT EXISTS search_index \
-           USING fts5(type, source, date, link, content, file UNINDEXED, tokenize='unicode61'); \
+           USING fts5(type, source, date, link, content, file UNINDEXED, extra UNINDEXED, tokenize='unicode61'); \
          CREATE TABLE IF NOT EXISTS indexed_files( \
            path TEXT PRIMARY KEY, mtime INTEGER, size INTEGER, \
            rowid_ref INTEGER, indexed_at INTEGER);",
@@ -123,9 +133,9 @@ pub fn index_doc(conn: &Connection, row: &IndexRow, mtime: i64, size: i64) -> Re
         conn.execute("DELETE FROM search_index WHERE rowid = ?1", params![old])?;
     }
     conn.execute(
-        "INSERT INTO search_index(type, source, date, link, content, file) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![row.kind, row.source, row.date, row.link, row.content, row.file],
+        "INSERT INTO search_index(type, source, date, link, content, file, extra) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![row.kind, row.source, row.date, row.link, row.content, row.file, row.extra],
     )?;
     let new_rowid = conn.last_insert_rowid();
     conn.execute(
@@ -161,7 +171,7 @@ pub fn query(conn: &Connection, q: &str, limit: usize, types: &[String]) -> Resu
     let mut sql = String::from(
         "SELECT type, source, date, link, \
                 snippet(search_index, 4, '[', ']', '…', 40), \
-                bm25(search_index), file \
+                bm25(search_index), file, extra \
          FROM search_index WHERE search_index MATCH ?",
     );
     let mut args: Vec<Value> = vec![Value::Text(q.to_string())];
@@ -189,6 +199,7 @@ pub fn query(conn: &Connection, q: &str, limit: usize, types: &[String]) -> Resu
             snippet: r.get(4)?,
             rank: r.get(5)?,
             key: r.get(6)?,
+            extra: r.get(7)?,
         })
     })?;
     rows.collect()
@@ -217,6 +228,7 @@ mod tests {
             link: format!("/{kind}"),
             content: content.into(),
             file: file.into(),
+            extra: String::new(),
         }
     }
 

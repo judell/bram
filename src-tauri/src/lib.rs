@@ -14961,6 +14961,7 @@ fn run_search_index_pass<R: tauri::Runtime>(
             link: "/sessions".to_string(),
             content: claude_session_all_text(&path),
             file: path_str,
+            extra: String::new(),
         };
         // Index even empty-content sessions so the next pass skips them.
         search_index::index_doc(&conn, &row, mtime, size).map_err(|e| e.to_string())?;
@@ -15001,6 +15002,7 @@ fn run_codex_search_index_pass<R: tauri::Runtime>(
             link: "/sessions".to_string(),
             content: codex_session_all_text(&s.path),
             file: path_str,
+            extra: String::new(),
         };
         search_index::index_doc(&conn, &row, mtime, size).map_err(|e| e.to_string())?;
         indexed += 1;
@@ -15066,6 +15068,7 @@ fn run_commit_index_pass<R: tauri::Runtime>(
             link,
             content: format!("{}\n{}\n{}", subject, body, author),
             file: key,
+            extra: String::new(),
         };
         search_index::index_doc(&conn, &row, token, 0).map_err(|e| e.to_string())?;
         indexed += 1;
@@ -15131,6 +15134,7 @@ fn run_issue_index_pass<R: tauri::Runtime>(
             link: url,
             content,
             file: key,
+            extra: String::new(),
         };
         search_index::index_doc(&conn, &row, token, 0).map_err(|e| e.to_string())?;
         indexed += 1;
@@ -15222,6 +15226,9 @@ fn run_history_index_pass<R: tauri::Runtime>(
             link: String::new(),
             content,
             file: key,
+            // Self-contained detail: the group the pass already built, so the
+            // Search expander renders it directly (no recency-limited re-fetch).
+            extra: serde_json::to_string(&g).unwrap_or_default(),
         };
         search_index::index_doc(&conn, &row, token, 0).map_err(|e| e.to_string())?;
         indexed += 1;
@@ -33117,6 +33124,14 @@ fn route_request<R: tauri::Runtime>(
                         "key": h.key,
                         "id": id,
                         "provider": provider,
+                        // Self-contained detail parsed to JSON (history rows carry
+                        // the WorklistHistoryGroup); null for buckets fetched live.
+                        "extra": if h.extra.is_empty() {
+                            serde_json::Value::Null
+                        } else {
+                            serde_json::from_str::<serde_json::Value>(&h.extra)
+                                .unwrap_or(serde_json::Value::Null)
+                        },
                     })
                 })
                 .collect::<Vec<_>>(),
@@ -34368,100 +34383,6 @@ fn route_request<R: tauri::Runtime>(
             Ok(bytes) => (200, "text/markdown; charset=utf-8", bytes),
             Err(_) => (404, "text/plain; charset=utf-8", Vec::new()),
         };
-    }
-
-    // /__worklist-history/search?q=<query> — filter the same group rows
-    // /__worklist-history/list produces by substring-matching the
-    // serialized JSON of each group (catches title, ids, subtitle, prose
-    // summaries, before/after fields inside current_item). Case-insensitive.
-    // Returns {results: [...]} (Commits/Issues shape, the new standard).
-    if path == "__worklist-history/search" {
-        let mut q = String::new();
-        for pair in query.split('&') {
-            if let Some(v) = pair.strip_prefix("q=") {
-                q = percent_decode(v);
-                break;
-            }
-        }
-        let trimmed = q.trim();
-        if trimmed.len() < 2 {
-            return (
-                200,
-                "application/json; charset=utf-8",
-                br#"{"results":[]}"#.to_vec(),
-            );
-        }
-        let needle = trimmed.to_lowercase();
-        let groups = recent_worklist_history_groups(app, WORKLIST_HISTORY_DEFAULT_LIMIT, false);
-        let mut results: Vec<serde_json::Value> = Vec::new();
-        for g in &groups {
-            let serialized = serde_json::to_string(g).unwrap_or_default();
-            if !serialized.to_lowercase().contains(&needle) {
-                continue;
-            }
-            // hitBody concatenates the human-readable text fields the modal
-            // and card-snippet renderer can window into. Mirrors what the
-            // serialized-JSON filter above matches against, but in a
-            // reader-friendly format (no JSON syntax noise).
-            let mut hit_body = String::new();
-            hit_body.push_str(&g.title);
-            hit_body.push('\n');
-            if !g.subtitle.is_empty() {
-                hit_body.push_str(&g.subtitle);
-                hit_body.push('\n');
-            }
-            if !g.prose_phase_summary.is_empty() {
-                hit_body.push_str(&g.prose_phase_summary);
-                hit_body.push('\n');
-            }
-            if let Some(item) = g.current_item.as_ref() {
-                if let Some(obj) = item.as_object() {
-                    for key in ["before", "after", "feedback"] {
-                        if let Some(v) = obj.get(key).and_then(|v| v.as_str()) {
-                            if !v.is_empty() {
-                                hit_body.push_str(v);
-                                hit_body.push('\n');
-                            }
-                        }
-                    }
-                }
-            }
-            // Woven feedback phases carry the user's iterate notes; include
-            // them so a feedback-text match produces a readable snippet.
-            for phase in &g.phases {
-                if phase.kind == "feedback" && !phase.body.is_empty() {
-                    hit_body.push_str(&phase.body);
-                    hit_body.push('\n');
-                }
-            }
-            // Center hitBody on the first match and cap at 4 KB. The
-            // iframe modal uses a 500-char window and the card preview
-            // uses 160; 4 KB gives both room without blowing up the
-            // payload size (a "pe" query against 120 groups was 949 KB
-            // before this cap; per-row cap drops it to ~120 * 4 KB ≈
-            // 480 KB worst case, and typical groups are smaller than
-            // the cap so the real reduction is larger).
-            const HIT_BODY_CAP: usize = 4096;
-            let lower_body = hit_body.to_lowercase();
-            let centered = if let Some(pos) = lower_body.find(&needle) {
-                let half = HIT_BODY_CAP / 2;
-                let start = pos.saturating_sub(half);
-                let end = (start + HIT_BODY_CAP).min(hit_body.len());
-                let start = end.saturating_sub(HIT_BODY_CAP);
-                hit_body.get(start..end).unwrap_or("").to_string()
-            } else {
-                hit_body.chars().take(HIT_BODY_CAP).collect()
-            };
-            let mut row = serde_json::to_value(g).unwrap_or(serde_json::Value::Null);
-            if let Some(obj) = row.as_object_mut() {
-                obj.insert("hitBody".to_string(), serde_json::Value::String(centered));
-            }
-            results.push(row);
-        }
-        let body = serde_json::json!({ "results": results })
-            .to_string()
-            .into_bytes();
-        return (200, "application/json; charset=utf-8", body);
     }
 
     // (Removed: /__feedback-history/{search,list,content} — the standalone

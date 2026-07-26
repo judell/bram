@@ -10,5 +10,17 @@
     </Link>
     <Text when="{commit.inProgress &amp;&amp; !commit.loaded}" color="$textColor-secondary" value="Loading…" />
     <Markdown when="{commit.value &amp;&amp; commit.value.message}" content="{commit.value.message}" />
+    <Text when="{commit.value &amp;&amp; commit.value.stats}" fontSize="$fontSize-sm" color="$textColor-secondary"
+      value="+{commit.value.stats.additions} / -{commit.value.stats.deletions} across {commit.value.files.length} file(s)" />
+    <Items when="{commit.value &amp;&amp; commit.value.files}" data="{commit.value.files}">
+      <VStack gap="0" borderTop="1px solid $borderColor" paddingTop="$space-2">
+        <HStack gap="$space-3" verticalAlignment="center" paddingBottom="$space-2">
+          <Text fontWeight="$fontWeight-bold" value="{$item.filename}" />
+          <Text color="green" value="+{$item.additions}" />
+          <Text color="red" value="-{$item.deletions}" />
+        </HStack>
+        <DiffView text="{$item.patch || '(no textual diff)'}" />
+      </VStack>
+    </Items>
   </VStack>
 </Component>

@@ -1,7 +1,10 @@
 <Component name="IssueDetail">
   <!-- issue-230 shared detail: full issue (body + comments), with the external
        forge link pinned at the top. Prop: number. -->
-  <DataSource id="issue" url="/__issue" queryParams="{{ number: $props.number }}" when="{!!$props.number}" />
+  <!-- refreshTick: bump it (e.g. after a local comment) to force a refetch —
+       event-driven, no polling. `_r` is ignored by the host. -->
+  <DataSource id="issue" url="/__issue"
+    queryParams="{{ number: $props.number, _r: $props.refreshTick }}" when="{!!$props.number}" />
   <VStack gap="$space-3" padding="$space-2">
     <Link when="{issue.value &amp;&amp; issue.value.url}" noIndicator onClick="openExternal(issue.value.url)">
       <Text fontWeight="$fontWeight-bold"

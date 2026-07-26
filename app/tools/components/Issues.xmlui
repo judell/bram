@@ -1,7 +1,6 @@
 <Component name="Issues"
   var.issuesExpanded="{false}"
   var.expandedNumber="{null}"
-  var.fullscreenImage="{null}"
   var.showNewIssueHint="{false}"
   var.newIssueSubmitting="{false}"
   var.closingIssue="{false}"
@@ -10,8 +9,7 @@
   var.newIssueText="{''}"
   var.newIssueVoiceRecording="{false}"
   var.lastIssuesSig="{''}"
-  var.query=""
-  var.selectedHitLine="{null}"
+  var.issueRefreshTick="{0}"
   var.sortField="updatedAt"
   var.sortDir="desc"
   var.issuesSource="{(issuesFull.value &amp;&amp; issuesFull.value.length > 0) ? issuesFull.value : (issuesFirstPage.value || [])}"
@@ -21,23 +19,24 @@
     if (av < bv) return sortDir === 'asc' ? -1 : 1;
     if (av > bv) return sortDir === 'asc' ? 1 : -1;
     return 0;
-  })}">
+  })}"
+  var.pageIssues="{sortedIssues.slice(0, issuesExpanded ? 999 : 20)}">
 
+  <!-- issue-230: Issues is a browse list with an inline-expander (shared
+       IssueDetail) + the comment/close controls. Search lives on the unified
+       Search page. No polling — the agent-turn-end event covers locally-filed
+       issues, comment/close bump issueRefreshTick, and Refresh is manual for
+       remote (GitHub/GitLab) changes with no push channel. -->
   <DataSource
     id="issuesFirstPage"
     url="/__issues"
     queryParams="{{ limit: 20 }}"
-    pollIntervalInSeconds="30"
     onLoaded="(data) => {
       const currentSig = ((data || []).map(i => i && i.number).filter(Boolean).sort()).join(',');
-      if (newIssueSubmitting && newIssueStartSig && currentSig !== newIssueStartSig) {
-        newIssueSubmitting = false;
-        newIssueStartSig = '';
-        newIssueTurnEnded = false;
-      } else if (newIssueSubmitting && newIssueTurnEnded) {
-        newIssueSubmitting = false;
-        newIssueStartSig = '';
-        newIssueTurnEnded = false;
+      if (newIssueSubmitting &amp;&amp; newIssueStartSig &amp;&amp; currentSig !== newIssueStartSig) {
+        newIssueSubmitting = false; newIssueStartSig = ''; newIssueTurnEnded = false;
+      } else if (newIssueSubmitting &amp;&amp; newIssueTurnEnded) {
+        newIssueSubmitting = false; newIssueStartSig = ''; newIssueTurnEnded = false;
       }
       lastIssuesSig = currentSig;
     }" />
@@ -46,43 +45,17 @@
     id="issuesFull"
     url="/__issues"
     when="{issuesFirstPage.loaded || issuesFirstPage.value}"
-    pollIntervalInSeconds="30"
     onLoaded="(data) => {
       const currentSig = ((data || []).map(i => i && i.number).filter(Boolean).sort()).join(',');
-      if (newIssueSubmitting && newIssueStartSig && currentSig !== newIssueStartSig) {
-        newIssueSubmitting = false;
-        newIssueStartSig = '';
-        newIssueTurnEnded = false;
-      } else if (newIssueSubmitting && newIssueTurnEnded) {
-        newIssueSubmitting = false;
-        newIssueStartSig = '';
-        newIssueTurnEnded = false;
+      if (newIssueSubmitting &amp;&amp; newIssueStartSig &amp;&amp; currentSig !== newIssueStartSig) {
+        newIssueSubmitting = false; newIssueStartSig = ''; newIssueTurnEnded = false;
+      } else if (newIssueSubmitting &amp;&amp; newIssueTurnEnded) {
+        newIssueSubmitting = false; newIssueStartSig = ''; newIssueTurnEnded = false;
       }
       lastIssuesSig = currentSig;
     }" />
 
-  <DataSource
-    id="repoOrigin"
-    url="/__repo/origin" />
-
-  <DataSource
-    id="issueDetail"
-    url="/__issue"
-    queryParams="{{ number: expandedNumber }}"
-    pollIntervalInSeconds="30"
-    when="{!!expandedNumber}" />
-
-  <DataSource
-    id="searchResults"
-    url="/__issues/search"
-    queryParams="{{ q: query }}"
-    when="{!!query &amp;&amp; query.trim().length >= 2}" />
-
-  <!-- issues-tab-close-via-invoke: manual close rides the issue_close_manual
-       Tauri invoke (window.__bramCloseIssue), not an HTTP route -- the
-       /__issue/close route was removed in the H5 close-authority work
-       (user-clicked button stays possible; no agent-reachable channel
-       returns). The old APICall kept calling the dead route and 404ed. -->
+  <DataSource id="repoOrigin" url="/__repo/origin" />
 
   <APICall
     id="commentIssueCall"
@@ -90,26 +63,7 @@
     method="post"
     queryParams="{{ number: $param.number, body: $param.body }}"
     completedNotificationMessage="Comment posted."
-    onSuccess="closeCommentBox.setValue(''); issueDetail.refetch(); issuesFirstPage.refetch(); issuesFull.refetch()" />
-
-  <variable
-    name="displayedIssues"
-    value="{window.selectDisplayed(query, searchResults.value, sortedIssues.slice(0, issuesExpanded ? 999 : 20))}" />
-
-  <variable
-    name="selectedIssue"
-    value="{!expandedNumber ? null : (((issueDetail.value &amp;&amp; issueDetail.value.number === expandedNumber) ? issueDetail.value : ((((searchResults.value &amp;&amp; searchResults.value.results) || []).find(i => i.number === expandedNumber)) || (sortedIssues || []).find(i => i.number === expandedNumber))))}" />
-
-  <ModalDialog
-    when="{!!fullscreenImage}"
-    fullScreen="true"
-    onClose="fullscreenImage = null">
-    <Image
-      src="{fullscreenImage}"
-      fit="contain"
-      width="100%"
-      height="100%" />
-  </ModalDialog>
+    onSuccess="issueRefreshTick = issueRefreshTick + 1; issuesFirstPage.refetch(); issuesFull.refetch()" />
 
   <ModalDialog
     when="{showNewIssueHint}"
@@ -123,7 +77,7 @@
         <Text fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" value="Ask the agent to file an issue" />
         <ChangeListener
           listenTo="{worklistVoiceSeq}"
-          onDidChange="() => { if (worklistVoiceText && worklistVoiceTarget === 'new-issue') { appendVoiceTranscript(newIssueBox, worklistVoiceText); newIssueText = newIssueBox.value || ''; } newIssueVoiceRecording = false; worklistVoiceRecordingActive = false; }" />
+          onDidChange="() => { if (worklistVoiceText &amp;&amp; worklistVoiceTarget === 'new-issue') { appendVoiceTranscript(newIssueBox, worklistVoiceText); newIssueText = newIssueBox.value || ''; } newIssueVoiceRecording = false; worklistVoiceRecordingActive = false; }" />
         <HStack gap="$space-2" verticalAlignment="start">
           <TextArea
             id="newIssueBox"
@@ -164,345 +118,152 @@
     </VStack>
   </ModalDialog>
 
-  <SearchHitModal
-    id="searchHitModalRef"
-    query="{query}" />
-
   <PushSource
     id="issuesAgentTurnEndEvt"
     initial="{null}"
     subscribe="{window.bramSubscribeTauriEvent('agent-turn-end')}" />
   <ChangeListener
     listenTo="{issuesAgentTurnEndEvt.value &amp;&amp; issuesAgentTurnEndEvt.value.tick}"
-    onDidChange="() => { if (newIssueSubmitting) { newIssueTurnEnded = true; issuesFirstPage.refetch(); issuesFull.refetch(); } }" />
-  <HSplitter
-    height="100%"
-    initialPrimarySize="{window.__bramRestoreSplitterSize('issues', '40%')}"
-    onResize="(px) => window.__bramSaveSplitterSize('issues', px)">
+    onDidChange="() => { if (newIssueSubmitting) { newIssueTurnEnded = true; } issuesFirstPage.refetch(); issuesFull.refetch(); }" />
 
-    <VStack padding="$space-4" gap="$space-4" overflowY="auto">
-      <HStack gap="$space-3" verticalAlignment="center">
-        <Heading level="h2">Issues</Heading>
-        <Button
-          when="{repoOrigin.value &amp;&amp; repoOrigin.value.issuesNewUrl}"
-          label="+ New issue"
-          size="xs"
-          enabled="{!newIssueSubmitting}"
-          onClick="showNewIssueHint = true" />
-        <Theme size-Spinner="16px">
-          <Spinner when="{newIssueSubmitting || (issuesFirstPage.inProgress &amp;&amp; !issuesFirstPage.loaded)}" />
-        </Theme>
-        <SpaceFiller />
-        <SearchBox
-          placeholder="Search title, body, comments, authors…"
-          inProgress="{searchResults.inProgress}"
-          onQueryChange="(q) => query = q"
-          onClear="expandedNumber = null; selectedHitLine = null; searchHitModalRef.close()" />
-      </HStack>
+  <!-- Host synthesizes issues-changed when its background poll of the forge
+       detects a change; the client only refetches on the event — no polling,
+       no manual refresh. Same pattern as git-status-changed. -->
+  <PushSource
+    id="issuesChangedEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('issues-changed')}" />
+  <ChangeListener
+    listenTo="{issuesChangedEvt.value &amp;&amp; issuesChangedEvt.value.tick}"
+    onDidChange="() => { issuesFirstPage.refetch(); issuesFull.refetch(); }" />
 
-      <Text
-        when="{!repoOrigin.value || !repoOrigin.value.htmlBase}"
-        color="$textColor-secondary">
-        No forge remote detected for this project. Add an origin remote (GitHub or GitLab) to populate this tab.
-      </Text>
+  <VStack padding="$space-4" gap="$space-4" overflowY="auto" height="100%">
+    <HStack gap="$space-3" verticalAlignment="center">
+      <Heading level="h2">Issues</Heading>
+      <Button
+        when="{repoOrigin.value &amp;&amp; repoOrigin.value.issuesNewUrl}"
+        label="+ New issue"
+        size="xs"
+        enabled="{!newIssueSubmitting}"
+        onClick="showNewIssueHint = true" />
+      <Theme size-Spinner="16px">
+        <Spinner when="{newIssueSubmitting || (issuesFirstPage.inProgress &amp;&amp; !issuesFirstPage.loaded)}" />
+      </Theme>
+    </HStack>
 
-      <Text
-        when="{(!query || query.trim().length &lt; 2) &amp;&amp; repoOrigin.value &amp;&amp; repoOrigin.value.htmlBase &amp;&amp; issuesFirstPage.loaded &amp;&amp; !issuesFirstPage.inProgress &amp;&amp; (!issuesSource || issuesSource.length === 0)}"
-        color="$textColor-secondary">
-        No issues found. (Either the repo has none, or `{(repoOrigin.value &amp;&amp; repoOrigin.value.cli) || 'gh'}` is not installed / authenticated.)
-      </Text>
+    <Text
+      when="{!repoOrigin.value || !repoOrigin.value.htmlBase}"
+      color="$textColor-secondary">
+      No forge remote detected for this project. Add an origin remote (GitHub or GitLab) to populate this tab.
+    </Text>
+    <Text
+      when="{repoOrigin.value &amp;&amp; repoOrigin.value.htmlBase &amp;&amp; issuesFirstPage.loaded &amp;&amp; !issuesFirstPage.inProgress &amp;&amp; (!issuesSource || issuesSource.length === 0)}"
+      color="$textColor-secondary">
+      No issues found. (Either the repo has none, or `{(repoOrigin.value &amp;&amp; repoOrigin.value.cli) || 'gh'}` is not installed / authenticated.)
+    </Text>
 
-      <Text
-        when="{query &amp;&amp; query.trim().length >= 2 &amp;&amp; searchResults.value &amp;&amp; (!searchResults.value.results || searchResults.value.results.length === 0) &amp;&amp; !searchResults.inProgress}"
-        color="$textColor-secondary">
-        No matches.
-      </Text>
-
-      <VStack gap="0" width="100%" when="{displayedIssues.length > 0}">
-        <HStack
-          when="{(!query || query.trim().length &lt; 2)}"
-          gap="$space-3"
-          paddingHorizontal="$space-3"
-          paddingVertical="$space-2"
-          backgroundColor="$color-surface-100"
-          borderBottom="1px solid $borderColor">
-          <Link
-            when="{!expandedNumber}"
-            width="64px"
-            noIndicator
-            onClick="const r = window.toggleSort(sortField, sortDir, 'state', 'desc'); sortField = r.field; sortDir = r.dir">
-            <Text fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary"
-              value="{window.sortLabel('STATE', sortField, sortDir, 'state')}" />
-          </Link>
-          <Link
-            width="*"
-            noIndicator
-            onClick="const r = window.toggleSort(sortField, sortDir, 'number', 'asc'); sortField = r.field; sortDir = r.dir">
-            <Text fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary"
-              value="{window.sortLabel('TITLE', sortField, sortDir, 'number')}" />
-          </Link>
-          <Link
-            when="{!expandedNumber}"
-            width="90px"
-            noIndicator
-            onClick="const r = window.toggleSort(sortField, sortDir, 'updatedAt', 'desc'); sortField = r.field; sortDir = r.dir">
-            <Text fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary"
-              value="{window.sortLabel('AGE', sortField, sortDir, 'updatedAt')}" />
-          </Link>
-        </HStack>
-        <Items data="{displayedIssues}">
-          <VStack gap="0" borderBottom="1px solid $borderColor" var.issueNumber="{$item.number}">
-            <HStack
-              gap="$space-3"
-              paddingHorizontal="$space-3"
-              paddingVertical="$space-2"
-              verticalAlignment="center">
-              <HStack when="{!expandedNumber}" width="64px" verticalAlignment="center">
-                <Text
-                  fontSize="$fontSize-sm"
-                  fontWeight="$fontWeight-bold"
-                  color="{$item.state === 'OPEN' ? '$color-success-700' : '$textColor-secondary'}"
-                  value="{$item.state === 'OPEN' ? 'open' : 'closed'}" />
-              </HStack>
-              <HStack width="*" gap="$space-2" verticalAlignment="center">
-                <Link
-                  onClick="expandedNumber = $item.number; selectedHitLine = null"
-                  noIndicator>
-                  <VStack gap="0">
-                    <Text
-                      value="#{$item.number} {$item.title}"
-                      fontWeight="{expandedNumber === $item.number ? '$fontWeight-bold' : '$fontWeight-normal'}"
-                      maxLines="1" />
-                    <Text
-                      when="{$item.commentSummary}"
-                      fontSize="$fontSize-xs"
-                      color="$textColor-secondary"
-                      maxLines="1"
-                      value="{'comments: ' + $item.commentSummary}" />
-                    <Text
-                      fontSize="$fontSize-xs"
-                      color="$textColor-secondary"
-                      maxLines="1"
-                      value="{(($item.author &amp;&amp; ($item.author.login || $item.author.name)) || 'unknown') + ' opened ' + getDateUntilNow($item.createdAt) + ' ago'}" />
-                    <Text
-                      when="{$item.latestCommentAuthor &amp;&amp; $item.latestCommentAt}"
-                      fontSize="$fontSize-xs"
-                      color="$textColor-secondary"
-                      maxLines="1"
-                      value="{$item.latestCommentAuthor + ' commented ' + getDateUntilNow($item.latestCommentAt) + ' ago'}" />
-                  </VStack>
-                </Link>
-              </HStack>
-              <HStack when="{!expandedNumber}" width="90px" verticalAlignment="center">
-                <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{getDateUntilNow($item.activityAt || $item.updatedAt || $item.createdAt)}" />
-              </HStack>
-            </HStack>
-
-            <VStack
-              when="{$item.hits &amp;&amp; $item.hits.length > 0}"
-              gap="0"
-              paddingHorizontal="$space-3"
-              paddingBottom="$space-2">
-              <Items data="{$item.hits}" var.parentIssue="{$item}">
-                <Link
-                  onClick="searchHitModalRef.open(searchHitBestBody(query, [parentIssue.body, $item.snippet, parentIssue.title]), '#' + parentIssue.number + ' ' + parentIssue.title)">
-                  <HStack gap="$space-2">
-                    <Text
-                      value="{$item.field}"
-                      fontSize="$fontSize-xs"
-                      color="$textColor-secondary"
-                      width="56px" />
-                    <Text
-                      value="{$item.snippet}"
-                      fontSize="$fontSize-xs"
-                      whiteSpace="nowrap"
-                      overflowMode="ellipsis"
-                      maxLines="1" />
-                  </HStack>
-                </Link>
-              </Items>
-            </VStack>
-          </VStack>
-        </Items>
-        <HStack
-          when="{(!query || query.trim().length &lt; 2) &amp;&amp; issuesSource &amp;&amp; issuesSource.length > 20}"
-          padding="$space-2"
-          horizontalAlignment="center">
-          <Link
-            onClick="issuesExpanded = !issuesExpanded"
-            noIndicator>
-            <Text
-              fontSize="$fontSize-sm"
-              value="{issuesExpanded ? 'Show fewer' : 'More (' + (issuesSource.length - 20) + ' more)'}" />
-          </Link>
-        </HStack>
-        <Text
-          when="{query &amp;&amp; query.trim().length >= 2 &amp;&amp; searchResults.value &amp;&amp; searchResults.value.truncated}"
-          paddingHorizontal="$space-3"
-          paddingVertical="$space-2"
-          color="$textColor-secondary"
-          fontSize="$fontSize-xs">
-          (results truncated)
-        </Text>
-      </VStack>
-    </VStack>
-
-    <VStack when="{expandedNumber}" padding="$space-4" gap="$space-3" overflowY="auto">
-      <HStack gap="$space-2" verticalAlignment="center">
-        <Text
-          when="{selectedIssue}"
-          fontSize="$fontSize-sm"
-          fontWeight="$fontWeight-bold"
-          color="{selectedIssue.state === 'OPEN' ? '$color-success-700' : '$textColor-secondary'}"
-          value="{selectedIssue.state === 'OPEN' ? 'open' : 'closed'}" />
-        <Link
-          when="{selectedIssue}"
-          width="*"
-          noIndicator
-          onClick="selectedIssue.url ? openExternal(selectedIssue.url) : null">
-          <Text
-            fontWeight="$fontWeight-bold"
-            value="#{selectedIssue.number} {selectedIssue.title}"
-            maxLines="2" />
-        </Link>
-        <Button
-          label="✕"
-          variant="ghost"
-          size="xs"
-          tooltip="Close detail pane"
-          onClick="expandedNumber = null; selectedHitLine = null" />
-      </HStack>
-      <VStack when="{selectedIssue}" gap="0">
-        <Text
-          fontSize="$fontSize-sm"
-          color="$textColor-secondary"
-          value="{((selectedIssue.author &amp;&amp; (selectedIssue.author.login || selectedIssue.author.name)) || 'unknown') + ' opened ' + getDateUntilNow(selectedIssue.createdAt) + ' ago'}" />
-        <Text
-          when="{selectedIssue.latestCommentAuthor &amp;&amp; selectedIssue.latestCommentAt}"
-          fontSize="$fontSize-sm"
-          color="$textColor-secondary"
-          value="{selectedIssue.latestCommentAuthor + ' commented ' + getDateUntilNow(selectedIssue.latestCommentAt) + ' ago'}" />
-        <Text
-          when="{selectedIssue.state === 'CLOSED' &amp;&amp; selectedIssue.closedBy &amp;&amp; selectedIssue.closedByAt}"
-          fontSize="$fontSize-sm"
-          color="$textColor-secondary"
-          value="{'closed by ' + selectedIssue.closedBy + ' ' + getDateUntilNow(selectedIssue.closedByAt) + ' ago'}" />
-      </VStack>
-      <Link
-        when="{selectedHitLine &amp;&amp; query &amp;&amp; query.trim().length >= 2}"
-        onClick="selectedHitLine = null"
-        noIndicator>
-        <Text value="↥ Show full issue" fontSize="$fontSize-xs" />
-      </Link>
-      <Text when="{issueDetail.inProgress &amp;&amp; !issueDetail.loaded}">Loading…</Text>
-      <Markdown
-        when="{issueDetail.value &amp;&amp; issueDetail.value.body}"
-        content="{issueDetail.value.body}" />
-      <VStack
-        gap="$space-2"
-        when="{issueDetail.value &amp;&amp; issueDetail.value.body &amp;&amp; window.__bramExtractMarkdownImages(issueDetail.value.body).length > 0}">
-        <Items data="{window.__bramExtractMarkdownImages(issueDetail.value.body)}">
-          <Link onClick="fullscreenImage = $item" noIndicator>
-            <Image
-              src="{$item}"
-              maxHeight="200px"
-              fit="contain" />
-          </Link>
-        </Items>
-      </VStack>
-      <VStack
+    <VStack gap="0" width="100%" when="{pageIssues.length > 0}">
+      <HStack
         gap="$space-3"
-        when="{issueDetail.value &amp;&amp; issueDetail.value.comments &amp;&amp; issueDetail.value.comments.length > 0}">
-        <Items data="{issueDetail.value.comments}">
-          <VStack
-            gap="$space-1"
-            paddingTop="$space-2"
-            borderTop="1px solid $borderColor">
-            <Text
-              fontSize="$fontSize-sm"
-              color="$textColor-secondary"
-              value="{(($item.author &amp;&amp; ($item.author.login || $item.author.name)) || 'unknown') + ' commented ' + getDateUntilNow($item.createdAt) + ' ago'}" />
-            <Markdown
-              when="{$item.body}"
-              content="{$item.body}" />
-            <VStack
-              gap="$space-2"
-              when="{$item.body &amp;&amp; window.__bramExtractMarkdownImages($item.body).length > 0}">
-              <Items data="{window.__bramExtractMarkdownImages($item.body)}">
-                <Link onClick="fullscreenImage = $item" noIndicator>
-                  <Image
-                    src="{$item}"
-                    maxHeight="200px"
-                    fit="contain" />
-                </Link>
-              </Items>
-            </VStack>
-          </VStack>
-        </Items>
-      </VStack>
-      <VStack
-        gap="$space-1"
-        when="{issueDetail.value &amp;&amp; issueDetail.value.crossReferences &amp;&amp; issueDetail.value.crossReferences.length > 0}"
-        paddingTop="$space-3"
-        borderTop="1px solid $borderColor">
-        <Text
-          fontSize="$fontSize-sm"
-          color="$textColor-secondary"
-          value="Mentioned in {issueDetail.value.crossReferences.length} {issueDetail.value.crossReferences.length === 1 ? 'issue' : 'issues'}" />
-        <Items data="{issueDetail.value.crossReferences}">
-          <Link
-            onClick="expandedNumber = $item.number; selectedHitLine = null; query = ''"
-            noIndicator>
-            <HStack gap="$space-2" verticalAlignment="center">
-              <Text value="#{$item.number}" fontSize="$fontSize-sm" color="$textColor-secondary" />
+        paddingHorizontal="$space-3"
+        paddingVertical="$space-2"
+        backgroundColor="$color-surface-100"
+        borderBottom="1px solid $borderColor">
+        <Link width="64px" noIndicator
+          onClick="const r = window.toggleSort(sortField, sortDir, 'state', 'desc'); sortField = r.field; sortDir = r.dir">
+          <Text fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary"
+            value="{window.sortLabel('STATE', sortField, sortDir, 'state')}" />
+        </Link>
+        <Link width="*" noIndicator
+          onClick="const r = window.toggleSort(sortField, sortDir, 'number', 'asc'); sortField = r.field; sortDir = r.dir">
+          <Text fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary"
+            value="{window.sortLabel('TITLE', sortField, sortDir, 'number')}" />
+        </Link>
+        <Link width="90px" noIndicator
+          onClick="const r = window.toggleSort(sortField, sortDir, 'updatedAt', 'desc'); sortField = r.field; sortDir = r.dir">
+          <Text fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary"
+            value="{window.sortLabel('AGE', sortField, sortDir, 'updatedAt')}" />
+        </Link>
+      </HStack>
+      <Items data="{pageIssues}">
+        <VStack gap="0" borderBottom="1px solid $borderColor" var.rowIssue="{$item}">
+          <HStack gap="$space-3" paddingHorizontal="$space-3" paddingVertical="$space-2" verticalAlignment="center">
+            <HStack width="64px" verticalAlignment="center">
               <Text
                 fontSize="$fontSize-sm"
                 fontWeight="$fontWeight-bold"
                 color="{$item.state === 'OPEN' ? '$color-success-700' : '$textColor-secondary'}"
                 value="{$item.state === 'OPEN' ? 'open' : 'closed'}" />
-              <Text value="{$item.title}" />
             </HStack>
-          </Link>
-        </Items>
-      </VStack>
-      <VStack
-        when="{selectedIssue}"
-        gap="$space-2"
-        paddingTop="$space-3"
-        borderTop="1px solid $borderColor">
-        <TextArea
-          id="closeCommentBox"
-          placeholder="Optional comment"
-          autoFocus="true"
-          autoComplete="off"
-          autoCorrect="{false}"
-          spellCheck="{false}"
-          autoCapitalize="off"
-          resize="vertical"
-          minRows="2"
-          maxRows="12"
-          width="*"
-          enabled="{!commentIssueCall.inProgress &amp;&amp; !closingIssue}" />
-        <HStack gap="$space-2">
-          <Button
-            label="Comment"
-            variant="outlined"
-            size="sm"
-            enabled="{!commentIssueCall.inProgress &amp;&amp; !closingIssue &amp;&amp; closeCommentBox.value &amp;&amp; closeCommentBox.value.trim().length > 0}"
-            onClick="commentIssueCall.execute({ number: selectedIssue.number, body: closeCommentBox.value })" />
-          <Button
-            when="{selectedIssue.state === 'OPEN'}"
-            label="Close issue"
-            variant="outlined"
-            size="sm"
-            enabled="{!commentIssueCall.inProgress &amp;&amp; !closingIssue}"
-            onClick="closingIssue = true; window.__bramCloseIssue(selectedIssue.number, closeCommentBox.value || '', () => { closingIssue = false; closeCommentBox.setValue(''); issueDetail.refetch(); issuesFirstPage.refetch(); issuesFull.refetch(); }, () => { closingIssue = false; })" />
-          <Theme size-Spinner="16px">
-            <Spinner when="{commentIssueCall.inProgress || closingIssue}" />
-          </Theme>
-        </HStack>
-      </VStack>
-    </VStack>
+            <HStack width="*" gap="$space-2" verticalAlignment="center">
+              <Link
+                onClick="expandedNumber = (expandedNumber === $item.number) ? null : $item.number"
+                noIndicator>
+                <VStack gap="0">
+                  <Text
+                    value="#{$item.number} {$item.title}"
+                    fontWeight="{expandedNumber === $item.number ? '$fontWeight-bold' : '$fontWeight-normal'}"
+                    maxLines="1" />
+                  <Text when="{$item.commentSummary}" fontSize="$fontSize-xs" color="$textColor-secondary" maxLines="1"
+                    value="{'comments: ' + $item.commentSummary}" />
+                  <Text fontSize="$fontSize-xs" color="$textColor-secondary" maxLines="1"
+                    value="{(($item.author &amp;&amp; ($item.author.login || $item.author.name)) || 'unknown') + ' opened ' + getDateUntilNow($item.createdAt) + ' ago'}" />
+                  <Text when="{$item.latestCommentAuthor &amp;&amp; $item.latestCommentAt}" fontSize="$fontSize-xs" color="$textColor-secondary" maxLines="1"
+                    value="{$item.latestCommentAuthor + ' commented ' + getDateUntilNow($item.latestCommentAt) + ' ago'}" />
+                </VStack>
+              </Link>
+            </HStack>
+            <HStack width="90px" verticalAlignment="center">
+              <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{getDateUntilNow($item.activityAt || $item.updatedAt || $item.createdAt)}" />
+            </HStack>
+          </HStack>
 
-  </HSplitter>
+          <VStack when="{expandedNumber === $item.number}" paddingHorizontal="$space-3" paddingBottom="$space-3">
+            <IssueDetail number="{rowIssue.number}" refreshTick="{issueRefreshTick}" />
+            <VStack gap="$space-2" paddingTop="$space-3" borderTop="1px solid $borderColor">
+              <TextArea
+                id="closeCommentBox"
+                placeholder="Optional comment"
+                autoComplete="off"
+                autoCorrect="{false}"
+                spellCheck="{false}"
+                autoCapitalize="off"
+                resize="vertical"
+                minRows="2"
+                maxRows="12"
+                width="*"
+                enabled="{!commentIssueCall.inProgress &amp;&amp; !closingIssue}" />
+              <HStack gap="$space-2">
+                <Button
+                  label="Comment"
+                  variant="outlined"
+                  size="sm"
+                  enabled="{!commentIssueCall.inProgress &amp;&amp; !closingIssue &amp;&amp; closeCommentBox.value &amp;&amp; closeCommentBox.value.trim().length > 0}"
+                  onClick="commentIssueCall.execute({ number: rowIssue.number, body: closeCommentBox.value }); closeCommentBox.setValue('')" />
+                <Button
+                  when="{rowIssue.state === 'OPEN'}"
+                  label="Close issue"
+                  variant="outlined"
+                  size="sm"
+                  enabled="{!commentIssueCall.inProgress &amp;&amp; !closingIssue}"
+                  onClick="closingIssue = true; window.__bramCloseIssue(rowIssue.number, closeCommentBox.value || '', () => { closingIssue = false; closeCommentBox.setValue(''); issueRefreshTick = issueRefreshTick + 1; issuesFirstPage.refetch(); issuesFull.refetch(); }, () => { closingIssue = false; })" />
+                <Theme size-Spinner="16px">
+                  <Spinner when="{commentIssueCall.inProgress || closingIssue}" />
+                </Theme>
+              </HStack>
+            </VStack>
+          </VStack>
+        </VStack>
+      </Items>
+      <HStack
+        when="{issuesSource &amp;&amp; issuesSource.length > 20}"
+        padding="$space-2"
+        horizontalAlignment="center">
+        <Link onClick="issuesExpanded = !issuesExpanded" noIndicator>
+          <Text fontSize="$fontSize-sm"
+            value="{issuesExpanded ? 'Show fewer' : 'More (' + (issuesSource.length - 20) + ' more)'}" />
+        </Link>
+      </HStack>
+    </VStack>
+  </VStack>
 </Component>

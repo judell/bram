@@ -1,19 +1,14 @@
 <Component
   name="Commits"
   var.selectedSha="{null}"
-  var.selectedLine="{null}"
   var.commitsExpanded="{false}"
-  var.query=""
   var.pullError="{null}"
   var.pushError="{null}">
 
-  <DataSource
-    id="commits"
-    url="/__commits" />
-
-  <DataSource
-    id="gitStatus"
-    url="/__git/status" />
+  <!-- issue-230: Commits is a browse list with an inline-expander (shared
+       CommitDetail). Search lives on the unified Search page. -->
+  <DataSource id="commits" url="/__commits" />
+  <DataSource id="gitStatus" url="/__git/status" />
 
   <APICall
     id="pullRebase"
@@ -21,26 +16,6 @@
     url="/__git/pull-rebase"
     onSuccess="pullError = null; commits.refetch(); gitStatus.refetch()"
     onError="(e) => pullError = (e &amp;&amp; e.message) ? e.message : String(e)" />
-
-  <DataSource
-    id="commitDetail"
-    url="/__commit"
-    queryParams="{{ sha: selectedSha }}"
-    when="{!!selectedSha}" />
-
-  <DataSource
-    id="searchResults"
-    url="/__commits/search"
-    queryParams="{{ q: query }}"
-    when="{!!query &amp;&amp; query.trim().length >= 2}" />
-
-  <variable
-    name="selectedCommit"
-    value="{!selectedSha ? null : ((((searchResults.value &amp;&amp; searchResults.value.results) || []).find(c => c.sha === selectedSha)) || ((commits.value || []).find(c => c.sha === selectedSha)))}" />
-
-  <SearchHitModal
-    id="searchHitModalRef"
-    query="{query}" />
 
   <PushSource
     id="gitStatusEvt"
@@ -51,185 +26,56 @@
     onDidChange="() => { commits.refetch(); gitStatus.refetch(); }" />
   <ChangeListener
     listenTo="{gitStatus.value &amp;&amp; gitStatus.value.branch}"
-    onDidChange="() => { selectedSha = null; selectedLine = null; commitsExpanded = false; }" />
-  <HSplitter height="100%"
-    initialPrimarySize="{window.__bramRestoreSplitterSize('commits', '50%')}"
-    onResize="(px) => window.__bramSaveSplitterSize('commits', px)">
+    onDidChange="() => { selectedSha = null; commitsExpanded = false; }" />
 
-    <VStack padding="$space-4" gap="$space-4" overflowY="auto">
-      <HStack gap="$space-3" verticalAlignment="center">
-        <Heading level="h2">Commits</Heading>
-        <Text
-          when="{gitStatus.value &amp;&amp; gitStatus.value.branch}"
-          maxWidth="260px"
-          fontSize="$fontSize-sm"
-          color="$textColor-secondary"
-          tooltip="{gitStatus.value.branch}"
-          value="{'on ' + gitStatus.value.branch}" />
-        <Button
-          when="{(commits.value || []).filter(c => !c.pushed).length > 0}"
-          label="Push {(commits.value || []).filter(c => !c.pushed).length}{gitStatus.value &amp;&amp; gitStatus.value.branch ? ' to ' + gitStatus.value.branch : ''}"
-          size="xs"
-          tooltip="{gitStatus.value &amp;&amp; gitStatus.value.upstream ? 'Push unpublished commits to ' + gitStatus.value.upstream : 'Push unpublished commits and set upstream on origin'}"
-          onClick="pushError = null; gitPush(commits, gitStatus, gitStatus.value &amp;&amp; gitStatus.value.branch, (e) => pushError = e)" />
-        <Button
-          label="{gitStatus.value &amp;&amp; gitStatus.value.behind > 0 ? 'Pull ' + gitStatus.value.behind : 'Pull'}"
-          size="xs"
-          enabled="{!pullRebase.inProgress &amp;&amp; gitStatus.value &amp;&amp; gitStatus.value.behind > 0}"
-          onClick="pullError = null; pullRebase.execute()" />
-        <SpaceFiller />
-        <SearchBox
-          placeholder="Search commits…"
-          inProgress="{searchResults.inProgress}"
-          onQueryChange="(q) => query = q"
-          onClear="selectedSha = null; selectedLine = null; searchHitModalRef.close()" />
-      </HStack>
+  <VStack padding="$space-4" gap="$space-4" overflowY="auto" height="100%">
+    <HStack gap="$space-3" verticalAlignment="center">
+      <Heading level="h2">Commits</Heading>
+      <Text
+        when="{gitStatus.value &amp;&amp; gitStatus.value.branch}"
+        maxWidth="260px"
+        fontSize="$fontSize-sm"
+        color="$textColor-secondary"
+        tooltip="{gitStatus.value.branch}"
+        value="{'on ' + gitStatus.value.branch}" />
+      <Button
+        when="{(commits.value || []).filter(c => !c.pushed).length > 0}"
+        label="Push {(commits.value || []).filter(c => !c.pushed).length}{gitStatus.value &amp;&amp; gitStatus.value.branch ? ' to ' + gitStatus.value.branch : ''}"
+        size="xs"
+        tooltip="{gitStatus.value &amp;&amp; gitStatus.value.upstream ? 'Push unpublished commits to ' + gitStatus.value.upstream : 'Push unpublished commits and set upstream on origin'}"
+        onClick="pushError = null; gitPush(commits, gitStatus, gitStatus.value &amp;&amp; gitStatus.value.branch, (e) => pushError = e)" />
+      <Button
+        label="{gitStatus.value &amp;&amp; gitStatus.value.behind > 0 ? 'Pull ' + gitStatus.value.behind : 'Pull'}"
+        size="xs"
+        enabled="{!pullRebase.inProgress &amp;&amp; gitStatus.value &amp;&amp; gitStatus.value.behind > 0}"
+        onClick="pullError = null; pullRebase.execute()" />
+    </HStack>
 
-      <HStack
-        when="{pullError}"
-        backgroundColor="$color-danger-100"
-        padding="$space-2"
-        gap="$space-2"
-        verticalAlignment="start">
-        <Text fontSize="$fontSize-sm" color="$color-danger-700" width="*">
-          Pull failed: {pullError}
-        </Text>
-        <Button
-          label="✕"
-          variant="ghost"
-          size="xs"
-          tooltip="Dismiss"
-          onClick="pullError = null" />
-      </HStack>
+    <HStack when="{pullError}" backgroundColor="$color-danger-100" padding="$space-2" gap="$space-2" verticalAlignment="start">
+      <Text fontSize="$fontSize-sm" color="$color-danger-700" width="*">Pull failed: {pullError}</Text>
+      <Button label="✕" variant="ghost" size="xs" tooltip="Dismiss" onClick="pullError = null" />
+    </HStack>
+    <HStack when="{pushError}" backgroundColor="$color-danger-100" padding="$space-2" gap="$space-2" verticalAlignment="start">
+      <Text fontSize="$fontSize-sm" color="$color-danger-700" width="*">Push failed: {pushError}</Text>
+      <Button label="✕" variant="ghost" size="xs" tooltip="Dismiss" onClick="pushError = null" />
+    </HStack>
 
-      <HStack
-        when="{pushError}"
-        backgroundColor="$color-danger-100"
-        padding="$space-2"
-        gap="$space-2"
-        verticalAlignment="start">
-        <Text fontSize="$fontSize-sm" color="$color-danger-700" width="*">
-          Push failed: {pushError}
-        </Text>
-        <Button
-          label="✕"
-          variant="ghost"
-          size="xs"
-          tooltip="Dismiss"
-          onClick="pushError = null" />
-      </HStack>
-
-      <VStack
-        gap="$space-3"
-        when="{query &amp;&amp; query.trim().length >= 2 &amp;&amp; searchResults.value &amp;&amp; searchResults.value.results}">
-        <Text
-          when="{searchResults.value.results.length === 0}"
-          color="$textColor-secondary"
-          fontSize="$fontSize-sm">
-          No matches.
-        </Text>
-        <Items data="{searchResults.value.results}">
-          <VStack gap="$space-1" var.commitSha="{$item.sha}">
-            <Link
-              onClick="selectedSha = commitSha; selectedLine = null"
-              noIndicator="true">
-              <HStack gap="$space-2" verticalAlignment="center">
-                <Text
-                  value="{$item.sha.slice(0, 7)}"
-                  variant="code"
-                  fontSize="$fontSize-xs"
-                  color="$textColor-secondary" />
-                <Text
-                  value="{$item.commit.message}"
-                  fontWeight="{selectedSha === $item.sha ? '$fontWeight-bold' : '$fontWeight-normal'}"
-                  maxLines="1" />
-              </HStack>
-            </Link>
-            <Items data="{$item.hits}" var.parentBody="{$item.body}" var.parentRow="{$item}">
-              <Link
-                onClick="searchHitModalRef.open(searchHitBestBody(query, [parentBody, $item.snippet, parentRow.commit.message]), parentRow.commit.message)">
-                <HStack gap="$space-2" paddingLeft="$space-3">
-                  <Text
-                    value="{$item.field}"
-                    fontSize="$fontSize-xs"
-                    color="$textColor-secondary"
-                    width="56px" />
-                  <Text
-                    value="{$item.snippet}"
-                    fontSize="$fontSize-xs"
-                    whiteSpace="nowrap"
-                    overflowMode="ellipsis"
-                    maxLines="1" />
-                </HStack>
-              </Link>
-            </Items>
-          </VStack>
-        </Items>
-        <Text
-          when="{searchResults.value.truncated}"
-          color="$textColor-secondary"
-          fontSize="$fontSize-xs">
-          (results truncated)
-        </Text>
-      </VStack>
-
-      <VStack
-        gap="$space-1"
-        when="{(!query || query.trim().length &lt; 2) &amp;&amp; commits.value &amp;&amp; commits.value.length > 0}">
-        <Items data="{(commits.value || []).slice(0, commitsExpanded ? 999 : 20)}">
+    <VStack gap="$space-1" when="{commits.value &amp;&amp; commits.value.length > 0}">
+      <Items data="{(commits.value || []).slice(0, commitsExpanded ? 999 : 20)}">
+        <VStack gap="0" borderBottom="1px solid $borderColor">
           <Link
-            onClick="selectedSha = $item.sha; selectedLine = null"
+            onClick="selectedSha = (selectedSha === $item.sha) ? null : $item.sha"
             noIndicator="true">
             <HStack gap="$space-3" verticalAlignment="center" paddingVertical="$space-0_5">
-              <Text
-                when="{$item.pushed}"
-                value="✓"
-                color="$color-success-600"
-                fontSize="$fontSize-xs"
-                width="12px" />
-              <Text
-                when="{!$item.pushed}"
-                value=" "
-                width="12px" />
-              <Text
-                value="{$item.sha.slice(0, 7)}"
-                variant="code"
-                fontSize="$fontSize-xs"
-                color="$textColor-secondary"
-                width="64px" />
-              <Text
-                when="{!selectedSha}"
-                value="{formatDateTime($item.commit.author.date, 'MM-dd HH:mm')}"
-                fontSize="$fontSize-xs"
-                color="$textColor-secondary"
-                overflowMode="none"
-                width="74px" />
-              <HStack
-                when="{!selectedSha}"
-                width="196px"
-                gap="$space-1"
-                verticalAlignment="center">
-                <Text
-                  value="{$item.commit.author.login || $item.commit.author.name}"
-                  fontSize="$fontSize-sm"
-                  color="$textColor-secondary"
-                  width="*"
-                  maxLines="1" />
+              <Text when="{$item.pushed}" value="✓" color="$color-success-600" fontSize="$fontSize-xs" width="12px" />
+              <Text when="{!$item.pushed}" value=" " width="12px" />
+              <Text value="{$item.sha.slice(0, 7)}" variant="code" fontSize="$fontSize-xs" color="$textColor-secondary" width="64px" />
+              <Text value="{formatDateTime($item.commit.author.date, 'MM-dd HH:mm')}" fontSize="$fontSize-xs" color="$textColor-secondary" overflowMode="none" width="74px" />
+              <HStack width="196px" gap="$space-1" verticalAlignment="center">
+                <Text value="{$item.commit.author.login || $item.commit.author.name}" fontSize="$fontSize-sm" color="$textColor-secondary" width="*" maxLines="1" />
                 <HStack gap="4px" verticalAlignment="center">
-                  <Text
-                    value="{'+' + ($item.additions || 0)}"
-                    textAlign="right"
-                    width="36px"
-                    fontFamily="$fontFamily-monospace"
-                    fontSize="$fontSize-xs"
-                    color="$color-success-700" />
-                  <Text
-                    value="{($item.deletions || 0) > 0 ? '-' + $item.deletions : ''}"
-                    textAlign="right"
-                    width="36px"
-                    fontFamily="$fontFamily-monospace"
-                    fontSize="$fontSize-xs"
-                    color="$color-danger-700" />
+                  <Text value="{'+' + ($item.additions || 0)}" textAlign="right" width="36px" fontFamily="$fontFamily-monospace" fontSize="$fontSize-xs" color="$color-success-700" />
+                  <Text value="{($item.deletions || 0) > 0 ? '-' + $item.deletions : ''}" textAlign="right" width="36px" fontFamily="$fontFamily-monospace" fontSize="$fontSize-xs" color="$color-danger-700" />
                 </HStack>
               </HStack>
               <Text
@@ -240,135 +86,18 @@
                 maxLines="1" />
             </HStack>
           </Link>
-        </Items>
-        <Link
-          when="{commits.value &amp;&amp; commits.value.length > 20}"
-          onClick="commitsExpanded = !commitsExpanded"
-          noIndicator="true">
-          <Text
-            fontSize="$fontSize-xs"
-            color="$textColor-secondary"
-            value="{commitsExpanded ? 'Show fewer' : 'More (' + (commits.value.length - 20) + ' more)'}" />
-        </Link>
-      </VStack>
-    </VStack>
-
-    <VStack when="{selectedSha}" padding="$space-4" gap="$space-3" overflowY="auto">
-      <variable
-        name="commitMessageBody"
-        value="{(commitDetail.value &amp;&amp; commitDetail.value.message) ? commitDetail.value.message.split('\n\n').slice(1).join('\n\n').trim() : ''}" />
-      <variable
-        name="commitHits"
-        value="{(selectedCommit &amp;&amp; selectedCommit.hits) ? selectedCommit.hits : []}" />
-      <ChangeListener
-        listenTo="{selectedSha}"
-        onDidChange="(function () {
-          if (!messageExpander) return;
-          const fromSearch = ((searchResults.value &amp;&amp; searchResults.value.results) || []).find(c => c.sha === selectedSha);
-          const hits = (fromSearch &amp;&amp; fromSearch.hits) || [];
-          if (hits.length > 0) messageExpander.expand(); else messageExpander.collapse();
-        })()" />
-      <VStack gap="$space-3">
-        <HStack
-          when="{selectedCommit}"
-          gap="$space-2"
-          verticalAlignment="center">
-          <Text value="{selectedSha &amp;&amp; selectedSha.slice(0, 7)}" variant="code" fontSize="$fontSize-sm" />
-          <Link
-            width="*"
-            noIndicator
-            onClick="(selectedCommit.html_url &amp;&amp; selectedCommit.pushed) ? openExternal(selectedCommit.html_url) : null">
-            <Text
-              value="{selectedCommit.commit.message.split('\n')[0]}"
-              fontWeight="$fontWeight-bold" />
-          </Link>
-          <Button
-            label="✕"
-            variant="ghost"
-            size="xs"
-            tooltip="Close detail pane"
-            onClick="selectedSha = null; selectedLine = null" />
-        </HStack>
-        <ExpandableItem
-          id="messageExpander"
-          when="{commitMessageBody || commitHits.length > 0}"
-          initiallyExpanded="false"
-          iconPosition="start"
-          fullWidthSummary="true">
-          <property name="summary">
-            <Text value="Full message" fontSize="$fontSize-sm" color="$textColor-secondary" />
-          </property>
-          <VStack
-            when="{commitHits.length > 0 &amp;&amp; selectedCommit &amp;&amp; selectedCommit.body}"
-            gap="$space-3">
-            <Items data="{commitHits}">
-              <VStack
-                gap="$space-1"
-                var.hitLine="{$item.line}"
-                var.hitField="{$item.field}"
-                var.hitSnippet="{$item.snippet}">
-                <Text
-                  value="{hitField === 'author' ? 'author · ' + hitSnippet : hitField + ' · line ' + hitLine}"
-                  fontSize="$fontSize-xs"
-                  color="$textColor-secondary" />
-                <Items
-                  when="{hitLine > 0}"
-                  data="{snippetAroundLine(selectedCommit.body, hitLine, 6)}">
-                  <HStack
-                    gap="$space-2"
-                    backgroundColor="{$item.isMatch ? '$color-warn-100' : 'transparent'}"
-                    padding="$space-0_5">
-                    <Text
-                      value="{$item.line}"
-                      fontFamily="$fontFamily-monospace"
-                      fontSize="$fontSize-xs"
-                      color="$textColor-secondary"
-                      width="40px"
-                      textAlign="right" />
-                    <Text
-                      value="{$item.text}"
-                      fontFamily="$fontFamily-monospace"
-                      fontSize="$fontSize-sm"
-                      whiteSpace="pre"
-                      fontWeight="{$item.isMatch ? '$fontWeight-bold' : '$fontWeight-normal'}" />
-                  </HStack>
-                </Items>
-              </VStack>
-            </Items>
+          <VStack when="{selectedSha === $item.sha}" paddingBottom="$space-2">
+            <CommitDetail sha="{$item.sha}" url="{$item.pushed ? $item.html_url : ''}" />
           </VStack>
-          <Text
-            when="{commitHits.length === 0 &amp;&amp; commitMessageBody}"
-            fontFamily="$fontFamily-monospace"
-            fontSize="$fontSize-sm"
-            whiteSpace="pre-wrap"
-            value="{commitMessageBody}" />
-        </ExpandableItem>
-        <Text
-          when="{selectedCommit}"
-          fontSize="$fontSize-sm"
-          color="$textColor-secondary"
-          value="{selectedCommit.commit.author.name} · {formatDateTime(selectedCommit.commit.author.date, 'MM-dd HH:mm')}" />
-
-        <Text when="{commitDetail.inProgress}">Loading…</Text>
-        <VStack gap="$space-4" when="{commitDetail.value}">
-          <Text fontSize="$fontSize-sm">
-            +{commitDetail.value.stats.additions} / -{commitDetail.value.stats.deletions}
-            {' across '}
-            {commitDetail.value.files.length} file(s)
-          </Text>
-          <Items data="{commitDetail.value.files}">
-            <VStack gap="0" borderTop="1px solid $borderColor" paddingTop="$space-2">
-              <HStack gap="$space-3" verticalAlignment="center" paddingBottom="$space-2">
-                <Text fontWeight="$fontWeight-bold" value="{$item.filename}" />
-                <Text color="green" value="+{$item.additions}" />
-                <Text color="red" value="-{$item.deletions}" />
-              </HStack>
-              <DiffView text="{$item.patch || '(no textual diff)'}" />
-            </VStack>
-          </Items>
         </VStack>
-      </VStack>
+      </Items>
+      <Link
+        when="{commits.value &amp;&amp; commits.value.length > 20}"
+        onClick="commitsExpanded = !commitsExpanded"
+        noIndicator="true">
+        <Text fontSize="$fontSize-xs" color="$textColor-secondary"
+          value="{commitsExpanded ? 'Show fewer' : 'More (' + (commits.value.length - 20) + ' more)'}" />
+      </Link>
     </VStack>
-
-  </HSplitter>
+  </VStack>
 </Component>

@@ -131,6 +131,9 @@ window._xsLogs = window._xsLogs || [];
   window.ResizeObserver = Wrapped;
   setInterval(function () {
     var t = total; total = 0;
+    // Stash the per-second RO fire rate (every second, flood or not) so the
+    // heartbeat-batch line can pair it with drift — RO-rate ↔ drift in one grep.
+    window.__bramRoFiresPerSec = t;
     var snap = counts; counts = Object.create(null);
     var newN = newElements; newElements = 0;
     var repN = repeatFires; repeatFires = 0;
@@ -338,6 +341,7 @@ window._xsLogs = window._xsLogs || [];
             maxDriftMs: Math.round(batch.maxDrift),
             spikes: batch.spikes,
             bgFires: batch.bgFires,
+            roFiresPerSec: window.__bramRoFiresPerSec || 0,
             at: new Date().toISOString(),
           });
         } catch (e) {}
@@ -374,6 +378,20 @@ window._xsLogs = window._xsLogs || [];
           at: new Date().toISOString(),
         });
       } catch (e) {}
+    }
+    // WebKit has no Long Tasks API, so the PerformanceObserver('longtask')
+    // below records nothing. The heartbeat IS the working stall source: a
+    // foreground tick late by >=200ms means the main thread was blocked that
+    // long. Emit the long-task signal from here (source:"heartbeat"), gated to
+    // the foreground so setInterval's ~1s background throttle isn't misread as
+    // a stall. Overlaps heartbeat-drift (>=500ms) intentionally — this widens
+    // coverage down to 200ms.
+    if (drift >= 200 && !bg && !window.__bramMenuPending) {
+      window.__bramIframeTrace("long-task", {
+        ms: Math.round(drift),
+        name: "heartbeat",
+        source: "heartbeat",
+      });
     }
   }, TICK_MS);
 })();
@@ -1012,6 +1030,12 @@ window.__bramIframeTrace = function (subkind, fields) {
 // duration instead of leaving a gap. Attribution granularity is
 // whatever the webview provides (often just "self"), but duration +
 // timing against the surrounding trace is the diagnostic payload.
+//
+// NOTE: WebKit (Bram's WKWebView) does NOT implement the Long Tasks API,
+// so this observer records nothing here — a platform gap, not a bug. The
+// working stall source is the heartbeat above, which emits the same
+// `long-task` subkind with source:"heartbeat" for foreground ticks late by
+// >=200ms. This observer stays for Chromium-based webviews and future WebKit.
 try {
   if (typeof PerformanceObserver === "function") {
     new PerformanceObserver(function (list) {

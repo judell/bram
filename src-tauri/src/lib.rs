@@ -14517,10 +14517,14 @@ fn find_snippets(text: &str, q_lower: &str, max_count: usize) -> Vec<String> {
     snippets
 }
 
-fn discover_claude_sessions<R: tauri::Runtime>(
+/// Cheap enumeration of the current project's Claude session files:
+/// `(path, mtime, size, id)`, sorted newest-first. Deliberately does NOT
+/// extract titles — `claude_session_title` reads the whole file, so callers
+/// that don't need every title (e.g. the search indexer, which skips unchanged
+/// sessions) enrich lazily instead. See issue-230-indexer-lazy-claude-titles.
+fn discover_claude_session_files<R: tauri::Runtime>(
     app: &AppHandle<R>,
-    limit: Option<usize>,
-) -> Result<Vec<SessionRecord>, String> {
+) -> Result<Vec<(PathBuf, u64, u64, String)>, String> {
     let lookup = claude_sessions_dir_lookup(app)?;
     let dir = lookup.chosen;
     let entries = match std::fs::read_dir(&dir) {
@@ -14551,6 +14555,14 @@ fn discover_claude_sessions<R: tauri::Runtime>(
         candidates.push((path, mtime, metadata.len(), id));
     }
     candidates.sort_by(|a, b| b.1.cmp(&a.1));
+    Ok(candidates)
+}
+
+fn discover_claude_sessions<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    limit: Option<usize>,
+) -> Result<Vec<SessionRecord>, String> {
+    let mut candidates = discover_claude_session_files(app)?;
     if let Some(limit) = limit {
         candidates.truncate(limit);
     }
@@ -14910,16 +14922,20 @@ fn run_search_index_pass<R: tauri::Runtime>(
 ) -> Result<(usize, usize, usize, i64), String> {
     let db = search_index_db_path(app).ok_or("no index db path")?;
     let conn = search_index::open(&db.to_string_lossy()).map_err(|e| e.to_string())?;
-    let sessions = discover_claude_sessions(app, None)?;
-    let files = sessions.len();
+    // Cheap enumeration (no titles) — extract the title only for sessions we
+    // actually index, since claude_session_title reads the whole file
+    // (issue-230-indexer-lazy-claude-titles).
+    let files_vec = discover_claude_session_files(app)?;
+    let files = files_vec.len();
     let (mut indexed, mut skipped) = (0usize, 0usize);
-    for s in sessions {
-        let path_str = s.path.to_string_lossy().to_string();
-        let (mtime, size) = (s.mtime as i64, s.size as i64);
+    for (path, mtime_u, size_u, id) in files_vec {
+        let path_str = path.to_string_lossy().to_string();
+        let (mtime, size) = (mtime_u as i64, size_u as i64);
         if !search_index::needs_index(&conn, &path_str, mtime, size).unwrap_or(true) {
             skipped += 1;
             continue;
         }
+        let title = claude_session_title(&path).ok().flatten().unwrap_or(id);
         let row = search_index::IndexRow {
             kind: "session".to_string(),
             // Carry provider + file size alongside the title (mirrors the
@@ -14927,15 +14943,15 @@ fn run_search_index_pass<R: tauri::Runtime>(
             // reliably encoded and can change mid-session.
             source: format!(
                 "{} · {} · {} KB",
-                s.title.clone().unwrap_or_else(|| s.id.clone()),
-                session_provider_label(s.provider),
+                title,
+                session_provider_label(SessionProvider::Claude),
                 size / 1024
             ),
             date: mtime.to_string(),
             // Internal tab route; exact-session deep-link is deferred. The
             // expander derives id from the doc key (file basename) for /__turns.
             link: "/sessions".to_string(),
-            content: claude_session_all_text(&s.path),
+            content: claude_session_all_text(&path),
             file: path_str,
         };
         // Index even empty-content sessions so the next pass skips them.

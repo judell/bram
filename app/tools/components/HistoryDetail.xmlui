@@ -1,0 +1,79 @@
+<Component name="HistoryDetail">
+  <!-- issue-230: the worklist-history detail block, extracted from the
+       History tab's modal so the Search history expander can render the full
+       detail. Takes a WorklistHistoryGroup as `group`. -->
+  <VStack gap="$space-4" padding="$space-2" var.g="{$props.group}">
+    <VStack gap="$space-1">
+      <Text
+        value="{window.__bramHistoryDateRangeLine(g)}"
+        color="$textColor-secondary"
+        fontSize="$fontSize-sm" />
+      <Text
+        value="{window.__bramHistoryPhasePath(g)}"
+        fontWeight="$fontWeight-bold" />
+      <Text
+        when="{window.__bramWorklistItemFiles(g).length > 0}"
+        value="{window.__bramWorklistItemFiles(g).length + ' file' + (window.__bramWorklistItemFiles(g).length === 1 ? '' : 's')}"
+        color="$textColor-secondary"
+        fontSize="$fontSize-sm" />
+      <Text
+        when="{g.commitContextLabel}"
+        value="{g.commitContextLabel}"
+        color="$textColor-secondary"
+        fontSize="$fontSize-sm" />
+      <Text
+        when="{g.detailsRestoredLabel}"
+        value="{g.detailsRestoredLabel}"
+        color="$textColor-secondary"
+        fontSize="$fontSize-sm" />
+      <Link
+        when="{window.__bramHistoryCommitUrl(g)}"
+        noIndicator
+        onClick="openExternal(window.__bramHistoryCommitUrl(g))">
+        <Text value="view commit" fontSize="$fontSize-sm" />
+      </Link>
+    </VStack>
+
+    <VStack gap="$space-2" when="{window.__bramHistoryItemFieldMarkdown(g, 'before')}">
+      <Text value="Before" fontWeight="$fontWeight-bold" />
+      <Markdown content="{window.__bramHistoryItemFieldMarkdown(g, 'before')}" />
+    </VStack>
+
+    <VStack gap="$space-2" when="{window.__bramHistoryItemFieldMarkdown(g, 'after')}">
+      <Text value="After" fontWeight="$fontWeight-bold" />
+      <Markdown content="{window.__bramHistoryItemFieldMarkdown(g, 'after')}" />
+    </VStack>
+
+    <VStack gap="$space-2" when="{window.__bramWorklistItemFiles(g).length > 0}">
+      <Text value="Files" fontWeight="$fontWeight-bold" />
+      <Items data="{window.__bramWorklistItemFiles(g)}">
+        <Text value="{$item}" variant="code" fontSize="$fontSize-sm" />
+      </Items>
+    </VStack>
+
+    <VStack gap="$space-2" when="{g.commitSiblingIds &amp;&amp; g.commitSiblingIds.length > 0}">
+      <Text value="Committed with" fontWeight="$fontWeight-bold" />
+      <Items data="{g.commitSiblingIds || []}">
+        <Text value="{$item}" variant="code" fontSize="$fontSize-sm" />
+      </Items>
+    </VStack>
+
+    <VStack gap="$space-2" when="{window.__bramHistoryCommitUrl(g)}">
+      <Text value="Commit" fontWeight="$fontWeight-bold" />
+      <Link noIndicator onClick="openExternal(window.__bramHistoryCommitUrl(g))">
+        <Text value="{window.__bramHistoryCommitUrl(g)}" variant="code" fontSize="$fontSize-sm" />
+      </Link>
+    </VStack>
+
+    <VStack gap="$space-2">
+      <Text value="Phases" fontWeight="$fontWeight-bold" />
+      <Items data="{g.phases || []}">
+        <VStack gap="$space-1" paddingVertical="$space-1" borderTop="1px solid $borderColor">
+          <Text value="{window.__bramHistoryPhaseLabel($item) + ' · ' + (($item.iso || '').slice(0, 16))}" fontSize="$fontSize-sm" />
+          <Markdown when="{$item.kind === 'feedback'}" content="{$item.body}" />
+          <Text when="{$item.kind !== 'feedback'}" value="{$item.summary}" color="$textColor-secondary" fontSize="$fontSize-xs" />
+        </VStack>
+      </Items>
+    </VStack>
+  </VStack>
+</Component>

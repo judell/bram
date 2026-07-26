@@ -15396,81 +15396,83 @@ fn run_issue_index_pass<R: tauri::Runtime>(
 /// One pass over `resources/worklist-history/<ts>.json` (+ sibling `.md`
 /// changelog). Entries are written once and immutable, so the file mtime as
 /// change token means they index once then skip. Keyed `history:<ts>`.
+// Cheap change-gate for the history bucket: newest history-file mtime seen this
+// process. recent_worklist_history_groups() reads every history file, so we
+// skip the whole rebuild when nothing changed (history only moves on worklist
+// commits/drops). -1 = never indexed this process (forces the first pass).
+static HISTORY_LAST_MAXMTIME: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(-1);
+
 fn run_history_index_pass<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> Result<(usize, usize, usize, i64), String> {
     let db = search_index_db_path(app).ok_or("no index db path")?;
     let conn = search_index::open(&db.to_string_lossy()).map_err(|e| e.to_string())?;
-    let Some(dir) = worklist_history_dir(app) else {
+
+    // Cheap gate: only the newest file mtime (stat, no reads).
+    let newest = worklist_history_dir(app)
+        .and_then(|dir| std::fs::read_dir(&dir).ok())
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
+                .filter_map(|e| e.metadata().ok())
+                .filter_map(|m| m.modified().ok())
+                .filter_map(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+    if HISTORY_LAST_MAXMTIME.load(std::sync::atomic::Ordering::Relaxed) == newest {
         return Ok((0, 0, 0, search_index::row_count(&conn).unwrap_or(0)));
-    };
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(_) => return Ok((0, 0, 0, search_index::row_count(&conn).unwrap_or(0))),
-    };
-    let (mut seen, mut indexed, mut skipped) = (0usize, 0usize, 0usize);
-    for entry in entries.flatten() {
-        let json_path = entry.path();
-        if json_path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-        let Some(stem) = json_path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if stem.parse::<i64>().is_err() {
-            continue; // history files are <unix-ms>.json
-        }
-        seen += 1;
-        let mtime = std::fs::metadata(&json_path)
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        let key = format!("history:{}", stem);
-        if !search_index::needs_index(&conn, &key, mtime, 0).unwrap_or(true) {
+    }
+
+    // Index one row per item-id GROUP (matching the History tab) instead of one
+    // per snapshot file — so each row's source is a single clean id, not a
+    // per-snapshot comma-list, and the expander's title-lookup resolves for
+    // multi-item snapshots too. resolve_commit_urls=false skips gh.
+    let groups = recent_worklist_history_groups(app, usize::MAX, false);
+    let seen = groups.len();
+    let (mut indexed, mut skipped) = (0usize, 0usize);
+    for g in groups {
+        let key = format!("history:{}", g.id);
+        let token = g.latest_ts;
+        if !search_index::needs_index(&conn, &key, token, 0).unwrap_or(true) {
             skipped += 1;
             continue;
         }
-        let json_raw = std::fs::read_to_string(&json_path).unwrap_or_default();
-        let md = std::fs::read_to_string(json_path.with_extension("md")).unwrap_or_default();
-        let summary = worklist_history_summary(&md);
-        // Descriptive name = the worklist item id(s) in this entry (e.g.
-        // "issue-230-index-history"); the summary ("1 applied" etc.) is the
-        // action suffix. Far more legible than the bare status count.
-        let ids: Vec<String> = serde_json::from_str::<serde_json::Value>(&json_raw)
-            .ok()
-            .and_then(|v| {
-                v.get("items").and_then(|i| i.as_array()).map(|arr| {
-                    arr.iter()
-                        .filter_map(|it| it.get("id").and_then(|x| x.as_str()).map(String::from))
-                        .collect()
-                })
-            })
-            .unwrap_or_default();
-        let source = if ids.is_empty() {
-            if summary.trim().is_empty() {
-                format!("history {}", stem)
-            } else {
-                summary
+        let mut content = format!("{}\n{}\n{}\n", g.title, g.subtitle, g.prose_phase_summary);
+        for p in &g.phases {
+            if !p.summary.is_empty() {
+                content.push_str(&p.summary);
+                content.push('\n');
             }
-        } else if summary.trim().is_empty() {
-            ids.join(", ")
-        } else {
-            format!("{} ({})", ids.join(", "), summary)
-        };
+            if !p.body.is_empty() {
+                content.push_str(&p.body);
+                content.push('\n');
+            }
+            if !p.full_changelog.is_empty() {
+                content.push_str(&p.full_changelog);
+                content.push('\n');
+            }
+        }
+        content.push_str(&g.ids.join(" "));
         let row = search_index::IndexRow {
             kind: "worklist-history".to_string(),
-            source,
-            date: mtime.to_string(),
-            // Internal tab route; exact-entry deep-link is deferred.
-            link: "/history".to_string(),
-            content: format!("{}\n{}", md, json_raw),
+            source: g.title.clone(),
+            // latest_ts is unix MILLIS (history file stems are ms); the date
+            // column is epoch SECONDS everywhere else, so convert.
+            date: (token / 1000).to_string(),
+            // No footer link for history — the expander's rich detail carries
+            // its own "view commit".
+            link: String::new(),
+            content,
             file: key,
         };
-        search_index::index_doc(&conn, &row, mtime, 0).map_err(|e| e.to_string())?;
+        search_index::index_doc(&conn, &row, token, 0).map_err(|e| e.to_string())?;
         indexed += 1;
     }
+    HISTORY_LAST_MAXMTIME.store(newest, std::sync::atomic::Ordering::Relaxed);
     let rows = search_index::row_count(&conn).unwrap_or(0);
     Ok((seen, indexed, skipped, rows))
 }

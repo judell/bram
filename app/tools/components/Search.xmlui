@@ -35,10 +35,18 @@
        (matching turns), everything else via the stored indexed content. -->
   <DataSource id="docContent" url="/__search/doc"
     queryParams="{{ key: expandedHit &amp;&amp; expandedHit.key }}"
-    when="{expandedHit &amp;&amp; expandedHit.type !== 'session'}" />
+    when="{expandedHit &amp;&amp; (expandedHit.type === 'commit' || expandedHit.type === 'issue')}" />
   <DataSource id="sessionTurns" url="/__turns"
     queryParams="{{ id: expandedHit &amp;&amp; expandedHit.id, provider: 'claude' }}"
     when="{expandedHit &amp;&amp; expandedHit.type === 'session'}" />
+  <!-- History detail: look up the WorklistHistoryGroup by the item id parsed
+       from the hit source ("id (summary)"). /search skips gh commit
+       resolution, so it's fast; the raw commit URL still links. -->
+  <DataSource id="historyGroups" url="/__worklist-history/search"
+    queryParams="{{ q: (expandedHit &amp;&amp; expandedHit.source || '').split(' (')[0] }}"
+    when="{expandedHit &amp;&amp; expandedHit.type === 'worklist-history'}" />
+  <variable name="historyGroup"
+    value="{(expandedHit &amp;&amp; expandedHit.type === 'worklist-history' &amp;&amp; historyGroups.value &amp;&amp; historyGroups.value.results) ? (historyGroups.value.results.find(g => g.title === (expandedHit.source || '').split(' (')[0]) || null) : null}" />
 
   <VStack padding="$space-4" gap="$space-3" overflowY="auto">
     <HStack gap="$space-3" verticalAlignment="center">
@@ -118,11 +126,15 @@
                 </VStack>
               </Items>
             </VStack>
-            <VStack when="{$item.type !== 'session'}" maxHeight="420px" overflowY="auto">
+            <VStack when="{$item.type === 'worklist-history'}" maxHeight="420px" overflowY="auto">
+              <Text when="{historyGroups.inProgress}" color="$textColor-secondary" value="Loading…" />
+              <HistoryDetail when="{historyGroup}" group="{historyGroup}" />
+            </VStack>
+            <VStack when="{$item.type === 'commit' || $item.type === 'issue'}" maxHeight="420px" overflowY="auto">
               <Text when="{docContent.inProgress}" color="$textColor-secondary" value="Loading…" />
               <Markdown when="{docContent.value}" content="{docContent.value.content}" />
             </VStack>
-            <Link when="{$item.link}"
+            <Link when="{$item.link &amp;&amp; $item.type !== 'worklist-history'}"
               onClick="$item.link.startsWith('http') ? openExternal($item.link) : navigate($item.link)">
               <Text fontSize="$fontSize-sm"
                 value="{$item.link.startsWith('http') ? 'Open on GitHub ↗' : 'Open in Bram →'}" />

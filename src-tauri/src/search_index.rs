@@ -17,7 +17,7 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Result};
 // change token (mtime) doesn't — so unchanged docs re-index instead of keeping
 // stale values. v3: session/history `link` → internal tab routes. v4: history
 // `source` → descriptive item id(s) instead of the "1 applied" summary.
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 7;
 
 /// A row to index. `content` is the searchable text; `file` is the source
 /// file's absolute path (the reindex key); the rest are the #230 common-schema

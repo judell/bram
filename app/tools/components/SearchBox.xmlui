@@ -1,5 +1,8 @@
 <Component name="SearchBox">
-  <HStack gap="$space-1" verticalAlignment="center" width="*" maxWidth="20rem">
+  <!-- boxWidth sets the control's fixed width (custom prop name — a bare
+       `width` on the instance is a reserved layout prop and wouldn't reach this
+       inner HStack). Defaults to 20rem. -->
+  <HStack gap="$space-1" verticalAlignment="center" width="{$props.boxWidth || '20rem'}">
     <TextBox
       id="searchBox"
       placeholder="{$props.placeholder || 'Search…'}"

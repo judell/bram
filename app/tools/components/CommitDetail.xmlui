@@ -1,26 +1,61 @@
 <Component name="CommitDetail">
   <!-- issue-230 shared detail: full commit message, external forge link pinned
-       at the top. Props: sha (for /__commit), url (the html_url — /__commit
-       returns files/message/sha/stats but no url, so the caller passes it). -->
+       at the top. Props: sha (for /__commit), url (the html_url), height.
+       search-in-view-transplant: in-view find over the commit message. Same
+       structure as SessionDetail — the find toolbar sits ABOVE a List (the only
+       reliably bounded scroller in XMLUI; a VStack maxHeight does not clip), so
+       the controls stay in view while the body scrolls. Diffs are not searched. -->
   <DataSource id="commit" url="/__commit" queryParams="{{ sha: $props.sha }}" when="{!!$props.sha}" />
-  <VStack gap="$space-3" padding="$space-2">
-    <Link when="{$props.url}" noIndicator onClick="openExternal($props.url)">
-      <Text fontWeight="$fontWeight-bold"
-        value="{'Open commit on ' + (($props.url || '').includes('gitlab') ? 'GitLab' : 'GitHub') + ' ↗'}" />
-    </Link>
-    <Text when="{commit.inProgress &amp;&amp; !commit.loaded}" color="$textColor-secondary" value="Loading…" />
-    <Markdown when="{commit.value &amp;&amp; commit.value.message}" content="{commit.value.message}" />
-    <Text when="{commit.value &amp;&amp; commit.value.stats}" fontSize="$fontSize-sm" color="$textColor-secondary"
-      value="+{commit.value.stats.additions} / -{commit.value.stats.deletions} across {commit.value.files.length} file(s)" />
-    <Items when="{commit.value &amp;&amp; commit.value.files}" data="{commit.value.files}">
-      <VStack gap="0" borderTop="1px solid $borderColor" paddingTop="$space-2">
-        <HStack gap="$space-3" verticalAlignment="center" paddingBottom="$space-2">
-          <Text fontWeight="$fontWeight-bold" value="{$item.filename}" />
-          <Text color="green" value="+{$item.additions}" />
-          <Text color="red" value="-{$item.deletions}" />
-        </HStack>
-        <DiffView text="{$item.patch || '(no textual diff)'}" />
+  <VStack gap="$space-2" padding="$space-2"
+    var.findText=""
+    var.appliedNeedle=""
+    var.cursor="{0}"
+    var.counts="{{ counts: [], total: 0 }}">
+
+    <!-- Fixed find toolbar (sibling above the List). -->
+    <HStack when="{commit.value &amp;&amp; commit.value.message}" gap="$space-2" verticalAlignment="center">
+      <TextBox width="16rem" placeholder="Find in commit…"
+        autoComplete="off" autoCorrect="{false}" spellCheck="{false}" autoCapitalize="off"
+        onDidChange="(v) => findText = v" />
+      <Button size="xs" variant="outlined" label="▲" enabled="{counts.total > 0}"
+        tooltip="Previous match" onClick="cursor = window.__bramCursorStep(counts.total, cursor, -1)" />
+      <Button size="xs" variant="outlined" label="▼" enabled="{counts.total > 0}"
+        tooltip="Next match" onClick="cursor = window.__bramCursorStep(counts.total, cursor, 1)" />
+      <Text fontSize="$fontSize-sm" color="$textColor-secondary"
+        when="{appliedNeedle &amp;&amp; appliedNeedle.trim().length >= 2}"
+        value="{counts.total ? ((cursor + 1) + ' / ' + counts.total + ' matches') : 'No matches'}" />
+    </HStack>
+    <ChangeListener listenTo="{findText}" debounceWaitInMs="200"
+      onDidChange="() => appliedNeedle = findText" />
+    <ChangeListener listenTo="{findText}" debounceWaitInMs="200"
+      onDidChange="() => cursor = 0" />
+    <ChangeListener listenTo="{appliedNeedle + '|' + (commit.value ? commit.value.sha : '')}"
+      onDidChange="() => counts = window.__bramBlockMatchCounts(window.__bramCommitBlocks(commit.value), appliedNeedle)" />
+
+    <!-- Bounded scroller = a single-row List (mirrors SessionDetail). -->
+    <List data="{[{}]}" height="{$props.height || '400px'}">
+      <VStack gap="$space-3">
+        <Link when="{$props.url}" noIndicator onClick="openExternal($props.url)">
+          <Text fontWeight="$fontWeight-bold"
+            value="{'Open commit on ' + (($props.url || '').includes('gitlab') ? 'GitLab' : 'GitHub') + ' ↗'}" />
+        </Link>
+        <Text when="{commit.inProgress &amp;&amp; !commit.loaded}" color="$textColor-secondary" value="Loading…" />
+        <Markdown when="{commit.value &amp;&amp; commit.value.message}" content="{commit.value.message}"
+          highlightText="{appliedNeedle}"
+          highlightActiveIndex="{window.__bramActiveOccForBlock(counts.counts, cursor, 0)}" />
+        <Text when="{commit.value &amp;&amp; commit.value.stats}" fontSize="$fontSize-sm" color="$textColor-secondary"
+          value="+{commit.value.stats.additions} / -{commit.value.stats.deletions} across {commit.value.files.length} file(s)" />
+        <Items when="{commit.value &amp;&amp; commit.value.files}" data="{commit.value.files}">
+          <VStack gap="0" borderTop="1px solid $borderColor" paddingTop="$space-2">
+            <HStack gap="$space-3" verticalAlignment="center" paddingBottom="$space-2">
+              <Text fontWeight="$fontWeight-bold" value="{$item.filename}" />
+              <Text color="green" value="+{$item.additions}" />
+              <Text color="red" value="-{$item.deletions}" />
+            </HStack>
+            <DiffView text="{$item.patch || '(no textual diff)'}" />
+          </VStack>
+        </Items>
       </VStack>
-    </Items>
+    </List>
   </VStack>
 </Component>

@@ -67,7 +67,7 @@
   <variable name="historyGroup"
     value="{(expandedHit &amp;&amp; expandedHit.type === 'worklist-history') ? (expandedHit.extra || null) : null}" />
 
-  <VStack padding="$space-4" gap="$space-3" overflowY="auto">
+  <VStack padding="$space-4" gap="$space-3" overflowY="auto" height="100%">
     <HStack gap="$space-3" verticalAlignment="center">
       <Heading level="h2">Search</Heading>
       <SearchBox

@@ -1,30 +1,66 @@
 <Component name="IssueDetail">
-  <!-- issue-230 shared detail: full issue (body + comments), with the external
-       forge link pinned at the top. Prop: number. -->
-  <!-- refreshTick: bump it (e.g. after a local comment) to force a refetch —
-       event-driven, no polling. `_r` is ignored by the host. -->
+  <!-- issue-230 shared detail: full issue (body + comments), external forge link
+       pinned at the top. Props: number, refreshTick, height.
+       search-in-view-transplant: in-view find across the body + comment blocks.
+       Same structure as SessionDetail — the find toolbar sits ABOVE a List (the
+       only reliably bounded scroller), so the controls stay in view. Block 0 is
+       the body; comment N is block 1+N. -->
   <DataSource id="issue" url="/__issue"
     queryParams="{{ number: $props.number, _r: $props.refreshTick }}" when="{!!$props.number}" />
-  <VStack gap="$space-3" padding="$space-2">
-    <Link when="{issue.value &amp;&amp; issue.value.url}" noIndicator onClick="openExternal(issue.value.url)">
-      <Text fontWeight="$fontWeight-bold"
-        value="{'Open issue #' + issue.value.number + ' on ' + ((issue.value.url || '').includes('gitlab') ? 'GitLab' : 'GitHub') + ' ↗'}" />
-    </Link>
-    <Text when="{issue.value}" fontSize="$fontSize-sm"
-      color="{issue.value.state === 'OPEN' ? '$color-success-700' : '$textColor-secondary'}"
-      value="{(issue.value.state === 'OPEN' ? 'open' : 'closed') + ' · #' + issue.value.number + ' ' + issue.value.title}" />
-    <Text when="{issue.value &amp;&amp; issue.value.author}" fontSize="$fontSize-sm" color="$textColor-secondary"
-      value="{((issue.value.author.login || issue.value.author.name) || 'unknown') + ' opened ' + getDateUntilNow(issue.value.createdAt) + ' ago'}" />
-    <Text when="{issue.inProgress &amp;&amp; !issue.loaded}" color="$textColor-secondary" value="Loading…" />
-    <Markdown when="{issue.value &amp;&amp; issue.value.body}" content="{issue.value.body}" />
-    <VStack when="{issue.value &amp;&amp; issue.value.comments &amp;&amp; issue.value.comments.length > 0}" gap="$space-3">
-      <Items data="{issue.value.comments}">
-        <VStack gap="$space-1" paddingTop="$space-2" borderTop="1px solid $borderColor">
-          <Text fontSize="$fontSize-xs" color="$textColor-secondary"
-            value="{(($item.author &amp;&amp; ($item.author.login || $item.author.name)) || 'unknown')}" />
-          <Markdown content="{$item.body}" />
+  <VStack gap="$space-2" padding="$space-2"
+    var.findText=""
+    var.appliedNeedle=""
+    var.cursor="{0}"
+    var.counts="{{ counts: [], total: 0 }}">
+
+    <!-- Fixed find toolbar (sibling above the List). -->
+    <HStack when="{issue.value}" gap="$space-2" verticalAlignment="center">
+      <TextBox width="16rem" placeholder="Find in issue…"
+        autoComplete="off" autoCorrect="{false}" spellCheck="{false}" autoCapitalize="off"
+        onDidChange="(v) => findText = v" />
+      <Button size="xs" variant="outlined" label="▲" enabled="{counts.total > 0}"
+        tooltip="Previous match" onClick="cursor = window.__bramCursorStep(counts.total, cursor, -1)" />
+      <Button size="xs" variant="outlined" label="▼" enabled="{counts.total > 0}"
+        tooltip="Next match" onClick="cursor = window.__bramCursorStep(counts.total, cursor, 1)" />
+      <Text fontSize="$fontSize-sm" color="$textColor-secondary"
+        when="{appliedNeedle &amp;&amp; appliedNeedle.trim().length >= 2}"
+        value="{counts.total ? ((cursor + 1) + ' / ' + counts.total + ' matches') : 'No matches'}" />
+    </HStack>
+    <ChangeListener listenTo="{findText}" debounceWaitInMs="200"
+      onDidChange="() => appliedNeedle = findText" />
+    <ChangeListener listenTo="{findText}" debounceWaitInMs="200"
+      onDidChange="() => cursor = 0" />
+    <ChangeListener listenTo="{appliedNeedle + '|' + (issue.value ? issue.value.number : '')}"
+      onDidChange="() => counts = window.__bramBlockMatchCounts(window.__bramIssueBlocks(issue.value), appliedNeedle)" />
+
+    <!-- Bounded scroller = a single-row List (mirrors SessionDetail). -->
+    <List data="{[{}]}" height="{$props.height || '400px'}">
+      <VStack gap="$space-3">
+        <Link when="{issue.value &amp;&amp; issue.value.url}" noIndicator onClick="openExternal(issue.value.url)">
+          <Text fontWeight="$fontWeight-bold"
+            value="{'Open issue #' + issue.value.number + ' on ' + ((issue.value.url || '').includes('gitlab') ? 'GitLab' : 'GitHub') + ' ↗'}" />
+        </Link>
+        <Text when="{issue.value}" fontSize="$fontSize-sm"
+          color="{issue.value.state === 'OPEN' ? '$color-success-700' : '$textColor-secondary'}"
+          value="{(issue.value.state === 'OPEN' ? 'open' : 'closed') + ' · #' + issue.value.number + ' ' + issue.value.title}" />
+        <Text when="{issue.value &amp;&amp; issue.value.author}" fontSize="$fontSize-sm" color="$textColor-secondary"
+          value="{((issue.value.author.login || issue.value.author.name) || 'unknown') + ' opened ' + getDateUntilNow(issue.value.createdAt) + ' ago'}" />
+        <Text when="{issue.inProgress &amp;&amp; !issue.loaded}" color="$textColor-secondary" value="Loading…" />
+        <Markdown when="{issue.value &amp;&amp; issue.value.body}" content="{issue.value.body}"
+          highlightText="{appliedNeedle}"
+          highlightActiveIndex="{window.__bramActiveOccForBlock(counts.counts, cursor, 0)}" />
+        <VStack when="{issue.value &amp;&amp; issue.value.comments &amp;&amp; issue.value.comments.length > 0}" gap="$space-3">
+          <Items data="{issue.value.comments}">
+            <VStack gap="$space-1" paddingTop="$space-2" borderTop="1px solid $borderColor">
+              <Text fontSize="$fontSize-xs" color="$textColor-secondary"
+                value="{(($item.author &amp;&amp; ($item.author.login || $item.author.name)) || 'unknown')}" />
+              <Markdown content="{$item.body}"
+                highlightText="{appliedNeedle}"
+                highlightActiveIndex="{window.__bramActiveOccForBlock(counts.counts, cursor, 1 + $itemIndex)}" />
+            </VStack>
+          </Items>
         </VStack>
-      </Items>
-    </VStack>
+      </VStack>
+    </List>
   </VStack>
 </Component>

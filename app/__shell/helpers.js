@@ -5815,6 +5815,89 @@ window.__bramFindStep = function (indices, cur, dir) {
   return (c + dir + n) % n;
 };
 
+// ---- Cross-block in-view find (search-in-view-transplant) ----
+// The non-virtualized detail views (Commit/Issue/History) render several
+// Markdown blocks. A single global cursor steps every match across all blocks;
+// the block holding the active match gets its local occurrence index (fed to
+// Markdown's highlightActiveIndex), everyone else gets -1.
+
+// Wraparound step over a flat count of matches.
+window.__bramCursorStep = function (total, cur, dir) {
+  var n = Number(total) || 0;
+  if (!n) return 0;
+  var c = Number(cur) || 0;
+  return (c + dir + n) % n;
+};
+
+// Case-insensitive match count of needle in one block of text.
+window.__bramCountOccurrences = function (text, needle) {
+  var s = text == null ? "" : String(text);
+  var q = (needle == null ? "" : String(needle)).trim().toLowerCase();
+  if (q.length < 2 || !s) return 0;
+  var hay = s.toLowerCase();
+  var n = 0, i = hay.indexOf(q);
+  while (i !== -1) { n++; i = hay.indexOf(q, i + q.length); }
+  return n;
+};
+
+// Per-block counts + total for an ordered array of block texts.
+window.__bramBlockMatchCounts = function (blocks, needle) {
+  var arr = blocks || [], counts = [], total = 0;
+  for (var i = 0; i < arr.length; i++) {
+    var c = window.__bramCountOccurrences(arr[i], needle);
+    counts.push(c);
+    total += c;
+  }
+  return { counts: counts, total: total };
+};
+
+// Given per-block counts and a global cursor, the local occurrence index active
+// in `blockIdx`, or -1 when the cursor falls in a different block.
+window.__bramActiveOccForBlock = function (counts, cursor, blockIdx) {
+  var c = counts || [], k = Number(cursor) || 0, acc = 0;
+  for (var i = 0; i < c.length; i++) {
+    var cnt = c[i] || 0;
+    if (i === blockIdx) return (k >= acc && k < acc + cnt) ? (k - acc) : -1;
+    acc += cnt;
+  }
+  return -1;
+};
+
+// Ordered block-text arrays per detail view (index positions must match the
+// order the components render their Markdown blocks).
+window.__bramCommitBlocks = function (commit) {
+  return [(commit && commit.message) || ""];
+};
+window.__bramIssueBlocks = function (issue) {
+  var out = [(issue && issue.body) || ""];
+  var comments = (issue && issue.comments) || [];
+  for (var i = 0; i < comments.length; i++) out.push((comments[i] && comments[i].body) || "");
+  return out;
+};
+window.__bramHistoryBlocks = function (g) {
+  var out = [
+    window.__bramHistoryItemFieldMarkdown(g, "before") || "",
+    window.__bramHistoryItemFieldMarkdown(g, "after") || "",
+  ];
+  var phases = (g && g.phases) || [];
+  for (var i = 0; i < phases.length; i++) {
+    if (phases[i] && phases[i].kind === "feedback") out.push(phases[i].body || "");
+  }
+  return out;
+};
+// Global block index of a History phase's feedback Markdown (before=0, after=1,
+// feedback phases follow in order), or -1 for a non-feedback phase.
+window.__bramHistoryPhaseBlockIndex = function (g, phaseItemIndex) {
+  var phases = (g && g.phases) || [];
+  var p = phases[phaseItemIndex];
+  if (!p || p.kind !== "feedback") return -1;
+  var n = 0;
+  for (var i = 0; i < phaseItemIndex; i++) {
+    if (phases[i] && phases[i].kind === "feedback") n++;
+  }
+  return 2 + n;
+};
+
 window.__bramProjectedLastExchange = function (payload) {
   var turns = (payload && payload.turns) || [];
   var lastUser = null;

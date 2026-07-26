@@ -15234,9 +15234,19 @@ fn run_search_index_pass<R: tauri::Runtime>(
         }
         let row = search_index::IndexRow {
             kind: "session".to_string(),
-            source: s.title.clone().unwrap_or_else(|| s.id.clone()),
+            // Carry provider + file size alongside the title (mirrors the
+            // footer info bar). Model is deliberately omitted — it isn't
+            // reliably encoded and can change mid-session.
+            source: format!(
+                "{} · {} · {} KB",
+                s.title.clone().unwrap_or_else(|| s.id.clone()),
+                session_provider_label(s.provider),
+                size / 1024
+            ),
             date: mtime.to_string(),
-            link: s.id.clone(),
+            // Internal tab route; exact-session deep-link is deferred. The
+            // expander derives id from the doc key (file basename) for /__turns.
+            link: "/sessions".to_string(),
             content: claude_session_all_text(&s.path),
             file: path_str,
         };
@@ -15425,16 +15435,36 @@ fn run_history_index_pass<R: tauri::Runtime>(
         let json_raw = std::fs::read_to_string(&json_path).unwrap_or_default();
         let md = std::fs::read_to_string(json_path.with_extension("md")).unwrap_or_default();
         let summary = worklist_history_summary(&md);
-        let source = if summary.trim().is_empty() {
-            format!("history {}", stem)
+        // Descriptive name = the worklist item id(s) in this entry (e.g.
+        // "issue-230-index-history"); the summary ("1 applied" etc.) is the
+        // action suffix. Far more legible than the bare status count.
+        let ids: Vec<String> = serde_json::from_str::<serde_json::Value>(&json_raw)
+            .ok()
+            .and_then(|v| {
+                v.get("items").and_then(|i| i.as_array()).map(|arr| {
+                    arr.iter()
+                        .filter_map(|it| it.get("id").and_then(|x| x.as_str()).map(String::from))
+                        .collect()
+                })
+            })
+            .unwrap_or_default();
+        let source = if ids.is_empty() {
+            if summary.trim().is_empty() {
+                format!("history {}", stem)
+            } else {
+                summary
+            }
+        } else if summary.trim().is_empty() {
+            ids.join(", ")
         } else {
-            summary
+            format!("{} ({})", ids.join(", "), summary)
         };
         let row = search_index::IndexRow {
             kind: "worklist-history".to_string(),
             source,
             date: mtime.to_string(),
-            link: worklist_history_commit_url(&md),
+            // Internal tab route; exact-entry deep-link is deferred.
+            link: "/history".to_string(),
             content: format!("{}\n{}", md, json_raw),
             file: key,
         };
@@ -33164,9 +33194,30 @@ fn route_request<R: tauri::Runtime>(
         return (200, "application/json; charset=utf-8", body);
     }
 
-    // issue-230 unified search: validation-only query route over the FTS5
-    // index (JSON, no UI yet). The faceted route + unified Search.xmlui page
-    // are the next phase.
+    // issue-230 inline expander: full stored content for one doc, by key
+    // (the `file` column). Backs commit/issue/history expansion; sessions use
+    // /__turns instead.
+    if path == "__search/doc" {
+        let mut key = String::new();
+        for pair in query.split('&') {
+            if let Some(v) = pair.strip_prefix("key=") {
+                key = percent_decode(v);
+            }
+        }
+        let content = if key.is_empty() {
+            None
+        } else {
+            search_index_db_path(app)
+                .and_then(|db| search_index::open(&db.to_string_lossy()).ok())
+                .and_then(|conn| search_index::get_doc(&conn, &key).ok().flatten())
+        };
+        let body =
+            serde_json::to_vec(&serde_json::json!({ "content": content.unwrap_or_default() }))
+                .unwrap_or_default();
+        return (200, "application/json; charset=utf-8", body);
+    }
+
+    // issue-230 unified search: query route over the FTS5 index.
     if path == "__search" {
         let mut q = String::new();
         let mut limit = 50usize;
@@ -33221,6 +33272,18 @@ fn route_request<R: tauri::Runtime>(
                         "link": h.link,
                         "snippet": h.snippet,
                         "rank": h.rank,
+                        "key": h.key,
+                        // session doc key is the JSONL path; expose its stem as
+                        // the session id so the expander can hit /__turns.
+                        "id": if h.kind == "session" {
+                            std::path::Path::new(&h.key)
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("")
+                                .to_string()
+                        } else {
+                            String::new()
+                        },
                     })
                 })
                 .collect::<Vec<_>>(),

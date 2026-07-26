@@ -1,16 +1,17 @@
 <Component name="Search" var.query="">
   <!-- issue-230 unified search across the local FTS5 index (sessions,
-       commits, issues, worklist-history). Each type is queried INDEPENDENTLY
-       (its own top-100 by bm25) so a length-penalized bucket — whole-session
-       rows are huge and rank low — is never squeezed out of a global top-100
-       by shorter commit/issue/history rows. Each pill counts its own bucket;
-       the list merges the selected buckets, re-sorted by rank. -->
+       commits, issues, worklist-history). Each type is queried independently
+       (its own top-100) so a length-penalized bucket isn't squeezed out of a
+       global top-100; the pills count per-type and the list merges the
+       selected buckets by rank. Clicking a title inline-expands that row
+       (single-open) and fetches the real per-type source. -->
   <variable name="typeColors"
     value="{{ session: 'blue', commit: 'green', issue: 'orange', history: 'purple' }}" />
   <variable name="facetColors"
     value="{{ Sessions: 'blue', Commits: 'green', Issues: 'orange', History: 'purple' }}" />
   <variable name="selectedTypes" value="{['session', 'commit', 'issue', 'worklist-history']}" />
   <variable name="ready" value="{!!query &amp;&amp; query.trim().length >= 2}" />
+  <variable name="expandedHit" value="{null}" />
 
   <DataSource id="rSession" url="/__search"
     queryParams="{{ q: query, limit: 100, types: 'session' }}" when="{ready}" />
@@ -30,7 +31,14 @@
     ).sort((a, b) => a.rank - b.rank).slice(0, 100)
   }" />
 
-  <SearchHitModal id="searchHitModalRef" query="{query}" />
+  <!-- Real per-type source for the single open row: sessions via /__turns
+       (matching turns), everything else via the stored indexed content. -->
+  <DataSource id="docContent" url="/__search/doc"
+    queryParams="{{ key: expandedHit &amp;&amp; expandedHit.key }}"
+    when="{expandedHit &amp;&amp; expandedHit.type !== 'session'}" />
+  <DataSource id="sessionTurns" url="/__turns"
+    queryParams="{{ id: expandedHit &amp;&amp; expandedHit.id, provider: 'claude' }}"
+    when="{expandedHit &amp;&amp; expandedHit.type === 'session'}" />
 
   <VStack padding="$space-4" gap="$space-3" overflowY="auto">
     <HStack gap="$space-3" verticalAlignment="center">
@@ -40,12 +48,9 @@
         placeholder="Search sessions, commits, issues, history…"
         inProgress="{rSession.inProgress || rCommit.inProgress || rIssue.inProgress || rHistory.inProgress}"
         onQueryChange="(q) => query = q"
-        onClear="query = ''; searchHitModalRef.close()" />
+        onClear="query = ''; expandedHit = null" />
     </HStack>
 
-    <!-- Facet pills: colored type + count of that bucket's hits; click to
-         toggle inclusion. Each count is its own per-type query, so no bucket
-         is hidden by another's volume. -->
     <HStack gap="$space-3" verticalAlignment="center">
       <Link noIndicator onClick="selectedTypes = window.__bramToggleType(selectedTypes, 'session', !selectedTypes.includes('session'))">
         <HStack gap="$space-1" verticalAlignment="center" opacity="{selectedTypes.includes('session') ? 1 : 0.4}">
@@ -82,19 +87,48 @@
 
     <Theme fontSize-Badge="0.55em">
       <Items data="{displayed}">
-        <HStack gap="$space-3" paddingVertical="$space-2" borderBottom="1px solid $borderColor" verticalAlignment="start">
-          <VStack gap="$space-0_5" width="7rem">
-            <Badge value="{$item.type === 'worklist-history' ? 'history' : $item.type}" colorMap="{typeColors}" />
-            <Text fontSize="$fontSize-xs" color="$textColor-secondary"
-              value="{$item.date ? formatDateTime(new Date(Number($item.date) * 1000), 'yyyy-MM-dd HH:mm') : ''}" />
-          </VStack>
-          <VStack width="*" gap="$space-0_5">
-            <Link noIndicator onClick="searchHitModalRef.open($item.snippet, $item.source)">
-              <Text maxLines="1" fontWeight="$fontWeight-bold" value="{$item.source}" />
+        <VStack gap="$space-1" paddingVertical="$space-2" borderBottom="1px solid $borderColor">
+          <HStack gap="$space-3" verticalAlignment="start">
+            <VStack gap="$space-0_5" width="7rem">
+              <Badge value="{$item.type === 'worklist-history' ? 'history' : $item.type}" colorMap="{typeColors}" />
+              <Text fontSize="$fontSize-xs" color="$textColor-secondary"
+                value="{$item.date ? formatDateTime(new Date(Number($item.date) * 1000), 'yyyy-MM-dd HH:mm') : ''}" />
+            </VStack>
+            <VStack width="*" gap="$space-0_5">
+              <Link noIndicator onClick="expandedHit = (expandedHit &amp;&amp; expandedHit.key === $item.key) ? null : $item">
+                <Text maxLines="1" fontWeight="$fontWeight-bold" value="{$item.source}" />
+              </Link>
+              <Text when="{!(expandedHit &amp;&amp; expandedHit.key === $item.key)}"
+                fontSize="$fontSize-sm" color="$textColor-secondary" value="…{$item.snippet}…" />
+            </VStack>
+          </HStack>
+
+          <!-- Inline expander: real per-type source + a footer link. -->
+          <VStack when="{expandedHit &amp;&amp; expandedHit.key === $item.key}"
+            gap="$space-2" paddingLeft="7rem" paddingTop="$space-1">
+            <VStack when="{$item.type === 'session'}" maxHeight="420px" overflowY="auto" gap="$space-2">
+              <Text when="{sessionTurns.inProgress}" color="$textColor-secondary" value="Loading…" />
+              <Items when="{sessionTurns.value}"
+                data="{window.__bramProjectedSessionTurns(sessionTurns.value).filter(t => (t.text || '').toLowerCase().includes(query.trim().toLowerCase()))}">
+                <VStack gap="$space-0_5" borderTop="1px solid $borderColor" paddingVertical="$space-1">
+                  <Text fontSize="$fontSize-xs" fontWeight="$fontWeight-bold"
+                    color="{$item.role === 'user' ? '$color-info-700' : '$color-success-700'}"
+                    value="{$item.role}" />
+                  <Markdown content="{paragraphsContaining($item.text, query)}" />
+                </VStack>
+              </Items>
+            </VStack>
+            <VStack when="{$item.type !== 'session'}" maxHeight="420px" overflowY="auto">
+              <Text when="{docContent.inProgress}" color="$textColor-secondary" value="Loading…" />
+              <Markdown when="{docContent.value}" content="{docContent.value.content}" />
+            </VStack>
+            <Link when="{$item.link}"
+              onClick="$item.link.startsWith('http') ? openExternal($item.link) : navigate($item.link)">
+              <Text fontSize="$fontSize-sm"
+                value="{$item.link.startsWith('http') ? 'Open on GitHub ↗' : 'Open in Bram →'}" />
             </Link>
-            <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="…{$item.snippet}…" />
           </VStack>
-        </HStack>
+        </VStack>
       </Items>
     </Theme>
   </VStack>

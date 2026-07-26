@@ -13,7 +13,11 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Result};
 
 /// Bump when the on-disk schema shape changes. The index is a rebuildable
 /// cache, so a version mismatch just drops and recreates — no migration.
-const SCHEMA_VERSION: i64 = 2;
+// Bumped to force a full rebuild when stored row values change but the per-doc
+// change token (mtime) doesn't — so unchanged docs re-index instead of keeping
+// stale values. v3: session/history `link` → internal tab routes. v4: history
+// `source` → descriptive item id(s) instead of the "1 applied" summary.
+const SCHEMA_VERSION: i64 = 5;
 
 /// A row to index. `content` is the searchable text; `file` is the source
 /// file's absolute path (the reindex key); the rest are the #230 common-schema
@@ -39,6 +43,9 @@ pub struct Hit {
     pub link: String,
     pub snippet: String,
     pub rank: f64,
+    /// The doc key (the `file` column) — lets the inline expander fetch the
+    /// full stored content via get_doc / the /__search/doc route.
+    pub key: String,
 }
 
 /// Open (or create) the index at `path`, in WAL mode, with the current schema.
@@ -143,7 +150,7 @@ pub fn query(conn: &Connection, q: &str, limit: usize, types: &[String]) -> Resu
     let mut sql = String::from(
         "SELECT type, source, date, link, \
                 snippet(search_index, 4, '[', ']', '…', 10), \
-                bm25(search_index) \
+                bm25(search_index), file \
          FROM search_index WHERE search_index MATCH ?",
     );
     let mut args: Vec<Value> = vec![Value::Text(q.to_string())];
@@ -170,9 +177,21 @@ pub fn query(conn: &Connection, q: &str, limit: usize, types: &[String]) -> Resu
             link: r.get(3)?,
             snippet: r.get(4)?,
             rank: r.get(5)?,
+            key: r.get(6)?,
         })
     })?;
     rows.collect()
+}
+
+/// Fetch one doc's full stored content by its key (the `file` column) — backs
+/// the inline expander's /__search/doc route for commit/issue/history.
+pub fn get_doc(conn: &Connection, key: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT content FROM search_index WHERE file = ?1 LIMIT 1",
+        params![key],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()
 }
 
 #[cfg(test)]

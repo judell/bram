@@ -15389,6 +15389,15 @@ fn run_issue_index_pass<R: tauri::Runtime>(
         search_index::index_doc(&conn, &row, token, 0).map_err(|e| e.to_string())?;
         indexed += 1;
     }
+    // Relocate the issue poll to the host: `indexed > 0` means at least one
+    // issue's `updatedAt` moved since last pass (new issue, new comment, or a
+    // close), so synthesize `issues-changed` and let the Issues tab refetch on
+    // the event instead of polling. Bare signal — the client's
+    // bramSubscribeTauriEvent wrapper supplies the `.tick`. Same pattern as
+    // git-status-changed. First (cold-index) pass fires once; harmless.
+    if indexed > 0 {
+        emit_replayable_signal(app, "issues-changed");
+    }
     let rows = search_index::row_count(&conn).unwrap_or(0);
     Ok((seen, indexed, skipped, rows))
 }

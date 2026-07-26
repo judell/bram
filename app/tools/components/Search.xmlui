@@ -45,8 +45,8 @@
   <VStack padding="$space-4" gap="$space-3" overflowY="auto">
     <HStack gap="$space-3" verticalAlignment="center">
       <Heading level="h2">Search</Heading>
-      <SpaceFiller />
       <SearchBox
+        width="42rem"
         placeholder="Search sessions, commits, issues, history…"
         inProgress="{rSession.inProgress || rCommit.inProgress || rIssue.inProgress || rHistory.inProgress}"
         onQueryChange="(q) => query = q"

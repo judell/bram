@@ -6,12 +6,19 @@
   <DataSource id="turns" url="/__turns"
     queryParams="{{ id: $props.sessionId, provider: $props.provider }}" when="{!!$props.sessionId}"
     onLoaded="(data) => window.__bramMeasureTurnsRender(window.__bramProjectedSessionTurns(data).length)" />
+  <!-- Memoize the projected turns into a stable reference. Calling the
+       projection inline in List's `data` returns a NEW array every render, so
+       virtua sees "new data" → remounts all rows → RO fires → re-render → an
+       87/sec resizeobserver-flood. The variable only recomputes when
+       turns.value changes. -->
+  <variable name="projectedTurns"
+    value="{turns.value ? window.__bramProjectedSessionTurns(turns.value) : []}" />
   <VStack gap="$space-2" padding="$space-2">
     <Text when="{turns.inProgress &amp;&amp; !turns.loaded}" color="$textColor-secondary" value="Loading…" />
     <!-- Virtualized: List (virtua-backed) renders only the visible turns, so a
          big transcript no longer mounts thousands of Markdown blocks at once.
          Needs a bounded height; 400px fits inside Search's expander wrapper. -->
-    <List when="{turns.value}" data="{window.__bramProjectedSessionTurns(turns.value)}" height="400px">
+    <List when="{turns.value}" data="{projectedTurns}" height="{$props.height || '400px'}">
       <VStack gap="$space-0_5" borderTop="1px solid $borderColor" paddingVertical="$space-1">
         <Text fontSize="$fontSize-xs" fontWeight="$fontWeight-bold"
           color="{$item.role === 'user' ? '$color-info-700' : '$color-success-700'}"

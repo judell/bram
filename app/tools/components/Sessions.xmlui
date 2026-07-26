@@ -2,12 +2,7 @@
   name="Sessions"
   var.currentProvider="{null}"
   var.expandedId="{null}"
-  var.expandedProvider="{null}"
-  var.fullscreenImage="{null}"
-  var.query=""
-  var.scope="all"
   var.sessionsExpanded="{false}"
-  var.selectedSnippet="{false}"
   var.renamingSession="{null}"
   var.renameDraft=""
   var.newSessionOpen="{false}"
@@ -15,12 +10,14 @@
   var.pendingDeletes="{loadPendingSessionDeletes()}"
   var.pendingRenames="{loadPendingSessionRenames()}"
   var.lastDeleteId="{null}"
-  var.lastDeleteProvider="{null}"
   var.lastRenameId="{null}"
   var.lastRenameProvider="{null}"
   var.lastRenameOriginalTitle=""
   var.lastRenameTitle="">
 
+  <!-- issue-230: Sessions is now a browse list with an inline-expander
+       (shared SessionDetail). Search lives on the unified Search page, so no
+       search box / splitter / right pane here. -->
   <DataSource
     id="sessionsMeta"
     url="/__sessions/meta"
@@ -29,7 +26,6 @@
       if (currentProvider !== data.provider) {
         currentProvider = data.provider;
         expandedId = null;
-        expandedProvider = null;
         sessionsExpanded = false;
       }
     }" />
@@ -46,57 +42,15 @@
     queryParams="{{ provider: currentProvider }}"
     when="{sessionsExpanded &amp;&amp; !!currentProvider}" />
 
-  <!-- Projected turns for the expanded session from the single host
-       projection (/__turns); this pane is a pure consumer — no client-side
-       JSONL parsing (docs/turn-transport-redesign.md). -->
-  <DataSource
-    id="sessionContent"
-    url="/__turns"
-    queryParams="{{ id: expandedId, provider: expandedProvider }}"
-    when="{!!expandedId &amp;&amp; !!expandedProvider}" />
-
-  <DataSource
-    id="searchResults"
-    url="/__sessions/search"
-    queryParams="{{ q: query, scope: scope, provider: currentProvider }}"
-    when="{!!query &amp;&amp; query.trim().length >= 2}" />
-
   <variable
     name="sessionsSource"
     value="{(sessionsExpanded &amp;&amp; sessionsFull.value) ? sessionsFull.value : (sessionsFirstPage.value || [])}" />
 
-  <variable
-    name="displayedSessions"
-    value="{window.selectDisplayed(query, searchResults.value, sessionsSource)}" />
-
-  <variable
-    name="selectedSession"
-    value="{!expandedId ? null : (displayedSessions.find(s => s.id === expandedId &amp;&amp; s.provider === expandedProvider) || (sessionsSource || []).find(s => s.id === expandedId &amp;&amp; s.provider === expandedProvider))}" />
-
-  <!-- sessions-delete-pending-self-heal: pendingDeletes is grow-only, so a
-       row that's grayed "delete pending" but still present (delete didn't
-       stick / session re-created) stays grayed forever with its buttons
-       disabled. On each list change, drop pending ids that are still in the
-       list — un-graying them so the user can retry; ids of genuinely-gone
-       sessions stay (harmless, no row). -->
+  <!-- sessions-delete-pending-self-heal: drop pending ids still present in the
+       list so a stuck "pending" row re-enables. -->
   <ChangeListener
-    listenTo="{displayedSessions}"
-    onDidChange="pendingDeletes = pendingDeletes.filter(id => !(displayedSessions || []).some(s => s.id === id)); savePendingSessionDeletes(pendingDeletes)" />
-
-  <SearchHitModal
-    id="searchHitModalRef"
-    query="{query}" />
-
-  <ModalDialog
-    when="{!!fullscreenImage}"
-    fullScreen="true"
-    onClose="fullscreenImage = null">
-    <Image
-      src="{window.imageSrcForPath(fullscreenImage)}"
-      fit="contain"
-      width="100%"
-      height="100%" />
-  </ModalDialog>
+    listenTo="{sessionsSource}"
+    onDidChange="pendingDeletes = pendingDeletes.filter(id => !(sessionsSource || []).some(s => s.id === id)); savePendingSessionDeletes(pendingDeletes)" />
 
   <APICall
     id="deleteSession"
@@ -106,7 +60,7 @@
     confirmTitle="Delete session?"
     confirmMessage="This cannot be undone."
     completedNotificationMessage="Session deleted. Reload Bram to refresh the session list; you do not need to restart the agent."
-    onSuccess="pendingDeletes = pendingDeletes.concat([lastDeleteId]); savePendingSessionDeletes(pendingDeletes); if (expandedId === lastDeleteId &amp;&amp; expandedProvider === lastDeleteProvider) { expandedId = null; expandedProvider = null; } sessionsFirstPage.refetch(); if (sessionsExpanded) sessionsFull.refetch();" />
+    onSuccess="pendingDeletes = pendingDeletes.concat([lastDeleteId]); savePendingSessionDeletes(pendingDeletes); if (expandedId === lastDeleteId) { expandedId = null; } sessionsFirstPage.refetch(); if (sessionsExpanded) sessionsFull.refetch();" />
 
   <APICall
     id="renameSession"
@@ -145,7 +99,6 @@
     </VStack>
   </ModalDialog>
 
-  <!-- sessions-new-named-session: start a fresh session, optionally named. -->
   <ModalDialog
     id="newSessionDialog"
     when="{newSessionOpen}"
@@ -181,195 +134,113 @@
     subscribe="{window.bramSubscribeTauriEvent('sessions-list-changed')}" />
   <ChangeListener
     listenTo="{sessionsListChangedEvt.value &amp;&amp; sessionsListChangedEvt.value.tick}"
-    onDidChange="() => { sessionsMeta.refetch(); sessionsFirstPage.refetch(); if (sessionsExpanded) sessionsFull.refetch(); if (expandedId &amp;&amp; expandedProvider) sessionContent.refetch(); }" />
-  <HSplitter height="100%"
-    initialPrimarySize="{window.__bramRestoreSplitterSize('sessions', '50%')}"
-    onResize="(px) => window.__bramSaveSplitterSize('sessions', px)">
+    onDidChange="() => { sessionsMeta.refetch(); sessionsFirstPage.refetch(); if (sessionsExpanded) sessionsFull.refetch(); }" />
 
-    <VStack padding="$space-4" gap="$space-3" overflowY="auto">
-      <HStack gap="$space-3" verticalAlignment="center">
-        <Heading level="h2">Sessions</Heading>
-        <Button
-          label="+ New session"
-          variant="solid"
-          size="sm"
-          tooltip="Start a fresh session and make it current"
-          onClick="newSessionDraft = ''; newSessionOpen = true" />
-        <SpaceFiller />
-        <SearchBox
-          placeholder="Search user/assistant text…"
-          inProgress="{searchResults.inProgress}"
-          onQueryChange="(q) => query = q"
-          onClear="expandedId = null; expandedProvider = null; selectedSnippet = false; searchHitModalRef.close()" />
-      </HStack>
-      <Text
-        when="{sessionsMeta.value}"
-        fontSize="$fontSize-sm"
-        color="$textColor-secondary"
-        value="{sessionsMeta.value.count > 0 ? ('Auto-detected provider: ' + sessionsMeta.value.provider + ' (' + sessionsMeta.value.count + ' session' + (sessionsMeta.value.count === 1 ? '' : 's') + ')') : ('Auto-detected provider: ' + sessionsMeta.value.provider + ' (no sessions yet)')}" />
-      <VStack
-        when="{sessionsMeta.value &amp;&amp; sessionsMeta.value.discoveryNotes &amp;&amp; sessionsMeta.value.discoveryNotes.length > 0}"
-        gap="$space-1"
-        padding="$space-2"
-        borderRadius="$borderRadius"
-        backgroundColor="$color-warning-50">
-        <Items data="{sessionsMeta.value.discoveryNotes}">
-          <Text
-            fontSize="$fontSize-xs"
-            color="$textColor-secondary"
-            value="{$item}" />
-        </Items>
-      </VStack>
-
-      <VStack gap="0" width="100%">
-        <HStack
-          gap="$space-3"
-          paddingHorizontal="$space-3"
-          paddingVertical="$space-2"
-          backgroundColor="$color-surface-100"
-          borderBottom="1px solid $borderColor">
-          <Text width="*" fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary" value="TITLE" />
-          <Text when="{!expandedId}" width="140px" fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary" value="MODIFIED" />
-          <Text when="{!expandedId}" width="70px" fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary" value="SIZE" />
-        </HStack>
-        <Items data="{displayedSessions}">
-          <VStack gap="0" borderBottom="1px solid $borderColor">
-            <HStack
-              gap="$space-2"
-              paddingHorizontal="$space-3"
-              paddingVertical="$space-2"
-              verticalAlignment="start"
-              opacity="{(pendingDeletes.includes($item.id) || pendingRenames.includes($item.id)) ? 0.5 : 1}">
-              <Button
-                label="⟳"
-                variant="ghost"
-                size="xs"
-                enabled="{!(pendingDeletes.includes($item.id) || pendingRenames.includes($item.id))}"
-                tooltip="{pendingDeletes.includes($item.id) ? 'delete pending' : (pendingRenames.includes($item.id) ? 'rename pending' : 'Reload: kill the running agent and resume this session')}"
-                onClick="window.__bramReloadAgentSessionClick($item.provider, $item.id, toast)" />
-              <Button
-                label="✕"
-                variant="ghost"
-                size="xs"
-                enabled="{!(pendingDeletes.includes($item.id) || pendingRenames.includes($item.id))}"
-                tooltip="{pendingDeletes.includes($item.id) ? 'delete pending' : (pendingRenames.includes($item.id) ? 'rename pending' : 'Delete session')}"
-                onClick="lastDeleteId = $item.id; lastDeleteProvider = $item.provider; deleteSession.execute({ id: $item.id, provider: $item.provider })" />
-              <Button
-                label="✎"
-                variant="ghost"
-                size="xs"
-                enabled="{!(pendingDeletes.includes($item.id) || pendingRenames.includes($item.id))}"
-                tooltip="{pendingDeletes.includes($item.id) ? 'delete pending' : (pendingRenames.includes($item.id) ? 'rename pending' : 'Rename session')}"
-                onClick="renamingSession = { id: $item.id, provider: $item.provider, title: ($item.title || '') }; renameDraft = ($item.title || '')" />
-              <Link
-                width="*"
-                onClick="expandedId = $item.id; expandedProvider = $item.provider; selectedSnippet = false"
-                noIndicator>
-                <Text
-                  width="100%"
-                  fontWeight="{(expandedId === $item.id &amp;&amp; expandedProvider === $item.provider) ? '$fontWeight-bold' : '$fontWeight-normal'}"
-                  value="{($item.current ? '[current] ' : '') + ($item.title || '(untitled)')}" />
-              </Link>
-              <Text when="{!expandedId}" width="140px" fontSize="$fontSize-sm" value="{formatDateTime(new Date($item.mtime * 1000), 'yyyy-MM-dd HH:mm')}" />
-              <Text when="{!expandedId}" width="70px" fontSize="$fontSize-sm" value="{Math.round($item.size / 1024) + ' KB'}" />
-            </HStack>
-            <Link
-              when="{$item.snippets &amp;&amp; $item.snippets.length > 0}"
-              onClick="searchHitModalRef.open(($item.snippets || []).join(' … '), $item.title || '(untitled)')">
-              <Text
-                paddingHorizontal="$space-3"
-                paddingBottom="$space-2"
-                fontSize="$fontSize-sm"
-                color="$textColor-secondary"
-                value="…{$item.snippets.join(' … ')}…" />
-            </Link>
-          </VStack>
-        </Items>
-        <Link
-          when="{(!query || query.trim().length &lt; 2) &amp;&amp; !sessionsExpanded &amp;&amp; sessionsMeta.value &amp;&amp; sessionsMeta.value.count > 20}"
-          onClick="sessionsExpanded = true"
-          noIndicator="true">
-          <Text
-            paddingHorizontal="$space-3"
-            paddingVertical="$space-2"
-            fontSize="$fontSize-xs"
-            color="$textColor-secondary"
-            value="More ({sessionsMeta.value.count - 20} more)" />
-        </Link>
-        <Link
-          when="{(!query || query.trim().length &lt; 2) &amp;&amp; sessionsExpanded &amp;&amp; sessionsSource.length > 20}"
-          onClick="sessionsExpanded = false"
-          noIndicator="true">
-          <Text
-            paddingHorizontal="$space-3"
-            paddingVertical="$space-2"
-            fontSize="$fontSize-xs"
-            color="$textColor-secondary"
-            value="Show fewer" />
-        </Link>
-      </VStack>
+  <VStack padding="$space-4" gap="$space-3" overflowY="auto" height="100%">
+    <HStack gap="$space-3" verticalAlignment="center">
+      <Heading level="h2">Sessions</Heading>
+      <Button
+        label="+ New session"
+        variant="solid"
+        size="sm"
+        tooltip="Start a fresh session and make it current"
+        onClick="newSessionDraft = ''; newSessionOpen = true" />
+    </HStack>
+    <Text
+      when="{sessionsMeta.value}"
+      fontSize="$fontSize-sm"
+      color="$textColor-secondary"
+      value="{sessionsMeta.value.count > 0 ? ('Auto-detected provider: ' + sessionsMeta.value.provider + ' (' + sessionsMeta.value.count + ' session' + (sessionsMeta.value.count === 1 ? '' : 's') + ')') : ('Auto-detected provider: ' + sessionsMeta.value.provider + ' (no sessions yet)')}" />
+    <VStack
+      when="{sessionsMeta.value &amp;&amp; sessionsMeta.value.discoveryNotes &amp;&amp; sessionsMeta.value.discoveryNotes.length > 0}"
+      gap="$space-1"
+      padding="$space-2"
+      borderRadius="$borderRadius"
+      backgroundColor="$color-warning-50">
+      <Items data="{sessionsMeta.value.discoveryNotes}">
+        <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{$item}" />
+      </Items>
     </VStack>
 
-    <VStack
-      when="{expandedId &amp;&amp; expandedProvider}"
-      padding="$space-4"
-      gap="$space-3"
-      overflowY="auto">
-      <HStack gap="$space-2" verticalAlignment="center">
-        <Text
-          when="{selectedSession}"
-          fontWeight="$fontWeight-bold"
-          value="{(selectedSession.current ? '[current] ' : '') + (selectedSession.title || '(untitled)')}"
-          width="*"
-          maxLines="1" />
-        <Button
-          icon="down"
-          variant="ghost"
-          size="xs"
-          tooltip="Scroll to bottom of this session"
-          onClick="scrollBookmarkIntoView('end-of-expanded-session', true)" />
+    <VStack gap="0" width="100%">
+      <HStack
+        gap="$space-3"
+        paddingHorizontal="$space-3"
+        paddingVertical="$space-2"
+        backgroundColor="$color-surface-100"
+        borderBottom="1px solid $borderColor">
+        <Text width="*" fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary" value="TITLE" />
+        <Text width="140px" fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary" value="MODIFIED" />
+        <Text width="70px" fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary" value="SIZE" />
       </HStack>
-      <Link
-        when="{selectedSnippet &amp;&amp; query &amp;&amp; query.trim().length >= 2}"
-        onClick="selectedSnippet = false"
-        noIndicator>
-        <Text value="↥ Show full session" fontSize="$fontSize-xs" />
-      </Link>
-      <Text when="{sessionContent.inProgress &amp;&amp; !sessionContent.loaded}">Loading…</Text>
-      <Items
-        when="{sessionContent.value}"
-        data="{(selectedSnippet &amp;&amp; query &amp;&amp; query.trim().length >= 2) ? window.__bramProjectedSessionTurns(sessionContent.value).filter(t => (t.text || '').toLowerCase().includes(query.trim().toLowerCase())) : window.__bramProjectedSessionTurns(sessionContent.value)}">
-        <VStack
-          gap="$space-1"
-          paddingVertical="$space-2"
-          borderTop="1px solid $borderColor">
-          <Text
-            fontSize="$fontSize-sm"
-            fontWeight="$fontWeight-bold"
-            color="{$item.role === 'user' ? '$color-info-700' : '$color-success-700'}"
-            value="{$item.role}" />
-          <Markdown content="{(selectedSnippet &amp;&amp; query &amp;&amp; query.trim().length >= 2) ? paragraphsContaining($item.text, query) : $item.text}" />
-          <VStack gap="$space-2" when="{$item.images &amp;&amp; $item.images.length > 0}">
-            <Items data="{$item.images}">
-              <Link onClick="fullscreenImage = $item" noIndicator>
-                <Image
-                  src="{window.imageSrcForPath($item)}"
-                  maxHeight="200px"
-                  fit="contain" />
-              </Link>
-            </Items>
+      <Items data="{sessionsSource}">
+        <VStack gap="0" borderBottom="1px solid $borderColor">
+          <HStack
+            gap="$space-2"
+            paddingHorizontal="$space-3"
+            paddingVertical="$space-2"
+            verticalAlignment="start"
+            opacity="{(pendingDeletes.includes($item.id) || pendingRenames.includes($item.id)) ? 0.5 : 1}">
+            <Button
+              label="⟳"
+              variant="ghost"
+              size="xs"
+              enabled="{!(pendingDeletes.includes($item.id) || pendingRenames.includes($item.id))}"
+              tooltip="{pendingDeletes.includes($item.id) ? 'delete pending' : (pendingRenames.includes($item.id) ? 'rename pending' : 'Reload: kill the running agent and resume this session')}"
+              onClick="window.__bramReloadAgentSessionClick($item.provider, $item.id, toast)" />
+            <Button
+              label="✕"
+              variant="ghost"
+              size="xs"
+              enabled="{!(pendingDeletes.includes($item.id) || pendingRenames.includes($item.id))}"
+              tooltip="{pendingDeletes.includes($item.id) ? 'delete pending' : (pendingRenames.includes($item.id) ? 'rename pending' : 'Delete session')}"
+              onClick="lastDeleteId = $item.id; deleteSession.execute({ id: $item.id, provider: $item.provider })" />
+            <Button
+              label="✎"
+              variant="ghost"
+              size="xs"
+              enabled="{!(pendingDeletes.includes($item.id) || pendingRenames.includes($item.id))}"
+              tooltip="{pendingDeletes.includes($item.id) ? 'delete pending' : (pendingRenames.includes($item.id) ? 'rename pending' : 'Rename session')}"
+              onClick="renamingSession = { id: $item.id, provider: $item.provider, title: ($item.title || '') }; renameDraft = ($item.title || '')" />
+            <Link
+              width="*"
+              onClick="expandedId = (expandedId === $item.id) ? null : $item.id"
+              noIndicator>
+              <Text
+                width="100%"
+                fontWeight="{expandedId === $item.id ? '$fontWeight-bold' : '$fontWeight-normal'}"
+                value="{($item.current ? '[current] ' : '') + ($item.title || '(untitled)')}" />
+            </Link>
+            <Text width="140px" fontSize="$fontSize-sm" value="{formatDateTime(new Date($item.mtime * 1000), 'yyyy-MM-dd HH:mm')}" />
+            <Text width="70px" fontSize="$fontSize-sm" value="{Math.round($item.size / 1024) + ' KB'}" />
+          </HStack>
+          <VStack when="{expandedId === $item.id}" paddingBottom="$space-2">
+            <SessionDetail sessionId="{$item.id}" provider="{$item.provider}" height="600px" />
           </VStack>
         </VStack>
       </Items>
-      <HStack width="100%" horizontalAlignment="end" bookmark="end-of-expanded-session" scrollMarginTop="$space-16">
-        <Button
-          icon="up"
-          variant="ghost"
-          size="xs"
-          tooltip="Scroll to top"
-          onClick="window.scrollAllToTop()" />
-      </HStack>
+      <Link
+        when="{!sessionsExpanded &amp;&amp; sessionsMeta.value &amp;&amp; sessionsMeta.value.count > 20}"
+        onClick="sessionsExpanded = true"
+        noIndicator="true">
+        <Text
+          paddingHorizontal="$space-3"
+          paddingVertical="$space-2"
+          fontSize="$fontSize-xs"
+          color="$textColor-secondary"
+          value="More ({sessionsMeta.value.count - 20} more)" />
+      </Link>
+      <Link
+        when="{sessionsExpanded &amp;&amp; sessionsSource.length > 20}"
+        onClick="sessionsExpanded = false"
+        noIndicator="true">
+        <Text
+          paddingHorizontal="$space-3"
+          paddingVertical="$space-2"
+          fontSize="$fontSize-xs"
+          color="$textColor-secondary"
+          value="Show fewer" />
+      </Link>
     </VStack>
-
-  </HSplitter>
+  </VStack>
 </Component>

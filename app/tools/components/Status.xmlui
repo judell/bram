@@ -86,7 +86,7 @@
           <Column header="level" width="80px">
             <Text
               fontWeight="$fontWeight-bold"
-              color="{$item.level === 'warn' ? '$color-warn-700' : ($item.level === 'ok' ? '$color-success-700' : '$textColor-secondary')}"
+              color="{$item.level === 'error' ? '$color-danger-700' : ($item.level === 'warn' ? '$color-warn-700' : ($item.level === 'ok' ? '$color-success-700' : '$textColor-secondary'))}"
               value="{$item.level || 'n/a'}" />
           </Column>
           <Column header="state" width="150px">

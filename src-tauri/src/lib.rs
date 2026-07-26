@@ -28716,7 +28716,9 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
                 "rows": [
                     {
                         "signal": "Current items",
-                        "level": if applied_count > 0 { "warn" } else { "ok" },
+                        // Threshold on the active count (proposed + applied):
+                        // a small worklist is normal, not a warning.
+                        "level": if items.len() >= 10 { "error" } else if items.len() >= 5 { "warn" } else { "none" },
                         "state": format!("{} active", items.len()),
                         "detail": format!("proposed {}, applied {}, committed {}, pruned {}", proposed_count, applied_count, committed_count, pruned_count),
                         "seen": last_history.get("iso").and_then(|v| v.as_str()).unwrap_or(""),

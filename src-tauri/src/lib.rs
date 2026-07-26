@@ -10079,18 +10079,8 @@ fn glab_issue_view_bytes(root: &Path, number: u64) -> Result<Vec<u8>, String> {
 // schema (gh's --json shape — each forge maps INTO it). Adding a forge
 // (e.g. Codeberg/Forgejo) = a detection entry in project_forge, one
 // impl below, and a docs/forge-adapter.md column; wrapper orchestration
-// (activity enrichment, the local-grep search pipeline, close-authority
-// policy) is forge-neutral and stays above this trait.
-enum SearchFetch {
-    // Full issues (body + comments included): the search indexer indexes
-    // them locally.
-    LocalGrep(Vec<serde_json::Value>),
-    // The forge filters server-side and has no local list to index (e.g.
-    // GitLab). A marker only — the indexer skips it. Carried no payload
-    // since the per-page issue-search UI that consumed server-filtered
-    // results was removed (issue #230).
-    ServerFiltered,
-}
+// (activity enrichment, search indexing, close-authority policy) is
+// forge-neutral and stays above this trait.
 
 trait ForgeAdapter: Sync {
     fn label(&self) -> &'static str;
@@ -10098,7 +10088,11 @@ trait ForgeAdapter: Sync {
     // installed / authenticated") — not for dispatch.
     fn cli(&self) -> &'static str;
     fn issues_list(&self, root: &Path, limit: usize) -> Result<Vec<serde_json::Value>, String>;
-    fn issues_search_fetch(&self, root: &Path, query: &str) -> Result<SearchFetch, String>;
+    /// Cheap change-probe for the search indexer: `(number, updatedAt_epoch)`
+    /// for every issue, WITHOUT bodies/comments, so the common "nothing
+    /// changed" pass is cheap. `None` = this forge has no local issue-index
+    /// path (GitLab), so the indexer skips it (issue-230-incremental-issue-fetch).
+    fn issues_change_probe(&self, root: &Path) -> Result<Option<Vec<(u64, i64)>>, String>;
     fn issue_view(&self, root: &Path, number: u64) -> Result<serde_json::Value, String>;
     fn issue_comment(&self, root: &Path, number: u64, body: &str) -> Result<(), String>;
     fn issue_close(&self, root: &Path, number: u64, comment: &str) -> Result<(), String>;
@@ -10178,8 +10172,10 @@ impl ForgeAdapter for GitHubForge {
         serde_json::from_slice(&stdout).map_err(|e| format!("[gh issue list] parse: {}", e))
     }
 
-    fn issues_search_fetch(&self, root: &Path, query: &str) -> Result<SearchFetch, String> {
-        let _ = query; // full fetch; the wrapper greps locally
+    fn issues_change_probe(&self, root: &Path) -> Result<Option<Vec<(u64, i64)>>, String> {
+        // number + updatedAt only — no body/comments, so this is far cheaper
+        // than the full list. The indexer fetches full detail (issue_view) only
+        // for issues whose updatedAt advanced.
         let full_limit = GH_ISSUE_LIST_LIMIT.to_string();
         let stdout = gh_json_out(
             root,
@@ -10187,7 +10183,7 @@ impl ForgeAdapter for GitHubForge {
                 "issue",
                 "list",
                 "--json",
-                "number,title,state,author,createdAt,updatedAt,labels,url,body,comments",
+                "number,updatedAt",
                 "--limit",
                 &full_limit,
                 "--state",
@@ -10195,9 +10191,21 @@ impl ForgeAdapter for GitHubForge {
             ],
             "gh issue list",
         )?;
-        let issues = serde_json::from_slice(&stdout)
+        let rows: Vec<serde_json::Value> = serde_json::from_slice(&stdout)
             .map_err(|e| format!("[gh issue list] parse: {}", e))?;
-        Ok(SearchFetch::LocalGrep(issues))
+        let probe = rows
+            .iter()
+            .filter_map(|v| {
+                let number = v.get("number").and_then(|n| n.as_u64())?;
+                let updated = v
+                    .get("updatedAt")
+                    .and_then(|u| u.as_str())
+                    .and_then(parse_iso_to_epoch)
+                    .unwrap_or(0);
+                Some((number, updated))
+            })
+            .collect();
+        Ok(Some(probe))
     }
 
     fn issue_view(&self, root: &Path, number: u64) -> Result<serde_json::Value, String> {
@@ -10288,10 +10296,10 @@ impl ForgeAdapter for GitLabForge {
         serde_json::from_slice(&bytes).map_err(|e| format!("[glab issue list] parse: {}", e))
     }
 
-    fn issues_search_fetch(&self, _root: &Path, _query: &str) -> Result<SearchFetch, String> {
-        // GitLab filters server-side and the search indexer does not index
-        // GitLab issues, so there is nothing to fetch — return the marker.
-        Ok(SearchFetch::ServerFiltered)
+    fn issues_change_probe(&self, _root: &Path) -> Result<Option<Vec<(u64, i64)>>, String> {
+        // GitLab issues are not indexed for search yet — None makes the indexer
+        // skip them, preserving the prior ServerFiltered behavior.
+        Ok(None)
     }
 
     fn issue_view(&self, root: &Path, number: u64) -> Result<serde_json::Value, String> {
@@ -15068,28 +15076,33 @@ fn run_commit_index_pass<R: tauri::Runtime>(
 
 /// One pass over the forge's issues — index each issue keyed by
 /// `issue:<number>`, change-token = `updatedAt` epoch, so edited issues
-/// reindex. GitHub (LocalGrep) only; GitLab's server-filtered path is skipped
-/// until its list-all path is added. Returns (seen, indexed, skipped, rows).
+/// reindex. Two-step incremental poll: a cheap `number,updatedAt` probe, then a
+/// full `issue_view` (body + comments) only for issues whose `updatedAt`
+/// advanced (or are new). GitHub only; GitLab's probe returns `None` and is
+/// skipped until it grows a list-all path. Returns (seen, indexed, skipped,
+/// rows).
 fn run_issue_index_pass<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> Result<(usize, usize, usize, i64), String> {
     let db = search_index_db_path(app).ok_or("no index db path")?;
     let conn = search_index::open(&db.to_string_lossy()).map_err(|e| e.to_string())?;
     let root = project_root(Some(app)).ok_or("no project root")?;
-    let issues = match forge_adapter(app).issues_search_fetch(&root, "") {
-        Ok(SearchFetch::LocalGrep(issues)) => issues,
-        Ok(SearchFetch::ServerFiltered) => {
-            // GitLab: no list-all path here yet; leave issues unindexed.
-            return Ok((0, 0, 0, search_index::row_count(&conn).unwrap_or(0)));
-        }
-        Err(e) => return Err(e),
+    let adapter = forge_adapter(app);
+    let Some(probe) = adapter.issues_change_probe(&root)? else {
+        // GitLab: not indexed yet (probe returned None).
+        return Ok((0, 0, 0, search_index::row_count(&conn).unwrap_or(0)));
     };
     let (mut seen, mut indexed, mut skipped) = (0usize, 0usize, 0usize);
-    for issue in issues {
-        let Some(number) = issue.get("number").and_then(|v| v.as_i64()) else {
-            continue;
-        };
+    for (number, token) in probe {
         seen += 1;
+        let key = format!("issue:{}", number);
+        if !search_index::needs_index(&conn, &key, token, 0).unwrap_or(true) {
+            skipped += 1;
+            continue;
+        }
+        // Changed or new since last pass — fetch full detail for this one issue
+        // (the only network cost beyond the cheap probe).
+        let issue = adapter.issue_view(&root, number)?;
         let title = issue.get("title").and_then(|v| v.as_str()).unwrap_or("");
         let body = issue.get("body").and_then(|v| v.as_str()).unwrap_or("");
         let url = issue
@@ -15102,16 +15115,6 @@ fn run_issue_index_pass<R: tauri::Runtime>(
             .and_then(|v| v.get("login"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let token = issue
-            .get("updatedAt")
-            .and_then(|v| v.as_str())
-            .and_then(parse_iso_to_epoch)
-            .unwrap_or(0);
-        let key = format!("issue:{}", number);
-        if !search_index::needs_index(&conn, &key, token, 0).unwrap_or(true) {
-            skipped += 1;
-            continue;
-        }
         let mut content = format!("{}\n{}\n{}", title, body, author);
         if let Some(comments) = issue.get("comments").and_then(|v| v.as_array()) {
             for c in comments {
@@ -15132,10 +15135,9 @@ fn run_issue_index_pass<R: tauri::Runtime>(
         search_index::index_doc(&conn, &row, token, 0).map_err(|e| e.to_string())?;
         indexed += 1;
     }
-    // Relocate the issue poll to the host: `indexed > 0` means at least one
-    // issue's `updatedAt` moved since last pass (new issue, new comment, or a
-    // close), so synthesize `issues-changed` and let the Issues tab refetch on
-    // the event instead of polling. Bare signal — the client's
+    // `indexed > 0` means at least one issue's `updatedAt` moved (new issue, new
+    // comment, or a close), so synthesize `issues-changed` and let the Issues
+    // tab refetch on the event instead of polling. Bare signal — the client's
     // bramSubscribeTauriEvent wrapper supplies the `.tick`. Same pattern as
     // git-status-changed. First (cold-index) pass fires once; harmless.
     if indexed > 0 {

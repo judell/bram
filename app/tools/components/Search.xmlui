@@ -6,9 +6,9 @@
        selected buckets by rank. Clicking a title inline-expands that row
        (single-open) and fetches the real per-type source. -->
   <variable name="typeColors"
-    value="{{ session: 'blue', commit: 'green', issue: 'orange', history: 'purple' }}" />
+    value="{{ session: 'blue', commit: 'green', issue: '#c2410c', history: 'purple' }}" />
   <variable name="facetColors"
-    value="{{ Sessions: 'blue', Commits: 'green', Issues: 'orange', History: 'purple' }}" />
+    value="{{ Sessions: 'blue', Commits: 'green', Issues: '#c2410c', History: 'purple' }}" />
   <variable name="selectedTypes" value="{['session', 'commit', 'issue', 'worklist-history']}" />
   <variable name="ready" value="{!!query &amp;&amp; query.trim().length >= 2}" />
   <variable name="expandedHit" value="{null}" />

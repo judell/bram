@@ -347,7 +347,6 @@ The HTTP routes shell out to `git`; the IPC command shells out to
 | Surface | Kind | Query / params | Response | Consumer |
 | --- | --- | --- | --- | --- |
 | `/__commits` | HTTP GET | — | `[{ sha, summary, body, author, time }, …]` (HEAD ↓) | agent pane iframe |
-| `/__commits/search` | HTTP GET | `q=` | filtered commit list | agent pane iframe |
 | `/__commit` | HTTP GET | `sha=` | `{ sha, summary, body, diff }` | agent pane iframe |
 | `/__repo/origin` | HTTP GET | — | `{ remote, owner, name }` | agent pane iframe |
 | `/__git-diff` | HTTP GET | `path=` | `git diff -- <path>`, `text/plain` | agent pane iframe |
@@ -372,7 +371,6 @@ agent's own shell — there's no `/__issue/create` endpoint.
 | Surface | Kind | Query / params | Response | Consumer |
 | --- | --- | --- | --- | --- |
 | `/__issues` | HTTP GET | — | `[{ number, title, state, … }, …]` | agent pane iframe |
-| `/__issues/search` | HTTP GET | `q=` | filtered issue list | agent pane iframe |
 | `/__issue` | HTTP GET | `n=<number>` | `{ number, title, body, state, comments: [...] }` | agent pane iframe |
 | `/__issue/comment` | HTTP GET | `number=<n>&body=<urlencoded>` | `gh issue comment` JSON on success, 400 if `number` missing | agent pane iframe |
 

@@ -9664,123 +9664,13 @@ fn git_log_recent<R: tauri::Runtime>(app: &AppHandle<R>, count: usize) -> Result
     serde_json::to_vec(&commits).map_err(|e| e.to_string())
 }
 
-// Full-history commit search. Walks `git log` (full body via %B) and
-// matches each commit's subject+body lines and author against the
-// query (case-insensitive substring). Returns the Context-shaped
-// payload: `{ results: [{...commit fields, hits: [{line, snippet,
-// field}]}], truncated }`. Capped at MAX_RESULTS commits scanned and
-// MAX_HITS total hits so a wide-net query doesn't pin git.
-fn git_log_search<R: tauri::Runtime>(app: &AppHandle<R>, query: &str) -> Result<Vec<u8>, String> {
-    use serde_json::json;
-    use std::collections::HashSet;
-    let q = query.trim();
-    if q.is_empty() {
-        return Ok(b"{\"results\":[],\"truncated\":false}".to_vec());
-    }
-    let needle = q.to_lowercase();
-    const MAX_RESULTS: usize = 50;
-    const MAX_HITS: usize = 200;
-
-    let unpushed: HashSet<String> = git_run(app, &["rev-list", "@{u}..HEAD"])
-        .unwrap_or_default()
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    let remote_url = git_run(app, &["remote", "get-url", "origin"])
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    let html_base = remote_to_html(&remote_url);
-
-    // Use record/field separators that won't appear in commit
-    // messages so we can reassemble multi-line bodies safely.
-    // %x1e between records, %x1f between fields, body last.
-    let format = "--format=%H%x1f%an%x1f%aI%x1f%B%x1e";
-    let log_out = git_run(app, &["log", "-n2000", format])?;
-
-    let mut results: Vec<serde_json::Value> = Vec::new();
-    let mut total_hits = 0usize;
-    let mut truncated = false;
-
-    for record in log_out.split('\x1e') {
-        let record = record.trim_start_matches('\n');
-        if record.is_empty() {
-            continue;
-        }
-        let parts: Vec<&str> = record.splitn(4, '\x1f').collect();
-        if parts.len() != 4 {
-            continue;
-        }
-        if results.len() >= MAX_RESULTS || total_hits >= MAX_HITS {
-            truncated = true;
-            break;
-        }
-        let sha = parts[0].to_string();
-        let author = parts[1];
-        let date = parts[2];
-        let body = parts[3].trim_end_matches('\n');
-        let subject = body.lines().next().unwrap_or("").to_string();
-
-        let mut hits: Vec<serde_json::Value> = Vec::new();
-        for (i, line) in body.lines().enumerate() {
-            if total_hits >= MAX_HITS {
-                truncated = true;
-                break;
-            }
-            if line.to_lowercase().contains(&needle) {
-                let snippet: String = line.trim().chars().take(200).collect();
-                hits.push(json!({
-                    "line": i + 1,
-                    "snippet": snippet,
-                    "field": if i == 0 { "subject" } else { "body" },
-                }));
-                total_hits += 1;
-            }
-        }
-        if author.to_lowercase().contains(&needle) && total_hits < MAX_HITS {
-            hits.push(json!({
-                "line": 0,
-                "snippet": author,
-                "field": "author",
-            }));
-            total_hits += 1;
-        }
-
-        if hits.is_empty() {
-            continue;
-        }
-        let pushed = !unpushed.contains(&sha);
-        let html_url = if html_base.is_empty() {
-            String::new()
-        } else {
-            format!("{}/commit/{}", html_base, sha)
-        };
-        results.push(json!({
-            "sha": sha,
-            "html_url": html_url,
-            "pushed": pushed,
-            "commit": {
-                "author": { "name": author, "date": date },
-                "message": subject,
-            },
-            "body": body,
-            "hits": hits,
-        }));
-    }
-
-    serde_json::to_vec(&json!({ "results": results, "truncated": truncated }))
-        .map_err(|e| e.to_string())
-}
-
 // Shell out to `gh` to list issues for the current repo. Returns the raw
 // JSON bytes from `gh`. On any failure (gh missing, not a GitHub repo,
 // auth missing, etc) returns an empty JSON array so the frontend renders
 // a friendly empty state rather than a 500.
 // gh issue list caps at the N newest issues across all states; set well
 // above the repo's total issue count so no open issue is dropped (issue
-// #104). Both gh_issues_list and gh_issues_search must share this so they
-// can't drift. Bump if the repo ever approaches this many issues.
+// #104). Bump if the repo ever approaches this many issues.
 const GH_ISSUE_LIST_LIMIT: usize = 500;
 
 fn gh_issues_list<R: tauri::Runtime>(app: &AppHandle<R>, limit: usize) -> Result<Vec<u8>, String> {
@@ -9797,230 +9687,6 @@ fn gh_issues_list<R: tauri::Runtime>(app: &AppHandle<R>, limit: usize) -> Result
         enrich_issue_activity(app, issue, repo_slug.as_deref());
     }
     serde_json::to_vec(&issues).map_err(|e| e.to_string())
-}
-
-// Issue search: shells out to `gh issue list --search "<q>"`, then for each
-// matched issue computes per-line hits across `title` and `body` (no comment
-// search yet — adding that requires a second `gh issue view` per hit). Same
-// shape as Commits search: { results: [{...fields, hits: [{line, snippet,
-// field}]}], truncated }. On any gh failure returns the empty envelope so
-// the frontend renders cleanly.
-fn gh_issues_search<R: tauri::Runtime>(app: &AppHandle<R>, query: &str) -> Result<Vec<u8>, String> {
-    use serde_json::json;
-    let q = query.trim();
-    if q.is_empty() {
-        return Ok(b"{\"results\":[],\"truncated\":false}".to_vec());
-    }
-    let needle = q.to_lowercase();
-    const MAX_HITS: usize = 200;
-
-    let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
-    let repo_slug = repo_owner_name(app);
-    // Fetch strategy is the adapter's call: LocalGrep forges hand back
-    // the full window (body + comments) and the pipeline below computes
-    // per-line hits; ServerFiltered forges searched server-side and the
-    // results wrap with empty hit lists.
-    let issues = match forge_adapter(app).issues_search_fetch(&root, q) {
-        Ok(SearchFetch::LocalGrep(issues)) => issues,
-        Ok(SearchFetch::ServerFiltered(mut issues)) => {
-            for issue in issues.iter_mut() {
-                if let Some(obj) = issue.as_object_mut() {
-                    obj.insert("hits".into(), serde_json::Value::Array(vec![]));
-                }
-            }
-            return serde_json::to_vec(&json!({ "results": issues, "truncated": false }))
-                .map_err(|e| e.to_string());
-        }
-        Err(e) => {
-            eprintln!("{}", e);
-            return Ok(b"{\"results\":[],\"truncated\":false}".to_vec());
-        }
-    };
-
-    let mut results: Vec<(usize, serde_json::Value)> = Vec::new();
-    let mut total_hits = 0usize;
-    let mut truncated = false;
-
-    for (issue_index, mut issue) in issues.into_iter().enumerate() {
-        enrich_issue_activity(app, &mut issue, repo_slug.as_deref());
-        if total_hits >= MAX_HITS {
-            truncated = true;
-            break;
-        }
-        let title = issue.get("title").and_then(|v| v.as_str()).unwrap_or("");
-        let body = issue.get("body").and_then(|v| v.as_str()).unwrap_or("");
-        let issue_author = issue
-            .get("author")
-            .and_then(|v| v.get("login"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        let mut hits: Vec<serde_json::Value> = Vec::new();
-        if title.to_lowercase().contains(&needle) {
-            let snippet: String = title.trim().chars().take(200).collect();
-            hits.push(json!({
-                "line": 0,
-                "snippet": snippet,
-                "field": "title",
-            }));
-            total_hits += 1;
-        }
-        if total_hits < MAX_HITS && issue_author.to_lowercase().contains(&needle) {
-            hits.push(json!({
-                "line": 0,
-                "snippet": issue_author,
-                "field": "author",
-            }));
-            total_hits += 1;
-        }
-        for (i, line) in body.lines().enumerate() {
-            if total_hits >= MAX_HITS {
-                truncated = true;
-                break;
-            }
-            if line.to_lowercase().contains(&needle) {
-                let snippet: String = line.trim().chars().take(200).collect();
-                hits.push(json!({
-                    "line": i + 1,
-                    "snippet": snippet,
-                    "field": "body",
-                }));
-                total_hits += 1;
-            }
-        }
-        // Grep each comment's body, per-line. `comments` is an array of
-        // {body, author: {login}, ...} from the JSON fields list.
-        if total_hits < MAX_HITS {
-            if let Some(comments) = issue.get("comments").and_then(|v| v.as_array()) {
-                'comments: for (ci, comment) in comments.iter().enumerate() {
-                    let cbody = comment.get("body").and_then(|v| v.as_str()).unwrap_or("");
-                    let cauthor = comment
-                        .get("author")
-                        .and_then(|v| v.get("login"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    if cauthor.to_lowercase().contains(&needle) {
-                        if total_hits >= MAX_HITS {
-                            truncated = true;
-                            break 'comments;
-                        }
-                        hits.push(json!({
-                            "line": 0,
-                            "snippet": cauthor,
-                            "field": "author",
-                            "commentIndex": ci,
-                            "commentAuthor": cauthor,
-                        }));
-                        total_hits += 1;
-                    }
-                    for (i, line) in cbody.lines().enumerate() {
-                        if total_hits >= MAX_HITS {
-                            truncated = true;
-                            break 'comments;
-                        }
-                        if line.to_lowercase().contains(&needle) {
-                            let snippet: String = line.trim().chars().take(200).collect();
-                            hits.push(json!({
-                                "line": i + 1,
-                                "snippet": snippet,
-                                "field": "comment",
-                                "commentIndex": ci,
-                                "commentAuthor": cauthor,
-                            }));
-                            total_hits += 1;
-                        }
-                    }
-                }
-            }
-        }
-        if hits.is_empty() {
-            continue;
-        }
-        let mut out_issue = issue.clone();
-        if let Some(obj) = out_issue.as_object_mut() {
-            obj.insert("hits".into(), serde_json::Value::Array(hits));
-        }
-        results.push((issue_index, out_issue));
-    }
-    sort_issue_search_results_by_title_hits(&mut results);
-    let results: Vec<serde_json::Value> = results.into_iter().map(|(_, issue)| issue).collect();
-
-    serde_json::to_vec(&json!({ "results": results, "truncated": truncated }))
-        .map_err(|e| e.to_string())
-}
-
-fn issue_search_result_rank(issue: &serde_json::Value) -> usize {
-    let has_title_hit = issue
-        .get("hits")
-        .and_then(|v| v.as_array())
-        .map(|hits| {
-            hits.iter()
-                .any(|hit| hit.get("field").and_then(|field| field.as_str()) == Some("title"))
-        })
-        .unwrap_or(false);
-
-    if has_title_hit {
-        0
-    } else {
-        1
-    }
-}
-
-fn sort_issue_search_results_by_title_hits(results: &mut Vec<(usize, serde_json::Value)>) {
-    results.sort_by_key(|(issue_index, issue)| (issue_search_result_rank(issue), *issue_index));
-}
-
-#[cfg(test)]
-mod issue_search_tests {
-    use super::sort_issue_search_results_by_title_hits;
-    use serde_json::{json, Value};
-
-    fn issue(number: u64, field: &str) -> Value {
-        json!({
-            "number": number,
-            "hits": [
-                {
-                    "field": field,
-                    "line": 0,
-                    "snippet": field
-                }
-            ]
-        })
-    }
-
-    fn numbers(results: &[(usize, Value)]) -> Vec<u64> {
-        results
-            .iter()
-            .map(|(_, issue)| issue.get("number").and_then(|v| v.as_u64()).unwrap())
-            .collect()
-    }
-
-    #[test]
-    fn title_hits_sort_before_body_and_comment_hits() {
-        let mut results = vec![
-            (0, issue(1, "body")),
-            (1, issue(2, "comment")),
-            (2, issue(3, "title")),
-        ];
-
-        sort_issue_search_results_by_title_hits(&mut results);
-
-        assert_eq!(numbers(&results), vec![3, 1, 2]);
-    }
-
-    #[test]
-    fn issue_search_rank_preserves_order_inside_each_tier() {
-        let mut results = vec![
-            (0, issue(1, "comment")),
-            (1, issue(2, "title")),
-            (2, issue(3, "body")),
-            (3, issue(4, "title")),
-        ];
-
-        sort_issue_search_results_by_title_hits(&mut results);
-
-        assert_eq!(numbers(&results), vec![2, 4, 1, 3]);
-    }
 }
 
 // Shell out to `gh issue view <number> --json ...` and return the raw JSON
@@ -10416,12 +10082,14 @@ fn glab_issue_view_bytes(root: &Path, number: u64) -> Result<Vec<u8>, String> {
 // (activity enrichment, the local-grep search pipeline, close-authority
 // policy) is forge-neutral and stays above this trait.
 enum SearchFetch {
-    // Full issues (body + comments included): the wrapper runs the
-    // local grep pipeline with per-line hit highlighting.
+    // Full issues (body + comments included): the search indexer indexes
+    // them locally.
     LocalGrep(Vec<serde_json::Value>),
-    // The forge filtered server-side: the wrapper wraps results with
-    // empty hit lists.
-    ServerFiltered(Vec<serde_json::Value>),
+    // The forge filters server-side and has no local list to index (e.g.
+    // GitLab). A marker only — the indexer skips it. Carried no payload
+    // since the per-page issue-search UI that consumed server-filtered
+    // results was removed (issue #230).
+    ServerFiltered,
 }
 
 trait ForgeAdapter: Sync {
@@ -10620,11 +10288,10 @@ impl ForgeAdapter for GitLabForge {
         serde_json::from_slice(&bytes).map_err(|e| format!("[glab issue list] parse: {}", e))
     }
 
-    fn issues_search_fetch(&self, root: &Path, query: &str) -> Result<SearchFetch, String> {
-        let bytes = glab_issues_list_bytes(root, Some(query))?;
-        let issues = serde_json::from_slice(&bytes)
-            .map_err(|e| format!("[glab issue search] parse: {}", e))?;
-        Ok(SearchFetch::ServerFiltered(issues))
+    fn issues_search_fetch(&self, _root: &Path, _query: &str) -> Result<SearchFetch, String> {
+        // GitLab filters server-side and the search indexer does not index
+        // GitLab issues, so there is nothing to fetch — return the marker.
+        Ok(SearchFetch::ServerFiltered)
     }
 
     fn issue_view(&self, root: &Path, number: u64) -> Result<serde_json::Value, String> {
@@ -15335,7 +15002,7 @@ fn run_issue_index_pass<R: tauri::Runtime>(
     let root = project_root(Some(app)).ok_or("no project root")?;
     let issues = match forge_adapter(app).issues_search_fetch(&root, "") {
         Ok(SearchFetch::LocalGrep(issues)) => issues,
-        Ok(SearchFetch::ServerFiltered(_)) => {
+        Ok(SearchFetch::ServerFiltered) => {
             // GitLab: no list-all path here yet; leave issues unindexed.
             return Ok((0, 0, 0, search_index::row_count(&conn).unwrap_or(0)));
         }
@@ -33731,23 +33398,6 @@ fn route_request<R: tauri::Runtime>(
         };
     }
 
-    if path == "__commits/search" {
-        let mut q = String::new();
-        for pair in query.split('&') {
-            if let Some(enc) = pair.strip_prefix("q=") {
-                q = percent_decode(enc);
-                break;
-            }
-        }
-        return match git_log_search(app, &q) {
-            Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
-            Err(e) => {
-                eprintln!("[http /__commits/search q={}] {}", q, e);
-                (500, "text/plain; charset=utf-8", e.into_bytes())
-            }
-        };
-    }
-
     // issue-90-q-page: durable scratch queue backing the Queue tab. GET
     // returns the whole queue file (default empty); writes go through the
     // POST /__queue/save route. Entry order is presentation order only.
@@ -33774,23 +33424,6 @@ fn route_request<R: tauri::Runtime>(
             Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
             Err(e) => {
                 eprintln!("[http /__issues] {}", e);
-                (500, "text/plain; charset=utf-8", e.into_bytes())
-            }
-        };
-    }
-
-    if path == "__issues/search" {
-        let mut q = String::new();
-        for pair in query.split('&') {
-            if let Some(enc) = pair.strip_prefix("q=") {
-                q = percent_decode(enc);
-                break;
-            }
-        }
-        return match gh_issues_search(app, &q) {
-            Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
-            Err(e) => {
-                eprintln!("[http /__issues/search q={}] {}", q, e);
                 (500, "text/plain; charset=utf-8", e.into_bytes())
             }
         };

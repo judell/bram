@@ -14882,6 +14882,27 @@ fn claude_session_all_text(path: &Path) -> String {
     all
 }
 
+/// All user + agent message text of a Codex session, one message per line.
+/// Codex analog of `claude_session_all_text` (uses `codex_message_text`).
+fn codex_session_all_text(path: &Path) -> String {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
+    let mut all = String::new();
+    for line in content.lines() {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if let Some(text) = codex_message_text(&record) {
+            if !text.is_empty() {
+                all.push_str(&text);
+                all.push('\n');
+            }
+        }
+    }
+    all
+}
+
 /// One incremental pass over the current project's Claude sessions. Returns
 /// (files_seen, indexed, skipped, total_rows).
 fn run_search_index_pass<R: tauri::Runtime>(
@@ -14918,6 +14939,45 @@ fn run_search_index_pass<R: tauri::Runtime>(
             file: path_str,
         };
         // Index even empty-content sessions so the next pass skips them.
+        search_index::index_doc(&conn, &row, mtime, size).map_err(|e| e.to_string())?;
+        indexed += 1;
+    }
+    let rows = search_index::row_count(&conn).unwrap_or(0);
+    Ok((files, indexed, skipped, rows))
+}
+
+/// One incremental pass over the current project's Codex sessions. Codex analog
+/// of `run_search_index_pass`; same `kind:"session"` rows so both providers land
+/// in the Search page's Sessions facet. Returns (files_seen, indexed, skipped,
+/// total_rows).
+fn run_codex_search_index_pass<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<(usize, usize, usize, i64), String> {
+    let db = search_index_db_path(app).ok_or("no index db path")?;
+    let conn = search_index::open(&db.to_string_lossy()).map_err(|e| e.to_string())?;
+    let sessions = discover_codex_sessions(app, None)?;
+    let files = sessions.len();
+    let (mut indexed, mut skipped) = (0usize, 0usize);
+    for s in sessions {
+        let path_str = s.path.to_string_lossy().to_string();
+        let (mtime, size) = (s.mtime as i64, s.size as i64);
+        if !search_index::needs_index(&conn, &path_str, mtime, size).unwrap_or(true) {
+            skipped += 1;
+            continue;
+        }
+        let row = search_index::IndexRow {
+            kind: "session".to_string(),
+            source: format!(
+                "{} · {} · {} KB",
+                s.title.clone().unwrap_or_else(|| s.id.clone()),
+                session_provider_label(s.provider),
+                size / 1024
+            ),
+            date: mtime.to_string(),
+            link: "/sessions".to_string(),
+            content: codex_session_all_text(&s.path),
+            file: path_str,
+        };
         search_index::index_doc(&conn, &row, mtime, size).map_err(|e| e.to_string())?;
         indexed += 1;
     }
@@ -15198,6 +15258,7 @@ fn start_search_indexer<R: tauri::Runtime>(app: AppHandle<R>) {
         let mut iter: u64 = 0;
         loop {
             run_and_trace_index_pass(&app, "claude", run_search_index_pass);
+            run_and_trace_index_pass(&app, "codex", run_codex_search_index_pass);
             run_and_trace_index_pass(&app, "commits", run_commit_index_pass);
             run_and_trace_index_pass(&app, "worklist-history", run_history_index_pass);
             if iter % 6 == 0 {
@@ -32943,6 +33004,30 @@ fn route_request<R: tauri::Runtime>(
             &hits
                 .iter()
                 .map(|h| {
+                    // Session doc key is the JSONL path. Recover the provider
+                    // (Codex sessions live under ~/.codex/) and the session id
+                    // the expander needs: Claude's is the file stem, but a
+                    // Codex id lives inside the file (codex_session_meta).
+                    let (provider, id) = if h.kind == "session" {
+                        let path = std::path::Path::new(&h.key);
+                        if h.key.contains("/.codex/") {
+                            let id = codex_session_meta(path)
+                                .ok()
+                                .flatten()
+                                .map(|(id, _)| id)
+                                .unwrap_or_default();
+                            ("codex".to_string(), id)
+                        } else {
+                            let id = path
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("")
+                                .to_string();
+                            ("claude".to_string(), id)
+                        }
+                    } else {
+                        (String::new(), String::new())
+                    };
                     serde_json::json!({
                         "type": h.kind,
                         "source": h.source,
@@ -32951,17 +33036,8 @@ fn route_request<R: tauri::Runtime>(
                         "snippet": h.snippet,
                         "rank": h.rank,
                         "key": h.key,
-                        // session doc key is the JSONL path; expose its stem as
-                        // the session id so the expander can hit /__turns.
-                        "id": if h.kind == "session" {
-                            std::path::Path::new(&h.key)
-                                .file_stem()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("")
-                                .to_string()
-                        } else {
-                            String::new()
-                        },
+                        "id": id,
+                        "provider": provider,
                     })
                 })
                 .collect::<Vec<_>>(),

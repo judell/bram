@@ -109,7 +109,7 @@
           <VStack when="{expandedHit &amp;&amp; expandedHit.key === $item.key}"
             gap="$space-2" paddingLeft="7rem" paddingTop="$space-1">
             <VStack when="{$item.type === 'session'}" maxHeight="420px" overflowY="auto">
-              <SessionDetail sessionId="{$item.id}" provider="claude" />
+              <SessionDetail sessionId="{$item.id}" provider="{$item.provider || 'claude'}" />
             </VStack>
             <VStack when="{$item.type === 'commit'}" maxHeight="420px" overflowY="auto">
               <CommitDetail sha="{($item.key || '').split(':')[1]}" url="{$item.link}" />

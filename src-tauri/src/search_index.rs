@@ -149,7 +149,7 @@ pub fn row_count(conn: &Connection) -> Result<i64> {
 pub fn query(conn: &Connection, q: &str, limit: usize, types: &[String]) -> Result<Vec<Hit>> {
     let mut sql = String::from(
         "SELECT type, source, date, link, \
-                snippet(search_index, 4, '[', ']', '…', 10), \
+                snippet(search_index, 4, '[', ']', '…', 40), \
                 bm25(search_index), file \
          FROM search_index WHERE search_index MATCH ?",
     );

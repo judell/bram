@@ -77,6 +77,12 @@
     <ChangeListener
       listenTo="{currentMatch}"
       onDidChange="() => matchIndices.length ? detailList.scrollToIndex(matchIndices[currentMatch]) : null" />
+    <!-- Fresh search: jump to the first hit even when currentMatch is already 0
+         (so the currentMatch listener above fires no change). scrollToIndex
+         mounts the turn; the active turn's highlightActive then centers it. -->
+    <ChangeListener
+      listenTo="{matchIndices}"
+      onDidChange="() => matchIndices.length ? detailList.scrollToIndex(matchIndices[0]) : null" />
 
     <!-- Virtualized: List (virtua-backed) renders only the visible turns, so a
          big transcript no longer mounts thousands of Markdown blocks at once.

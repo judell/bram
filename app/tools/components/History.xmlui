@@ -1,0 +1,67 @@
+<Component
+  name="History"
+  var.expandedId="{null}"
+  var.historyExpanded="{false}">
+
+  <!-- issue-230: reverse-chron browse of worklist history as a simplified
+       inline-expander table (matching Commits/Sessions), not the old cards.
+       Served from the FTS index via /__history-index (indexed ORDER BY date) —
+       the file-scanning /__worklist-history/list was O(files) and hit 131s at
+       limit 200. Each row carries its full group in `extra`, so the expander
+       renders HistoryDetail with no re-fetch. -->
+  <DataSource id="historyList" url="/__history-index" queryParams="{{ limit: 300 }}" />
+
+  <VStack padding="$space-4" gap="$space-4" overflowY="auto" height="100%">
+    <Heading level="h2">History</Heading>
+
+    <Spinner when="{historyList.inProgress &amp;&amp; !historyList.loaded}" />
+
+    <VStack gap="$space-1" when="{historyList.value &amp;&amp; historyList.value.length > 0}">
+      <Items data="{(historyList.value || []).slice(0, historyExpanded ? 9999 : 50)}">
+        <VStack gap="0" borderBottom="1px solid $borderColor">
+          <Link
+            onClick="expandedId = (expandedId === $item.id) ? null : $item.id"
+            noIndicator="true">
+            <HStack gap="$space-3" verticalAlignment="center" paddingVertical="$space-0_5">
+              <Text
+                value="{formatDateTime(new Date(Number($item.date) * 1000), 'yyyy-MM-dd HH:mm')}"
+                fontSize="$fontSize-xs"
+                color="$textColor-secondary"
+                overflowMode="none"
+                width="120px" />
+              <Text
+                value="{$item.title}"
+                fontSize="$fontSize-sm"
+                fontWeight="{expandedId === $item.id ? '$fontWeight-bold' : '$fontWeight-normal'}"
+                width="*"
+                maxLines="1" />
+              <Text
+                when="{$item.extra}"
+                value="{window.__bramHistoryPhasePath($item.extra)}"
+                fontSize="$fontSize-xs"
+                color="$textColor-secondary"
+                overflowMode="none"
+                maxLines="1" />
+            </HStack>
+          </Link>
+          <VStack when="{expandedId === $item.id &amp;&amp; $item.extra}" paddingBottom="$space-2">
+            <HistoryDetail group="{$item.extra}" />
+          </VStack>
+        </VStack>
+      </Items>
+      <Link
+        when="{historyList.value &amp;&amp; historyList.value.length > 50}"
+        onClick="historyExpanded = !historyExpanded"
+        noIndicator="true">
+        <Text fontSize="$fontSize-xs" color="$textColor-secondary"
+          value="{historyExpanded ? 'Show fewer' : 'More (' + (historyList.value.length - 50) + ' more)'}" />
+      </Link>
+    </VStack>
+
+    <Text
+      when="{historyList.loaded &amp;&amp; historyList.value &amp;&amp; historyList.value.length === 0}"
+      color="$textColor-secondary"
+      fontSize="$fontSize-sm"
+      value="No worklist history yet." />
+  </VStack>
+</Component>

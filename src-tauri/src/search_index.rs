@@ -162,6 +162,33 @@ pub fn counts_by_type(conn: &Connection) -> Result<Vec<(String, i64)>> {
     Ok(rows)
 }
 
+/// List rows of one `type` bucket, newest-first (no full-text match) — for a
+/// reverse-chron browse like the History tab. `date` is epoch seconds stored as
+/// text, so sort it numerically. Cheap: an indexed ORDER BY / LIMIT, not a file
+/// scan. `snippet`/`rank` are unused here (empty / 0).
+pub fn list_by_type(conn: &Connection, kind: &str, limit: usize) -> Result<Vec<Hit>> {
+    let mut stmt = conn.prepare(
+        "SELECT type, source, date, link, '', 0.0, file, extra \
+         FROM search_index WHERE type = ?1 \
+         ORDER BY CAST(date AS INTEGER) DESC LIMIT ?2",
+    )?;
+    let rows = stmt
+        .query_map(params![kind, limit as i64], |r| {
+            Ok(Hit {
+                kind: r.get(0)?,
+                source: r.get(1)?,
+                date: r.get(2)?,
+                link: r.get(3)?,
+                snippet: r.get(4)?,
+                rank: r.get(5)?,
+                key: r.get(6)?,
+                extra: r.get(7)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 /// Full-text query across buckets, `bm25`-ranked (best first), with a
 /// highlighted `snippet()` of the matched `content` column (index 4). `q` must
 /// be a valid FTS5 MATCH expression — callers sanitize raw user input. When

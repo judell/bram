@@ -33142,6 +33142,49 @@ fn route_request<R: tauri::Runtime>(
         return (200, "application/json; charset=utf-8", body);
     }
 
+    // Reverse-chron worklist-history browse for the History tab, served from the
+    // FTS index (indexed ORDER BY date). The file-scanning
+    // /__worklist-history/list is O(files) and hit 131s at limit 200; this is a
+    // cheap indexed read at any depth. Each row carries its full group in
+    // `extra`, so the expander needs no re-fetch. Freshness lags the live file
+    // by up to one indexer pass — fine for a browse.
+    if path == "__history-index" {
+        let mut limit = 200usize;
+        for pair in query.split('&') {
+            if let Some(v) = pair.strip_prefix("limit=") {
+                if let Ok(n) = percent_decode(v).parse::<usize>() {
+                    limit = n.clamp(1, 2000);
+                }
+            }
+        }
+        let hits = search_index_db_path(app)
+            .and_then(|db| search_index::open(&db.to_string_lossy()).ok())
+            .map(|conn| {
+                search_index::list_by_type(&conn, "worklist-history", limit).unwrap_or_default()
+            })
+            .unwrap_or_default();
+        let body = serde_json::to_vec(
+            &hits
+                .iter()
+                .map(|h| {
+                    serde_json::json!({
+                        "id": h.key.strip_prefix("history:").unwrap_or(&h.key),
+                        "title": h.source,
+                        "date": h.date,
+                        "extra": if h.extra.is_empty() {
+                            serde_json::Value::Null
+                        } else {
+                            serde_json::from_str::<serde_json::Value>(&h.extra)
+                                .unwrap_or(serde_json::Value::Null)
+                        },
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_default();
+        return (200, "application/json; charset=utf-8", body);
+    }
+
     if path == "__context/skills" {
         // issue-221-skill-launcher: project skills from .claude/skills/*/SKILL.md.
         let body = serde_json::to_vec(&serde_json::json!({

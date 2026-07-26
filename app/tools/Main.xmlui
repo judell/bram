@@ -426,6 +426,7 @@
     <NavLink label="Search" to="/search" />
     <NavLink label="Issues" to="/issues" />
     <NavLink label="Commits" to="/commits" />
+    <NavLink label="History" to="/history" />
     <NavLink label="Queue" to="/queue" />
     <NavLink label="Sessions" to="/sessions" />
     <NavLink label="Context" to="/context" />
@@ -500,6 +501,7 @@
       <Page url="/context"><Context activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}" /></Page>
       <Page url="/issues"><Issues /></Page>
       <Page url="/commits"><Commits /></Page>
+      <Page url="/history"><History /></Page>
     </Pages>
   </Theme>
   <Footer>

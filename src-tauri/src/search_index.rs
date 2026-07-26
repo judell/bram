@@ -20,7 +20,11 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Result};
 // v8: add the `extra` column carrying a hit's self-contained structured detail
 // (the serialized WorklistHistoryGroup for history rows), so the expander needs
 // no recency-limited re-fetch.
-const SCHEMA_VERSION: i64 = 8;
+// v9: issue rows now store the fully-enriched issue payload in `extra` (for
+// cache-first /__issue serving) plus a synthetic "issues:list" row. Existing
+// issue rows carry empty `extra` at the old token, so force a rebuild to
+// backfill them (indexed=0/skipped=230 otherwise).
+const SCHEMA_VERSION: i64 = 9;
 
 /// A row to index. `content` is the searchable text; `file` is the source
 /// file's absolute path (the reindex key); the rest are the #230 common-schema
@@ -237,6 +241,16 @@ pub fn query(conn: &Connection, q: &str, limit: usize, types: &[String]) -> Resu
 pub fn get_doc(conn: &Connection, key: &str) -> Result<Option<String>> {
     conn.query_row(
         "SELECT content FROM search_index WHERE file = ?1 LIMIT 1",
+        params![key],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()
+}
+
+/// Read the `extra` column for a doc key (the cached structured payload).
+pub fn get_extra(conn: &Connection, key: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT extra FROM search_index WHERE file = ?1 LIMIT 1",
         params![key],
         |r| r.get::<_, String>(0),
     )

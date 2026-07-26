@@ -9675,7 +9675,7 @@ fn git_log_recent<R: tauri::Runtime>(app: &AppHandle<R>, count: usize) -> Result
 // #104). Bump if the repo ever approaches this many issues.
 const GH_ISSUE_LIST_LIMIT: usize = 500;
 
-fn gh_issues_list<R: tauri::Runtime>(app: &AppHandle<R>, limit: usize) -> Result<Vec<u8>, String> {
+fn build_issues_list<R: tauri::Runtime>(app: &AppHandle<R>, limit: usize) -> Result<Vec<u8>, String> {
     let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
     let repo_slug = repo_owner_name(app);
     let mut issues = match forge_adapter(app).issues_list(&root, limit) {
@@ -9691,10 +9691,34 @@ fn gh_issues_list<R: tauri::Runtime>(app: &AppHandle<R>, limit: usize) -> Result
     serde_json::to_vec(&issues).map_err(|e| e.to_string())
 }
 
-// Shell out to `gh issue view <number> --json ...` and return the raw JSON
-// bytes. Same failure envelope as gh_issues_list — empty object on any
-// error so the frontend can render something rather than 500.
-fn gh_issue_view<R: tauri::Runtime>(app: &AppHandle<R>, number: u64) -> Result<Vec<u8>, String> {
+// Cache-first: serve the full issues list from the search index's stored
+// `extra` blob (written by the background indexer, see run_issue_index_pass),
+// truncated to `limit`. Falls back to a live build on a cache miss or parse
+// failure so the route still works before the indexer's first pass completes.
+fn gh_issues_list<R: tauri::Runtime>(app: &AppHandle<R>, limit: usize) -> Result<Vec<u8>, String> {
+    if let Some(db) = search_index_db_path(app) {
+        if let Ok(conn) = search_index::open(&db.to_string_lossy()) {
+            if let Ok(Some(extra)) = search_index::get_extra(&conn, "issues:list") {
+                if !extra.is_empty() {
+                    if let Ok(serde_json::Value::Array(mut arr)) =
+                        serde_json::from_str::<serde_json::Value>(&extra)
+                    {
+                        arr.truncate(limit);
+                        if let Ok(bytes) = serde_json::to_vec(&serde_json::Value::Array(arr)) {
+                            return Ok(bytes);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    build_issues_list(app, limit)
+}
+
+// Shell out to `gh issue view <number> --json ...`, enrich, and return the
+// raw JSON bytes. Same failure envelope as build_issues_list — empty object
+// on any error so the frontend can render something rather than 500.
+fn build_enriched_issue<R: tauri::Runtime>(app: &AppHandle<R>, number: u64) -> Result<Vec<u8>, String> {
     let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
     let adapter = forge_adapter(app);
     let mut issue = match adapter.issue_view(&root, number) {
@@ -9724,6 +9748,24 @@ fn gh_issue_view<R: tauri::Runtime>(app: &AppHandle<R>, number: u64) -> Result<V
         }
     }
     serde_json::to_vec(&issue).map_err(|e| e.to_string())
+}
+
+// Cache-first: serve one enriched issue from the search index's stored
+// `extra` blob (written by the background indexer, see run_issue_index_pass).
+// Falls back to a live build on a cache miss so a never-indexed or
+// just-created issue still renders on first view.
+fn gh_issue_view<R: tauri::Runtime>(app: &AppHandle<R>, number: u64) -> Result<Vec<u8>, String> {
+    if let Some(db) = search_index_db_path(app) {
+        if let Ok(conn) = search_index::open(&db.to_string_lossy()) {
+            let key = format!("issue:{}", number);
+            if let Ok(Some(extra)) = search_index::get_extra(&conn, &key) {
+                if !extra.is_empty() {
+                    return Ok(extra.into_bytes());
+                }
+            }
+        }
+    }
+    build_enriched_issue(app, number)
 }
 
 // Fetch issues that cross-reference the given issue, via the GitHub timeline
@@ -15129,6 +15171,11 @@ fn run_issue_index_pass<R: tauri::Runtime>(
                 }
             }
         }
+        // Cache the same enriched payload the /__issue route serves, so the
+        // route can read straight from the index with byte-identical output
+        // (the enrichment cost moves here, off the request path).
+        let extra = String::from_utf8(build_enriched_issue(app, number).unwrap_or_default())
+            .unwrap_or_default();
         let row = search_index::IndexRow {
             kind: "issue".to_string(),
             source: format!("#{} {}", number, title),
@@ -15136,7 +15183,7 @@ fn run_issue_index_pass<R: tauri::Runtime>(
             link: url,
             content,
             file: key,
-            extra: String::new(),
+            extra,
         };
         search_index::index_doc(&conn, &row, token, 0).map_err(|e| e.to_string())?;
         indexed += 1;
@@ -15148,6 +15195,20 @@ fn run_issue_index_pass<R: tauri::Runtime>(
     // git-status-changed. First (cold-index) pass fires once; harmless.
     if indexed > 0 {
         emit_replayable_signal(app, "issues-changed");
+        // Rebuild + cache the full issues list so /__issues can also serve
+        // cache-first, byte-identical to a live build_issues_list.
+        if let Ok(list_bytes) = build_issues_list(app, GH_ISSUE_LIST_LIMIT) {
+            let list_row = search_index::IndexRow {
+                kind: "issue-list".to_string(),
+                source: String::new(),
+                date: String::new(),
+                link: String::new(),
+                content: String::new(), // empty: never matches FTS text queries
+                file: "issues:list".to_string(),
+                extra: String::from_utf8(list_bytes).unwrap_or_default(),
+            };
+            let _ = search_index::index_doc(&conn, &list_row, 0, 0);
+        }
     }
     let rows = search_index::row_count(&conn).unwrap_or(0);
     Ok((seen, indexed, skipped, rows))

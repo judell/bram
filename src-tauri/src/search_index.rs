@@ -141,6 +141,17 @@ pub fn row_count(conn: &Connection) -> Result<i64> {
     conn.query_row("SELECT count(*) FROM search_index", [], |r| r.get(0))
 }
 
+/// Indexed row count per `type` bucket, ordered by type. Powers the Status
+/// tab's Search-indexer section.
+pub fn counts_by_type(conn: &Connection) -> Result<Vec<(String, i64)>> {
+    let mut stmt =
+        conn.prepare("SELECT type, count(*) FROM search_index GROUP BY type ORDER BY type")?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 /// Full-text query across buckets, `bm25`-ranked (best first), with a
 /// highlighted `snippet()` of the matched `content` column (index 4). `q` must
 /// be a valid FTS5 MATCH expression — callers sanitize raw user input. When

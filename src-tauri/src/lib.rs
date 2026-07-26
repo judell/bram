@@ -20861,7 +20861,7 @@ fn session_size_status_row<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json:
         "level": match state {
             "red" | "amber" => "warn",
             "green" => "ok",
-            _ => "neutral",
+            _ => "none",
         },
         "state": format!("{} {}", human_bytes, state),
         "detail": if guidance.is_empty() {
@@ -22299,7 +22299,7 @@ fn send_ledger_status_rows() -> Vec<serde_json::Value> {
     let stranded = ledger.iter().filter(|e| e.state == "stranded").count();
     rows.push(serde_json::json!({
         "signal": "Send ledger",
-        "level": if stranded > 0 { "warn" } else if landed > 0 { "ok" } else { "neutral" },
+        "level": if stranded > 0 { "warn" } else if landed > 0 { "ok" } else { "none" },
         "state": format!("{} landed / {} in flight / {} stranded", landed, injected, stranded),
         "detail": format!(
             "ledger-driven Esc recovery; auto-resend trust-gated off by default; {} entries tracked this run",
@@ -22324,7 +22324,7 @@ fn send_ledger_status_rows() -> Vec<serde_json::Value> {
             "level": match entry.state {
                 "landed" => "ok",
                 "stranded" => "warn",
-                _ => "neutral",
+                _ => "none",
             },
             "state": state_label,
             "detail": format!(
@@ -27623,7 +27623,7 @@ fn startup_run_summary(
     } else if pty_chunks > 0 {
         "ok"
     } else {
-        "neutral"
+        "none"
     };
 
     serde_json::json!({
@@ -27717,14 +27717,14 @@ fn authorization_rows<R: tauri::Runtime>(
             vec![
                 serde_json::json!({
                     "signal": "Latest record",
-                    "level": "neutral",
+                    "level": "none",
                     "state": "none",
                     "detail": "No authorization record path",
                     "seen": "",
                 }),
                 serde_json::json!({
                     "signal": "Record age",
-                    "level": "neutral",
+                    "level": "none",
                     "state": "none",
                     "detail": "No authorization record path",
                     "seen": "",
@@ -27743,14 +27743,14 @@ fn authorization_rows<R: tauri::Runtime>(
             vec![
                 serde_json::json!({
                     "signal": "Latest record",
-                    "level": "neutral",
+                    "level": "none",
                     "state": "none",
                     "detail": "No readable authorization record",
                     "seen": modified,
                 }),
                 serde_json::json!({
                     "signal": "Record age",
-                    "level": "neutral",
+                    "level": "none",
                     "state": "none",
                     "detail": modified,
                     "seen": modified,
@@ -27765,14 +27765,14 @@ fn authorization_rows<R: tauri::Runtime>(
             vec![
                 serde_json::json!({
                     "signal": "Latest record",
-                    "level": "neutral",
+                    "level": "none",
                     "state": "none",
                     "detail": "No active authorization",
                     "seen": modified,
                 }),
                 serde_json::json!({
                     "signal": "Record age",
-                    "level": "neutral",
+                    "level": "none",
                     "state": "none",
                     "detail": modified,
                     "seen": modified,
@@ -27850,7 +27850,7 @@ fn agent_coordination_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_j
         if is_source_repo {
             rows.push(json!({
                 "signal": ENHANCE_SIDECAR_REL,
-                "level": "neutral",
+                "level": "none",
                 "state": "source-repo",
                 "detail": "Source repo: bundle is on-disk at app/__shell/conventions.md; Setup does not manage this path here.",
                 "seen": seen,
@@ -27890,7 +27890,7 @@ fn agent_coordination_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_j
         if is_source_repo {
             rows.push(json!({
                 "signal": "CLAUDE.md (marker block)",
-                "level": "neutral",
+                "level": "none",
                 "state": "source-repo",
                 "detail": "Source repo: CLAUDE.md is hand-maintained; Setup does not write a marker block here.",
                 "seen": seen,
@@ -27977,7 +27977,7 @@ fn agent_coordination_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_j
             };
             rows.push(json!({
                 "signal": ENHANCE_HOOK_SCRIPT_REL,
-                "level": if matches { "ok" } else if is_source_repo { "neutral" } else { "warn" },
+                "level": if matches { "ok" } else if is_source_repo { "none" } else { "warn" },
                 "state": if matches { "current" } else { "stale" },
                 "detail": if matches {
                     format!("Byte-matches bundle ({} B)", bundle_len)
@@ -28017,7 +28017,7 @@ fn agent_coordination_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_j
         if is_source_repo {
             rows.push(json!({
                 "signal": "AGENTS.md (marker block)",
-                "level": "neutral",
+                "level": "none",
                 "state": "source-repo",
                 "detail": "Source repo: AGENTS.md is hand-maintained; Setup does not write a marker block here.",
                 "seen": seen,
@@ -28259,6 +28259,60 @@ fn agent_coordination_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_j
     rows
 }
 
+/// Status-tab rows describing the FTS search index (issue-230): per-bucket row
+/// counts, total, and the db file size. Live db stats, independent of tracing.
+fn search_index_status_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_json::Value> {
+    let Some(db) = search_index_db_path(app) else {
+        return vec![serde_json::json!({
+            "signal": "Index db",
+            "level": "none",
+            "state": "unavailable",
+            "detail": "No project root / index db path",
+            "seen": "",
+        })];
+    };
+    let db_str = db.to_string_lossy().to_string();
+    let conn = match search_index::open(&db_str) {
+        Ok(c) => c,
+        Err(e) => {
+            return vec![serde_json::json!({
+                "signal": "Index db",
+                "level": "warn",
+                "state": "open failed",
+                "detail": e.to_string(),
+                "seen": "",
+            })];
+        }
+    };
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    for (kind, n) in search_index::counts_by_type(&conn).unwrap_or_default() {
+        rows.push(serde_json::json!({
+            "signal": kind,
+            "level": "none",
+            "state": format!("{} rows", n),
+            "detail": format!("Indexed {} documents", kind),
+            "seen": "",
+        }));
+    }
+    let total = search_index::row_count(&conn).unwrap_or(0);
+    rows.push(serde_json::json!({
+        "signal": "Total indexed",
+        "level": "none",
+        "state": format!("{} rows", total),
+        "detail": "All buckets combined",
+        "seen": "",
+    }));
+    let size = std::fs::metadata(&db).map(|m| m.len()).unwrap_or(0);
+    rows.push(serde_json::json!({
+        "signal": "Index db",
+        "level": "none",
+        "state": format_bytes_human(size),
+        "detail": db_str,
+        "seen": "",
+    }));
+    rows
+}
+
 fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String> {
     let now = unix_now_ms();
     let worklist = worklist_doc(app);
@@ -28338,7 +28392,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
                 startup_run["ptyChunks"].as_i64().unwrap_or(0),
                 startup_run["ptyBytes"].as_i64().unwrap_or(0),
                 startup_run["traceExportSize"].as_u64().unwrap_or(0),
-                startup_run["level"].as_str().unwrap_or("neutral"),
+                startup_run["level"].as_str().unwrap_or("none"),
             ),
         );
     }
@@ -28432,7 +28486,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
     let applied_integrity_row = if applied_items.is_empty() {
         serde_json::json!({
             "signal": "Applied integrity",
-            "level": "neutral",
+            "level": "none",
             "state": "n/a",
             "detail": "No applied items",
             "seen": "",
@@ -28494,7 +28548,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
     } else if bound_port.is_some() && file_port.is_some() {
         "ok"
     } else {
-        "neutral"
+        "none"
     };
     let port_state = if port_mismatch || meta_mismatch {
         "stale"
@@ -28541,7 +28595,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
         "level": match &file_port_probe {
             Some(PortStatus::Live) => "ok",
             Some(PortStatus::NotListening) | Some(PortStatus::Unresponsive(_)) => "warn",
-            None => "neutral",
+            None => "none",
         },
         "state": match &file_port_probe {
             Some(PortStatus::Live) => "responsive",
@@ -28602,7 +28656,6 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
         > trace["inflightClears"].as_i64().unwrap_or(0) + 1;
     let stale_reject_warn = trace["staleRejects"].as_i64().unwrap_or(0) > 0;
     let guard_warn = trace["guardBlocks"].as_i64().unwrap_or(0) > 0;
-    let interrupt_warn = trace["interrupts"].as_i64().unwrap_or(0) > 0;
     let _ = (orphan_auth, orphan_auth_detail);
 
     let rows = serde_json::json!({
@@ -28639,7 +28692,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
                 "rows": [
                     {
                         "signal": "Renderer drift",
-                        "level": if startup_run["heartbeatMaxDrift"].as_i64().unwrap_or(0) > 1000 { "warn" } else if startup_run["heartbeatMaxDrift"].as_i64().unwrap_or(0) > 0 { "ok" } else { "neutral" },
+                        "level": if startup_run["heartbeatMaxDrift"].as_i64().unwrap_or(0) > 1000 { "warn" } else if startup_run["heartbeatMaxDrift"].as_i64().unwrap_or(0) > 0 { "ok" } else { "none" },
                         "state": format!("{} ms max", startup_run["heartbeatMaxDrift"].as_i64().unwrap_or(0)),
                         "detail": format!(
                             "PTY {} chunks / {} KB over first {}s",
@@ -28651,7 +28704,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
                     },
                     {
                         "signal": "Inspector export",
-                        "level": if startup_run["traceExportSize"].as_u64().unwrap_or(0) > 5_000_000 { "warn" } else if startup_run["traceExportSize"].as_u64().unwrap_or(0) > 0 { "ok" } else { "neutral" },
+                        "level": if startup_run["traceExportSize"].as_u64().unwrap_or(0) > 5_000_000 { "warn" } else if startup_run["traceExportSize"].as_u64().unwrap_or(0) > 0 { "ok" } else { "none" },
                         "state": format!("{} KB", (startup_run["traceExportSize"].as_u64().unwrap_or(0) + 1023) / 1024),
                         "detail": startup_run["traceExportPath"].as_str().unwrap_or("No xs-trace export found in ~/Downloads"),
                         "seen": trace_export_seen,
@@ -28670,7 +28723,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
                     },
                     {
                         "signal": "Recent transitions",
-                        "level": if history.is_empty() { "neutral" } else { "ok" },
+                        "level": if history.is_empty() { "none" } else { "ok" },
                         "state": format!("{} snapshots", history.len()),
                         "detail": history.iter().filter_map(|h| h.get("summary").and_then(|v| v.as_str())).collect::<Vec<&str>>().join(" | ").if_empty("No worklist history yet"),
                         "seen": last_history.get("iso").and_then(|v| v.as_str()).unwrap_or(""),
@@ -28737,19 +28790,25 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
                     },
                     {
                         "signal": "Interrupts",
-                        "level": if interrupt_warn { "warn" } else { "ok" },
+                        // An interrupt/silence-clear is a normal event, not a
+                        // warning — always neutral level.
+                        "level": "none",
                         "state": format!("{} related records", trace["interrupts"].as_i64().unwrap_or(0)),
                         "detail": if trace["interrupts"].as_i64().unwrap_or(0) > 0 { "Interrupt/silence-clear records appeared recently" } else { "No interrupt-related records in recent trace" },
                         "seen": trace["lastInterrupt"].as_str().unwrap_or(""),
                     },
                     {
                         "signal": "Inspector exports",
-                        "level": if trace_export.is_some() { "ok" } else { "neutral" },
+                        "level": if trace_export.is_some() { "ok" } else { "none" },
                         "state": trace_export_state,
                         "detail": trace_export_detail,
                         "seen": trace_export_seen,
                     }
                 ]
+            },
+            {
+                "title": "Search indexer",
+                "rows": search_index_status_rows(app)
             }
         ]
     });

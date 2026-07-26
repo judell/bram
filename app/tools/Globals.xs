@@ -38,6 +38,7 @@ function statusSectionSubhead(title) {
     'Agent Coordination': 'Setup-managed file health',
     'Authorization': 'approval record flow',
     'Guards, Staleness, Interrupts, Traces': 'safety signal trail',
+    'Search indexer': 'FTS index contents',
   };
   return descriptions[title] || '';
 }
@@ -63,6 +64,12 @@ function statusSignalDescription(signal) {
     'Stale approvals': 'Counts rejected stale approvals. These happen when Worklist content changed after the user clicked, so the agent must not apply that payload.',
     'Interrupts': 'Shows recent interruption or silence-clear events. These explain why an agent cycle stopped, a spinner cleared, or an active turn ended unexpectedly.',
     'Inspector exports': 'Reports recent Inspector trace availability. Traces give agents exact UI evidence when markup alone does not explain a bug.',
+    'session': 'Number of indexed session transcripts (Claude + Codex) in the full-text search index.',
+    'commit': 'Number of indexed git commits in the full-text search index.',
+    'issue': 'Number of indexed forge issues in the full-text search index.',
+    'worklist-history': 'Number of indexed worklist-history entries in the full-text search index.',
+    'Total indexed': 'Total document rows across all buckets in the FTS search index.',
+    'Index db': 'On-disk size and path of the SQLite FTS index (a rebuildable cache).',
   };
   if (descriptions[signal]) return descriptions[signal];
   const s = signal || '';

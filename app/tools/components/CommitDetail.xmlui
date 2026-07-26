@@ -10,7 +10,8 @@
     var.findText=""
     var.appliedNeedle=""
     var.cursor="{0}"
-    var.counts="{{ counts: [], total: 0 }}">
+    var.counts="{{ counts: [], total: 0 }}"
+    var.oneRow="{[{}]}">
 
     <!-- Fixed find toolbar (sibling above the List). -->
     <HStack when="{commit.value &amp;&amp; commit.value.message}" gap="$space-2" verticalAlignment="center">
@@ -33,7 +34,7 @@
       onDidChange="() => counts = window.__bramBlockMatchCounts(window.__bramCommitBlocks(commit.value), appliedNeedle)" />
 
     <!-- Bounded scroller = a single-row List (mirrors SessionDetail). -->
-    <List data="{[{}]}" height="{$props.height || '400px'}">
+    <List data="{oneRow}" height="{$props.height || '400px'}">
       <VStack gap="$space-3">
         <Link when="{$props.url}" noIndicator onClick="openExternal($props.url)">
           <Text fontWeight="$fontWeight-bold"

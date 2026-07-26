@@ -9,7 +9,8 @@
     var.findText=""
     var.appliedNeedle=""
     var.cursor="{0}"
-    var.counts="{{ counts: [], total: 0 }}">
+    var.counts="{{ counts: [], total: 0 }}"
+    var.oneRow="{[{}]}">
 
     <!-- Fixed find toolbar (sibling above the List). -->
     <HStack gap="$space-2" verticalAlignment="center">
@@ -32,7 +33,7 @@
       onDidChange="() => counts = window.__bramBlockMatchCounts(window.__bramHistoryBlocks(g), appliedNeedle)" />
 
     <!-- Bounded scroller = a single-row List (mirrors SessionDetail). -->
-    <List data="{[{}]}" height="{$props.height || '400px'}">
+    <List data="{oneRow}" height="{$props.height || '400px'}">
       <VStack gap="$space-4">
         <VStack gap="$space-1">
           <Text

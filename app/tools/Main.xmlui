@@ -1,5 +1,5 @@
-<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{''}" var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.footerVoiceRecording="{false}" var.headerInflightTick="{0}" var.agentSwitcherSelected="{'claude'}" var.agentSwitching="{false}" var.composerFocused="{false}" var.transcriptAgentId="{''}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}" var.dismissedAgentIds="{window.__bramRestoreDismissedAgents()}"
-  onInit="updateBannerDismissedVersion = readLocalStorage('bram.updateBannerDismissedVersion', ''); startBramLatestJsonlPush(() => (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || '')">
+<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{''}" var.toolDescBannerDismissedVersion="{''}" var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.footerVoiceRecording="{false}" var.headerInflightTick="{0}" var.agentSwitcherSelected="{'claude'}" var.agentSwitching="{false}" var.composerFocused="{false}" var.transcriptAgentId="{''}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}" var.dismissedAgentIds="{window.__bramRestoreDismissedAgents()}"
+  onInit="updateBannerDismissedVersion = readLocalStorage('bram.updateBannerDismissedVersion', ''); toolDescBannerDismissedVersion = readLocalStorage('bram.toolDescBannerDismissedVersion', ''); startBramLatestJsonlPush(() => (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || '')">
   <PushSource
     id="mainAgentStatus"
     initial="{null}"
@@ -487,6 +487,34 @@
       tooltip="Dismiss"
       onClick="setupCompleteProvider = ''" />
   </HStack>
+
+  <!-- Tool-descriptions opt-in discoverability. Version-gated + dismissible
+       (same idiom as the update banner): shows on a fresh install and after
+       each upgrade until dismissed, so the opt-in feature is findable rather
+       than invisible. Deep link goes to Settings; scroll-to-field is a later
+       refinement (needs a helpers.js scroll helper). -->
+  <VStack
+    when="{appInfo.value &amp;&amp; appInfo.value.current &amp;&amp; appInfo.value.current !== toolDescBannerDismissedVersion}"
+    backgroundColor="$color-info-100"
+    padding="$space-2"
+    gap="$space-2">
+    <Text fontSize="$fontSize-sm">
+      Tool descriptions are opt-in and off by default. Turn them on in Settings (they also need an ANTHROPIC_API_KEY) to get a one-line intent header on each tool call.
+    </Text>
+    <HStack gap="$space-2" verticalAlignment="center">
+      <Button
+        label="Open Settings"
+        size="xs"
+        onClick="navigate('/settings')" />
+      <SpaceFiller />
+      <Button
+        label="✕"
+        variant="ghost"
+        size="xs"
+        tooltip="Dismiss — banner returns after an upgrade"
+        onClick="toolDescBannerDismissedVersion = appInfo.value.current; writeLocalStorage('bram.toolDescBannerDismissedVersion', appInfo.value.current)" />
+    </HStack>
+  </VStack>
 
   <!-- Explicit warn-scale highlight colors for the Markdown find <mark>
        (active match a shade darker), set app-side so the color is guaranteed

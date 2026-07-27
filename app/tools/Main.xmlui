@@ -650,7 +650,7 @@
            can't crowd the footer. Tooltips carry type, description, and
            the model the subagent ran on. -->
       <HStack
-        when="{window.__bramVisibleFooterAgents(footerAgents.value, dismissedAgentIds).length > 0}"
+        when="{window.__bramVisibleFooterAgents(footerAgents.value, dismissedAgentIds).length > 0 || (window.__bramDismissedInRoster ? window.__bramDismissedInRoster(footerAgents.value, dismissedAgentIds).length : 0) > 0}"
         gap="$space-1"
         paddingHorizontal="$space-1"
         verticalAlignment="center">
@@ -678,7 +678,7 @@
               label="✕"
               size="xs"
               variant="ghost"
-              tooltip="Dismiss this subagent"
+              tooltip="Dismiss this subagent — restore it later from the hidden menu"
               onClick="dismissedAgentIds = window.__bramDismissAgent(dismissedAgentIds, $item.agentId)" />
           </HStack>
         </Items>
@@ -693,6 +693,26 @@
               tooltip="{(window.__bramAgentChipTooltip || window.__bramAgentChipLabel)($item)}"
               onClick="transcriptAgentId = $item.agentId; navigate('/transcript')" />
           </Items>
+        </DropdownMenu>
+        <!-- Recover dismissed subagents (subagent-dismiss-recoverable): shown
+             only while the live roster still contains dismissed agents. Each
+             entry restores that pane; Restore all clears the set. Reachable
+             even when every subagent is hidden, because the strip's when also
+             opens for hidden-in-roster agents. -->
+        <DropdownMenu
+          when="{(window.__bramDismissedInRoster ? window.__bramDismissedInRoster(footerAgents.value, dismissedAgentIds).length : 0) > 0}"
+          label="{(window.__bramDismissedInRoster ? window.__bramDismissedInRoster(footerAgents.value, dismissedAgentIds).length : 0) + ' hidden'}"
+          alignment="end"
+          triggerButtonVariant="ghost">
+          <Items data="{window.__bramDismissedInRoster ? window.__bramDismissedInRoster(footerAgents.value, dismissedAgentIds).slice().reverse() : []}">
+            <MenuItem
+              label="{'↩ ' + window.__bramAgentChipLabel($item)}"
+              tooltip="{'Restore ' + (window.__bramAgentChipTooltip || window.__bramAgentChipLabel)($item)}"
+              onClick="dismissedAgentIds = window.__bramRestoreAgent(dismissedAgentIds, $item.agentId)" />
+          </Items>
+          <MenuItem
+            label="Restore all"
+            onClick="dismissedAgentIds = window.__bramRestoreAllAgents()" />
         </DropdownMenu>
       </HStack>
       <!-- Session info with the transcript viewport (Main / subagent)

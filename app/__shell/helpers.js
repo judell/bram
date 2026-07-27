@@ -6049,16 +6049,23 @@ window.__bramAgentChipTooltip = function (agent) {
   return s;
 };
 
-// Dismissible footer subagent chips (dismissible-subagent-chips): a
-// per-session set of dismissed agent ids so a finished subagent's chip can
-// be hidden from the footer strip without deleting anything host-side (the
-// roster keeps tracking it). sessionStorage scope is deliberate — a new
-// agent session gets a fresh roster, so a dismissal shouldn't outlive the
-// session. Stored as a JSON array of ids under one key.
+// Dismissible footer subagent chips (dismissible-subagent-chips): a set of
+// dismissed agent ids so a finished subagent's chip can be hidden from the
+// footer strip without deleting anything host-side (the roster keeps tracking
+// it). Persisted to localStorage (subagent-dismiss-recoverable) so a dismissal
+// survives reload/relaunch. Agent ids are unique per dispatch, so a stale id
+// from an old session never matches a new session's roster —
+// __bramVisibleFooterAgents still shows a genuinely-new session's agents in
+// full, preserving the original "fresh roster per session" behavior. The
+// "N hidden" footer control restores dismissed panes, so persistence is not a
+// black hole. Bounded to the most recent __BRAM_DISMISSED_AGENTS_CAP ids so
+// the set can't grow without limit. Stored as a JSON array under one key.
 var __BRAM_DISMISSED_AGENTS_KEY = "bram.dismissedAgentIds";
+var __BRAM_DISMISSED_AGENTS_CAP = 500;
 
 window.__bramRestoreDismissedAgents = function () {
-  var raw = __bramReadSS(__BRAM_DISMISSED_AGENTS_KEY, "");
+  var raw = "";
+  try { if (window.localStorage) raw = localStorage.getItem(__BRAM_DISMISSED_AGENTS_KEY) || ""; } catch (e) {}
   if (!raw) return [];
   try {
     var arr = JSON.parse(raw);
@@ -6066,14 +6073,37 @@ window.__bramRestoreDismissedAgents = function () {
   } catch (e) { return []; }
 };
 
-// Append agentId to the dismissed set, persist, and return the new array
-// (the XMLUI caller assigns the result back to its var — same shape as
+// Persist the dismissed set (capped to the most recent ids) and return the
+// capped array the caller should keep.
+function __bramPersistDismissedAgents(list) {
+  var capped = Array.isArray(list) ? list.slice(-__BRAM_DISMISSED_AGENTS_CAP) : [];
+  try {
+    if (window.localStorage) {
+      if (capped.length) localStorage.setItem(__BRAM_DISMISSED_AGENTS_KEY, JSON.stringify(capped));
+      else localStorage.removeItem(__BRAM_DISMISSED_AGENTS_KEY);
+    }
+  } catch (e) {}
+  return capped;
+}
+
+// Append agentId to the dismissed set, persist, and return the new (capped)
+// array (the XMLUI caller assigns the result back to its var — same shape as
 // __bramDismissSendNotice).
 window.__bramDismissAgent = function (dismissed, agentId) {
   var list = Array.isArray(dismissed) ? dismissed.slice() : [];
   if (agentId && list.indexOf(agentId) === -1) list.push(agentId);
-  __bramWriteSS(__BRAM_DISMISSED_AGENTS_KEY, list.length ? JSON.stringify(list) : "");
-  return list;
+  return __bramPersistDismissedAgents(list);
+};
+
+// Restore (un-dismiss) one agent; persist and return the new dismissed array.
+window.__bramRestoreAgent = function (dismissed, agentId) {
+  var list = Array.isArray(dismissed) ? dismissed.filter(function (id) { return id !== agentId; }) : [];
+  return __bramPersistDismissedAgents(list);
+};
+
+// Restore every dismissed agent; clears the set and returns [].
+window.__bramRestoreAllAgents = function () {
+  return __bramPersistDismissedAgents([]);
 };
 
 // The footer roster minus dismissed ids. Drives the strip's when, the
@@ -6085,6 +6115,18 @@ window.__bramVisibleFooterAgents = function (roster, dismissed) {
   if (!dismissed || !dismissed.length) return agents;
   return agents.filter(function (a) {
     return dismissed.indexOf(a && a.agentId) === -1;
+  });
+};
+
+// The dismissed agents still present in the current roster — drives the
+// "N hidden" recovery control (count + restore menu). Empty when nothing
+// hidden is in the live roster, so the control is absent unless there is
+// something to recover.
+window.__bramDismissedInRoster = function (roster, dismissed) {
+  var agents = (roster && roster.agents) || [];
+  if (!dismissed || !dismissed.length) return [];
+  return agents.filter(function (a) {
+    return a && dismissed.indexOf(a.agentId) !== -1;
   });
 };
 

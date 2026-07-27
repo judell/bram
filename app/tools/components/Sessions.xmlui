@@ -16,9 +16,9 @@
   var.lastRenameOriginalTitle=""
   var.lastRenameTitle="">
 
-  <!-- Browse list with a local metadata filter and inline SessionDetail.
-       Unified Search remains the cross-bucket/full-text path; this page's
-       search only narrows its own loaded session rows. -->
+  <!-- Browse list with full-text filtering through the shared SQLite index and
+       inline SessionDetail. Search hits are joined back to the lightweight
+       session metadata rows so browse actions and columns remain available. -->
   <DataSource
     id="sessionsMeta"
     url="/__sessions/meta"
@@ -41,20 +41,25 @@
     id="sessionsFull"
     url="/__sessions/list"
     queryParams="{{ provider: currentProvider }}"
-    when="{(sessionsExpanded || searchQuery.trim().length > 0) &amp;&amp; !!currentProvider}" />
+    when="{(sessionsExpanded || searchQuery.trim().length >= 2) &amp;&amp; !!currentProvider}" />
+
+  <DataSource
+    id="sessionsSearch"
+    url="/__search"
+    queryParams="{{ q: searchQuery, limit: 500, types: 'session' }}"
+    when="{searchQuery.trim().length >= 2}" />
 
   <variable
     name="sessionsSource"
-    value="{((sessionsExpanded || searchQuery.trim().length > 0) &amp;&amp; sessionsFull.value) ? sessionsFull.value : (sessionsFirstPage.value || [])}" />
+    value="{((sessionsExpanded || searchQuery.trim().length >= 2) &amp;&amp; sessionsFull.value) ? sessionsFull.value : (sessionsFirstPage.value || [])}" />
   <variable name="searchNeedle" value="{searchQuery.trim().toLowerCase()}" />
+  <variable name="searchReady" value="{searchNeedle.length >= 2}" />
   <variable name="filteredSessions" value="{
-    searchNeedle
-      ? (sessionsSource || []).filter(s => [
-          s.title || '',
-          s.id || '',
-          s.provider || ''
-        ].join(' ').toLowerCase().includes(searchNeedle))
-      : (sessionsSource || [])
+    searchReady
+      ? (sessionsSearch.value || [])
+          .map(hit => (sessionsSource || []).find(s => s.id === hit.id &amp;&amp; s.provider === hit.provider))
+          .filter(s => !!s)
+      : (searchNeedle ? [] : (sessionsSource || []))
   }" />
   <!-- sessions-delete-pending-self-heal: drop pending ids still present in the
        list so a stuck "pending" row re-enables. -->
@@ -152,7 +157,7 @@
       <SearchBox
         boxWidth="22rem"
         placeholder="Filter sessions…"
-        inProgress="{searchNeedle &amp;&amp; sessionsFull.inProgress}"
+        inProgress="{searchReady &amp;&amp; (sessionsSearch.inProgress || sessionsFull.inProgress)}"
         onQueryChange="(q) => searchQuery = q"
         onClear="searchQuery = ''; expandedId = null" />
       <Button
@@ -258,7 +263,11 @@
           color="$textColor-secondary"
           value="Show fewer" />
       </Link>
-      <Text when="{searchNeedle &amp;&amp; !sessionsFull.inProgress &amp;&amp; filteredSessions.length === 0}"
+      <Text when="{searchNeedle &amp;&amp; !searchReady}"
+        color="$textColor-secondary" fontSize="$fontSize-sm"
+        value="Type at least 2 characters to search session transcripts." />
+      <Text
+        when="{searchReady &amp;&amp; sessionsSearch.loaded &amp;&amp; sessionsFull.loaded &amp;&amp; !sessionsSearch.inProgress &amp;&amp; !sessionsFull.inProgress &amp;&amp; filteredSessions.length === 0}"
         color="$textColor-secondary" fontSize="$fontSize-sm" value="No matching sessions." />
     </VStack>
   </VStack>

@@ -154,16 +154,16 @@
           <!-- Inline expander: real per-type source + a footer link. -->
           <VStack when="{expandedHit &amp;&amp; expandedHit.key === $item.key}"
             gap="$space-2" paddingLeft="7rem" paddingTop="$space-1">
-            <VStack when="{$item.type === 'session'}" maxHeight="420px" overflowY="auto">
+            <VStack when="{$item.type === 'session'}">
               <SessionDetail sessionId="{$item.id}" provider="{$item.provider || 'claude'}" />
             </VStack>
-            <VStack when="{$item.type === 'commit'}" maxHeight="420px" overflowY="auto">
+            <VStack when="{$item.type === 'commit'}">
               <CommitDetail sha="{($item.key || '').split(':')[1]}" url="{$item.link}" />
             </VStack>
-            <VStack when="{$item.type === 'issue'}" maxHeight="420px" overflowY="auto">
+            <VStack when="{$item.type === 'issue'}">
               <IssueDetail number="{($item.key || '').split(':')[1]}" />
             </VStack>
-            <VStack when="{$item.type === 'worklist-history'}" maxHeight="420px" overflowY="auto">
+            <VStack when="{$item.type === 'worklist-history'}">
               <HistoryDetail when="{historyGroup}" group="{historyGroup}" />
             </VStack>
           </VStack>

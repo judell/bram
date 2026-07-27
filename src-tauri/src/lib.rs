@@ -9530,6 +9530,11 @@ fn get_app_info() -> AppInfo {
     info
 }
 
+// Memoizes the `gh api /user` login lookup (git_log_recent) for the life of
+// the process — the local GitHub identity doesn't change mid-session, and the
+// call costs ~0.5s that was previously paid on every /__commits request.
+static COMMITS_LOCAL_LOGIN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
 fn git_log_recent<R: tauri::Runtime>(app: &AppHandle<R>, count: usize) -> Result<Vec<u8>, String> {
     use std::collections::HashSet;
     // Commits reachable from HEAD but not from any origin ref — exactly what a
@@ -9556,18 +9561,22 @@ fn git_log_recent<R: tauri::Runtime>(app: &AppHandle<R>, count: usize) -> Result
         .unwrap_or_default()
         .trim()
         .to_string();
-    let local_login: Option<String> = project_root(Some(app))
-        .filter(|_| project_forge(app) == Forge::GitHub)
-        .and_then(|root| {
-        std::process::Command::new("gh")
-            .current_dir(&root)
-            .args(&["api", "/user", "--jq", ".login"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .filter(|s| !s.is_empty())
-    });
+    let local_login: Option<String> = COMMITS_LOCAL_LOGIN
+        .get_or_init(|| {
+            project_root(Some(app))
+                .filter(|_| project_forge(app) == Forge::GitHub)
+                .and_then(|root| {
+                    std::process::Command::new("gh")
+                        .current_dir(&root)
+                        .args(&["api", "/user", "--jq", ".login"])
+                        .output()
+                        .ok()
+                        .filter(|o| o.status.success())
+                        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                        .filter(|s| !s.is_empty())
+                })
+        })
+        .clone();
 
     let count_arg = format!("-n{}", count);
     // __C__ sentinel marks the start of each commit; --shortstat lines
@@ -9664,6 +9673,51 @@ fn git_log_recent<R: tauri::Runtime>(app: &AppHandle<R>, count: usize) -> Result
     finalize(&header_parts, additions, deletions, &mut commits);
 
     serde_json::to_vec(&commits).map_err(|e| e.to_string())
+}
+
+// Cache-first: serve the commit list from the search index's stored
+// `commits:list` extra blob (written by the background indexer, see
+// run_commit_index_pass), truncated to `count`. The `pushed` flag is dynamic
+// (flips the instant the user pushes and drives the Commits-tab Push button),
+// so it is never trusted from cache: every read recomputes it live from a
+// fresh `git rev-list` (cheap — no shortstat, no gh call). Falls back to a
+// live git_log_recent build on a cache miss or parse failure so the route
+// still works before the indexer's first pass completes.
+fn commits_list_cached<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    count: usize,
+) -> Result<Vec<u8>, String> {
+    use std::collections::HashSet;
+    if let Some(db) = search_index_db_path(app) {
+        if let Ok(conn) = search_index::open(&db.to_string_lossy()) {
+            if let Ok(Some(extra)) = search_index::get_extra(&conn, "commits:list") {
+                if !extra.is_empty() {
+                    if let Ok(mut arr) = serde_json::from_str::<Vec<serde_json::Value>>(&extra) {
+                        // Recompute `pushed` live — cheap and must never be stale.
+                        let unpushed: HashSet<String> =
+                            git_run(app, &["rev-list", "HEAD", "--not", "--remotes=origin"])
+                                .unwrap_or_default()
+                                .lines()
+                                .map(|l| l.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect();
+                        for c in arr.iter_mut() {
+                            if let Some(sha) =
+                                c.get("sha").and_then(|v| v.as_str()).map(|s| s.to_string())
+                            {
+                                c["pushed"] = serde_json::Value::Bool(!unpushed.contains(&sha));
+                            }
+                        }
+                        arr.truncate(count);
+                        if let Ok(bytes) = serde_json::to_vec(&arr) {
+                            return Ok(bytes);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    git_log_recent(app, count)
 }
 
 // Shell out to `gh` to list issues for the current repo. Returns the raw
@@ -10642,6 +10696,36 @@ fn current_head_commit_url<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<Stri
     Some(format!("{}/commit/{}", html_base, sha))
 }
 
+/// issue-202: never ship a multi-megabyte or generated-artifact diff to the
+/// webview. The vendored bundle (`app/vendor/xmlui-standalone.umd.js`, minified
+/// to a single line) and its `.map` show up as one 16 MB line; rendering that
+/// as a diff wedges the iframe. Replace the body with a compact stub for
+/// generated artifacts and for any oversized patch; ordinary diffs pass through
+/// unchanged. Shared by `git_commit_detail` (`/__commit`), the `/__worklist`
+/// TO COMMIT diff, and `/__git-diff`.
+fn cap_patch(path: &str, raw: String) -> String {
+    const MAX_PATCH_BYTES: usize = 200_000;
+    let generated = path.starts_with("app/vendor/")
+        || path.ends_with(".map")
+        || path.ends_with(".min.js")
+        || path.ends_with(".min.css")
+        || path.ends_with("-lock.json")
+        || path.ends_with(".lock");
+    if generated {
+        format!(
+            "@@ diff omitted \u{2014} generated artifact ({} KB) @@",
+            raw.len() / 1024
+        )
+    } else if raw.len() > MAX_PATCH_BYTES {
+        format!(
+            "@@ diff omitted \u{2014} large diff ({} KB) @@",
+            raw.len() / 1024
+        )
+    } else {
+        raw
+    }
+}
+
 fn git_commit_detail<R: tauri::Runtime>(app: &AppHandle<R>, sha: &str) -> Result<Vec<u8>, String> {
     if sha.is_empty() || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err("invalid sha".to_string());
@@ -10702,7 +10786,7 @@ fn git_commit_detail<R: tauri::Runtime>(app: &AppHandle<R>, sha: &str) -> Result
                 "filename": name,
                 "additions": a,
                 "deletions": d,
-                "patch": patches.get(name).cloned().unwrap_or_default(),
+                "patch": cap_patch(name, patches.get(name).cloned().unwrap_or_default()),
             })
         })
         .collect();
@@ -15116,6 +15200,24 @@ fn run_commit_index_pass<R: tauri::Runtime>(
         };
         search_index::index_doc(&conn, &row, token, 0).map_err(|e| e.to_string())?;
         indexed += 1;
+    }
+    // `indexed > 0` means at least one new/changed commit landed, so rebuild +
+    // cache the full commit list (with shortstat + gh-login resolution) for
+    // cache-first /__commits serving. Rebuilds rarely — not on every pass —
+    // since most passes see zero new commits.
+    if indexed > 0 {
+        if let Ok(list_bytes) = git_log_recent(app, 100) {
+            let list_row = search_index::IndexRow {
+                kind: "commit-list".to_string(),
+                source: String::new(),
+                date: String::new(),
+                link: String::new(),
+                content: String::new(), // empty: never matches FTS text queries
+                file: "commits:list".to_string(),
+                extra: String::from_utf8(list_bytes).unwrap_or_default(),
+            };
+            let _ = search_index::index_doc(&conn, &list_row, 0, 0);
+        }
     }
     let rows = search_index::row_count(&conn).unwrap_or(0);
     Ok((seen, indexed, skipped, rows))
@@ -33655,7 +33757,7 @@ fn route_request<R: tauri::Runtime>(
     }
 
     if path == "__commits" {
-        return match git_log_recent(app, 100) {
+        return match commits_list_cached(app, 100) {
             Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
             Err(e) => {
                 eprintln!("[http /__commits] {}", e);
@@ -34282,6 +34384,7 @@ fn route_request<R: tauri::Runtime>(
                             }
                         }
                     }
+                    let diff = cap_patch(fp, diff);
                     if !combined.is_empty() && !diff.is_empty() {
                         combined.push('\n');
                     }
@@ -34452,7 +34555,7 @@ fn route_request<R: tauri::Runtime>(
                 break;
             }
         }
-        let diff = git_run(app, &["diff", "--", &file_path]).unwrap_or_default();
+        let diff = cap_patch(&file_path, git_run(app, &["diff", "--", &file_path]).unwrap_or_default());
         return (200, "text/plain; charset=utf-8", diff.into_bytes());
     }
 

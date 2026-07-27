@@ -1091,6 +1091,11 @@ Before you `Approve` a `TO-APPLY` item you can `Iterate` to refine the proposal.
               <Spinner when="{isWorklistVoiceProcessingTarget('new-item')}" />
             </Theme>
           </HStack>
+          <!-- Image-paste strip on New Item (queue-items-voice-and-image-paste
+               transplant): the box above sets the new-item paste target on
+               focus, so a pasted image stages here; Send embeds it via
+               __bramWithStagedImageMarkers. -->
+          <PastedImageStrip target="new-item" />
           <HStack gap="$space-2">
             <Button
               label="Send"
@@ -1110,7 +1115,7 @@ Before you `Approve` a `TO-APPLY` item you can `Iterate` to refine the proposal.
                 submittedKind = window.__bramSetWorklistSubmittedKind('message');
                 messageSentAtText = new Date().toLocaleTimeString();
                 awaitingResponse = true;
-                toTurn(msg);
+                toTurn(window.__bramWithStagedImageMarkers(msg, 'new-item'));
                 newItemHelp = false; newItemIssue = null; newItemVoiceRecording = false; setWorklistVoiceTarget('message-agent'); newItemBox.setValue('');
               })()" />
             <Button

@@ -1691,7 +1691,8 @@ window.__bramWithStagedImageMarkers = function (text, target, voiceTarget) {
 window.__bramIsWorklistTextVoiceTarget = function (target) {
   var t = target || "";
   return ["message-agent", "feedback", "new-item", "new-issue"].indexOf(t) !== -1
-    || t.indexOf("feedback:") === 0;
+    || t.indexOf("feedback:") === 0
+    || t.indexOf("queue-item:") === 0;
 };
 
 // Inflight + submitted-message helpers (audit step 6). All pure data
@@ -6772,7 +6773,10 @@ window.__bramQueueSend = function (entries, idx, worklistItems) {
     if (!items.some(function (item) { return item.id === targetItemId; })) return entries;
     window.sendIterateWithFeedbackDraft(items, targetItemId, text);
   } else {
-    toTurn(text);
+    // Include any images pasted onto this item's strip (queue-items-voice-and-
+    // image-paste): consume the staged pastes for this item's target and embed
+    // their @<path> markers, same as the Worklist message send.
+    toTurn(window.__bramWithStagedImageMarkers(text, "queue-item:" + (entry.id || "")));
   }
   window.__bramIframeTrace("queue", { op: "send", id: entry.id || "", mode: mode, chars: text.length });
   return window.__bramQueueRemove(entries, idx, true);

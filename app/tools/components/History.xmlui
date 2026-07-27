@@ -1,7 +1,8 @@
 <Component
   name="History"
   var.expandedId="{null}"
-  var.historyExpanded="{false}">
+  var.historyExpanded="{false}"
+  var.searchQuery="">
 
   <!-- issue-230: reverse-chron browse of worklist history as a simplified
        inline-expander table (matching Commits/Sessions), not the old cards.
@@ -10,14 +11,36 @@
        limit 200. Each row carries its full group in `extra`, so the expander
        renders HistoryDetail with no re-fetch. -->
   <DataSource id="historyList" url="/__history-index" queryParams="{{ limit: 300 }}" />
-
+  <variable name="searchNeedle" value="{searchQuery.trim().toLowerCase()}" />
+  <variable name="filteredHistory" value="{
+    searchNeedle
+      ? (historyList.value || []).filter(h => [
+          h.id || '',
+          h.title || '',
+          h.extra ? window.__bramHistoryPhasePath(h.extra) : '',
+          h.extra ? window.__bramWorklistItemFiles(h.extra).join(' ') : '',
+          (h.extra &amp;&amp; h.extra.commitContextLabel) || '',
+          (h.extra &amp;&amp; h.extra.detailsRestoredLabel) || ''
+        ].join(' ').toLowerCase().includes(searchNeedle))
+      : (historyList.value || [])
+  }" />
+  <variable name="visibleHistory"
+    value="{filteredHistory.slice(0, searchNeedle ? 9999 : (historyExpanded ? 9999 : 50))}" />
   <VStack padding="$space-4" gap="$space-4" overflowY="auto" height="100%">
-    <Heading level="h2">History</Heading>
+    <HStack gap="$space-3" verticalAlignment="center">
+      <Heading level="h2">History</Heading>
+      <SearchBox
+        boxWidth="22rem"
+        placeholder="Filter history…"
+        inProgress="{historyList.inProgress}"
+        onQueryChange="(q) => searchQuery = q"
+        onClear="searchQuery = ''; expandedId = null" />
+    </HStack>
 
     <Spinner when="{historyList.inProgress &amp;&amp; !historyList.loaded}" />
 
     <VStack gap="$space-1" when="{historyList.value &amp;&amp; historyList.value.length > 0}">
-      <Items data="{(historyList.value || []).slice(0, historyExpanded ? 9999 : 50)}">
+      <Items data="{visibleHistory}">
         <VStack gap="0" borderBottom="1px solid $borderColor">
           <Link
             onClick="expandedId = (expandedId === $item.id) ? null : $item.id"
@@ -45,17 +68,19 @@
             </HStack>
           </Link>
           <VStack when="{expandedId === $item.id &amp;&amp; $item.extra}" paddingBottom="$space-2">
-            <HistoryDetail group="{$item.extra}" />
+            <HistoryDetail group="{$item.extra}" query="{searchQuery.trim()}" />
           </VStack>
         </VStack>
       </Items>
       <Link
-        when="{historyList.value &amp;&amp; historyList.value.length > 50}"
+        when="{!searchNeedle &amp;&amp; historyList.value &amp;&amp; historyList.value.length > 50}"
         onClick="historyExpanded = !historyExpanded"
         noIndicator="true">
         <Text fontSize="$fontSize-xs" color="$textColor-secondary"
           value="{historyExpanded ? 'Show fewer' : 'More (' + (historyList.value.length - 50) + ' more)'}" />
       </Link>
+      <Text when="{searchNeedle &amp;&amp; filteredHistory.length === 0}"
+        color="$textColor-secondary" fontSize="$fontSize-sm" value="No matching history entries." />
     </VStack>
 
     <Text

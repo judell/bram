@@ -1,6 +1,8 @@
 <Component name="Issues"
   var.issuesExpanded="{false}"
   var.expandedNumber="{null}"
+  var.searchQuery=""
+  var.searchNeedle="{searchQuery.trim().toLowerCase()}"
   var.showNewIssueHint="{false}"
   var.newIssueSubmitting="{false}"
   var.closingIssue="{false}"
@@ -20,11 +22,24 @@
     if (av > bv) return sortDir === 'asc' ? 1 : -1;
     return 0;
   })}"
-  var.pageIssues="{sortedIssues.slice(0, issuesExpanded ? 999 : 20)}">
+  var.filteredIssues="{
+    searchNeedle
+      ? sortedIssues.filter(i => [
+          i.number || '',
+          i.title || '',
+          i.state || '',
+          (i.author &amp;&amp; i.author.login) || '',
+          (i.author &amp;&amp; i.author.name) || '',
+          i.commentSummary || '',
+          i.latestCommentAuthor || ''
+        ].join(' ').toLowerCase().includes(searchNeedle))
+      : sortedIssues
+  }"
+  var.pageIssues="{filteredIssues.slice(0, searchNeedle ? 999 : (issuesExpanded ? 999 : 20))}">
 
-  <!-- issue-230: Issues is a browse list with an inline-expander (shared
-       IssueDetail) + the comment/close controls. Search lives on the unified
-       Search page. No polling — the agent-turn-end event covers locally-filed
+  <!-- Browse list with a local metadata filter, inline IssueDetail, and the
+       comment/close controls. Unified Search remains the cross-bucket/full-text
+       path. No polling — the agent-turn-end event covers locally-filed
        issues, comment/close bump issueRefreshTick, and Refresh is manual for
        remote (GitHub/GitLab) changes with no push channel. -->
   <DataSource
@@ -136,10 +151,15 @@
   <ChangeListener
     listenTo="{issuesChangedEvt.value &amp;&amp; issuesChangedEvt.value.tick}"
     onDidChange="() => { issuesFirstPage.refetch(); issuesFull.refetch(); }" />
-
   <VStack padding="$space-4" gap="$space-4" overflowY="auto" height="100%">
     <HStack gap="$space-3" verticalAlignment="center">
       <Heading level="h2">Issues</Heading>
+      <SearchBox
+        boxWidth="22rem"
+        placeholder="Filter issues…"
+        inProgress="{issuesFirstPage.inProgress || issuesFull.inProgress}"
+        onQueryChange="(q) => searchQuery = q"
+        onClear="searchQuery = ''; expandedNumber = null" />
       <Button
         when="{repoOrigin.value &amp;&amp; repoOrigin.value.issuesNewUrl}"
         label="+ New issue"
@@ -219,7 +239,8 @@
           </HStack>
 
           <VStack when="{expandedNumber === $item.number}" paddingHorizontal="$space-3" paddingBottom="$space-3">
-            <IssueDetail number="{rowIssue.number}" refreshTick="{issueRefreshTick}" />
+            <IssueDetail number="{rowIssue.number}" refreshTick="{issueRefreshTick}"
+              query="{searchQuery.trim()}" />
             <VStack gap="$space-2" paddingTop="$space-3" borderTop="1px solid $borderColor">
               <TextArea
                 id="closeCommentBox"
@@ -256,7 +277,7 @@
         </VStack>
       </Items>
       <HStack
-        when="{issuesSource &amp;&amp; issuesSource.length > 20}"
+        when="{!searchNeedle &amp;&amp; issuesSource &amp;&amp; issuesSource.length > 20}"
         padding="$space-2"
         horizontalAlignment="center">
         <Link onClick="issuesExpanded = !issuesExpanded" noIndicator>
@@ -265,5 +286,7 @@
         </Link>
       </HStack>
     </VStack>
+    <Text when="{searchNeedle &amp;&amp; !issuesFull.inProgress &amp;&amp; filteredIssues.length === 0}"
+      color="$textColor-secondary" fontSize="$fontSize-sm" value="No matching issues." />
   </VStack>
 </Component>

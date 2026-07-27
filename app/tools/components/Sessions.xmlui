@@ -3,6 +3,7 @@
   var.currentProvider="{null}"
   var.expandedId="{null}"
   var.sessionsExpanded="{false}"
+  var.searchQuery=""
   var.renamingSession="{null}"
   var.renameDraft=""
   var.newSessionOpen="{false}"
@@ -15,9 +16,9 @@
   var.lastRenameOriginalTitle=""
   var.lastRenameTitle="">
 
-  <!-- issue-230: Sessions is now a browse list with an inline-expander
-       (shared SessionDetail). Search lives on the unified Search page, so no
-       search box / splitter / right pane here. -->
+  <!-- Browse list with a local metadata filter and inline SessionDetail.
+       Unified Search remains the cross-bucket/full-text path; this page's
+       search only narrows its own loaded session rows. -->
   <DataSource
     id="sessionsMeta"
     url="/__sessions/meta"
@@ -40,12 +41,21 @@
     id="sessionsFull"
     url="/__sessions/list"
     queryParams="{{ provider: currentProvider }}"
-    when="{sessionsExpanded &amp;&amp; !!currentProvider}" />
+    when="{(sessionsExpanded || searchQuery.trim().length > 0) &amp;&amp; !!currentProvider}" />
 
   <variable
     name="sessionsSource"
-    value="{(sessionsExpanded &amp;&amp; sessionsFull.value) ? sessionsFull.value : (sessionsFirstPage.value || [])}" />
-
+    value="{((sessionsExpanded || searchQuery.trim().length > 0) &amp;&amp; sessionsFull.value) ? sessionsFull.value : (sessionsFirstPage.value || [])}" />
+  <variable name="searchNeedle" value="{searchQuery.trim().toLowerCase()}" />
+  <variable name="filteredSessions" value="{
+    searchNeedle
+      ? (sessionsSource || []).filter(s => [
+          s.title || '',
+          s.id || '',
+          s.provider || ''
+        ].join(' ').toLowerCase().includes(searchNeedle))
+      : (sessionsSource || [])
+  }" />
   <!-- sessions-delete-pending-self-heal: drop pending ids still present in the
        list so a stuck "pending" row re-enables. -->
   <ChangeListener
@@ -60,14 +70,14 @@
     confirmTitle="Delete session?"
     confirmMessage="This cannot be undone."
     completedNotificationMessage="Session deleted. Reload Bram to refresh the session list; you do not need to restart the agent."
-    onSuccess="pendingDeletes = pendingDeletes.concat([lastDeleteId]); savePendingSessionDeletes(pendingDeletes); if (expandedId === lastDeleteId) { expandedId = null; } sessionsFirstPage.refetch(); if (sessionsExpanded) sessionsFull.refetch();" />
+    onSuccess="pendingDeletes = pendingDeletes.concat([lastDeleteId]); savePendingSessionDeletes(pendingDeletes); if (expandedId === lastDeleteId) { expandedId = null; } sessionsFirstPage.refetch(); if (sessionsExpanded || searchNeedle) sessionsFull.refetch();" />
 
   <APICall
     id="renameSession"
     url="/__sessions/rename"
     method="get"
     queryParams="{{ id: $param.id, provider: $param.provider, title: $param.title }}"
-    onSuccess="sessionsFirstPage.refetch(); if (sessionsExpanded) sessionsFull.refetch();"
+    onSuccess="sessionsFirstPage.refetch(); if (sessionsExpanded || searchNeedle) sessionsFull.refetch();"
     onError="pendingRenames = pendingRenames.filter(id => id !== lastRenameId); savePendingSessionRenames(pendingRenames); renamingSession = { id: lastRenameId, provider: lastRenameProvider, title: lastRenameOriginalTitle }; renameDraft = lastRenameTitle" />
 
   <ModalDialog
@@ -134,11 +144,17 @@
     subscribe="{window.bramSubscribeTauriEvent('sessions-list-changed')}" />
   <ChangeListener
     listenTo="{sessionsListChangedEvt.value &amp;&amp; sessionsListChangedEvt.value.tick}"
-    onDidChange="() => { sessionsMeta.refetch(); sessionsFirstPage.refetch(); if (sessionsExpanded) sessionsFull.refetch(); }" />
+    onDidChange="() => { sessionsMeta.refetch(); sessionsFirstPage.refetch(); if (sessionsExpanded || searchNeedle) sessionsFull.refetch(); }" />
 
   <VStack padding="$space-4" gap="$space-3" overflowY="auto" height="100%">
     <HStack gap="$space-3" verticalAlignment="center">
       <Heading level="h2">Sessions</Heading>
+      <SearchBox
+        boxWidth="22rem"
+        placeholder="Filter sessions…"
+        inProgress="{searchNeedle &amp;&amp; sessionsFull.inProgress}"
+        onQueryChange="(q) => searchQuery = q"
+        onClear="searchQuery = ''; expandedId = null" />
       <Button
         label="+ New session"
         variant="solid"
@@ -173,7 +189,7 @@
         <Text width="140px" fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary" value="MODIFIED" />
         <Text width="70px" fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary" value="SIZE" />
       </HStack>
-      <Items data="{sessionsSource}">
+      <Items data="{filteredSessions}">
         <VStack gap="0" borderBottom="1px solid $borderColor">
           <HStack
             gap="$space-2"
@@ -215,12 +231,13 @@
             <Text width="70px" fontSize="$fontSize-sm" value="{Math.round($item.size / 1024) + ' KB'}" />
           </HStack>
           <VStack when="{expandedId === $item.id}" paddingBottom="$space-2">
-            <SessionDetail sessionId="{$item.id}" provider="{$item.provider}" height="600px" />
+            <SessionDetail sessionId="{$item.id}" provider="{$item.provider}"
+              height="600px" query="{searchQuery.trim()}" />
           </VStack>
         </VStack>
       </Items>
       <Link
-        when="{!sessionsExpanded &amp;&amp; sessionsMeta.value &amp;&amp; sessionsMeta.value.count > 20}"
+        when="{!searchNeedle &amp;&amp; !sessionsExpanded &amp;&amp; sessionsMeta.value &amp;&amp; sessionsMeta.value.count > 20}"
         onClick="sessionsExpanded = true"
         noIndicator="true">
         <Text
@@ -231,7 +248,7 @@
           value="More ({sessionsMeta.value.count - 20} more)" />
       </Link>
       <Link
-        when="{sessionsExpanded &amp;&amp; sessionsSource.length > 20}"
+        when="{!searchNeedle &amp;&amp; sessionsExpanded &amp;&amp; sessionsSource.length > 20}"
         onClick="sessionsExpanded = false"
         noIndicator="true">
         <Text
@@ -241,6 +258,8 @@
           color="$textColor-secondary"
           value="Show fewer" />
       </Link>
+      <Text when="{searchNeedle &amp;&amp; !sessionsFull.inProgress &amp;&amp; filteredSessions.length === 0}"
+        color="$textColor-secondary" fontSize="$fontSize-sm" value="No matching sessions." />
     </VStack>
   </VStack>
 </Component>

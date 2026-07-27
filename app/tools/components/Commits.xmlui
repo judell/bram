@@ -2,14 +2,28 @@
   name="Commits"
   var.selectedSha="{null}"
   var.commitsExpanded="{false}"
+  var.searchQuery=""
   var.pullError="{null}"
   var.pushError="{null}">
 
-  <!-- issue-230: Commits is a browse list with an inline-expander (shared
-       CommitDetail). Search lives on the unified Search page. -->
+  <!-- Browse list with a local metadata filter and inline CommitDetail.
+       Unified Search remains the cross-bucket/full-text path. -->
   <DataSource id="commits" url="/__commits" />
   <DataSource id="gitStatus" url="/__git/status" />
-
+  <variable name="searchNeedle" value="{searchQuery.trim().toLowerCase()}" />
+  <variable name="filteredCommits" value="{
+    searchNeedle
+      ? (commits.value || []).filter(c => [
+          c.sha || '',
+          (c.commit &amp;&amp; c.commit.message) || '',
+          (c.commit &amp;&amp; c.commit.author &amp;&amp; c.commit.author.login) || '',
+          (c.commit &amp;&amp; c.commit.author &amp;&amp; c.commit.author.name) || '',
+          (c.commit &amp;&amp; c.commit.author &amp;&amp; c.commit.author.email) || ''
+        ].join(' ').toLowerCase().includes(searchNeedle))
+      : (commits.value || [])
+  }" />
+  <variable name="visibleCommits"
+    value="{filteredCommits.slice(0, searchNeedle ? 999 : (commitsExpanded ? 999 : 20))}" />
   <APICall
     id="pullRebase"
     method="post"
@@ -31,6 +45,12 @@
   <VStack padding="$space-4" gap="$space-4" overflowY="auto" height="100%">
     <HStack gap="$space-3" verticalAlignment="center">
       <Heading level="h2">Commits</Heading>
+      <SearchBox
+        boxWidth="22rem"
+        placeholder="Filter commits…"
+        inProgress="{commits.inProgress}"
+        onQueryChange="(q) => searchQuery = q"
+        onClear="searchQuery = ''; selectedSha = null" />
       <Text
         when="{gitStatus.value &amp;&amp; gitStatus.value.branch}"
         maxWidth="260px"
@@ -61,7 +81,7 @@
     </HStack>
 
     <VStack gap="$space-1" when="{commits.value &amp;&amp; commits.value.length > 0}">
-      <Items data="{(commits.value || []).slice(0, commitsExpanded ? 999 : 20)}">
+      <Items data="{visibleCommits}">
         <VStack gap="0" borderBottom="1px solid $borderColor">
           <Link
             onClick="selectedSha = (selectedSha === $item.sha) ? null : $item.sha"
@@ -87,17 +107,20 @@
             </HStack>
           </Link>
           <VStack when="{selectedSha === $item.sha}" paddingBottom="$space-2">
-            <CommitDetail sha="{$item.sha}" url="{$item.pushed ? $item.html_url : ''}" />
+            <CommitDetail sha="{$item.sha}" url="{$item.pushed ? $item.html_url : ''}"
+              query="{searchQuery.trim()}" />
           </VStack>
         </VStack>
       </Items>
       <Link
-        when="{commits.value &amp;&amp; commits.value.length > 20}"
+        when="{!searchNeedle &amp;&amp; commits.value &amp;&amp; commits.value.length > 20}"
         onClick="commitsExpanded = !commitsExpanded"
         noIndicator="true">
         <Text fontSize="$fontSize-xs" color="$textColor-secondary"
           value="{commitsExpanded ? 'Show fewer' : 'More (' + (commits.value.length - 20) + ' more)'}" />
       </Link>
+      <Text when="{searchNeedle &amp;&amp; filteredCommits.length === 0}"
+        color="$textColor-secondary" fontSize="$fontSize-sm" value="No matching commits." />
     </VStack>
   </VStack>
 </Component>

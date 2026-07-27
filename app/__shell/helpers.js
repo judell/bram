@@ -6216,6 +6216,17 @@ window.__bramRestoreSendNoticeDismissed = function () {
   return __bramReadLS("bram.sendNoticeDismissed", "");
 };
 
+// Banner dismissed-version restores (banner-dismissed-flash-on-load): read
+// synchronously in the App var default so the dismissed version is known on the
+// very first render — no async gap where the banner flashes before onInit's
+// read lands. Mirrors __bramRestoreSendNoticeDismissed.
+window.__bramRestoreToolDescBannerDismissed = function () {
+  return __bramReadLS("bram.toolDescBannerDismissedVersion", "");
+};
+window.__bramRestoreUpdateBannerDismissed = function () {
+  return __bramReadLS("bram.updateBannerDismissedVersion", "");
+};
+
 window.__bramSendLedgerNotice = function (payload, dismissedKey) {
   var entries = (payload && payload.entries) || [];
   var nowMs = (payload && payload.nowMs) || Date.now();

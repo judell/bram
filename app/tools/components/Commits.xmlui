@@ -20,10 +20,10 @@
   <PushSource
     id="gitStatusEvt"
     initial="{null}"
-    subscribe="{window.bramSubscribeTauriEvent('git-status-changed')}" />
+    subscribe="{window.bramSubscribeTauriEvent('git-status-changed', false)}" />
   <ChangeListener
     listenTo="{gitStatusEvt.value &amp;&amp; gitStatusEvt.value.tick}"
-    onDidChange="() => { commits.refetch(); gitStatus.refetch(); }" />
+    onDidChange="window.__bramRefetchOnLiveEvent(gitStatusEvt.value, commits, gitStatus)" />
   <ChangeListener
     listenTo="{gitStatus.value &amp;&amp; gitStatus.value.branch}"
     onDidChange="() => { selectedSha = null; commitsExpanded = false; }" />

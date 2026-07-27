@@ -3722,7 +3722,7 @@ function __notifyStartupReadyForEvent(eventName) {
     .then(function () {})
     .catch(function () {});
 }
-window.subscribeTauriEvent = function (key, eventName, fn) {
+window.subscribeTauriEvent = function (key, eventName, fn, replayOnReady) {
   if (typeof window[key] === "function") {
     try { window[key](); } catch (e) {}
   }
@@ -3742,7 +3742,9 @@ window.subscribeTauriEvent = function (key, eventName, fn) {
   Promise.resolve(listenReady).then(function (ready) {
     if (!ready) return;
     var subs = __tauriEventSubscribers[eventName] || [];
-    if (subs.indexOf(fn) >= 0) __notifyStartupReadyForEvent(eventName);
+    if (replayOnReady !== false && subs.indexOf(fn) >= 0) {
+      __notifyStartupReadyForEvent(eventName);
+    }
   });
   return window[key];
 };
@@ -4586,13 +4588,15 @@ window.bramSubscribeTalkSessionChange = (function () {
 // payload carries the event data for consumers that need it.
 window.bramSubscribeTauriEvent = (function () {
   var byEvent = Object.create(null);
-  return function (eventName) {
-    if (byEvent[eventName]) return byEvent[eventName];
+  return function (eventName, replayLatestEvent) {
+    var shouldReplayLatest = replayLatestEvent !== false;
+    var cacheKey = eventName + (shouldReplayLatest ? "::replay" : "::live");
+    if (byEvent[cacheKey]) return byEvent[cacheKey];
     var subscribers = new Set();
     var tick = 0;
     var lastPayload = null;
     window.subscribeTauriEvent(
-      "__bramTauriExternal_" + eventName,
+      "__bramTauriExternal_" + eventName + (shouldReplayLatest ? "_replay" : "_live"),
       eventName,
       function (e) {
         tick += 1;
@@ -4603,7 +4607,8 @@ window.bramSubscribeTauriEvent = (function () {
             console.error("[bramSubscribeTauriEvent] subscriber threw:", err);
           }
         });
-      }
+      },
+      shouldReplayLatest
     );
     var replayLatest = function () {
       if (typeof window.fetch !== "function") return;
@@ -4627,14 +4632,26 @@ window.bramSubscribeTauriEvent = (function () {
         emit(snapshot || { tick: tick, payload: lastPayload });
       };
       subscribers.add(fire);
-      fire();
-      replayLatest();
+      if (shouldReplayLatest) fire();
+      if (shouldReplayLatest) replayLatest();
       return function () { subscribers.delete(fire); };
     };
-    byEvent[eventName] = factory;
+    byEvent[cacheKey] = factory;
     return factory;
   };
 })();
+
+// A live-only PushSource still causes ChangeListener to evaluate its initial
+// null state as tick 0. Treat only a real host event (positive tick, not a
+// replay snapshot) as invalidation, then refetch each supplied DataSource.
+window.__bramRefetchOnLiveEvent = function (eventValue) {
+  if (!eventValue || !eventValue.tick || eventValue.replayed) return false;
+  for (var i = 1; i < arguments.length; i++) {
+    var source = arguments[i];
+    if (source && typeof source.refetch === "function") source.refetch();
+  }
+  return true;
+};
 
 // External-driven AgentMenu bridge — emits the current pending menu
 // when either Tauri event fires. Subscribes lazily on first call so

@@ -1,21 +1,23 @@
 <Component name="CommitDetail">
   <!-- issue-230 shared detail: full commit message, external forge link pinned
-       at the top. Props: sha (for /__commit), url (the html_url), height.
+       at the top. Props: sha (for /__commit), url (the html_url), height,
+       query (optional initial/current find term).
        search-in-view-transplant: in-view find over the commit message. Same
        structure as SessionDetail — the find toolbar sits ABOVE a List (the only
        reliably bounded scroller in XMLUI; a VStack maxHeight does not clip), so
        the controls stay in view while the body scrolls. Diffs are not searched. -->
   <DataSource id="commit" url="/__commit" queryParams="{{ sha: $props.sha }}" when="{!!$props.sha}" />
   <VStack gap="$space-2" padding="$space-2"
-    var.findText=""
-    var.appliedNeedle=""
+    var.findText="{$props.query || ''}"
+    var.appliedNeedle="{$props.query || ''}"
     var.cursor="{0}"
     var.counts="{{ counts: [], total: 0 }}"
     var.oneRow="{[{ needle: '', counts: [], cursor: 0 }]}">
 
     <!-- Fixed find toolbar (sibling above the List). -->
     <HStack when="{commit.value &amp;&amp; commit.value.message}" gap="$space-2" verticalAlignment="center">
-      <TextBox width="16rem" placeholder="Find in commit…"
+      <TextBox id="findBox" width="16rem" placeholder="Find in commit…"
+        initialValue="{$props.query || ''}"
         autoComplete="off" autoCorrect="{false}" spellCheck="{false}" autoCapitalize="off"
         onDidChange="(v) => findText = v" />
       <Button size="xs" variant="outlined" label="▲" enabled="{counts.total > 0}"
@@ -26,6 +28,10 @@
         when="{appliedNeedle &amp;&amp; appliedNeedle.trim().length >= 2}"
         value="{counts.total ? ((cursor + 1) + ' / ' + counts.total + ' matches') : 'No matches'}" />
     </HStack>
+    <ChangeListener listenTo="{$props.query || ''}"
+      onDidChange="() => findText = ($props.query || '')" />
+    <ChangeListener listenTo="{$props.query || ''}"
+      onDidChange="() => findBox ? findBox.setValue($props.query || '') : null" />
     <ChangeListener listenTo="{findText}" debounceWaitInMs="200"
       onDidChange="() => appliedNeedle = findText" />
     <ChangeListener listenTo="{findText}" debounceWaitInMs="200"

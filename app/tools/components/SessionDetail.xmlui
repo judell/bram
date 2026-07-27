@@ -40,6 +40,7 @@
          Search.xmlui. -->
     <HStack when="{turns.value}" gap="$space-2" verticalAlignment="center">
       <TextBox
+        id="findBox"
         width="16rem"
         placeholder="Find in transcript…"
         initialValue="{$props.query || ''}"
@@ -60,6 +61,14 @@
         when="{appliedNeedle &amp;&amp; appliedNeedle.trim().length >= 2}"
         value="{matchIndices.length ? ((currentMatch + 1) + ' / ' + matchIndices.length + ' matches') : 'No matches'}" />
     </HStack>
+    <!-- `initialValue` covers the first mount; these listeners also carry a
+         later outer Search query into a still-mounted first result. TextBox's
+         documented setValue API updates the visible control, while the direct
+         assignment keeps matching independent of event-order details. -->
+    <ChangeListener listenTo="{$props.query || ''}"
+      onDidChange="() => findText = ($props.query || '')" />
+    <ChangeListener listenTo="{$props.query || ''}"
+      onDidChange="() => findBox ? findBox.setValue($props.query || '') : null" />
     <ChangeListener
       listenTo="{findText + '|' + projectedTurns.length}"
       debounceWaitInMs="200"

@@ -1,20 +1,21 @@
 <Component name="HistoryDetail">
   <!-- issue-230: the worklist-history detail block. Takes a WorklistHistoryGroup
-       as `group`; optional `height`.
+       as `group`; optional `height` and `query` (initial/current find term).
        search-in-view-transplant: in-view find across before / after /
        feedback-phase Markdown blocks. Same structure as SessionDetail — the find
        toolbar sits ABOVE a List (the only reliably bounded scroller), so the
        controls stay in view. Block 0 = before, 1 = after, then feedback phases. -->
   <VStack gap="$space-2" padding="$space-2" var.g="{$props.group}"
-    var.findText=""
-    var.appliedNeedle=""
+    var.findText="{$props.query || ''}"
+    var.appliedNeedle="{$props.query || ''}"
     var.cursor="{0}"
-    var.counts="{{ counts: [], total: 0 }}"
+    var.counts="{window.__bramBlockMatchCounts(window.__bramHistoryBlocks($props.group), $props.query || '')}"
     var.oneRow="{[{ needle: '', counts: [], cursor: 0 }]}">
 
     <!-- Fixed find toolbar (sibling above the List). -->
     <HStack gap="$space-2" verticalAlignment="center">
-      <TextBox width="16rem" placeholder="Find in history entry…"
+      <TextBox id="findBox" width="16rem" placeholder="Find in history entry…"
+        initialValue="{$props.query || ''}"
         autoComplete="off" autoCorrect="{false}" spellCheck="{false}" autoCapitalize="off"
         onDidChange="(v) => findText = v" />
       <Button size="xs" variant="outlined" label="▲" enabled="{counts.total > 0}"
@@ -25,22 +26,23 @@
         when="{appliedNeedle &amp;&amp; appliedNeedle.trim().length >= 2}"
         value="{counts.total ? ((cursor + 1) + ' / ' + counts.total + ' matches') : 'No matches'}" />
     </HStack>
+    <ChangeListener listenTo="{$props.query || ''}"
+      onDidChange="() => findText = ($props.query || '')" />
+    <ChangeListener listenTo="{$props.query || ''}"
+      onDidChange="() => findBox ? findBox.setValue($props.query || '') : null" />
     <ChangeListener listenTo="{findText}" debounceWaitInMs="200"
       onDidChange="() => appliedNeedle = findText" />
     <ChangeListener listenTo="{findText}" debounceWaitInMs="200"
       onDidChange="() => cursor = 0" />
     <ChangeListener listenTo="{appliedNeedle + '|' + (g &amp;&amp; g.phases ? g.phases.length : 0)}"
       onDidChange="() => counts = window.__bramBlockMatchCounts(window.__bramHistoryBlocks(g), appliedNeedle)" />
-    <!-- The List row template is a separate scope that can't see the outer
-         vars (appliedNeedle/counts/cursor). Thread the search state through
-         the List's data so the row reads it via $item; rebuild only when the
-         search changes (not every render), so the RO-flood fix still holds. -->
-    <ChangeListener listenTo="{appliedNeedle + '|' + cursor + '|' + counts.total}"
-      onDidChange="() => oneRow = [{ needle: appliedNeedle, counts: counts.counts, cursor: cursor }]" />
-
-    <!-- Bounded scroller = a single-row List (mirrors SessionDetail). Search
-         state arrives via $item (see the oneRow ChangeListener above). -->
-    <List data="{oneRow}" height="{$props.height || '400px'}">
+    <!-- Bounded scroller = a plain VStack with a firm height + overflowY:auto.
+         Ordinary CSS overflow caps regardless of ancestors, unlike xmlui List,
+         which defers its scroll to any scrolling ancestor (the page) and so
+         never bounds here (ListReact hasOutsideScroll). The toolbar is a sibling
+         ABOVE this, so it stays put while the body scrolls. Markdown sits at
+         component scope, reading appliedNeedle reactively (no List-row $item). -->
+    <VStack height="{$props.height || '400px'}" overflowY="auto">
       <VStack gap="$space-4">
         <VStack gap="$space-1">
           <Text
@@ -76,15 +78,15 @@
         <VStack gap="$space-2" when="{window.__bramHistoryItemFieldMarkdown(g, 'before')}">
           <Text value="Before" fontWeight="$fontWeight-bold" />
           <Markdown content="{window.__bramHistoryItemFieldMarkdown(g, 'before')}"
-            highlightText="{$item.needle}"
-            highlightActiveIndex="{window.__bramActiveOccForBlock($item.counts, $item.cursor, 0)}" />
+            highlightText="{appliedNeedle}"
+            highlightActiveIndex="{window.__bramActiveOccForBlock(counts.counts, cursor, 0)}" />
         </VStack>
 
         <VStack gap="$space-2" when="{window.__bramHistoryItemFieldMarkdown(g, 'after')}">
           <Text value="After" fontWeight="$fontWeight-bold" />
           <Markdown content="{window.__bramHistoryItemFieldMarkdown(g, 'after')}"
-            highlightText="{$item.needle}"
-            highlightActiveIndex="{window.__bramActiveOccForBlock($item.counts, $item.cursor, 1)}" />
+            highlightText="{appliedNeedle}"
+            highlightActiveIndex="{window.__bramActiveOccForBlock(counts.counts, cursor, 1)}" />
         </VStack>
 
         <VStack gap="$space-2" when="{window.__bramWorklistItemFiles(g).length > 0}">
@@ -110,17 +112,17 @@
 
         <VStack gap="$space-2">
           <Text value="Phases" fontWeight="$fontWeight-bold" />
-          <Items data="{window.__bramWithSearch(g.phases || [], $item.needle, $item.counts, $item.cursor)}">
+          <Items data="{g.phases || []}">
             <VStack gap="$space-1" paddingVertical="$space-1" borderTop="1px solid $borderColor">
               <Text value="{window.__bramHistoryPhaseLabel($item) + ' · ' + (($item.iso || '').slice(0, 16))}" fontSize="$fontSize-sm" />
               <Markdown when="{$item.kind === 'feedback'}" content="{$item.body}"
-                highlightText="{$item.__needle}"
-                highlightActiveIndex="{window.__bramActiveOccForBlock($item.__counts, $item.__cursor, window.__bramHistoryPhaseBlockIndex(g, $itemIndex))}" />
+                highlightText="{appliedNeedle}"
+                highlightActiveIndex="{window.__bramActiveOccForBlock(counts.counts, cursor, window.__bramHistoryPhaseBlockIndex(g, $itemIndex))}" />
               <Text when="{$item.kind !== 'feedback'}" value="{$item.summary}" color="$textColor-secondary" fontSize="$fontSize-xs" />
             </VStack>
           </Items>
         </VStack>
       </VStack>
-    </List>
+    </VStack>
   </VStack>
 </Component>

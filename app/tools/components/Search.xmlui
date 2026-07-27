@@ -61,6 +61,22 @@
       .slice(0, 100)
   }" />
 
+  <!-- Open the relevance winner only after all four facet requests for the
+       current query settle. During a refetch this key falls back to empty,
+       which collapses the stale result; when the new values land it changes
+       once to the trimmed query and opens displayed[0]. Manual row toggles do
+       not change this key, so they are not immediately undone. -->
+  <variable name="settledQuery" value="{
+    ready
+      &amp;&amp; rSession.loaded &amp;&amp; rCommit.loaded &amp;&amp; rIssue.loaded &amp;&amp; rHistory.loaded
+      &amp;&amp; !rSession.inProgress &amp;&amp; !rCommit.inProgress &amp;&amp; !rIssue.inProgress &amp;&amp; !rHistory.inProgress
+      ? query.trim()
+      : ''
+  }" />
+  <ChangeListener listenTo="{settledQuery}"
+    debounceWaitInMs="1"
+    onDidChange="() => expandedHit = settledQuery &amp;&amp; displayed.length ? displayed[0] : null" />
+
   <!-- History detail rides on the hit itself: /__search returns the full
        WorklistHistoryGroup in `extra` (indexed once), so the expander renders it
        directly — no recency-limited re-fetch that missed older items. -->
@@ -155,16 +171,20 @@
           <VStack when="{expandedHit &amp;&amp; expandedHit.key === $item.key}"
             gap="$space-2" paddingLeft="7rem" paddingTop="$space-1">
             <VStack when="{$item.type === 'session'}">
-              <SessionDetail sessionId="{$item.id}" provider="{$item.provider || 'claude'}" />
+              <SessionDetail sessionId="{$item.id}" provider="{$item.provider || 'claude'}"
+                query="{query.trim()}" />
             </VStack>
             <VStack when="{$item.type === 'commit'}">
-              <CommitDetail sha="{($item.key || '').split(':')[1]}" url="{$item.link}" />
+              <CommitDetail sha="{($item.key || '').split(':')[1]}" url="{$item.link}"
+                query="{query.trim()}" />
             </VStack>
             <VStack when="{$item.type === 'issue'}">
-              <IssueDetail number="{($item.key || '').split(':')[1]}" />
+              <IssueDetail number="{($item.key || '').split(':')[1]}"
+                query="{query.trim()}" />
             </VStack>
             <VStack when="{$item.type === 'worklist-history'}">
-              <HistoryDetail when="{historyGroup}" group="{historyGroup}" />
+              <HistoryDetail when="{historyGroup}" group="{historyGroup}"
+                query="{query.trim()}" />
             </VStack>
           </VStack>
         </VStack>

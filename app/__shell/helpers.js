@@ -5922,6 +5922,37 @@ window.__bramHistoryPhaseBlockIndex = function (g, phaseItemIndex) {
   return 2 + n;
 };
 
+// A List/Items row template is an isolated binding scope — it can read $item
+// but NOT the enclosing component's reassigned var.* (appliedNeedle/counts/
+// cursor). So the search state must ride in the row's data and be read via
+// $item. These decorators fold it in; callers rebuild only when the search
+// changes (not every render), so the RO-flood fix stays intact. See the
+// feedback_xmlui_list_row_scope_isolated learning.
+
+// Decorate an arbitrary nested-loop array (issue comments, history phases)
+// with the current search state under __-prefixed keys, preserving each
+// item's own fields via a shallow copy.
+window.__bramWithSearch = function (arr, needle, counts, cursor) {
+  var a = Array.isArray(arr) ? arr : [];
+  var n = needle || "", c = counts || [], k = (typeof cursor === "number" ? cursor : 0);
+  return a.map(function (x) {
+    return Object.assign({}, x, { __needle: n, __counts: c, __cursor: k });
+  });
+};
+
+// Decorate SessionDetail's projected turns with the needle (paints every
+// match in each turn) and an __active flag on the turn holding the cursor's
+// match (emphasized + centered). activeIdx is matchIndices[currentMatch].
+window.__bramSessionSearchRows = function (turns, needle, matchIndices, currentMatch) {
+  var arr = Array.isArray(turns) ? turns : [];
+  var n = needle || "";
+  var mi = Array.isArray(matchIndices) ? matchIndices : [];
+  var activeIdx = mi.length ? mi[Number(currentMatch) || 0] : -1;
+  return arr.map(function (t, i) {
+    return Object.assign({}, t, { __needle: n, __active: i === activeIdx });
+  });
+};
+
 window.__bramProjectedLastExchange = function (payload) {
   var turns = (payload && payload.turns) || [];
   var lastUser = null;

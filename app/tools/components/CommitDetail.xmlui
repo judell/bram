@@ -11,7 +11,7 @@
     var.appliedNeedle=""
     var.cursor="{0}"
     var.counts="{{ counts: [], total: 0 }}"
-    var.oneRow="{[{}]}">
+    var.oneRow="{[{ needle: '', counts: [], cursor: 0 }]}">
 
     <!-- Fixed find toolbar (sibling above the List). -->
     <HStack when="{commit.value &amp;&amp; commit.value.message}" gap="$space-2" verticalAlignment="center">
@@ -32,18 +32,28 @@
       onDidChange="() => cursor = 0" />
     <ChangeListener listenTo="{appliedNeedle + '|' + (commit.value ? commit.value.sha : '')}"
       onDidChange="() => counts = window.__bramBlockMatchCounts(window.__bramCommitBlocks(commit.value), appliedNeedle)" />
+    <!-- The List row can't see the outer search vars; thread them through the
+         row data and read via $item. Rebuild only when the search changes. -->
+    <ChangeListener listenTo="{appliedNeedle + '|' + cursor + '|' + counts.total}"
+      onDidChange="() => oneRow = [{ needle: appliedNeedle, counts: counts.counts, cursor: cursor }]" />
 
-    <!-- Bounded scroller = a single-row List (mirrors SessionDetail). -->
-    <List data="{oneRow}" height="{$props.height || '400px'}">
+    <!-- Loading indicator is a component-scope sibling: the List row is a
+         frozen scope that never sees the DataSource land after mount (first
+         click stuck "Loading…", second click instant on cache), so gate the
+         List on commit.value the way SessionDetail gates on turns.value. -->
+    <Text when="{commit.inProgress &amp;&amp; !commit.loaded}" color="$textColor-secondary" value="Loading…" />
+
+    <!-- Bounded scroller = a single-row List (mirrors SessionDetail). Mounts
+         only once commit.value is present; search state arrives via $item. -->
+    <List when="{commit.value}" data="{oneRow}" height="{$props.height || '400px'}">
       <VStack gap="$space-3">
         <Link when="{$props.url}" noIndicator onClick="openExternal($props.url)">
           <Text fontWeight="$fontWeight-bold"
             value="{'Open commit on ' + (($props.url || '').includes('gitlab') ? 'GitLab' : 'GitHub') + ' ↗'}" />
         </Link>
-        <Text when="{commit.inProgress &amp;&amp; !commit.loaded}" color="$textColor-secondary" value="Loading…" />
         <Markdown when="{commit.value &amp;&amp; commit.value.message}" content="{commit.value.message}"
-          highlightText="{appliedNeedle}"
-          highlightActiveIndex="{window.__bramActiveOccForBlock(counts.counts, cursor, 0)}" />
+          highlightText="{$item.needle}"
+          highlightActiveIndex="{window.__bramActiveOccForBlock($item.counts, $item.cursor, 0)}" />
         <Text when="{commit.value &amp;&amp; commit.value.stats}" fontSize="$fontSize-sm" color="$textColor-secondary"
           value="+{commit.value.stats.additions} / -{commit.value.stats.deletions} across {commit.value.files.length} file(s)" />
         <Items when="{commit.value &amp;&amp; commit.value.files}" data="{commit.value.files}">

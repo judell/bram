@@ -12,7 +12,7 @@
     var.appliedNeedle=""
     var.cursor="{0}"
     var.counts="{{ counts: [], total: 0 }}"
-    var.oneRow="{[{}]}">
+    var.oneRow="{[{ needle: '', counts: [], cursor: 0 }]}">
 
     <!-- Fixed find toolbar (sibling above the List). -->
     <HStack when="{issue.value}" gap="$space-2" verticalAlignment="center">
@@ -33,9 +33,20 @@
       onDidChange="() => cursor = 0" />
     <ChangeListener listenTo="{appliedNeedle + '|' + (issue.value ? issue.value.number : '')}"
       onDidChange="() => counts = window.__bramBlockMatchCounts(window.__bramIssueBlocks(issue.value), appliedNeedle)" />
+    <!-- The List row can't see the outer search vars; thread them through the
+         row data and read via $item. Rebuild only when the search changes. -->
+    <ChangeListener listenTo="{appliedNeedle + '|' + cursor + '|' + counts.total}"
+      onDidChange="() => oneRow = [{ needle: appliedNeedle, counts: counts.counts, cursor: cursor }]" />
 
-    <!-- Bounded scroller = a single-row List (mirrors SessionDetail). -->
-    <List data="{oneRow}" height="{$props.height || '400px'}">
+    <!-- Loading indicator is a component-scope sibling: the List row is a
+         frozen scope that never sees the DataSource land after mount (first
+         click stuck "Loading…", second click instant on cache), so gate the
+         List on issue.value the way SessionDetail gates on turns.value. -->
+    <Text when="{issue.inProgress &amp;&amp; !issue.loaded}" color="$textColor-secondary" value="Loading…" />
+
+    <!-- Bounded scroller = a single-row List (mirrors SessionDetail). Mounts
+         only once issue.value is present; search state arrives via $item. -->
+    <List when="{issue.value}" data="{oneRow}" height="{$props.height || '400px'}">
       <VStack gap="$space-3">
         <Link when="{issue.value &amp;&amp; issue.value.url}" noIndicator onClick="openExternal(issue.value.url)">
           <Text fontWeight="$fontWeight-bold"
@@ -46,18 +57,17 @@
           value="{(issue.value.state === 'OPEN' ? 'open' : 'closed') + ' · #' + issue.value.number + ' ' + issue.value.title}" />
         <Text when="{issue.value &amp;&amp; issue.value.author}" fontSize="$fontSize-sm" color="$textColor-secondary"
           value="{((issue.value.author.login || issue.value.author.name) || 'unknown') + ' opened ' + getDateUntilNow(issue.value.createdAt) + ' ago'}" />
-        <Text when="{issue.inProgress &amp;&amp; !issue.loaded}" color="$textColor-secondary" value="Loading…" />
         <Markdown when="{issue.value &amp;&amp; issue.value.body}" content="{issue.value.body}"
-          highlightText="{appliedNeedle}"
-          highlightActiveIndex="{window.__bramActiveOccForBlock(counts.counts, cursor, 0)}" />
+          highlightText="{$item.needle}"
+          highlightActiveIndex="{window.__bramActiveOccForBlock($item.counts, $item.cursor, 0)}" />
         <VStack when="{issue.value &amp;&amp; issue.value.comments &amp;&amp; issue.value.comments.length > 0}" gap="$space-3">
-          <Items data="{issue.value.comments}">
+          <Items data="{window.__bramWithSearch(issue.value.comments, $item.needle, $item.counts, $item.cursor)}">
             <VStack gap="$space-1" paddingTop="$space-2" borderTop="1px solid $borderColor">
               <Text fontSize="$fontSize-xs" color="$textColor-secondary"
                 value="{(($item.author &amp;&amp; ($item.author.login || $item.author.name)) || 'unknown')}" />
               <Markdown content="{$item.body}"
-                highlightText="{appliedNeedle}"
-                highlightActiveIndex="{window.__bramActiveOccForBlock(counts.counts, cursor, 1 + $itemIndex)}" />
+                highlightText="{$item.__needle}"
+                highlightActiveIndex="{window.__bramActiveOccForBlock($item.__counts, $item.__cursor, 1 + $itemIndex)}" />
             </VStack>
           </Items>
         </VStack>

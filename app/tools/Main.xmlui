@@ -488,7 +488,12 @@
       onClick="setupCompleteProvider = ''" />
   </HStack>
 
-  <Theme paddingVertical-Pages="0" paddingVertical-content-App="0">
+  <!-- Explicit warn-scale highlight colors for the Markdown find <mark>
+       (active match a shade darker), set app-side so the color is guaranteed
+       regardless of the bundle's defaultThemeVars emission. -->
+  <Theme paddingVertical-Pages="0" paddingVertical-content-App="0"
+    backgroundColor-mark-markdown="$color-warn-200"
+    backgroundColor-markActive-markdown="$color-warn-400">
     <Pages fallbackPath="/worklist">
       <Page url="/"><Workspace activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}" /></Page>
       <Page url="/worklist"><Workspace activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}" /></Page>

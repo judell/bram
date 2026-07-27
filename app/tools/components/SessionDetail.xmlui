@@ -27,7 +27,8 @@
     var.findText="{$props.query || ''}"
     var.appliedNeedle="{$props.query || ''}"
     var.matchIndices="{[]}"
-    var.currentMatch="{0}">
+    var.currentMatch="{0}"
+    var.rows="{[]}">
     <Text when="{turns.inProgress &amp;&amp; !turns.loaded}" color="$textColor-secondary" value="Loading…" />
 
     <!-- Find-in-view toolbar. Two debounced ChangeListeners (not one block:
@@ -74,6 +75,13 @@
       listenTo="{findText + '|' + projectedTurns.length}"
       debounceWaitInMs="200"
       onDidChange="() => appliedNeedle = findText" />
+    <!-- The List row can't see appliedNeedle/matchIndices/currentMatch (outer
+         vars are frozen in the row scope), so thread the search state through
+         the row data and read it via $item. Rebuild when the needle, cursor,
+         or turn count changes — not every render — so the RO-flood fix holds. -->
+    <ChangeListener
+      listenTo="{appliedNeedle + '|' + currentMatch + '|' + projectedTurns.length}"
+      onDidChange="() => rows = window.__bramSessionSearchRows(projectedTurns, appliedNeedle, matchIndices, currentMatch)" />
     <ChangeListener
       listenTo="{currentMatch}"
       onDidChange="() => matchIndices.length ? detailList.scrollToIndex(matchIndices[currentMatch]) : null" />
@@ -88,7 +96,7 @@
          big transcript no longer mounts thousands of Markdown blocks at once.
          Needs a bounded height; 400px fits inside Search's expander wrapper.
          `id` lets the find toolbar drive scrollToIndex. -->
-    <List id="detailList" when="{turns.value}" data="{projectedTurns}" height="{$props.height || '400px'}">
+    <List id="detailList" when="{turns.value}" data="{rows}" height="{$props.height || '400px'}">
       <VStack gap="$space-0_5" borderTop="1px solid $borderColor" paddingVertical="$space-1">
         <Text fontSize="$fontSize-xs" fontWeight="$fontWeight-bold"
           color="{$item.role === 'user' ? '$color-info-700' : '$color-success-700'}"
@@ -97,8 +105,8 @@
              turn (debounced needle); highlightActive emphasizes + centers the
              match on the active turn. -->
         <Markdown content="{$item.text}"
-          highlightText="{appliedNeedle}"
-          highlightActive="{matchIndices[currentMatch] === $itemIndex}" />
+          highlightText="{$item.__needle}"
+          highlightActive="{$item.__active}" />
         <VStack gap="$space-2" when="{$item.images &amp;&amp; $item.images.length > 0}">
           <Items data="{$item.images}">
             <Image src="{window.imageSrcForPath($item)}" maxHeight="200px" fit="contain" />

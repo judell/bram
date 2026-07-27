@@ -15640,23 +15640,23 @@ where
 }
 
 /// Background indexer: an initial pass shortly after startup, then a periodic
-/// incremental rescan (poll by change token). Sessions + commits run every
-/// pass (cheap: file mtimes / `git log`); issues run every 6th pass (~4.5 min)
-/// because they go through `gh` (network + rate limits). Watcher-driven
-/// refresh is a later refinement.
+/// incremental rescan (poll by change token) every 45s. Sessions + commits are
+/// cheap (file mtimes / `git log`). Issues run every pass too: the pass is
+/// itself incremental — a cheap `gh` `number,updatedAt` probe, with the
+/// full-detail fetch only for changed/new issues — so a freshly created issue
+/// becomes searchable within one pass (~45s) at roughly one lightweight `gh`
+/// call per pass, far under the authenticated rate limit. (Previously gated to
+/// every 6th pass out of an overcautious rate-limit worry; the incremental
+/// probe makes per-pass safe. See search-index-issues-every-pass.)
 fn start_search_indexer<R: tauri::Runtime>(app: AppHandle<R>) {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(2));
-        let mut iter: u64 = 0;
         loop {
             run_and_trace_session_index_pass(&app, "claude", run_search_index_pass);
             run_and_trace_session_index_pass(&app, "codex", run_codex_search_index_pass);
             run_and_trace_index_pass(&app, "commits", run_commit_index_pass);
             run_and_trace_index_pass(&app, "worklist-history", run_history_index_pass);
-            if iter % 6 == 0 {
-                run_and_trace_index_pass(&app, "issues", run_issue_index_pass);
-            }
-            iter = iter.wrapping_add(1);
+            run_and_trace_index_pass(&app, "issues", run_issue_index_pass);
             std::thread::sleep(std::time::Duration::from_secs(45));
         }
     });

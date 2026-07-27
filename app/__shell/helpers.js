@@ -6670,14 +6670,14 @@ window.__bramQueueSetTargetItem = function (entries, idx, targetItemId) {
 window.__bramQueueAdd = function (entries) {
   var next = (entries || []).slice();
   var now = Date.now();
-  next.push({
+  next.unshift({
     id: "q-" + now + "-" + Math.floor(Math.random() * 1e6),
     text: "",
     sendMode: "message",
     targetItemId: "",
     updatedAtMs: now,
   });
-  window.__bramIframeTrace("queue", { op: "add", id: next[next.length - 1].id, chars: 0 });
+  window.__bramIframeTrace("queue", { op: "add", id: next[0].id, chars: 0 });
   __bramQueueScheduleSave(next);
   return next;
 };

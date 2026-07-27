@@ -15051,27 +15051,173 @@ fn codex_session_all_text(path: &Path) -> String {
     all
 }
 
+/// Phase-resolved metrics for a Claude/Codex session-index pass. Fields are
+/// deliberately limited to counts, byte sizes, and durations so the
+/// persistent trace never receives paths, titles, or indexed content.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct SessionIndexPassStats {
+    files: usize,
+    indexed: usize,
+    skipped: usize,
+    rows: i64,
+    indexed_bytes: u64,
+    open_ms: u128,
+    discover_ms: u128,
+    gate_ms: u128,
+    extract_ms: u128,
+    write_ms: u128,
+    count_ms: u128,
+}
+
+fn format_session_index_scan(
+    bucket: &str,
+    stats: SessionIndexPassStats,
+    total_ms: u128,
+) -> String {
+    format!(
+        "op=scan bucket={} files={} indexed={} skipped={} rows={} indexed_bytes={} \
+         open_ms={} discover_ms={} gate_ms={} extract_ms={} write_ms={} count_ms={} ms={}",
+        bucket,
+        stats.files,
+        stats.indexed,
+        stats.skipped,
+        stats.rows,
+        stats.indexed_bytes,
+        stats.open_ms,
+        stats.discover_ms,
+        stats.gate_ms,
+        stats.extract_ms,
+        stats.write_ms,
+        stats.count_ms,
+        total_ms
+    )
+}
+
+fn search_index_facet_label(types: &[String]) -> String {
+    if types.is_empty() {
+        return "all".to_string();
+    }
+    types
+        .iter()
+        .map(|kind| match kind.as_str() {
+            "session" | "commit" | "issue" | "worklist-history" => kind.as_str(),
+            _ => "other",
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn format_search_index_query(
+    chars: usize,
+    facets: &str,
+    hits: usize,
+    open_ms: u128,
+    query_ms: u128,
+    enrich_ms: u128,
+    serialize_ms: u128,
+    body_bytes: usize,
+    total_ms: u128,
+) -> String {
+    format!(
+        "op=query chars={} facets={} hits={} open_ms={} query_ms={} enrich_ms={} \
+         serialize_ms={} body_bytes={} ms={}",
+        chars,
+        facets,
+        hits,
+        open_ms,
+        query_ms,
+        enrich_ms,
+        serialize_ms,
+        body_bytes,
+        total_ms
+    )
+}
+
+#[cfg(test)]
+mod search_index_phase_timing_tests {
+    use super::*;
+
+    #[test]
+    fn session_scan_trace_contains_metrics_only() {
+        let line = format_session_index_scan(
+            "codex",
+            SessionIndexPassStats {
+                files: 246,
+                indexed: 1,
+                skipped: 245,
+                rows: 2805,
+                indexed_bytes: 1_048_576,
+                open_ms: 2,
+                discover_ms: 7,
+                gate_ms: 11,
+                extract_ms: 31,
+                write_ms: 13,
+                count_ms: 1,
+            },
+            65,
+        );
+        assert_eq!(
+            line,
+            "op=scan bucket=codex files=246 indexed=1 skipped=245 rows=2805 \
+             indexed_bytes=1048576 open_ms=2 discover_ms=7 gate_ms=11 extract_ms=31 \
+             write_ms=13 count_ms=1 ms=65"
+        );
+    }
+
+    #[test]
+    fn query_trace_facets_are_allowlisted() {
+        let facets = search_index_facet_label(&[
+            "session".to_string(),
+            "private search text".to_string(),
+            "worklist-history".to_string(),
+        ]);
+        assert_eq!(facets, "session,other,worklist-history");
+        let line = format_search_index_query(19, &facets, 3, 1, 2, 3, 4, 512, 10);
+        assert_eq!(
+            line,
+            "op=query chars=19 facets=session,other,worklist-history hits=3 open_ms=1 \
+             query_ms=2 enrich_ms=3 serialize_ms=4 body_bytes=512 ms=10"
+        );
+        assert!(!line.contains("private search text"));
+    }
+}
+
 /// One incremental pass over the current project's Claude sessions. Returns
-/// (files_seen, indexed, skipped, total_rows).
+/// secret-safe phase timing and count metrics.
 fn run_search_index_pass<R: tauri::Runtime>(
     app: &AppHandle<R>,
-) -> Result<(usize, usize, usize, i64), String> {
+) -> Result<SessionIndexPassStats, String> {
+    let mut stats = SessionIndexPassStats::default();
+    let open_started = std::time::Instant::now();
     let db = search_index_db_path(app).ok_or("no index db path")?;
     let conn = search_index::open(&db.to_string_lossy()).map_err(|e| e.to_string())?;
+    stats.open_ms = open_started.elapsed().as_millis();
     // Cheap enumeration (no titles) — extract the title only for sessions we
     // actually index, since claude_session_title reads the whole file
     // (issue-230-indexer-lazy-claude-titles).
+    let discover_started = std::time::Instant::now();
     let files_vec = discover_claude_session_files(app)?;
-    let files = files_vec.len();
-    let (mut indexed, mut skipped) = (0usize, 0usize);
+    stats.discover_ms = discover_started.elapsed().as_millis();
+    stats.files = files_vec.len();
+    let mut gate_elapsed = std::time::Duration::ZERO;
+    let mut extract_elapsed = std::time::Duration::ZERO;
+    let mut write_elapsed = std::time::Duration::ZERO;
     for (path, mtime_u, size_u, id) in files_vec {
         let path_str = path.to_string_lossy().to_string();
         let (mtime, size) = (mtime_u as i64, size_u as i64);
-        if !search_index::needs_index(&conn, &path_str, mtime, size).unwrap_or(true) {
-            skipped += 1;
+        let gate_started = std::time::Instant::now();
+        let needs_index =
+            search_index::needs_index(&conn, &path_str, mtime, size).unwrap_or(true);
+        gate_elapsed += gate_started.elapsed();
+        if !needs_index {
+            stats.skipped += 1;
             continue;
         }
+        let extract_started = std::time::Instant::now();
         let title = claude_session_title(&path).ok().flatten().unwrap_or(id);
+        let content = claude_session_all_text(&path);
+        stats.indexed_bytes = stats.indexed_bytes.saturating_add(content.len() as u64);
         let row = search_index::IndexRow {
             kind: "session".to_string(),
             // Carry provider + file size alongside the title (mirrors the
@@ -15087,37 +15233,59 @@ fn run_search_index_pass<R: tauri::Runtime>(
             // Internal tab route; exact-session deep-link is deferred. The
             // expander derives id from the doc key (file basename) for /__turns.
             link: "/sessions".to_string(),
-            content: claude_session_all_text(&path),
+            content,
             file: path_str,
             extra: String::new(),
         };
+        extract_elapsed += extract_started.elapsed();
         // Index even empty-content sessions so the next pass skips them.
+        let write_started = std::time::Instant::now();
         search_index::index_doc(&conn, &row, mtime, size).map_err(|e| e.to_string())?;
-        indexed += 1;
+        write_elapsed += write_started.elapsed();
+        stats.indexed += 1;
     }
-    let rows = search_index::row_count(&conn).unwrap_or(0);
-    Ok((files, indexed, skipped, rows))
+    stats.gate_ms = gate_elapsed.as_millis();
+    stats.extract_ms = extract_elapsed.as_millis();
+    stats.write_ms = write_elapsed.as_millis();
+    let count_started = std::time::Instant::now();
+    stats.rows = search_index::row_count(&conn).unwrap_or(0);
+    stats.count_ms = count_started.elapsed().as_millis();
+    Ok(stats)
 }
 
 /// One incremental pass over the current project's Codex sessions. Codex analog
 /// of `run_search_index_pass`; same `kind:"session"` rows so both providers land
-/// in the Search page's Sessions facet. Returns (files_seen, indexed, skipped,
-/// total_rows).
+/// in the Search page's Sessions facet. Returns secret-safe phase timing and
+/// count metrics.
 fn run_codex_search_index_pass<R: tauri::Runtime>(
     app: &AppHandle<R>,
-) -> Result<(usize, usize, usize, i64), String> {
+) -> Result<SessionIndexPassStats, String> {
+    let mut stats = SessionIndexPassStats::default();
+    let open_started = std::time::Instant::now();
     let db = search_index_db_path(app).ok_or("no index db path")?;
     let conn = search_index::open(&db.to_string_lossy()).map_err(|e| e.to_string())?;
+    stats.open_ms = open_started.elapsed().as_millis();
+    let discover_started = std::time::Instant::now();
     let sessions = discover_codex_sessions(app, None)?;
-    let files = sessions.len();
-    let (mut indexed, mut skipped) = (0usize, 0usize);
+    stats.discover_ms = discover_started.elapsed().as_millis();
+    stats.files = sessions.len();
+    let mut gate_elapsed = std::time::Duration::ZERO;
+    let mut extract_elapsed = std::time::Duration::ZERO;
+    let mut write_elapsed = std::time::Duration::ZERO;
     for s in sessions {
         let path_str = s.path.to_string_lossy().to_string();
         let (mtime, size) = (s.mtime as i64, s.size as i64);
-        if !search_index::needs_index(&conn, &path_str, mtime, size).unwrap_or(true) {
-            skipped += 1;
+        let gate_started = std::time::Instant::now();
+        let needs_index =
+            search_index::needs_index(&conn, &path_str, mtime, size).unwrap_or(true);
+        gate_elapsed += gate_started.elapsed();
+        if !needs_index {
+            stats.skipped += 1;
             continue;
         }
+        let extract_started = std::time::Instant::now();
+        let content = codex_session_all_text(&s.path);
+        stats.indexed_bytes = stats.indexed_bytes.saturating_add(content.len() as u64);
         let row = search_index::IndexRow {
             kind: "session".to_string(),
             source: format!(
@@ -15128,15 +15296,23 @@ fn run_codex_search_index_pass<R: tauri::Runtime>(
             ),
             date: mtime.to_string(),
             link: "/sessions".to_string(),
-            content: codex_session_all_text(&s.path),
+            content,
             file: path_str,
             extra: String::new(),
         };
+        extract_elapsed += extract_started.elapsed();
+        let write_started = std::time::Instant::now();
         search_index::index_doc(&conn, &row, mtime, size).map_err(|e| e.to_string())?;
-        indexed += 1;
+        write_elapsed += write_started.elapsed();
+        stats.indexed += 1;
     }
-    let rows = search_index::row_count(&conn).unwrap_or(0);
-    Ok((files, indexed, skipped, rows))
+    stats.gate_ms = gate_elapsed.as_millis();
+    stats.extract_ms = extract_elapsed.as_millis();
+    stats.write_ms = write_elapsed.as_millis();
+    let count_started = std::time::Instant::now();
+    stats.rows = search_index::row_count(&conn).unwrap_or(0);
+    stats.count_ms = count_started.elapsed().as_millis();
+    Ok(stats)
 }
 
 /// Parse an RFC3339 timestamp (gh's `updatedAt`) to epoch seconds.
@@ -15437,6 +15613,32 @@ where
     }
 }
 
+/// Session passes expose the same aggregate scan fields as the other buckets,
+/// plus their discovery, change-gate, extraction, and SQLite phases.
+fn run_and_trace_session_index_pass<R, F>(app: &AppHandle<R>, bucket: &str, pass: F)
+where
+    R: tauri::Runtime,
+    F: Fn(&AppHandle<R>) -> Result<SessionIndexPassStats, String>,
+{
+    if !bram_trace_enabled() {
+        let _ = pass(app);
+        return;
+    }
+    let started = std::time::Instant::now();
+    match pass(app) {
+        Ok(stats) => append_bram_trace_line(
+            app,
+            "search-index",
+            &format_session_index_scan(bucket, stats, started.elapsed().as_millis()),
+        ),
+        Err(e) => append_bram_trace_line(
+            app,
+            "search-index",
+            &format!("op=scan-error bucket={} detail={}", bucket, e),
+        ),
+    }
+}
+
 /// Background indexer: an initial pass shortly after startup, then a periodic
 /// incremental rescan (poll by change token). Sessions + commits run every
 /// pass (cheap: file mtimes / `git log`); issues run every 6th pass (~4.5 min)
@@ -15447,8 +15649,8 @@ fn start_search_indexer<R: tauri::Runtime>(app: AppHandle<R>) {
         std::thread::sleep(std::time::Duration::from_secs(2));
         let mut iter: u64 = 0;
         loop {
-            run_and_trace_index_pass(&app, "claude", run_search_index_pass);
-            run_and_trace_index_pass(&app, "codex", run_codex_search_index_pass);
+            run_and_trace_session_index_pass(&app, "claude", run_search_index_pass);
+            run_and_trace_session_index_pass(&app, "codex", run_codex_search_index_pass);
             run_and_trace_index_pass(&app, "commits", run_commit_index_pass);
             run_and_trace_index_pass(&app, "worklist-history", run_history_index_pass);
             if iter % 6 == 0 {
@@ -33228,80 +33430,97 @@ fn route_request<R: tauri::Runtime>(
             }
         }
         let started = std::time::Instant::now();
+        let mut open_ms = 0;
+        let mut query_ms = 0;
         let hits = if q.trim().is_empty() {
             Vec::new()
         } else {
-            search_index_db_path(app)
-                .and_then(|db| search_index::open(&db.to_string_lossy()).ok())
-                .map(|conn| {
+            let conn = search_index_db_path(app).and_then(|db| {
+                let open_started = std::time::Instant::now();
+                let result = search_index::open(&db.to_string_lossy()).ok();
+                open_ms = open_started.elapsed().as_millis();
+                result
+            });
+            conn.map(|conn| {
+                let query_started = std::time::Instant::now();
+                let result =
                     search_index::query(&conn, &fts5_phrase_query(q.trim()), limit, &types)
-                        .unwrap_or_default()
-                })
-                .unwrap_or_default()
+                        .unwrap_or_default();
+                query_ms = query_started.elapsed().as_millis();
+                result
+            })
+            .unwrap_or_default()
         };
+        let enrich_started = std::time::Instant::now();
+        let enriched_hits = hits
+            .iter()
+            .map(|h| {
+                // Session doc key is the JSONL path. Recover the provider
+                // (Codex sessions live under ~/.codex/) and the session id
+                // the expander needs: Claude's is the file stem, but a
+                // Codex id lives inside the file (codex_session_meta).
+                let (provider, id) = if h.kind == "session" {
+                    let path = std::path::Path::new(&h.key);
+                    if h.key.contains("/.codex/") {
+                        let id = codex_session_meta(path)
+                            .ok()
+                            .flatten()
+                            .map(|(id, _)| id)
+                            .unwrap_or_default();
+                        ("codex".to_string(), id)
+                    } else {
+                        let id = path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("")
+                            .to_string();
+                        ("claude".to_string(), id)
+                    }
+                } else {
+                    (String::new(), String::new())
+                };
+                serde_json::json!({
+                    "type": h.kind,
+                    "source": h.source,
+                    "date": h.date,
+                    "link": h.link,
+                    "snippet": h.snippet,
+                    "rank": h.rank,
+                    "key": h.key,
+                    "id": id,
+                    "provider": provider,
+                    // Self-contained detail parsed to JSON (history rows carry
+                    // the WorklistHistoryGroup); null for buckets fetched live.
+                    "extra": if h.extra.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::from_str::<serde_json::Value>(&h.extra)
+                            .unwrap_or(serde_json::Value::Null)
+                    },
+                })
+            })
+            .collect::<Vec<_>>();
+        let enrich_ms = enrich_started.elapsed().as_millis();
+        let serialize_started = std::time::Instant::now();
+        let body = serde_json::to_vec(&enriched_hits).unwrap_or_default();
+        let serialize_ms = serialize_started.elapsed().as_millis();
         if bram_trace_enabled() {
             append_bram_trace_line(
                 app,
                 "search-index",
-                &format!(
-                    "op=query chars={} hits={} ms={}",
+                &format_search_index_query(
                     q.trim().len(),
+                    &search_index_facet_label(&types),
                     hits.len(),
-                    started.elapsed().as_millis()
+                    open_ms,
+                    query_ms,
+                    enrich_ms,
+                    serialize_ms,
+                    body.len(),
+                    started.elapsed().as_millis(),
                 ),
             );
         }
-        let body = serde_json::to_vec(
-            &hits
-                .iter()
-                .map(|h| {
-                    // Session doc key is the JSONL path. Recover the provider
-                    // (Codex sessions live under ~/.codex/) and the session id
-                    // the expander needs: Claude's is the file stem, but a
-                    // Codex id lives inside the file (codex_session_meta).
-                    let (provider, id) = if h.kind == "session" {
-                        let path = std::path::Path::new(&h.key);
-                        if h.key.contains("/.codex/") {
-                            let id = codex_session_meta(path)
-                                .ok()
-                                .flatten()
-                                .map(|(id, _)| id)
-                                .unwrap_or_default();
-                            ("codex".to_string(), id)
-                        } else {
-                            let id = path
-                                .file_stem()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("")
-                                .to_string();
-                            ("claude".to_string(), id)
-                        }
-                    } else {
-                        (String::new(), String::new())
-                    };
-                    serde_json::json!({
-                        "type": h.kind,
-                        "source": h.source,
-                        "date": h.date,
-                        "link": h.link,
-                        "snippet": h.snippet,
-                        "rank": h.rank,
-                        "key": h.key,
-                        "id": id,
-                        "provider": provider,
-                        // Self-contained detail parsed to JSON (history rows carry
-                        // the WorklistHistoryGroup); null for buckets fetched live.
-                        "extra": if h.extra.is_empty() {
-                            serde_json::Value::Null
-                        } else {
-                            serde_json::from_str::<serde_json::Value>(&h.extra)
-                                .unwrap_or(serde_json::Value::Null)
-                        },
-                    })
-                })
-                .collect::<Vec<_>>(),
-        )
-        .unwrap_or_default();
         return (200, "application/json; charset=utf-8", body);
     }
 

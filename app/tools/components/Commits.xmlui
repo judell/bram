@@ -107,7 +107,7 @@
             </HStack>
           </Link>
           <VStack when="{selectedSha === $item.sha}" paddingBottom="$space-2">
-            <CommitDetail sha="{$item.sha}" url="{$item.pushed ? $item.html_url : ''}"
+            <CommitDetail sha="{$item.sha}" url="{$item.html_url || ''}"
               query="{searchQuery.trim()}" />
           </VStack>
         </VStack>

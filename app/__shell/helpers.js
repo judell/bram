@@ -505,8 +505,8 @@ window.sendIterateWithFeedbackDraft = function (items, selectedId, text) {
       items: (items || []).filter(function (i) { return i.id === selectedId; })
         .map(function (i) {
           return wroteDraft
-            ? { id: i.id, feedbackRef: feedbackId }
-            : { id: i.id, feedback: text };
+            ? { id: i.id, feedbackRef: feedbackId, gate: window.__bramItemGate(i) }
+            : { id: i.id, feedback: text, gate: window.__bramItemGate(i) };
         }),
     }));
   });
@@ -1776,11 +1776,19 @@ window.__bramTraceApproveDropEnabled = function (submitting, selected) {
   return !submitting && !!selected;
 };
 
+// Gate label baked into approve/drop/iterate payloads so the display can show
+// TO APPLY vs TO COMMIT even after the item transitions or is pruned
+// (approval-turn-specify-gate). The projection can't recover the pre-action
+// status, so it must ride in the payload.
+window.__bramItemGate = function (i) {
+  return (((i && i.status) || "proposed") === "applied") ? "to commit" : "to apply";
+};
+
 window.__bramBuildApprovePayload = function (items, selectedId, feedback) {
   __bramAppMark("build-approve-payload");
   return JSON.stringify({
     items: (items || []).filter(function (i) { return i.id === selectedId; })
-      .map(function (i) { return { id: i.id, feedback: feedback }; }),
+      .map(function (i) { return { id: i.id, feedback: feedback, gate: window.__bramItemGate(i) }; }),
   });
 };
 
@@ -1792,8 +1800,8 @@ window.__bramBuildIteratePayload = function (items, selectedId, feedback) {
     items: (items || []).filter(function (i) { return i.id === selectedId; })
       .map(function (i) {
         return feedback && typeof feedback === "object" && feedback.feedbackRef
-          ? { id: i.id, feedbackRef: feedback.feedbackRef }
-          : { id: i.id, feedback: feedback };
+          ? { id: i.id, feedbackRef: feedback.feedbackRef, gate: window.__bramItemGate(i) }
+          : { id: i.id, feedback: feedback, gate: window.__bramItemGate(i) };
       }),
   });
 };
@@ -1802,7 +1810,7 @@ window.__bramBuildDropPayload = function (items, selectedId, feedback) {
   __bramAppMark("build-drop-payload");
   return JSON.stringify({
     items: (items || []).filter(function (i) { return i.id === selectedId; })
-      .map(function (i) { return { id: i.id, feedback: feedback }; }),
+      .map(function (i) { return { id: i.id, feedback: feedback, gate: window.__bramItemGate(i) }; }),
   });
 };
 
@@ -1819,7 +1827,7 @@ window.__bramBuildDropItems = function (items, selectedId, feedback) {
 window.__bramBuildSingleItemApprovePayload = function (itemRef, feedback) {
   __bramAppMark("build-single-item-approve-payload");
   return JSON.stringify({
-    items: [{ id: itemRef.id, feedback: feedback }],
+    items: [{ id: itemRef.id, feedback: feedback, gate: window.__bramItemGate(itemRef) }],
   });
 };
 
@@ -1831,7 +1839,7 @@ window.__bramBuildBatchApprovePayload = function (items, feedback) {
   __bramAppMark("build-batch-approve-payload");
   return JSON.stringify({
     items: (items || []).filter(function (i) { return (i.status || "proposed") === "applied"; })
-      .map(function (i) { return { id: i.id, feedback: feedback || "" }; }),
+      .map(function (i) { return { id: i.id, feedback: feedback || "", gate: window.__bramItemGate(i) }; }),
   });
 };
 
@@ -1844,7 +1852,7 @@ window.__bramBuildBatchDropPayload = function (items, feedback) {
   __bramAppMark("build-batch-drop-payload");
   return JSON.stringify({
     items: (items || []).filter(function (i) { return (i.status || "proposed") === "applied"; })
-      .map(function (i) { return { id: i.id, feedback: feedback || "" }; }),
+      .map(function (i) { return { id: i.id, feedback: feedback || "", gate: window.__bramItemGate(i) }; }),
   });
 };
 

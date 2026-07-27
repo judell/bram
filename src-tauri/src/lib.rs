@@ -22761,6 +22761,13 @@ fn format_worklist_payload_text<R: tauri::Runtime>(
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
+                // approval-turn-specify-gate: the payload carries the item's
+                // gate (to apply / to commit) baked in at action time; surface
+                // it so "approved: <id> (to commit)" is unambiguous.
+                let gate = it.get("gate").and_then(|v| v.as_str()).unwrap_or("");
+                if !gate.is_empty() && !label.is_empty() {
+                    label = format!("{} ({})", label, gate);
+                }
                 let mut fb = it
                     .get("feedback")
                     .and_then(|v| v.as_str())

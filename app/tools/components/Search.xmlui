@@ -1,4 +1,4 @@
-<Component name="Search" var.query="">
+<Component name="Search" var.query="{$queryParams.q || ''}">
   <!-- issue-230 unified search across the local FTS5 index (sessions,
        commits, issues, worklist-history). Each type is queried independently
        (its own top-100) so a length-penalized bucket isn't squeezed out of a
@@ -9,20 +9,28 @@
     value="{{ session: 'blue', commit: 'green', issue: '#c2410c', history: 'purple' }}" />
   <variable name="facetColors"
     value="{{ Sessions: 'blue', Commits: 'green', Issues: '#c2410c', History: 'purple' }}" />
-  <variable name="selectedTypes" value="{['session', 'commit', 'issue', 'worklist-history']}" />
+  <!-- selectedTypes (the facet pills) and mode seed from the URL so an
+       Evidence "replay" link (Workspace.xmlui) lands here pre-filled. Absent
+       => the everyday defaults (all buckets, AND mode). These stay locally
+       mutable working copies; $queryParams only changes on navigation, so a
+       fresh replay remounts and re-seeds without clobbering local edits.
+       See https://docs.xmlui.org/howto/deep-link-to-a-tab-or-section -->
+  <variable name="selectedTypes"
+    value="{$queryParams.types ? $queryParams.types.split(',') : ['session', 'commit', 'issue', 'worklist-history']}" />
+  <variable name="mode" value="{$queryParams.mode || 'and'}" />
   <variable name="ready" value="{!!query &amp;&amp; query.trim().length >= 2}" />
   <variable name="expandedHit" value="{null}" />
   <!-- Selected date window [lo, hi] (epoch seconds); null = no date filter. -->
   <variable name="dateFilter" value="{null}" />
 
   <DataSource id="rSession" url="/__search"
-    queryParams="{{ q: query, limit: 100, types: 'session' }}" when="{ready}" />
+    queryParams="{{ q: query, limit: 100, types: 'session', mode: mode }}" when="{ready}" />
   <DataSource id="rCommit" url="/__search"
-    queryParams="{{ q: query, limit: 100, types: 'commit' }}" when="{ready}" />
+    queryParams="{{ q: query, limit: 100, types: 'commit', mode: mode }}" when="{ready}" />
   <DataSource id="rIssue" url="/__search"
-    queryParams="{{ q: query, limit: 100, types: 'issue' }}" when="{ready}" />
+    queryParams="{{ q: query, limit: 100, types: 'issue', mode: mode }}" when="{ready}" />
   <DataSource id="rHistory" url="/__search"
-    queryParams="{{ q: query, limit: 100, types: 'worklist-history' }}" when="{ready}" />
+    queryParams="{{ q: query, limit: 100, types: 'worklist-history', mode: mode }}" when="{ready}" />
 
   <!-- Full relevance-ordered set of the selected buckets (no date filter) — the
        stable domain the slider measures, so moving the handles never shifts it. -->
@@ -89,9 +97,21 @@
       <SearchBox
         boxWidth="26rem"
         placeholder="Search sessions, commits, issues, history — quote for an exact phrase"
+        initialValue="{query}"
         inProgress="{rSession.inProgress || rCommit.inProgress || rIssue.inProgress || rHistory.inProgress}"
         onQueryChange="(q) => query = q"
         onClear="query = ''; expandedHit = null" />
+      <!-- Active-mode indicator: shown only when a replay link arrived with a
+           non-default mode (raw/phrase/prefix). The generic Search UI keeps no
+           permanent mode dropdown by design (quote-for-phrase is the everyday
+           surface); this appears exactly when a mode is in play and offers a
+           one-click reset to the AND default. -->
+      <HStack when="{mode !== 'and'}" gap="$space-1" verticalAlignment="center">
+        <Badge value="{'mode: ' + mode}" />
+        <Link noIndicator onClick="mode = 'and'" tooltip="Reset to default (AND) search mode">
+          <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="reset" />
+        </Link>
+      </HStack>
       <!-- Two-handled date-range filter; fills the rest of the row. The dates
            are shown as Text labels above the thumbs (top-level bindings) rather
            than via the Slider's valueFormat, which is a sync render callback the

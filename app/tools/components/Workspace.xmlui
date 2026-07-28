@@ -831,11 +831,21 @@
                                   value="{$item.polarity === 'negative' ? 'NEGATIVE' : 'POSITIVE'}" />
                                 <Text fontWeight="$fontWeight-bold" value="{$item.claim}" />
                               </HStack>
+                              <!-- issue-232 replay: each cited query is a link
+                                   that navigates to the Search tab pre-filled
+                                   with its q / mode / types and runs it. The
+                                   vendored engine's navigate takes the params
+                                   object as its second positional arg. -->
                               <Items data="{$item.queries || []}">
-                                <Text
-                                  fontSize="$fontSize-sm"
-                                  variant="code"
-                                  value="{'q=' + ($item.q || '') + ($item.mode ? '  mode=' + $item.mode : '') + ($item.types ? '  types=' + $item.types : '')}" />
+                                <Link noIndicator
+                                  tooltip="Replay this query in Search"
+                                  onClick="navigate('/search', { q: $item.q || '', mode: $item.mode || 'and', types: $item.types || '' })">
+                                  <Text
+                                    fontSize="$fontSize-sm"
+                                    variant="code"
+                                    color="$color-primary-600"
+                                    value="{'↳ q=' + ($item.q || '') + ($item.mode ? '  mode=' + $item.mode : '') + ($item.types ? '  types=' + $item.types : '')}" />
+                                </Link>
                               </Items>
                               <Items data="{$item.sources || []}">
                                 <VStack gap="$space-0">

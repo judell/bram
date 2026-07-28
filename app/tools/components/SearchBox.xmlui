@@ -6,6 +6,7 @@
     <TextBox
       id="searchBox"
       placeholder="{$props.placeholder || 'Search…'}"
+      initialValue="{$props.initialValue}"
       width="*"
       autoComplete="off"
       autoCorrect="{false}"

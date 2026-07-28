@@ -25,7 +25,8 @@ Bram has opinions. It thinks versioning and collaboration are well-handled by gi
 </table>
 -->
 
-<img width="964" height="905" alt="image" src="https://github.com/user-attachments/assets/45713e70-3017-4104-97b7-53797c66924f" />
+<img width="1067" height="908" alt="image" src="https://github.com/user-attachments/assets/093ddc62-ffa9-4f1f-8ecd-45fcc6f154ea" />
+
 
 
 

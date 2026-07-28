@@ -1208,8 +1208,10 @@ curl -4 -sS "http://127.0.0.1:61455/__search?q=<urlencoded>&limit=20&types=commi
 
 (replace `61455` with whatever `Read resources/.bram-port` returned.)
 
-- `q` is a **phrase** match — the host wraps it as a quoted FTS5 phrase, so
-  choose terms accordingly; a multi-word `q` matches that exact phrase.
+- `q` defaults to **AND** across terms (every term must appear); wrap it in
+  double quotes for an exact phrase. `mode=` overrides: `and` (default),
+  `phrase`, `prefix`, `raw` (raw FTS5 boolean — `OR` / `NEAR` / `NOT`); invalid
+  syntax falls back to a phrase match.
 - `types=` filters buckets (`session` / `commit` / `issue` /
   `worklist-history`); omit for all. `limit` defaults 50, clamps 1–500.
 - Ranked snippets are enough to judge relevance; for a hit's full stored

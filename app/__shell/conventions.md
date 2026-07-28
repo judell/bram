@@ -1221,6 +1221,52 @@ matched those terms," not proof of absence (the same trap as event-shaped
 logs). Scope is the current project. The issues bucket refreshes ~every 45s;
 a just-created issue may not be indexed for a beat.
 
+### Coordinating MCP demand with search
+
+When the question is "which how-to is missing, weak, or wrong?" for an
+MCP-served project (XMLUI is the live one), two evidence sources combine —
+neither is enough alone.
+
+- **MCP analytics** (`~/Library/Caches/xmlui/xmlui-mcp/xmlui-mcp-analytics.json`)
+  — population-scale *demand*, but **outcome-blind**: `result_count` is never
+  0, so "ill-served" is qualitative (high demand + high `result_count` +
+  unresolved). It is **global** across every project on the machine. Mine it
+  with `scripts/xmlui-mcp-demand-miner.py`.
+- **`/__search` + the session transcripts** — our real *outcome / struggle*, a
+  tiny biased sample. Join it to the demand log **on the clock** with
+  `scripts/xmlui-mcp-correlate.py`: the MCP query log is *what was reached for*,
+  the transcript is *intent + struggle*.
+
+**Time is the join axis.** Both streams are timestamped; align them and a burst
+of rephrased same-topic queries returning 60–120 "matches" that resolve
+nothing, landing next to a struggle turn, is a provable "ill-served here"
+moment. `--discover` ranks such windows; `--window` / `--topic` drill them.
+
+**Struggle is dry, not emotional.** Mining the corpus found ~0% emotional
+venting; the real marker is factual struggle-state language ("still no joy",
+"still not holding", broken / stuck / frozen). The markers in
+`xmlui-mcp-correlate.py` are derived from that, not hand-guessed — an
+expletive lexicon finds nothing here.
+
+**Two traps.**
+
+- **Operator test-phrases inflate demand.** Your own MCP-test queries (e.g.
+  "paginate a list") count as demand in the raw miner. The correlator's
+  struggle-gating is immune — a test query has no struggle beside it — so trust
+  it as the primary lens, and exclude known test phrases from the miner.
+- **A "miss" can be a contradiction, not an absence.** The strongest finding
+  this pipeline produced was not a missing page but docs that contradict their
+  own deprecation (AppState: the reference warns deprecated, the tutorial still
+  teaches it). Always check `xmlui_list_howto` / `xmlui_search_howto` for what
+  exists *and whether it actually resolves the demand*.
+
+**The pipeline.** (1) `xmlui-mcp-demand-miner.py` → ranked demand + weak
+coverage. (2) `xmlui-mcp-correlate.py --discover` / `--topic` → confirm real
+struggle on the clock. (3) `xmlui_list_howto` + `xmlui_search_howto` → absence
+or contradiction. (4) file an `xmlui-org/xmlui` issue with the receipts (demand
+`result_count`, the interleaved timeline, the doc gap). This pipeline produced
+xmlui-org/xmlui #3669 / #3672 / #3673 (docs) and #3674 (a parser bug).
+
 
 ## Debugging Bram itself
 

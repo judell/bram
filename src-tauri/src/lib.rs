@@ -15669,6 +15669,59 @@ fn fts5_phrase_query(q: &str) -> String {
     format!("\"{}\"", q.replace('"', "\"\""))
 }
 
+// Split a query into terms, treating a "..."-quoted span as a single phrase
+// term (search-query-modes); bare words become individual terms.
+fn fts5_split_terms(q: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut cur = String::new();
+    let mut in_quote = false;
+    for ch in q.chars() {
+        if ch == '"' {
+            in_quote = !in_quote;
+            cur.push(ch);
+        } else if ch.is_whitespace() && !in_quote {
+            let t = cur.trim();
+            if !t.is_empty() {
+                terms.push(t.to_string());
+            }
+            cur.clear();
+        } else {
+            cur.push(ch);
+        }
+    }
+    let t = cur.trim();
+    if !t.is_empty() {
+        terms.push(t.to_string());
+    }
+    terms
+}
+
+// Join query terms with AND, quoting bare terms and honoring "..." phrase
+// segments; `prefix` makes each term a prefix match. Always a valid FTS5 MATCH
+// expression — arbitrary input just becomes quoted literals.
+fn fts5_and_query(q: &str, prefix: bool) -> String {
+    let parts: Vec<String> = fts5_split_terms(q)
+        .into_iter()
+        .map(|t| {
+            let quoted = if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
+                t
+            } else {
+                format!("\"{}\"", t.replace('"', "\"\""))
+            };
+            if prefix {
+                format!("{}*", quoted)
+            } else {
+                quoted
+            }
+        })
+        .collect();
+    if parts.is_empty() {
+        fts5_phrase_query(q)
+    } else {
+        parts.join(" AND ")
+    }
+}
+
 fn list_sessions<R: tauri::Runtime>(
     app: &AppHandle<R>,
     preferred: Option<SessionProvider>,
@@ -33421,6 +33474,7 @@ fn route_request<R: tauri::Runtime>(
         let mut q = String::new();
         let mut limit = 50usize;
         let mut types: Vec<String> = Vec::new();
+        let mut mode = String::from("and");
         for pair in query.split('&') {
             if let Some(v) = pair.strip_prefix("q=") {
                 q = percent_decode(v);
@@ -33434,6 +33488,8 @@ fn route_request<R: tauri::Runtime>(
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
                     .collect();
+            } else if let Some(v) = pair.strip_prefix("mode=") {
+                mode = percent_decode(v);
             }
         }
         let started = std::time::Instant::now();
@@ -33450,9 +33506,24 @@ fn route_request<R: tauri::Runtime>(
             });
             conn.map(|conn| {
                 let query_started = std::time::Instant::now();
-                let result =
-                    search_index::query(&conn, &fts5_phrase_query(q.trim()), limit, &types)
-                        .unwrap_or_default();
+                // search-query-modes: default `and` (all terms), with `phrase`
+                // / `prefix` / `raw` opt-in. `"…"` spans are honored as phrases
+                // in and/prefix, giving the UI its quote=exact-phrase behavior.
+                let expr = match mode.as_str() {
+                    "phrase" => fts5_phrase_query(q.trim()),
+                    "prefix" => fts5_and_query(q.trim(), true),
+                    "raw" => q.trim().to_string(),
+                    _ => fts5_and_query(q.trim(), false),
+                };
+                // raw (or any odd expression) can be invalid FTS5 — fall back to
+                // a safe quoted phrase rather than erroring to empty results.
+                let result = match search_index::query(&conn, &expr, limit, &types) {
+                    Ok(r) => r,
+                    Err(_) => {
+                        search_index::query(&conn, &fts5_phrase_query(q.trim()), limit, &types)
+                            .unwrap_or_default()
+                    }
+                };
                 query_ms = query_started.elapsed().as_millis();
                 result
             })

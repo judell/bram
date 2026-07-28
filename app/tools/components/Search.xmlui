@@ -88,7 +88,7 @@
       <Heading level="h2">Search</Heading>
       <SearchBox
         boxWidth="26rem"
-        placeholder="Search sessions, commits, issues, history…"
+        placeholder="Search sessions, commits, issues, history — quote for an exact phrase"
         inProgress="{rSession.inProgress || rCommit.inProgress || rIssue.inProgress || rHistory.inProgress}"
         onQueryChange="(q) => query = q"
         onClear="query = ''; expandedHit = null" />

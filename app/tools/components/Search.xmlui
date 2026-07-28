@@ -93,7 +93,23 @@
 
   <VStack padding="$space-4" gap="$space-3" overflowY="auto" height="100%">
     <HStack gap="$space-3" verticalAlignment="center">
+      <!-- Back affordance for Evidence-replay arrivals: shown only when the
+           page was entered via a deep link (q in the URL). Worklist expansion
+           state persists via the window-side UI-state store, so a plain
+           navigate restores the item the user replayed from. -->
+      <Link when="{!!$queryParams.q}" noIndicator tooltip="Back to the Worklist, restoring the open item"
+        onClick="navigate('/worklist')">
+        <Text value="← Worklist" />
+      </Link>
       <Heading level="h2">Search</Heading>
+      <Theme paddingHorizontal-Button-xs="$space-0_5">
+        <Button
+          label="ⓘ"
+          variant="ghost"
+          size="xs"
+          tooltip="How search works"
+          onClick="searchHelpDialog.open()" />
+      </Theme>
       <SearchBox
         boxWidth="26rem"
         placeholder="Search sessions, commits, issues, history — quote for an exact phrase"
@@ -210,5 +226,27 @@
         </VStack>
       </Items>
     </Theme>
+
+    <ModalDialog id="searchHelpDialog" title="Search help">
+      <VStack gap="$space-3" padding="$space-2">
+        <Markdown content="Searches Bram's local full-text index of this project's history:
+
+- **Sessions** — Claude and Codex transcripts
+- **Commits** — the git log
+- **Issues** — the project forge
+- **History** — worklist history (proposals, approvals, commits)
+
+How queries work:
+
+- Type at least 2 characters.
+- Multiple words are ANDed — every term must appear somewhere in the document.
+- Wrap the whole query in double quotes for an exact phrase.
+- Click the colored pills to include or exclude a bucket; each shows its own hit count.
+- When results span dates, drag the two-handled slider to narrow the time window.
+- Click any result title to expand its full detail inline; click again to collapse.
+- Evidence replay links (from Worklist items) arrive here pre-filled. A non-default match mode (raw / prefix / phrase) shows as a badge next to the box with a one-click reset back to normal AND matching.
+- Matching is keyword-based, not semantic: zero hits means those exact words were not found in the index — not proof the thing never happened. Try fewer or different terms." />
+      </VStack>
+    </ModalDialog>
   </VStack>
 </Component>

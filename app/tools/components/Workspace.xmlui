@@ -61,7 +61,10 @@
       if (!transientEmpty) {
         const existingIds = new Set(items.map(i => i && i.id).filter(Boolean));
         const prevExpanded = expandedItemIds || [];
-        const filteredExpanded = prevExpanded.filter(id => existingIds.has(id));
+        // Entries are either bare item ids or composite section keys of the
+        // form id::section (details/files/before/after/diff/evidence); a
+        // section key survives as long as its base item still exists.
+        const filteredExpanded = prevExpanded.filter(id => existingIds.has(String(id).split('::')[0]));
         if (filteredExpanded.length !== prevExpanded.length) {
           expandedItemIds = filteredExpanded;
           const prevDrafts = feedbackDraftsById || {};
@@ -761,16 +764,23 @@
                   when="{(expandedItemIds || []).includes($item.id)}"
                   gap="$space-2"
                   paddingTop="$space-2">
+                  <!-- Section expansion persists across page switches (e.g.
+                       Evidence replay to Search and back) as composite keys
+                       id::section riding the same expandedItemIds store the
+                       outer item chevron uses; open sections re-open on
+                       mount, closed is the default. -->
                   <ExpandableItem
                     when="{$item.before || $item.after || $item.diff || window.__bramWorklistItemFiles($item).length > 0}"
                     summary="Details"
-                    initiallyExpanded="false"
+                    initiallyExpanded="{(expandedItemIds || []).includes($item.id + '::details')}"
+                    onExpandedChange="(open) => { expandedItemIds = open ? (expandedItemIds || []).filter(k => k !== $item.id + '::details').concat([$item.id + '::details']) : (expandedItemIds || []).filter(k => k !== $item.id + '::details'); window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds, feedbackDraftsById: feedbackDraftsById || {}}) }"
                     fullWidthSummary="true">
                     <VStack gap="$space-2">
                       <ExpandableItem
                         when="{window.__bramWorklistItemFiles($item).length > 0}"
                         summary="Files"
-                        initiallyExpanded="false"
+                        initiallyExpanded="{(expandedItemIds || []).includes($item.id + '::files')}"
+                        onExpandedChange="(open) => { expandedItemIds = open ? (expandedItemIds || []).filter(k => k !== $item.id + '::files').concat([$item.id + '::files']) : (expandedItemIds || []).filter(k => k !== $item.id + '::files'); window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds, feedbackDraftsById: feedbackDraftsById || {}}) }"
                         fullWidthSummary="true">
                         <VStack gap="$space-1">
                           <Items data="{window.__bramWorklistItemFiles($item)}">
@@ -784,21 +794,24 @@
                       <ExpandableItem
                         when="{$item.before}"
                         summary="Before"
-                        initiallyExpanded="false"
+                        initiallyExpanded="{(expandedItemIds || []).includes($item.id + '::before')}"
+                        onExpandedChange="(open) => { expandedItemIds = open ? (expandedItemIds || []).filter(k => k !== $item.id + '::before').concat([$item.id + '::before']) : (expandedItemIds || []).filter(k => k !== $item.id + '::before'); window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds, feedbackDraftsById: feedbackDraftsById || {}}) }"
                         fullWidthSummary="true">
                         <Markdown content="{$item.before}" />
                       </ExpandableItem>
                       <ExpandableItem
                         when="{$item.after}"
                         summary="After"
-                        initiallyExpanded="false"
+                        initiallyExpanded="{(expandedItemIds || []).includes($item.id + '::after')}"
+                        onExpandedChange="(open) => { expandedItemIds = open ? (expandedItemIds || []).filter(k => k !== $item.id + '::after').concat([$item.id + '::after']) : (expandedItemIds || []).filter(k => k !== $item.id + '::after'); window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds, feedbackDraftsById: feedbackDraftsById || {}}) }"
                         fullWidthSummary="true">
                         <Markdown content="{$item.after}" />
                       </ExpandableItem>
                       <ExpandableItem
                         when="{$item.diff}"
                         summary="Diff"
-                        initiallyExpanded="false"
+                        initiallyExpanded="{(expandedItemIds || []).includes($item.id + '::diff')}"
+                        onExpandedChange="(open) => { expandedItemIds = open ? (expandedItemIds || []).filter(k => k !== $item.id + '::diff').concat([$item.id + '::diff']) : (expandedItemIds || []).filter(k => k !== $item.id + '::diff'); window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds, feedbackDraftsById: feedbackDraftsById || {}}) }"
                         fullWidthSummary="true">
                         <VStack gap="$space-1">
                           <DiffView text="{($item.diff || '').slice(0, 20000)}" />
@@ -817,7 +830,8 @@
                       <ExpandableItem
                         when="{$item.citations &amp;&amp; $item.citations.length > 0}"
                         summary="{'Evidence (' + $item.citations.length + ')'}"
-                        initiallyExpanded="false"
+                        initiallyExpanded="{(expandedItemIds || []).includes($item.id + '::evidence')}"
+                        onExpandedChange="(open) => { expandedItemIds = open ? (expandedItemIds || []).filter(k => k !== $item.id + '::evidence').concat([$item.id + '::evidence']) : (expandedItemIds || []).filter(k => k !== $item.id + '::evidence'); window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds, feedbackDraftsById: feedbackDraftsById || {}}) }"
                         fullWidthSummary="true">
                         <VStack gap="$space-3">
                           <Items data="{$item.citations}">
@@ -833,13 +847,17 @@
                               </HStack>
                               <!-- issue-232 replay: each cited query is a link
                                    that navigates to the Search tab pre-filled
-                                   with its q / mode / types and runs it. The
-                                   vendored engine's navigate takes the params
-                                   object as its second positional arg. -->
+                                   with its q / mode / types and runs it.
+                                   Documented options form with a queryParams
+                                   key; requires the vendored engine to carry
+                                   the xmlui-org/xmlui 3694 wrapper fix
+                                   (2026-07-28 build) - older engines drop
+                                   object-form params. Search seeds from these
+                                   params on mount. -->
                               <Items data="{$item.queries || []}">
                                 <Link noIndicator
                                   tooltip="Replay this query in Search"
-                                  onClick="navigate('/search', { q: $item.q || '', mode: $item.mode || 'and', types: $item.types || '' })">
+                                  onClick="navigate('/search', { queryParams: { q: $item.q || '', mode: $item.mode || 'and', types: $item.types || '' } })">
                                   <Text
                                     fontSize="$fontSize-sm"
                                     variant="code"

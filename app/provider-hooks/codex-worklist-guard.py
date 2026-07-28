@@ -38,6 +38,7 @@ from pathlib import Path
 
 WORKLIST_REL = "resources/worklist.json"
 WORKLIST_DRAFTS_PREFIX = "resources/worklist-drafts/"
+WORKLIST_CITATIONS_PREFIX = "resources/worklist-citations/"
 AUTH_REL = "resources/.worklist-authorization.json"
 # Codex filesystem lifecycle channel (#130). Writing the intent file is how
 # Codex drives the worklist lifecycle (the loopback-curl equivalent), so it is
@@ -250,6 +251,17 @@ def is_worklist_draft(rel):
         and rel.startswith(WORKLIST_DRAFTS_PREFIX)
         and rel.endswith(".md")
         and "/" not in rel[len(WORKLIST_DRAFTS_PREFIX):]
+    )
+
+
+def is_worklist_citation(rel):
+    # issue-232: resources/worklist-citations/<id>.json is an agent-recorded
+    # proposal-authoring input, exempt from coverage like a draft.
+    return (
+        isinstance(rel, str)
+        and rel.startswith(WORKLIST_CITATIONS_PREFIX)
+        and rel.endswith(".json")
+        and "/" not in rel[len(WORKLIST_CITATIONS_PREFIX):]
     )
 
 
@@ -1027,6 +1039,8 @@ def main():
                 continue  # writing to the worklist itself is how proposing works
             if is_worklist_draft(rel):
                 continue  # draft prose files are proposal-authoring inputs
+            if is_worklist_citation(rel):
+                continue  # citation objects (issue-232) are proposal inputs
             if is_coordination_file(rel):
                 continue  # Codex lifecycle channel (#130)
             if rel in covered:
@@ -1142,6 +1156,8 @@ def main():
                 continue
             if is_worklist_draft(rel):
                 continue
+            if is_worklist_citation(rel):
+                continue  # citation objects (issue-232)
             if is_coordination_file(rel):
                 continue  # Codex lifecycle channel (#130)
             if rel in covered:

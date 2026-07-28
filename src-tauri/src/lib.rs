@@ -27674,6 +27674,36 @@ fn worklist_draft_path(drafts_dir: &Path, item_id: &str) -> Option<PathBuf> {
     draft_markdown_path(drafts_dir, item_id)
 }
 
+// Citation sibling path (issue-232-citation-objects):
+// resources/worklist-citations/<id>.json, parallel to worklist-drafts/<id>.md.
+// Same id-safety check as the draft path — no traversal from a crafted id.
+fn worklist_citation_path(dir: &Path, id: &str) -> Option<PathBuf> {
+    if id.is_empty() || id.contains('/') || id.contains('\\') {
+        return None;
+    }
+    Some(dir.join(format!("{}.json", id)))
+}
+
+// Parse a citation file into the citation array. Accepts either a top-level
+// JSON array of citation records or an object with a `citations` array. An
+// empty or malformed file yields None, which the merge treats as "missing" so
+// the UI shows no evidence affordance rather than an empty one.
+fn parse_worklist_citations(raw: &str) -> Option<Vec<serde_json::Value>> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let arr = match v {
+        serde_json::Value::Array(a) => a,
+        serde_json::Value::Object(mut o) => match o.remove("citations") {
+            Some(serde_json::Value::Array(a)) => a,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if arr.is_empty() {
+        return None;
+    }
+    Some(arr)
+}
+
 fn resolve_worklist_item_draft(
     drafts_dir: Option<&Path>,
     item: &serde_json::Value,
@@ -27707,6 +27737,27 @@ fn resolve_worklist_item_draft(
             serde_json::Value::String(String::new()),
         );
         obj.insert("_draftMissing".to_string(), serde_json::Value::Bool(true));
+    }
+
+    // Citations merge (issue-232-citation-objects): fold the sibling
+    // resources/worklist-citations/<id>.json into the item the same way draft
+    // prose is folded above, so the Worklist tab sees one combined item.
+    // citations-dir is the sibling of drafts-dir under resources/.
+    let citations = drafts_dir
+        .and_then(|d| d.parent())
+        .map(|p| p.join("worklist-citations"))
+        .and_then(|dir| worklist_citation_path(&dir, item_id))
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|raw| parse_worklist_citations(&raw));
+    if let Some(cites) = citations {
+        obj.insert("citations".to_string(), serde_json::Value::Array(cites));
+        obj.remove("_citationsMissing");
+    } else {
+        obj.insert("citations".to_string(), serde_json::Value::Array(Vec::new()));
+        obj.insert(
+            "_citationsMissing".to_string(),
+            serde_json::Value::Bool(true),
+        );
     }
     resolved
 }

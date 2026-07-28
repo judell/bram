@@ -809,6 +809,46 @@
                             value="{'Diff preview truncated at 20 KB for responsiveness.'}" />
                         </VStack>
                       </ExpandableItem>
+                      <!-- issue-232 Evidence: read-only citations merged from
+                           resources/worklist-citations/[id].json by the host.
+                           Each record shows claim, polarity, its search
+                           query(ies), and the cited sources + snippets. Nested
+                           Items rebind $item to query/source rows. -->
+                      <ExpandableItem
+                        when="{$item.citations &amp;&amp; $item.citations.length > 0}"
+                        summary="{'Evidence (' + $item.citations.length + ')'}"
+                        initiallyExpanded="false"
+                        fullWidthSummary="true">
+                        <VStack gap="$space-3">
+                          <Items data="{$item.citations}">
+                            <VStack gap="$space-1" paddingBottom="$space-2"
+                              borderBottom="1px solid $borderColor">
+                              <HStack gap="$space-2" verticalAlignment="center">
+                                <Text
+                                  fontSize="$fontSize-xs"
+                                  fontWeight="$fontWeight-bold"
+                                  color="{$item.polarity === 'negative' ? '$textColor-secondary' : '$color-success-600'}"
+                                  value="{$item.polarity === 'negative' ? 'NEGATIVE' : 'POSITIVE'}" />
+                                <Text fontWeight="$fontWeight-bold" value="{$item.claim}" />
+                              </HStack>
+                              <Items data="{$item.queries || []}">
+                                <Text
+                                  fontSize="$fontSize-sm"
+                                  variant="code"
+                                  value="{'q=' + ($item.q || '') + ($item.mode ? '  mode=' + $item.mode : '') + ($item.types ? '  types=' + $item.types : '')}" />
+                              </Items>
+                              <Items data="{$item.sources || []}">
+                                <VStack gap="$space-0">
+                                  <Text fontSize="$fontSize-xs" color="$textColor-secondary"
+                                    variant="code" value="{$item.id}" />
+                                  <Text fontSize="$fontSize-sm" maxLines="2"
+                                    value="{'…' + ($item.snippet || '') + '…'}" />
+                                </VStack>
+                              </Items>
+                            </VStack>
+                          </Items>
+                        </VStack>
+                      </ExpandableItem>
                     </VStack>
                   </ExpandableItem>
                 </VStack>

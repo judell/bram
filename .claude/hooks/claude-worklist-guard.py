@@ -48,6 +48,7 @@ _LIFECYCLE_PATHS_EXACT = {
 }
 _LIFECYCLE_PATHS_PREFIXES = (
     "resources/worklist-drafts/",
+    "resources/worklist-citations/",
     "resources/feedback-drafts/",
     "resources/feedback-history/",
     "resources/bram-traces/",

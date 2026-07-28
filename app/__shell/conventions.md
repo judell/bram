@@ -1269,6 +1269,42 @@ or contradiction. (4) file an `xmlui-org/xmlui` issue with the receipts (demand
 `result_count`, the interleaved timeline, the doc gap). This pipeline produced
 xmlui-org/xmlui #3669 / #3672 / #3673 (docs) and #3674 (a parser bug).
 
+### Recording citations (issue #232)
+
+When you propose or iterate a worklist item whose rationale rests on
+`/__search`, record the evidence as a durable sibling file at
+`resources/worklist-citations/<id>.json` — parallel to the draft at
+`worklist-drafts/<id>.md`. The host merges it into `/__worklist` the way it
+merges draft prose, and the Worklist tab renders it as a read-only **Evidence**
+expander per item. The file is a JSON array of citation records:
+
+```json
+[
+  {
+    "claim": "no latency evidence ties these surfaces to a real problem",
+    "queries": [
+      { "q": "issues queue settings refetch slow latency perceptible",
+        "mode": "and", "types": "session,worklist-history" }
+    ],
+    "sources": [
+      { "id": "issue:182", "snippet": "…the /__turn-state route is cheap…" }
+    ],
+    "indexedAt": "2026-07-28T18:00:00Z",
+    "polarity": "negative"
+  }
+]
+```
+
+- `polarity` is `"positive"` (a hit supports the claim) or `"negative"` (a
+  bounded absence — phrase these "not found in the indexed record using these
+  queries," never "does not exist").
+- Record the queries you actually ran (with `mode` / `types`) and the sources
+  they returned, so a positive finding is replayable and a negative one is
+  auditable.
+- Foundation slice: citations are **agent-recorded and read-only**. Automatic
+  host-capture, a replay action, and enforcement are tracked follow-ups on the
+  issue — don't build them here.
+
 
 ## Debugging Bram itself
 

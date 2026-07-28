@@ -1269,41 +1269,41 @@ or contradiction. (4) file an `xmlui-org/xmlui` issue with the receipts (demand
 `result_count`, the interleaved timeline, the doc gap). This pipeline produced
 xmlui-org/xmlui #3669 / #3672 / #3673 (docs) and #3674 (a parser bug).
 
-### Recording citations (issue #232)
+### Citing evidence in issues and the search-wins ledger (issue #233)
 
-When you propose or iterate a worklist item whose rationale rests on
-`/__search`, record the evidence as a durable sibling file at
-`resources/worklist-citations/<id>.json` — parallel to the draft at
-`worklist-drafts/<id>.md`. The host merges it into `/__worklist` the way it
-merges draft prose, and the Worklist tab renders it as a read-only **Evidence**
-expander per item. The file is a JSON array of citation records:
+When an issue comment, ledger entry, or postmortem cites evidence, make the
+references followable:
 
-```json
-[
-  {
-    "claim": "no latency evidence ties these surfaces to a real problem",
-    "queries": [
-      { "q": "issues queue settings refetch slow latency perceptible",
-        "mode": "and", "types": "session,worklist-history" }
-    ],
-    "sources": [
-      { "id": "issue:182", "snippet": "…the /__turn-state route is cheap…" }
-    ],
-    "indexedAt": "2026-07-28T18:00:00Z",
-    "polarity": "negative"
-  }
-]
-```
+- **Commits**: link the full-SHA forge URL
+  (`https://<forge>/<owner>/<repo>/commit/<full-sha>`), displayed as the
+  short SHA — bare short SHAs in backticks do **not** autolink on GitHub.
+  Resolve with `git rev-parse <short>`.
+- **Issues**: bare `#N` autolinks; use it.
+- **Local-only sources** (session transcripts, worklist-history records)
+  have no web URL. Name them by path or key, and where a runnable query
+  helps the reader, include the `/__search` query (`q` / `mode` / `types`)
+  that finds them — a distinctive phrase in `phrase` mode pinpoints; broad
+  AND queries only retrieve.
 
-- `polarity` is `"positive"` (a hit supports the claim) or `"negative"` (a
-  bounded absence — phrase these "not found in the indexed record using these
-  queries," never "does not exist").
-- Record the queries you actually ran (with `mode` / `types`) and the sources
-  they returned, so a positive finding is replayable and a negative one is
-  auditable.
-- Foundation slice: citations are **agent-recorded and read-only**. Automatic
-  host-capture, a replay action, and enforcement are tracked follow-ups on the
-  issue — don't build them here.
+**The search-wins ledger.** Keep a ledger issue in the project that collects
+receipts for the claim that agent + indexed project memory changes the work
+(this repo's is #233, which defines the entry format). Capture rule: record
+an entry **at the moment** a live question is answered by the index and
+something materially changes (a plan killed or redirected, prior art
+recovered, duplicate work prevented). Routine lookups don't qualify; entries
+are never reconstructed later. Ledgers are **project-local by design** —
+receipts carry project specifics, so they belong in the project's own
+tracker. Sharing standout entries upstream (to the flagship collection at
+judell/bram#233) is a per-entry choice by the project's humans, never an
+automatic behavior.
+
+Worklist drafts follow the same rule: **plans cite inline in their prose**
+(typed, followable refs — `code:path:line`, commit SHAs, issue numbers, doc
+URLs, pinpointing `/__search` queries). Do not author
+`resources/worklist-citations/<id>.json` files; that plumbing is dormant
+(#232's postmortem has the rationale). For handing a user a runnable query
+from the pane, use Search deep-linking:
+`navigate('/search', { queryParams: { q, mode, types } })`.
 
 
 ## Debugging Bram itself

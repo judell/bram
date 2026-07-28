@@ -5840,18 +5840,42 @@ window.__bramProjectedSessionTurns = function (payload) {
 };
 
 // ---- In-view find (search-in-view-find) ----
-// Ordered indices of the projected turns whose text contains the needle
+// Search terms for the in-view find, mirroring /__search's modes: a
+// double-quoted query is ONE phrase; otherwise whitespace-split into terms
+// >= 2 chars. Returns an array (possibly single-element or empty) suitable for
+// Markdown's multi-term highlightText (xmlui #3675), so the in-view find keeps
+// step with AND-mode search, which matches non-adjacent terms.
+window.__bramSearchTerms = function (query) {
+  var s = (query == null ? "" : String(query)).trim();
+  if (s.length < 2) return [];
+  if (s.charAt(0) === '"' && s.charAt(s.length - 1) === '"') {
+    var inner = s.slice(1, -1).trim();
+    return inner.length >= 2 ? [inner] : [];
+  }
+  var out = [];
+  var parts = s.split(/\s+/);
+  for (var i = 0; i < parts.length; i++) {
+    if (parts[i].length >= 2) out.push(parts[i]);
+  }
+  return out;
+};
+
+// Ordered indices of the projected turns whose text contains ANY search term
 // (case-insensitive). The index IS the List data index, so the caller can
-// List.scrollToIndex() straight to a match. Gated at >= 2 chars to skip the
-// noise scans of a single keystroke (mirrors the Search page's `ready` gate).
+// List.scrollToIndex() straight to a match. Multi-term to match AND-mode
+// search: a turn holding the terms non-adjacent still counts.
 window.__bramFindMatchingTurnIndices = function (turns, needle) {
-  var q = (needle == null ? "" : String(needle)).trim().toLowerCase();
-  if (q.length < 2 || !turns || !turns.length) return [];
+  var terms = window.__bramSearchTerms(needle);
+  if (!terms.length || !turns || !turns.length) return [];
+  var lower = [];
+  for (var k = 0; k < terms.length; k++) lower.push(String(terms[k]).toLowerCase());
   var out = [];
   for (var i = 0; i < turns.length; i++) {
     var t = turns[i];
     var text = t && t.text ? String(t.text).toLowerCase() : "";
-    if (text.indexOf(q) !== -1) out.push(i);
+    for (var j = 0; j < lower.length; j++) {
+      if (text.indexOf(lower[j]) !== -1) { out.push(i); break; }
+    }
   }
   return out;
 };
@@ -5879,15 +5903,23 @@ window.__bramCursorStep = function (total, cur, dir) {
   return (c + dir + n) % n;
 };
 
-// Case-insensitive match count of needle in one block of text.
+// Case-insensitive match count in one block of text, summed across all search
+// terms (multi-term, to match AND-mode search + multi-term highlightText). The
+// per-block total equals the number of <mark>s the component paints, so the
+// "N / M matches" counter and the ▲▼ cursor stay in step with the marks.
 window.__bramCountOccurrences = function (text, needle) {
   var s = text == null ? "" : String(text);
-  var q = (needle == null ? "" : String(needle)).trim().toLowerCase();
-  if (q.length < 2 || !s) return 0;
+  if (!s) return 0;
+  var terms = Array.isArray(needle) ? needle : window.__bramSearchTerms(needle);
   var hay = s.toLowerCase();
-  var n = 0, i = hay.indexOf(q);
-  while (i !== -1) { n++; i = hay.indexOf(q, i + q.length); }
-  return n;
+  var total = 0;
+  for (var t = 0; t < terms.length; t++) {
+    var q = String(terms[t]).trim().toLowerCase();
+    if (q.length < 2) continue;
+    var i = hay.indexOf(q);
+    while (i !== -1) { total++; i = hay.indexOf(q, i + q.length); }
+  }
+  return total;
 };
 
 // Per-block counts + total for an ordered array of block texts.

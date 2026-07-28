@@ -78,14 +78,14 @@
         <VStack gap="$space-2" when="{window.__bramHistoryItemFieldMarkdown(g, 'before')}">
           <Text value="Before" fontWeight="$fontWeight-bold" />
           <Markdown content="{window.__bramHistoryItemFieldMarkdown(g, 'before')}"
-            highlightText="{appliedNeedle}"
+            highlightText="{window.__bramSearchTerms(appliedNeedle)}"
             highlightActiveIndex="{window.__bramActiveOccForBlock(counts.counts, cursor, 0)}" />
         </VStack>
 
         <VStack gap="$space-2" when="{window.__bramHistoryItemFieldMarkdown(g, 'after')}">
           <Text value="After" fontWeight="$fontWeight-bold" />
           <Markdown content="{window.__bramHistoryItemFieldMarkdown(g, 'after')}"
-            highlightText="{appliedNeedle}"
+            highlightText="{window.__bramSearchTerms(appliedNeedle)}"
             highlightActiveIndex="{window.__bramActiveOccForBlock(counts.counts, cursor, 1)}" />
         </VStack>
 
@@ -116,7 +116,7 @@
             <VStack gap="$space-1" paddingVertical="$space-1" borderTop="1px solid $borderColor">
               <Text value="{window.__bramHistoryPhaseLabel($item) + ' · ' + (($item.iso || '').slice(0, 16))}" fontSize="$fontSize-sm" />
               <Markdown when="{$item.kind === 'feedback'}" content="{$item.body}"
-                highlightText="{appliedNeedle}"
+                highlightText="{window.__bramSearchTerms(appliedNeedle)}"
                 highlightActiveIndex="{window.__bramActiveOccForBlock(counts.counts, cursor, window.__bramHistoryPhaseBlockIndex(g, $itemIndex))}" />
               <Text when="{$item.kind !== 'feedback'}" value="{$item.summary}" color="$textColor-secondary" fontSize="$fontSize-xs" />
             </VStack>

@@ -114,7 +114,7 @@
              turn (debounced needle); highlightActive emphasizes + centers the
              match on the active turn. -->
         <Markdown content="{$item.text}"
-          highlightText="{$item.__needle}"
+          highlightText="{window.__bramSearchTerms($item.__needle)}"
           highlightActive="{$item.__active}" />
         <VStack gap="$space-2" when="{$item.images &amp;&amp; $item.images.length > 0}">
           <Items data="{$item.images}">

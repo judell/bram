@@ -64,7 +64,7 @@
         <Text when="{issue.value &amp;&amp; issue.value.author}" fontSize="$fontSize-sm" color="$textColor-secondary"
           value="{((issue.value.author.login || issue.value.author.name) || 'unknown') + ' opened ' + getDateUntilNow(issue.value.createdAt) + ' ago'}" />
         <Markdown when="{issue.value &amp;&amp; issue.value.body}" content="{issue.value.body}"
-          highlightText="{$item.needle}"
+          highlightText="{window.__bramSearchTerms($item.needle)}"
           highlightActiveIndex="{window.__bramActiveOccForBlock($item.counts, $item.cursor, 0)}" />
         <VStack when="{issue.value &amp;&amp; issue.value.comments &amp;&amp; issue.value.comments.length > 0}" gap="$space-3">
           <Items data="{window.__bramWithSearch(issue.value.comments, $item.needle, $item.counts, $item.cursor)}">
@@ -72,7 +72,7 @@
               <Text fontSize="$fontSize-xs" color="$textColor-secondary"
                 value="{(($item.author &amp;&amp; ($item.author.login || $item.author.name)) || 'unknown')}" />
               <Markdown content="{$item.body}"
-                highlightText="{$item.__needle}"
+                highlightText="{window.__bramSearchTerms($item.__needle)}"
                 highlightActiveIndex="{window.__bramActiveOccForBlock($item.__counts, $item.__cursor, 1 + $itemIndex)}" />
             </VStack>
           </Items>

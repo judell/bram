@@ -58,7 +58,7 @@
             value="{'Open commit on ' + (($props.url || '').includes('gitlab') ? 'GitLab' : 'GitHub') + ' ↗'}" />
         </Link>
         <Markdown when="{commit.value &amp;&amp; commit.value.message}" content="{commit.value.message}"
-          highlightText="{$item.needle}"
+          highlightText="{window.__bramSearchTerms($item.needle)}"
           highlightActiveIndex="{window.__bramActiveOccForBlock($item.counts, $item.cursor, 0)}" />
         <Text when="{commit.value &amp;&amp; commit.value.stats}" fontSize="$fontSize-sm" color="$textColor-secondary"
           value="+{commit.value.stats.additions} / -{commit.value.stats.deletions} across {commit.value.files.length} file(s)" />

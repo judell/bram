@@ -1183,6 +1183,45 @@ render?") are answered by evidence, not inspection. The norms:
   half.
 
 
+## Search-first
+
+Bram indexes the whole project history in embedded SQLite FTS5 (#230) —
+Claude + Codex session transcripts, commits, issues, worklist-history — and
+serves it at `GET /__search`. That turns the past into one bounded, ranked,
+snippet-first query instead of per-source greps. Session JSONLs are 20–30 MB
+and ungreppable without wrecking context, so before this the transcript
+history was effectively write-only to the agent.
+
+**The drill.** Before diagnosing a reported bug, proposing a worklist item,
+filing an issue, or asserting a fact about the project's past, **query
+`/__search` and cite what it returns.** The two highest-value triggers are bug
+reports ("has this recurred / been fixed?") and "have we done X / did we
+decide Y" questions. This is the log-first drill widened from the trace to the
+whole history.
+
+**The call** (Claude loopback curl; literal port from `resources/.bram-port`,
+already in the `.claude/settings.json` allowlist, so no prompt):
+
+```
+curl -4 -sS "http://127.0.0.1:61455/__search?q=<urlencoded>&limit=20&types=commits,issues"
+```
+
+(replace `61455` with whatever `Read resources/.bram-port` returned.)
+
+- `q` is a **phrase** match — the host wraps it as a quoted FTS5 phrase, so
+  choose terms accordingly; a multi-word `q` matches that exact phrase.
+- `types=` filters buckets (`session` / `commit` / `issue` /
+  `worklist-history`); omit for all. `limit` defaults 50, clamps 1–500.
+- Ranked snippets are enough to judge relevance; for a hit's full stored
+  content, `GET /__search/doc`.
+- Compact read: `… | jq -r '.[] | "\(.type)\t\(.key)\t\(.snippet[0:140])"'`.
+
+**Caveats.** FTS5 is keyword/phrase, not semantic — a miss means "nothing
+matched those terms," not proof of absence (the same trap as event-shaped
+logs). Scope is the current project. The issues bucket refreshes ~every 45s;
+a just-created issue may not be indexed for a beat.
+
+
 ## Debugging Bram itself
 
 Three forensics surfaces, used together. The first two are raw

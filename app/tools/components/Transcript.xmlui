@@ -77,14 +77,18 @@
     height="100%"
     padding="$space-4"
     gap="$space-2"
-    onInit="repinArmed = true; window.__bramRegisterTranscriptScroll(() => { atBottom = false; transcriptList.scrollToTop(); }, () => { atBottom = true; transcriptList.scrollToBottom(); }); window.__bramTranscriptMount()"
-    onCleanup="window.__bramSetTranscriptMounted(false)"
+    onInit="window.__bramRegisterTranscriptScroll(() => { atBottom = false; transcriptList.scrollToTop(); }, () => { atBottom = true; transcriptList.scrollToBottom(); }); window.__bramTranscriptMount()"
+    onCleanup="window.__bramSetTranscriptMounted(false); window.__bramSetVisibleRange(Object.assign({}, window.__bramVisibleRange || {}, { atBottom: atBottom, total: events.length }))"
     var.events="{window.__bramTranscriptEventsFromTurns($props.agentId ? subagentTurns.value : turnsEvt.value, null)}"
     var.eventsVersion="{($props.agentId ? (subagentTurns.value &amp;&amp; subagentTurns.value.total) : (turnsEvt.value &amp;&amp; turnsEvt.value.revision)) || events.length}"
     var.expanded="{[]}"
-    var.atBottom="{true}"
+    var.atBottom="{!window.__bramVisibleRange || window.__bramVisibleRange.atBottom !== false}"
     var.repinArmed="{false}"
     var.settleArmed="{false}"
+    var.mountReturnState="{window.__bramVisibleRange || null}"
+    var.mountFollow="{!mountReturnState || mountReturnState.atBottom !== false}"
+    var.mountPinArmed="{true}"
+    var.mountPinTicks="{0}"
     var.currentSession="{((transcriptSessions.value || []).find(s => s.current)) || ((transcriptSessions.value || [])[0])}">
     <HStack verticalAlignment="center" gap="$space-2">
       <Heading level="h2">Transcript</Heading>
@@ -309,6 +313,22 @@
          engine's async-unmount lifecycle violation (observed 9× in
          5 min of chip-switching, 2026-07-06); the Timer is
          component-owned and disposes cleanly. -->
+    <!-- transcript-tab-return-bottom-pin: restore the pre-switch state on
+         every mount. mountReturnState snapshots the window-side stash the
+         previous mount wrote at cleanup (atBottom + visible range), BEFORE
+         this mount's own range events overwrite it. Following: pin until
+         confirmed - the List's scroll event is user-driven only, so landing
+         is confirmed via the visible range reaching the last index
+         (https://docs.xmlui.org/components/List#scroll), bounded at 8
+         ticks. Reading: one scrollToIndex back to the stored first visible
+         row (https://docs.xmlui.org/components/List#scrolltoindex), and
+         follow stays off so arrivals never yank the reader. Armed in the
+         var initializer, not onInit - f846258's onInit arming was
+         clobberable by declaration order. -->
+    <Timer
+      interval="250"
+      enabled="{mountPinArmed}"
+      onTick="() => { mountPinTicks = mountPinTicks + 1; if (!mountFollow) { mountPinArmed = false; atBottom = false; if (mountReturnState &amp;&amp; mountReturnState.startIndex > 0) { transcriptList.scrollToIndex(mountReturnState.startIndex); } window.__bramIframeTrace('transcript-mount-restore', {index: (mountReturnState &amp;&amp; mountReturnState.startIndex) || 0, events: events.length}); } else if ((window.__bramVisibleRange &amp;&amp; window.__bramVisibleRange.endIndex >= events.length - 1) || mountPinTicks > 8) { mountPinArmed = false; window.__bramIframeTrace('transcript-mount-pin', {landed: (window.__bramVisibleRange &amp;&amp; window.__bramVisibleRange.endIndex >= events.length - 1) || false, ticks: mountPinTicks, events: events.length}); } else { transcriptList.scrollToBottom(); } }" />
     <ChangeListener
       listenTo="{$props.agentId}"
       onDidChange="() => { atBottom = true; repinArmed = true; window.__bramIframeTrace('subagent-switch', {agentId: $props.agentId || 'main', events: events.length}); transcriptList.scrollToBottom(); }" />

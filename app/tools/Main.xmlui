@@ -65,6 +65,11 @@
     listenTo="{mainAgentStatus.value &amp;&amp; mainAgentStatus.value.state}"
     onDidChange="() => { headerInflightTick = headerInflightTick + 1; window.__bramIframeTrace('header-inflight-refetch', {tick: headerInflightTick, state: (mainAgentStatus.value &amp;&amp; mainAgentStatus.value.state) || ''}); }" />
   <DataSource id="appInfo" url="/__app-info" />
+  <!-- issue-231 footer tips: settings snapshot feeds the relevance gates
+       (Tool Descriptions / batch actions); tick bumps re-pick on dismiss
+       or next. One-shot fetch, no polling. -->
+  <DataSource id="footerTipSettings" url="/__settings" />
+  <variable name="footerTipTick" value="{0}" />
   <DataSource
     id="headerSettings"
     url="/__settings"
@@ -752,6 +757,52 @@
             onClick="sendNoticeDismissed = window.__bramDismissSendNotice(window.__bramSendLedgerNoticeKey(sendLedgerDs.value))" />
         </HStack>
       </VStack>
+      <!-- issue-231 footer tips: one context-driven, dismissible Tip line at
+           the footer bottom, picked by window.__bramPickTip from the settings
+           snapshot. Re-picks on mount and on footerTipTick bumps; Next skips
+           for this session, the cross dismisses permanently. Existence guard
+           keeps a stale binary (pre-tips helpers.js) from throwing. -->
+      <HStack
+        when="{window.__bramPickTip ? window.__bramPickTip(footerTipSettings.value, footerSessions.value, footerTipTick) : null}"
+        gap="$space-2"
+        paddingHorizontal="$space-2"
+        paddingVertical="$space-1"
+        verticalAlignment="center"
+        marginTop="$space-1"
+        backgroundColor="$color-surface-50"
+        borderTop="1px solid $borderColor">
+        <!-- Clickable only when the tip carries a link: external url opens
+             in the system browser, internal route navigates in-pane, and a
+             linkless tip renders as plain text. -->
+        <!-- Plain Text wraps (width=* flex child, same as the send-ledger
+             note above); a nested Text inside Link cannot (the anchor is an
+             inline-flex whose child never shrinks). So the tip text is always
+             plain, and the link rides an explicit Open button. -->
+        <Text
+          width="*"
+          fontSize="$fontSize-sm"
+          color="$textColor-secondary"
+          value="{(window.__bramPickTip(footerTipSettings.value, footerSessions.value, footerTipTick) || {}).text}" />
+        <Button
+          when="{window.__bramTipLink ? window.__bramTipLink(footerTipSettings.value, footerSessions.value, footerTipTick) : ''}"
+          label="Open"
+          variant="ghost"
+          size="xs"
+          tooltip="Open the related page"
+          onClick="window.__bramTipLink(footerTipSettings.value, footerSessions.value, footerTipTick).indexOf('http') === 0 ? openExternal(window.__bramTipLink(footerTipSettings.value, footerSessions.value, footerTipTick)) : navigate(window.__bramTipLink(footerTipSettings.value, footerSessions.value, footerTipTick))" />
+        <Button
+          label="Next"
+          variant="ghost"
+          size="xs"
+          tooltip="Show a different tip"
+          onClick="footerTipTick = window.__bramSkipTip((window.__bramPickTip(footerTipSettings.value, footerSessions.value, footerTipTick) || {}).id, footerTipTick)" />
+        <Button
+          label="✕"
+          variant="ghost"
+          size="xs"
+          tooltip="{window.__bramTipDismissTooltip ? window.__bramTipDismissTooltip() : 'Dismiss this tip'}"
+          onClick="footerTipTick = window.__bramDismissTip((window.__bramPickTip(footerTipSettings.value, footerSessions.value, footerTipTick) || {}).id, footerTipTick)" />
+      </HStack>
     </VStack>
     </Theme>
   </Footer>

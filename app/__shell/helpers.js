@@ -7268,3 +7268,146 @@ window.addEventListener("unhandledrejection", (e) => {
     at: new Date().toISOString(),
   });
 });
+
+// ---------------------------------------------------------------------------
+// Footer tips (issue-231): one context-driven, dismissible "Tip:" line at the
+// footer bottom. Pure functions over snapshots the footer already fetches;
+// per-tip dismissal and the global switch persist in localStorage. No timers
+// by design — markup re-picks on mount and when the tick bumps (dismiss/next).
+//
+// Registry fields: `priority` is the pick order — among eligible, not-
+// dismissed, not-skipped tips the LOWEST number shows first (spaced by 10 so
+// new tips can slot between). Links are optional: `route` is an internal
+// deep link (navigate), `url` is external (opened in the system browser via
+// openExternal), neither means the tip is informational text only.
+
+window.__bramTipsRegistry = [
+  { id: 'tool-descriptions', priority: 10,
+    url: 'https://blog.jonudell.net/2026/07/23/agents-that-narrate-their-work-are-the-best-team-players/',
+    text: 'Tip: Turn on Tool Descriptions (Settings) to make agentic work more legible.' },
+  { id: 'batch-actions', priority: 20, route: '/settings?from=tip',
+    text: 'Tip: Batch actions let you approve or drop several worklist items in one click — enable them in Settings → Worklist.' },
+  { id: 'queue', priority: 30, route: '/queue?from=tip',
+    text: 'Tip: The Queue tab lines up notes for the agent while it works — reorder them, dictate by voice, paste images — then send as one message or an iterate.' },
+  { id: 'session-rename', priority: 40, route: '/sessions?from=tip',
+    text: 'Tip: Sessions can be renamed — give the current one a name that matches the project, in the Sessions tab.' },
+  { id: 'issue-to-item', priority: 50, route: '/worklist?addItem=1',
+    text: 'Tip: Turn an open issue into a worklist item — this opens the Add-item dialog, where you can cite the issue.' },
+  { id: 'issue-comments-collab', priority: 60,
+    url: 'https://blog.jonudell.net/2026/06/17/vibe-coding-as-a-team-sport/',
+    text: 'Tip: Use issue comments to communicate with other team members — humans and agents alike.' },
+  { id: 'log-first', priority: 70,
+    url: 'https://blog.jonudell.net/2026/07/08/dont-infer-behavior-from-code-observe-it-in-logs/',
+    text: 'Tip: Tell your agent to record evidence in logs.' },
+  { id: 'voice-input', priority: 80,
+    url: 'https://blog.jonudell.net/2026/07/16/talking-to-claude-code-and-codex/',
+    text: 'Tip: Use voice input to converse more easily with agents.' },
+  { id: 'agent-switch', priority: 90,
+    text: "Tip: Switch agents to have Claude Code review Codex's work, or vice versa." },
+  { id: 'worklist-scope-issue', priority: 100,
+    text: "Tip: If a worklist item's scope gets out of hand, tell the agent to file an issue, then drop the item — you can resurrect it later from the issue and worklist history." },
+  { id: 'paste-screenshot', priority: 110,
+    text: 'Tip: Paste a screenshot to show a UI glitch to the agent — it renders in the Worklist and Transcript so you can both see it.' },
+  { id: 'iterate-before-approve', priority: 120,
+    text: 'Tip: Use Iterate to refine a proposed or applied item before you click Approve.' },
+  { id: 'tips-dismiss-interval', priority: 130, route: '/settings?from=tip',
+    text: "Tip: Use Settings → 'Dismissed tips return after' to control how long a dismissed tip stays hidden." },
+];
+
+// The picked tip's link, if any: external url wins, then internal route,
+// else '' (informational tip). Markup gates the clickable wrapper on this.
+window.__bramTipLink = function (settings, sessions, tick) {
+  var t = window.__bramPickTip(settings, sessions, tick);
+  return t ? (t.url || t.route || '') : '';
+};
+
+window.__bramTipSkips = {}; // session-only "Next" skips; reset on reload
+
+// Dismissals are id -> epoch-ms, expiring after the user-configurable
+// interval (bram.tips.dismissInterval: '1d' | '7d' | '30d' | 'forever',
+// default one week). A legacy plain-array shape reads as dismissed-now.
+function __bramTipDismissedMap() {
+  var raw = __bramReadLS('bram.tips.dismissed', '{}');
+  try {
+    var v = JSON.parse(raw);
+    if (Array.isArray(v)) { var m = {}; v.forEach(function (id) { m[id] = Date.now(); }); return m; }
+    return (v && typeof v === 'object') ? v : {};
+  } catch (e) { return {}; }
+}
+
+var __bramTipIntervals = {
+  '1m': { ms: 60000, label: '1 minute' },
+  '1d': { ms: 86400000, label: '1 day' },
+  '7d': { ms: 7 * 86400000, label: '1 week' },
+  '30d': { ms: 30 * 86400000, label: '1 month' },
+  'forever': { ms: Infinity, label: 'forever' },
+};
+
+window.__bramTipsDismissInterval = function () {
+  var v = __bramReadLS('bram.tips.dismissInterval', '7d');
+  return __bramTipIntervals[v] ? v : '7d';
+};
+
+window.__bramSetTipsDismissInterval = function (v) {
+  __bramWriteLS('bram.tips.dismissInterval', __bramTipIntervals[v] ? v : '7d');
+  return v;
+};
+
+window.__bramTipDismissTooltip = function () {
+  var v = window.__bramTipsDismissInterval();
+  return v === 'forever' ? 'Dismiss this tip forever'
+    : 'Dismiss this tip for ' + __bramTipIntervals[v].label;
+};
+
+function __bramTipDismissed(id) {
+  var at = __bramTipDismissedMap()[id];
+  if (!at) return false;
+  return (Date.now() - Number(at)) < __bramTipIntervals[window.__bramTipsDismissInterval()].ms;
+}
+
+window.__bramTipsEnabled = function () {
+  return __bramReadLS('bram.tipsEnabled', '1') !== '0';
+};
+
+window.__bramSetTipsEnabled = function (on) {
+  __bramWriteLS('bram.tipsEnabled', on ? '1' : '0');
+  return !!on;
+};
+
+// Relevance gates. A tip with no gate is evergreen (eligible until dismissed).
+// The settings snapshot is the /__settings payload; done-detection for gated
+// tips is the gate itself (opting in retires the tip with no stored state).
+function __bramTipEligible(tip, settings) {
+  var s = settings || {};
+  if (tip.id === 'tool-descriptions') return !(s.ai && s.ai.describeCommands);
+  if (tip.id === 'batch-actions') return !(s.worklist && s.worklist.batchCommitActions);
+  return true;
+}
+
+// Highest-priority eligible, not-dismissed, not-skipped tip, or null. The
+// sessions arg is reserved for future predicates; tick exists only so markup
+// bindings re-evaluate when dismiss/next bump it.
+window.__bramPickTip = function (settings, sessions, tick) {
+  if (!window.__bramTipsEnabled()) return null;
+  var reg = window.__bramTipsRegistry.slice().sort(function (a, b) { return a.priority - b.priority; });
+  for (var i = 0; i < reg.length; i++) {
+    var t = reg[i];
+    if (__bramTipDismissed(t.id)) continue;
+    if (window.__bramTipSkips[t.id]) continue;
+    if (!__bramTipEligible(t, settings)) continue;
+    return t;
+  }
+  return null;
+};
+
+window.__bramDismissTip = function (id, tick) {
+  var m = __bramTipDismissedMap();
+  if (id) m[id] = Date.now();
+  __bramWriteLS('bram.tips.dismissed', JSON.stringify(m));
+  return (Number(tick) || 0) + 1;
+};
+
+window.__bramSkipTip = function (id, tick) {
+  if (id) window.__bramTipSkips[id] = true;
+  return (Number(tick) || 0) + 1;
+};

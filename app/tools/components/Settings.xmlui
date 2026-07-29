@@ -47,6 +47,12 @@
       enabled="{traceArchiveStatus.value &amp;&amp; traceArchiveStatus.value.state === 'pending'}"
       onTick="traceArchiveStatus.refetch()" />
 
+    <!-- issue-231: tip arrivals carry from=tip; the back link returns to
+         wherever the tip was clicked. Hidden on normal visits. -->
+    <Link when="{$queryParams.from === 'tip'}" noIndicator
+      tooltip="Back to where you were" onClick="navigate(-1)">
+      <Text value="← Back" />
+    </Link>
     <Heading level="h2">Settings</Heading>
     <Text
       fontSize="$fontSize-sm"
@@ -143,6 +149,25 @@
           label="Agent-pane hot-reload"
           initialValue="{settingsToolsPaneHotReload(settingsConfig.value)}"
           onDidChange="(v) => saveSettings.execute({ ui: { toolsPaneHotReload: v } })" />
+        <!-- issue-231: per-user preferences, localStorage-backed (not project
+             settings) — tips dismissal state is per-user too. The interval
+             governs how long a dismissed tip stays hidden; the footer's
+             dismiss tooltip echoes it. -->
+        <Switch
+          label="Show tips in the footer"
+          initialValue="{window.__bramTipsEnabled ? window.__bramTipsEnabled() : true}"
+          onDidChange="(v) => window.__bramSetTipsEnabled(v)" />
+        <Select
+          label="Dismissed tips return after"
+          width="14rem"
+          initialValue="{window.__bramTipsDismissInterval ? window.__bramTipsDismissInterval() : '7d'}"
+          onDidChange="(v) => window.__bramSetTipsDismissInterval(v)">
+          <Option value="1m" label="1 minute" />
+          <Option value="1d" label="1 day" />
+          <Option value="7d" label="1 week" />
+          <Option value="30d" label="1 month" />
+          <Option value="forever" label="Never (dismiss forever)" />
+        </Select>
       </VStack>
 
       <VStack gap="$space-2">

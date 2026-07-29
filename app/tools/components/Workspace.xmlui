@@ -8,7 +8,7 @@
   var.closeIssuesDialog="{null}"
   var.closeIssuesItemRef="{null}"
   var.closeIssuesState="{null}"
-  var.newItemHelp="{false}"
+  var.newItemHelp="{!!$queryParams.addItem}"
   var.newItemSubmitting="{false}"
   var.newItemStartSig="{''}"
   var.newItemTurnEnded="{false}"
@@ -1096,7 +1096,7 @@ Iterate is the right move when the agent's first cut is *almost* what you want."
     <ModalDialog
       when="{newItemHelp}"
       title="Add a worklist item"
-      onClose="newItemHelp = false; newItemIssue = null; newItemVoiceRecording = false; setWorklistVoiceTarget('message-agent'); newItemBox.setValue('')">
+      onClose="newItemHelp = false; newItemIssue = null; newItemVoiceRecording = false; setWorklistVoiceTarget('message-agent'); newItemBox.setValue(''); if ($queryParams.addItem) navigate('/worklist')">
       <VStack gap="$space-3" padding="$space-2">
         <Text>
           The worklist is how you and the agent coordinate multi-step work.
@@ -1185,11 +1185,12 @@ Before you `Approve` a `TO-APPLY` item you can `Iterate` to refine the proposal.
                 awaitingResponse = true;
                 toTurn(window.__bramWithStagedImageMarkers(msg, 'new-item'));
                 newItemHelp = false; newItemIssue = null; newItemVoiceRecording = false; setWorklistVoiceTarget('message-agent'); newItemBox.setValue('');
+                if ($queryParams.addItem) navigate('/worklist');
               })()" />
             <Button
               label="Cancel"
               variant="ghost"
-              onClick="newItemHelp = false; newItemIssue = null; newItemVoiceRecording = false; setWorklistVoiceTarget('message-agent'); newItemBox.setValue('')" />
+              onClick="newItemHelp = false; newItemIssue = null; newItemVoiceRecording = false; setWorklistVoiceTarget('message-agent'); newItemBox.setValue(''); if ($queryParams.addItem) navigate('/worklist')" />
           </HStack>
         </VStack>
       </VStack>

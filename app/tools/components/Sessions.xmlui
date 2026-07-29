@@ -153,6 +153,10 @@
 
   <VStack padding="$space-4" gap="$space-3" overflowY="auto" height="100%">
     <HStack gap="$space-3" verticalAlignment="center">
+      <Link when="{$queryParams.from === 'tip'}" noIndicator
+        tooltip="Back to where you were" onClick="navigate(-1)">
+        <Text value="← Back" />
+      </Link>
       <Heading level="h2">Sessions</Heading>
       <SearchBox
         boxWidth="22rem"

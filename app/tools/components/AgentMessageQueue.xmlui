@@ -53,6 +53,10 @@
 
   <VStack gap="$space-3" padding="$space-2">
     <HStack verticalAlignment="center" gap="$space-2">
+      <Link when="{$queryParams.from === 'tip'}" noIndicator
+        tooltip="Back to where you were" onClick="navigate(-1)">
+        <Text value="← Back" />
+      </Link>
       <Heading level="h2">Queue</Heading>
       <Button
         label="+ New item"

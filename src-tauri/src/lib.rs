@@ -9683,6 +9683,30 @@ fn git_log_recent<R: tauri::Runtime>(app: &AppHandle<R>, count: usize) -> Result
 // fresh `git rev-list` (cheap — no shortstat, no gh call). Falls back to a
 // live git_log_recent build on a cache miss or parse failure so the route
 // still works before the indexer's first pass completes.
+// Rebuild + cache the full commit list (with shortstat + gh-login
+// resolution) for cache-first /__commits serving. Shared by the commits
+// index pass (on new commits seen) and the worklist commit gate, which
+// refreshes the cache at the moment it creates a commit so the Commits tab
+// updates within event latency instead of waiting an indexer cycle.
+fn rebuild_commits_list_cache<R: tauri::Runtime>(app: &AppHandle<R>, conn: &rusqlite::Connection) {
+    if let Ok(list_bytes) = git_log_recent(app, 100) {
+        let extra = String::from_utf8(list_bytes).unwrap_or_default();
+        if extra.is_empty() {
+            return;
+        }
+        let list_row = search_index::IndexRow {
+            kind: "commit-list".to_string(),
+            source: String::new(),
+            date: String::new(),
+            link: String::new(),
+            content: String::new(), // empty: never matches FTS text queries
+            file: "commits:list".to_string(),
+            extra,
+        };
+        let _ = search_index::index_doc(conn, &list_row, 0, 0);
+    }
+}
+
 // commits-pending-closes-visibility: annotate each commit row with the
 // issues queued to close once it reaches origin (close-on-push, security
 // H5), so the Commits tab can show the consequence of Push at the decision
@@ -15538,18 +15562,7 @@ fn run_commit_index_pass<R: tauri::Runtime>(
     // cache-first /__commits serving. Rebuilds rarely — not on every pass —
     // since most passes see zero new commits.
     if indexed > 0 {
-        if let Ok(list_bytes) = git_log_recent(app, 100) {
-            let list_row = search_index::IndexRow {
-                kind: "commit-list".to_string(),
-                source: String::new(),
-                date: String::new(),
-                link: String::new(),
-                content: String::new(), // empty: never matches FTS text queries
-                file: "commits:list".to_string(),
-                extra: String::from_utf8(list_bytes).unwrap_or_default(),
-            };
-            let _ = search_index::index_doc(&conn, &list_row, 0, 0);
-        }
+        rebuild_commits_list_cache(app, &conn);
     }
     let rows = search_index::row_count(&conn).unwrap_or(0);
     Ok((seen, indexed, skipped, rows))
@@ -36320,6 +36333,18 @@ fn handle_worklist_commit<R: tauri::Runtime>(
     // selections as pending closes bound to this SHA. Nothing closes now; the
     // user's next Push triggers flush_pending_issue_closes.
     enqueue_issue_closes_from_auth(app, &auth, &sha);
+
+    // worklist-commit-refresh-commits-cache: the gate just created the
+    // commit, so refresh the commits:list cache now (local git, ~tens of ms)
+    // and emit git-status-changed deterministically — the Commits tab then
+    // shows the new commit within event latency instead of waiting for the
+    // next indexer pass to notice.
+    if let Some(db) = search_index_db_path(app) {
+        if let Ok(conn) = search_index::open(&db.to_string_lossy()) {
+            rebuild_commits_list_cache(app, &conn);
+        }
+    }
+    emit_replayable_signal(app, "git-status-changed");
 
     let prune_body = serde_json::json!({
         "op": "prune",

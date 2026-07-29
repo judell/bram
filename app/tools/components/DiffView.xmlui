@@ -23,7 +23,7 @@
            reserve 60vh or nest a scroller inside an outer scroller. -->
       <Items
         when="{$props.compact}"
-        data="{diffViewRows(annotate.lastResult, $props.text)}">
+        data="{window.__bramDiffFindRows(diffViewRows(annotate.lastResult, $props.text), $props.needle, $props.activeIndex)}">
         <HStack
           gap="0"
           backgroundColor="{$item.bg}"
@@ -42,9 +42,18 @@
       <!-- Default: virtualized bounded List for full / potentially large
            diffs (the modal, the TO COMMIT item diff, the Commits patch view).
            maxHeight defaults to 60vh so existing callers are unchanged. -->
+      <!-- Find marks (search-index-commit-diffs iterate): optional needle /
+           activeIndex props split matched slices into highlighted segments;
+           without a needle the decorator passes rows through untouched. The
+           ChangeListener scrolls the inner list to the active mark whenever
+           the cursor (or the annotate result) changes. -->
+      <ChangeListener
+        listenTo="{((annotate.lastResult || []).length) + '|' + ($props.needle || '') + '|' + ($props.activeIndex == null ? -1 : $props.activeIndex)}"
+        onDidChange="() => window.__bramDiffScrollToActive(diffRowsList, diffViewRows(annotate.lastResult, $props.text), $props.needle, $props.activeIndex)" />
       <List
+        id="diffRowsList"
         when="{!$props.compact}"
-        data="{diffViewRows(annotate.lastResult, $props.text)}"
+        data="{window.__bramDiffFindRows(diffViewRows(annotate.lastResult, $props.text), $props.needle, $props.activeIndex)}"
         height="{$props.maxHeight || '60vh'}"
         fixedItemSize="true">
         <HStack

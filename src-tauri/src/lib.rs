@@ -15534,8 +15534,46 @@ fn parse_iso_to_epoch(s: &str) -> Option<i64> {
         .map(|dt| dt.unix_timestamp())
 }
 
+/// Diff-schema stamp carried in the commit rows' otherwise-unused `size`
+/// slot (always 0 before diffs were indexed). Bumping it makes every older
+/// row fail the change gate and re-extract exactly once — the backfill
+/// mechanism for search-index-commit-diffs.
+const COMMIT_DIFF_SCHEMA: i64 = 1;
+
+/// Bound a commit patch for FTS indexing: lines longer than 2000 chars
+/// (minified vendor bumps ride on one line) collapse to a marker, and the
+/// retained text caps at 256 KB. Returns (text, elided_lines, dropped_bytes).
+fn sanitize_commit_patch(patch: &str) -> (String, usize, usize) {
+    const MAX_LINE: usize = 2000;
+    const MAX_TOTAL: usize = 256 * 1024;
+    let mut out = String::new();
+    let mut elided = 0usize;
+    let mut dropped = 0usize;
+    for line in patch.lines() {
+        if out.len() >= MAX_TOTAL {
+            dropped += line.len() + 1;
+            continue;
+        }
+        if line.len() > MAX_LINE {
+            elided += 1;
+            out.push_str("[long line elided]\n");
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if dropped > 0 {
+        out.push_str("[patch truncated]\n");
+    }
+    (out, elided, dropped)
+}
+
 /// One pass over `git log` — index each commit (immutable, keyed by
-/// `commit:<sha>`, so seen shas skip). Returns (seen, indexed, skipped, rows).
+/// `commit:<sha>`, so seen shas skip). The doc content carries the commit
+/// message, author, and its sanitized patch text (search-index-commit-diffs).
+/// Patches are fetched only for shas that need indexing — batched `git show`
+/// after the cheap header-only gate — so steady-state passes (zero new
+/// commits) pay no diff cost. Returns (seen, indexed, skipped, rows).
 fn run_commit_index_pass<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> Result<(usize, usize, usize, i64), String> {
@@ -15551,6 +15589,8 @@ fn run_commit_index_pass<R: tauri::Runtime>(
     let format = "--format=%H%x1f%at%x1f%an%x1f%B%x1e";
     let log_out = git_run(app, &["log", "-n2000", format]).map_err(|e| e.to_string())?;
     let (mut seen, mut indexed, mut skipped) = (0usize, 0usize, 0usize);
+    // Gate first, collect what needs indexing: (sha, token, author, body).
+    let mut pending: Vec<(String, i64, String, String)> = Vec::new();
     for record in log_out.split('\x1e') {
         let record = record.trim_start_matches('\n');
         if record.is_empty() {
@@ -15563,15 +15603,62 @@ fn run_commit_index_pass<R: tauri::Runtime>(
         seen += 1;
         let sha = parts[0];
         let token = parts[1].parse::<i64>().unwrap_or(0);
-        let author = parts[2];
-        let body = parts[3].trim_end_matches('\n');
-        let subject = body.lines().next().unwrap_or("");
         let key = format!("commit:{}", sha);
-        if !search_index::needs_index(&conn, &key, token, 0).unwrap_or(true) {
+        if !search_index::needs_index(&conn, &key, token, COMMIT_DIFF_SCHEMA).unwrap_or(true) {
             skipped += 1;
             continue;
         }
+        pending.push((
+            sha.to_string(),
+            token,
+            parts[2].to_string(),
+            parts[3].trim_end_matches('\n').to_string(),
+        ));
+    }
+    // Batched patch fetch for the pending shas only. A failed batch degrades
+    // to message-only content for its shas (never blocks the pass).
+    let mut patches: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for chunk in pending.chunks(100) {
+        let mut args: Vec<&str> = vec![
+            "show",
+            "--format=%x1e%H%x1f",
+            "--patch",
+            "--no-color",
+            "-M",
+        ];
+        args.extend(chunk.iter().map(|(sha, _, _, _)| sha.as_str()));
+        let Ok(show_out) = git_run(app, &args) else {
+            continue;
+        };
+        for record in show_out.split('\x1e') {
+            if record.is_empty() {
+                continue;
+            }
+            if let Some((sha, patch)) = record.split_once('\x1f') {
+                patches.insert(sha.trim().to_string(), patch.to_string());
+            }
+        }
+    }
+    for (sha, token, author, body) in pending {
+        let subject = body.lines().next().unwrap_or("").to_string();
+        let key = format!("commit:{}", sha);
         let short: String = sha.chars().take(9).collect();
+        let (patch, elided, dropped) =
+            sanitize_commit_patch(patches.get(&sha).map(String::as_str).unwrap_or(""));
+        if elided > 0 || dropped > 0 {
+            append_bram_trace_line(
+                app,
+                "search-index",
+                &format!(
+                    "op=diff-truncated sha={} kept={} elided_lines={} dropped_bytes={}",
+                    short,
+                    patch.len(),
+                    elided,
+                    dropped
+                ),
+            );
+        }
         let link = if html_base.is_empty() {
             String::new()
         } else {
@@ -15582,11 +15669,12 @@ fn run_commit_index_pass<R: tauri::Runtime>(
             source: format!("{} {}", short, subject),
             date: token.to_string(),
             link,
-            content: format!("{}\n{}\n{}", subject, body, author),
+            content: format!("{}\n{}\n{}\n{}", subject, body, author, patch),
             file: key,
             extra: String::new(),
         };
-        search_index::index_doc(&conn, &row, token, 0).map_err(|e| e.to_string())?;
+        search_index::index_doc(&conn, &row, token, COMMIT_DIFF_SCHEMA)
+            .map_err(|e| e.to_string())?;
         indexed += 1;
     }
     // `indexed > 0` means at least one new/changed commit landed, so rebuild +

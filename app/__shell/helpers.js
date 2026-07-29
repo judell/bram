@@ -5947,8 +5947,16 @@ window.__bramActiveOccForBlock = function (counts, cursor, blockIdx) {
 
 // Ordered block-text arrays per detail view (index positions must match the
 // order the components render their Markdown blocks).
+// Message first, then one block per file patch — matching CommitDetail's
+// render order (head row, then file rows). Counting runs on the raw patch
+// text; DiffView paints marks per rendered segment, so a term spanning a
+// segment boundary can count without painting a mark. The counter and the
+// row scroll stay honest; only the mark emphasis degrades in that edge.
 window.__bramCommitBlocks = function (commit) {
-  return [(commit && commit.message) || ""];
+  var out = [(commit && commit.message) || ""];
+  var files = (commit && commit.files) || [];
+  for (var i = 0; i < files.length; i++) out.push((files[i] && files[i].patch) || "");
+  return out;
 };
 window.__bramIssueBlocks = function (issue) {
   var out = [(issue && issue.body) || ""];
@@ -5967,6 +5975,164 @@ window.__bramHistoryBlocks = function (g) {
   }
   return out;
 };
+// ---- Find-in-diff (search-index-commit-diffs iterate) ----
+// CommitDetail's outer List rows: a head row (message + stats), then one row
+// per file. Search state rides each row (List rows are isolated scopes);
+// each file row carries its block's local active occurrence for DiffView.
+window.__bramCommitDetailRows = function (commit, needle, counts, cursor) {
+  var cc = (counts && counts.counts) || [];
+  var cur = Number(cursor) || 0;
+  var rows = [{
+    kind: "head",
+    message: (commit && commit.message) || "",
+    stats: (commit && commit.stats) || null,
+    filesCount: ((commit && commit.files) || []).length,
+    needle: needle || "",
+    counts: cc,
+    cursor: cur,
+  }];
+  var files = (commit && commit.files) || [];
+  for (var i = 0; i < files.length; i++) {
+    var f = files[i] || {};
+    rows.push({
+      kind: "file",
+      filename: f.filename,
+      additions: f.additions,
+      deletions: f.deletions,
+      patch: f.patch,
+      needle: needle || "",
+      activeOcc: window.__bramActiveOccForBlock(cc, cur, 1 + i),
+    });
+  }
+  return rows;
+};
+
+// Outer row index holding the cursor's match (0 = head/message row, b >= 1 =
+// file row b), for the outer List's scrollToIndex.
+window.__bramCommitActiveRow = function (counts, cursor) {
+  var c = (counts && counts.counts) || [], k = Number(cursor) || 0, acc = 0;
+  for (var i = 0; i < c.length; i++) {
+    acc += c[i] || 0;
+    if (k < acc) return i;
+  }
+  return 0;
+};
+
+// Shared walker for the two functions below: visits every term match in
+// document order across a DiffView row array (per segment; matches never
+// span segments) and calls visit(rowIdx, segIdx, start, len, occ). Returns
+// the total occurrence count.
+window.__bramDiffWalkMatches = function (rows, terms, visit) {
+  var lower = [];
+  for (var t = 0; t < terms.length; t++) lower.push(String(terms[t]).toLowerCase());
+  var occ = 0;
+  for (var r = 0; r < (rows || []).length; r++) {
+    var segs = rows[r].segments || [];
+    for (var s = 0; s < segs.length; s++) {
+      var text = segs[s].text == null ? "" : String(segs[s].text);
+      var hay = text.toLowerCase();
+      var pos = 0;
+      while (pos < hay.length) {
+        var best = -1, bestLen = 0;
+        for (var q = 0; q < lower.length; q++) {
+          var idx = hay.indexOf(lower[q], pos);
+          if (idx !== -1 && (best === -1 || idx < best)) { best = idx; bestLen = lower[q].length; }
+        }
+        if (best === -1) break;
+        if (visit) visit(r, s, best, bestLen, occ);
+        occ++;
+        pos = best + bestLen;
+      }
+    }
+  }
+  return occ;
+};
+
+// Decorate diffViewRows output with find marks: matched slices get a mark bg
+// (the block-local `activeIndex`-th gets the stronger active bg). No terms =>
+// rows pass through untouched, so DiffView callers without a find are free.
+window.__bramDiffFindRows = function (rows, needle, activeIndex) {
+  var terms = window.__bramSearchTerms(needle);
+  if (!terms.length || !rows || !rows.length) return rows || [];
+  var act = activeIndex == null ? -1 : Number(activeIndex);
+  // Collect match spans per (row, seg) in one walk, then rebuild segments.
+  var spans = {};
+  window.__bramDiffWalkMatches(rows, terms, function (r, s, start, len, occ) {
+    var key = r + ":" + s;
+    (spans[key] = spans[key] || []).push({ start: start, len: len, occ: occ });
+  });
+  return rows.map(function (row, r) {
+    var segs = [];
+    (row.segments || []).forEach(function (seg, s) {
+      var text = seg.text == null ? "" : String(seg.text);
+      var list = spans[r + ":" + s];
+      if (!list || !list.length) { segs.push(seg); return; }
+      var pos = 0;
+      for (var i = 0; i < list.length; i++) {
+        var m = list[i];
+        if (m.start > pos) segs.push({ text: text.slice(pos, m.start), bg: seg.bg || null, color: seg.color });
+        segs.push({
+          text: text.slice(m.start, m.start + m.len),
+          bg: m.occ === act ? "rgba(249, 115, 22, 0.6)" : "rgba(250, 204, 21, 0.45)",
+          color: seg.color,
+        });
+        pos = m.start + m.len;
+      }
+      if (pos < text.length) segs.push({ text: text.slice(pos), bg: seg.bg || null, color: seg.color });
+    });
+    return { kind: row.kind, bg: row.bg, color: row.color, segments: segs };
+  });
+};
+
+// Row index of the block-local `activeIndex`-th mark (same walk as the
+// decorator), or -1. Drives DiffView's inner scrollToIndex.
+window.__bramDiffActiveRow = function (rows, needle, activeIndex) {
+  var terms = window.__bramSearchTerms(needle);
+  var act = activeIndex == null ? -1 : Number(activeIndex);
+  if (!terms.length || act < 0 || !rows || !rows.length) return -1;
+  var found = -1;
+  window.__bramDiffWalkMatches(rows, terms, function (r, s, start, len, occ) {
+    if (occ === act && found === -1) found = r;
+  });
+  return found;
+};
+
+// Scroll a DiffView's inner List to the active mark's row, if any. Traced
+// (subkind=diff-find-scroll) while the find-in-diff mechanics soak: a step
+// that doesn't land names itself — no line = listener never fired; a line
+// with row=-1 = the walker missed; hasRef=false = the List ref wasn't up.
+window.__bramDiffScrollToActive = function (listRef, rows, needle, activeIndex) {
+  var r = window.__bramDiffActiveRow(rows, needle, activeIndex);
+  try {
+    window.logToHost && window.logToHost({
+      kind: "iframe-trace",
+      subkind: "diff-find-scroll",
+      rows: (rows || []).length,
+      active: activeIndex == null ? -1 : Number(activeIndex),
+      row: r,
+      hasRef: !!(listRef && listRef.scrollToIndex),
+    });
+  } catch (e) {}
+  if (r >= 0 && listRef && listRef.scrollToIndex) listRef.scrollToIndex(r);
+};
+
+// Scroll CommitDetail's outer list to the block row holding the cursor.
+// Same soak trace (subkind=commit-find-scroll).
+window.__bramCommitScrollToActive = function (listRef, counts, cursor) {
+  var row = window.__bramCommitActiveRow(counts, cursor);
+  try {
+    window.logToHost && window.logToHost({
+      kind: "iframe-trace",
+      subkind: "commit-find-scroll",
+      row: row,
+      cursor: Number(cursor) || 0,
+      total: (counts && counts.total) || 0,
+      hasRef: !!(listRef && listRef.scrollToIndex),
+    });
+  } catch (e) {}
+  if (listRef && listRef.scrollToIndex) listRef.scrollToIndex(row);
+};
+
 // Global block index of a History phase's feedback Markdown (before=0, after=1,
 // feedback phases follow in order), or -1 for a non-feedback phase.
 window.__bramHistoryPhaseBlockIndex = function (g, phaseItemIndex) {

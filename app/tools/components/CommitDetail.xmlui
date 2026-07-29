@@ -5,14 +5,18 @@
        search-in-view-transplant: in-view find over the commit message. Same
        structure as SessionDetail — the find toolbar sits ABOVE a List (the only
        reliably bounded scroller in XMLUI; a VStack maxHeight does not clip), so
-       the controls stay in view while the body scrolls. Diffs are not searched. -->
+       the controls stay in view while the body scrolls.
+       search-index-commit-diffs iterate: diffs are searched too — blocks are
+       message + one per file patch; the outer List is one row per block so
+       stepping scrolls the active file into view, and DiffView highlights and
+       scrolls to the active mark via its needle/activeIndex props. -->
   <DataSource id="commit" url="/__commit" queryParams="{{ sha: $props.sha }}" when="{!!$props.sha}" />
   <VStack gap="$space-2" padding="$space-2"
     var.findText="{$props.query || ''}"
     var.appliedNeedle="{$props.query || ''}"
     var.cursor="{0}"
     var.counts="{{ counts: [], total: 0 }}"
-    var.oneRow="{[{ needle: '', counts: [], cursor: 0 }]}">
+    var.detailRows="{[{ kind: 'head', message: '', stats: null, filesCount: 0, needle: '', counts: [], cursor: 0 }]}">
 
     <!-- Fixed find toolbar (sibling above the List). -->
     <HStack when="{commit.value &amp;&amp; commit.value.message}" gap="$space-2" verticalAlignment="center">
@@ -38,10 +42,15 @@
       onDidChange="() => cursor = 0" />
     <ChangeListener listenTo="{appliedNeedle + '|' + (commit.value ? commit.value.sha : '')}"
       onDidChange="() => counts = window.__bramBlockMatchCounts(window.__bramCommitBlocks(commit.value), appliedNeedle)" />
-    <!-- The List row can't see the outer search vars; thread them through the
-         row data and read via $item. Rebuild only when the search changes. -->
-    <ChangeListener listenTo="{appliedNeedle + '|' + cursor + '|' + counts.total}"
-      onDidChange="() => oneRow = [{ needle: appliedNeedle, counts: counts.counts, cursor: cursor }]" />
+    <!-- The List rows can't see the outer search vars; thread them through the
+         row data and read via $item. Rebuild when the search changes or the
+         commit lands (sha in the key — rows carry the message and files now). -->
+    <ChangeListener listenTo="{appliedNeedle + '|' + cursor + '|' + counts.total + '|' + (commit.value ? commit.value.sha : '')}"
+      onDidChange="() => detailRows = window.__bramCommitDetailRows(commit.value, appliedNeedle, counts, cursor)" />
+    <!-- Step the outer list to the row (message or file) holding the active
+         match, mirroring SessionDetail's scrollToIndex-on-cursor. -->
+    <ChangeListener listenTo="{cursor + '|' + counts.total}"
+      onDidChange="() => counts.total ? window.__bramCommitScrollToActive(commitList, counts, cursor) : null" />
 
     <!-- Loading indicator is a component-scope sibling: the List row is a
          frozen scope that never sees the DataSource land after mount (first
@@ -49,29 +58,32 @@
          List on commit.value the way SessionDetail gates on turns.value. -->
     <Text when="{commit.inProgress &amp;&amp; !commit.loaded}" color="$textColor-secondary" value="Loading…" />
 
-    <!-- Bounded scroller = a single-row List (mirrors SessionDetail). Mounts
-         only once commit.value is present; search state arrives via $item. -->
-    <List when="{commit.value}" data="{oneRow}" height="{$props.height || '400px'}">
-      <VStack gap="$space-3">
+    <!-- Bounded scroller = a List with one row per block: head (message +
+         stats) then one per file (mirrors SessionDetail's virtualized find).
+         Mounts only once commit.value is present; rows are baked from the
+         loaded commit (a row template is a frozen scope — reading commit.value
+         from inside it is the first-click-stuck-Loading trap), and search
+         state arrives via $item. -->
+    <List when="{commit.value}" id="commitList" data="{detailRows}" height="{$props.height || '400px'}">
+      <VStack when="{$item.kind === 'head'}" gap="$space-3" paddingBottom="$space-2">
         <Link when="{$props.url}" noIndicator onClick="openExternal($props.url)">
           <Text fontWeight="$fontWeight-bold"
             value="{'Open commit on ' + (($props.url || '').includes('gitlab') ? 'GitLab' : 'GitHub') + ' ↗'}" />
         </Link>
-        <Markdown when="{commit.value &amp;&amp; commit.value.message}" content="{commit.value.message}"
+        <Markdown when="{$item.message}" content="{$item.message}"
           highlightText="{window.__bramSearchTerms($item.needle)}"
           highlightActiveIndex="{window.__bramActiveOccForBlock($item.counts, $item.cursor, 0)}" />
-        <Text when="{commit.value &amp;&amp; commit.value.stats}" fontSize="$fontSize-sm" color="$textColor-secondary"
-          value="+{commit.value.stats.additions} / -{commit.value.stats.deletions} across {commit.value.files.length} file(s)" />
-        <Items when="{commit.value &amp;&amp; commit.value.files}" data="{commit.value.files}">
-          <VStack gap="0" borderTop="1px solid $borderColor" paddingTop="$space-2">
-            <HStack gap="$space-3" verticalAlignment="center" paddingBottom="$space-2">
-              <Text fontWeight="$fontWeight-bold" value="{$item.filename}" />
-              <Text color="green" value="+{$item.additions}" />
-              <Text color="red" value="-{$item.deletions}" />
-            </HStack>
-            <DiffView text="{$item.patch || '(no textual diff)'}" />
-          </VStack>
-        </Items>
+        <Text when="{$item.stats}" fontSize="$fontSize-sm" color="$textColor-secondary"
+          value="+{$item.stats.additions} / -{$item.stats.deletions} across {$item.filesCount} file(s)" />
+      </VStack>
+      <VStack when="{$item.kind === 'file'}" gap="0" borderTop="1px solid $borderColor" paddingTop="$space-2">
+        <HStack gap="$space-3" verticalAlignment="center" paddingBottom="$space-2">
+          <Text fontWeight="$fontWeight-bold" value="{$item.filename}" />
+          <Text color="green" value="+{$item.additions}" />
+          <Text color="red" value="-{$item.deletions}" />
+        </HStack>
+        <DiffView text="{$item.patch || '(no textual diff)'}"
+          needle="{$item.needle}" activeIndex="{$item.activeOcc}" />
       </VStack>
     </List>
   </VStack>

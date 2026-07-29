@@ -112,7 +112,7 @@
       </Theme>
       <SearchBox
         boxWidth="26rem"
-        placeholder="Search sessions, commits, issues, history — quote for an exact phrase"
+        placeholder="Quote for an exact phrase"
         initialValue="{query}"
         inProgress="{rSession.inProgress || rCommit.inProgress || rIssue.inProgress || rHistory.inProgress}"
         onQueryChange="(q) => query = q"

@@ -20022,6 +20022,72 @@ mod codex_unified_exec_tests {
 }
 
 // promote-tool-descriptions-to-row iterate: Codex analog of the Bash
+// transcript-search-tool-rendering: agent-side /__search curls are
+// semantic searches, so project them as a Search tool use instead of a
+// generic Bash row. Extracts a display string per /__search request found
+// in a shell command (several often ride one Bash call). Expansion still
+// shows the real command — this labels, it does not disguise.
+fn st_extract_search_queries(cmd: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = cmd;
+    while let Some(pos) = rest.find("/__search") {
+        rest = &rest[pos + "/__search".len()..];
+        let is_doc = rest.starts_with("/doc");
+        let after = if is_doc { &rest["/doc".len()..] } else { rest };
+        let Some(q_start) = after.strip_prefix('?') else { continue };
+        let end = q_start
+            .find(|ch: char| ch == '"' || ch == '\'' || ch.is_whitespace())
+            .unwrap_or(q_start.len());
+        let query_str = &q_start[..end];
+        let mut q = String::new();
+        let mut mode = String::new();
+        let mut types = String::new();
+        let mut key = String::new();
+        for pair in query_str.split('&') {
+            if let Some(v) = pair.strip_prefix("q=") {
+                q = percent_decode(v);
+            } else if let Some(v) = pair.strip_prefix("mode=") {
+                mode = percent_decode(v);
+            } else if let Some(v) = pair.strip_prefix("types=") {
+                types = percent_decode(v);
+            } else if let Some(v) = pair.strip_prefix("key=") {
+                key = percent_decode(v);
+            }
+        }
+        if is_doc {
+            if !key.is_empty() {
+                out.push(format!("doc:{}", key));
+            }
+            continue;
+        }
+        if q.is_empty() {
+            continue;
+        }
+        // Explicit, labeled shape (user spec 2026-07-28):
+        //   [terms] mode:and types:session,issue   (types:all when unfiltered)
+        let disp = format!(
+            "[{}] mode:{} types:{}",
+            q,
+            if mode.is_empty() { "and" } else { &mode },
+            if types.is_empty() { "all" } else { &types },
+        );
+        out.push(disp);
+    }
+    out
+}
+
+// nameDetail for a Search row: every query enumerated in the explicit
+// labeled shape — a "+N more" suffix read as if it extended the types
+// list, and elision hid the queries the row exists to show (user review
+// 2026-07-28). Safety cap only; the UI clips long rows itself.
+fn st_search_name_detail(queries: &[String]) -> String {
+    let joined = queries.join(" | ");
+    if joined.chars().count() <= 300 {
+        return joined;
+    }
+    format!("{}…", joined.chars().take(297).collect::<String>())
+}
+
 // nameDetail — command words for exec_command (input.cmd) and for
 // unified exec (the shell commands embedded in the JS script).
 fn st_codex_name_detail(payload: &serde_json::Value) -> String {
@@ -20477,26 +20543,34 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
                         let empty = serde_json::json!({});
                         let input = c_obj.get("input").unwrap_or(&empty);
                         let summary = st_tool_summary(name, input);
+                        // promote-tool-descriptions-to-row iterate: the
+                        // command words behind a Bash call ("grep" /
+                        // "rg, sed, grep"), so the row reads
+                        // Bash (cargo, jq) instead of bare Bash.
+                        // transcript-search-tool-rendering: a Bash call
+                        // whose command hits /__search projects as a
+                        // Search row with the decoded queries instead.
+                        let bash_cmd = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                        let search_queries = if name == "Bash" {
+                            st_extract_search_queries(bash_cmd)
+                        } else {
+                            Vec::new()
+                        };
+                        let (proj_name, name_detail) = if !search_queries.is_empty() {
+                            ("Search".to_string(), st_search_name_detail(&search_queries))
+                        } else if name == "Bash" {
+                            (name.to_string(), st_bash_command_words(bash_cmd))
+                        } else {
+                            (name.to_string(), String::new())
+                        };
                         let mut entry = serde_json::json!({
                             "kind": "tool",
                             "id": id,
-                            "name": name,
+                            "name": proj_name,
                             "summary": summary,
                             "commandDisplay": st_tool_command_display(name, input),
                             "commandMarkdown": st_tool_command_markdown(name, input),
-                            // promote-tool-descriptions-to-row iterate: the
-                            // command words behind a Bash call ("grep" /
-                            // "rg, sed, grep"), so the row reads
-                            // Bash (cargo, jq) instead of bare Bash.
-                            "nameDetail": if name == "Bash" {
-                                input
-                                    .get("command")
-                                    .and_then(|v| v.as_str())
-                                    .map(st_bash_command_words)
-                                    .unwrap_or_default()
-                            } else {
-                                String::new()
-                            },
+                            "nameDetail": name_detail,
                             // The agent-authored intent sentence (Claude's Bash
                             // tool requires it; other tools/providers may lack
                             // it). Rendered above the command in the Transcript
@@ -20658,14 +20732,27 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
                     let id = p.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
                     let name = st_codex_tool_name(p);
                     let summary = st_codex_tool_summary(p);
+                    // transcript-search-tool-rendering: same Search
+                    // projection as the Claude side, over the exec cmd.
+                    let codex_cmd = st_codex_tool_input(p)
+                        .get("cmd")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let search_queries = st_extract_search_queries(&codex_cmd);
+                    let (proj_name, name_detail) = if !search_queries.is_empty() {
+                        ("Search".to_string(), st_search_name_detail(&search_queries))
+                    } else {
+                        (name.clone(), st_codex_name_detail(p))
+                    };
                     let entry = serde_json::json!({
                         "kind": "tool",
                         "id": id,
-                        "name": name,
+                        "name": proj_name,
                         "summary": summary,
                         "commandDisplay": st_codex_tool_command_display(p),
                         "commandMarkdown": st_codex_tool_command_markdown(p),
-                        "nameDetail": st_codex_name_detail(p),
+                        "nameDetail": name_detail,
                     });
                     let entry_idx = entries.len();
                     entries.push(entry);

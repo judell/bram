@@ -6177,6 +6177,43 @@ window.__bramSessionSearchRows = function (turns, needle, matchIndices, currentM
   });
 };
 
+// transcript-find-in-page-v2: match scan over transcript EVENTS (the
+// Transcript's row shape) — sibling of __bramFindMatchingTurnIndices, which
+// is turn-shaped (t.text only). Scans the fields the rows actually render,
+// so a match is a visible match.
+window.__bramFindMatchingEventIndices = function (events, needle) {
+  var terms = window.__bramSearchTerms(needle);
+  if (!terms.length || !events || !events.length) return [];
+  var lower = [];
+  for (var k = 0; k < terms.length; k++) lower.push(String(terms[k]).toLowerCase());
+  var out = [];
+  for (var i = 0; i < events.length; i++) {
+    var ev = events[i] || {};
+    var text = [ev.text, ev.summary, ev.name, ev.nameDetail, ev.commandDisplay, ev.description]
+      .filter(Boolean).join("\n").toLowerCase();
+    if (!text) continue;
+    for (var j = 0; j < lower.length; j++) {
+      if (text.indexOf(lower[j]) !== -1) { out.push(i); break; }
+    }
+  }
+  return out;
+};
+
+// Bake find state into transcript rows (rows are isolated scopes — they
+// can't see the outer find vars). Returns NULL when the find is inactive so
+// the caller's `findRows || events` binding falls back to the live events
+// array — the hot refetch path pays nothing and never sees stale copies.
+window.__bramTranscriptFindRows = function (events, needle, matchIndices, cursor) {
+  var terms = window.__bramSearchTerms(needle);
+  if (!terms.length) return null;
+  var arr = Array.isArray(events) ? events : [];
+  var mi = Array.isArray(matchIndices) ? matchIndices : [];
+  var activeIdx = mi.length ? mi[Number(cursor) || 0] : -1;
+  return arr.map(function (ev, i) {
+    return Object.assign({}, ev, { __needle: needle || "", __active: i === activeIdx });
+  });
+};
+
 window.__bramProjectedLastExchange = function (payload) {
   var turns = (payload && payload.turns) || [];
   var lastUser = null;

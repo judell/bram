@@ -89,11 +89,43 @@
     var.mountFollow="{!mountReturnState || mountReturnState.atBottom !== false}"
     var.mountPinArmed="{true}"
     var.mountPinTicks="{0}"
+    var.findText="{''}"
+    var.appliedNeedle="{''}"
+    var.findMatches="{[]}"
+    var.findCursor="{0}"
+    var.findRows="{null}"
     var.currentSession="{((transcriptSessions.value || []).find(s => s.current)) || ((transcriptSessions.value || [])[0])}">
-    <HStack verticalAlignment="center" gap="$space-2">
-      <Heading level="h2">Transcript</Heading>
-      <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{events.length + ' events'}" />
-    </HStack>
+    <!-- transcript-find-in-page-v2: inline find row, no UDC — the FindBar
+         factoring is parked (stash@{0}) on the xmlui #3584 emitEvent-in-UDC
+         silent-failure family. The pane's scroller is the App's
+         mainContentArea, so the heading + find row pin via StickySection —
+         CSS position:sticky against that scrollport. In vertical-sticky the
+         AppHeader is ALSO sticky at top:0 inside the same scroller, so
+         without an offset the pinned row is hidden exactly behind it (the
+         2026-07-29 'still not sticky' failure, reproduced + fixed in a
+         standalone replica); top=$height-AppHeader pins it flush below
+         instead — the same theme var the framework itself uses to align
+         NavPanel with the header (NavPanel.module.scss), present from
+         first paint (unlike the engine's measured --header-height, whose
+         size observer races at load). Needs an explicit backgroundColor
+         or scrolled content shows through (per the sticky-header
+         how-to). -->
+    <StickySection stickTo="top" top="$height-AppHeader" backgroundColor="$backgroundColor">
+      <HStack verticalAlignment="center" gap="$space-2" paddingVertical="$space-2">
+        <Heading level="h2">Transcript</Heading>
+        <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{events.length + ' events'}" />
+        <TextBox id="transcriptFindBox" width="16rem" placeholder="Find in transcript…"
+          autoComplete="off" autoCorrect="{false}" spellCheck="{false}" autoCapitalize="off"
+          onDidChange="(v) => findText = v" />
+        <Button size="xs" variant="outlined" label="▲" enabled="{findMatches.length > 0}"
+          tooltip="Previous match" onClick="findCursor = window.__bramFindStep(findMatches, findCursor, -1)" />
+        <Button size="xs" variant="outlined" label="▼" enabled="{findMatches.length > 0}"
+          tooltip="Next match" onClick="findCursor = window.__bramFindStep(findMatches, findCursor, 1)" />
+        <Text fontSize="$fontSize-sm" color="$textColor-secondary"
+          when="{findText.trim().length >= 2}"
+          value="{findMatches.length ? ((findCursor + 1) + ' / ' + findMatches.length + ' matches') : 'No matches'}" />
+      </HStack>
+    </StickySection>
     <Text
       when="{currentSession}"
       fontSize="$fontSize-sm"
@@ -114,7 +146,7 @@
     <List
       id="transcriptList"
       height="*"
-      data="{events}"
+      data="{findRows || events}"
       onScroll="(ev) => { if (atBottom !== ev.atEnd) window.__bramIframeTrace('transcript-follow', {atBottom: ev.atEnd, agentId: $props.agentId || 'main'}); atBottom = ev.atEnd }"
       onVisibleRangeDidChange="(range) => window.__bramSetVisibleRange(range)">
       <property name="emptyListTemplate"><Fragment/></property>
@@ -128,13 +160,19 @@
           gap="$space-1">
           <Text value="You" fontWeight="bold" color="$color-primary-600" fontSize="$fontSize-sm" />
           <!-- Worklist payloads, feedback refs, and image markers are already
-               resolved by the host projection; render the text as-is. -->
-          <Markdown content="{$item.text}" />
+               resolved by the host projection; render the text as-is.
+               highlightText/highlightActive ride the find decoration
+               (__needle/__active baked into findRows; inert otherwise). -->
+          <Markdown content="{$item.text}"
+            highlightText="{window.__bramSearchTerms($item.__needle)}"
+            highlightActive="{$item.__active}" />
         </VStack>
         <!-- assistant text -->
         <Markdown
           when="{$item.kind === 'text'}"
-          content="{$item.text}" />
+          content="{$item.text}"
+          highlightText="{window.__bramSearchTerms($item.__needle)}"
+          highlightActive="{$item.__active}" />
         <!-- task notification: quiet system-note row (host-reclassified
              subagent completion report — never rendered as "You") -->
         <Text
@@ -171,7 +209,8 @@
             backgroundColor="$color-surface-50"
             padding="$space-2"
             borderRadius="$borderRadius">
-            <Markdown content="{$item.text}" />
+            <Markdown content="{$item.text}"
+              highlightText="{window.__bramSearchTerms($item.__needle)}" />
           </VStack>
         </VStack>
         <!-- tool call (foldable) -->
@@ -245,7 +284,8 @@
             <Markdown
               when="{window.__bramShowToolCommand ? window.__bramShowToolCommand($item) : (($item.commandDisplay || $item.summary) &amp;&amp; ($item.name !== 'apply_patch' || !$item.commandDisplay))}"
               overflowMode="scroll"
-              content="{window.__bramFormatToolCommand($item.commandDisplay || $item.summary, $item.aiDescription || $item.description)}" />
+              content="{window.__bramFormatToolCommand($item.commandDisplay || $item.summary, $item.aiDescription || $item.description)}"
+              highlightText="{window.__bramSearchTerms($item.__needle)}" />
             <Markdown
               when="{$item.commandMarkdown}"
               overflowMode="flow"
@@ -286,6 +326,40 @@
          guarded), and we re-pin to the end on new content only while the user
          is parked there — so following never fights reading, and there's no
          RO-driven re-stick to loop or yank the viewport. -->
+    <!-- transcript-find-in-page-v2 wiring. Match recompute + cursor reset +
+         needle mirror are debounced together (200ms); the decorated-rows
+         rebuild is keyed (needle, cursor, events length + revision) so the
+         RO-flood fix holds — no per-render data identity churn. Stepping and
+         fresh matches disarm follow (atBottom=false): a read-pause gesture,
+         same anti-yank contract as scrolling up; re-arm stays the user's
+         explicit scroll to bottom. -->
+    <ChangeListener
+      listenTo="{findText + '|' + events.length}"
+      debounceWaitInMs="200"
+      onDidChange="() => findMatches = window.__bramFindMatchingEventIndices ? window.__bramFindMatchingEventIndices(events, findText) : []" />
+    <ChangeListener
+      listenTo="{findText}"
+      debounceWaitInMs="200"
+      onDidChange="() => findCursor = 0" />
+    <ChangeListener
+      listenTo="{findText}"
+      debounceWaitInMs="200"
+      onDidChange="() => appliedNeedle = findText" />
+    <ChangeListener
+      listenTo="{appliedNeedle + '|' + findCursor + '|' + events.length + ':' + eventsVersion}"
+      onDidChange="() => findRows = window.__bramTranscriptFindRows ? window.__bramTranscriptFindRows(events, appliedNeedle, findMatches, findCursor) : null" />
+    <ChangeListener
+      listenTo="{findCursor}"
+      onDidChange="() => findMatches.length ? transcriptList.scrollToIndex(findMatches[findCursor]) : null" />
+    <ChangeListener
+      listenTo="{findCursor}"
+      onDidChange="() => findMatches.length ? (atBottom = false) : null" />
+    <ChangeListener
+      listenTo="{findMatches}"
+      onDidChange="() => findMatches.length ? transcriptList.scrollToIndex(findMatches[findCursor] || findMatches[0]) : null" />
+    <ChangeListener
+      listenTo="{findMatches}"
+      onDidChange="() => findMatches.length ? (atBottom = false) : null" />
     <ChangeListener
       listenTo="{events.length + ':' + eventsVersion}"
       onDidChange="() => { if (atBottom) { transcriptList.scrollToBottom(); settleArmed = true; window.__bramIframeTrace('transcript-repin', {events: events.length, agentId: $props.agentId || 'main'}); } }" />

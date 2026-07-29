@@ -247,7 +247,7 @@
                https://docs.xmlui.org/components/Column#width -->
           <Column header="Skill" width="*">
             <Link
-              onClick="window.__bramRunSkill($item.name, skillArgsBox &amp;&amp; skillArgsBox.value); skillsDialog.close(); navigate('/transcript')"
+              onClick="window.__bramRunSkill($item.name, skillArgsBox &amp;&amp; skillArgsBox.value); skillsDialog.close(); window.__bramSetVisibleRange(null); navigate('/transcript')"
               noIndicator="true">
               <Text
                 value="{$item.name}"
@@ -664,7 +664,7 @@
           size="xs"
           variant="outlined"
           tooltip="{window.__bramMainChipTooltip ? window.__bramMainChipTooltip(footerAgents.value) : 'Show the main conversation in the Transcript tab'}"
-          onClick="transcriptAgentId = ''; navigate('/transcript')" />
+          onClick="transcriptAgentId = ''; window.__bramSetVisibleRange(null); navigate('/transcript')" />
         <!-- One continuous reverse-chron read: newest chip leftmost (after
              Main), then the dropdown continues newest→oldest top-down. Each
              chip pairs its label with a ghost ✕ that appends the agentId to
@@ -678,7 +678,7 @@
               size="xs"
               variant="outlined"
               tooltip="{(window.__bramAgentChipTooltip || window.__bramAgentChipLabel)($item)}"
-              onClick="transcriptAgentId = $item.agentId; navigate('/transcript')" />
+              onClick="transcriptAgentId = $item.agentId; window.__bramSetVisibleRange(null); navigate('/transcript')" />
             <Button
               label="✕"
               size="xs"
@@ -696,7 +696,7 @@
             <MenuItem
               label="{window.__bramAgentChipLabel($item)}"
               tooltip="{(window.__bramAgentChipTooltip || window.__bramAgentChipLabel)($item)}"
-              onClick="transcriptAgentId = $item.agentId; navigate('/transcript')" />
+              onClick="transcriptAgentId = $item.agentId; window.__bramSetVisibleRange(null); navigate('/transcript')" />
           </Items>
         </DropdownMenu>
         <!-- Recover dismissed subagents (subagent-dismiss-recoverable): shown

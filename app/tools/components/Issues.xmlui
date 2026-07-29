@@ -32,11 +32,17 @@
           (i.author &amp;&amp; i.author.name) || '',
           i.commentSummary || '',
           i.latestCommentAuthor || ''
-        ].join(' ').toLowerCase().includes(searchNeedle))
+        ].join(' ').toLowerCase().includes(searchNeedle)
+          || (issuesSearchFts.value || []).some(hit => hit.key === 'issue:' + i.number))
       : sortedIssues
   }"
   var.pageIssues="{filteredIssues.slice(0, searchNeedle ? 999 : (issuesExpanded ? 999 : 20))}">
 
+  <DataSource
+    id="issuesSearchFts"
+    url="/__search"
+    queryParams="{{ q: searchQuery, limit: 300, types: 'issue' }}"
+    when="{searchQuery.trim().length >= 2}" />
   <!-- Browse list with a local metadata filter, inline IssueDetail, and the
        comment/close controls. Unified Search remains the cross-bucket/full-text
        path. No polling — the agent-turn-end event covers locally-filed

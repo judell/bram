@@ -9,6 +9,15 @@
   <!-- Browse list with a local metadata filter and inline CommitDetail.
        Unified Search remains the cross-bucket/full-text path. -->
   <DataSource id="commits" url="/__commits" />
+  <!-- commits-issues-filter-use-fts: the filter box unions the local field
+       match (sha prefixes, authors, subjects) with full-message FTS hits
+       from the index, so body-only terms (e.g. "yank") match here the same
+       as on the Search tab. Sessions-precedent, hybridized. -->
+  <DataSource
+    id="commitsSearch"
+    url="/__search"
+    queryParams="{{ q: searchQuery, limit: 300, types: 'commit' }}"
+    when="{searchQuery.trim().length >= 2}" />
   <DataSource id="gitStatus" url="/__git/status" />
   <variable name="searchNeedle" value="{searchQuery.trim().toLowerCase()}" />
   <variable name="filteredCommits" value="{
@@ -19,7 +28,8 @@
           (c.commit &amp;&amp; c.commit.author &amp;&amp; c.commit.author.login) || '',
           (c.commit &amp;&amp; c.commit.author &amp;&amp; c.commit.author.name) || '',
           (c.commit &amp;&amp; c.commit.author &amp;&amp; c.commit.author.email) || ''
-        ].join(' ').toLowerCase().includes(searchNeedle))
+        ].join(' ').toLowerCase().includes(searchNeedle)
+          || (commitsSearch.value || []).some(hit => hit.key === 'commit:' + c.sha))
       : (commits.value || [])
   }" />
   <variable name="visibleCommits"

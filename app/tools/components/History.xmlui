@@ -11,6 +11,11 @@
        limit 200. Each row carries its full group in `extra`, so the expander
        renders HistoryDetail with no re-fetch. -->
   <DataSource id="historyList" url="/__history-index" queryParams="{{ limit: 300 }}" />
+  <DataSource
+    id="historySearch"
+    url="/__search"
+    queryParams="{{ q: searchQuery, limit: 300, types: 'worklist-history' }}"
+    when="{searchQuery.trim().length >= 2}" />
   <variable name="searchNeedle" value="{searchQuery.trim().toLowerCase()}" />
   <variable name="filteredHistory" value="{
     searchNeedle
@@ -21,7 +26,8 @@
           h.extra ? window.__bramWorklistItemFiles(h.extra).join(' ') : '',
           (h.extra &amp;&amp; h.extra.commitContextLabel) || '',
           (h.extra &amp;&amp; h.extra.detailsRestoredLabel) || ''
-        ].join(' ').toLowerCase().includes(searchNeedle))
+        ].join(' ').toLowerCase().includes(searchNeedle)
+          || (historySearch.value || []).some(hit => hit.key === 'history:' + h.id))
       : (historyList.value || [])
   }" />
   <variable name="visibleHistory"

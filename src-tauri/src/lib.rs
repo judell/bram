@@ -9745,11 +9745,89 @@ fn build_issues_list<R: tauri::Runtime>(app: &AppHandle<R>, limit: usize) -> Res
     serde_json::to_vec(&issues).map_err(|e| e.to_string())
 }
 
+// Writes the issues:list cache row and clears the staleness marker, so
+// /__issues serves cache-first, byte-identical to a live build (#235).
+fn cache_issues_list_row(conn: &rusqlite::Connection, list_json: &str) {
+    if list_json.is_empty() {
+        return;
+    }
+    let list_row = search_index::IndexRow {
+        kind: "issue-list".to_string(),
+        source: String::new(),
+        date: String::new(),
+        link: String::new(),
+        content: String::new(), // empty: never matches FTS text queries
+        file: "issues:list".to_string(),
+        extra: list_json.to_string(),
+    };
+    let _ = search_index::index_doc(conn, &list_row, 0, 0);
+    set_issues_list_stale(conn, false);
+}
+
+// Staleness marker for the issues:list cache: non-empty extra means the last
+// rebuild failed, so the next issues pass retries the rebuild even when no
+// per-issue doc changed. Bounds #235's staleness window to one indexer cycle
+// instead of "until the next issue activity".
+fn set_issues_list_stale(conn: &rusqlite::Connection, stale: bool) {
+    let row = search_index::IndexRow {
+        kind: "issue-list-stale".to_string(),
+        source: String::new(),
+        date: String::new(),
+        link: String::new(),
+        content: String::new(),
+        file: "issues:list:stale".to_string(),
+        extra: if stale { "1".to_string() } else { String::new() },
+    };
+    let _ = search_index::index_doc(conn, &row, 0, 0);
+}
+
+fn issues_list_stale(conn: &rusqlite::Connection) -> bool {
+    matches!(
+        search_index::get_extra(conn, "issues:list:stale"),
+        Ok(Some(s)) if !s.is_empty()
+    )
+}
+
 // Cache-first: serve the full issues list from the search index's stored
 // `extra` blob (written by the background indexer, see run_issue_index_pass),
 // truncated to `limit`. Falls back to a live build on a cache miss or parse
 // failure so the route still works before the indexer's first pass completes.
-fn gh_issues_list<R: tauri::Runtime>(app: &AppHandle<R>, limit: usize) -> Result<Vec<u8>, String> {
+// `fresh` (the Issues tab's manual Refresh, /__issues?fresh=1) bypasses the
+// cache with a live build and rewrites the cache row on success — the
+// user-actionable escape hatch for a stale cache (#235). A failed live build
+// falls back to the cache: stale beats broken while the forge is unreachable.
+fn gh_issues_list<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    limit: usize,
+    fresh: bool,
+) -> Result<Vec<u8>, String> {
+    if fresh {
+        match build_issues_list(app, GH_ISSUE_LIST_LIMIT) {
+            Ok(full) => {
+                if let Some(db) = search_index_db_path(app) {
+                    if let Ok(conn) = search_index::open(&db.to_string_lossy()) {
+                        if let Ok(s) = std::str::from_utf8(&full) {
+                            cache_issues_list_row(&conn, s);
+                        }
+                    }
+                }
+                if let Ok(serde_json::Value::Array(mut arr)) =
+                    serde_json::from_slice::<serde_json::Value>(&full)
+                {
+                    arr.truncate(limit);
+                    if let Ok(bytes) = serde_json::to_vec(&serde_json::Value::Array(arr)) {
+                        return Ok(bytes);
+                    }
+                }
+                return Ok(full);
+            }
+            Err(e) => append_bram_trace_line(
+                app,
+                "search-index",
+                &format!("op=issues-list-fresh-error detail={}", e.replace('\n', " ")),
+            ),
+        }
+    }
     if let Some(db) = search_index_db_path(app) {
         if let Ok(conn) = search_index::open(&db.to_string_lossy()) {
             if let Ok(Some(extra)) = search_index::get_extra(&conn, "issues:list") {
@@ -15471,21 +15549,32 @@ fn run_issue_index_pass<R: tauri::Runtime>(
     // tab refetch on the event instead of polling. Bare signal — the client's
     // bramSubscribeTauriEvent wrapper supplies the `.tick`. Same pattern as
     // git-status-changed. First (cold-index) pass fires once; harmless.
+    let list_stale = issues_list_stale(&conn);
     if indexed > 0 {
         emit_replayable_signal(app, "issues-changed");
+    }
+    if indexed > 0 || list_stale {
         // Rebuild + cache the full issues list so /__issues can also serve
-        // cache-first, byte-identical to a live build_issues_list.
-        if let Ok(list_bytes) = build_issues_list(app, GH_ISSUE_LIST_LIMIT) {
-            let list_row = search_index::IndexRow {
-                kind: "issue-list".to_string(),
-                source: String::new(),
-                date: String::new(),
-                link: String::new(),
-                content: String::new(), // empty: never matches FTS text queries
-                file: "issues:list".to_string(),
-                extra: String::from_utf8(list_bytes).unwrap_or_default(),
-            };
-            let _ = search_index::index_doc(&conn, &list_row, 0, 0);
+        // cache-first, byte-identical to a live build_issues_list. Runs on
+        // doc changes AND while the staleness marker is set, so one failed
+        // rebuild self-heals on the next pass instead of waiting for the
+        // next issue activity; failures are traced, not swallowed (#235).
+        match build_issues_list(app, GH_ISSUE_LIST_LIMIT) {
+            Ok(list_bytes) => {
+                if list_stale && indexed == 0 {
+                    append_bram_trace_line(app, "search-index", "op=issues-list-rebuild-retry");
+                    emit_replayable_signal(app, "issues-changed");
+                }
+                cache_issues_list_row(&conn, &String::from_utf8(list_bytes).unwrap_or_default());
+            }
+            Err(e) => {
+                append_bram_trace_line(
+                    app,
+                    "search-index",
+                    &format!("op=issues-list-rebuild-error detail={}", e.replace('\n', " ")),
+                );
+                set_issues_list_stale(&conn, true);
+            }
         }
     }
     let rows = search_index::row_count(&conn).unwrap_or(0);
@@ -34137,16 +34226,18 @@ fn route_request<R: tauri::Runtime>(
 
     if path == "__issues" {
         let mut limit = GH_ISSUE_LIST_LIMIT;
+        let mut fresh = false;
         for pair in query.split('&') {
             if let Some(v) = pair.strip_prefix("limit=") {
                 let parsed = percent_decode(v)
                     .parse::<usize>()
                     .unwrap_or(GH_ISSUE_LIST_LIMIT);
                 limit = parsed.clamp(1, GH_ISSUE_LIST_LIMIT);
-                break;
+            } else if pair == "fresh=1" {
+                fresh = true;
             }
         }
-        return match gh_issues_list(app, limit) {
+        return match gh_issues_list(app, limit, fresh) {
             Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
             Err(e) => {
                 eprintln!("[http /__issues] {}", e);

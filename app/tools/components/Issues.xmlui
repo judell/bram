@@ -56,6 +56,15 @@
       lastIssuesSig = currentSig;
     }" />
 
+  <!-- issue-235: manual Refresh escape hatch. fresh=1 makes the host bypass
+       the issues:list cache, live-build from the forge, and rewrite the
+       cache; the two DataSources then refetch the now-fresh cache. -->
+  <APICall
+    id="issuesFreshFetch"
+    method="get"
+    url="/__issues"
+    queryParams="{{ limit: 1, fresh: 1 }}"
+    onSuccess="issuesFirstPage.refetch(); issuesFull.refetch()" />
   <DataSource
     id="issuesFull"
     url="/__issues"
@@ -160,6 +169,13 @@
         inProgress="{issuesFirstPage.inProgress || issuesFull.inProgress}"
         onQueryChange="(q) => searchQuery = q"
         onClear="searchQuery = ''; expandedNumber = null" />
+      <Button
+        label="↻"
+        size="xs"
+        variant="ghost"
+        tooltip="Refresh from the forge (bypasses the cache)"
+        enabled="{!issuesFreshFetch.inProgress}"
+        onClick="issuesFreshFetch.execute()" />
       <Button
         when="{repoOrigin.value &amp;&amp; repoOrigin.value.issuesNewUrl}"
         label="+ New issue"

@@ -20,17 +20,13 @@
 
     <!-- Fixed find toolbar (sibling above the List). -->
     <HStack when="{commit.value &amp;&amp; commit.value.message}" gap="$space-2" verticalAlignment="center">
-      <TextBox id="findBox" width="16rem" placeholder="Find in commit…"
+      <FindBar id="findBox" placeholder="Find in commit…"
         initialValue="{$props.query || ''}"
-        autoComplete="off" autoCorrect="{false}" spellCheck="{false}" autoCapitalize="off"
-        onDidChange="(v) => findText = v" />
-      <Button size="xs" variant="outlined" label="▲" enabled="{counts.total > 0}"
-        tooltip="Previous match" onClick="cursor = window.__bramCursorStep(counts.total, cursor, -1)" />
-      <Button size="xs" variant="outlined" label="▼" enabled="{counts.total > 0}"
-        tooltip="Next match" onClick="cursor = window.__bramCursorStep(counts.total, cursor, 1)" />
-      <Text fontSize="$fontSize-sm" color="$textColor-secondary"
-        when="{appliedNeedle &amp;&amp; appliedNeedle.trim().length >= 2}"
-        value="{counts.total ? ((cursor + 1) + ' / ' + counts.total + ' matches') : 'No matches'}" />
+        matchCount="{counts.total}"
+        current="{cursor}"
+        showCount="{appliedNeedle &amp;&amp; appliedNeedle.trim().length >= 2}"
+        onNeedleChange="(v) => findText = v"
+        onStep="(d) => cursor = window.__bramCursorStep(counts.total, cursor, d)" />
     </HStack>
     <ChangeListener listenTo="{$props.query || ''}"
       onDidChange="() => findText = ($props.query || '')" />

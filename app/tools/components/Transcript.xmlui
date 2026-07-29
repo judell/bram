@@ -114,16 +114,12 @@
       <HStack verticalAlignment="center" gap="$space-2" paddingVertical="$space-2">
         <Heading level="h2">Transcript</Heading>
         <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{events.length + ' events'}" />
-        <TextBox id="transcriptFindBox" width="16rem" placeholder="Find in transcript…"
-          autoComplete="off" autoCorrect="{false}" spellCheck="{false}" autoCapitalize="off"
-          onDidChange="(v) => findText = v" />
-        <Button size="xs" variant="outlined" label="▲" enabled="{findMatches.length > 0}"
-          tooltip="Previous match" onClick="findCursor = window.__bramFindStep(findMatches, findCursor, -1)" />
-        <Button size="xs" variant="outlined" label="▼" enabled="{findMatches.length > 0}"
-          tooltip="Next match" onClick="findCursor = window.__bramFindStep(findMatches, findCursor, 1)" />
-        <Text fontSize="$fontSize-sm" color="$textColor-secondary"
-          when="{findText.trim().length >= 2}"
-          value="{findMatches.length ? ((findCursor + 1) + ' / ' + findMatches.length + ' matches') : 'No matches'}" />
+        <FindBar placeholder="Find in transcript…"
+          matchCount="{findMatches.length}"
+          current="{findCursor}"
+          showCount="{findText.trim().length >= 2}"
+          onNeedleChange="(v) => findText = v"
+          onStep="(d) => findCursor = window.__bramFindStep(findMatches, findCursor, d)" />
       </HStack>
     </StickySection>
     <Text

@@ -1,0 +1,42 @@
+<Component name="FindBar">
+  <!-- Shared find-in-view toolbar row (lineage c121f90 / 58472a7; factored
+       out at the pattern's fifth consumer). Visual row ONLY by design: each
+       host owns its match state machine — the data shapes and scroll targets
+       differ per view, and a UDC cannot reach a host List across the
+       component boundary anyway. The emitEvent contract was empirically
+       cleared of the xmlui #3584 family on 2026-07-29 (standalone replica on
+       the vendored engine): #3584 needs Items-inside-Drawer(portal); this
+       shape is the documented one
+       (https://docs.xmlui.org/howto/emit-a-custom-event-from-a-component).
+       Contract:
+       props   placeholder, initialValue, matchCount, current (0-based),
+               showCount
+       events  needleChange(text), step(delta: -1 | 1)
+       method  setValue(v) — delegates to the inner TextBox; used by the
+               deep-link replay path when $props.query changes after mount
+               (https://docs.xmlui.org/howto/pass-arguments-to-a-component-method) -->
+  <method name="setValue">(v) => findBarBox.setValue(v)</method>
+  <HStack gap="$space-2" verticalAlignment="center">
+    <TextBox
+      id="findBarBox"
+      width="16rem"
+      placeholder="{$props.placeholder || 'Find…'}"
+      initialValue="{$props.initialValue || ''}"
+      autoComplete="off"
+      autoCorrect="{false}"
+      spellCheck="{false}"
+      autoCapitalize="off"
+      onDidChange="(v) => emitEvent('needleChange', v)" />
+    <Button size="xs" variant="outlined" label="▲"
+      enabled="{($props.matchCount || 0) > 0}"
+      tooltip="Previous match"
+      onClick="emitEvent('step', -1)" />
+    <Button size="xs" variant="outlined" label="▼"
+      enabled="{($props.matchCount || 0) > 0}"
+      tooltip="Next match"
+      onClick="emitEvent('step', 1)" />
+    <Text fontSize="$fontSize-sm" color="$textColor-secondary"
+      when="{$props.showCount}"
+      value="{($props.matchCount || 0) ? (($props.current + 1) + ' / ' + $props.matchCount + ' matches') : 'No matches'}" />
+  </HStack>
+</Component>

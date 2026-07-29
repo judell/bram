@@ -80,6 +80,15 @@
       <Button label="✕" variant="ghost" size="xs" tooltip="Dismiss" onClick="pushError = null" />
     </HStack>
 
+    <!-- commits-pending-closes-visibility: name the issues the next Push
+         will auto-close (close-on-push queue, joined by the host onto each
+         commit row as pendingCloses). Visible exactly at the Push decision. -->
+    <Text
+      when="{(commits.value || []).filter(c => !c.pushed &amp;&amp; c.pendingCloses &amp;&amp; c.pendingCloses.length > 0).length > 0}"
+      fontSize="$fontSize-sm"
+      color="$textColor-secondary"
+      value="{'Push will close ' + (commits.value || []).filter(c => !c.pushed &amp;&amp; c.pendingCloses &amp;&amp; c.pendingCloses.length > 0).map(c => c.pendingCloses.map(p => '#' + p.issue).join(', ')).join(', ')}" />
+
     <VStack gap="$space-1" when="{commits.value &amp;&amp; commits.value.length > 0}">
       <Items data="{visibleCommits}">
         <VStack gap="0" borderBottom="1px solid $borderColor">
@@ -104,6 +113,12 @@
                 fontWeight="{selectedSha === $item.sha ? '$fontWeight-bold' : '$fontWeight-normal'}"
                 width="*"
                 maxLines="1" />
+              <Text
+                when="{!$item.pushed &amp;&amp; $item.pendingCloses &amp;&amp; $item.pendingCloses.length > 0}"
+                value="{'closes ' + $item.pendingCloses.map(p => '#' + p.issue).join(' ') + ' on push'}"
+                fontSize="$fontSize-xs"
+                color="$color-primary-600"
+                overflowMode="none" />
             </HStack>
           </Link>
           <VStack when="{selectedSha === $item.sha}" paddingBottom="$space-2">

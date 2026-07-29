@@ -9683,6 +9683,72 @@ fn git_log_recent<R: tauri::Runtime>(app: &AppHandle<R>, count: usize) -> Result
 // fresh `git rev-list` (cheap — no shortstat, no gh call). Falls back to a
 // live git_log_recent build on a cache miss or parse failure so the route
 // still works before the indexer's first pass completes.
+// commits-pending-closes-visibility: annotate each commit row with the
+// issues queued to close once it reaches origin (close-on-push, security
+// H5), so the Commits tab can show the consequence of Push at the decision
+// point. Joined from the queue file by sha, falling back to patch-id so a
+// rebase's SHA rewrite doesn't detach the attribution — the same identity
+// flush_pending_issue_closes uses to re-anchor.
+fn attach_pending_closes<R: tauri::Runtime>(app: &AppHandle<R>, arr: &mut Vec<serde_json::Value>) {
+    let Some(path) = issue_close_queue_file(app) else { return };
+    let records = read_pending_issue_closes(&path);
+    if records.is_empty() {
+        return;
+    }
+    let shas: std::collections::HashSet<String> = arr
+        .iter()
+        .filter_map(|c| c.get("sha").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .collect();
+    let root = project_root(Some(app));
+    // Patch-id -> sha for unpushed rows, computed lazily and only when some
+    // record's sha is absent from the served rows (i.e. post-rebase).
+    let mut patch_ids: Option<std::collections::HashMap<String, String>> = None;
+    let mut by_sha: std::collections::HashMap<String, Vec<serde_json::Value>> =
+        std::collections::HashMap::new();
+    for r in &records {
+        let mut target = if shas.contains(&r.commit_sha) {
+            Some(r.commit_sha.clone())
+        } else {
+            None
+        };
+        if target.is_none() {
+            if let (Some(pid), Some(root)) = (r.patch_id.as_ref(), root.as_ref()) {
+                let map = patch_ids.get_or_insert_with(|| {
+                    let mut m = std::collections::HashMap::new();
+                    for c in arr.iter() {
+                        if c.get("pushed").and_then(|v| v.as_bool()).unwrap_or(true) {
+                            continue;
+                        }
+                        if let Some(sha) = c.get("sha").and_then(|v| v.as_str()) {
+                            if let Some(p) = git_commit_patch_id(root, sha) {
+                                m.insert(p, sha.to_string());
+                            }
+                        }
+                    }
+                    m
+                });
+                target = map.get(pid).cloned();
+            }
+        }
+        if let Some(sha) = target {
+            by_sha.entry(sha).or_default().push(serde_json::json!({
+                "issue": r.issue,
+                "comment": r.comment,
+            }));
+        }
+    }
+    if by_sha.is_empty() {
+        return;
+    }
+    for c in arr.iter_mut() {
+        if let Some(sha) = c.get("sha").and_then(|v| v.as_str()).map(|s| s.to_string()) {
+            if let Some(closes) = by_sha.get(&sha) {
+                c["pendingCloses"] = serde_json::Value::Array(closes.clone());
+            }
+        }
+    }
+}
+
 fn commits_list_cached<R: tauri::Runtime>(
     app: &AppHandle<R>,
     count: usize,
@@ -9708,6 +9774,7 @@ fn commits_list_cached<R: tauri::Runtime>(
                                 c["pushed"] = serde_json::Value::Bool(!unpushed.contains(&sha));
                             }
                         }
+                        attach_pending_closes(app, &mut arr);
                         arr.truncate(count);
                         if let Ok(bytes) = serde_json::to_vec(&arr) {
                             return Ok(bytes);
@@ -9717,7 +9784,18 @@ fn commits_list_cached<R: tauri::Runtime>(
             }
         }
     }
-    git_log_recent(app, count)
+    match git_log_recent(app, count) {
+        Ok(bytes) => {
+            if let Ok(mut arr) = serde_json::from_slice::<Vec<serde_json::Value>>(&bytes) {
+                attach_pending_closes(app, &mut arr);
+                if let Ok(out) = serde_json::to_vec(&arr) {
+                    return Ok(out);
+                }
+            }
+            Ok(bytes)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // Shell out to `gh` to list issues for the current repo. Returns the raw

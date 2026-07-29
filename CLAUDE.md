@@ -52,7 +52,10 @@ The `xmlui-mcp` server is loaded for this conversation. Use it.
 
 The helpers.js / Globals.xs / window code-organization discipline (where
 each kind of code lives, when delegators are warranted, the `__bram*`
-prefix) is in `@app/__shell/conventions.md`, `@`-imported below.
+prefix, the xs failure modes, and the post-edit error grep) is in
+`@docs/developing-bram.md`, `@`-imported below. That file is
+source-repo-only; `@app/__shell/conventions.md` (also imported below) is
+the cross-target half that Setup seeds into every managed project.
 
 ### Files you'll edit most (Bram)
 
@@ -65,13 +68,9 @@ prefix) is in `@app/__shell/conventions.md`, `@`-imported below.
 - `app/__shell/helpers.js` — window helpers loaded by `index.html` via
   `xmlui://localhost/__shell/helpers.js`
 
-Reload boundary: only `app/tools/**` is hot-reloadable Bram app code
-(`Main.xmlui`, `components/**`, `Globals.xs`, `config.json`, themes, and
-resources). For every other Bram runtime path, `app/__shell/**`
-including `helpers.js`, `app/vendor/**`, `app/index.html`, `app/main.js`,
-`app/styles.css`, and `src-tauri/**`, rebuild from `src-tauri/` and
-relaunch the locally built `./bram` symlink. Do not assume a plain restart
-or an installed/older binary picked up the edit.
+Reload boundary: only `app/tools/**` is hot-reloadable; everything else
+(including `helpers.js`) is rebuild-from-`src-tauri/` + relaunch `./bram`
+territory — full table and launch discipline in `@docs/developing-bram.md`.
 
 ## Working on the target app
 
@@ -195,5 +194,6 @@ cross-origin iframe reload) — lives at
 mechanism here surprises you.
 
 <!-- bram:start -->
+@docs/developing-bram.md
 @app/__shell/conventions.md
 <!-- bram:end -->

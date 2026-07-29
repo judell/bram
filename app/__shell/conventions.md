@@ -15,14 +15,19 @@ preview is reserved for a simple app or a quick check. Don't assume
 an iframe is present — detect before you rely on it.
 
 > Note on memory: this file is loaded into every session in this
-> project via a `@`-import in `CLAUDE.md`. **Don't save project-related
-> memories** — preferring the worklist, helper APIs, release quirks,
-> conventions you discover, etc. Per-user memory is private to one
-> agent on one machine; this file is shared with everyone running
-> Bram. When you learn something worth keeping for future
-> sessions, add it here so the whole community gets it. Memory stays
-> reserved for things that genuinely can't live in the project repo
-> (cross-project user preferences, etc.).
+> project via a `@`-import in `CLAUDE.md`, and Setup seeds it into
+> every managed project as `.claude/bram-conventions.md`. **Don't save
+> project-related memories** — preferring the worklist, helper APIs,
+> release quirks, conventions you discover, etc. Per-user memory is
+> private to one agent on one machine; shared files reach everyone
+> running Bram (Claude and Codex alike). Route by audience: would the
+> knowledge change an agent's behavior in a project that is NOT the
+> Bram source repo? Yes → here. No (it only matters when editing
+> Bram's own source) → `docs/developing-bram.md`, which loads only in
+> the source repo. XMLUI-framework-generic findings → upstream xmlui
+> docs, reachable through the xmlui-mcp server. Memory stays reserved
+> for things that genuinely can't live in any repo (cross-project
+> user preferences, provider-specific tool quirks, etc.).
 
 Bram's own UI is XMLUI. When developing Bram, expect the
 XMLUI MCP server to be available, read the xmlui_rules,
@@ -91,113 +96,13 @@ When a non-obvious markup choice depends on documentation, cite the
 relevant how-to or component URL in the response.
 
 
-## Code organization (helpers.js / Globals.xs / window)
+## Code organization (developing Bram only)
 
-Iframe-side code spans four surfaces. The rules below describe where
-each kind of code should live, and how XMLUI markup calls into it.
-
-### The surfaces
-
-- **`app/__shell/helpers.js`** — real JavaScript. Async, `fetch`,
-  `setTimeout`, `postMessage`, tauri event listeners — anything the
-  XMLUI expression engine can't host directly. Functions live on
-  `window` (see naming below) and are reached from XMLUI markup as
-  `window.foo(...)`. Reload behavior depends on which Bram binary is
-  running; see *Build vs. hot-reload boundary*.
-- **`app/tools/Globals.xs`** — XMLUI's expression engine context.
-  Holds xs-scope module state (vars whose readers/writers all live in
-  xs) and the few helpers whose proximity to that state earns them a
-  place here. Engine restrictions: no async/await, no setTimeout, no
-  fetch, no Promise chaining outside DataSource. Top-level
-  `function foo(...)` declarations auto-hoist onto `window.foo`.
-- **`window.*`** — the shared namespace. helpers.js writes here
-  explicitly; `Globals.xs` writes here implicitly via hoisting. The
-  `__bram*` prefix exists to give helpers.js a collision-safe space
-  when an xs-side counterpart of the same name would otherwise hoist
-  over it.
-- **`.xmlui` files** — markup. Attribute handlers (`onClick`,
-  `onDidChange`, `onLoaded`, etc.) and binding expressions
-  (`value="{...}"`, `when="{...}"`) are tiny expressions, not
-  hosting environments for code.
-
-### Where each kind of code goes
-
-- **Pure functions** (sync, no XMLUI component state, no
-  engine-hostile primitives) → `window.foo` in `helpers.js`. XMLUI
-  markup calls them as `window.foo(...)`.
-- **Shims for outside-sandbox operations** (async, fetch, setTimeout,
-  postMessage, tauri events) → also `window.foo` in `helpers.js`,
-  because the engine can't host them. Markup calls them as
-  `window.foo(...)`.
-- **xs-only code** → `Globals.xs`, but only when the function
-  genuinely needs xs (touches xs-scope module state directly, or is a
-  very hot binding-string callee where the `window.` prefix is
-  measurably annoying enough to justify the cost).
-- **XMLUI attribute handlers** → a single function call:
-  `onClick="window.foo(...)"` (or `onClick="foo(...)"` if `foo` is an
-  xs function). Never multi-statement bodies, never multi-line arrow
-  bodies, never object-literal blobs. The past failure modes are
-  catalogued in *Failure modes that informed these rules* below.
-
-### When and why do we need delegators?
-
-A *delegator* is `function foo(...) { return window.__bramFoo(...); }`
-in `Globals.xs`. Its only purpose is to let XMLUI markup write the
-bare name `foo(...)` instead of `window.__bramFoo(...)`.
-
-**Default: don't add one.** Call helpers as `window.foo(...)` from
-XMLUI markup. This includes inside arrow-function bodies passed to
-`subscribeTauriEvent` / `onDidChange` / `onLoaded` etc. — the engine
-analyzes the *qualified* `window.foo` member access without trouble.
-The historical bite (a bare `foo` inside an arrow body silently
-aborts identifier analysis when no xs declaration exists) is avoided
-by writing `window.foo` rather than by adding a delegator.
-
-**Add a delegator only when** (a) the function is called many times
-in attribute expressions where the seven-character `window.` prefix
-is genuinely annoying, and (b) the name doesn't already exist on the
-bare `window` surface. Each delegator we add hoists `function foo`
-onto `window.foo`, expanding the collision-prone surface — the
-exchange rate has to be worth it.
-
-The `Globals.xs` of today has zero delegators — the fossil set from a
-prior model was pared away during the host-route migrations. The rule
-above governs whether any new one earns its place.
-
-### The `__bram*` namespace prefix
-
-`__bramFoo` on `window` defends a helpers.js export against being
-clobbered by a `function foo` declaration in `Globals.xs` (which
-would auto-hoist onto `window.foo`). It is **not** a blanket rule
-for every helpers.js name — bare-name window helpers
-(`toShell`, `toTurn`, `logToHost`, `openExternal`, `sendKeys`,
-`captureScreenshot`, etc.) are fine as long as no `Globals.xs`
-declaration shadows them.
-
-The discipline:
-
-- If a name has a matching `Globals.xs` delegator → name the helper
-  `window.__bramFoo`. The delegator body is
-  `return window.__bramFoo(...)`; no collision.
-- If a name lives only in `helpers.js` → bare `window.foo` is fine.
-  No prefix required.
-
-### Failure modes that informed these rules
-
-Captured in user memory (cross-project, not in this file):
-
-- `feedback_xmlui_no_complex_expressions_in_attributes` — keep
-  attribute expressions to a single function call.
-- `feedback_xmlui_arrow_body_needs_xs_decl` — arrow-body identifier
-  analysis. Refined fix: use `window.foo()` rather than bare `foo()`
-  inside arrow bodies. Adding an xs declaration also works, but
-  costs.
-- `feedback_xs_to_window_migration_name_collision` — the `__bramFoo`
-  prefix is for names that have an xs counterpart, not a blanket
-  rule. Same evidence, sharper edge.
-- `feedback_helpers_js_load_order` — new top-level *calls* in
-  helpers.js must come after the function they invoke; load-time
-  throws abort the whole file.
+The helpers.js / Globals.xs / window code-organization discipline, the
+delegator and `__bram*` naming rules, the xs-engine failure modes, and
+the post-edit verification ritual moved to `docs/developing-bram.md`
+in the Bram source repo — they apply only when editing Bram's own
+source, so they are not seeded into managed projects.
 
 
 ## Coordinate via worklist.json
@@ -1089,41 +994,10 @@ submission. A separate submit button creates a third decision point
 two messages when one would do. Only add a separate submit button if
 the auxiliary input is genuinely independent of the primary actions.
 
-### Build vs. hot-reload boundary
+### Build vs. hot-reload boundary (developing Bram only)
 
-Use a hard boundary for Bram development:
-
-| path | rule |
-|---|---|
-| `app/tools/**` | Hot-reloadable tools XMLUI app code: `Main.xmlui`, `components/**`, `Globals.xs`, `config.json`, `themes/**`, `resources/**`. |
-| user's project directory | Target-pane reload / project dev-server reload, depending on the project setup. |
-| `app/__shell/**` | Rebuild from `src-tauri/`, then relaunch `./bram`. This includes `helpers.js`. |
-| `app/main.js`, `app/index.html`, `app/styles.css` | Rebuild from `src-tauri/`, then relaunch `./bram`. Parent-shell code is not hot-reloaded. |
-| `app/vendor/**` | Rebuild from `src-tauri/`, then relaunch `./bram`. |
-| `src-tauri/**` | Rebuild from `src-tauri/`, then relaunch `./bram`. |
-
-Do not describe `app/__shell/helpers.js`, parent-shell assets, vendor
-assets, or Rust as hot-reloadable. Even if the watcher reloads an iframe,
-those paths are shell/runtime code and their behavior can depend on
-pre-XMLUI globals, parent-window state, custom scheme handling, Tauri
-commands, or long-lived listeners. Validate those edits only after a
-fresh build and relaunch of the locally built binary.
-
-Launch discipline for Bram development:
-
-1. For `app/tools/**`, save the file and let the tools iframe reload.
-2. For every other Bram runtime path, run `cargo build` from
-   `src-tauri/`, then relaunch the locally built `./bram` symlink
-   (`src-tauri/target/debug/bram`), not an installed/older app.
-
-The Bram binary embeds the `app/` tree at build time
-(`include_dir!("$CARGO_MANIFEST_DIR/../app")`, plus Tauri
-`frontendDist: "../app"`). That embedding is the reason the rebuild rule
-exists for shell/runtime assets: a plain restart of the wrong binary, or
-a build followed by relaunching that wrong binary, still runs stale code.
-
-Don't suggest `cargo run`; the user prefers rebuild + restart, and the
-incremental build is fast.
+The hot-reload table, launch discipline, and debug-build rules moved
+to `docs/developing-bram.md` in the Bram source repo.
 
 ### Updating forge issues via gh / glab
 
@@ -1179,6 +1053,20 @@ render?") are answered by evidence, not inspection. The norms:
   trap). Any claim of the form "X never happens" requires an
   instrument that affirmatively records zeros with a denominator —
   the reveal-floor's per-turn gap distributions are the pattern.
+- **Exhaust on-disk evidence before declaring anything unverifiable.**
+  Before writing "can't test from here" / "needs separate
+  investigation", enumerate what already exists: rotated
+  `bram-traces/bram-trace-*.log` archives (days of history, not just
+  the live log), `git log`/`git blame`, Inspector exports, persisted
+  tool results. Issue #69's hook regression was "unverifiable" until
+  one grep across the rotated archives found 243 records that flipped
+  the conclusion.
+- **Local absence is not disproof.** For a bug reported from another
+  machine or user, "not in my repo/history/disk" is expected for
+  machine-specific artifacts and proves nothing about the remote
+  case (issue #123). Verify the mechanism locally; frame the
+  specifics as "can't be checked from here", never as discrediting
+  the report.
 - **Register new subkinds.** Every new trace op or subkind lands in
   the trace-vocabulary table (below) in the same change that
   introduces it, so the reading half keeps pace with the writing

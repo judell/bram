@@ -19,6 +19,7 @@ Both panes here are XMLUI, and most edits land in `.xmlui` files.
 - Avoid raw browser JS in event handlers.
 - Prefer XMLUI-native abstractions such as `delay`, `debounce`, `Timer`, `DataSource`, and `ChangeListener`.
 - Read `app/__shell/conventions.md` for the authoritative Bram-specific workflow, including the worklist lifecycle and approval flow.
+- When editing Bram itself (this repo), also read `docs/developing-bram.md` — code organization (helpers.js / Globals.xs / window), the xs-engine failure modes, the post-edit error grep, push-over-polling, and the build vs. hot-reload boundary.
 - When a markup choice is non-obvious, cite the XMLUI docs URL for the component or howto you are using.
 
 ## Worklist Coordination

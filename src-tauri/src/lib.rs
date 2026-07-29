@@ -13626,9 +13626,33 @@ fn issue_close_manual(app: AppHandle, number: u64, comment: Option<String>) -> R
     gh_issue_close(&app, number, comment.as_deref().unwrap_or("")).map(|_| ())
 }
 
+// issue-237: when a push fails with queued issue-closes waiting, say so in
+// the error the pane banner shows — the closes are otherwise stranded
+// silently behind a failing button.
+fn describe_stranded_closes<R: tauri::Runtime>(app: &AppHandle<R>) -> String {
+    let Some(path) = issue_close_queue_file(app) else {
+        return String::new();
+    };
+    let records = read_pending_issue_closes(&path);
+    if records.is_empty() {
+        return String::new();
+    }
+    let issues: Vec<String> = records.iter().map(|r| format!("#{}", r.issue)).collect();
+    format!(
+        " — {} queued issue-close(s) ({}) deferred until a push succeeds",
+        records.len(),
+        issues.join(", ")
+    )
+}
+
 #[tauri::command]
 fn git_push(app: AppHandle, branch: Option<String>) -> Result<(), String> {
-    let current = git_current_branch(&app)?;
+    git_push_inner(&app, branch)
+        .map_err(|e| format!("{}{}", e, describe_stranded_closes(&app)))
+}
+
+fn git_push_inner(app: &AppHandle, branch: Option<String>) -> Result<(), String> {
+    let current = git_current_branch(app)?;
     if let Some(expected) = branch.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         if expected != current {
             return Err(format!(
@@ -13637,27 +13661,35 @@ fn git_push(app: AppHandle, branch: Option<String>) -> Result<(), String> {
             ));
         }
     }
-    let stderr = match git_run(&app, &["push"]) {
+    let stderr = match git_run(app, &["push"]) {
         Ok(_) => {
-            finish_git_push(&app);
+            finish_git_push(app);
             return Ok(());
         }
         Err(e) => e,
     };
+    // issue-237: the upstream-name mismatch (branch created from
+    // origin/main, e.g. `git switch -c feature origin/main`) shares the
+    // missing-upstream remedy — `push -u origin <current>` pushes to the
+    // same-name remote branch and repairs the upstream for future pushes.
+    // (git wraps the mismatch message across lines mid-phrase, so match it
+    // on a whitespace-normalized copy — caught by the scratch-clone test.)
+    let flat = stderr.split_whitespace().collect::<Vec<&str>>().join(" ");
     let missing_upstream = stderr.contains("has no upstream branch")
         || stderr.contains("no upstream branch")
-        || stderr.contains("set the remote as upstream");
+        || stderr.contains("set the remote as upstream")
+        || flat.contains("does not match the name of your current branch");
     if missing_upstream {
-        git_run(&app, &["push", "-u", "origin", &current])?;
-        finish_git_push(&app);
+        git_run(app, &["push", "-u", "origin", &current])?;
+        finish_git_push(app);
         return Ok(());
     }
     let is_nonff = stderr.contains("non-fast-forward") || stderr.contains("fetch first");
     if !is_nonff {
         return Err(stderr);
     }
-    auto_rebase_and_push(&app)
-        .map(|_| finish_git_push(&app))
+    auto_rebase_and_push(app)
+        .map(|_| finish_git_push(app))
         .map_err(|e| format!("non-fast-forward; {}", e))
 }
 
@@ -32794,6 +32826,36 @@ fn enqueue_issue_closes_from_auth<R: tauri::Runtime>(
     }
 }
 
+// issue-237: closing an issue should mean the fix reached the DEFAULT
+// branch — a commit visible only on a review branch must defer. Local
+// reachability check against origin/HEAD (fallback origin/main,
+// origin/master). None = no default ref resolvable locally; the caller
+// falls back to the forge-visibility check so repos without origin/HEAD
+// keep the old behavior.
+fn commit_on_origin_default<R: tauri::Runtime>(app: &AppHandle<R>, sha: &str) -> Option<bool> {
+    let root = project_root(Some(app))?;
+    for r in [
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/main",
+        "refs/remotes/origin/master",
+    ] {
+        let resolved = std::process::Command::new("git")
+            .current_dir(&root)
+            .args(["rev-parse", "--verify", "--quiet", r])
+            .output()
+            .ok()?;
+        if resolved.status.success() {
+            let anc = std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["merge-base", "--is-ancestor", sha, r])
+                .status()
+                .ok()?;
+            return Some(anc.success());
+        }
+    }
+    None
+}
+
 // On the user's explicit Push, close each queued issue whose commit is now
 // visible on origin, with the commit-link comment (plus any user comment).
 // Records whose commit isn't visible yet stay queued. NOT gated on the
@@ -32822,9 +32884,33 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>) {
         // a rebase-rewritten twin. Re-anchor by patch-id over recent origin
         // history and adopt the new SHA; if nothing matches, defer as before
         // but say so — the silent-forever case is what hid the #227 miss.
-        let mut visible =
-            matches!(gh_commit_visible(app, &repo_slug, &record.commit_sha), Ok(true));
-        if !visible {
+        let default_check = commit_on_origin_default(app, &record.commit_sha);
+        let mut visible = match default_check {
+            Some(v) => v,
+            None => matches!(gh_commit_visible(app, &repo_slug, &record.commit_sha), Ok(true)),
+        };
+        // On origin but not merged to the default branch (review-branch
+        // push): defer without re-anchoring noise; close fires once merged.
+        let deferred_unmerged = !visible
+            && default_check == Some(false)
+            && matches!(gh_commit_visible(app, &repo_slug, &record.commit_sha), Ok(true));
+        if deferred_unmerged {
+            eprintln!(
+                "[issue-close-queue] op=deferred-not-on-default issue={} sha={}",
+                record.issue, record.commit_sha
+            );
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "issue-close-queue",
+                    &format!(
+                        "op=deferred-not-on-default issue={} sha={}",
+                        record.issue, record.commit_sha
+                    ),
+                );
+            }
+        }
+        if !visible && !deferred_unmerged {
             let reanchored = record.patch_id.as_deref().and_then(|pid| {
                 let root = project_root(Some(app))?;
                 let branch = git_current_branch(app).ok()?;
@@ -32847,10 +32933,13 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>) {
                         );
                     }
                     record.commit_sha = new_sha;
-                    visible = matches!(
-                        gh_commit_visible(app, &repo_slug, &record.commit_sha),
-                        Ok(true)
-                    );
+                    visible = match commit_on_origin_default(app, &record.commit_sha) {
+                        Some(v) => v,
+                        None => matches!(
+                            gh_commit_visible(app, &repo_slug, &record.commit_sha),
+                            Ok(true)
+                        ),
+                    };
                 }
                 _ => {
                     eprintln!(

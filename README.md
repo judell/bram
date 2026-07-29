@@ -44,6 +44,8 @@ Bram has opinions. It thinks versioning and collaboration are well-handled by gi
 
 <a href="https://blog.jonudell.net/2026/07/16/talking-to-claude-code-and-codex/">Talking to Claude Code and Codex</a>
 
+<a href="https://blog.jonudell.net/2026/07/12/small-models-can-solve-big-problems/">Small mmodels can solve big problems</a>
+
 <a href="https://blog.jonudell.net/2026/07/23/agents-that-narrate-their-work-are-the-best-team-players/">Agents that narrate their work are the best team players</a>
 
 ### Elsewhere

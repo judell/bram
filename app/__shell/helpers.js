@@ -7488,6 +7488,8 @@ window.__bramTipsRegistry = [
   { id: 'tool-descriptions', priority: 10,
     url: 'https://blog.jonudell.net/2026/07/23/agents-that-narrate-their-work-are-the-best-team-players/',
     text: 'Tip: Turn on Tool Descriptions (Settings) to make agentic work more legible.' },
+  { id: 'terminal-toggle', priority: 15,
+    text: 'Tip: Use the terminal button in the top toolbar to show or hide the terminal.' },
   { id: 'batch-actions', priority: 20, route: '/settings?from=tip',
     text: 'Tip: Batch actions let you approve or drop several worklist items in one click — enable them in Settings → Worklist.' },
   { id: 'queue', priority: 30, route: '/queue?from=tip',

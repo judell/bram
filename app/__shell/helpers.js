@@ -212,9 +212,11 @@ window._xsLogs = window._xsLogs || [];
         // into direct evidence.
         var llt = window.__bramLastLongTask || null;
         var lltFresh = llt && (Date.now() - llt.at) <= 1500;
+        var route = "";
+        try { route = String(location.hash || ""); } catch (eRt) { /* ignore */ }
         window.__bramIframeTrace("input-latency", {
           context: "iframe", event: type, latencyMs: Math.round(dt),
-          hadFocus: hadFocus, target: tgt,
+          hadFocus: hadFocus, target: tgt, route: route,
           describeInflight: window.__bramDescribeInflight || 0,
           lastLongTaskMs: lltFresh ? llt.ms : 0,
           lastLongTaskName: lltFresh ? llt.name : "",
@@ -4800,7 +4802,8 @@ window.__bramProjectedTurnEqual = function (a, b) {
   return true;
 };
 
-window.__bramBroadcastProjectedTurns = function (payload) {
+window.__bramBroadcastProjectedTurns = function (payload, reason) {
+  var __bcastT0 = Date.now();
   var prev = __projectedTurnsValue;
   if (payload && prev && prev.sid === payload.sid) {
     var prevTurns = prev.turns || [];
@@ -4819,6 +4822,38 @@ window.__bramBroadcastProjectedTurns = function (payload) {
     try { __projectedTurnsSubscribers[j](payload); } catch (e) {}
   }
   __bramEagerDescribe(payload);
+  // projection-broadcast-attribution (round 2 of the boot-latency work):
+  // every broadcast names its trigger, the active route, and its cost —
+  // sync ms here, render settle via double-rAF. The 2026-07-30 finding
+  // that motivated this: ~195ms settles on #/worklist, a page that
+  // renders no transcript rows (Workspace subscribes to the projection).
+  try {
+    var __bcastRoute = "";
+    try { __bcastRoute = String(location.hash || ""); } catch (eR) { /* ignore */ }
+    var __bcastTurns = (payload && payload.turns && payload.turns.length) || 0;
+    var __bcastReason = reason || "unknown";
+    window.__bramIframeTrace("projection-broadcast", {
+      reason: __bcastReason,
+      route: __bcastRoute,
+      subscribers: window.__bramProjectionEmitCount || 0,
+      turns: __bcastTurns,
+      ms: Date.now() - __bcastT0,
+    });
+    var __bcastSettleT0 = Date.now();
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        try {
+          window.__bramIframeTrace("projection-broadcast", {
+            stage: "settle",
+            reason: __bcastReason,
+            route: __bcastRoute,
+            turns: __bcastTurns,
+            settleMs: Date.now() - __bcastSettleT0,
+          });
+        } catch (eS) { /* ignore */ }
+      });
+    });
+  } catch (eB) { /* ignore */ }
 };
 
 // promote-tool-descriptions-to-row (eager): request descriptions as
@@ -5028,7 +5063,7 @@ window.__bramFlushDescribePatches = function () {
     sid: prev.sid,
     provider: prev.provider,
     turns: newTurns,
-  });
+  }, "describe-flush");
   try {
     window.__bramIframeTrace("describe-patch", {
       stage: "end",
@@ -5105,7 +5140,7 @@ window.__bramRefetchProjectedTurns = function (reason, forceFull) {
           window.__bramRefetchProjectedTurns((reason || "") + "-window-miss", true);
           return;
         }
-        window.__bramBroadcastProjectedTurns(next);
+        window.__bramBroadcastProjectedTurns(next, "refetch:" + (reason || ""));
         __projectedTurnsLastCostMs = Date.now() - startedMs;
         try {
           if (window.logToHost && !window.__bramMenuPending) {
@@ -5135,9 +5170,24 @@ window.bramSubscribeProjectedTurns = (function () {
     var subscribers = new Set();
     var lastValue = window.getProjectedTurns();
     var notify = function () {
+      // projection-broadcast-attribution: time each PushSource emit's sync
+      // slice; >=50ms names a consumer directly. (React may defer the real
+      // render — the broadcast's settleMs catches that half.)
+      var idx = 0;
       subscribers.forEach(function (fn) {
+        var __subT0 = Date.now();
         try { fn(); } catch (e) { console.error("[bramSubscribeProjectedTurns] subscriber threw:", e); }
+        var __subMs = Date.now() - __subT0;
+        if (__subMs >= 50) {
+          try {
+            window.__bramIframeTrace("projection-subscriber", {
+              idx: idx, ms: __subMs, total: subscribers.size,
+            });
+          } catch (eT) { /* ignore */ }
+        }
+        idx++;
       });
+      try { window.__bramProjectionEmitCount = subscribers.size; } catch (eC) { /* ignore */ }
     };
     window.onProjectedTurnsChange(function (v) { lastValue = v; notify(); });
     factory = function (emit) {

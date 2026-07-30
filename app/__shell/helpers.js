@@ -197,9 +197,19 @@ window._xsLogs = window._xsLogs || [];
       if (t0 - lastLog < THRESHOLD_MS) return;
       lastLog = t0;
       if (typeof window.__bramIframeTrace === "function") {
+        // describe-backfill-observability: attribute the delay at emit time —
+        // how many describe fetches were in flight, and the most recent
+        // long task (if within 1.5s). Turns keydown<->storm correlation
+        // into direct evidence.
+        var llt = window.__bramLastLongTask || null;
+        var lltFresh = llt && (Date.now() - llt.at) <= 1500;
         window.__bramIframeTrace("input-latency", {
           context: "iframe", event: type, latencyMs: Math.round(dt),
           hadFocus: hadFocus, target: tgt,
+          describeInflight: window.__bramDescribeInflight || 0,
+          lastLongTaskMs: lltFresh ? llt.ms : 0,
+          lastLongTaskName: lltFresh ? llt.name : "",
+          lastLongTaskAgoMs: lltFresh ? (Date.now() - llt.at) : -1,
         });
       }
     });
@@ -387,6 +397,9 @@ window._xsLogs = window._xsLogs || [];
     // a stall. Overlaps heartbeat-drift (>=500ms) intentionally — this widens
     // coverage down to 200ms.
     if (drift >= 200 && !bg && !window.__bramMenuPending) {
+      // describe-backfill-observability: remember the latest long task so
+      // input-latency can attribute a slow keystroke to it at emit time.
+      window.__bramLastLongTask = { ms: Math.round(drift), name: "heartbeat", at: Date.now() };
       window.__bramIframeTrace("long-task", {
         ms: Math.round(drift),
         name: "heartbeat",
@@ -1043,6 +1056,7 @@ try {
       for (var i = 0; i < entries.length; i++) {
         var e = entries[i];
         if (e.duration >= 200) {
+          window.__bramLastLongTask = { ms: Math.round(e.duration), name: e.name || "", at: Date.now() };
           window.__bramIframeTrace("long-task", {
             ms: Math.round(e.duration),
             name: e.name || "",
@@ -5006,6 +5020,26 @@ window.__bramFlushDescribePatches = function () {
       ms: Date.now() - __describePatchT0,
     });
   } catch (traceErr2) { /* ignore */ }
+  // describe-backfill-observability: the sync end above shows ms:0-1 —
+  // the real cost lands in the subscriber fan-out + React re-render after
+  // the broadcast. Measure to the second next paint (menu-paint /
+  // search-render pattern). Kept separate from the sync begin/end pair,
+  // whose freeze-forensics contract must not move into rAF.
+  try {
+    var __describeSettleT0 = Date.now();
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        try {
+          window.__bramIframeTrace("describe-patch", {
+            stage: "settle",
+            patches: applied,
+            settleMs: Date.now() - __describeSettleT0,
+            sinceBeginMs: Date.now() - __describePatchT0,
+          });
+        } catch (e) { /* ignore */ }
+      });
+    });
+  } catch (settleErr) { /* ignore */ }
 };
 
 // Adaptive coalesce (2026-07-07 codex esc wedge): one full /__turns
@@ -6722,11 +6756,50 @@ window.__bramDescribeContextForTool = function (toolId) {
   return "";
 };
 
+// describe-backfill-observability: backfill pressure counters. One
+// coalesced `describe-load` line per second while requests are issued or
+// in flight — issued_1s (this window), inflight (fetches out minus
+// completions), requested_total (session lifetime). The 2026-07-30 boot
+// storm (~375 calls in 4 min saturating the main thread during typing)
+// was only reconstructible by cross-correlating three other subkinds;
+// this draws the curve directly, with a denominator.
+var __describeLoad = { inflight: 0, issued: 0, total: 0, armed: false };
+function __bramDescribeLoadTick() {
+  __describeLoad.armed = false;
+  if (__describeLoad.issued === 0 && __describeLoad.inflight === 0) return;
+  try {
+    window.__bramIframeTrace("describe-load", {
+      issued_1s: __describeLoad.issued,
+      inflight: __describeLoad.inflight,
+      requested_total: __describeLoad.total,
+    });
+  } catch (e) { /* ignore */ }
+  __describeLoad.issued = 0;
+  if (__describeLoad.inflight > 0) {
+    __describeLoad.armed = true;
+    setTimeout(__bramDescribeLoadTick, 1000);
+  }
+}
+function __bramDescribeLoadIssued() {
+  __describeLoad.issued++;
+  __describeLoad.total++;
+  __describeLoad.inflight++;
+  window.__bramDescribeInflight = __describeLoad.inflight;
+  if (!__describeLoad.armed) {
+    __describeLoad.armed = true;
+    setTimeout(__bramDescribeLoadTick, 1000);
+  }
+}
+function __bramDescribeLoadDone() {
+  if (__describeLoad.inflight > 0) __describeLoad.inflight--;
+  window.__bramDescribeInflight = __describeLoad.inflight;
+}
 window.__bramRequestCommandDescription = function (item, onDone) {
   var id = item && item.id;
   var done = function () { try { if (onDone) onDone(); } catch (e) {} };
   if (!id || window.__bramDescribeRequested[id]) { done(); return; }
   window.__bramDescribeRequested[id] = true;
+  __bramDescribeLoadIssued();
   window
     .fetch("/__describe-command", {
       method: "POST",
@@ -6749,6 +6822,7 @@ window.__bramRequestCommandDescription = function (item, onDone) {
     })
     .then(function (r) { return r.json(); })
     .then(function (res) {
+      __bramDescribeLoadDone();
       if (res && res.ok && res.description) {
         window.__bramDescribeUnavailable = false;
         // Direct splice into the accumulated projection — see
@@ -6770,6 +6844,7 @@ window.__bramRequestCommandDescription = function (item, onDone) {
       done();
     })
     .catch(function () {
+      __bramDescribeLoadDone();
       delete window.__bramDescribeRequested[id];
       done();
     });

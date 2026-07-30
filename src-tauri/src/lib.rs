@@ -37300,6 +37300,19 @@ fn handle_describe_command<R: tauri::Runtime>(
     body: &[u8],
 ) -> (u16, &'static str, Vec<u8>) {
     const JSON: &str = "application/json; charset=utf-8";
+    // describe-backfill-observability: server-side view of backfill
+    // pressure. Guard decrements on every return path.
+    static DESCRIBE_INFLIGHT: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    struct InflightGuard;
+    impl Drop for InflightGuard {
+        fn drop(&mut self) {
+            DESCRIBE_INFLIGHT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let describe_concurrent =
+        DESCRIBE_INFLIGHT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    let _inflight_guard = InflightGuard;
     let parsed: serde_json::Value = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(e) => {
@@ -37566,7 +37579,7 @@ fn handle_describe_command<R: tauri::Runtime>(
         app,
         "ai-describe",
         &format!(
-            "op=call ms={} model={} input_tokens={} output_tokens={} upgraded={} ctx={} result={} redactions={} id={}",
+            "op=call ms={} model={} input_tokens={} output_tokens={} upgraded={} ctx={} result={} redactions={} concurrent={} id={}",
             ms,
             model,
             input_tokens,
@@ -37575,6 +37588,7 @@ fn handle_describe_command<R: tauri::Runtime>(
             if context.is_empty() { 0 } else { 1 },
             if result_head.is_empty() { 0 } else { 1 },
             redactions,
+            describe_concurrent,
             id
         ),
     );

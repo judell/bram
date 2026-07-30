@@ -4909,8 +4909,22 @@ function __bramVisibleToolIds() {
   return ids;
 }
 function __bramPumpDescribeQueue() {
+  // eager-describe-scan-instrumentation: bracket the visibility work.
+  // On non-Transcript pages the visible-range signal is absent and
+  // __bramVisibleToolIds falls back to a [data-index] DOM scrape — a
+  // layout query that also rides the 1.5s drain interval. `via` names
+  // which path ran; emitted only when the queue had work, so
+  // steady-state noise is zero.
+  var __pumpT0 = Date.now();
+  var __pumpVia = "";
+  var __pumpVisible = 0;
   try {
+    if (__bramDescribeQueue.length) {
+      __pumpVia = (window.__bramVisibleRange && window.__bramVisibleRange.startIndex >= 0)
+        ? "range" : "dom-scrape";
+    }
     var vis = __bramVisibleToolIds();
+    try { __pumpVisible = Object.keys(vis).length; } catch (eV) { /* ignore */ }
     if (__bramDescribeQueue.length > 1) {
       var front = [], rest = [];
       for (var qi = 0; qi < __bramDescribeQueue.length; qi++) {
@@ -4919,6 +4933,20 @@ function __bramPumpDescribeQueue() {
       __bramDescribeQueue = front.concat(rest);
     }
   } catch (e) {}
+  if (__pumpVia) {
+    try {
+      var __pumpRoute = "";
+      try { __pumpRoute = String(location.hash || ""); } catch (eR) { /* ignore */ }
+      window.__bramIframeTrace("describe-scan", {
+        op: "pump",
+        ms: Date.now() - __pumpT0,
+        via: __pumpVia,
+        visible: __pumpVisible,
+        queue: __bramDescribeQueue.length,
+        route: __pumpRoute,
+      });
+    } catch (eT) { /* ignore */ }
+  }
   while (__bramDescribeInFlight < __BRAM_DESCRIBE_CONCURRENCY && __bramDescribeQueue.length) {
     var e = __bramDescribeQueue.shift();
     if (!e || !e.id || window.__bramDescribeRequested[e.id]) continue;
@@ -4939,11 +4967,19 @@ function __bramEagerDescribe(payload) {
     if (window.__bramDescribeUnavailable) return;
     if (!payload || !payload.turns) return;
     if (window.location.pathname.indexOf("/tools/") === -1) return;
+    // eager-describe-scan-instrumentation: this full walk runs inside
+    // EVERY broadcast (O(turns x entries) + a material string-probe per
+    // undescribed entry) — the last unbracketed O(session) cost in the
+    // broadcast chain (round-3 suspect for the 17.5s zero-subscriber
+    // settle, 2026-07-30 22:49 boot). op=scan quantifies it per pass.
+    var __scanT0 = Date.now();
+    var __scanEntries = 0;
     var turns = payload.turns;
     var queue = [];
     for (var i = turns.length - 1; i >= 0; i--) {
       var entries = (turns[i] && turns[i].entries) || [];
       for (var k = entries.length - 1; k >= 0; k--) {
+        __scanEntries++;
         var e = entries[k];
         if (!e || e.kind !== "tool" || !e.id) continue;
         if (e.aiDescription) continue;
@@ -4953,6 +4989,18 @@ function __bramEagerDescribe(payload) {
       }
     }
     __bramDescribeQueue = queue;
+    try {
+      var __scanRoute = "";
+      try { __scanRoute = String(location.hash || ""); } catch (eR) { /* ignore */ }
+      window.__bramIframeTrace("describe-scan", {
+        op: "scan",
+        ms: Date.now() - __scanT0,
+        turns: turns.length,
+        entries: __scanEntries,
+        queued: queue.length,
+        route: __scanRoute,
+      });
+    } catch (eT) { /* ignore */ }
     __bramPumpDescribeQueue();
   } catch (err) {}
 }

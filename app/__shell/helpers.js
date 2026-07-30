@@ -4838,6 +4838,8 @@ window.__bramBroadcastProjectedTurns = function (payload, reason) {
       subscribers: window.__bramProjectionEmitCount || 0,
       turns: __bcastTurns,
       ms: Date.now() - __bcastT0,
+      tail_emits: window.__bramProjectionTailEmits || 0,
+      tail_skips: window.__bramProjectionTailSkips || 0,
     });
     var __bcastSettleT0 = Date.now();
     requestAnimationFrame(function () {
@@ -5195,6 +5197,67 @@ window.bramSubscribeProjectedTurns = (function () {
       subscribers.add(fire);
       fire();
       window.__bramRefetchProjectedTurns(lastValue == null ? "first-subscribe" : "subscribe");
+      return function () { subscribers.delete(fire); };
+    };
+    return factory;
+  };
+})();
+
+// workspace-tail-subscription (graduation of projection-broadcast-attribution
+// c0e88c1): tail-only consumers subscribe here instead of to the full
+// projection. The last exchange is computed ONCE per broadcast in plain JS
+// and re-emitted ONLY when the fields tail consumers read change
+// (lastAssistantText.text, lastExchange.userText/assistantText, image
+// count). During a describe backfill — old rows gaining aiDescription —
+// that is essentially never, so a tail consumer's reactive graph idles
+// through the storm instead of re-evaluating per broadcast (the
+// 153-310ms-per-settle #/worklist cost that produced 20 slow keystrokes
+// vs the Transcript boot's 1). tail_emits/tail_skips ride the
+// projection-broadcast trace line, so the fix reports through the same
+// instrument that convicted the problem.
+window.__bramProjectionTailEmits = 0;
+window.__bramProjectionTailSkips = 0;
+window.bramSubscribeProjectedLastExchange = (function () {
+  var factory;
+  return function () {
+    if (factory) return factory;
+    var subscribers = new Set();
+    var lastKey = null;
+    var lastValue = null;
+    var keyOf = function (t) {
+      if (!t) return "";
+      var a = (t.lastAssistantText && t.lastAssistantText.text) || "";
+      var ex = t.lastExchange || {};
+      return a + " " + (ex.userText || "") + " " +
+        (ex.assistantText || "") + " " + ((ex.userImages || []).length);
+    };
+    var recompute = function (v) {
+      var next = window.__bramProjectedLastExchange(v);
+      var k = keyOf(next);
+      if (lastValue !== null && k === lastKey) {
+        window.__bramProjectionTailSkips++;
+        return;
+      }
+      lastKey = k;
+      lastValue = next;
+      window.__bramProjectionTailEmits++;
+      subscribers.forEach(function (fn) {
+        try { fn(); } catch (e) { console.error("[bramSubscribeProjectedLastExchange] subscriber threw:", e); }
+      });
+    };
+    window.onProjectedTurnsChange(function (v) { recompute(v); });
+    recompute(window.getProjectedTurns());
+    factory = function (emit) {
+      var fire = function () { emit(lastValue); };
+      subscribers.add(fire);
+      fire();
+      // Preserve the full-projection factory's subscribe-refetch semantics:
+      // on a Worklist-only boot this subscription is what pulls the first
+      // projection (provider-start/talk-session ticks also trigger, but do
+      // not depend on them).
+      window.__bramRefetchProjectedTurns(
+        window.getProjectedTurns() == null ? "tail-first-subscribe" : "tail-subscribe"
+      );
       return function () { subscribers.delete(fire); };
     };
     return factory;

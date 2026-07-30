@@ -167,10 +167,16 @@
   <ChangeListener
     listenTo="{(expandedItemIds || []).length === 0 ? 'none' : 'some'}"
     onDidChange="() => { if ((expandedItemIds || []).length === 0 && worklistVoiceTarget === 'feedback') setWorklistVoiceTarget('message-agent'); }" />
+  <!-- workspace-tail-subscription: this surface consumes only the LAST
+       exchange, so it subscribes to the tail-scoped source — emissions
+       arrive only when the exchange content changes, not on every
+       projection broadcast (the #/worklist boot-storm cost, c0e88c1).
+       initial seeds the walker's empty shape so bindings below never
+       see null. -->
   <PushSource
     id="projectedTurnsDS"
-    initial="{null}"
-    subscribe="{window.bramSubscribeProjectedTurns()}" />
+    initial="{window.__bramProjectedLastExchange(null)}"
+    subscribe="{window.bramSubscribeProjectedLastExchange()}" />
   <!-- Edit hints only matter while a Worklist action is in flight;
        ungated this fetched (~650 ms host walk) on every session write
        for a 2-byte empty response
@@ -181,9 +187,9 @@
     when="{submitting}" />
   <ChangeListener
     listenToSources="{{
-      assistantText: window.__bramProjectedLastExchange(projectedTurnsDS.value).lastAssistantText.text,
-      exchangeUserText: window.__bramProjectedLastExchange(projectedTurnsDS.value).lastExchange.userText,
-      exchangeAssistantText: window.__bramProjectedLastExchange(projectedTurnsDS.value).lastExchange.assistantText
+      assistantText: (projectedTurnsDS.value || window.__bramProjectedLastExchange(null)).lastAssistantText.text,
+      exchangeUserText: (projectedTurnsDS.value || window.__bramProjectedLastExchange(null)).lastExchange.userText,
+      exchangeAssistantText: (projectedTurnsDS.value || window.__bramProjectedLastExchange(null)).lastExchange.assistantText
     }}"
     onDidChange="(c) => {
       const v = c.newValue || {};
@@ -1257,7 +1263,7 @@ Drop is the clean rejection path; Iterate is what you want if the item just need
     <!-- Agent dock: the last exchange from the same projected-turns
          source Transcript uses, so provider switches update both
          surfaces together. Pending menus render in the app footer. -->
-    <VStack var.dockExchange="{window.__bramProjectedLastExchange(projectedTurnsDS.value)}">
+    <VStack var.dockExchange="{projectedTurnsDS.value || window.__bramProjectedLastExchange(null)}">
     <VStack
       when="{(dockExchange.lastExchange &amp;&amp; dockExchange.lastExchange.userText) || (dockExchange.lastExchange &amp;&amp; dockExchange.lastExchange.userImages &amp;&amp; dockExchange.lastExchange.userImages.length > 0) || (dockExchange.lastAssistantText &amp;&amp; dockExchange.lastAssistantText.text)}"
       gap="$space-2"

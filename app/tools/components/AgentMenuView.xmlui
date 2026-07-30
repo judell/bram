@@ -16,15 +16,29 @@
     var.menuIdentity="{window.__bramMenuIdentity($props.menu)}"
     var.menuPreviewOpen="{true}"
     var.previewModalOpen="{false}"
+    var.menuHeaderSource="{$props.menu.toolCallSignature || $props.menu.text || ''}"
+    var.menuHeaderCmd="{(menuHeaderSource.split('\n').find(l => l.indexOf(($props.menu.tool || '') + ': ') === 0 || l.indexOf(($props.menu.tool || '') + '(') === 0) || '').replace(($props.menu.tool || '') + ': ', '').replace(($props.menu.tool || '') + '(', '')}"
+    var.menuHeaderLine="{(menuHeaderCmd || menuHeaderSource.split('\n')[0] || '').slice(0, 100)}"
     width="100%"
     onInit="window.__bramTraceAgentMenuRender($props.menu, $props.surface || 'component')"
     padding="$space-3"
     borderRadius="$borderRadius"
     border="1px solid $color-warn-200"
     backgroundColor="$color-warn-50">
+    <!-- Header carries the command's first line so a collapsed preview still
+         says what is being approved. A mid-prompt transcript row cannot
+         provide this context on Claude: the tool_use JSONL record flushes
+         only after the permission decision (answer-at-click
+         call_present=false), so the menu is self-describing instead. -->
     <Text fontSize="$fontSize-xs" color="$color-warn-800">
-      Agent wants to use <Text fontFamily="$fontFamily-monospace">{$props.menu.tool}</Text>
+      Agent wants to use <Text fontFamily="$fontFamily-monospace">{$props.menu.tool}</Text><Text when="{menuHeaderLine}" fontFamily="$fontFamily-monospace" fontSize="$fontSize-xs"> — {menuHeaderLine}</Text>
     </Text>
+    <!-- Each new menu starts at the designed default; without this, a
+         Hide-preview toggle leaks into the next prompt (observed
+         2026-07-30). Single arrow expression: sync callback. -->
+    <ChangeListener
+      listenTo="{menuIdentity}"
+      onDidChange="() => menuPreviewOpen = true" />
     <Button
       when="{$props.menu.toolCallSignature || $props.menu.toolCallContent || $props.menu.text}"
       label="{menuPreviewOpen ? 'Hide preview' : 'Show preview'}"
@@ -32,17 +46,28 @@
       size="xs"
       onClick="menuPreviewOpen = !menuPreviewOpen" />
 
-    <!-- signature only (no diff): short, render inline -->
+    <!-- signature only (no diff): capped to the inline window like the
+         diff/content siblings — an uncapped multiline command (heredoc
+         scripts) grew the sticky footer past the viewport, clipping its
+         top and collapsing the content area (2026-07-30) -->
     <VStack
       when="{menuPreviewOpen &amp;&amp; $props.menu.toolCallSignature &amp;&amp; !$props.menu.toolCallDiff}"
+      gap="$space-1"
       padding="$space-2"
       borderRadius="$borderRadius"
-      backgroundColor="$color-surface-100">
+      backgroundColor="$color-surface-100"
+      var.sigLines="{($props.menu.toolCallSignature || '').split('\n')}">
       <Text
-        value="{$props.menu.toolCallSignature}"
+        value="{sigLines.slice(0, 24).join('\n')}"
         fontFamily="$fontFamily-monospace"
         fontSize="$fontSize-sm"
         preserveLinebreaks="true" />
+      <Button
+        when="{sigLines.length > 24}"
+        label="View full command ({sigLines.length} lines)"
+        variant="ghost"
+        size="xs"
+        onClick="previewModalOpen = true" />
     </VStack>
 
     <!-- diff: compact content-hugging rows capped to the inline window;
@@ -80,25 +105,33 @@
         onClick="previewModalOpen = true" />
     </VStack>
 
-    <!-- prose / command text (no signature) -->
+    <!-- prose / command text (no signature): same 24-line inline cap -->
     <VStack
       when="{menuPreviewOpen &amp;&amp; !$props.menu.toolCallSignature &amp;&amp; $props.menu.text}"
+      gap="$space-1"
       padding="$space-2"
       borderRadius="$borderRadius"
-      backgroundColor="$color-surface-100">
+      backgroundColor="$color-surface-100"
+      var.textLines="{($props.menu.text || '').split('\n')}">
       <!-- AskUserQuestion's text is a prose question -> body font. Other
            menus' text can be a command-like preview -> keep monospace. -->
       <Text
         when="{$props.menu.tool === 'AskUserQuestion'}"
-        value="{$props.menu.text}"
+        value="{textLines.slice(0, 24).join('\n')}"
         fontSize="$fontSize-sm"
         preserveLinebreaks="true" />
       <Text
         when="{$props.menu.tool !== 'AskUserQuestion'}"
-        value="{$props.menu.text}"
+        value="{textLines.slice(0, 24).join('\n')}"
         fontFamily="$fontFamily-monospace"
         fontSize="$fontSize-xs"
         preserveLinebreaks="true" />
+      <Button
+        when="{textLines.length > 24}"
+        label="View full ({textLines.length} lines)"
+        variant="ghost"
+        size="xs"
+        onClick="previewModalOpen = true" />
     </VStack>
 
     <VStack
@@ -154,6 +187,13 @@
         <Markdown
           when="{!$props.menu.toolCallDiff &amp;&amp; $props.menu.toolCallContent}"
           content="{$props.menu.toolCallContent}" />
+        <!-- signature/text spill target (the two capped blocks above) -->
+        <Text
+          when="{!$props.menu.toolCallDiff &amp;&amp; !$props.menu.toolCallContent &amp;&amp; ($props.menu.toolCallSignature || $props.menu.text)}"
+          value="{$props.menu.toolCallSignature || $props.menu.text}"
+          fontFamily="$fontFamily-monospace"
+          fontSize="$fontSize-sm"
+          preserveLinebreaks="true" />
       </ModalDialog>
     </Theme>
   </VStack>

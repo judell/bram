@@ -34,7 +34,12 @@ PORT_REL = os.path.join("resources", ".bram-port")
 _EVENTS_LOG_CAP_BYTES = 5 * 1024 * 1024
 
 
-def _breadcrumb(root, event, tool):
+def _breadcrumb(root, event, tool, extra=""):
+    # `extra` (menu-no-claim-signature-gap phase 1): POST outcome suffix —
+    # "post=<path> ok ms=N" / "post=<path> err=<ExcClass> ms=N" /
+    # "post=skipped port=none" — so a fired-but-claimless prompt
+    # self-classifies (lost in transit vs host-side) instead of conflating
+    # with "hook never ran". One extra line per POSTing invocation.
     try:
         d = os.path.join(root, "resources", "bram-traces")
         if not os.path.isdir(os.path.join(root, "resources")):
@@ -48,12 +53,13 @@ def _breadcrumb(root, event, tool):
             pass
         with open(path, "a") as f:
             f.write(
-                "%s claude %s %s\n"
+                "%s claude %s %s%s\n"
                 % (
                     time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
                     + (".%03dZ" % (int(time.time() * 1000) % 1000)),
                     event or "?",
                     tool or "?",
+                    (" " + extra) if extra else "",
                 )
             )
     except Exception:
@@ -79,6 +85,11 @@ def _port(root):
 
 
 def _post(port, path, body):
+    # Returns an outcome string for the breadcrumb (phase-1 attribution:
+    # 42/59 menus surfaced claimless on 2026-07-30 while breadcrumbs showed
+    # the hook firing — the loss is in this POST or on the host, and
+    # fail-silent meant the two were indistinguishable).
+    started = time.time()
     try:
         # Echo the per-session token Bram set in this agent's env so the route
         # can tell our POSTs from a foreign agent's. Absent (agent not launched
@@ -95,10 +106,15 @@ def _post(port, path, body):
             method="POST",
         )
         # Short timeout: the hook is synchronous before the prompt renders, so
-        # it must not stall. Fire-and-forget; ignore the response.
+        # it must not stall. Fire-and-forget; ignore the response body.
         urllib.request.urlopen(req, timeout=0.4).read()
-    except Exception:
-        pass
+        return "post=%s ok ms=%d" % (path, int((time.time() - started) * 1000))
+    except Exception as e:
+        return "post=%s err=%s ms=%d" % (
+            path,
+            type(e).__name__,
+            int((time.time() - started) * 1000),
+        )
 
 
 def main():
@@ -108,22 +124,26 @@ def main():
         payload = {}
     event = payload.get("hook_event_name") or ""
     root = _project_root(payload)
-    _breadcrumb(root, event, payload.get("tool_name"))
+    tool = payload.get("tool_name")
+    _breadcrumb(root, event, tool)
     port = _port(root)
     if not port:
+        if event in ("PermissionRequest", "PreToolUse", "PostToolUse", "PermissionDenied"):
+            _breadcrumb(root, event, tool, "post=skipped port=none")
         return
+    outcome = None
     if event == "PermissionRequest":
-        _post(port, "/__menu/permission", {
-            "tool_name": payload.get("tool_name"),
+        outcome = _post(port, "/__menu/permission", {
+            "tool_name": tool,
             "tool_input": payload.get("tool_input") or {},
             "permission_suggestions": payload.get("permission_suggestions") or [],
             "tool_use_id": payload.get("tool_use_id"),
         })
-    elif event == "PreToolUse" and payload.get("tool_name") == "AskUserQuestion":
+    elif event == "PreToolUse" and tool == "AskUserQuestion":
         # Family B: no PermissionRequest fires; choices live in tool_input.
         # questions. Surface the same way (host builds the menu from tool_input).
-        _post(port, "/__menu/permission", {
-            "tool_name": payload.get("tool_name"),
+        outcome = _post(port, "/__menu/permission", {
+            "tool_name": tool,
             "tool_input": payload.get("tool_input") or {},
             "permission_suggestions": [],
             "tool_use_id": payload.get("tool_use_id"),
@@ -134,11 +154,13 @@ def main():
         # tool_name + tool_input let the host key the removal by signature:
         # PermissionRequest claims carry no tool_use_id, so id-only clears
         # matched nothing (parallel-menu-claim-queue soak, 2026-07-18).
-        _post(port, "/__menu/permission/clear", {
+        outcome = _post(port, "/__menu/permission/clear", {
             "tool_use_id": payload.get("tool_use_id"),
-            "tool_name": payload.get("tool_name"),
+            "tool_name": tool,
             "tool_input": payload.get("tool_input") or {},
         })
+    if outcome:
+        _breadcrumb(root, event, tool, outcome)
 
 
 try:

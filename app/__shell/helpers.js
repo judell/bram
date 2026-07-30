@@ -173,7 +173,12 @@ window._xsLogs = window._xsLogs || [];
 (function installInputLatencyProbe() {
   if (window.__bramInputLatencyProbe) return;
   window.__bramInputLatencyProbe = true;
-  var THRESHOLD_MS = 200;
+  // describe-backfill-pacing soak: floor dropped 200 -> 100ms. The 2026-07-30
+  // storm analysis showed every blocking instrument floored at 200ms while
+  // typing feel degrades from ~50-100ms (31.9s of measured settle vs 5.8s of
+  // sampled long-task in the same window). Revisit after the soak if
+  // steady-state noise appears.
+  var THRESHOLD_MS = 100;
   var lastLog = 0;
   function describe(el) {
     try {
@@ -188,6 +193,10 @@ window._xsLogs = window._xsLogs || [];
   function onInput(ev) {
     var t0 = performance.now();
     var type = ev.type;
+    // describe-backfill-pacing: typing-activity timestamp — the issuance
+    // hold keys on this (typed within the last 2s), NOT on composer focus,
+    // which is sticky and would starve the backfill during reading.
+    if (type === "keydown") window.__bramLastKeydownAt = Date.now();
     var hadFocus = false;
     try { hadFocus = document.hasFocus(); } catch (e) {}
     var tgt = describe(ev.target);
@@ -4957,7 +4966,16 @@ window.__bramPatchProjectedToolDescription = function (toolId, description) {
   __describePendingPatches[toolId] = description;
   if (!__describeFlushArmed) {
     __describeFlushArmed = true;
-    setTimeout(function () { window.__bramFlushDescribePatches(); }, 400);
+    // Adaptive window (describe-backfill-pacing): 2s during backfill,
+    // 400ms otherwise — the guarded call tolerates load order (the
+    // window fn is defined later in this file; by first patch it exists).
+    var win = 400;
+    try {
+      if (typeof window.__bramDescribeFlushWindowMs === "function") {
+        win = window.__bramDescribeFlushWindowMs();
+      }
+    } catch (e) { /* ignore */ }
+    setTimeout(function () { window.__bramFlushDescribePatches(); }, win);
   }
   return true;
 };
@@ -6764,14 +6782,48 @@ window.__bramDescribeContextForTool = function (toolId) {
 // was only reconstructible by cross-correlating three other subkinds;
 // this draws the curve directly, with a denominator.
 var __describeLoad = { inflight: 0, issued: 0, total: 0, armed: false };
+// describe-backfill-pacing lever (b): hold NEW describe requests while the
+// user typed within the last 2s. In-flight requests complete normally (they
+// self-cap at ~3); held ones drain in order once typing quiets. Keyed to
+// keystrokes, not focus — see the input-probe comment.
+var __describeHold = [];
+var __describeHoldArmed = false;
+var __DESCRIBE_TYPING_HOLD_MS = 2000;
+function __bramDescribeTypingRecent() {
+  return Date.now() - (window.__bramLastKeydownAt || 0) < __DESCRIBE_TYPING_HOLD_MS;
+}
+function __bramDescribeHoldDrain() {
+  __describeHoldArmed = false;
+  if (!__describeHold.length) return;
+  if (__bramDescribeTypingRecent()) {
+    __describeHoldArmed = true;
+    setTimeout(__bramDescribeHoldDrain, 500);
+    return;
+  }
+  var held = __describeHold;
+  __describeHold = [];
+  for (var i = 0; i < held.length; i++) {
+    try { window.__bramRequestCommandDescription(held[i].item, held[i].onDone, true); } catch (e) { /* ignore */ }
+  }
+}
+// describe-backfill-pacing lever (a): the patch-flush coalesce window widens
+// to 2s while the backfill is active (anything in flight or just issued),
+// returning to 400ms when the storm drains. At the 2026-07-30 storm's rates
+// this cuts ~189 flushes to ~40 and settle churn from ~23% to ~5%, while a
+// completed description still lands within ~2s.
+window.__bramDescribeFlushWindowMs = function () {
+  return (__describeLoad.inflight > 0 || __describeLoad.issued > 0) ? 2000 : 400;
+};
 function __bramDescribeLoadTick() {
   __describeLoad.armed = false;
-  if (__describeLoad.issued === 0 && __describeLoad.inflight === 0) return;
+  if (__describeLoad.issued === 0 && __describeLoad.inflight === 0 && !__describeHold.length) return;
   try {
     window.__bramIframeTrace("describe-load", {
       issued_1s: __describeLoad.issued,
       inflight: __describeLoad.inflight,
       requested_total: __describeLoad.total,
+      held: __describeHold.length,
+      window_ms: window.__bramDescribeFlushWindowMs(),
     });
   } catch (e) { /* ignore */ }
   __describeLoad.issued = 0;
@@ -6794,11 +6846,25 @@ function __bramDescribeLoadDone() {
   if (__describeLoad.inflight > 0) __describeLoad.inflight--;
   window.__bramDescribeInflight = __describeLoad.inflight;
 }
-window.__bramRequestCommandDescription = function (item, onDone) {
+window.__bramRequestCommandDescription = function (item, onDone, fromHold) {
   var id = item && item.id;
   var done = function () { try { if (onDone) onDone(); } catch (e) {} };
-  if (!id || window.__bramDescribeRequested[id]) { done(); return; }
-  window.__bramDescribeRequested[id] = true;
+  if (!id) { done(); return; }
+  if (!fromHold) {
+    if (window.__bramDescribeRequested[id]) { done(); return; }
+    window.__bramDescribeRequested[id] = true;
+    // Typing-hold (describe-backfill-pacing): queue instead of fetch while
+    // keystrokes are contending for the main thread; the latch above keeps
+    // duplicate callers out while the request waits.
+    if (__bramDescribeTypingRecent()) {
+      __describeHold.push({ item: item, onDone: onDone });
+      if (!__describeHoldArmed) {
+        __describeHoldArmed = true;
+        setTimeout(__bramDescribeHoldDrain, 500);
+      }
+      return;
+    }
+  }
   __bramDescribeLoadIssued();
   window
     .fetch("/__describe-command", {

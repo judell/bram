@@ -5360,6 +5360,16 @@ window.__bramFollowVerify = function (cause, agentId) {
   } catch (e) { /* ignore */ }
 };
 
+// xmlui eval-trace sink (engine-neutral probe, vendored eval-trace.ts):
+// the engine emits evaluation/statement/action lines only while
+// window.__xmluiEvalTraceUntil holds a future performance.now() deadline,
+// through this registered sink. Bram forwards into its trace channel under
+// the existing xmlui-probe subkind (vocabulary unchanged). Arm from
+// devtools with: window.__xmluiEvalTraceUntil = performance.now() + 3000
+window.__xmluiEvalTraceSink = function (op, d) {
+  try { window.__bramIframeTrace("xmlui-probe", { op: op, d: d }); } catch (e) { /* ignore */ }
+};
+
 window.__bramRegisterTranscriptScroll = function (goTop, goBottom) {
   window.__bramTranscriptScrollActions = { top: goTop, bottom: goBottom };
 };
@@ -6914,7 +6924,7 @@ window.__bramExpandTool = function (arr, item) {
   // xmlui-probe trace lines (op=eval|stmt|action) synchronously via
   // logToHost → invoke, so a hang in the ensuing re-render names its exact
   // site — the trace stream ends AT the hanging statement/binding/action.
-  try { window.__bramXmluiTraceUntil = performance.now() + 1500; } catch (e) {}
+  try { window.__xmluiEvalTraceUntil = performance.now() + 1500; } catch (e) {}
   var next = window.__bramToggleInArray(arr, item && item.id);
   try {
     var opening = item && item.id && (next || []).indexOf(item.id) >= 0;

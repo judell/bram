@@ -63,10 +63,17 @@
     listenTo="{dateRange ? (dateRange[0] + '-' + dateRange[1]) : ''}"
     onDidChange="() => (dateSlider &amp;&amp; dateRange) ? dateSlider.setValue(dateRange) : null" />
 
+  <!-- search-rows-confinement: bake the per-row view-model here, once per
+       result-set change — formatDateTime ran 576x per keystroke when it
+       lived in the row template (probe capture 2026-07-31). -->
   <variable name="displayed" value="{
     merged
       .filter(h => !dateFilter || (Number(h.date) >= dateFilter[0] &amp;&amp; Number(h.date) &lt;= dateFilter[1]))
       .slice(0, 100)
+      .map(h => Object.assign({}, h, {
+        typeLabel: h.type === 'worklist-history' ? 'history' : h.type,
+        dateLabel: h.date ? formatDateTime(new Date(Number(h.date) * 1000), 'yyyy-MM-dd HH:mm') : ''
+      }))
   }" />
 
   <!-- Open the relevance winner only after all four facet requests for the
@@ -186,45 +193,14 @@
       value="No matches." />
 
     <Theme fontSize-Badge="0.55em">
-      <Items data="{displayed}">
-        <VStack gap="$space-1" paddingVertical="$space-2" borderBottom="1px solid $borderColor">
-          <HStack gap="$space-3" verticalAlignment="start">
-            <VStack gap="$space-0_5" width="7rem">
-              <Badge value="{$item.type === 'worklist-history' ? 'history' : $item.type}" colorMap="{typeColors}" />
-              <Text fontSize="$fontSize-xs" color="$textColor-secondary"
-                value="{$item.date ? formatDateTime(new Date(Number($item.date) * 1000), 'yyyy-MM-dd HH:mm') : ''}" />
-            </VStack>
-            <VStack width="*" gap="$space-0_5">
-              <Link noIndicator onClick="expandedHit = (expandedHit &amp;&amp; expandedHit.key === $item.key) ? null : $item">
-                <Text maxLines="1" fontWeight="$fontWeight-bold" value="{$item.source}" />
-              </Link>
-              <Text when="{!(expandedHit &amp;&amp; expandedHit.key === $item.key)}"
-                fontSize="$fontSize-sm" color="$textColor-secondary" value="…{$item.snippet}…" />
-            </VStack>
-          </HStack>
-
-          <!-- Inline expander: real per-type source + a footer link. -->
-          <VStack when="{expandedHit &amp;&amp; expandedHit.key === $item.key}"
-            gap="$space-2" paddingLeft="7rem" paddingTop="$space-1">
-            <VStack when="{$item.type === 'session'}">
-              <SessionDetail sessionId="{$item.id}" provider="{$item.provider || 'claude'}"
-                query="{query.trim()}" />
-            </VStack>
-            <VStack when="{$item.type === 'commit'}">
-              <CommitDetail sha="{($item.key || '').split(':')[1]}" url="{$item.link}"
-                query="{query.trim()}" />
-            </VStack>
-            <VStack when="{$item.type === 'issue'}">
-              <IssueDetail number="{($item.key || '').split(':')[1]}"
-                query="{query.trim()}" />
-            </VStack>
-            <VStack when="{$item.type === 'worklist-history'}">
-              <HistoryDetail when="{historyGroup}" group="{historyGroup}"
-                query="{query.trim()}" />
-            </VStack>
-          </VStack>
-        </VStack>
-      </Items>
+      <!-- search-rows-confinement: rows render behind the SearchResults
+           boundary; see that component's header for the probe receipts. -->
+      <SearchResults
+        hits="{displayed}"
+        expandedKey="{(expandedHit &amp;&amp; expandedHit.key) || ''}"
+        query="{query.trim()}"
+        historyGroup="{historyGroup}"
+        onRowToggle="(h) => expandedHit = (expandedHit &amp;&amp; expandedHit.key === h.key) ? null : h" />
     </Theme>
 
     <ModalDialog id="searchHelpDialog" title="Search help">

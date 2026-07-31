@@ -1,0 +1,55 @@
+<Component name="SearchResults">
+  <!-- search-rows-confinement: the result rows live behind this component
+       boundary so bindings re-evaluate on THIS component's prop changes
+       only. Before: rows sat in Search's container scope, and any state
+       change there — a composer keystroke, a loader flap — re-evaluated
+       every row binding (probe capture 2026-07-31: 5 composer
+       COMPONENT_STATE_CHANGED actions cascaded ~950 row evaluations each;
+       see xmlui-org/xmlui#3710 and the confine-a-hot-input howto,
+       applied here to the victims rather than the hot source).
+       Rows arrive as a precomputed view-model (typeLabel/dateLabel baked
+       by Search once per result set — formatDateTime is not in scope
+       here, by design). Props down, events up: row clicks emit
+       rowToggle(item); expansion state stays in Search. -->
+  <variable name="typeColors"
+    value="{{ session: 'blue', commit: 'green', issue: '#c2410c', history: 'purple' }}" />
+  <Items data="{$props.hits}">
+    <VStack gap="$space-1" paddingVertical="$space-2" borderBottom="1px solid $borderColor">
+      <HStack gap="$space-3" verticalAlignment="start">
+        <VStack gap="$space-0_5" width="7rem">
+          <Badge value="{$item.typeLabel}" colorMap="{typeColors}" />
+          <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{$item.dateLabel}" />
+        </VStack>
+        <VStack width="*" gap="$space-0_5">
+          <Link noIndicator onClick="emitEvent('rowToggle', $item)">
+            <Text maxLines="1" fontWeight="$fontWeight-bold" value="{$item.source}" />
+          </Link>
+          <Text when="{$props.expandedKey !== $item.key}"
+            fontSize="$fontSize-sm" color="$textColor-secondary" value="…{$item.snippet}…" />
+        </VStack>
+      </HStack>
+
+      <!-- Inline expander: real per-type source (the detail components are
+           themselves UDCs, confined already). -->
+      <VStack when="{$props.expandedKey === $item.key}"
+        gap="$space-2" paddingLeft="7rem" paddingTop="$space-1">
+        <VStack when="{$item.type === 'session'}">
+          <SessionDetail sessionId="{$item.id}" provider="{$item.provider || 'claude'}"
+            query="{$props.query}" />
+        </VStack>
+        <VStack when="{$item.type === 'commit'}">
+          <CommitDetail sha="{($item.key || '').split(':')[1]}" url="{$item.link}"
+            query="{$props.query}" />
+        </VStack>
+        <VStack when="{$item.type === 'issue'}">
+          <IssueDetail number="{($item.key || '').split(':')[1]}"
+            query="{$props.query}" />
+        </VStack>
+        <VStack when="{$item.type === 'worklist-history'}">
+          <HistoryDetail when="{$props.historyGroup}" group="{$props.historyGroup}"
+            query="{$props.query}" />
+        </VStack>
+      </VStack>
+    </VStack>
+  </Items>
+</Component>

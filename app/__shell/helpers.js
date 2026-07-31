@@ -5312,6 +5312,87 @@ window.bramSubscribeProjectedLastExchange = (function () {
   };
 })();
 
+// transcript-new-below-badge: pane-wide unseen-below counter. The echo guard
+// made READING stable, which removed the yank's accidental "agent responded"
+// signal; this counter feeds the footer status-line chip that replaces it on
+// every tab. base = the turn count last seen at the transcript bottom;
+// unseen = turns beyond it. Auto-bases while the Transcript sits mounted at
+// the bottom (content you watched arrive is seen); any transition to
+// FOLLOWING clears it explicitly and logs follow-state op=unseen-clear with
+// the recruited count — how often the chip earned the click.
+window.__bramUnseenCount = 0;
+window.bramSubscribeTranscriptUnseen = (function () {
+  var factory;
+  var base = -1;
+  var lastTotal = 0;
+  var subscribers = new Set();
+  function totalOf(v) { return (v && v.turns && v.turns.length) || 0; }
+  function notify() {
+    subscribers.forEach(function (fn) {
+      try { fn(); } catch (e) { console.error("[bramSubscribeTranscriptUnseen] subscriber threw:", e); }
+    });
+  }
+  function recompute(v) {
+    lastTotal = totalOf(v);
+    if (base < 0 || lastTotal < base) base = lastTotal;
+    var atBottomLive = window.__bramTranscriptMounted &&
+      (!window.__bramVisibleRange || window.__bramVisibleRange.atBottom !== false);
+    if (atBottomLive) base = lastTotal;
+    var next = Math.max(0, lastTotal - base);
+    if (next !== window.__bramUnseenCount) {
+      window.__bramUnseenCount = next;
+      notify();
+    }
+  }
+  window.__bramUnseenMarkSeen = function (cause) {
+    base = lastTotal;
+    var had = window.__bramUnseenCount;
+    if (had > 0) {
+      var route = "";
+      try { route = String(location.hash || ""); } catch (e) { /* ignore */ }
+      if (cause === "unseen-jump" && window.__bramUnseenJumpRoute) {
+        route = window.__bramUnseenJumpRoute;
+        window.__bramUnseenJumpRoute = "";
+      }
+      window.__bramIframeTrace("follow-state", {
+        op: "unseen-clear", count: had, cause: cause || "", route: route,
+      });
+      window.__bramUnseenCount = 0;
+      notify();
+    }
+  };
+  window.onProjectedTurnsChange(function (v) { recompute(v); });
+  recompute(window.getProjectedTurns());
+  return function () {
+    if (factory) return factory;
+    factory = function (emit) {
+      var fire = function () { emit(window.__bramUnseenCount); };
+      subscribers.add(fire);
+      fire();
+      return function () { subscribers.delete(fire); };
+    };
+    return factory;
+  };
+})();
+window.__bramUnseenValue = function () { return window.__bramUnseenCount || 0; };
+// Chip click: on the Transcript, ride the registered footer-arrow-down
+// closure (verified transition + bottom-promise). From any other tab, clear
+// the saved viewport state (the Main-chip precedent for forcing a
+// follow-mount) and stamp a short-lived tag; __bramTranscriptMount turns the
+// tag into a follow-state transition cause=unseen-jump. The markup pairs
+// this call with navigate('/transcript'); same-route navigation is a no-op.
+window.__bramUnseenJump = function () {
+  if (window.__bramTranscriptMounted) {
+    window.__bramTranscriptScroll("bottom");
+    return;
+  }
+  window.__bramSetVisibleRange(null);
+  window.__bramUnseenJumpAt = Date.now();
+  // Recruiting route, so unseen-clear can report which tab the chip
+  // converted (the clear itself fires after navigation lands).
+  try { window.__bramUnseenJumpRoute = String(location.hash || ""); } catch (e) { /* ignore */ }
+};
+
 // transcript-scroll-gestures: the footer's transcript-only jump arrows live
 // in Main.xmlui and cannot reach the Transcript component's transcriptList id
 // directly, so the Transcript registers its scroll closures at mount. The
@@ -5407,6 +5488,7 @@ window.__bramFollowTransition = function (to, cause, agentId) {
   try {
     var c = String(cause || "");
     if (c.indexOf("user-scroll") !== 0) window.__bramFollowEchoOpen(c);
+    if (to && window.__bramUnseenMarkSeen) window.__bramUnseenMarkSeen(c);
     var route = "";
     try { route = String(location.hash || ""); } catch (e2) { /* ignore */ }
     window.__bramIframeTrace("follow-state", {
@@ -5462,6 +5544,11 @@ window.__bramTranscriptMount = function () {
   // Mount echoes (virtua initial layout + restore scrolls) precede any
   // __bramFollowTransition call, so the echo window opens here, wider.
   if (window.__bramFollowEchoOpen) window.__bramFollowEchoOpen("mount", 1500);
+  // Chip-recruited arrival from another tab: attribute the follow-mount.
+  if (window.__bramUnseenJumpAt && Date.now() - window.__bramUnseenJumpAt < 15000) {
+    window.__bramUnseenJumpAt = 0;
+    window.__bramFollowTransition(true, "unseen-jump");
+  }
   if (window.__bramSetTranscriptMounted) window.__bramSetTranscriptMounted(true);
   if (window.__bramRefetchProjectedTurns) window.__bramRefetchProjectedTurns("transcript-mount");
 };

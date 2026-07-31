@@ -4,6 +4,15 @@
     id="mainAgentStatus"
     initial="{null}"
     subscribe="{window.bramSubscribeAgentStatus()}" />
+  <!-- transcript-new-below-badge: pane-wide unseen counter feed (helpers.js;
+       pushed, never polled). The echo guard ended the yank-to-bottom, which
+       had doubled as the "agent responded" signal; the header chip replaces
+       it — visible on every tab, one click to the transcript's live edge.
+       App scope so the AppHeader can bind it. -->
+  <PushSource
+    id="transcriptUnseen"
+    initial="{window.__bramUnseenValue ? window.__bramUnseenValue() : 0}"
+    subscribe="{window.bramSubscribeTranscriptUnseen ? window.bramSubscribeTranscriptUnseen() : null}" />
   <!-- PTY-throughput subscription now lives inside ActivitySparkline so its
        per-chunk churn is isolated from the footer composer. -->
 
@@ -555,6 +564,19 @@
              rationale now lives in FooterAgentStatus.xmlui. Measured by the
              footer-churn / heartbeat-batch instrument. -->
         <FooterAgentStatus enhanceStatus="{enhanceStatus.value}" />
+        <!-- transcript-new-below-badge chip: on the footer's first line,
+             right after the agent status verb — "the most obvious place to
+             look for status" (third placement per review feedback; bottom
+             corner got lost, app header wasn't where the eye goes). One
+             click to the transcript's live edge from any tab. -->
+        <Button
+          when="{transcriptUnseen.value > 0}"
+          label="{'▼ ' + transcriptUnseen.value + ' new'}"
+          size="xs"
+          variant="outlined"
+          marginLeft="$space-4"
+          tooltip="New transcript content below — jump to the live edge"
+          onClick="window.__bramUnseenJump(); navigate('/transcript')" />
       </HStack>
       <!-- Canonical pending-menu surface: menus render HERE — below the
            status verb, above the message box — the same place on every tab,

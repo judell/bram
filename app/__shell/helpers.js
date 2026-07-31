@@ -5318,6 +5318,48 @@ window.bramSubscribeProjectedLastExchange = (function () {
 // closures capture xs scope (atBottom, transcriptList); this shim only stores
 // and dispatches them. Mount-time re-registration overwrites stale closures
 // from a prior mount, so no unregister step is needed.
+// transcript-follow-contract (layer 1): instrumentation for the Transcript's
+// follow/reading contract (the contract text lives in Transcript.xmlui's
+// header comment). Transition logs every state flip with its cause; Verify
+// measures every bottom-promise against the List's own layout (double-rAF,
+// then the visibleRange the List itself reported) and logs a violation when
+// the promise missed — the whack-a-mole lineage (9daa693 / f846258 /
+// 6a892f6 / 652d9b3 / c4c14ed) becomes self-naming. Observe-only: neither
+// helper changes scroll behavior. Caveat: a legitimate append arriving
+// inside the verify window can log a violation that the next repin heals —
+// violations are leads, not convictions; corroborate with the surrounding
+// transition/repin lines.
+window.__bramFollowTransition = function (to, cause, agentId) {
+  try {
+    var route = "";
+    try { route = String(location.hash || ""); } catch (e2) { /* ignore */ }
+    window.__bramIframeTrace("follow-state", {
+      op: "transition", to: !!to, cause: cause || "", route: route,
+      agentId: agentId || "main",
+    });
+  } catch (e) { /* ignore */ }
+  return to;
+};
+window.__bramFollowVerify = function (cause, agentId) {
+  try {
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        try {
+          var r = window.__bramVisibleRange;
+          var landed = !!(r && r.atBottom !== false);
+          window.__bramIframeTrace("follow-state", {
+            op: landed ? "verify" : "violation",
+            cause: cause || "",
+            landed: landed,
+            endIndex: (r && typeof r.endIndex === "number") ? r.endIndex : -1,
+            agentId: agentId || "main",
+          });
+        } catch (e3) { /* ignore */ }
+      });
+    });
+  } catch (e) { /* ignore */ }
+};
+
 window.__bramRegisterTranscriptScroll = function (goTop, goBottom) {
   window.__bramTranscriptScrollActions = { top: goTop, bottom: goBottom };
 };

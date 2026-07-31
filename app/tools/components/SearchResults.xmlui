@@ -13,7 +13,19 @@
        rowToggle(item); expansion state stays in Search. -->
   <variable name="typeColors"
     value="{{ session: 'blue', commit: 'green', issue: '#c2410c', history: 'purple' }}" />
-  <Items data="{$props.hits}">
+  <!-- search-results-virtualize: List, not Items — ~10 rows in the DOM
+       regardless of result count. The 2026-07-31 Timelines recording showed
+       per-keystroke frames Layout-dominated: the auto-growing composer
+       forces synchronous layout, and 100 materialized rows made each pass
+       250-1300ms. Virtualizing collapses the laid-out DOM for every
+       trigger. height=100% resolves through the Theme wrapper
+       (layout-transparent) to this component's star-sized instance
+       wrapper. -->
+  <!-- No Theme wrapper here: it sat inside the star-height chain and the
+       List's height=100% resolved against it instead of the sized instance
+       wrapper — results rendered zero-height (2026-07-31 "fast because
+       broken"). Badge size is a cosmetic follow-up. -->
+  <List height="100%" data="{$props.hits}">
     <VStack gap="$space-1" paddingVertical="$space-2" borderBottom="1px solid $borderColor">
       <HStack gap="$space-3" verticalAlignment="start">
         <VStack gap="$space-0_5" width="7rem">
@@ -24,14 +36,19 @@
           <Link noIndicator onClick="emitEvent('rowToggle', $item)">
             <Text maxLines="1" fontWeight="$fontWeight-bold" value="{$item.source}" />
           </Link>
-          <Text when="{$props.expandedKey !== $item.key}"
+          <Text when="{!$item.expanded}"
             fontSize="$fontSize-sm" color="$textColor-secondary" value="…{$item.snippet}…" />
         </VStack>
       </HStack>
 
       <!-- Inline expander: real per-type source (the detail components are
-           themselves UDCs, confined already). -->
-      <VStack when="{$props.expandedKey === $item.key}"
+           themselves UDCs, confined already). Expansion state rides IN the
+           row data ($item.expanded, baked by Search), not a component prop:
+           virtualized List rows re-render on data-array identity change,
+           not on outer prop change — a prop-keyed expander froze at its
+           first paint (2026-07-31 "cannot collapse the auto-expand").
+           https://docs.xmlui.org/howto/keep-per-item-state-in-a-loop -->
+      <VStack when="{$item.expanded}"
         gap="$space-2" paddingLeft="7rem" paddingTop="$space-1">
         <VStack when="{$item.type === 'session'}">
           <SessionDetail sessionId="{$item.id}" provider="{$item.provider || 'claude'}"
@@ -51,5 +68,5 @@
         </VStack>
       </VStack>
     </VStack>
-  </Items>
+  </List>
 </Component>

@@ -72,7 +72,8 @@
       .slice(0, 100)
       .map(h => Object.assign({}, h, {
         typeLabel: h.type === 'worklist-history' ? 'history' : h.type,
-        dateLabel: h.date ? formatDateTime(new Date(Number(h.date) * 1000), 'yyyy-MM-dd HH:mm') : ''
+        dateLabel: h.date ? formatDateTime(new Date(Number(h.date) * 1000), 'yyyy-MM-dd HH:mm') : '',
+        expanded: !!(expandedHit &amp;&amp; expandedHit.key === h.key)
       }))
   }" />
 
@@ -98,7 +99,10 @@
   <variable name="historyGroup"
     value="{(expandedHit &amp;&amp; expandedHit.type === 'worklist-history') ? (expandedHit.extra || null) : null}" />
 
-  <VStack padding="$space-4" gap="$space-3" overflowY="auto" height="100%">
+  <!-- search-results-virtualize: the page no longer scrolls — the results
+       List inside SearchResults is the sole scroller (Transcript's star-fill
+       pattern); header, pills, hint, and slider stay fixed above it. -->
+  <VStack padding="$space-4" gap="$space-3" height="100%">
     <HStack gap="$space-3" verticalAlignment="center">
       <!-- Back affordance for Evidence-replay arrivals: shown only when the
            page was entered via a deep link (q in the URL). Worklist expansion
@@ -192,16 +196,17 @@
       color="$textColor-secondary"
       value="No matches." />
 
-    <Theme fontSize-Badge="0.55em">
-      <!-- search-rows-confinement: rows render behind the SearchResults
-           boundary; see that component's header for the probe receipts. -->
-      <SearchResults
-        hits="{displayed}"
-        expandedKey="{(expandedHit &amp;&amp; expandedHit.key) || ''}"
-        query="{query.trim()}"
-        historyGroup="{historyGroup}"
-        onRowToggle="(h) => expandedHit = (expandedHit &amp;&amp; expandedHit.key === h.key) ? null : h" />
-    </Theme>
+    <!-- search-rows-confinement + search-results-virtualize: rows render
+         behind the SearchResults boundary (probe receipts in its header),
+         virtualized, filling the remaining page height (reserved layout
+         props on the instance size its wrapper). Badge theming moved inside
+         the component so the star chain has no intervening wrapper. -->
+    <SearchResults
+      height="*"
+      hits="{displayed}"
+      query="{query.trim()}"
+      historyGroup="{historyGroup}"
+      onRowToggle="(h) => expandedHit = h.expanded ? null : h" />
 
     <ModalDialog id="searchHelpDialog" title="Search help">
       <VStack gap="$space-3" padding="$space-2">

@@ -5329,12 +5329,88 @@ window.bramSubscribeProjectedLastExchange = (function () {
 // inside the verify window can log a violation that the next repin heals —
 // violations are leads, not convictions; corroborate with the surrounding
 // transition/repin lines.
+// transcript-follow-echo-guard (layer 2, policy): programmatic scrolls and
+// layout shifts echo scroll events that the onScroll classifier used to
+// attribute to the user (layer-1 soak: ~every tool-expand phantom-re-armed
+// FOLLOWING within 200-400ms; find-step and mount restores echoed too;
+// 1,056 bottom-promises meanwhile landed with zero violations, so only the
+// classification half changes). Every deliberate transition (non-user cause)
+// opens a one-shot echo window; scroll events inside it are classified
+// programmatic — logged op=echo-suppressed, never a state flip. Mount opens
+// a longer window because virtua's initial layout echoes precede any
+// transition. Cost, documented and accepted: a genuine user scroll within
+// the window is deferred until the next scroll event.
+window.__bramFollowEchoUntil = 0;
+window.__bramFollowEchoCause = "";
+window.__bramFollowEchoOpen = function (cause, ms) {
+  try {
+    window.__bramFollowEchoUntil = performance.now() + (ms || 700);
+    window.__bramFollowEchoCause = cause || "";
+  } catch (e) { /* ignore */ }
+};
+// Input corroboration: a scroll event is user intent only with user input
+// beside it — wheel (macOS momentum keeps emitting wheel events, so flick
+// coasts stay corroborated), keydown, or a recent/held pointer. Machine
+// scrolls (virtua shift compensation, expanded-content growth, repins)
+// have no input beside them at ANY latency — this is what the fixed echo
+// window could not express: the first live soak caught a tool-expand echo
+// re-arming FOLLOWING 2.7s after the expand, sailing past the 700ms
+// window and pinning a reading user through a full streaming turn
+// (2026-07-31 03:53:48). Listeners are passive+capture; pointer "held"
+// covers long scrollbar drags where pointerdown ages past the window.
+window.__bramLastUserInputMs = 0;
+window.__bramPointerHeld = false;
+(function () {
+  function mark() { window.__bramLastUserInputMs = Date.now(); }
+  try {
+    window.addEventListener("wheel", mark, { passive: true, capture: true });
+    window.addEventListener("keydown", mark, { passive: true, capture: true });
+    window.addEventListener("pointerdown", function () {
+      window.__bramPointerHeld = true; mark();
+    }, { passive: true, capture: true });
+    window.addEventListener("pointerup", function () {
+      window.__bramPointerHeld = false; mark();
+    }, { passive: true, capture: true });
+    window.addEventListener("pointercancel", function () {
+      window.__bramPointerHeld = false; mark();
+    }, { passive: true, capture: true });
+  } catch (e) { /* classifier falls back to echo windows alone */ }
+})();
+window.__bramFollowClassify = function (cur, atEnd, agentId) {
+  try {
+    var suppress = "";
+    if (performance.now() < (window.__bramFollowEchoUntil || 0)) {
+      suppress = window.__bramFollowEchoCause || "echo-window";
+    } else if (!window.__bramPointerHeld &&
+               (Date.now() - (window.__bramLastUserInputMs || 0)) > 400) {
+      suppress = "uncorroborated";
+    }
+    if (suppress) {
+      if (cur !== atEnd) {
+        window.__bramIframeTrace("follow-state", {
+          op: "echo-suppressed", to: !!atEnd, cause: suppress,
+          inputAgeMs: window.__bramLastUserInputMs
+            ? (Date.now() - window.__bramLastUserInputMs) : -1,
+          agentId: agentId || "main",
+        });
+      }
+      return cur;
+    }
+    if (cur !== atEnd) {
+      window.__bramFollowTransition(atEnd,
+        atEnd ? "user-scroll-bottom" : "user-scroll-up", agentId);
+    }
+  } catch (e) { /* ignore */ }
+  return atEnd;
+};
 window.__bramFollowTransition = function (to, cause, agentId) {
   try {
+    var c = String(cause || "");
+    if (c.indexOf("user-scroll") !== 0) window.__bramFollowEchoOpen(c);
     var route = "";
     try { route = String(location.hash || ""); } catch (e2) { /* ignore */ }
     window.__bramIframeTrace("follow-state", {
-      op: "transition", to: !!to, cause: cause || "", route: route,
+      op: "transition", to: !!to, cause: c, route: route,
       agentId: agentId || "main",
     });
   } catch (e) { /* ignore */ }
@@ -5383,6 +5459,9 @@ window.__bramTranscriptScroll = function (dir) {
 };
 
 window.__bramTranscriptMount = function () {
+  // Mount echoes (virtua initial layout + restore scrolls) precede any
+  // __bramFollowTransition call, so the echo window opens here, wider.
+  if (window.__bramFollowEchoOpen) window.__bramFollowEchoOpen("mount", 1500);
   if (window.__bramSetTranscriptMounted) window.__bramSetTranscriptMounted(true);
   if (window.__bramRefetchProjectedTurns) window.__bramRefetchProjectedTurns("transcript-mount");
 };

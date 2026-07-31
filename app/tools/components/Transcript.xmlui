@@ -11,9 +11,8 @@
        Follow + read-pause are driven explicitly from the List's `scroll`
        event (no DOM access, no opaque scrollAnchor heuristic): onScroll
        tracks atBottom; when new events arrive, follow only if the user is
-       parked at the bottom. The event fires only for user-driven scrolls
-       (the List's own scrollToBottom is guarded), so following never fights
-       reading.
+       parked at the bottom. Scroll events are NOT all user-driven — see
+       the classification rule in the contract below.
 
        THE FOLLOW CONTRACT (transcript-follow-contract; authoritative).
        Two states: FOLLOWING (viewport pinned to the live edge) and
@@ -28,13 +27,27 @@
        - Every transition that promises the bottom is VERIFIED against the
          List's own layout (window.__bramFollowVerify, double-rAF ->
          visibleRange), never assumed.
+       - CLASSIFICATION (transcript-follow-echo-guard, layer 2): a scroll
+         event is user intent only when (a) no echo window is open — every
+         deliberate transition (non-user-scroll cause) and mount opens one
+         — AND (b) user input corroborates it: wheel, keydown, or a
+         held/recent pointer within 400ms. Machine scrolls (virtua shift
+         compensation, expanded-content growth, repins) have no input
+         beside them at any latency — the first live soak caught an
+         expand echo re-arming FOLLOWING 2.7s after the click, past any
+         plausible fixed window (03:53:48). Suppressed events log
+         `follow-state op=echo-suppressed` (cause: the window opener, or
+         `uncorroborated`), never a state flip. Layer-1 receipts: 1,056
+         bottom-promises, zero violations, while echoes phantom-flipped
+         state on every tool-expand.
        Every state flip logs `follow-state op=transition` with its cause;
        every bottom-promise logs op=verify or op=violation. A new
        transition MUST route through window.__bramFollowTransition /
-       __bramFollowVerify — an untraced flip is a contract bug even when
-       the scroll behaves. scrollAnchor="bottom" is deliberately NOT used:
-       its re-stick ResizeObserver yanks readers on height changes
-       (c4c14ed; xmlui #3599). -->
+       __bramFollowVerify, and onScroll classification through
+       window.__bramFollowClassify — an untraced flip is a contract bug
+       even when the scroll behaves. scrollAnchor="bottom" is deliberately
+       NOT used: its re-stick ResizeObserver yanks readers on height
+       changes (c4c14ed; xmlui #3599). -->
 
   <!-- Projected turns from the single host projection (/__turns). The
        Transcript is a pure consumer: no raw-JSONL parsing, no draft/feedback
@@ -165,7 +178,7 @@
       id="transcriptList"
       height="*"
       data="{findRows || events}"
-      onScroll="(ev) => { if (atBottom !== ev.atEnd) window.__bramFollowTransition(ev.atEnd, ev.atEnd ? 'user-scroll-bottom' : 'user-scroll-up', $props.agentId); atBottom = ev.atEnd }"
+      onScroll="(ev) => atBottom = window.__bramFollowClassify(atBottom, ev.atEnd, $props.agentId)"
       onVisibleRangeDidChange="(range) => window.__bramSetVisibleRange(range)">
       <property name="emptyListTemplate"><Fragment/></property>
       <VStack gap="$space-1" paddingVertical="$space-1">

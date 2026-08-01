@@ -1150,6 +1150,27 @@ upstream issue only when that evidence chain survives the current-corpus
 check, and include the followable search, session, commit, and documentation
 receipts.
 
+Use `scripts/xmlui-howto-gap-miner.py` for a repeatable first pass. It groups
+nearby `xmlui_search_howto` calls only when at least two meaningful terms
+overlap, consolidates high-similarity recurrences across dates, attaches only
+locally-near component/example/source fallbacks, and nominates a compact query
+using recurrence plus corpus-wide term rarity. It asks `GET /__search` for
+downstream project evidence and reconciles the result against the current
+how-to directory. Its classification is a review hint, not a verdict; read the
+returned snippets and current-doc matches before filing anything. Typical use
+from the Bram repo:
+
+```
+python3 scripts/xmlui-howto-gap-miner.py --since 2026-06-01 --top 20
+python3 scripts/xmlui-howto-gap-miner.py --since 2026-06-01 --json
+```
+
+The tool deliberately does not score `result_count`, parse provider-specific
+transcripts, or correlate frustration by clock time. `--analytics`,
+`--howto-dir`, `--search-url`, and `--port-file` make each input explicit;
+defaults target the local XMLUI analytics/cache, `~/xmlui` how-tos, and this
+project's `resources/.bram-port`.
+
 ### Citing evidence in issues and the search-wins ledger (issue #233)
 
 When an issue comment, ledger entry, or postmortem cites evidence, make the

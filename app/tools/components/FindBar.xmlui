@@ -12,8 +12,11 @@
        props   placeholder, initialValue, matchCount, current (0-based),
                showCount
        events  needleChange(text), step(delta: -1 | 1)
+       props   clearRevision — changing this value clears the inner TextBox
+               reactively without crossing the UDC boundary imperatively
        method  setValue(v) — delegates to the inner TextBox; used by the
-               deep-link replay path when $props.query changes after mount
+               deep-link replay path when $props.query changes
+               after mount
                (https://docs.xmlui.org/howto/pass-arguments-to-a-component-method) -->
   <method name="setValue">(v) => findBarBox.setValue(v)</method>
   <HStack gap="$space-2" verticalAlignment="center">
@@ -27,6 +30,9 @@
       spellCheck="{false}"
       autoCapitalize="off"
       onDidChange="(v) => emitEvent('needleChange', v)" />
+    <ChangeListener
+      listenTo="{$props.clearRevision}"
+      onDidChange="() => findBarBox.setValue('')" />
     <Button size="xs" variant="outlined" label="▲"
       enabled="{($props.matchCount || 0) > 0}"
       tooltip="Previous match"

@@ -5395,14 +5395,79 @@ window.bramSubscribeTranscriptUnseen = (function () {
   };
 })();
 window.__bramUnseenValue = function () { return window.__bramUnseenCount || 0; };
+// Transcript find clearing crosses from the app footer into the Transcript
+// component. Publish a value through PushSource instead of retaining an XMLUI
+// closure with component ids and xs state on window. The component observes
+// the tick and owns both reactive-state and visible-input updates. Preserve a
+// pending clear across navigation so a new-below jump can publish after the
+// Transcript route mounts.
+window.__bramTranscriptFindClearPending = false;
+window.bramSubscribeTranscriptFindClear = (function () {
+  var factory;
+  var subscribers = new Set();
+  var tick = 0;
+  var currentEvent = null;
+
+  var publish = function (cause) {
+    currentEvent = { tick: ++tick, cause: cause || "" };
+    subscribers.forEach(function (fn) {
+      try { fn(); } catch (e) {
+        console.error("[bramSubscribeTranscriptFindClear] subscriber threw:", e);
+      }
+    });
+  };
+
+  window.__bramClearTranscriptFind = function (cause) {
+    var route = "";
+    try { route = String(location.hash || ""); } catch (e) { /* ignore */ }
+    var live = route.indexOf("/transcript") >= 0 &&
+      window.__bramTranscriptMounted && subscribers.size > 0;
+    if (!live) {
+      window.__bramTranscriptFindClearPending = true;
+      window.__bramIframeTrace("follow-state", {
+        op: "find-clear", cause: cause || "", route: route, deferred: true,
+      });
+      return false;
+    }
+    window.__bramTranscriptFindClearPending = false;
+    publish(cause);
+    window.__bramIframeTrace("follow-state", {
+      op: "find-clear", cause: cause || "", route: route, deferred: false,
+    });
+    return true;
+  };
+
+  window.__bramConsumeTranscriptFindClear = function () {
+    if (!window.__bramTranscriptFindClearPending) return;
+    setTimeout(function () {
+      window.__bramClearTranscriptFind("pending-mount");
+    }, 0);
+  };
+
+  return function () {
+    if (factory) return factory;
+    factory = function (emit) {
+      var fire = function () { emit(currentEvent); };
+      subscribers.add(fire);
+      emit(null);
+      return function () { subscribers.delete(fire); };
+    };
+    return factory;
+  };
+})();
+
 // Chip click: on the Transcript, ride the registered footer-arrow-down
-// closure (verified transition + bottom-promise). From any other tab, clear
-// the saved viewport state (the Main-chip precedent for forcing a
-// follow-mount) and stamp a short-lived tag; __bramTranscriptMount turns the
-// tag into a follow-state transition cause=unseen-jump. The markup pairs
-// this call with navigate('/transcript'); same-route navigation is a no-op.
+// closure (verified transition + bottom-promise). From any other tab, queue
+// the find clear, clear the saved viewport state (the Main-chip precedent
+// for forcing a follow-mount), and stamp a short-lived tag;
+// __bramTranscriptMount turns the tag into a follow-state transition
+// cause=unseen-jump. The markup pairs this call with
+// navigate('/transcript'); same-route navigation is a no-op.
 window.__bramUnseenJump = function () {
-  if (window.__bramTranscriptMounted) {
+  var onTranscript = false;
+  try { onTranscript = String(location.hash || "").indexOf("/transcript") >= 0; } catch (e) { /* ignore */ }
+  window.__bramClearTranscriptFind("unseen-jump");
+  if (onTranscript && window.__bramTranscriptMounted) {
     window.__bramTranscriptScroll("bottom");
     return;
   }
@@ -5603,6 +5668,7 @@ window.__bramTranscriptMount = function () {
     window.__bramFollowTransition(true, "unseen-jump");
   }
   if (window.__bramSetTranscriptMounted) window.__bramSetTranscriptMounted(true);
+  if (window.__bramConsumeTranscriptFindClear) window.__bramConsumeTranscriptFindClear();
   if (window.__bramRefetchProjectedTurns) window.__bramRefetchProjectedTurns("transcript-mount");
 };
 

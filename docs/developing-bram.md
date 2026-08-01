@@ -180,6 +180,27 @@ freshness. Drive refetch from events or actions, by tier:
   piggybacks on work it already does (the search indexer fetches
   issues anyway).
 
+## Perf diagnosis ordering
+
+**Timeline first, semantic probes second.** When the pane feels slow,
+record a browser Timeline (Safari Web Inspector → Timelines, Frames
+view) before reaching for Bram's semantic instruments. The Timeline's
+Script / Layout / Paint split is the cheap first partition and names
+the fix class directly: Layout-dominated frames point at DOM size and
+forced reflow (virtualize, bound the region), Script-dominated frames
+point at evaluation work — and only then is the eval-trace probe
+(which binding? which handler?) the right drill.
+
+Receipt: the 2026-07-31 search-typing-lag hunt fixed three script-side
+layers (describe pacing, projection tail-scoping, eval confinement)
+before a Timeline recording named Layout as the felt cost —
+virtualization (69be17a) was the fix a day-one recording would have
+named immediately. The probe still earned its keep by falsifying the
+eval theory decisively, and it remains irreplaceable where Timelines
+can't go (hard freezes, remote machines, semantic attribution) — but
+the ordering lesson stands: category attribution before semantic
+attribution.
+
 ## Build vs. hot-reload boundary
 
 | path | rule |

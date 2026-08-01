@@ -20115,6 +20115,63 @@ mod codex_unified_exec_tests {
 // generic Bash row. Extracts a display string per /__search request found
 // in a shell command (several often ride one Bash call). Expansion still
 // shows the real command — this labels, it does not disguise.
+fn st_shell_words(input: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for ch in input.chars() {
+        if escaped {
+            word.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote != Some('\'') {
+            escaped = true;
+            continue;
+        }
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            } else {
+                word.push(ch);
+            }
+            continue;
+        }
+        if ch == '\'' || ch == '"' {
+            quote = Some(ch);
+        } else if ch.is_whitespace() {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+        } else {
+            word.push(ch);
+        }
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
+fn st_search_data_arg(words: &[String], key: &str) -> String {
+    for (idx, word) in words.iter().enumerate() {
+        let value = if word == "--data" || word == "--data-urlencode" {
+            words.get(idx + 1).map(String::as_str).unwrap_or("")
+        } else if let Some(value) = word.strip_prefix("--data=") {
+            value
+        } else if let Some(value) = word.strip_prefix("--data-urlencode=") {
+            value
+        } else {
+            continue;
+        };
+        if let Some(value) = value.strip_prefix(&format!("{}=", key)) {
+            return percent_decode(value);
+        }
+    }
+    String::new()
+}
+
 fn st_extract_search_queries(cmd: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = cmd;
@@ -20122,25 +20179,31 @@ fn st_extract_search_queries(cmd: &str) -> Vec<String> {
         rest = &rest[pos + "/__search".len()..];
         let is_doc = rest.starts_with("/doc");
         let after = if is_doc { &rest["/doc".len()..] } else { rest };
-        let Some(q_start) = after.strip_prefix('?') else { continue };
-        let end = q_start
-            .find(|ch: char| ch == '"' || ch == '\'' || ch.is_whitespace())
-            .unwrap_or(q_start.len());
-        let query_str = &q_start[..end];
         let mut q = String::new();
         let mut mode = String::new();
         let mut types = String::new();
         let mut key = String::new();
-        for pair in query_str.split('&') {
-            if let Some(v) = pair.strip_prefix("q=") {
-                q = percent_decode(v);
-            } else if let Some(v) = pair.strip_prefix("mode=") {
-                mode = percent_decode(v);
-            } else if let Some(v) = pair.strip_prefix("types=") {
-                types = percent_decode(v);
-            } else if let Some(v) = pair.strip_prefix("key=") {
-                key = percent_decode(v);
+        if let Some(q_start) = after.strip_prefix('?') {
+            let end = q_start
+                .find(|ch: char| ch == '"' || ch == '\'' || ch.is_whitespace())
+                .unwrap_or(q_start.len());
+            for pair in q_start[..end].split('&') {
+                if let Some(v) = pair.strip_prefix("q=") {
+                    q = percent_decode(v);
+                } else if let Some(v) = pair.strip_prefix("mode=") {
+                    mode = percent_decode(v);
+                } else if let Some(v) = pair.strip_prefix("types=") {
+                    types = percent_decode(v);
+                } else if let Some(v) = pair.strip_prefix("key=") {
+                    key = percent_decode(v);
+                }
             }
+        } else {
+            let words = st_shell_words(after);
+            q = st_search_data_arg(&words, "q");
+            mode = st_search_data_arg(&words, "mode");
+            types = st_search_data_arg(&words, "types");
+            key = st_search_data_arg(&words, "key");
         }
         if is_doc {
             if !key.is_empty() {
@@ -20164,6 +20227,34 @@ fn st_extract_search_queries(cmd: &str) -> Vec<String> {
     out
 }
 
+// Codex unified exec wraps one or more nested tool calls in a JS script, so
+// there is no top-level input.cmd to inspect. Return Some whenever the call is
+// semantically a Bram search, even when a dynamic script prevents us from
+// recovering literal query details. That distinction lets the Transcript show
+// a Search tool row instead of a generic exec row without inventing metadata.
+fn st_codex_search_queries(payload: &serde_json::Value) -> Option<Vec<String>> {
+    let input = st_codex_tool_input(payload);
+    match payload.get("name").and_then(|v| v.as_str()).unwrap_or("") {
+        "exec_command" => {
+            let cmd = input.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
+            cmd.contains("/__search")
+                .then(|| st_extract_search_queries(cmd))
+        }
+        "exec" => {
+            let script = input.as_str().unwrap_or("");
+            if !script.contains("/__search") {
+                return None;
+            }
+            let queries = st_codex_exec_cmds(script)
+                .iter()
+                .flat_map(|cmd| st_extract_search_queries(cmd))
+                .collect();
+            Some(queries)
+        }
+        _ => None,
+    }
+}
+
 // nameDetail for a Search row: every query enumerated in the explicit
 // labeled shape — a "+N more" suffix read as if it extended the types
 // list, and elision hid the queries the row exists to show (user review
@@ -20174,6 +20265,91 @@ fn st_search_name_detail(queries: &[String]) -> String {
         return joined;
     }
     format!("{}…", joined.chars().take(297).collect::<String>())
+}
+
+#[cfg(test)]
+mod codex_search_projection_tests {
+    use super::{
+        st_codex_search_queries, st_extract_search_queries, st_parse_lines_to_turns,
+        st_search_name_detail,
+    };
+
+    #[test]
+    fn legacy_exec_command_projects_bram_search() {
+        let call = serde_json::json!({
+            "type": "function_call",
+            "name": "exec_command",
+            "arguments": r#"{"cmd":"curl -sS 'http://127.0.0.1:59727/__search?q=spinner%20size&mode=and&types=session,commit'"}"#
+        });
+        let queries = st_codex_search_queries(&call).expect("recognized search");
+        assert_eq!(
+            st_search_name_detail(&queries),
+            "[spinner size] mode:and types:session,commit"
+        );
+    }
+
+    #[test]
+    fn unified_exec_projects_nested_bram_search() {
+        let call = serde_json::json!({
+            "type": "custom_tool_call",
+            "name": "exec",
+            "input": r#"await tools.exec_command({cmd:"curl -sS 'http://127.0.0.1:59727/__search?q=navpanel%20footer&mode=and'"});"#
+        });
+        let queries = st_codex_search_queries(&call).expect("recognized search");
+        assert_eq!(
+            st_search_name_detail(&queries),
+            "[navpanel footer] mode:and types:all"
+        );
+    }
+
+    #[test]
+    fn curl_get_data_arguments_keep_search_detail() {
+        let queries = st_extract_search_queries(
+            "curl -sS --get http://127.0.0.1:59727/__search \
+             --data-urlencode 'q=spinner size' --data mode=and \
+             --data types=session,issue,commit",
+        );
+        assert_eq!(
+            st_search_name_detail(&queries),
+            "[spinner size] mode:and types:session,issue,commit"
+        );
+    }
+
+    #[test]
+    fn projected_codex_turn_uses_search_tool_name() {
+        let jsonl = r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Checking memory."}]}}
+{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-search","name":"exec","input":"await tools.exec_command({cmd:\"curl -sS 'http://127.0.0.1:59727/__search?q=navpanel%20footer&mode=and'\"});"}}"#;
+        let turns = st_parse_lines_to_turns(jsonl);
+        let tool = turns
+            .iter()
+            .flat_map(|turn| turn["entries"].as_array().into_iter().flatten())
+            .find(|entry| entry["kind"] == "tool")
+            .expect("projected tool entry");
+        assert_eq!(tool["name"], "Search");
+        assert_eq!(tool["nameDetail"], "[navpanel footer] mode:and types:all");
+    }
+
+    #[test]
+    fn dynamic_unified_exec_still_projects_as_search_without_fake_detail() {
+        let call = serde_json::json!({
+            "type": "custom_tool_call",
+            "name": "exec",
+            "input": "const url = base + '/__search'; await tools.exec_command({cmd: build(url, q)});"
+        });
+        let queries = st_codex_search_queries(&call).expect("recognized search");
+        assert!(queries.is_empty());
+        assert!(st_search_name_detail(&queries).is_empty());
+    }
+
+    #[test]
+    fn ordinary_unified_exec_is_not_search() {
+        let call = serde_json::json!({
+            "type": "custom_tool_call",
+            "name": "exec",
+            "input": r#"await tools.exec_command({cmd:"git status --short"});"#
+        });
+        assert!(st_codex_search_queries(&call).is_none());
+    }
 }
 
 // nameDetail — command words for exec_command (input.cmd) and for
@@ -20821,17 +20997,14 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
                     let name = st_codex_tool_name(p);
                     let summary = st_codex_tool_summary(p);
                     // transcript-search-tool-rendering: same Search
-                    // projection as the Claude side, over the exec cmd.
-                    let codex_cmd = st_codex_tool_input(p)
-                        .get("cmd")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let search_queries = st_extract_search_queries(&codex_cmd);
-                    let (proj_name, name_detail) = if !search_queries.is_empty() {
-                        ("Search".to_string(), st_search_name_detail(&search_queries))
-                    } else {
-                        (name.clone(), st_codex_name_detail(p))
+                    // projection as the Claude side. Codex may use legacy
+                    // exec_command(input.cmd) or unified exec(input=JS).
+                    let search_queries = st_codex_search_queries(p);
+                    let (proj_name, name_detail) = match search_queries {
+                        Some(queries) => {
+                            ("Search".to_string(), st_search_name_detail(&queries))
+                        }
+                        None => (name.clone(), st_codex_name_detail(p)),
                     };
                     let entry = serde_json::json!({
                         "kind": "tool",

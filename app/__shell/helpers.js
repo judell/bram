@@ -5335,8 +5335,16 @@ window.bramSubscribeTranscriptUnseen = (function () {
   function recompute(v) {
     lastTotal = totalOf(v);
     if (base < 0 || lastTotal < base) base = lastTotal;
-    var atBottomLive = window.__bramTranscriptMounted &&
-      (!window.__bramVisibleRange || window.__bramVisibleRange.atBottom !== false);
+    // follow-state-source-of-truth hardening: "watched at the bottom"
+    // requires the route to corroborate the mounted flag (a skipped
+    // Transcript unmount cleanup — see the Lifecycle-violation console
+    // errors — leaves the flag true from another tab, silently
+    // swallowing arrivals), and reads the synchronous follow truth
+    // instead of the stale-able visibleRange snapshot.
+    var onTranscript = false;
+    try { onTranscript = String(location.hash || "").indexOf("/transcript") >= 0; } catch (e) { /* ignore */ }
+    var atBottomLive = onTranscript && window.__bramTranscriptMounted &&
+      window.__bramFollowAtBottom !== false;
     if (atBottomLive) base = lastTotal;
     var next = Math.max(0, lastTotal - base);
     if (next !== window.__bramUnseenCount) {
@@ -5457,6 +5465,30 @@ window.__bramPointerHeld = false;
     }, { passive: true, capture: true });
   } catch (e) { /* classifier falls back to echo windows alone */ }
 })();
+// follow-state-source-of-truth: consumers were reading stale copies of
+// follow state — the repin ChangeListener fired 240ms into READING off a
+// pre-assignment xs var (2026-08-01 04:40:01 live capture) and the verify
+// layer couldn't see it (a misfired repin still lands, so it logs
+// landed=True). window.__bramFollowAtBottom is written SYNCHRONOUSLY by
+// the classifier and every deliberate transition; repins gate on it via
+// __bramFollowRepinOk, which logs op=repin-blocked whenever the stale var
+// would have misfired — the blind spot becomes a counter.
+window.__bramFollowAtBottom = true;
+window.__bramFollowReadingAtMs = 0;
+window.__bramFollowRepinOk = function (varAtBottom, agentId) {
+  var truth = window.__bramFollowAtBottom !== false;
+  if (!truth && varAtBottom) {
+    try {
+      window.__bramIframeTrace("follow-state", {
+        op: "repin-blocked", varAtBottom: !!varAtBottom,
+        sinceReadingMs: window.__bramFollowReadingAtMs
+          ? (Date.now() - window.__bramFollowReadingAtMs) : -1,
+        agentId: agentId || "main",
+      });
+    } catch (e) { /* ignore */ }
+  }
+  return truth;
+};
 window.__bramFollowClassify = function (cur, atEnd, agentId) {
   try {
     var suppress = "";
@@ -5475,11 +5507,14 @@ window.__bramFollowClassify = function (cur, atEnd, agentId) {
           agentId: agentId || "main",
         });
       }
+      window.__bramFollowAtBottom = cur !== false;
       return cur;
     }
     if (cur !== atEnd) {
       window.__bramFollowTransition(atEnd,
         atEnd ? "user-scroll-bottom" : "user-scroll-up", agentId);
+    } else {
+      window.__bramFollowAtBottom = atEnd !== false;
     }
   } catch (e) { /* ignore */ }
   return atEnd;
@@ -5487,6 +5522,8 @@ window.__bramFollowClassify = function (cur, atEnd, agentId) {
 window.__bramFollowTransition = function (to, cause, agentId) {
   try {
     var c = String(cause || "");
+    window.__bramFollowAtBottom = !!to;
+    if (!to) window.__bramFollowReadingAtMs = Date.now();
     if (c.indexOf("user-scroll") !== 0) window.__bramFollowEchoOpen(c);
     if (to && window.__bramUnseenMarkSeen) window.__bramUnseenMarkSeen(c);
     var route = "";
@@ -5544,6 +5581,10 @@ window.__bramTranscriptMount = function () {
   // Mount echoes (virtua initial layout + restore scrolls) precede any
   // __bramFollowTransition call, so the echo window opens here, wider.
   if (window.__bramFollowEchoOpen) window.__bramFollowEchoOpen("mount", 1500);
+  // Seed the synchronous follow truth from the same expression the
+  // Transcript's atBottom var uses at mount.
+  window.__bramFollowAtBottom =
+    !window.__bramVisibleRange || window.__bramVisibleRange.atBottom !== false;
   // Chip-recruited arrival from another tab: attribute the follow-mount.
   if (window.__bramUnseenJumpAt && Date.now() - window.__bramUnseenJumpAt < 15000) {
     window.__bramUnseenJumpAt = 0;

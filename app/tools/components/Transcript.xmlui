@@ -45,7 +45,13 @@
        transition MUST route through window.__bramFollowTransition /
        __bramFollowVerify, and onScroll classification through
        window.__bramFollowClassify — an untraced flip is a contract bug
-       even when the scroll behaves. scrollAnchor="bottom" is deliberately
+       even when the scroll behaves. Repins gate on the SYNCHRONOUS
+       window truth (window.__bramFollowRepinOk), never on the xs
+       atBottom var alone: the var's assignment rides the engine's state
+       pipeline and a repin can fire before it lands (2026-08-01
+       04:40:01 — a repin 240ms into READING, invisible to verify
+       because a misfired repin still logs landed=True). A blocked
+       misfire logs op=repin-blocked. scrollAnchor="bottom" is deliberately
        NOT used: its re-stick ResizeObserver yanks readers on height
        changes (c4c14ed; xmlui #3599). -->
 
@@ -112,7 +118,7 @@
     height="100%"
     padding="$space-4"
     gap="$space-2"
-    onInit="window.__bramRegisterTranscriptScroll(() => { atBottom = window.__bramFollowTransition(false, 'footer-arrow-up', $props.agentId); transcriptList.scrollToTop(); }, () => { atBottom = window.__bramFollowTransition(true, 'footer-arrow-down', $props.agentId); transcriptList.scrollToBottom(); window.__bramFollowVerify('footer-arrow-down', $props.agentId); }); window.__bramTranscriptMount()"
+    onInit="window.__bramRegisterTranscriptScroll(() => { atBottom = window.__bramFollowTransition(false, 'footer-arrow-up', $props.agentId); transcriptList.scrollToTop(); }, () => { transcriptFindBar.setValue(''); findText = ''; atBottom = window.__bramFollowTransition(true, 'footer-arrow-down', $props.agentId); transcriptList.scrollToBottom(); window.__bramFollowVerify('footer-arrow-down', $props.agentId); }); window.__bramTranscriptMount()"
     onCleanup="window.__bramSetTranscriptMounted(false); window.__bramSetVisibleRange(Object.assign({}, window.__bramVisibleRange || {}, { atBottom: atBottom, total: events.length }))"
     var.events="{window.__bramTranscriptEventsFromTurns($props.agentId ? subagentTurns.value : turnsEvt.value, null)}"
     var.eventsVersion="{($props.agentId ? (subagentTurns.value &amp;&amp; subagentTurns.value.total) : (turnsEvt.value &amp;&amp; turnsEvt.value.revision)) || events.length}"
@@ -149,7 +155,7 @@
       <HStack verticalAlignment="center" gap="$space-2" paddingVertical="$space-2">
         <Heading level="h2">Transcript</Heading>
         <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{events.length + ' events'}" />
-        <FindBar placeholder="Find in transcript…"
+        <FindBar id="transcriptFindBar" placeholder="Find in transcript…"
           matchCount="{findMatches.length}"
           current="{findCursor}"
           showCount="{findText.trim().length >= 2}"
@@ -393,7 +399,7 @@
       onDidChange="() => findMatches.length ? (atBottom = window.__bramFollowTransition(false, 'find-step', $props.agentId)) : null" />
     <ChangeListener
       listenTo="{events.length + ':' + eventsVersion}"
-      onDidChange="() => { if (atBottom) { transcriptList.scrollToBottom(); settleArmed = true; window.__bramFollowVerify('content-append-repin', $props.agentId); window.__bramIframeTrace('transcript-repin', {events: events.length, agentId: $props.agentId || 'main'}); } }" />
+      onDidChange="() => { if (window.__bramFollowRepinOk(atBottom, $props.agentId)) { transcriptList.scrollToBottom(); settleArmed = true; window.__bramFollowVerify('content-append-repin', $props.agentId); window.__bramIframeTrace('transcript-repin', {events: events.length, agentId: $props.agentId || 'main'}); } }" />
     <!-- Settle re-assert: content keeps growing for a beat after the repin
          (async Markdown layout, eager tool descriptions splicing in), so one
          delayed re-scroll pins the true bottom once measurements settle.
@@ -404,7 +410,7 @@
     <Timer
       interval="200"
       enabled="{settleArmed}"
-      onTick="() => { settleArmed = false; if (atBottom) { transcriptList.scrollToBottom(); window.__bramFollowVerify('settle-repin', $props.agentId); window.__bramIframeTrace('transcript-settle-repin', {events: events.length, agentId: $props.agentId || 'main'}); } }" />
+      onTick="() => { settleArmed = false; if (window.__bramFollowRepinOk(atBottom, $props.agentId)) { transcriptList.scrollToBottom(); window.__bramFollowVerify('settle-repin', $props.agentId); window.__bramIframeTrace('transcript-settle-repin', {events: events.length, agentId: $props.agentId || 'main'}); } }" />
     <!-- Viewport switch (chip click: Main ↔ subagent) always lands at the
          bottom: re-arm follow mode so the async refetch's events swap
          re-pins via the listener above, and pin immediately for the

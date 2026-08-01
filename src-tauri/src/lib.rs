@@ -9705,7 +9705,15 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
         // Tell subscribers the menu went away. Emit AFTER releasing all
         // pty_menu_* locks for the same anti-deadlock reason as in
         // pty_menu_update.
-        turn_state_set_menu(app, None, "pty-menu", "dismissed");
+        // ghost-menu-send-gate-eviction: a user answer ENDS the prompt, so
+        // the state clear must not be deferred by hook ownership (the
+        // deferral guards a live hook display against grid flicker; this
+        // input just dismissed that display). hook-permission source
+        // releases the owner and clears pending_menu, opening the
+        // send-gate. The hook's later keyed clear is idempotent. Receipt:
+        // 2026-08-01 18:47:27 grid-deferred dismissed left pending set and
+        // held every pane send for 7 minutes.
+        turn_state_set_menu(app, None, "hook-permission", "dismissed");
         emit_replayable_payload(app, "pty-menu-changed", Option::<PtyMenu>::None);
     } else if input == "\x1b" {
         clear_active_sentinel_with_reason(app, "pty-escape");
@@ -9774,6 +9782,28 @@ fn pty_menu_clear_for_outcome<R: tauri::Runtime>(app: &AppHandle<R>, reason: &st
         *held = None;
     }
     let Some(tool) = cleared_tool else {
+        // ghost-menu-send-gate-eviction: the raw cache is already empty
+        // (display cleared earlier) but a deferred clear may have left
+        // turn-state pending_menu set — an unanswerable ghost that holds
+        // the send-gate (2026-08-01: 7-minute outage, op=hold-stale). Sweep
+        // it here: any outcome clear reaching this point means the prompt
+        // is over.
+        let ghost = turn_state_cell()
+            .lock()
+            .ok()
+            .map(|s| s.pending_menu.is_some())
+            .unwrap_or(false);
+        if ghost {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "send-gate",
+                    &format!("op=ghost-cleared reason={}", reason),
+                );
+            }
+            turn_state_set_menu(app, None, "hook-permission", "dismissed");
+            emit_replayable_payload(app, "pty-menu-changed", Option::<PtyMenu>::None);
+        }
         return;
     };
     if bram_trace_enabled() {
@@ -9784,7 +9814,10 @@ fn pty_menu_clear_for_outcome<R: tauri::Runtime>(app: &AppHandle<R>, reason: &st
         );
     }
     menu_prose_probe_record_dismiss(app, &tool, reason);
-    turn_state_set_menu(app, None, "pty-menu", "dismissed");
+    // ghost-menu-send-gate-eviction: outcome clears (hook-clear, turn-end,
+    // superseded, jsonl-resolved) are evidence the prompt is over — never
+    // defer them behind hook ownership.
+    turn_state_set_menu(app, None, "hook-permission", "dismissed");
     emit_replayable_payload(app, "pty-menu-changed", Option::<PtyMenu>::None);
 }
 

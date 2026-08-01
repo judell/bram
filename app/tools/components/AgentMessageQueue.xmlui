@@ -93,10 +93,14 @@
       <DndItems data="{entries || []}"
         dragHandle="true"
         onReorder="(newOrder) => { entries = window.__bramQueueReorder(entries, newOrder); }">
+      <!-- queue-compact-rows: one controls row per item (mic + edited +
+           Send-as + selects, then SpaceFiller pushing Send/Delete right),
+           tight inter-item padding. The former right-hand button column is
+           folded into the row. -->
       <HStack
         gap="$space-2"
         verticalAlignment="start"
-        paddingVertical="$space-5">
+        paddingVertical="$space-2">
         <VStack width="*" gap="$space-0_5">
           <TextArea
             id="queueBox"
@@ -134,8 +138,6 @@
               fontSize="$fontSize-xs"
               color="$textColor-secondary"
               value="{window.__bramQueueEditedLabel($item.updatedAtMs)}" />
-          </HStack>
-          <HStack gap="$space-2" verticalAlignment="center">
             <Text
               fontSize="$fontSize-xs"
               color="$textColor-secondary"
@@ -154,37 +156,30 @@
               data="{((queueWorklist.value &amp;&amp; queueWorklist.value.items) || []).map(i => ({ value: i.id, label: i.id + ((i.status || 'proposed') === 'applied' ? ' (to commit)' : ' (to apply)') }))}"
               initialValue="{$item.targetItemId || ''}"
               onDidChange="(v) => { entries = window.__bramQueueSetTargetItem(entries, $itemIndex, v); }" />
-          </HStack>
-        </VStack>
-        <VStack width="5rem" gap="$space-1">
-          <!-- Readiness binds LIVE off the push sources, exactly like the
-               header badge above — do NOT route it through a cached var +
-               ChangeListener. That bridge strands: it seeds at one instant
-               and only updates on a transition, so a mount that straddles
-               the PushSource replay leaves it stuck (dimmed-while-ready, or
-               undimmed-while-working). A direct binding recomputes every
-               render and can't strand. -->
-          <VStack
-            opacity="{window.__bramQueueReady(queueAgentStatus.value, queueMenuEvt.value) ? 1 : 0.45}"
-            width="100%">
-            <!-- On send, land on the surface where the result shows: a
-                 Message turn appears in Transcript, an Iterate targets a
-                 worklist item so it shows in Worklist. navigate() is called
-                 directly here (it resolves inside a component — verified with
-                 a faithful standalone repro). The enabled gate blocks no-op
-                 sends, so navigation only runs on a real send. -->
+            <SpaceFiller />
+            <!-- Readiness binds LIVE off the push sources, exactly like the
+                 header badge above — do NOT route it through a cached var +
+                 ChangeListener. That bridge strands: it seeds at one instant
+                 and only updates on a transition, so a mount that straddles
+                 the PushSource replay leaves it stuck (dimmed-while-ready, or
+                 undimmed-while-working). A direct binding recomputes every
+                 render and can't strand. On send, land on the surface where
+                 the result shows (Message -> Transcript, Iterate ->
+                 Worklist); the enabled gate blocks no-op sends, so
+                 navigation only runs on a real send. -->
             <Button
               label="Send"
               size="xs"
+              opacity="{window.__bramQueueReady(queueAgentStatus.value, queueMenuEvt.value) ? 1 : 0.45}"
               enabled="{window.__bramQueueCanSendWhenReady($item, window.__bramQueueReady(queueAgentStatus.value, queueMenuEvt.value), (queueWorklist.value &amp;&amp; queueWorklist.value.items) || [])}"
               tooltip="Send this note to the agent as a fresh turn"
               onClick="entries = window.__bramQueueSend(entries, $itemIndex, (queueWorklist.value &amp;&amp; queueWorklist.value.items) || []); navigate(window.__bramQueueSendMode($item) === 'iterate' ? '/worklist' : '/transcript')" />
-          </VStack>
-          <Button
-            label="Delete"
-            size="xs"
-            variant="ghost"
-            onClick="entries = window.__bramQueueRemove(entries, $itemIndex)" />
+            <Button
+              label="Delete"
+              size="xs"
+              variant="ghost"
+              onClick="entries = window.__bramQueueRemove(entries, $itemIndex)" />
+          </HStack>
         </VStack>
       </HStack>
       </DndItems>

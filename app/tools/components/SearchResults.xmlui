@@ -25,7 +25,12 @@
        List's height=100% resolved against it instead of the sized instance
        wrapper — results rendered zero-height (2026-07-31 "fast because
        broken"). Badge size is a cosmetic follow-up. -->
-  <List height="100%" data="{$props.hits}">
+  <!-- idKey="key": hit ids are unreliable across buckets (issue hits carry
+       id="" — every issue row would share one empty identity, and a pill
+       toggle's recomposition then overlap-corrupts the virtualizer's row
+       reconciliation, 2026-08-01 screenshot). `key` is unique across all
+       four buckets. https://docs.xmlui.org/components/List#idkey -->
+  <List height="100%" data="{$props.hits}" idKey="key">
     <VStack gap="$space-1" paddingVertical="$space-2" borderBottom="1px solid $borderColor">
       <HStack gap="$space-3" verticalAlignment="start">
         <VStack gap="$space-0_5" width="7rem">

@@ -696,6 +696,14 @@ struct HookMenuClaim {
     // Keep the claim for keyed lifecycle cleanup, but never arbitrate it onto
     // a later terminal prompt.
     answered: bool,
+    // parallel-menu-answer-records: the chosen option label, captured at the
+    // pane click. The keyed clear that later delivers this call's tool_use id
+    // emits op=answer from HERE — per claim, so parallel bursts can no longer
+    // overwrite each other in the single global stash (2026-08-01: two Shell
+    // answers 2.5s apart, second overwrote first, neither bound). Preserve the
+    // click time so deferred-clear traces measure the real binding delay.
+    answered_label: Option<String>,
+    answered_at_ms: Option<i64>,
 }
 // TTL backstop for claims whose clears were lost; a queued-but-undisplayed
 // claim is inert (it only surfaces when the grid shows its labels), so the
@@ -742,12 +750,20 @@ fn menu_hook_claims_empty() -> bool {
         .unwrap_or(true)
 }
 
-fn mark_hook_claim_answered(claims: &mut [HookMenuClaim], id_key: &str) -> bool {
+fn mark_hook_claim_answered(
+    claims: &mut [HookMenuClaim],
+    id_key: &str,
+    label: Option<&str>,
+) -> bool {
     let Some(claim) = claims.iter_mut().find(|claim| claim.id_key == id_key) else {
         return false;
     };
     let changed = !claim.answered;
     claim.answered = true;
+    if let Some(label) = label.filter(|l| !l.is_empty()) {
+        claim.answered_label = Some(label.to_string());
+        claim.answered_at_ms = Some(unix_now_ms());
+    }
     changed
 }
 
@@ -1161,7 +1177,7 @@ fn resolve_claim_tool_use_id<R: tauri::Runtime>(
 fn st_tool_resolution_state(
     text: &str,
     resolved_ids: &mut std::collections::HashSet<String>,
-    resolved_sigs: &mut Vec<String>,
+    resolved_calls: &mut Vec<(String, String)>,
     unresolved_sigs: &mut Vec<String>,
 ) {
     let mut calls: Vec<(String, String)> = Vec::new();
@@ -1201,10 +1217,41 @@ fn st_tool_resolution_state(
     }
     for (id, sig) in calls {
         if resolved_ids.contains(&id) {
-            resolved_sigs.push(sig);
+            resolved_calls.push((id, sig));
         } else {
             unresolved_sigs.push(sig);
         }
+    }
+}
+
+#[cfg(test)]
+mod hook_claim_resolution_tests {
+    use super::st_tool_resolution_state;
+    use std::collections::HashSet;
+
+    #[test]
+    fn resolved_calls_retain_ids_for_signature_keyed_claim_answers() {
+        let jsonl = concat!(
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_done","name":"Bash","input":{"command":"exit 1"}},{"type":"tool_use","id":"toolu_live","name":"Bash","input":{"command":"sleep 1"}}]}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_done","content":"failed"}]}}"#,
+        );
+        let mut resolved_ids = HashSet::new();
+        let mut resolved_calls = Vec::new();
+        let mut unresolved_sigs = Vec::new();
+
+        st_tool_resolution_state(
+            jsonl,
+            &mut resolved_ids,
+            &mut resolved_calls,
+            &mut unresolved_sigs,
+        );
+
+        assert_eq!(
+            resolved_calls,
+            vec![("toolu_done".to_string(), "Bash(exit 1)".to_string())]
+        );
+        assert_eq!(unresolved_sigs, vec!["Bash(sleep 1)".to_string()]);
     }
 }
 
@@ -1223,10 +1270,10 @@ fn janitor_resolved_claims<R: tauri::Runtime>(app: &AppHandle<R>) {
         return;
     };
     let mut resolved_ids: std::collections::HashSet<String> = Default::default();
-    let mut resolved_sigs: Vec<String> = Vec::new();
+    let mut resolved_calls: Vec<(String, String)> = Vec::new();
     let mut unresolved_sigs: Vec<String> = Vec::new();
     if let Some(text) = st_read_tail(&path, 4 * 1024 * 1024) {
-        st_tool_resolution_state(&text, &mut resolved_ids, &mut resolved_sigs, &mut unresolved_sigs);
+        st_tool_resolution_state(&text, &mut resolved_ids, &mut resolved_calls, &mut unresolved_sigs);
     }
     for sf in st_subagent_files(&path) {
         if st_subagent_finished(&sf.jsonl_path) {
@@ -1236,22 +1283,42 @@ fn janitor_resolved_claims<R: tauri::Runtime>(app: &AppHandle<R>) {
             st_tool_resolution_state(
                 &text,
                 &mut resolved_ids,
-                &mut resolved_sigs,
+                &mut resolved_calls,
                 &mut unresolved_sigs,
             );
         }
     }
+    let resolved_id_for_claim = |c: &HookMenuClaim| -> Option<String> {
+        if let Some(id) = c.tool_use_id.as_deref() {
+            return resolved_ids.contains(id).then(|| id.to_string());
+        }
+        if let Some(sig) = c.signature.as_deref() {
+            if unresolved_sigs.iter().any(|s| s == sig) {
+                return None;
+            }
+            let mut ids = resolved_calls
+                .iter()
+                .filter(|(_, resolved_sig)| resolved_sig == sig)
+                .map(|(id, _)| id.clone());
+            return match (ids.next(), ids.next()) {
+                (Some(id), None) => Some(id),
+                _ => None,
+            };
+        }
+        None
+    };
     let claim_resolved = |c: &HookMenuClaim| -> bool {
         if let Some(id) = c.tool_use_id.as_deref() {
             return resolved_ids.contains(id);
         }
-        if let Some(sig) = c.signature.as_deref() {
-            return resolved_sigs.iter().any(|s| s == sig)
-                && !unresolved_sigs.iter().any(|s| s == sig);
-        }
-        false
+        c.signature.as_deref().is_some_and(|sig| {
+            resolved_calls
+                .iter()
+                .any(|(_, resolved_sig)| resolved_sig == sig)
+                && !unresolved_sigs.iter().any(|unresolved_sig| unresolved_sig == sig)
+        })
     };
-    let (removed_keys, depth) = {
+    let (removed_keys, answered_records, depth) = {
         let Ok(mut q) = menu_hook_claims_cell().lock() else {
             return;
         };
@@ -1263,9 +1330,26 @@ fn janitor_resolved_claims<R: tauri::Runtime>(app: &AppHandle<R>) {
         if removed.is_empty() {
             return;
         }
+        let answered_records: Vec<(String, String, Option<i64>)> = q
+            .iter()
+            .filter(|c| claim_resolved(c))
+            .filter_map(|c| {
+                Some((
+                    resolved_id_for_claim(c)?,
+                    c.answered_label.clone()?,
+                    c.answered_at_ms,
+                ))
+            })
+            .collect();
         q.retain(|c| !claim_resolved(c));
-        (removed, q.len())
+        (removed, answered_records, q.len())
     };
+    // parallel-menu-answer-records: claims resolved via JSONL (no PostToolUse
+    // fired — e.g. failed commands, batch tails) still carry their pane
+    // answer; emit it here, id in hand.
+    for (id, label, answered_at_ms) in &answered_records {
+        record_deferred_claim_menu_answer(app, id, label, "jsonl-clear", *answered_at_ms);
+    }
     let displayed_removed = menu_hook_displayed_cell()
         .lock()
         .ok()
@@ -1668,6 +1752,8 @@ mod grid_rescue_candidate_tests {
             },
             at_ms: 0,
             answered: false,
+            answered_label: None,
+            answered_at_ms: None,
         }
     }
 
@@ -1745,10 +1831,24 @@ fn clear_hook_permission_menu<R: tauri::Runtime>(
                 .filter(|c| matches(c))
                 .map(|c| c.id_key.clone())
                 .collect();
-            let removed_ident: Option<(String, Option<String>)> = q
+            let removed_ident: Option<(
+                String,
+                Option<String>,
+                bool,
+                Option<String>,
+                Option<i64>,
+            )> = q
                 .iter()
                 .find(|c| matches(c))
-                .map(|c| (c.menu.tool.clone(), c.signature.clone()));
+                .map(|c| {
+                    (
+                        c.menu.tool.clone(),
+                        c.signature.clone(),
+                        c.answered,
+                        c.answered_label.clone(),
+                        c.answered_at_ms,
+                    )
+                });
             q.retain(|c| !matches(c));
             (removed, removed_ident, q.len())
         };
@@ -1760,8 +1860,25 @@ fn clear_hook_permission_menu<R: tauri::Runtime>(
         // adopted a lingering stash onto a call that never showed a menu
         // (test E 2026-07-24 05:12: the Read approval bound to the next
         // grep's id).
-        if let (Some(id), Some((rt, rs))) = (id, removed_ident.as_ref()) {
-            bind_pending_menu_answer(app, rt, id, rs.as_deref());
+        if let (Some(id), Some((rt, rs, answered, ral, answered_at_ms))) =
+            (id, removed_ident.as_ref())
+        {
+            // parallel-menu-answer-records: the claim's own captured label is
+            // authoritative — per claim, immune to the single-slot stash
+            // overwrite that lost both parallel Shell answers on 2026-08-01.
+            // The stash bind remains the fallback for claims answered before
+            // this field existed and for edge flows that never marked one.
+            if let Some(label) = ral.as_deref() {
+                record_deferred_claim_menu_answer(
+                    app,
+                    id,
+                    label,
+                    "claim-clear",
+                    *answered_at_ms,
+                );
+            } else if !answered {
+                bind_pending_menu_answer(app, rt, id, rs.as_deref());
+            }
         }
         let displayed_removed = menu_hook_displayed_cell()
             .lock()
@@ -3834,6 +3951,8 @@ mod claim_label_join_tests {
             },
             at_ms: 0,
             answered: false,
+            answered_label: None,
+            answered_at_ms: None,
         }
     }
 
@@ -3892,8 +4011,20 @@ mod claim_label_join_tests {
         identity.signature = Some("Bash(id -un)".to_string());
         let mut claims = vec![sw_vers, date, identity];
 
-        assert!(mark_hook_claim_answered(&mut claims, "sw-vers"));
-        assert!(mark_hook_claim_answered(&mut claims, "date"));
+        assert!(mark_hook_claim_answered(&mut claims, "sw-vers", Some("Yes")));
+        assert!(mark_hook_claim_answered(&mut claims, "date", Some("Yes, and don't ask again")));
+        assert_eq!(
+            claims.iter().find(|c| c.id_key == "sw-vers").unwrap().answered_label.as_deref(),
+            Some("Yes")
+        );
+        assert_eq!(
+            claims.iter().find(|c| c.id_key == "date").unwrap().answered_label.as_deref(),
+            Some("Yes, and don't ask again")
+        );
+        assert!(claims
+            .iter()
+            .filter(|c| c.answered)
+            .all(|c| c.answered_at_ms.is_some()));
         let selectable = selectable_hook_claims(&claims);
         assert_eq!(selectable.len(), 1);
         assert_eq!(selectable[0].id_key, "identity");
@@ -6054,6 +6185,8 @@ fn handle_permission_menu<R: tauri::Runtime>(
             menu,
             at_ms: claim_at_ms,
             answered: false,
+            answered_label: None,
+            answered_at_ms: None,
         });
         q.len()
     };
@@ -9472,39 +9605,31 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
         // answered call. Prefer the pending-call lookup (matches the
         // suppressor's identity); a hook-claimed prompt's own id is the
         // fallback under record-flush lag. No id at all is the normal
-        // record-flush race (the tool_use lands only after approval) —
-        // stash for the hook-clear binding instead of dropping.
-        match chosen_label.as_deref() {
+        // record-flush race (the tool_use lands only after approval): store
+        // the answer on an exact displayed claim, using the singleton stash
+        // only when no claim identity exists.
+        let answer_recorded_at_click = match chosen_label.as_deref() {
             Some(label) => {
                 let id = answered_id.clone().or_else(|| resolved_id.clone());
                 match id {
-                    Some(id) => record_menu_answer(app, &id, label, "click"),
+                    Some(id) => {
+                        record_menu_answer(app, &id, label, "click");
+                        true
+                    }
                     None => {
-                        // Stash under the DISPLAYED CLAIM's identity when one
-                        // exists: the grid cell's tool is a guess ("Bash" for
-                        // a Read approval — test E 2026-07-24 05:12), and a
-                        // guessed tool can never match the keyed clear that
-                        // will deliver the id.
-                        let claim_ident: Option<(String, Option<String>)> =
-                            hook_displayed
-                                .as_ref()
-                                .map(|displayed| displayed.id_key.clone())
-                                .and_then(|k| {
-                                    menu_hook_claims_cell().lock().ok().and_then(|q| {
-                                        q.iter().find(|c| c.id_key == k).map(|c| {
-                                            (c.menu.tool.clone(), c.signature.clone())
-                                        })
-                                    })
-                                });
-                        let (stash_tool, stash_sig) =
-                            claim_ident.unwrap_or((tool.clone(), signature.clone()));
-                        stash_pending_menu_answer(
-                            app,
-                            &stash_tool,
-                            label,
-                            stash_sig.as_deref(),
-                            "no-tool-use-id",
-                        );
+                        // A displayed claim stores its own deferred label
+                        // below. Only a claimless grid menu may use the
+                        // singleton fallback stash.
+                        if hook_displayed.is_none() {
+                            stash_pending_menu_answer(
+                                app,
+                                &tool,
+                                label,
+                                signature.as_deref(),
+                                "no-tool-use-id",
+                            );
+                        }
+                        false
                     }
                 }
             }
@@ -9516,15 +9641,23 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
                         &format!("op=answer-miss reason=no-key-match tool={}", tool),
                     );
                 }
+                false
             }
-        }
+        };
         if chosen_label.is_some() {
             if let Some(answered_display) = hook_displayed.as_ref() {
                 let (marked, depth, selectable_depth) = menu_hook_claims_cell()
                     .lock()
                     .map(|mut claims| {
-                        let marked =
-                            mark_hook_claim_answered(&mut claims, &answered_display.id_key);
+                        let marked = mark_hook_claim_answered(
+                            &mut claims,
+                            &answered_display.id_key,
+                            if answer_recorded_at_click {
+                                None
+                            } else {
+                                chosen_label.as_deref()
+                            },
+                        );
                         let selectable_depth =
                             claims.iter().filter(|claim| !claim.answered).count();
                         (marked, claims.len(), selectable_depth)
@@ -23973,6 +24106,29 @@ fn record_menu_answer<R: tauri::Runtime>(
     }
 }
 
+fn record_deferred_claim_menu_answer<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    tool_use_id: &str,
+    label: &str,
+    via: &str,
+    answered_at_ms: Option<i64>,
+) {
+    if bram_trace_enabled() {
+        if let Some(answered_at_ms) = answered_at_ms {
+            append_bram_trace_line(
+                app,
+                "prompt-lifecycle",
+                &format!(
+                    "op=answer-deferred-bind gap_ms={} via={}",
+                    unix_now_ms().saturating_sub(answered_at_ms),
+                    via,
+                ),
+            );
+        }
+    }
+    record_menu_answer(app, tool_use_id, label, via);
+}
+
 // menu-answer-deferred-id-binding: a pane answer whose call id is
 // unknowable at click time (Claude Code flushes the pending tool_use
 // record only AFTER approval, so the lookup finds nothing and a
@@ -24184,7 +24340,7 @@ fn record_hook_menu_answer<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
             }
             opt
         });
-    let Some((id_opt, label, labels, claim_tool, claim_sig)) = hit else {
+    let Some((id_opt, label, labels, _claim_tool, _claim_sig)) = hit else {
         if bram_trace_enabled() {
             append_bram_trace_line(
                 app,
@@ -24223,10 +24379,37 @@ fn record_hook_menu_answer<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
         })
         .or_else(|| lookup_pending_tool_call(app).tool_use_id);
     let Some(id) = id else {
-        // The record-flush race: stash for the hook-clear binding.
-        stash_pending_menu_answer(app, &claim_tool, &label, claim_sig.as_deref(), "no-tool-use-id");
+        // This is a real displayed claim, so keep the deferred answer on that
+        // exact identity. The singleton stash is reserved for claimless grid
+        // and pending menus; using it here lets parallel clicks overwrite one
+        // another before their keyed clears arrive.
+        let (marked, depth, selectable_depth) = menu_hook_claims_cell()
+            .lock()
+            .map(|mut claims| {
+                let marked = mark_hook_claim_answered(
+                    &mut claims,
+                    &displayed_key,
+                    Some(label.as_str()),
+                );
+                let selectable_depth = claims.iter().filter(|claim| !claim.answered).count();
+                (marked, claims.len(), selectable_depth)
+            })
+            .unwrap_or((false, 0, 0));
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "hook-menu",
+                &format!(
+                    "op=claim-queue-answer marked={} depth={} selectable_depth={}",
+                    marked, depth, selectable_depth
+                ),
+            );
+        }
         return;
     };
+    if let Ok(mut claims) = menu_hook_claims_cell().lock() {
+        mark_hook_claim_answered(&mut claims, &displayed_key, None);
+    }
     record_menu_answer(app, &id, &label, "click");
 }
 

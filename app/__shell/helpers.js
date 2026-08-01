@@ -5332,9 +5332,21 @@ window.bramSubscribeTranscriptUnseen = (function () {
       try { fn(); } catch (e) { console.error("[bramSubscribeTranscriptUnseen] subscriber threw:", e); }
     });
   }
+  var lastSid = null;
   function recompute(v) {
+    // unseen-counter-seed-fix: pre-load null projections must not seed the
+    // baseline (base=0 made the first real projection count all history as
+    // unseen — the "1230 new" boot chip; archive receipts count=1233/1230).
+    // Identity-aware re-base: a sid change (boot, /clear, session or
+    // provider switch) adopts the new total — history is never "new";
+    // only same-session growth counts as arrivals.
+    if (!v) return;
+    var sid = (v && v.sid) || "";
     lastTotal = totalOf(v);
-    if (base < 0 || lastTotal < base) base = lastTotal;
+    if (base < 0 || sid !== lastSid || lastTotal < base) {
+      base = lastTotal;
+      lastSid = sid;
+    }
     // follow-state-source-of-truth hardening: "watched at the bottom"
     // requires the route to corroborate the mounted flag (a skipped
     // Transcript unmount cleanup — see the Lifecycle-violation console

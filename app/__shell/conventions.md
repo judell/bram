@@ -1089,11 +1089,31 @@ reports ("has this recurred / been fixed?") and "have we done X / did we
 decide Y" questions. This is the log-first drill widened from the trace to the
 whole history.
 
+**Proactive triggers.** Search-first is not only for explicit questions about
+the past. Fire a `/__search` *before* acting, and cite what it returns,
+whenever:
+
+- the user asks to "search the project" in any phrasing — `/__search` leads,
+  grep follows for current-tree state (the FTS index covers history, not the
+  working tree; the two are complements, in that order);
+- you are about to reconstruct environment or infrastructure state — remote
+  pod/VM setup, which corpora/indexes/models exist and where artifacts live,
+  connection or proxy patterns ("where does X live" questions you are about
+  to answer by directory listing). Infra state is exactly the knowledge that
+  lives only in session history: it's not in the repo, not in CLAUDE.md, and
+  each agent session starts blind to it;
+- you are about to re-derive an operational recipe the project has plausibly
+  executed before — setup scripts, launch/detach patterns, copy-back flows.
+
+The test: if you find yourself groveling through the tree or asking the user
+for a fact that a prior session likely established, the query was already
+overdue.
+
 **The call** (Claude loopback curl; literal port from `resources/.bram-port`,
 already in the `.claude/settings.json` allowlist, so no prompt):
 
 ```
-curl -4 -sS "http://127.0.0.1:61455/__search?q=<urlencoded>&limit=20&types=commits,issues"
+curl -4 -sS "http://127.0.0.1:61455/__search?q=<urlencoded>&limit=20&types=commit,issue"
 ```
 
 (replace `61455` with whatever `Read resources/.bram-port` returned.)

@@ -1063,7 +1063,12 @@ function __gridDetectMenu(rows) {
 
     const blockTop = menu[0].row;
     const blockBottom = menu[menu.length - 1].row;
-    const aboveRows = rows.slice(Math.max(0, blockTop - 8), blockTop);
+    // Codex prompt bodies wrap according to terminal width. Eight physical
+    // rows was not enough for a two-line reason plus wrapped options: the
+    // recognizable header fell just outside the window, leaving the scene
+    // formally unbounded. Search a wider prompt-local window and still take
+    // the nearest matching header below.
+    const aboveRows = rows.slice(Math.max(0, blockTop - 16), blockTop);
     const belowText = rows
       .slice(blockBottom + 1, blockBottom + 4)
       .map((r) => r.text)
@@ -1114,6 +1119,7 @@ function __gridDetectMenu(rows) {
       .slice()
       .reverse()
       .find((r) => headerRe.test(r.text));
+    const headerIndex = headerRow ? rows.lastIndexOf(headerRow, blockTop - 1) : -1;
     let headerText = headerRow ? headerRow.text.trim() : "";
     if (!headerText && !isYesMenu && !isAllowMenu) {
       // Pickers have no "Do you want to…" header; carry the nearest
@@ -1125,8 +1131,15 @@ function __gridDetectMenu(rows) {
         .find((r) => r.text.trim());
       headerText = near ? near.text.trim() : "";
     }
+    // The host scores queued claims against this scene. When a recognizable
+    // permission header is present, bound the scene to that prompt box;
+    // parallel Codex status rows immediately above it ("Running …") name
+    // other live claims and would otherwise make the longest command win.
+    // Headerless pickers and unusually tall/scrolled boxes retain the broad
+    // fallback used before this boundary was available.
+    const promptTop = headerIndex >= 0 ? headerIndex : Math.max(0, blockTop - 12);
     const above = rows
-      .slice(Math.max(0, blockTop - 12), blockTop)
+      .slice(promptTop, blockTop)
       .map((r) => r.text.replace(/^[⏺⎿\s]+/, "").trimEnd())
       .filter((s) => s.trim());
     return {
@@ -1279,6 +1292,21 @@ function __gridTraceFirstOutputTransition() {
 let __gridMenuPresent = false;
 let __gridLastMenu = null;
 let __gridMissKey = null;
+function __gridMenuIdentity(menu) {
+  const normalize = (value) =>
+    String(value || "")
+      .trim()
+      .replace(/\s+/g, " ");
+  // Parallel permission prompts intentionally reuse the same option family.
+  // The command/context above the options is therefore part of menu identity;
+  // omitting it freezes both the preview and capture-time parsedOffset on the
+  // first prompt while the terminal advances through later prompts.
+  const scene = [menu.header].concat(menu.above || []).map(normalize).join("|");
+  const options = (menu.options || [])
+    .map((option) => String(option.n) + normalize(option.label))
+    .join("|");
+  return scene + "|" + options;
+}
 function __gridShadowCheck() {
   try {
     const rows = __gridReadLiveRows();
@@ -1322,8 +1350,7 @@ function __gridShadowCheck() {
     // so the NEXT miss can capture (the old never-reset key logged a
     // persistent miss at most once ever — the 20:16 episode logged nothing).
     __gridMissKey = null;
-    const key =
-      menu.header + "|" + menu.options.map((o) => o.n + o.label).join("|");
+    const key = __gridMenuIdentity(menu);
     if (key === __gridLastMenuKey) return;
     __gridLastMenuKey = key;
     // menu-stack-pty-inflight-prose: extract the in-flight turn's prose from
@@ -1379,6 +1406,9 @@ function __gridShadowCheck() {
         subkind: "xterm-grid-menu",
         header: menu.header,
         options: menu.options,
+        sceneRows: menu.above.length,
+        sceneBounded: !!menu.header,
+        parsedOffset: __ptyParsedOffset,
       },
     }).catch(() => {});
   } catch (e) {

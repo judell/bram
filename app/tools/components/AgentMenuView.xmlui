@@ -140,12 +140,16 @@
       width="100%">
       <Theme paddingHorizontal-Button-sm="$space-3">
         <Items data="{$props.menu.options}">
-          <HStack gap="$space-2" verticalAlignment="center" width="100%">
+          <HStack
+            gap="$space-2"
+            verticalAlignment="center"
+            width="100%"
+            var.answerKeys="{$item.answerKeys || ($item.key + '\r')}">
             <Button
               label="{($item.key || '')}"
               variant="outlined"
               size="sm"
-              onClick="sendKeys($item.key + '\r')" />
+              onClick="sendKeys(answerKeys)" />
             <VStack width="*" gap="$space-0_5">
               <Text
                 value="{($item.label || '')}"

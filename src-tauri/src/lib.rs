@@ -692,6 +692,10 @@ struct HookMenuClaim {
     signature: Option<String>,
     menu: PtyMenu,
     at_ms: i64,
+    // A pane answer is authoritative before PostToolUse/tool_result arrives.
+    // Keep the claim for keyed lifecycle cleanup, but never arbitrate it onto
+    // a later terminal prompt.
+    answered: bool,
 }
 // TTL backstop for claims whose clears were lost; a queued-but-undisplayed
 // claim is inert (it only surfaces when the grid shows its labels), so the
@@ -701,12 +705,34 @@ static MENU_HOOK_CLAIMS: OnceLock<Mutex<Vec<HookMenuClaim>>> = OnceLock::new();
 fn menu_hook_claims_cell() -> &'static Mutex<Vec<HookMenuClaim>> {
     MENU_HOOK_CLAIMS.get_or_init(|| Mutex::new(Vec::new()))
 }
-// id_key of the claim currently displayed in the pane plus the option
-// labels it was last emitted with (adopt-grid-labels-on-join: the labels
-// may be upgraded in place from synthesized to the grid's own phrasing).
-static MENU_HOOK_DISPLAYED: OnceLock<Mutex<Option<(String, Vec<String>)>>> = OnceLock::new();
-fn menu_hook_displayed_cell() -> &'static Mutex<Option<(String, Vec<String>)>> {
+// The exact claim-backed menu currently displayed in the pane. Keep identity,
+// adopted grid labels, and the merged payload together: click handling must
+// interpret input against the same answerKeys-bearing options the user saw,
+// not the raw PTY-grid cache.
+#[derive(Clone)]
+struct HookMenuDisplayed {
+    id_key: String,
+    labels: Vec<String>,
+    menu: PtyMenu,
+}
+static MENU_HOOK_DISPLAYED: OnceLock<Mutex<Option<HookMenuDisplayed>>> = OnceLock::new();
+fn menu_hook_displayed_cell() -> &'static Mutex<Option<HookMenuDisplayed>> {
     MENU_HOOK_DISPLAYED.get_or_init(|| Mutex::new(None))
+}
+
+fn displayed_menu_for_input<'a>(
+    hook_displayed: Option<&'a HookMenuDisplayed>,
+    raw_menu: Option<&'a PtyMenu>,
+) -> Option<&'a PtyMenu> {
+    hook_displayed
+        .map(|displayed| &displayed.menu)
+        .or(raw_menu)
+}
+
+fn hook_display_matches_id(displayed: Option<&HookMenuDisplayed>, id_key: &str) -> bool {
+    displayed
+        .map(|current| current.id_key == id_key)
+        .unwrap_or(false)
 }
 
 fn menu_hook_claims_empty() -> bool {
@@ -714,6 +740,23 @@ fn menu_hook_claims_empty() -> bool {
         .lock()
         .map(|q| q.is_empty())
         .unwrap_or(true)
+}
+
+fn mark_hook_claim_answered(claims: &mut [HookMenuClaim], id_key: &str) -> bool {
+    let Some(claim) = claims.iter_mut().find(|claim| claim.id_key == id_key) else {
+        return false;
+    };
+    let changed = !claim.answered;
+    claim.answered = true;
+    changed
+}
+
+fn selectable_hook_claims(claims: &[HookMenuClaim]) -> Vec<HookMenuClaim> {
+    claims
+        .iter()
+        .filter(|claim| !claim.answered)
+        .cloned()
+        .collect()
 }
 
 // Normalize a menu option label for the hook↔grid join: whitespace
@@ -727,23 +770,49 @@ fn normalized_menu_label(s: &str) -> String {
         .to_lowercase()
 }
 
-// Signature join (primary): the claim's command text found in the grid
-// scene (header + context lines above the options). Bram synthesizes hook
-// option labels ("Yes, and allow …") while CC's terminal phrases its own
-// ("Yes, and always allow access to …"), so labels routinely can't match —
-// but the command text is shared verbatim by both sides. A 40-char
-// normalized prefix survives grid wrapping/truncation; the ≥8-char guard
-// keeps trivial commands from cross-joining.
-fn claim_signature_join(claim: &HookMenuClaim, grid_scene: &str) -> bool {
+// Score the complete claim signature against the terminal's normalized grid
+// scene. Token scoring survives wrapping and a long command whose head has
+// scrolled out, while considering the whole signature lets same-prefix
+// parallel calls distinguish themselves by the command/query fragment that
+// is actually visible. A score below eight is too little evidence to join.
+fn claim_signature_scene_score(claim: &HookMenuClaim, grid_scene: &str) -> usize {
     let Some(sig) = claim.signature.as_deref() else {
-        return false;
+        return 0;
     };
     let inner = sig
         .split_once('(')
         .map(|(_, r)| r.trim_end_matches(')'))
         .unwrap_or(sig);
-    let frag: String = normalized_menu_label(inner).chars().take(40).collect();
-    frag.chars().count() >= 8 && grid_scene.contains(frag.as_str())
+    let normalized = normalized_menu_label(inner);
+    // A shell prompt line is structural evidence, not arbitrary prose. Codex
+    // renders the command as the final `$ <command>` line immediately above
+    // the options; accepting an exact line lets short commands such as
+    // `id -un` arbitrate while another same-label claim remains queued. Keep
+    // the length floor below for unanchored containment so a stray `ls` in
+    // explanatory text still cannot claim a prompt.
+    let prompt_command = format!("$ {}", normalized);
+    if grid_scene == prompt_command
+        || grid_scene.ends_with(format!(" {}", prompt_command).as_str())
+    {
+        return normalized.chars().count() + 20_000;
+    }
+    if normalized.chars().count() >= 8 && grid_scene.contains(normalized.as_str()) {
+        return normalized.chars().count() + 10_000;
+    }
+    let tokens: HashSet<&str> = normalized
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| token.chars().count() >= 4)
+        .collect();
+    tokens
+        .into_iter()
+        .filter(|token| grid_scene.contains(token))
+        .map(|token| token.chars().count())
+        .sum()
+}
+
+#[cfg(test)]
+fn claim_signature_join(claim: &HookMenuClaim, grid_scene: &str) -> bool {
+    claim_signature_scene_score(claim, grid_scene) >= 8
 }
 
 // How a claim joins the grid's displayed labels: exact normalized set
@@ -781,11 +850,91 @@ fn claim_label_join(claim: &HookMenuClaim, grid_labels: &[String]) -> Option<&'s
     None
 }
 
+// Provider-neutral grid arbitration. Prefer a unique best match from the
+// complete command signatures. If signature evidence is absent or tied,
+// accept labels only when exactly one queued claim matches. Several parallel
+// prompts commonly have identical Yes/No families; labels alone must never
+// choose one of them because a pane click answers the terminal's live prompt.
+fn select_grid_joined_claim<'a>(
+    claims: &'a [HookMenuClaim],
+    grid_labels: &[String],
+    grid_scene: &str,
+) -> Option<(&'a HookMenuClaim, &'static str)> {
+    let scored: Vec<(&HookMenuClaim, usize)> = claims
+        .iter()
+        .map(|claim| (claim, claim_signature_scene_score(claim, grid_scene)))
+        .collect();
+    let best_score = scored.iter().map(|(_, score)| *score).max().unwrap_or(0);
+    if best_score >= 8 {
+        let mut winners = scored
+            .iter()
+            .filter(|(_, score)| *score == best_score)
+            .map(|(claim, _)| *claim);
+        if let (Some(winner), None) = (winners.next(), winners.next()) {
+            return Some((winner, "signature"));
+        }
+    }
+
+    let mut label_matches = claims.iter().filter_map(|claim| {
+        claim_label_join(claim, grid_labels).map(|how| (claim, how))
+    });
+    match (label_matches.next(), label_matches.next()) {
+        (Some(one), None) => Some(one),
+        _ => None,
+    }
+}
+
 // Freshness bound for the grid snapshot used as the join selector. Grid
 // reports arrive ~1/s while a menu is displayed, so a stale snapshot means
 // no menu is on screen (or the terminal is mid-repaint) — hold rather than
 // guess.
 const CLAIM_JOIN_GRID_FRESH_MS: u128 = 2_500;
+// Permission hooks for parallel calls can arrive in a few milliseconds. Hold
+// the single-claim optimistic path for a small burst window so intermediate
+// claims never become pane states that the iframe cannot paint. This is shared
+// hook-menu policy: Codex supplied the specimen, but no provider is named in
+// the queue or in the coalescer.
+const MENU_HOOK_CLAIM_COALESCE_MS: u64 = 50;
+
+fn claim_remained_sole(claims: &[HookMenuClaim], id_key: &str, at_ms: i64) -> bool {
+    let mut selectable = claims.iter().filter(|claim| !claim.answered);
+    matches!(
+        (selectable.next(), selectable.next()),
+        (Some(claim), None) if claim.id_key == id_key && claim.at_ms == at_ms
+    )
+}
+
+fn schedule_hook_claim_optimism<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id_key: String,
+    at_ms: i64,
+) {
+    let app_handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(
+            MENU_HOOK_CLAIM_COALESCE_MS,
+        ));
+        let (fire, depth) = menu_hook_claims_cell()
+            .lock()
+            .map(|claims| (claim_remained_sole(&claims, &id_key, at_ms), claims.len()))
+            .unwrap_or((false, 0));
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                &app_handle,
+                "hook-menu",
+                &format!(
+                    "op=claim-coalesce result={} wait_ms={} depth={}",
+                    if fire { "fire" } else { "skip" },
+                    MENU_HOOK_CLAIM_COALESCE_MS,
+                    depth,
+                ),
+            );
+        }
+        if fire {
+            select_hook_claim_display(&app_handle, "claim-coalesced");
+        }
+    });
+}
 
 // upstream-prompt-lifecycle-events (upstream ask #3 implemented locally):
 // Bram emits the PromptShown/PromptResolved pair itself — the
@@ -1121,7 +1270,7 @@ fn janitor_resolved_claims<R: tauri::Runtime>(app: &AppHandle<R>) {
         .lock()
         .ok()
         .and_then(|d| d.clone())
-        .map(|(k, _)| removed_keys.contains(&k))
+        .map(|displayed| removed_keys.contains(&displayed.id_key))
         .unwrap_or(false);
     if bram_trace_enabled() {
         append_bram_trace_line(
@@ -1169,6 +1318,31 @@ fn grid_menu_recently_dismissed(grid_labels: Option<&Vec<String>>) -> bool {
         .unwrap_or(false)
 }
 
+fn grid_options_preserving_answer_keys(
+    claim_options: &[MenuOption],
+    grid_options: &[MenuOption],
+) -> Vec<MenuOption> {
+    if claim_options.len() != grid_options.len() {
+        return grid_options.to_vec();
+    }
+
+    grid_options
+        .iter()
+        .enumerate()
+        .map(|(index, grid_option)| {
+            let claim_option = claim_options
+                .iter()
+                .find(|option| option.key == grid_option.key)
+                .or_else(|| claim_options.get(index));
+            let mut merged = grid_option.clone();
+            if merged.answer_keys.is_none() {
+                merged.answer_keys = claim_option.and_then(|option| option.answer_keys.clone());
+            }
+            merged
+        })
+        .collect()
+}
+
 fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str) {
     if !bram_menus_hook_driven_enabled() {
         return;
@@ -1181,6 +1355,7 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
         q.retain(|c| now - c.at_ms < MENU_HOOK_CLAIM_TTL_MS);
         q.clone()
     };
+    let selectable_claims = selectable_hook_claims(&claims);
     // Grid labels + scene text (header and context lines), normalized for
     // the join, plus the raw options for label adoption
     // (adopt-grid-labels-on-join: the grid's own phrasing is authoritative
@@ -1206,29 +1381,20 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
                     (labels, scene, s.options.clone(), s.picker)
                 })
         });
-    let joined: Option<(&HookMenuClaim, &'static str)> =
-        grid_view.as_ref().and_then(|(gl, scene, _, _)| {
-            claims.iter().find_map(|c| {
-                if claim_signature_join(c, scene) {
-                    Some((c, "signature"))
-                } else {
-                    claim_label_join(c, gl).map(|how| (c, how))
-                }
-            })
-        });
+    let joined: Option<(&HookMenuClaim, &'static str)> = grid_view
+        .as_ref()
+        .and_then(|(gl, scene, _, _)| select_grid_joined_claim(&selectable_claims, gl, scene));
     let grid_labels = grid_view.as_ref().map(|(gl, _, _, _)| gl);
     // Optimistic single-claim display: PermissionRequest fires BEFORE the
     // prompt renders, so the grid can't corroborate the very first claim
-    // yet. With exactly one claim and nothing displayed, show it now (the
-    // single-prompt behavior Bram has always had); the join corrects it
-    // within a grid-report cycle if the terminal disagrees.
-    // claim-optimism-only-at-add: optimism is justified ONLY at the
-    // claim-add moment. A failed command gets no PostToolUse (2026-07-18
+    // yet. The claim-add path schedules a short coalescing window; only a
+    // claim that remains the sole queued claim may display without grid
+    // evidence. A failed command gets no PostToolUse (2026-07-18
     // soak: exit-1 scutil left an orphan claim), and clear-remove /
     // grid-report reselection re-displayed the orphan, which the no-grid
     // hold branch then pinned across turns. Reselection requires grid
     // corroboration; orphans stay inert until the TTL sweeps them.
-    let displayed: Option<(String, Vec<String>)> =
+    let displayed: Option<HookMenuDisplayed> =
         menu_hook_displayed_cell().lock().ok().and_then(|d| d.clone());
 
     // Keep a still-correct display: if the pane already shows the terminal's
@@ -1242,9 +1408,10 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
     // when the pane shows an anonymous rescue and a claim now exists;
     // labels are identical either way, so the upgrade is visible only as
     // the command text and real tool name appearing.
-    if let (Some((k, shown)), Some(gl)) = (displayed.as_ref(), grid_labels) {
-        let rescue_upgrade = k.starts_with("grid-rescue:") && !claims.is_empty();
-        if shown == gl && !rescue_upgrade {
+    if let (Some(displayed), Some(gl)) = (displayed.as_ref(), grid_labels) {
+        let rescue_upgrade =
+            displayed.id_key.starts_with("grid-rescue:") && !selectable_claims.is_empty();
+        if displayed.labels == *gl && !rescue_upgrade {
             return;
         }
     }
@@ -1252,9 +1419,7 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
     // What to display, in preference order:
     //  1. a queued claim that JOINS the terminal's current menu (right prompt
     //     plus enrichment);
-    //  2. else the newest queued claim (its prompt is live — the hook just
-    //     claimed it; a compound/odd-shape command whose signature can't join
-    //     still needs to show, 2026-07-19 cc misses);
+    //  2. else one claim that survived the optimism coalescing window;
     //  3. else the grid menu itself, when the terminal shows a menu no claim
     //     matches. `menus.parseAndDisplay` is off by default, so
     //     `pty_menu_update` will NOT surface it — the claim queue is the only
@@ -1286,7 +1451,7 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
                 .lock()
                 .ok()
                 .and_then(|s| s.as_ref().and_then(|d| d.answered_id.clone()));
-            grid_rescue_candidate(&claims, "Bash").and_then(|c| {
+            grid_rescue_candidate(&selectable_claims, "Bash").and_then(|c| {
                 if c.tool_use_id.is_some() && c.tool_use_id == answered_id {
                     Err("answered-claim")
                 } else {
@@ -1298,17 +1463,17 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
     };
     let show = match joined {
         Some((c, how)) => Show::Claim(c, how),
-        // Unjoined optimism ONLY at the claim-add moment: PermissionRequest
-        // fires before the prompt renders, so a fresh claim can't be grid-
-        // corroborated yet (the 2026-07-19 compound-command misses). On
+        // Unjoined optimism ONLY after the claim remained sole for the
+        // coalescing window. PermissionRequest fires before the prompt renders,
+        // so a fresh claim can't be grid-corroborated yet. On
         // RESELECTION (grid-report / clear-remove) an unjoined claim must
         // not display — after a user-input dismissal the answered prompt's
         // claim stays queued until its PostToolUse (the command's whole
         // runtime), and re-displaying it resurrects the answered prompt as
         // a ghost the send-gate then honors (2026-07-20 18:04:51 specimen,
         // open_ms=18101; unjoined-claim-respects-user-dismissal).
-        None if cause == "claim-add" && !claims.is_empty() => {
-            Show::Claim(claims.iter().max_by_key(|c| c.at_ms).unwrap(), "unjoined")
+        None if cause == "claim-coalesced" && selectable_claims.len() == 1 => {
+            Show::Claim(&selectable_claims[0], "unjoined")
         }
         None if grid_view.is_some() && !grid_menu_recently_dismissed(grid_labels) => {
             match tool_join {
@@ -1321,7 +1486,7 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
                             &format!(
                                 "op=grid-rescue-bare reason={} depth={}",
                                 reason,
-                                claims.len()
+                                selectable_claims.len()
                             ),
                         );
                     }
@@ -1340,7 +1505,7 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
         Show::Claim(claim, how) => {
             let mut menu = claim.menu.clone();
             if let Some((_, _, raw, _)) = grid_view.as_ref() {
-                menu.options = raw.clone();
+                menu.options = grid_options_preserving_answer_keys(&menu.options, raw);
             }
             let labels: Vec<String> = menu
                 .options
@@ -1394,7 +1559,7 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
                         &format!(
                             "op=claim-queue-select joined=none cause={} depth={}",
                             cause,
-                            claims.len(),
+                            selectable_claims.len(),
                         ),
                     );
                 }
@@ -1407,14 +1572,21 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
             // Dedup: already showing this exact menu.
             if displayed
                 .as_ref()
-                .map(|(k, l)| k == &id_key && l == &labels)
+                .map(|displayed| displayed.id_key == id_key && displayed.labels == labels)
                 .unwrap_or(false)
             {
                 return;
             }
-            let relabel_same = displayed.as_ref().map(|(k, _)| k == &id_key).unwrap_or(false);
+            let relabel_same = displayed
+                .as_ref()
+                .map(|displayed| displayed.id_key == id_key)
+                .unwrap_or(false);
             if let Ok(mut d) = menu_hook_displayed_cell().lock() {
-                *d = Some((id_key.clone(), labels.clone()));
+                *d = Some(HookMenuDisplayed {
+                    id_key: id_key.clone(),
+                    labels: labels.clone(),
+                    menu: menu.clone(),
+                });
             }
             // A grid-rescue is grid-sourced, not hook-owned; a claim display
             // owns the slot. Clear the owner before a grid surface so a stale
@@ -1435,7 +1607,7 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
                         cause,
                         menu.tool,
                         tool_use_id.as_deref().unwrap_or("none"),
-                        claims.len(),
+                        selectable_claims.len(),
                     ),
                 );
             }
@@ -1495,6 +1667,7 @@ mod grid_rescue_candidate_tests {
                 signature_source: None,
             },
             at_ms: 0,
+            answered: false,
         }
     }
 
@@ -1594,7 +1767,7 @@ fn clear_hook_permission_menu<R: tauri::Runtime>(
             .lock()
             .ok()
             .and_then(|d| d.clone())
-            .map(|(k, _)| removed_keys.contains(&k))
+            .map(|displayed| removed_keys.contains(&displayed.id_key))
             .unwrap_or(false);
         if bram_trace_enabled() {
             append_bram_trace_line(
@@ -3637,7 +3810,10 @@ fn fence_decision(
 
 #[cfg(test)]
 mod claim_label_join_tests {
-    use super::{claim_label_join, normalized_menu_label, HookMenuClaim};
+    use super::{
+        claim_label_join, claim_remained_sole, mark_hook_claim_answered,
+        normalized_menu_label, select_grid_joined_claim, selectable_hook_claims, HookMenuClaim,
+    };
 
     fn claim_with_labels(labels: &[&str]) -> HookMenuClaim {
         HookMenuClaim {
@@ -3650,12 +3826,14 @@ mod claim_label_join_tests {
                     .map(|l| super::MenuOption {
                         key: "1".to_string(),
                         label: l.to_string(),
+                        answer_keys: None,
                         description: None,
                     })
                     .collect(),
                 ..Default::default()
             },
             at_ms: 0,
+            answered: false,
         }
     }
 
@@ -3696,16 +3874,88 @@ mod claim_label_join_tests {
         assert!(!super::claim_signature_join(&c, &scene));
     }
 
-    // grid-rescue-unjoinable-claim: the 2026-07-19 community-calendar
-    // specimen, reproduced deterministically. A compound
-    // `jq … > /tmp/body.json && curl …/__worklist/commit` command claims
-    // with the jq-prefix signature, but the terminal renders a tmp/-access
-    // permission menu whose grid scene shows the curl TAIL (the long jq
-    // head scrolled out) and whose option wording is CC's own. Both joins
-    // fail → the claim can never surface → the miss. This documents the
-    // repro permanently; the fix adds a grid-rescue when this happens.
     #[test]
-    fn specimen_compound_commit_menu_does_not_join() {
+    fn answered_claims_stop_competing_with_a_short_final_command() {
+        let labels = [
+            "Yes, proceed",
+            "Yes, and don't ask again for commands",
+            "No, and tell Codex what to do differently",
+        ];
+        let mut sw_vers = claim_with_labels(&labels);
+        sw_vers.id_key = "sw-vers".to_string();
+        sw_vers.signature = Some("Bash(sw_vers -productVersion)".to_string());
+        let mut date = claim_with_labels(&labels);
+        date.id_key = "date".to_string();
+        date.signature = Some("Bash(date +%s)".to_string());
+        let mut identity = claim_with_labels(&labels);
+        identity.id_key = "identity".to_string();
+        identity.signature = Some("Bash(id -un)".to_string());
+        let mut claims = vec![sw_vers, date, identity];
+
+        assert!(mark_hook_claim_answered(&mut claims, "sw-vers"));
+        assert!(mark_hook_claim_answered(&mut claims, "date"));
+        let selectable = selectable_hook_claims(&claims);
+        assert_eq!(selectable.len(), 1);
+        assert_eq!(selectable[0].id_key, "identity");
+
+        let selected = select_grid_joined_claim(
+            &selectable,
+            &grid(&labels),
+            &normalized_menu_label("$ id -un"),
+        )
+        .unwrap();
+        assert_eq!(selected.0.id_key, "identity");
+        assert_eq!(selected.1, "signature");
+    }
+
+    #[test]
+    fn anchored_short_command_wins_before_it_is_the_final_claim() {
+        let labels = [
+            "Yes, proceed",
+            "Yes, and don't ask again for commands",
+            "No, and tell Codex what to do differently",
+        ];
+        let mut date = claim_with_labels(&labels);
+        date.id_key = "date".to_string();
+        date.signature = Some("Bash(date +%s)".to_string());
+        date.answered = true;
+        let mut identity = claim_with_labels(&labels);
+        identity.id_key = "identity".to_string();
+        identity.signature = Some("Bash(id -un)".to_string());
+        let mut sw_vers = claim_with_labels(&labels);
+        sw_vers.id_key = "sw-vers".to_string();
+        sw_vers.signature = Some("Bash(sw_vers -productVersion)".to_string());
+        let claims = vec![date, identity, sw_vers];
+        let selectable = selectable_hook_claims(&claims);
+        assert_eq!(selectable.len(), 2);
+
+        let selected = select_grid_joined_claim(
+            &selectable,
+            &grid(&labels),
+            &normalized_menu_label(
+                "Would you like to run the following command? Reason: identity $ id -un",
+            ),
+        )
+        .unwrap();
+        assert_eq!(selected.0.id_key, "identity");
+        assert_eq!(selected.1, "signature");
+
+        let mut short = claim_with_labels(&["Yes", "No"]);
+        short.signature = Some("Bash(ls)".to_string());
+        assert!(!super::claim_signature_join(
+            &short,
+            &normalized_menu_label("The assistant suggests ls for listing files"),
+        ));
+        assert!(super::claim_signature_join(
+            &short,
+            &normalized_menu_label("Would you like to run the following command? $ ls"),
+        ));
+    }
+
+    // A compound command can lose its head above the terminal viewport. Full
+    // signature token scoring must still recognize its visible curl tail.
+    #[test]
+    fn signature_join_matches_visible_compound_command_tail() {
         let mut claim = claim_with_labels(&["Yes", "Yes, and allow access to /tmp", "No"]);
         claim.signature = Some(
             "Bash(jq -n --arg msg \"Fix Visit Santa Rosa timezone: relabel fake-UTC epochs\" \
@@ -3723,10 +3973,76 @@ mod claim_label_join_tests {
             "curl -sS --data @/tmp/body.json http://127.0.0.1:61666/__worklist/commit \
              Do you want to proceed?",
         );
-        assert!(!super::claim_signature_join(&claim, &scene));
+        assert!(super::claim_signature_join(&claim, &scene));
         assert_eq!(super::claim_label_join(&claim, &grid), None);
-        // Both None ⇒ no queued claim joins the visible grid menu ⇒ the
-        // pre-fix silent miss.
+    }
+
+    // 2026-07-31 three-search specimen: every claim has the same tool, option
+    // labels, and long curl prefix. The visible query fragment must select the
+    // terminal's actual prompt; a scene containing only shared evidence must
+    // remain ambiguous instead of falling back to identical labels.
+    #[test]
+    fn parallel_same_prefix_claims_require_unique_grid_evidence() {
+        let labels = [
+            "Yes, proceed",
+            "Yes, and don't ask again for commands",
+            "No, and tell the agent what to do",
+        ];
+        let mut spinner = claim_with_labels(&labels);
+        spinner.id_key = "spinner".to_string();
+        spinner.signature = Some(
+            "Shell(curl -sS 'http://127.0.0.1:59727/__search?q=spinner%20size&mode=and')"
+                .to_string(),
+        );
+        let mut navpanel = claim_with_labels(&labels);
+        navpanel.id_key = "navpanel".to_string();
+        navpanel.signature = Some(
+            "Shell(curl -sS 'http://127.0.0.1:59727/__search?q=navpanel%20footer&mode=and')"
+                .to_string(),
+        );
+        let mut apicall = claim_with_labels(&labels);
+        apicall.id_key = "apicall".to_string();
+        apicall.signature = Some(
+            "Shell(curl -sS 'http://127.0.0.1:59727/__search?q=apicall%20inprogress&mode=and')"
+                .to_string(),
+        );
+        let claims = vec![spinner, navpanel, apicall];
+        let grid_labels = grid(&labels);
+        let visible = normalized_menu_label(
+            "Running curl -sS http://127.0.0.1:59727/__search?q=navpanel%20footer&mode=and",
+        );
+        let (selected, how) =
+            select_grid_joined_claim(&claims, &grid_labels, &visible).unwrap();
+        assert_eq!(selected.id_key, "navpanel");
+        assert_eq!(how, "signature");
+
+        let shared_only = normalized_menu_label(
+            "Running curl -sS http://127.0.0.1:59727/__search Do you want to proceed?",
+        );
+        assert!(select_grid_joined_claim(&claims, &grid_labels, &shared_only).is_none());
+    }
+
+    // The delayed optimism callback is tied to the exact claim that scheduled
+    // it. Any added/replaced/cleared claim makes the callback inert.
+    #[test]
+    fn coalesced_optimism_requires_an_unchanged_sole_claim() {
+        let mut first = claim_with_labels(&["Yes", "No"]);
+        first.id_key = "first".to_string();
+        first.at_ms = 100;
+        assert!(claim_remained_sole(&[first.clone()], "first", 100));
+
+        let mut second = claim_with_labels(&["Yes", "No"]);
+        second.id_key = "second".to_string();
+        second.at_ms = 101;
+        assert!(!claim_remained_sole(
+            &[first.clone(), second],
+            "first",
+            100
+        ));
+
+        first.at_ms = 102;
+        assert!(!claim_remained_sole(&[first], "first", 100));
+        assert!(!claim_remained_sole(&[], "first", 100));
     }
 
     // Grid wrapping and typographic apostrophes must not break the join;
@@ -4019,6 +4335,12 @@ static LOOPBACK_STARTED_MS: OnceLock<i64> = OnceLock::new();
 struct MenuOption {
     key: String,
     label: String,
+    // Keys written to the provider terminal when this option is chosen.
+    // Kept separate from `key`, which is the human-visible menu number.
+    // Providers with direct shortcuts (Codex: y/p/a/Esc) set this; numbered
+    // menus fall back to "<key>\r" in the shared XMLUI view.
+    #[serde(rename = "answerKeys", skip_serializing_if = "Option::is_none")]
+    answer_keys: Option<String>,
     // AskUserQuestion (Family-B) carries a per-option description; permission
     // menus (Family-A) leave this None and it is omitted from the payload.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -5092,6 +5414,7 @@ fn askuserquestion_to_menu(value: &serde_json::Value, tool: &str) -> Option<PtyM
         options.push(MenuOption {
             key: (i + 1).to_string(),
             label: label.to_string(),
+            answer_keys: None,
             description,
         });
     }
@@ -5232,6 +5555,7 @@ fn codex_permission_request_to_menu(value: &serde_json::Value) -> Option<PtyMenu
     let mut options = vec![MenuOption {
         key: "1".to_string(),
         label: "Yes, proceed".to_string(),
+        answer_keys: Some("y".to_string()),
         description: None,
     }];
     match tool_name {
@@ -5243,11 +5567,13 @@ fn codex_permission_request_to_menu(value: &serde_json::Value) -> Option<PtyMenu
                     "Yes, and don't ask again for commands that start with {}",
                     prefix
                 ),
+                answer_keys: Some("p".to_string()),
                 description: None,
             });
             options.push(MenuOption {
                 key: "3".to_string(),
                 label: "No, and tell Codex what to do differently".to_string(),
+                answer_keys: Some("\u{1b}".to_string()),
                 description: None,
             });
         }
@@ -5255,11 +5581,13 @@ fn codex_permission_request_to_menu(value: &serde_json::Value) -> Option<PtyMenu
             options.push(MenuOption {
                 key: "2".to_string(),
                 label: "Yes, and don't ask again for these files".to_string(),
+                answer_keys: Some("a".to_string()),
                 description: None,
             });
             options.push(MenuOption {
                 key: "3".to_string(),
                 label: "No, and tell Codex what to do differently".to_string(),
+                answer_keys: Some("\u{1b}".to_string()),
                 description: None,
             });
         }
@@ -5267,6 +5595,7 @@ fn codex_permission_request_to_menu(value: &serde_json::Value) -> Option<PtyMenu
             options.push(MenuOption {
                 key: "2".to_string(),
                 label: "No, and tell Codex what to do differently".to_string(),
+                answer_keys: Some("\u{1b}".to_string()),
                 description: None,
             });
         }
@@ -5351,6 +5680,7 @@ fn permission_request_to_menu(value: &serde_json::Value) -> Option<PtyMenu> {
     let mut options = vec![MenuOption {
         key: "1".to_string(),
         label: "Yes".to_string(),
+        answer_keys: None,
         description: None,
     }];
     // Claude Code renders allow-suggestions by kind. For file-edit tools
@@ -5379,6 +5709,7 @@ fn permission_request_to_menu(value: &serde_json::Value) -> Option<PtyMenu> {
         options.push(MenuOption {
             key: (options.len() + 1).to_string(),
             label: "Yes, allow all edits during this session".to_string(),
+            answer_keys: None,
             description: None,
         });
     }
@@ -5401,12 +5732,14 @@ fn permission_request_to_menu(value: &serde_json::Value) -> Option<PtyMenu> {
         options.push(MenuOption {
             key: (options.len() + 1).to_string(),
             label,
+            answer_keys: None,
             description: None,
         });
     }
     options.push(MenuOption {
         key: (options.len() + 1).to_string(),
         label: "No".to_string(),
+        answer_keys: None,
         description: None,
     });
     Some(PtyMenu {
@@ -5541,6 +5874,23 @@ fn attach_hook_edit_diff<R: tauri::Runtime>(
     }
 }
 
+// Stable claim identity comes from the provider-native tool name and input,
+// never from the pane's display alias (`Bash` is rendered as `Shell` for
+// Codex). The same helper is used at PermissionRequest add and PostToolUse
+// clear so provider presentation cannot strand claims in the shared queue.
+fn permission_claim_signature(value: &serde_json::Value) -> Option<String> {
+    let tool_name = value
+        .get("tool_name")
+        .and_then(|v| v.as_str())
+        .filter(|t| !t.is_empty() && *t != "?")?;
+    let input = value.get("tool_input").filter(|v| v.is_object())?;
+    Some(format_pending_tool_call(&PendingToolCall {
+        name: tool_name.to_string(),
+        input: input.clone(),
+        id: String::new(),
+    }))
+}
+
 fn handle_permission_menu<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
@@ -5591,19 +5941,7 @@ fn handle_permission_menu<R: tauri::Runtime>(
         // Same canonical signature the claim path computes, so keyed
         // removal matches when tool_use_id can't (PermissionRequest claims
         // carry no id; PostToolUse clears do — signature is the shared key).
-        let clear_signature = value
-            .get("tool_name")
-            .and_then(|v| v.as_str())
-            .filter(|t| !t.is_empty() && *t != "?")
-            .and_then(|tool_name| {
-                value.get("tool_input").filter(|v| v.is_object()).map(|input| {
-                    format_pending_tool_call(&PendingToolCall {
-                        name: tool_name.to_string(),
-                        input: input.clone(),
-                        id: String::new(),
-                    })
-                })
-            });
+        let clear_signature = permission_claim_signature(&value);
         clear_hook_permission_menu(
             app,
             value
@@ -5683,16 +6021,7 @@ fn handle_permission_menu<R: tauri::Runtime>(
     // the id_key when the event carried no tool_use_id (PermissionRequest
     // omits it — 2026-07-18 soak showed every claim degenerating to a
     // colliding "Bash|" key without this).
-    let claim_signature = value
-        .get("tool_input")
-        .filter(|v| v.is_object())
-        .map(|input| {
-            format_pending_tool_call(&PendingToolCall {
-                name: menu.tool.clone(),
-                input: input.clone(),
-                id: String::new(),
-            })
-        });
+    let claim_signature = permission_claim_signature(&value);
     // claim-id-resolution: adopt the transcript's tool_use_id when the
     // event omitted it and the signature matches exactly one unresolved
     // call.
@@ -5708,6 +6037,7 @@ fn handle_permission_menu<R: tauri::Runtime>(
     let resolved_trace = tool_use_id
         .clone()
         .unwrap_or_else(|| resolution.to_string());
+    let claim_at_ms = unix_now_ms();
     let depth = {
         let Ok(mut q) = menu_hook_claims_cell().lock() else {
             return (
@@ -5722,7 +6052,8 @@ fn handle_permission_menu<R: tauri::Runtime>(
             tool_use_id,
             signature: claim_signature,
             menu,
-            at_ms: unix_now_ms(),
+            at_ms: claim_at_ms,
+            answered: false,
         });
         q.len()
     };
@@ -5736,7 +6067,7 @@ fn handle_permission_menu<R: tauri::Runtime>(
             ),
         );
     }
-    select_hook_claim_display(app, "claim-add");
+    schedule_hook_claim_optimism(app, id_key, claim_at_ms);
     (
         200,
         "application/json; charset=utf-8",
@@ -7281,6 +7612,7 @@ fn report_grid_menu(app: AppHandle, payload: serde_json::Value) {
                             Some(MenuOption {
                                 key: n.to_string(),
                                 label,
+                                answer_keys: None,
                                 description: None,
                             })
                         })
@@ -8906,6 +9238,15 @@ fn pty_menu_input_clears_inflight(input: &str) -> bool {
     input == "\x1b" || input == "3\r" || input == "3\n"
 }
 
+fn menu_option_matches_input(option: &MenuOption, input: &str) -> bool {
+    if let Some(answer_keys) = option.answer_keys.as_deref() {
+        !answer_keys.is_empty() && input == answer_keys
+    } else {
+        !option.key.is_empty()
+            && input.trim_matches(|c| c == '\r' || c == '\n') == option.key
+    }
+}
+
 fn pty_output_clears_inflight(output: &[u8]) -> bool {
     let stripped = strip_ansi(output);
     let text = String::from_utf8_lossy(&stripped);
@@ -8919,6 +9260,16 @@ fn pty_output_clears_inflight(output: &[u8]) -> bool {
 // re-fire when the next PTY chunk arrives (the dismissed text is still
 // in the rolling buffer).
 fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
+    // Hook/grid reconciliation may enrich the pane payload with provider-
+    // native answerKeys while the raw PTY detector cache still contains only
+    // numbered grid options. Interpret the click against the exact payload
+    // shown in the pane, but leave its identity published until the dismissal
+    // suppressor is armed below so a concurrent stale grid report cannot
+    // resurrect the just-answered prompt.
+    let hook_displayed = menu_hook_displayed_cell()
+        .lock()
+        .ok()
+        .and_then(|displayed| displayed.clone());
     let dismissed: Option<(
         String,
         Vec<String>,
@@ -8927,7 +9278,9 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
         Option<String>,
     )> = match pty_menu_cell().lock() {
         Ok(mut menu) => {
-            let fp = menu.as_ref().map(|m| {
+            let authoritative_menu =
+                displayed_menu_for_input(hook_displayed.as_ref(), menu.as_ref());
+            let fp = authoritative_menu.map(|m| {
                 (
                     m.tool.clone(),
                     m.options
@@ -8942,18 +9295,20 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
                     m.options
                         .iter()
                         .find(|o| o.label.trim_start().starts_with("No"))
-                        .map(|o| o.key.clone()),
+                        .map(|o| {
+                            o.answer_keys
+                                .clone()
+                                .unwrap_or_else(|| o.key.clone())
+                        }),
                     // transcript-render-menu-answers: the option this input
-                    // selects, matched while the menu is still in hand. Pane
-                    // buttons send "<key>\r"; a terminal digit press arrives
-                    // bare. Arrow-highlight + Enter sends only "\r" and stays
-                    // unknown — no answer is recorded then.
+                    // selects, matched while the menu is still in hand.
+                    // Provider adapters can supply direct answer keys (Codex
+                    // y/p/a/Esc); numbered menus keep accepting "<key>\r" or
+                    // a bare terminal digit. Arrow-highlight + Enter sends
+                    // only "\r" and stays unknown.
                     m.options
                         .iter()
-                        .find(|o| {
-                            !o.key.is_empty()
-                                && input.trim_matches(|c| c == '\r' || c == '\n') == o.key
-                        })
+                        .find(|o| menu_option_matches_input(o, input))
                         .map(|o| o.label.trim().to_string()),
                 )
             });
@@ -9131,10 +9486,9 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
                         // guessed tool can never match the keyed clear that
                         // will deliver the id.
                         let claim_ident: Option<(String, Option<String>)> =
-                            menu_hook_displayed_cell()
-                                .lock()
-                                .ok()
-                                .and_then(|d| d.as_ref().map(|(k, _)| k.clone()))
+                            hook_displayed
+                                .as_ref()
+                                .map(|displayed| displayed.id_key.clone())
                                 .and_then(|k| {
                                     menu_hook_claims_cell().lock().ok().and_then(|q| {
                                         q.iter().find(|c| c.id_key == k).map(|c| {
@@ -9164,6 +9518,30 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
                 }
             }
         }
+        if chosen_label.is_some() {
+            if let Some(answered_display) = hook_displayed.as_ref() {
+                let (marked, depth, selectable_depth) = menu_hook_claims_cell()
+                    .lock()
+                    .map(|mut claims| {
+                        let marked =
+                            mark_hook_claim_answered(&mut claims, &answered_display.id_key);
+                        let selectable_depth =
+                            claims.iter().filter(|claim| !claim.answered).count();
+                        (marked, claims.len(), selectable_depth)
+                    })
+                    .unwrap_or((false, 0, 0));
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        app,
+                        "hook-menu",
+                        &format!(
+                            "op=claim-queue-answer marked={} depth={} selectable_depth={}",
+                            marked, depth, selectable_depth
+                        ),
+                    );
+                }
+            }
+        }
         if let Ok(mut s) = pty_menu_suppressed_cell().lock() {
             *s = Some(DismissedMenu {
                 tool,
@@ -9174,6 +9552,17 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
                 seen_absent: false,
                 answered_id,
             });
+        }
+        // The pane no longer displays this claim. Clear the identity only
+        // after the suppressor is armed, and only if no newer selection won
+        // the race. The next fresh grid report can now join the changed scene
+        // to another queued claim even when every option label is identical.
+        if let Some(answered_display) = hook_displayed.as_ref() {
+            if let Ok(mut displayed) = menu_hook_displayed_cell().lock() {
+                if hook_display_matches_id(displayed.as_ref(), &answered_display.id_key) {
+                    *displayed = None;
+                }
+            }
         }
         clear_grid_menu_sighting();
         if clears_inflight {
@@ -23760,7 +24149,7 @@ fn record_hook_menu_answer<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
     let displayed_key = menu_hook_displayed_cell()
         .lock()
         .ok()
-        .and_then(|d| d.as_ref().map(|(k, _)| k.clone()));
+        .and_then(|d| d.as_ref().map(|displayed| displayed.id_key.clone()));
     let Some(displayed_key) = displayed_key else {
         return;
     };
@@ -30204,6 +30593,7 @@ mod pty_menu_tests {
             options: vec![super::MenuOption {
                 key: "1".to_string(),
                 label: "Yes".to_string(),
+                answer_keys: None,
                 description: None,
             }],
             tool_call_signature: None,
@@ -30280,14 +30670,22 @@ mod pty_menu_tests {
         assert_eq!(menu.text, "Shell: gh issue list");
         assert_eq!(menu.options.len(), 3);
         assert_eq!(menu.options[0].label, "Yes, proceed");
+        assert_eq!(menu.options[0].answer_keys.as_deref(), Some("y"));
         assert_eq!(
             menu.options[1].label,
             "Yes, and don't ask again for commands that start with gh issue list"
         );
+        assert_eq!(menu.options[1].answer_keys.as_deref(), Some("p"));
         assert_eq!(
             menu.options[2].label,
             "No, and tell Codex what to do differently"
         );
+        assert_eq!(menu.options[2].answer_keys.as_deref(), Some("\u{1b}"));
+        assert!(super::menu_option_matches_input(&menu.options[0], "y"));
+        assert!(!super::menu_option_matches_input(
+            &menu.options[0],
+            "1\r"
+        ));
     }
 
     #[test]
@@ -30304,10 +30702,168 @@ mod pty_menu_tests {
         let menu = super::permission_request_to_menu(&payload).unwrap();
         assert_eq!(menu.tool, "apply_patch");
         assert_eq!(menu.options.len(), 3);
+        assert_eq!(menu.options[0].answer_keys.as_deref(), Some("y"));
         assert_eq!(
             menu.options[1].label,
             "Yes, and don't ask again for these files"
         );
+        assert_eq!(menu.options[1].answer_keys.as_deref(), Some("a"));
+        assert_eq!(menu.options[2].answer_keys.as_deref(), Some("\u{1b}"));
+    }
+
+    #[test]
+    fn grid_option_adoption_preserves_claim_answer_keys_by_key() {
+        let option = |key: &str, label: &str, answer_keys: Option<&str>| super::MenuOption {
+            key: key.to_string(),
+            label: label.to_string(),
+            answer_keys: answer_keys.map(str::to_string),
+            description: None,
+        };
+        let claim = vec![
+            option("1", "Hook yes", Some("y")),
+            option("2", "Hook persist", Some("p")),
+            option("3", "Hook no", Some("\u{1b}")),
+        ];
+        let grid = vec![
+            option("2", "Grid persist", None),
+            option("1", "Grid yes", None),
+            option("3", "Grid no", None),
+        ];
+
+        let merged = super::grid_options_preserving_answer_keys(&claim, &grid);
+        assert_eq!(merged[0].label, "Grid persist");
+        assert_eq!(merged[0].answer_keys.as_deref(), Some("p"));
+        assert_eq!(merged[1].label, "Grid yes");
+        assert_eq!(merged[1].answer_keys.as_deref(), Some("y"));
+        assert_eq!(merged[2].answer_keys.as_deref(), Some("\u{1b}"));
+    }
+
+    #[test]
+    fn grid_option_adoption_does_not_carry_inputs_across_count_mismatch() {
+        let option = |key: &str, answer_keys: Option<&str>| super::MenuOption {
+            key: key.to_string(),
+            label: key.to_string(),
+            answer_keys: answer_keys.map(str::to_string),
+            description: None,
+        };
+        let claim = vec![
+            option("1", Some("y")),
+            option("2", Some("p")),
+            option("3", Some("\u{1b}")),
+        ];
+        let grid = vec![option("1", None), option("2", None)];
+
+        let merged = super::grid_options_preserving_answer_keys(&claim, &grid);
+        assert!(merged.iter().all(|option| option.answer_keys.is_none()));
+    }
+
+    #[test]
+    fn pane_payload_is_authoritative_for_click_input() {
+        let menu = |answer_keys: Option<&str>| super::PtyMenu {
+            tool: "Shell".to_string(),
+            text: String::new(),
+            options: vec![super::MenuOption {
+                key: "1".to_string(),
+                label: "Yes, proceed (y)".to_string(),
+                answer_keys: answer_keys.map(str::to_string),
+                description: None,
+            }],
+            tool_call_signature: Some("Shell(test)".to_string()),
+            tool_call_diff: None,
+            tool_call_content: None,
+            cache_source: None,
+            at_host_ms: None,
+            signature_source: None,
+        };
+        let raw_grid = menu(None);
+        let displayed = super::HookMenuDisplayed {
+            id_key: "sig:Bash(test)".to_string(),
+            labels: vec!["yes, proceed (y)".to_string()],
+            menu: menu(Some("y")),
+        };
+
+        let authoritative =
+            super::displayed_menu_for_input(Some(&displayed), Some(&raw_grid)).unwrap();
+        assert!(super::menu_option_matches_input(
+            &authoritative.options[0],
+            "y"
+        ));
+        assert!(!super::menu_option_matches_input(&raw_grid.options[0], "y"));
+    }
+
+    #[test]
+    fn dismissal_only_matches_the_hook_identity_it_answered() {
+        let menu = super::PtyMenu {
+            tool: "Shell".to_string(),
+            text: String::new(),
+            options: Vec::new(),
+            tool_call_signature: None,
+            tool_call_diff: None,
+            tool_call_content: None,
+            cache_source: None,
+            at_host_ms: None,
+            signature_source: None,
+        };
+        let current = super::HookMenuDisplayed {
+            id_key: "sig:Bash(date +%s)".to_string(),
+            labels: Vec::new(),
+            menu,
+        };
+
+        assert!(super::hook_display_matches_id(
+            Some(&current),
+            "sig:Bash(date +%s)"
+        ));
+        assert!(!super::hook_display_matches_id(
+            Some(&current),
+            "sig:Bash(sw_vers -productVersion)"
+        ));
+    }
+
+    #[test]
+    fn permission_claim_signature_keeps_native_tool_identity_across_lifecycle() {
+        let permission = serde_json::json!({
+            "provider": "codex",
+            "hook_event_name": "PermissionRequest",
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": "curl http://127.0.0.1/search",
+                "description": "Search"
+            }
+        });
+        let clear = serde_json::json!({
+            "provider": "codex",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": "curl http://127.0.0.1/search",
+                "description": "Search"
+            }
+        });
+
+        let claim_signature = super::permission_claim_signature(&permission);
+        assert_eq!(claim_signature, super::permission_claim_signature(&clear));
+        assert_eq!(
+            claim_signature.as_deref(),
+            Some("Bash(curl http://127.0.0.1/search)")
+        );
+
+        let visible = super::permission_request_to_menu(&permission).unwrap();
+        assert_eq!(visible.tool, "Shell");
+    }
+
+    #[test]
+    fn numbered_menu_inputs_keep_key_plus_enter_behavior() {
+        let option = super::MenuOption {
+            key: "1".to_string(),
+            label: "Yes".to_string(),
+            answer_keys: None,
+            description: None,
+        };
+
+        assert!(super::menu_option_matches_input(&option, "1"));
+        assert!(super::menu_option_matches_input(&option, "1\r"));
+        assert!(!super::menu_option_matches_input(&option, "y"));
     }
 
     #[test]
@@ -30343,6 +30899,7 @@ mod pty_menu_tests {
         let opt = |key: &str, label: &str| super::MenuOption {
             key: key.to_string(),
             label: label.to_string(),
+            answer_keys: None,
             description: None,
         };
         let bash_opts = vec![
@@ -30443,6 +31000,7 @@ mod pty_menu_tests {
             options: vec![super::MenuOption {
                 key: "1".to_string(),
                 label: "Yes".to_string(),
+                answer_keys: None,
                 description: None,
             }],
             tool_call_signature: None,
@@ -30478,11 +31036,13 @@ mod pty_menu_tests {
                 super::MenuOption {
                     key: "1".to_string(),
                     label: "Yes".to_string(),
+                    answer_keys: None,
                     description: None,
                 },
                 super::MenuOption {
                     key: "2".to_string(),
                     label: "No".to_string(),
+                    answer_keys: None,
                     description: None,
                 },
             ],
@@ -30502,6 +31062,7 @@ mod pty_menu_tests {
             options: vec![super::MenuOption {
                 key: "1".to_string(),
                 label: "Yes".to_string(),
+                answer_keys: None,
                 description: None,
             }],
             tool_call_signature: Some("Bash(New-Item foo.bar)".to_string()),
@@ -30541,11 +31102,13 @@ mod pty_menu_tests {
                 super::MenuOption {
                     key: "1".to_string(),
                     label: "Yes, proceed (y)".to_string(),
+                    answer_keys: None,
                     description: None,
                 },
                 super::MenuOption {
                     key: "2".to_string(),
                     label: "No, and tell Codex what to do differently (esc)".to_string(),
+                    answer_keys: None,
                     description: None,
                 },
             ],

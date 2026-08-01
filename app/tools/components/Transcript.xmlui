@@ -136,9 +136,8 @@
     var.mountPinTicks="{0}"
     var.findText="{''}"
     var.appliedNeedle="{''}"
-    var.findMatches="{[]}"
     var.findCursor="{0}"
-    var.findRows="{null}"
+    var.findPlan="{null}"
     var.currentSession="{((transcriptSessions.value || []).find(s => s.current)) || ((transcriptSessions.value || [])[0])}">
     <!-- transcript-find-in-page-v2: inline find row, no UDC — the FindBar
          factoring is parked (stash@{0}) on the xmlui #3584 emitEvent-in-UDC
@@ -161,11 +160,11 @@
         <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{events.length + ' events'}" />
         <FindBar id="transcriptFindBar" placeholder="Find in transcript…"
           clearRevision="{transcriptFindClearEvt.value &amp;&amp; transcriptFindClearEvt.value.tick}"
-          matchCount="{findMatches.length}"
-          current="{findCursor}"
+          matchCount="{findPlan ? findPlan.total : 0}"
+          current="{findPlan ? findPlan.cursor : findCursor}"
           showCount="{findText.trim().length >= 2}"
           onNeedleChange="(v) => findText = v"
-          onStep="(d) => findCursor = window.__bramFindStep(findMatches, findCursor, d)" />
+          onStep="(d) => findCursor = window.__bramFindCursorStep(findPlan ? findPlan.total : 0, findCursor, d)" />
       </HStack>
     </StickySection>
     <Text
@@ -188,7 +187,8 @@
     <List
       id="transcriptList"
       height="*"
-      data="{findRows || events}"
+      data="{(findPlan &amp;&amp; findPlan.rows) || events}"
+      idKey="{findPlan ? '__findKey' : 'id'}"
       onScroll="(ev) => atBottom = window.__bramFollowClassify(atBottom, ev.atEnd, $props.agentId)"
       onVisibleRangeDidChange="(range) => window.__bramSetVisibleRange(range)">
       <property name="emptyListTemplate"><Fragment/></property>
@@ -203,18 +203,19 @@
           <Text value="You" fontWeight="bold" color="$color-primary-600" fontSize="$fontSize-sm" />
           <!-- Worklist payloads, feedback refs, and image markers are already
                resolved by the host projection; render the text as-is.
-               highlightText/highlightActive ride the find decoration
-               (__needle/__active baked into findRows; inert otherwise). -->
+               highlightText/highlightActiveIndex ride the find decoration
+               (__needle/__activeOcc/__blockIdx baked by the find plan; inert
+               otherwise). -->
           <Markdown content="{$item.text}"
             highlightText="{window.__bramSearchTerms($item.__needle)}"
-            highlightActive="{$item.__active}" />
+            highlightActiveIndex="{$item.__activeOcc}" />
         </VStack>
         <!-- assistant text -->
         <Markdown
           when="{$item.kind === 'text'}"
           content="{$item.text}"
           highlightText="{window.__bramSearchTerms($item.__needle)}"
-          highlightActive="{$item.__active}" />
+          highlightActiveIndex="{$item.__activeOcc}" />
         <!-- task notification: quiet system-note row (host-reclassified
              subagent completion report — never rendered as "You") -->
         <Text
@@ -223,6 +224,13 @@
           fontStyle="italic"
           color="$textColor-secondary"
           value="{'🔔 ' + $item.text}" />
+        <Markdown
+          when="{$item.kind === 'notification' &amp;&amp; $item.__findPreview}"
+          fontSize="$fontSize-sm"
+          color="$textColor-secondary"
+          content="{window.__bramMarkdownLiteral($item.__findPreview)}"
+          highlightText="{window.__bramSearchTerms($item.__needle)}"
+          highlightActiveIndex="{$item.__activeOcc}" />
         <!-- image strip -->
         <VStack
           when="{$item.kind === 'images'}"
@@ -246,13 +254,22 @@
               color="$textColor-secondary"
               value="{((expanded || []).includes($item.id) ? '▾' : '▸') + '  💭 thinking'}" />
           </Link>
+          <Markdown
+            when="{$item.__findPreview}"
+            fontSize="$fontSize-sm"
+            color="$textColor-secondary"
+            content="{window.__bramMarkdownLiteral($item.__findPreview)}"
+            highlightText="{window.__bramSearchTerms($item.__needle)}"
+            highlightActiveIndex="{$item.__activeOcc}" />
           <VStack
             when="{(expanded || []).includes($item.id)}"
             backgroundColor="$color-surface-50"
             padding="$space-2"
             borderRadius="$borderRadius">
+            <!-- Expanded body: unmarked while finding (the preview above
+                 is the counted, active-highlighted surface). -->
             <Markdown content="{$item.text}"
-              highlightText="{window.__bramSearchTerms($item.__needle)}" />
+              highlightText="{$item.__findPreview ? [] : window.__bramSearchTerms($item.__needle)}" />
           </VStack>
         </VStack>
         <!-- tool call (foldable) -->
@@ -295,6 +312,17 @@
                 value="{$item.summary}" />
             </HStack>
           </Link>
+          <!-- The matcher includes collapsed tool metadata and command text.
+               Surface a compact excerpt while finding so every counted match
+               has an actual <mark>, including a match that exists only in the
+               folded command body. -->
+          <Markdown
+            when="{$item.__findPreview}"
+            fontSize="$fontSize-sm"
+            color="$textColor-secondary"
+            content="{window.__bramMarkdownLiteral($item.__findPreview)}"
+            highlightText="{window.__bramSearchTerms($item.__needle)}"
+            highlightActiveIndex="{$item.__activeOcc}" />
           <!-- transcript-render-menu-answers: the user's menu answer (host
                menu-answer overlay, keyed by tool_use id). AskUserQuestion
                rows only — a bare '✔ Yes' under a permission-prompted
@@ -327,7 +355,7 @@
               when="{window.__bramShowToolCommand ? window.__bramShowToolCommand($item) : (($item.commandDisplay || $item.summary) &amp;&amp; ($item.name !== 'apply_patch' || !$item.commandDisplay))}"
               overflowMode="scroll"
               content="{window.__bramFormatToolCommand($item.commandDisplay || $item.summary, $item.aiDescription || $item.description)}"
-              highlightText="{window.__bramSearchTerms($item.__needle)}" />
+              highlightText="{$item.__findPreview ? [] : window.__bramSearchTerms($item.__needle)}" />
             <Markdown
               when="{$item.commandMarkdown}"
               overflowMode="flow"
@@ -374,14 +402,16 @@
          RO-flood fix holds — no per-render data identity churn. Stepping and
          fresh matches disarm follow (atBottom=false): a read-pause gesture,
          same anti-yank contract as scrolling up; re-arm stays the user's
-         explicit scroll to bottom. -->
+         explicit scroll to bottom. The List switches from its normal `id`
+         identity to each decorated row's `__findKey` while find is active.
+         That key includes the needle and an active-occurrence suffix only on
+         the active row, forcing virtua's mounted row to consume the changed
+         $item without remounting the rest of the visible batch. Newly
+         virtualized rows and the first batch follow the same path.
+         https://docs.xmlui.org/components/List#idkey -->
     <ChangeListener
       listenTo="{transcriptFindClearEvt.value &amp;&amp; transcriptFindClearEvt.value.tick}"
       onDidChange="() => findText = ''" />
-    <ChangeListener
-      listenTo="{findText + '|' + events.length}"
-      debounceWaitInMs="200"
-      onDidChange="() => findMatches = window.__bramFindMatchingEventIndices ? window.__bramFindMatchingEventIndices(events, findText) : []" />
     <ChangeListener
       listenTo="{findText}"
       debounceWaitInMs="200"
@@ -390,21 +420,22 @@
       listenTo="{findText}"
       debounceWaitInMs="200"
       onDidChange="() => appliedNeedle = findText" />
+    <!-- Occurrence-granular find plan: matches, per-event occurrence counts,
+         total, and the active event/occurrence for the current cursor. The
+         plan computes matches internally (no separate findMatches var), which
+         removes the debounce race between the matcher and the plan. -->
     <ChangeListener
       listenTo="{appliedNeedle + '|' + findCursor + '|' + events.length + ':' + eventsVersion}"
-      onDidChange="() => findRows = window.__bramTranscriptFindRows ? window.__bramTranscriptFindRows(events, appliedNeedle, findMatches, findCursor) : null" />
+      onDidChange="() => findPlan = window.__bramTranscriptFindPlan ? window.__bramTranscriptFindPlan(events, appliedNeedle, findCursor) : null" />
+    <!-- Scroll only when the active EVENT changes (stepping between
+         occurrences within one event keeps it in view). -->
+    <ChangeListener
+      listenTo="{(findPlan &amp;&amp; findPlan.total) ? findPlan.activeEventIndex : -1}"
+      onDidChange="() => (findPlan &amp;&amp; findPlan.total) ? transcriptList.scrollToIndex(findPlan.activeEventIndex) : null" />
+    <!-- Every step disarms follow (read-pause), same anti-yank contract. -->
     <ChangeListener
       listenTo="{findCursor}"
-      onDidChange="() => findMatches.length ? transcriptList.scrollToIndex(findMatches[findCursor]) : null" />
-    <ChangeListener
-      listenTo="{findCursor}"
-      onDidChange="() => findMatches.length ? (atBottom = window.__bramFollowTransition(false, 'find-step', $props.agentId)) : null" />
-    <ChangeListener
-      listenTo="{findMatches}"
-      onDidChange="() => findMatches.length ? transcriptList.scrollToIndex(findMatches[findCursor] || findMatches[0]) : null" />
-    <ChangeListener
-      listenTo="{findMatches}"
-      onDidChange="() => findMatches.length ? (atBottom = window.__bramFollowTransition(false, 'find-step', $props.agentId)) : null" />
+      onDidChange="() => (findPlan &amp;&amp; findPlan.total) ? (atBottom = window.__bramFollowTransition(false, 'find-step', $props.agentId)) : null" />
     <ChangeListener
       listenTo="{events.length + ':' + eventsVersion}"
       onDidChange="() => { if (window.__bramFollowRepinOk(atBottom, $props.agentId)) { transcriptList.scrollToBottom(); settleArmed = true; window.__bramFollowVerify('content-append-repin', $props.agentId); window.__bramIframeTrace('transcript-repin', {events: events.length, agentId: $props.agentId || 'main'}); } }" />

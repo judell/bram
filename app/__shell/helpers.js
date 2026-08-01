@@ -6430,8 +6430,12 @@ window.__bramFindMatchingTurnIndices = function (turns, needle) {
   return out;
 };
 
-// Step a match cursor by `dir` (+1 / -1) with wraparound. Returns 0 when there
-// are no matches, so the caller never indexes an empty array.
+// Step an occurrence count by `dir` (+1 / -1) with wraparound. Returns 0 when
+// there are no matches, so callers never address an empty result set.
+window.__bramFindCursorStep = function (total, cur, dir) {
+  var n = Number(total) || 0;
+  return n ? (((Number(cur) || 0) + dir + n) % n) : 0;
+};
 window.__bramFindStep = function (indices, cur, dir) {
   var n = indices && indices.length ? indices.length : 0;
   if (!n) return 0;
@@ -6732,14 +6736,14 @@ window.__bramSessionSearchRows = function (turns, needle, matchIndices, currentM
 // is turn-shaped (t.text only). Scans the fields the rows actually render,
 // so a match is a visible match.
 window.__bramFindMatchingEventIndices = function (events, needle) {
-  var terms = window.__bramSearchTerms(needle);
+  var terms = Array.isArray(needle) ? needle : window.__bramSearchTerms(needle);
   if (!terms.length || !events || !events.length) return [];
   var lower = [];
   for (var k = 0; k < terms.length; k++) lower.push(String(terms[k]).toLowerCase());
   var out = [];
   for (var i = 0; i < events.length; i++) {
     var ev = events[i] || {};
-    var text = [ev.text, ev.summary, ev.name, ev.nameDetail, ev.commandDisplay, ev.description]
+    var text = [ev.text, ev.summary, ev.name, ev.nameDetail, ev.aiDescription, ev.commandDisplay, ev.description]
       .filter(Boolean).join("\n").toLowerCase();
     if (!text) continue;
     for (var j = 0; j < lower.length; j++) {
@@ -6749,19 +6753,155 @@ window.__bramFindMatchingEventIndices = function (events, needle) {
   return out;
 };
 
+
+// Return a compact, visible excerpt for event kinds whose searchable text is
+// otherwise hidden behind a fold or rendered by plain Text (which cannot mark
+// substrings). User/assistant prose already has a top-level highlighted
+// Markdown, so it needs no duplicate preview.
+window.__bramTranscriptFindPreview = function (event, needle) {
+  var ev = event || {};
+  if (ev.kind === "user" || ev.kind === "text") return "";
+  var terms = Array.isArray(needle) ? needle : window.__bramSearchTerms(needle);
+  if (!terms.length) return "";
+  var text = [ev.text, ev.name, ev.nameDetail, ev.aiDescription, ev.summary, ev.commandDisplay, ev.description]
+    .filter(Boolean).join(" · ").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  var lower = text.toLowerCase();
+  var first = -1;
+  var matchLength = 0;
+  for (var i = 0; i < terms.length; i++) {
+    var term = String(terms[i]).toLowerCase();
+    var at = lower.indexOf(term);
+    if (at >= 0 && (first < 0 || at < first)) {
+      first = at;
+      matchLength = term.length;
+    }
+  }
+  if (first < 0) return "";
+  // Widened forward so several occurrences within one event fall inside the
+  // counted+marked excerpt (occurrence-granular find counts what it shows).
+  var start = Math.max(0, first - 80);
+  var end = Math.min(text.length, first + matchLength + 600);
+  return (start ? "…" : "") + text.slice(start, end) + (end < text.length ? "…" : "");
+};
+
+// Feed a plain-text find excerpt through Markdown without treating tool names,
+// shell syntax, or file paths as formatting.
+window.__bramMarkdownLiteral = function (text) {
+  return String(text || "")
+    .replace(/\\/g, "\\\\")
+    .replace(/([`*_{}\[\]()<>#+.!|~-])/g, "\\$1");
+};
+
 // Bake find state into transcript rows (rows are isolated scopes — they
 // can't see the outer find vars). Returns NULL when the find is inactive so
-// the caller's `findRows || events` binding falls back to the live events
+// the caller's `findPlan.rows || events` binding falls back to the live events
 // array — the hot refetch path pays nothing and never sees stale copies.
-window.__bramTranscriptFindRows = function (events, needle, matchIndices, cursor) {
+window.__bramTranscriptFindPlan = function (events, needle, cursor) {
+  // Occurrence-granular transcript find (like the Commit/Issue/History
+  // detail views). Each matching event is a "block" with ONE canonical
+  // marked surface — prose (user/assistant) marks its body text; tool /
+  // thinking / notification mark a compact preview excerpt. Count
+  // occurrences in exactly that surface so the counter equals the painted
+  // <mark>s, run a global cursor over the total, and light the specific
+  // occurrence via highlightActiveIndex. Event-granular navigation skipped
+  // intra-event occurrences (2026-08-01: first click jumped 1->3 because
+  // event[0] had two visible marks); this steps mark-by-mark.
   var terms = window.__bramSearchTerms(needle);
-  if (!terms.length) return null;
   var arr = Array.isArray(events) ? events : [];
-  var mi = Array.isArray(matchIndices) ? matchIndices : [];
-  var activeIdx = mi.length ? mi[Number(cursor) || 0] : -1;
-  return arr.map(function (ev, i) {
-    return Object.assign({}, ev, { __needle: needle || "", __active: i === activeIdx });
-  });
+  if (!terms.length) return null;
+  // XMLUI re-evaluates the adapter expression when the cursor changes, so
+  // the outer events array is often new even though its cached event objects
+  // are unchanged. Compare those identities once (cheap O(rows)); only scan
+  // strings, count occurrences, make previews, and clone base rows when the
+  // needle or an event object actually changed.
+  var needleKey = String(needle || "");
+  var cache = window.__bramTranscriptFindCache;
+  var cacheHit = !!cache && cache.needle === needleKey && cache.events.length === arr.length;
+  if (cacheHit) {
+    for (var same = 0; same < arr.length; same++) {
+      if (cache.events[same] !== arr[same]) { cacheHit = false; break; }
+    }
+  }
+  if (!cacheHit) {
+    var matchIndicesBuilt = window.__bramFindMatchingEventIndices(arr, terms);
+    var countsBuilt = [];
+    var blockOfEventBuilt = {};
+    var previewsBuilt = {};
+    for (var b = 0; b < matchIndicesBuilt.length; b++) {
+      var ei = matchIndicesBuilt[b];
+      var ev = arr[ei] || {};
+      var isProse = ev.kind === "user" || ev.kind === "text";
+      var preview = isProse ? "" : window.__bramTranscriptFindPreview(ev, terms);
+      var surface = isProse ? (ev.text || "") : preview;
+      countsBuilt.push(window.__bramCountOccurrences(surface, terms));
+      blockOfEventBuilt[ei] = b;
+      if (!isProse) previewsBuilt[ei] = preview;
+    }
+    var totalBuilt = 0;
+    for (var c = 0; c < countsBuilt.length; c++) totalBuilt += countsBuilt[c];
+    var keySep = String.fromCharCode(0);
+    var baseRows = arr.map(function (row, i) {
+      var bi = Object.prototype.hasOwnProperty.call(blockOfEventBuilt, i) ? blockOfEventBuilt[i] : -1;
+      var idBase = (row.id === undefined || row.id === null || row.id === "") ? ("row-" + i) : String(row.id);
+      return Object.assign({}, row, {
+        __findKey: idBase + keySep + "f:" + needleKey,
+        __findPreview: Object.prototype.hasOwnProperty.call(previewsBuilt, i) ? previewsBuilt[i] : "",
+        __needle: bi >= 0 ? needleKey : "",
+        __activeOcc: -1,
+        __blockIdx: bi,
+      });
+    });
+    cache = {
+      needle: needleKey,
+      events: arr,
+      matchIndices: matchIndicesBuilt,
+      counts: countsBuilt,
+      total: totalBuilt,
+      rows: baseRows,
+    };
+    window.__bramTranscriptFindCache = cache;
+  }
+  var matchIndices = cache.matchIndices;
+  var counts = cache.counts;
+  var total = cache.total;
+  var cur = Number(cursor) || 0;
+  cur = total > 0 ? (((cur % total) + total) % total) : 0;
+  // Locate the active block + the active occurrence WITHIN it, so the row
+  // key can stay cursor-stable for every row except the active one. Baking
+  // the global cursor into every key (the first cut) remounted all visible
+  // rows per step — each re-parsing its Markdown — which is what felt
+  // sluggish and let fast clicks outpace rendering. Now a step changes at
+  // most two keys (the row losing active, the row gaining it).
+  var activeEventIndex = -1, activeLocalOcc = -1, acc = 0;
+  for (var k = 0; k < counts.length; k++) {
+    if (cur >= acc && cur < acc + counts[k]) {
+      activeEventIndex = matchIndices[k];
+      activeLocalOcc = cur - acc;
+      break;
+    }
+    acc += counts[k];
+  }
+  if (activeEventIndex < 0 && matchIndices.length) { activeEventIndex = matchIndices[0]; activeLocalOcc = 0; }
+  // A cursor step now copies only the array plus the active row. Every other
+  // decorated object is reused, preserving List identity and avoiding an
+  // O(rows) object rebuild on every click.
+  var rows = cache.rows.slice();
+  if (activeEventIndex >= 0) {
+    var activeBase = cache.rows[activeEventIndex];
+    rows[activeEventIndex] = Object.assign({}, activeBase, {
+      __findKey: activeBase.__findKey + String.fromCharCode(0) + "a:" + activeLocalOcc,
+      __activeOcc: activeLocalOcc,
+    });
+  }
+  if (window.__bramIframeTrace) {
+    window.__bramIframeTrace("transcript-find-plan", {
+      events: rows.length, matches: matchIndices.length, occurrences: total,
+      cursor: cur, activeEvent: activeEventIndex, terms: terms.length,
+      cacheHit: cacheHit,
+    });
+  }
+  return { rows: rows, total: total, activeEventIndex: activeEventIndex, cursor: cur };
 };
 
 window.__bramProjectedLastExchange = function (payload) {

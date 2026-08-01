@@ -30,8 +30,8 @@
          provide this context on Claude: the tool_use JSONL record flushes
          only after the permission decision (answer-at-click
          call_present=false), so the menu is self-describing instead. -->
-    <Text fontSize="$fontSize-xs" color="$color-warn-800">
-      Agent wants to use <Text fontFamily="$fontFamily-monospace">{$props.menu.tool}</Text><Text when="{menuHeaderLine}" fontFamily="$fontFamily-monospace" fontSize="$fontSize-xs"> — {menuHeaderLine}</Text>
+    <Text fontSize="$fontSize-base" color="$color-warn-800">
+      Agent wants to use <Text fontFamily="$fontFamily-monospace" fontSize="$fontSize-base">{$props.menu.tool}</Text><Text when="{menuHeaderLine}" fontFamily="$fontFamily-monospace" fontSize="$fontSize-base"> — {menuHeaderLine}</Text>
     </Text>
     <!-- Each new menu starts at the designed default; without this, a
          Hide-preview toggle leaks into the next prompt (observed

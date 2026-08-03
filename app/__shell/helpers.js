@@ -6657,6 +6657,10 @@ window.__bramDiffFindRows = function (rows, needle, activeIndex) {
         segs.push({
           text: text.slice(m.start, m.start + m.len),
           bg: m.occ === act ? "rgba(249, 115, 22, 0.6)" : "rgba(250, 204, 21, 0.45)",
+          // Tag the active slice so the scroll helper can scrollIntoView it: a
+          // wrapped diff line is many visual rows inside ONE tall List row, so
+          // scrollToIndex(row) only reaches the row top, not a mark deep in it.
+          active: m.occ === act,
           color: seg.color,
         });
         pos = m.start + m.len;
@@ -6696,7 +6700,23 @@ window.__bramDiffScrollToActive = function (listRef, rows, needle, activeIndex) 
       hasRef: !!(listRef && listRef.scrollToIndex),
     });
   } catch (e) {}
-  if (r >= 0 && listRef && listRef.scrollToIndex) listRef.scrollToIndex(r);
+  if (r >= 0 && listRef && listRef.scrollToIndex) {
+    listRef.scrollToIndex(r);
+    // scrollToIndex reaches the row top; a wrapped line wraps into many visual
+    // rows inside that one tall List row, so a mark deep in it stays off-screen.
+    // After the row mounts (double-rAF = after layout), scrollIntoView the
+    // active slice (only one carries data-testid="diff-active-mark") to bring
+    // its wrapped sub-line into view. block:nearest minimizes vertical movement;
+    // inline:nearest is a no-op now that lines wrap (no horizontal overflow).
+    if (typeof requestAnimationFrame === "function" && typeof document !== "undefined") {
+      requestAnimationFrame(function () {
+        requestAnimationFrame(function () {
+          var el = document.querySelector('[data-testid="diff-active-mark"]');
+          if (el && el.scrollIntoView) el.scrollIntoView({ block: "nearest", inline: "nearest" });
+        });
+      });
+    }
+  }
 };
 
 // Scroll CommitDetail's outer list to the block row holding the cursor.

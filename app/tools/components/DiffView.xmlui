@@ -24,20 +24,31 @@
       <Items
         when="{$props.compact}"
         data="{window.__bramDiffFindRows(diffViewRows(annotate.lastResult, $props.text), $props.needle, $props.activeIndex)}">
-        <HStack
-          gap="0"
+        <!-- A line WRAPS as continuous text: an outer Text (line box, width:100%,
+             pre-wrap) hosts the per-segment inner Texts with inline="true"
+             (xmlui-org/xmlui#3713 / the new inline display mode). True inline
+             runs share one line-breaking context, so a highlighted match stays
+             whole mid-word — inline-block/flex segments split it (hooks ->
+             "hook" / "s in..."). See judell/bram#239. -->
+        <Text
+          width="100%"
+          whiteSpace="pre-wrap"
+          fontFamily="$fontFamily-monospace"
+          fontSize="$fontSize-sm"
           backgroundColor="{$item.bg}"
           paddingHorizontal="$space-2">
           <Items data="{$item.segments}">
             <Text
+              inline="true"
+              whiteSpace="pre-wrap"
               fontFamily="$fontFamily-monospace"
               fontSize="$fontSize-sm"
-              whiteSpace="pre"
               backgroundColor="{$item.bg || 'transparent'}"
               color="{$item.color}"
+              testId="{$item.active ? 'diff-active-mark' : ''}"
               value="{$item.text}" />
           </Items>
-        </HStack>
+        </Text>
       </Items>
       <!-- Default: virtualized bounded List for full / potentially large
            diffs (the modal, the TO COMMIT item diff, the Commits patch view).
@@ -50,26 +61,35 @@
       <ChangeListener
         listenTo="{((annotate.lastResult || []).length) + '|' + ($props.needle || '') + '|' + ($props.activeIndex == null ? -1 : $props.activeIndex)}"
         onDidChange="() => window.__bramDiffScrollToActive(diffRowsList, diffViewRows(annotate.lastResult, $props.text), $props.needle, $props.activeIndex)" />
+      <!-- fixedItemSize dropped: wrapped lines have variable heights, so virtua
+           must measure each row rather than assume the first row's height. -->
       <List
         id="diffRowsList"
         when="{!$props.compact}"
         data="{window.__bramDiffFindRows(diffViewRows(annotate.lastResult, $props.text), $props.needle, $props.activeIndex)}"
-        height="{$props.maxHeight || '60vh'}"
-        fixedItemSize="true">
-        <HStack
-          gap="0"
+        height="{$props.maxHeight || '60vh'}">
+        <!-- A line WRAPS as continuous text: outer Text (line box, width:100%,
+             pre-wrap) hosting per-segment inner Texts with inline="true", so a
+             highlighted match stays whole mid-word. See judell/bram#239. -->
+        <Text
+          width="100%"
+          whiteSpace="pre-wrap"
+          fontFamily="$fontFamily-monospace"
+          fontSize="$fontSize-sm"
           backgroundColor="{$item.bg}"
           paddingHorizontal="$space-2">
           <Items data="{$item.segments}">
             <Text
+              inline="true"
+              whiteSpace="pre-wrap"
               fontFamily="$fontFamily-monospace"
               fontSize="$fontSize-sm"
-              whiteSpace="pre"
               backgroundColor="{$item.bg || 'transparent'}"
               color="{$item.color}"
+              testId="{$item.active ? 'diff-active-mark' : ''}"
               value="{$item.text}" />
           </Items>
-        </HStack>
+        </Text>
       </List>
     </VStack>
   </Theme>

@@ -1,124 +1,83 @@
 <Component name="HistoryDetail">
   <!-- issue-230: the worklist-history detail block. Takes a WorklistHistoryGroup
        as `group`; optional `height` and `query` (initial/current find term).
-       search-in-view-transplant: in-view find across before / after /
-       feedback-phase Markdown blocks. Same structure as SessionDetail — the find
-       toolbar sits ABOVE a List (the only reliably bounded scroller), so the
-       controls stay in view. Block 0 = before, 1 = after, then feedback phases. -->
-  <VStack gap="$space-2" padding="$space-2" var.g="{$props.group}"
-    var.findText="{$props.query || ''}"
-    var.appliedNeedle="{$props.query || ''}"
-    var.cursor="{0}"
-    var.counts="{window.__bramBlockMatchCounts(window.__bramHistoryBlocks($props.group), $props.query || '')}"
-    var.oneRow="{[{ needle: '', counts: [], cursor: 0 }]}">
-
-    <!-- Fixed find toolbar (sibling above the List). -->
-    <HStack gap="$space-2" verticalAlignment="center">
-      <FindBar id="findBox" placeholder="Find in history entry…"
-        initialValue="{$props.query || ''}"
-        matchCount="{counts.total}"
-        current="{cursor}"
-        showCount="{appliedNeedle &amp;&amp; appliedNeedle.trim().length >= 2}"
-        onNeedleChange="(v) => findText = v"
-        onStep="(d) => cursor = window.__bramCursorStep(counts.total, cursor, d)" />
-    </HStack>
-    <ChangeListener listenTo="{$props.query || ''}"
-      onDidChange="() => findText = ($props.query || '')" />
-    <ChangeListener listenTo="{$props.query || ''}"
-      onDidChange="() => findBox ? findBox.setValue($props.query || '') : null" />
-    <ChangeListener listenTo="{findText}" debounceWaitInMs="200"
-      onDidChange="() => appliedNeedle = findText" />
-    <ChangeListener listenTo="{findText}" debounceWaitInMs="200"
-      onDidChange="() => cursor = 0" />
-    <ChangeListener listenTo="{appliedNeedle + '|' + (g &amp;&amp; g.phases ? g.phases.length : 0)}"
-      onDidChange="() => counts = window.__bramBlockMatchCounts(window.__bramHistoryBlocks(g), appliedNeedle)" />
-    <!-- Bounded scroller = a plain VStack with a firm height + overflowY:auto.
-         Ordinary CSS overflow caps regardless of ancestors, unlike xmlui List,
-         which defers its scroll to any scrolling ancestor (the page) and so
-         never bounds here (ListReact hasOutsideScroll). The toolbar is a sibling
-         ABOVE this, so it stays put while the body scrolls. Markdown sits at
-         component scope, reading appliedNeedle reactively (no List-row $item). -->
-    <VStack height="{$props.height || '400px'}" overflowY="auto">
-      <VStack gap="$space-4">
-        <VStack gap="$space-1">
-          <Text
-            value="{window.__bramHistoryDateRangeLine(g)}"
-            color="$textColor-secondary"
-            fontSize="$fontSize-sm" />
-          <Text
-            value="{window.__bramHistoryPhasePath(g)}"
-            fontWeight="$fontWeight-bold" />
-          <Text
-            when="{window.__bramWorklistItemFiles(g).length > 0}"
-            value="{window.__bramWorklistItemFiles(g).length + ' file' + (window.__bramWorklistItemFiles(g).length === 1 ? '' : 's')}"
-            color="$textColor-secondary"
-            fontSize="$fontSize-sm" />
-          <Text
-            when="{g.commitContextLabel}"
-            value="{g.commitContextLabel}"
-            color="$textColor-secondary"
-            fontSize="$fontSize-sm" />
-          <Text
-            when="{g.detailsRestoredLabel}"
-            value="{g.detailsRestoredLabel}"
-            color="$textColor-secondary"
-            fontSize="$fontSize-sm" />
-          <Link
-            when="{window.__bramHistoryCommitUrl(g)}"
-            noIndicator
-            onClick="openExternal(window.__bramHistoryCommitUrl(g))">
+       findable-list-udc: the occurrence-granular find spine lives in
+       FindableList. Flattened from its nested VStack+overflowY shape into a flat
+       typed-row array (__bramHistoryBlockRows) preserving section order — a
+       header row (metadata baked in), before, after, files, committed, commit, a
+       phases-header, then one row per phase. Searchable rows (before / after /
+       feedback-phase) mark their body via __bramHistoryMarkedText; every other
+       kind is a zero-match metadata row. See xmlui-org/xmlui#3713. -->
+  <VStack gap="$space-2" padding="$space-2">
+    <FindableList when="{$props.group}"
+      data="{window.__bramHistoryBlockRows($props.group)}"
+      markedText="__bramHistoryMarkedText"
+      query="{$props.query || ''}"
+      placeholder="Find in history entry…"
+      height="{$props.height || '400px'}">
+      <property name="rowTemplate">
+        <VStack when="{$item.kind === 'header'}" gap="$space-1">
+          <Text value="{$item.dateRange}" color="$textColor-secondary" fontSize="$fontSize-sm" />
+          <Text value="{$item.phasePath}" fontWeight="$fontWeight-bold" />
+          <Text when="{$item.filesCount > 0}"
+            value="{$item.filesCount + ' file' + ($item.filesCount === 1 ? '' : 's')}"
+            color="$textColor-secondary" fontSize="$fontSize-sm" />
+          <Text when="{$item.commitContextLabel}" value="{$item.commitContextLabel}"
+            color="$textColor-secondary" fontSize="$fontSize-sm" />
+          <Text when="{$item.detailsRestoredLabel}" value="{$item.detailsRestoredLabel}"
+            color="$textColor-secondary" fontSize="$fontSize-sm" />
+          <Link when="{$item.commitUrl}" noIndicator onClick="openExternal($item.commitUrl)">
             <Text value="view commit" fontSize="$fontSize-sm" />
           </Link>
         </VStack>
 
-        <VStack gap="$space-2" when="{window.__bramHistoryItemFieldMarkdown(g, 'before')}">
+        <VStack when="{$item.kind === 'before'}" gap="$space-2">
           <Text value="Before" fontWeight="$fontWeight-bold" />
-          <Markdown content="{window.__bramHistoryItemFieldMarkdown(g, 'before')}"
-            highlightText="{window.__bramSearchTerms(appliedNeedle)}"
-            highlightActiveIndex="{window.__bramActiveOccForBlock(counts.counts, cursor, 0)}" />
+          <Markdown content="{$item.body}"
+            highlightText="{window.__bramSearchTerms($item.__needle)}"
+            highlightActiveIndex="{$item.__activeOcc}" />
         </VStack>
 
-        <VStack gap="$space-2" when="{window.__bramHistoryItemFieldMarkdown(g, 'after')}">
+        <VStack when="{$item.kind === 'after'}" gap="$space-2">
           <Text value="After" fontWeight="$fontWeight-bold" />
-          <Markdown content="{window.__bramHistoryItemFieldMarkdown(g, 'after')}"
-            highlightText="{window.__bramSearchTerms(appliedNeedle)}"
-            highlightActiveIndex="{window.__bramActiveOccForBlock(counts.counts, cursor, 1)}" />
+          <Markdown content="{$item.body}"
+            highlightText="{window.__bramSearchTerms($item.__needle)}"
+            highlightActiveIndex="{$item.__activeOcc}" />
         </VStack>
 
-        <VStack gap="$space-2" when="{window.__bramWorklistItemFiles(g).length > 0}">
+        <VStack when="{$item.kind === 'files'}" gap="$space-2">
           <Text value="Files" fontWeight="$fontWeight-bold" />
-          <Items data="{window.__bramWorklistItemFiles(g)}">
+          <Items data="{$item.files}">
             <Text value="{$item}" variant="code" fontSize="$fontSize-sm" />
           </Items>
         </VStack>
 
-        <VStack gap="$space-2" when="{g.commitSiblingIds &amp;&amp; g.commitSiblingIds.length > 0}">
+        <VStack when="{$item.kind === 'committed'}" gap="$space-2">
           <Text value="Committed with" fontWeight="$fontWeight-bold" />
-          <Items data="{g.commitSiblingIds || []}">
+          <Items data="{$item.ids}">
             <Text value="{$item}" variant="code" fontSize="$fontSize-sm" />
           </Items>
         </VStack>
 
-        <VStack gap="$space-2" when="{window.__bramHistoryCommitUrl(g)}">
+        <VStack when="{$item.kind === 'commit'}" gap="$space-2">
           <Text value="Commit" fontWeight="$fontWeight-bold" />
-          <Link noIndicator onClick="openExternal(window.__bramHistoryCommitUrl(g))">
-            <Text value="{window.__bramHistoryCommitUrl(g)}" variant="code" fontSize="$fontSize-sm" />
+          <Link noIndicator onClick="openExternal($item.url)">
+            <Text value="{$item.url}" variant="code" fontSize="$fontSize-sm" />
           </Link>
         </VStack>
 
-        <VStack gap="$space-2">
+        <VStack when="{$item.kind === 'phases-header'}" gap="$space-2">
           <Text value="Phases" fontWeight="$fontWeight-bold" />
-          <Items data="{g.phases || []}">
-            <VStack gap="$space-1" paddingVertical="$space-1" borderTop="1px solid $borderColor">
-              <Text value="{window.__bramHistoryPhaseLabel($item) + ' · ' + (($item.iso || '').slice(0, 16))}" fontSize="$fontSize-sm" />
-              <Markdown when="{$item.kind === 'feedback'}" content="{$item.body}"
-                highlightText="{window.__bramSearchTerms(appliedNeedle)}"
-                highlightActiveIndex="{window.__bramActiveOccForBlock(counts.counts, cursor, window.__bramHistoryPhaseBlockIndex(g, $itemIndex))}" />
-              <Text when="{$item.kind !== 'feedback'}" value="{$item.summary}" color="$textColor-secondary" fontSize="$fontSize-xs" />
-            </VStack>
-          </Items>
         </VStack>
-      </VStack>
-    </VStack>
+
+        <VStack when="{$item.kind === 'phase'}" gap="$space-1" paddingVertical="$space-1" borderTop="1px solid $borderColor">
+          <Text value="{$item.label}" fontSize="$fontSize-sm" />
+          <Markdown when="{$item.isFeedback}" content="{$item.body}"
+            highlightText="{window.__bramSearchTerms($item.__needle)}"
+            highlightActiveIndex="{$item.__activeOcc}" />
+          <Text when="{!$item.isFeedback}" value="{$item.summary}" color="$textColor-secondary" fontSize="$fontSize-xs" />
+        </VStack>
+      </property>
+    </FindableList>
   </VStack>
 </Component>

@@ -6430,14 +6430,6 @@ window.__bramFindStep = function (indices, cur, dir) {
 // the block holding the active match gets its local occurrence index (fed to
 // Markdown's highlightActiveIndex), everyone else gets -1.
 
-// Wraparound step over a flat count of matches.
-window.__bramCursorStep = function (total, cur, dir) {
-  var n = Number(total) || 0;
-  if (!n) return 0;
-  var c = Number(cur) || 0;
-  return (c + dir + n) % n;
-};
-
 // Case-insensitive match count in one block of text, summed across all search
 // terms (multi-term, to match AND-mode search + multi-term highlightText). The
 // per-block total equals the number of <mark>s the component paints, so the
@@ -6457,42 +6449,6 @@ window.__bramCountOccurrences = function (text, needle) {
   return total;
 };
 
-// Per-block counts + total for an ordered array of block texts.
-window.__bramBlockMatchCounts = function (blocks, needle) {
-  var arr = blocks || [], counts = [], total = 0;
-  for (var i = 0; i < arr.length; i++) {
-    var c = window.__bramCountOccurrences(arr[i], needle);
-    counts.push(c);
-    total += c;
-  }
-  return { counts: counts, total: total };
-};
-
-// Given per-block counts and a global cursor, the local occurrence index active
-// in `blockIdx`, or -1 when the cursor falls in a different block.
-window.__bramActiveOccForBlock = function (counts, cursor, blockIdx) {
-  var c = counts || [], k = Number(cursor) || 0, acc = 0;
-  for (var i = 0; i < c.length; i++) {
-    var cnt = c[i] || 0;
-    if (i === blockIdx) return (k >= acc && k < acc + cnt) ? (k - acc) : -1;
-    acc += cnt;
-  }
-  return -1;
-};
-
-// Ordered block-text arrays per detail view (index positions must match the
-// order the components render their Markdown blocks).
-// Message first, then one block per file patch — matching CommitDetail's
-// render order (head row, then file rows). Counting runs on the raw patch
-// text; DiffView paints marks per rendered segment, so a term spanning a
-// segment boundary can count without painting a mark. The counter and the
-// row scroll stay honest; only the mark emphasis degrades in that edge.
-window.__bramCommitBlocks = function (commit) {
-  var out = [(commit && commit.message) || ""];
-  var files = (commit && commit.files) || [];
-  for (var i = 0; i < files.length; i++) out.push((files[i] && files[i].patch) || "");
-  return out;
-};
 // findable-list-udc phase 2: the flat block OBJECTS a commit's CommitDetail
 // feeds to FindableList as `data` (undecorated — __bramFindPlan owns the search
 // decoration). Head block (message + stats) then one per file diff. Stable `id`
@@ -6547,60 +6503,53 @@ window.__bramIssueBlockRows = function (issue) {
 window.__bramIssueMarkedText = function (row) {
   return (row && row.body) || "";
 };
-window.__bramHistoryBlocks = function (g) {
-  var out = [
-    window.__bramHistoryItemFieldMarkdown(g, "before") || "",
-    window.__bramHistoryItemFieldMarkdown(g, "after") || "",
-  ];
+// findable-list-udc HistoryDetail: flat typed rows for FindableList, preserving
+// the current section order. Computed metadata is baked in (frozen row-scope
+// trap); searchable rows (before/after/feedback-phase) carry `body`, every
+// other kind is a zero-match metadata/header row (markedText -> "").
+window.__bramHistoryBlockRows = function (g) {
+  if (!g) return [];
+  var files = window.__bramWorklistItemFiles(g) || [];
+  var commitUrl = window.__bramHistoryCommitUrl(g) || "";
+  var before = window.__bramHistoryItemFieldMarkdown(g, "before") || "";
+  var after = window.__bramHistoryItemFieldMarkdown(g, "after") || "";
+  var siblings = (g && g.commitSiblingIds) || [];
+  var rows = [{
+    id: "header", kind: "header",
+    dateRange: window.__bramHistoryDateRangeLine(g),
+    phasePath: window.__bramHistoryPhasePath(g),
+    filesCount: files.length,
+    commitContextLabel: g.commitContextLabel,
+    detailsRestoredLabel: g.detailsRestoredLabel,
+    commitUrl: commitUrl,
+  }];
+  if (before) rows.push({ id: "before", kind: "before", body: before });
+  if (after) rows.push({ id: "after", kind: "after", body: after });
+  if (files.length) rows.push({ id: "files", kind: "files", files: files });
+  if (siblings.length) rows.push({ id: "committed", kind: "committed", ids: siblings });
+  if (commitUrl) rows.push({ id: "commit", kind: "commit", url: commitUrl });
+  rows.push({ id: "phases-header", kind: "phases-header" });
   var phases = (g && g.phases) || [];
   for (var i = 0; i < phases.length; i++) {
-    if (phases[i] && phases[i].kind === "feedback") out.push(phases[i].body || "");
-  }
-  return out;
-};
-// ---- Find-in-diff (search-index-commit-diffs iterate) ----
-// CommitDetail's outer List rows: a head row (message + stats), then one row
-// per file. Search state rides each row (List rows are isolated scopes);
-// each file row carries its block's local active occurrence for DiffView.
-window.__bramCommitDetailRows = function (commit, needle, counts, cursor) {
-  var cc = (counts && counts.counts) || [];
-  var cur = Number(cursor) || 0;
-  var rows = [{
-    kind: "head",
-    message: (commit && commit.message) || "",
-    stats: (commit && commit.stats) || null,
-    filesCount: ((commit && commit.files) || []).length,
-    needle: needle || "",
-    counts: cc,
-    cursor: cur,
-  }];
-  var files = (commit && commit.files) || [];
-  for (var i = 0; i < files.length; i++) {
-    var f = files[i] || {};
+    var p = phases[i] || {};
     rows.push({
-      kind: "file",
-      filename: f.filename,
-      additions: f.additions,
-      deletions: f.deletions,
-      patch: f.patch,
-      needle: needle || "",
-      activeOcc: window.__bramActiveOccForBlock(cc, cur, 1 + i),
+      id: "phase:" + i, kind: "phase",
+      isFeedback: p.kind === "feedback",
+      label: window.__bramHistoryPhaseLabel(p) + " · " + (String(p.iso || "").slice(0, 16)),
+      body: p.body || "",
+      summary: p.summary || "",
     });
   }
   return rows;
 };
-
-// Outer row index holding the cursor's match (0 = head/message row, b >= 1 =
-// file row b), for the outer List's scrollToIndex.
-window.__bramCommitActiveRow = function (counts, cursor) {
-  var c = (counts && counts.counts) || [], k = Number(cursor) || 0, acc = 0;
-  for (var i = 0; i < c.length; i++) {
-    acc += c[i] || 0;
-    if (k < acc) return i;
-  }
-  return 0;
+// Marked surface (counted == highlighted): before / after / feedback-phase body.
+window.__bramHistoryMarkedText = function (row) {
+  if (!row) return "";
+  if (row.kind === "before" || row.kind === "after") return row.body || "";
+  if (row.kind === "phase" && row.isFeedback) return row.body || "";
+  return "";
 };
-
+// ---- Find-in-diff (search-index-commit-diffs iterate) ----
 // Shared walker for the two functions below: visits every term match in
 // document order across a DiffView row array (per segment; matches never
 // span segments) and calls visit(rowIdx, segIdx, start, len, occ). Returns
@@ -6717,36 +6666,6 @@ window.__bramDiffScrollToActive = function (listRef, rows, needle, activeIndex) 
       });
     }
   }
-};
-
-// Scroll CommitDetail's outer list to the block row holding the cursor.
-// Same soak trace (subkind=commit-find-scroll).
-window.__bramCommitScrollToActive = function (listRef, counts, cursor) {
-  var row = window.__bramCommitActiveRow(counts, cursor);
-  try {
-    window.logToHost && window.logToHost({
-      kind: "iframe-trace",
-      subkind: "commit-find-scroll",
-      row: row,
-      cursor: Number(cursor) || 0,
-      total: (counts && counts.total) || 0,
-      hasRef: !!(listRef && listRef.scrollToIndex),
-    });
-  } catch (e) {}
-  if (listRef && listRef.scrollToIndex) listRef.scrollToIndex(row);
-};
-
-// Global block index of a History phase's feedback Markdown (before=0, after=1,
-// feedback phases follow in order), or -1 for a non-feedback phase.
-window.__bramHistoryPhaseBlockIndex = function (g, phaseItemIndex) {
-  var phases = (g && g.phases) || [];
-  var p = phases[phaseItemIndex];
-  if (!p || p.kind !== "feedback") return -1;
-  var n = 0;
-  for (var i = 0; i < phaseItemIndex; i++) {
-    if (phases[i] && phases[i].kind === "feedback") n++;
-  }
-  return 2 + n;
 };
 
 // A List/Items row template is an isolated binding scope — it can read $item

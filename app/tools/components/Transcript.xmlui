@@ -432,6 +432,13 @@
     <ChangeListener
       listenTo="{(findPlan &amp;&amp; findPlan.total) ? findPlan.activeEventIndex : -1}"
       onDidChange="() => (findPlan &amp;&amp; findPlan.total) ? transcriptList.scrollToIndex(findPlan.activeEventIndex) : null" />
+    <!-- Reveal the active mark within a tall event: scrollToIndex reaches the
+         event TOP, and Markdown paints <mark data-active> but does not scroll it
+         (__bramRevealActiveMark, shared with the migrated consumers). Fires on
+         findPlan.cursor (post-recompute) so within-event steps land too. -->
+    <ChangeListener
+      listenTo="{(findPlan &amp;&amp; findPlan.total) ? findPlan.cursor : -1}"
+      onDidChange="() => window.__bramRevealActiveMark()" />
     <!-- Every step disarms follow (read-pause), same anti-yank contract. -->
     <ChangeListener
       listenTo="{findCursor}"

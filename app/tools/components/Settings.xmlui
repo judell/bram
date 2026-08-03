@@ -111,6 +111,8 @@
         </HStack>
       </VStack>
 
+      <ContentSeparator />
+
       <VStack gap="$space-2">
         <HStack gap="$space-2" verticalAlignment="center">
           <Button
@@ -130,6 +132,8 @@
           initialValue="{!!(settingsConfig.value &amp;&amp; settingsConfig.value.mirrorWorklistLifecycleToIssue)}"
           onDidChange="(v) => saveSettings.execute({ mirrorWorklistLifecycleToIssue: v })" />
       </VStack>
+
+      <ContentSeparator />
 
       <VStack gap="$space-2">
         <HStack gap="$space-2" verticalAlignment="center">
@@ -182,6 +186,8 @@
           onDidChange="(v) => window.__bramSetSearchBadgesInitialAllOn(v)" />
       </VStack>
 
+      <ContentSeparator />
+
       <VStack gap="$space-2">
         <HStack gap="$space-2" verticalAlignment="center">
           <Button
@@ -197,6 +203,8 @@
           initialValue="{settingsDescribeCommands(settingsConfig.value)}"
           onDidChange="(v) => saveSettings.execute({ ai: { describeCommands: v } })" />
       </VStack>
+
+      <ContentSeparator />
 
       <VStack gap="$space-2">
         <HStack gap="$space-2" verticalAlignment="center">

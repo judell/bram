@@ -6759,10 +6759,30 @@ window.__bramMarkdownLiteral = function (text) {
 // out" signal, no timer). Returns true so the caller can latch its one-shot
 // guard var in a single-expression handler.
 window.__bramFindableInitScroll = function (listRef, plan) {
-  if (plan && plan.total > 0 && listRef && listRef.scrollToIndex) {
-    listRef.scrollToIndex(plan.activeIndex);
-  }
+  window.__bramFindableScrollReveal(listRef, plan);
   return true;
+};
+// scrollToIndex reaches the active block's TOP, but xmlui Markdown renders the
+// active occurrence as <mark data-active="true"> and does NOT scroll it into
+// view (Markdown has no scroll logic). So a mark deep in a tall block (a long
+// turn / comment / phase / commit message) stays off-screen. After the block is
+// laid out (double-rAF), scrollIntoView the active mark. Only one exists at a
+// time; when the active block is a DiffView (Commit file block) there is no
+// Markdown mark — this no-ops and DiffView's own reveal handles it.
+window.__bramRevealActiveMark = function () {
+  if (typeof requestAnimationFrame !== "function" || typeof document === "undefined") return;
+  requestAnimationFrame(function () {
+    requestAnimationFrame(function () {
+      var el = document.querySelector('mark[data-active="true"]');
+      if (el && el.scrollIntoView) el.scrollIntoView({ block: "nearest", inline: "nearest" });
+    });
+  });
+};
+// Scroll the inner List to the active block, then reveal its active mark. Used
+// on the initial scroll and on every block change.
+window.__bramFindableScrollReveal = function (listRef, plan) {
+  if (plan && plan.total > 0 && listRef && listRef.scrollToIndex) listRef.scrollToIndex(plan.activeIndex);
+  window.__bramRevealActiveMark();
 };
 // Scalar params (keying, cacheId) — NOT an opts object: an inline object
 // literal in the XMLUI binding that calls this is the handler-blob anti-pattern

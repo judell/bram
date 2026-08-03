@@ -62,11 +62,20 @@
     <ChangeListener listenTo="{findText}" debounceWaitInMs="200"
       onDidChange="() => appliedNeedle = findText" />
 
-    <!-- Scroll only when the active ROW changes (stepping between occurrences
-         within one row keeps it in view). Fires on cursor CHANGE only. -->
+    <!-- Active ROW changed: scroll the List to that block, then reveal the
+         active mark within it (Markdown paints <mark data-active> but does not
+         scroll it — see __bramRevealActiveMark). -->
     <ChangeListener
       listenTo="{(findPlan &amp;&amp; findPlan.total) ? findPlan.activeIndex : -1}"
-      onDidChange="() => (findPlan &amp;&amp; findPlan.total) ? findableInnerList.scrollToIndex(findPlan.activeIndex) : null" />
+      onDidChange="() => (findPlan &amp;&amp; findPlan.total) ? window.__bramFindableScrollReveal(findableInnerList, findPlan) : null" />
+
+    <!-- Every cursor step (incl. stepping WITHIN one tall block, where
+         activeIndex doesn't change): reveal the active mark. No scrollToIndex
+         here — re-scrolling to the block top on within-block steps would yank
+         the view; the mark reveal alone keeps it in place. -->
+    <ChangeListener
+      listenTo="{(findPlan &amp;&amp; findPlan.total) ? findPlan.cursor : -1}"
+      onDidChange="() => window.__bramRevealActiveMark()" />
 
 
     <!-- Explicit maxHeight makes .outerListWrapper its own bounded scroller

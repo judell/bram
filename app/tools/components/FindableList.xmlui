@@ -10,6 +10,8 @@
                            memo (Transcript, thousands of rows). Off for
                            bounded views.
          - cacheId         optional distinct memo-cache key per consumer.
+         - query           optional initial/current find term; seeds the needle
+                           and replays after mount (deep-link / filter seed).
          - height, idKey, placeholder
          - rowTemplate     the per-row markup (template property below)
 
@@ -21,19 +23,37 @@
 
        __bramFindPlan is called qualified (window.__bramFindPlan), so no xs
        delegator is warranted (docs/developing-bram.md: default is none). -->
-  <variable name="findText" value="{''}" />
-  <variable name="appliedNeedle" value="{''}" />
+  <variable name="findText" value="{$props.query || ''}" />
+  <variable name="appliedNeedle" value="{$props.query || ''}" />
   <variable name="findCursor" value="{0}" />
-  <variable name="findPlan" value="{null}" />
+  <!-- findPlan is COMPUTED, not set imperatively in a ChangeListener. A
+       ChangeListener fires on CHANGE, not at mount, so a query SEEDED at mount
+       (Commits filter / deep link) never triggered the plan and find was inert
+       (no matches, no highlights). A computed var evaluates at mount AND on
+       every dependency change (appliedNeedle / findCursor / data). The window
+       memo cache keeps recomputes cheap; the helper writes only window.*, never
+       a reactive var, so computing here is side-effect-safe. -->
+  <variable name="findPlan"
+    value="{window.__bramFindPlan($props.data, appliedNeedle, findCursor, $props.markedText, !!$props.virtualizedKeying, $props.cacheId || 'default')}" />
+  <!-- Guards the one-shot initial scroll below. -->
+  <variable name="didInitScroll" value="{false}" />
 
   <VStack gap="$space-2" height="{$props.height || '*'}">
     <FindBar id="findBar"
       placeholder="{$props.placeholder || 'Find…'}"
+      initialValue="{$props.query || ''}"
       matchCount="{findPlan ? findPlan.total : 0}"
       current="{findCursor}"
       showCount="{findText.trim().length >= 2}"
       onNeedleChange="(v) => findText = v"
       onStep="(d) => findCursor = window.__bramFindCursorStep(findPlan ? findPlan.total : 0, findCursor, d)" />
+
+    <!-- Deep-link / filter seed: replay $props.query after mount (two
+         listeners — an onDidChange arrow is a single expression, not a block). -->
+    <ChangeListener listenTo="{$props.query || ''}"
+      onDidChange="() => findText = ($props.query || '')" />
+    <ChangeListener listenTo="{$props.query || ''}"
+      onDidChange="() => findBar ? findBar.setValue($props.query || '') : null" />
 
     <!-- needle settles -> reset cursor + apply (two listeners: an onDidChange
          arrow must be a single expression, not a statement block). -->
@@ -42,24 +62,41 @@
     <ChangeListener listenTo="{findText}" debounceWaitInMs="200"
       onDidChange="() => appliedNeedle = findText" />
 
-    <!-- Recompute the plan when the needle, cursor, or data length change.
-         The plan computes matches internally (count &gt; 0 on the marked
-         surface), so there is no separate matches var to race. -->
-    <ChangeListener
-      listenTo="{appliedNeedle + '|' + findCursor + '|' + ($props.data ? $props.data.length : 0)}"
-      onDidChange="() => findPlan = window.__bramFindPlan($props.data, appliedNeedle, findCursor, $props.markedText, { keying: !!$props.virtualizedKeying, cacheId: $props.cacheId || 'default' })" />
-
     <!-- Scroll only when the active ROW changes (stepping between occurrences
-         within one row keeps it in view). -->
+         within one row keeps it in view). Fires on cursor CHANGE only. -->
     <ChangeListener
       listenTo="{(findPlan &amp;&amp; findPlan.total) ? findPlan.activeIndex : -1}"
       onDidChange="() => (findPlan &amp;&amp; findPlan.total) ? findableInnerList.scrollToIndex(findPlan.activeIndex) : null" />
 
+
+    <!-- Explicit maxHeight makes .outerListWrapper its own bounded scroller
+         (useHasExplicitHeight, xmlui hooks.tsx). height="*" alone is DELETED
+         unless the star resolves off a bounded vertical-Stack parent
+         (layout-resolver.ts), and when it's dropped the overflow:auto wrapper
+         grows to full content height and overlaps siblings — the observed bug.
+         Consumers pass a definite height (CommitDetail: 400px). -->
+    <!-- onVisibleRangeDidChange is the event-driven replacement for a mount
+         timer: List fires it when its visible (mounted) range first appears or
+         grows (xmlui List.tsx events), which is precisely "the rows are laid
+         out." One-shot, latched by didInitScroll and gated on matches, so it
+         scrolls the first match into view exactly once — no guessed duration.
+         Cursor steps and later searches are handled by the ChangeListener
+         above (activeIndex changes). The event is not suppressed for the
+         list's own programmatic scroll, hence the latch guards a loop. -->
     <List id="findableInnerList"
       height="*"
+      maxHeight="{$props.height || '400px'}"
       data="{(findPlan &amp;&amp; findPlan.rows) || $props.data}"
-      idKey="{findPlan ? '__findKey' : ($props.idKey || 'id')}">
-      <Slot name="rowTemplate" item="{$item}" />
+      idKey="{findPlan ? '__findKey' : ($props.idKey || 'id')}"
+      onVisibleRangeDidChange="() => (!didInitScroll &amp;&amp; findPlan &amp;&amp; findPlan.total > 0) ? (didInitScroll = window.__bramFindableInitScroll(findableInnerList, findPlan)) : null">
+      <!-- The row markup is a per-item template: List re-instantiates it per
+           row with its own $item, and the named Slot re-exposes that decorated
+           $item to the consumer's rowTemplate. A BARE <Slot> as the List child
+           is resolved once (not per item) and the rows pile up unkeyed
+           (overlap); the explicit itemTemplate property is the per-item form. -->
+      <property name="itemTemplate">
+        <Slot name="rowTemplate" item="{$item}" />
+      </property>
     </List>
   </VStack>
 </Component>

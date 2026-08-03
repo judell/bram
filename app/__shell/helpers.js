@@ -6512,6 +6512,34 @@ window.__bramCommitBlocks = function (commit) {
   for (var i = 0; i < files.length; i++) out.push((files[i] && files[i].patch) || "");
   return out;
 };
+// findable-list-udc phase 2: the flat block OBJECTS a commit's CommitDetail
+// feeds to FindableList as `data` (undecorated — __bramFindPlan owns the search
+// decoration). Head block (message + stats) then one per file diff. Stable `id`
+// keys the inner List in the no-search pass-through.
+window.__bramCommitBlockRows = function (commit) {
+  var rows = [{
+    id: "head", kind: "head",
+    message: (commit && commit.message) || "",
+    stats: (commit && commit.stats) || null,
+    filesCount: ((commit && commit.files) || []).length,
+  }];
+  var files = (commit && commit.files) || [];
+  for (var i = 0; i < files.length; i++) {
+    var f = files[i] || {};
+    rows.push({
+      id: "file:" + i, kind: "file",
+      filename: f.filename, additions: f.additions, deletions: f.deletions,
+      patch: f.patch,
+    });
+  }
+  return rows;
+};
+// The marked surface FindableList counts AND the row template highlights (the
+// invariant): file blocks mark the raw patch, the head block marks the message.
+window.__bramCommitMarkedText = function (row) {
+  if (!row) return "";
+  return row.kind === "file" ? (row.patch || "") : (row.message || "");
+};
 window.__bramIssueBlocks = function (issue) {
   var out = [(issue && issue.body) || ""];
   var comments = (issue && issue.comments) || [];
@@ -6807,19 +6835,35 @@ window.__bramMarkdownLiteral = function (text) {
 // is passed as a window-helper NAME (string) for robustness — function-valued
 // XMLUI props into JS are the shakiest link; window helpers are the idiom.
 //   returns { rows, total, activeIndex, cursor } or null (no terms).
-window.__bramFindPlan = function (data, needle, cursor, markedTextName, opts) {
+// One-shot initial scroll to the active match once a plan first has matches.
+// The scroll-on-step ChangeListener fires on cursor CHANGE, not at mount, so a
+// query seeded at mount (or resolved from cache) left the first match
+// unscrolled — inconsistently, depending on whether the commit loaded async
+// (a post-mount change that DID fire the listener) or from cache (no change).
+// Driven by the List's onVisibleRangeDidChange (the event-driven "rows are laid
+// out" signal, no timer). Returns true so the caller can latch its one-shot
+// guard var in a single-expression handler.
+window.__bramFindableInitScroll = function (listRef, plan) {
+  if (plan && plan.total > 0 && listRef && listRef.scrollToIndex) {
+    listRef.scrollToIndex(plan.activeIndex);
+  }
+  return true;
+};
+// Scalar params (keying, cacheId) — NOT an opts object: an inline object
+// literal in the XMLUI binding that calls this is the handler-blob anti-pattern
+// (docs/developing-bram.md) that can silently abort the binding.
+window.__bramFindPlan = function (data, needle, cursor, markedTextName, keying, cacheId) {
+  keying = !!keying;
   var terms = window.__bramSearchTerms(needle);
   var arr = Array.isArray(data) ? data : [];
   if (!terms.length) return null;
-  opts = opts || {};
-  var keying = !!opts.keying;
   var markedTextFn = (markedTextName && window[markedTextName]) ? window[markedTextName] : null;
   var surfaceOf = function (row) {
     if (markedTextFn) { try { return String(markedTextFn(row) || ""); } catch (e) { return ""; } }
     return String((row && (row.text || row.summary)) || "");
   };
   var needleKey = String(needle || "");
-  var cacheSlot = "__bramFindPlanCache_" + (opts.cacheId || "default");
+  var cacheSlot = "__bramFindPlanCache_" + (cacheId || "default");
   var cache = window[cacheSlot];
   var cacheHit = !!cache && cache.needle === needleKey && cache.data.length === arr.length;
   if (cacheHit) {

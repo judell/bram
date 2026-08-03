@@ -2,85 +2,57 @@
   <!-- issue-230 shared detail: full commit message, external forge link pinned
        at the top. Props: sha (for /__commit), url (the html_url), height,
        query (optional initial/current find term).
-       search-in-view-transplant: in-view find over the commit message. Same
-       structure as SessionDetail — the find toolbar sits ABOVE a List (the only
-       reliably bounded scroller in XMLUI; a VStack maxHeight does not clip), so
-       the controls stay in view while the body scrolls.
-       search-index-commit-diffs iterate: diffs are searched too — blocks are
-       message + one per file patch; the outer List is one row per block so
-       stepping scrolls the active file into view, and DiffView highlights and
-       scrolls to the active mark via its needle/activeIndex props. -->
+       findable-list-udc phase 2: the occurrence-granular find spine (FindBar,
+       cursor, plan, cross-block scroll) now lives in FindableList. CommitDetail
+       supplies only the raw block objects (__bramCommitBlockRows), the marked
+       surface helper name (__bramCommitMarkedText), and the row markup; the
+       head block renders the message as Markdown, each file block a DiffView.
+       The invariant FindableList can't enforce: the surface markedText counts
+       (message / patch) must be the one the template highlights — see
+       xmlui-org/xmlui#3713. -->
   <DataSource id="commit" url="/__commit" queryParams="{{ sha: $props.sha }}" when="{!!$props.sha}" />
-  <VStack gap="$space-2" padding="$space-2"
-    var.findText="{$props.query || ''}"
-    var.appliedNeedle="{$props.query || ''}"
-    var.cursor="{0}"
-    var.counts="{{ counts: [], total: 0 }}"
-    var.detailRows="{[{ kind: 'head', message: '', stats: null, filesCount: 0, needle: '', counts: [], cursor: 0 }]}">
+  <VStack gap="$space-2" padding="$space-2">
 
-    <!-- Fixed find toolbar (sibling above the List). -->
-    <HStack when="{commit.value &amp;&amp; commit.value.message}" gap="$space-2" verticalAlignment="center">
-      <FindBar id="findBox" placeholder="Find in commit…"
-        initialValue="{$props.query || ''}"
-        matchCount="{counts.total}"
-        current="{cursor}"
-        showCount="{appliedNeedle &amp;&amp; appliedNeedle.trim().length >= 2}"
-        onNeedleChange="(v) => findText = v"
-        onStep="(d) => cursor = window.__bramCursorStep(counts.total, cursor, d)" />
-    </HStack>
-    <ChangeListener listenTo="{$props.query || ''}"
-      onDidChange="() => findText = ($props.query || '')" />
-    <ChangeListener listenTo="{$props.query || ''}"
-      onDidChange="() => findBox ? findBox.setValue($props.query || '') : null" />
-    <ChangeListener listenTo="{findText}" debounceWaitInMs="200"
-      onDidChange="() => appliedNeedle = findText" />
-    <ChangeListener listenTo="{findText}" debounceWaitInMs="200"
-      onDidChange="() => cursor = 0" />
-    <ChangeListener listenTo="{appliedNeedle + '|' + (commit.value ? commit.value.sha : '')}"
-      onDidChange="() => counts = window.__bramBlockMatchCounts(window.__bramCommitBlocks(commit.value), appliedNeedle)" />
-    <!-- The List rows can't see the outer search vars; thread them through the
-         row data and read via $item. Rebuild when the search changes or the
-         commit lands (sha in the key — rows carry the message and files now). -->
-    <ChangeListener listenTo="{appliedNeedle + '|' + cursor + '|' + counts.total + '|' + (commit.value ? commit.value.sha : '')}"
-      onDidChange="() => detailRows = window.__bramCommitDetailRows(commit.value, appliedNeedle, counts, cursor)" />
-    <!-- Step the outer list to the row (message or file) holding the active
-         match, mirroring SessionDetail's scrollToIndex-on-cursor. -->
-    <ChangeListener listenTo="{cursor + '|' + counts.total}"
-      onDidChange="() => counts.total ? window.__bramCommitScrollToActive(commitList, counts, cursor) : null" />
-
-    <!-- Loading indicator is a component-scope sibling: the List row is a
-         frozen scope that never sees the DataSource land after mount (first
-         click stuck "Loading…", second click instant on cache), so gate the
-         List on commit.value the way SessionDetail gates on turns.value. -->
+    <!-- Loading indicator is a component-scope sibling: FindableList (and the
+         List inside it) is a frozen scope that never sees the DataSource land
+         after mount (first click stuck "Loading…", second click instant on
+         cache), so gate the FindableList on commit.value the way SessionDetail
+         gates on turns.value. -->
     <Text when="{commit.inProgress &amp;&amp; !commit.loaded}" color="$textColor-secondary" value="Loading…" />
 
-    <!-- Bounded scroller = a List with one row per block: head (message +
-         stats) then one per file (mirrors SessionDetail's virtualized find).
-         Mounts only once commit.value is present; rows are baked from the
-         loaded commit (a row template is a frozen scope — reading commit.value
-         from inside it is the first-click-stuck-Loading trap), and search
-         state arrives via $item. -->
-    <List when="{commit.value}" id="commitList" data="{detailRows}" height="{$props.height || '400px'}">
-      <VStack when="{$item.kind === 'head'}" gap="$space-3" paddingBottom="$space-2">
-        <Link when="{$props.url}" noIndicator onClick="openExternal($props.url)">
-          <Text fontWeight="$fontWeight-bold"
-            value="{'Open commit on ' + (($props.url || '').includes('gitlab') ? 'GitLab' : 'GitHub') + ' ↗'}" />
-        </Link>
-        <Markdown when="{$item.message}" content="{$item.message}"
-          highlightText="{window.__bramSearchTerms($item.needle)}"
-          highlightActiveIndex="{window.__bramActiveOccForBlock($item.counts, $item.cursor, 0)}" />
-        <Text when="{$item.stats}" fontSize="$fontSize-sm" color="$textColor-secondary"
-          value="+{$item.stats.additions} / -{$item.stats.deletions} across {$item.filesCount} file(s)" />
-      </VStack>
-      <VStack when="{$item.kind === 'file'}" gap="0" borderTop="1px solid $borderColor" paddingTop="$space-2">
-        <HStack gap="$space-3" verticalAlignment="center" paddingBottom="$space-2">
-          <Text fontWeight="$fontWeight-bold" value="{$item.filename}" />
-          <Text color="green" value="+{$item.additions}" />
-          <Text color="red" value="-{$item.deletions}" />
-        </HStack>
-        <DiffView text="{$item.patch || '(no textual diff)'}"
-          needle="{$item.needle}" activeIndex="{$item.activeOcc}" />
-      </VStack>
-    </List>
+    <!-- Mounts only once commit.value is present; data (raw block objects) is
+         baked from the loaded commit here in CommitDetail's scope, not inside a
+         frozen row template (the first-click-stuck-Loading trap). Search state
+         is decorated onto each $item by FindableList's __bramFindPlan and read
+         back through the rowTemplate slot. -->
+    <FindableList when="{commit.value}"
+      data="{window.__bramCommitBlockRows(commit.value)}"
+      markedText="__bramCommitMarkedText"
+      query="{$props.query || ''}"
+      placeholder="Find in commit…"
+      height="{$props.height || '400px'}">
+      <property name="rowTemplate">
+        <VStack when="{$item.kind === 'head'}" gap="$space-3" paddingBottom="$space-2">
+          <Link when="{$props.url}" noIndicator onClick="openExternal($props.url)">
+            <Text fontWeight="$fontWeight-bold"
+              value="{'Open commit on ' + (($props.url || '').includes('gitlab') ? 'GitLab' : 'GitHub') + ' ↗'}" />
+          </Link>
+          <Markdown when="{$item.message}" content="{$item.message}"
+            highlightText="{window.__bramSearchTerms($item.__needle)}"
+            highlightActiveIndex="{$item.__activeOcc}" />
+          <Text when="{$item.stats}" fontSize="$fontSize-sm" color="$textColor-secondary"
+            value="+{$item.stats.additions} / -{$item.stats.deletions} across {$item.filesCount} file(s)" />
+        </VStack>
+        <VStack when="{$item.kind === 'file'}" gap="0" borderTop="1px solid $borderColor" paddingTop="$space-2">
+          <HStack gap="$space-3" verticalAlignment="center" paddingBottom="$space-2">
+            <Text fontWeight="$fontWeight-bold" value="{$item.filename}" />
+            <Text color="green" value="+{$item.additions}" />
+            <Text color="red" value="-{$item.deletions}" />
+          </HStack>
+          <DiffView text="{$item.patch || '(no textual diff)'}"
+            needle="{$item.__needle}" activeIndex="{$item.__activeOcc}" />
+        </VStack>
+      </property>
+    </FindableList>
   </VStack>
 </Component>

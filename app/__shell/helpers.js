@@ -6521,11 +6521,31 @@ window.__bramCommitMarkedText = function (row) {
   if (!row) return "";
   return row.kind === "file" ? (row.patch || "") : (row.message || "");
 };
-window.__bramIssueBlocks = function (issue) {
-  var out = [(issue && issue.body) || ""];
+// findable-list-udc IssueDetail: flat typed rows for FindableList. Body row
+// (block 0) bakes the header fields so the row template never reads issue.value
+// from a frozen List-row scope (first-click-stuck-Loading trap); one comment
+// row per comment (blocks 1+N).
+window.__bramIssueBlockRows = function (issue) {
+  var rows = [{
+    id: "body", kind: "body",
+    body: (issue && issue.body) || "",
+    number: issue && issue.number,
+    url: (issue && issue.url) || "",
+    state: issue && issue.state,
+    title: (issue && issue.title) || "",
+    author: issue && issue.author,
+    createdAt: issue && issue.createdAt,
+  }];
   var comments = (issue && issue.comments) || [];
-  for (var i = 0; i < comments.length; i++) out.push((comments[i] && comments[i].body) || "");
-  return out;
+  for (var i = 0; i < comments.length; i++) {
+    var c = comments[i] || {};
+    rows.push({ id: "comment:" + i, kind: "comment", body: c.body || "", author: c.author });
+  }
+  return rows;
+};
+// Marked surface (counted == highlighted): the body text for both kinds.
+window.__bramIssueMarkedText = function (row) {
+  return (row && row.body) || "";
 };
 window.__bramHistoryBlocks = function (g) {
   var out = [
@@ -6715,17 +6735,6 @@ window.__bramHistoryPhaseBlockIndex = function (g, phaseItemIndex) {
 // $item. These decorators fold it in; callers rebuild only when the search
 // changes (not every render), so the RO-flood fix stays intact. See the
 // feedback_xmlui_list_row_scope_isolated learning.
-
-// Decorate an arbitrary nested-loop array (issue comments, history phases)
-// with the current search state under __-prefixed keys, preserving each
-// item's own fields via a shallow copy.
-window.__bramWithSearch = function (arr, needle, counts, cursor) {
-  var a = Array.isArray(arr) ? arr : [];
-  var n = needle || "", c = counts || [], k = (typeof cursor === "number" ? cursor : 0);
-  return a.map(function (x) {
-    return Object.assign({}, x, { __needle: n, __counts: c, __cursor: k });
-  });
-};
 
 // transcript-find-in-page-v2: match scan over transcript EVENTS (the
 // Transcript's row shape). Scans the fields the rows actually render,

@@ -1464,8 +1464,8 @@ window.settingsInfoBodies = {
     "Auto-reload the agent pane as you edit Bram's own source. For developing Bram.\n\n" +
     "## Show tips in the footer\n\n" +
     "Show rotating tips in the footer.\n\n" +
-    "## Soft beep on turn completion\n\n" +
-    "Play a soft beep when a turn finishes.\n\n" +
+    "## Soft beep on menus and turn completion\n\n" +
+    "Play a soft beep when a permission menu appears or a turn finishes.\n\n" +
     "## Dismissed tips return after\n\n" +
     "How long a dismissed tip stays hidden before showing again.\n\n" +
     "## Search badges start all on\n\n" +
@@ -8388,11 +8388,12 @@ window.__bramSetSearchBadgesInitialAllOn = function (on) {
   return !!on;
 };
 
-// turn-complete-beep: a per-user (localStorage) audio cue when the agent
-// finishes a turn. Default OFF. Per-user, not a project setting — an audio
-// preference must not ride the shared .bram.json.
+// turn-complete-beep: a per-user (localStorage) audio cue when a permission
+// menu appears or the agent finishes a turn. Default ON (it's genuinely useful);
+// an explicit off stores '0' and stays off. Per-user, not a project setting — an
+// audio preference must not ride the shared .bram.json.
 window.__bramBeepEnabled = function () {
-  return __bramReadLS('bram.turnCompleteBeep', '0') === '1';
+  return __bramReadLS('bram.turnCompleteBeep', '1') !== '0';
 };
 window.__bramSetBeepEnabled = function (on) {
   __bramWriteLS('bram.turnCompleteBeep', on ? '1' : '0');

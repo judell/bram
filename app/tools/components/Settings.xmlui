@@ -164,7 +164,7 @@
         <!-- turn-complete-beep: per-user (localStorage) audio cue; toggling
              on plays the beep once as confirmation. -->
         <Switch
-          label="Soft beep on turn completion"
+          label="Soft beep on menus and turn completion"
           initialValue="{window.__bramBeepEnabled ? window.__bramBeepEnabled() : false}"
           onDidChange="(v) => window.__bramSetBeepEnabled(v)" />
         <Select

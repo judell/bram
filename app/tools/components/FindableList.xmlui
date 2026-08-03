@@ -1,0 +1,65 @@
+<Component name="FindableList">
+  <!-- findable-list-udc (phase 1, foundation — no consumer migrated yet).
+       Owns the occurrence-granular find spine so the five find consumers can
+       retire their duplicated per-view builders. Consumer supplies:
+         - data           the base array (one element per block/row)
+         - markedText      the NAME of a window helper `(row) => string`
+                           returning the row's canonical marked surface (the
+                           text whose occurrences are counted AND highlighted)
+         - virtualizedKeying  opt-in bool: cursor-stable-except-active idKey +
+                           memo (Transcript, thousands of rows). Off for
+                           bounded views.
+         - cacheId         optional distinct memo-cache key per consumer.
+         - height, idKey, placeholder
+         - rowTemplate     the per-row markup (template property below)
+
+       THE INVARIANT the UDC cannot enforce (the how-to must teach): the
+       surface `markedText` counts and the surface `rowTemplate` highlights
+       must be the SAME one. Route highlightText + highlightActiveIndex to the
+       Markdown (or DiffView activeIndex) rendering `$item.__markedText`; read
+       the active occurrence from `$item.__activeOcc`. See xmlui-org/xmlui#3713.
+
+       __bramFindPlan is called qualified (window.__bramFindPlan), so no xs
+       delegator is warranted (docs/developing-bram.md: default is none). -->
+  <variable name="findText" value="{''}" />
+  <variable name="appliedNeedle" value="{''}" />
+  <variable name="findCursor" value="{0}" />
+  <variable name="findPlan" value="{null}" />
+
+  <VStack gap="$space-2" height="{$props.height || '*'}">
+    <FindBar id="findBar"
+      placeholder="{$props.placeholder || 'Find…'}"
+      matchCount="{findPlan ? findPlan.total : 0}"
+      current="{findCursor}"
+      showCount="{findText.trim().length >= 2}"
+      onNeedleChange="(v) => findText = v"
+      onStep="(d) => findCursor = window.__bramFindCursorStep(findPlan ? findPlan.total : 0, findCursor, d)" />
+
+    <!-- needle settles -> reset cursor + apply (two listeners: an onDidChange
+         arrow must be a single expression, not a statement block). -->
+    <ChangeListener listenTo="{findText}" debounceWaitInMs="200"
+      onDidChange="() => findCursor = 0" />
+    <ChangeListener listenTo="{findText}" debounceWaitInMs="200"
+      onDidChange="() => appliedNeedle = findText" />
+
+    <!-- Recompute the plan when the needle, cursor, or data length change.
+         The plan computes matches internally (count &gt; 0 on the marked
+         surface), so there is no separate matches var to race. -->
+    <ChangeListener
+      listenTo="{appliedNeedle + '|' + findCursor + '|' + ($props.data ? $props.data.length : 0)}"
+      onDidChange="() => findPlan = window.__bramFindPlan($props.data, appliedNeedle, findCursor, $props.markedText, { keying: !!$props.virtualizedKeying, cacheId: $props.cacheId || 'default' })" />
+
+    <!-- Scroll only when the active ROW changes (stepping between occurrences
+         within one row keeps it in view). -->
+    <ChangeListener
+      listenTo="{(findPlan &amp;&amp; findPlan.total) ? findPlan.activeIndex : -1}"
+      onDidChange="() => (findPlan &amp;&amp; findPlan.total) ? findableInnerList.scrollToIndex(findPlan.activeIndex) : null" />
+
+    <List id="findableInnerList"
+      height="*"
+      data="{(findPlan &amp;&amp; findPlan.rows) || $props.data}"
+      idKey="{findPlan ? '__findKey' : ($props.idKey || 'id')}">
+      <Slot name="rowTemplate" item="{$item}" />
+    </List>
+  </VStack>
+</Component>

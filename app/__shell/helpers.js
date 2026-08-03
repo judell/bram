@@ -6797,6 +6797,89 @@ window.__bramMarkdownLiteral = function (text) {
 // can't see the outer find vars). Returns NULL when the find is inactive so
 // the caller's `findPlan.rows || events` binding falls back to the live events
 // array — the hot refetch path pays nothing and never sees stale copies.
+// findable-list-udc (phase 1): generalized occurrence-granular find plan.
+// A parameterization of __bramTranscriptFindPlan: the per-row canonical
+// marked surface is supplied by markedTextFn(row) instead of the hardcoded
+// isProse?text:preview logic, and a row MATCHES iff that surface holds >=1
+// occurrence (matching == counting == highlighting: the one invariant).
+// opts.keying (bool) turns on the cursor-stable-except-active idKey + memo
+// (Transcript; thousands of rows). Bounded views leave it off. markedTextFn
+// is passed as a window-helper NAME (string) for robustness — function-valued
+// XMLUI props into JS are the shakiest link; window helpers are the idiom.
+//   returns { rows, total, activeIndex, cursor } or null (no terms).
+window.__bramFindPlan = function (data, needle, cursor, markedTextName, opts) {
+  var terms = window.__bramSearchTerms(needle);
+  var arr = Array.isArray(data) ? data : [];
+  if (!terms.length) return null;
+  opts = opts || {};
+  var keying = !!opts.keying;
+  var markedTextFn = (markedTextName && window[markedTextName]) ? window[markedTextName] : null;
+  var surfaceOf = function (row) {
+    if (markedTextFn) { try { return String(markedTextFn(row) || ""); } catch (e) { return ""; } }
+    return String((row && (row.text || row.summary)) || "");
+  };
+  var needleKey = String(needle || "");
+  var cacheSlot = "__bramFindPlanCache_" + (opts.cacheId || "default");
+  var cache = window[cacheSlot];
+  var cacheHit = !!cache && cache.needle === needleKey && cache.data.length === arr.length;
+  if (cacheHit) {
+    for (var same = 0; same < arr.length; same++) {
+      if (cache.data[same] !== arr[same]) { cacheHit = false; break; }
+    }
+  }
+  if (!cacheHit) {
+    var matchIndicesBuilt = [];
+    var countsBuilt = [];
+    var blockOfBuilt = {};
+    var surfacesBuilt = {};
+    for (var i0 = 0; i0 < arr.length; i0++) {
+      var s0 = surfaceOf(arr[i0]);
+      var c0 = window.__bramCountOccurrences(s0, terms);
+      if (c0 > 0) {
+        blockOfBuilt[i0] = matchIndicesBuilt.length;
+        matchIndicesBuilt.push(i0);
+        countsBuilt.push(c0);
+        surfacesBuilt[i0] = s0;
+      }
+    }
+    var totalBuilt = 0;
+    for (var c1 = 0; c1 < countsBuilt.length; c1++) totalBuilt += countsBuilt[c1];
+    var keySep = String.fromCharCode(0);
+    var baseRows = arr.map(function (row, i) {
+      var bi = Object.prototype.hasOwnProperty.call(blockOfBuilt, i) ? blockOfBuilt[i] : -1;
+      var idBase = (row.id === undefined || row.id === null || row.id === "") ? ("row-" + i) : String(row.id);
+      return Object.assign({}, row, {
+        __findKey: keying ? (idBase + keySep + "f:" + needleKey) : idBase,
+        __markedText: Object.prototype.hasOwnProperty.call(surfacesBuilt, i) ? surfacesBuilt[i] : "",
+        __needle: bi >= 0 ? needleKey : "",
+        __activeOcc: -1,
+        __blockIdx: bi,
+      });
+    });
+    cache = { needle: needleKey, data: arr, matchIndices: matchIndicesBuilt,
+              counts: countsBuilt, total: totalBuilt, rows: baseRows, keying: keying };
+    window[cacheSlot] = cache;
+  }
+  var matchIndices = cache.matchIndices, counts = cache.counts, total = cache.total;
+  var cur = Number(cursor) || 0;
+  cur = total > 0 ? (((cur % total) + total) % total) : 0;
+  var activeIndex = -1, activeLocalOcc = -1, acc = 0;
+  for (var k = 0; k < counts.length; k++) {
+    if (cur >= acc && cur < acc + counts[k]) { activeIndex = matchIndices[k]; activeLocalOcc = cur - acc; break; }
+    acc += counts[k];
+  }
+  if (activeIndex < 0 && matchIndices.length) { activeIndex = matchIndices[0]; activeLocalOcc = 0; }
+  var rows = cache.rows.slice();
+  if (activeIndex >= 0) {
+    var base = cache.rows[activeIndex];
+    rows[activeIndex] = Object.assign({}, base, {
+      __findKey: cache.keying ? (base.__findKey + String.fromCharCode(0) + "a:" + activeLocalOcc) : base.__findKey,
+      __activeOcc: activeLocalOcc,
+    });
+  }
+  return { rows: rows, total: total, activeIndex: activeIndex, cursor: cur };
+};
+
 window.__bramTranscriptFindPlan = function (events, needle, cursor) {
   // Occurrence-granular transcript find (like the Commit/Issue/History
   // detail views). Each matching event is a "block" with ONE canonical

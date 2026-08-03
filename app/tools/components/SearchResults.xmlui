@@ -31,6 +31,12 @@
        reconciliation, 2026-08-01 screenshot). `key` is unique across all
        four buckets. https://docs.xmlui.org/components/List#idkey -->
   <List height="100%" data="{$props.hits}" idKey="key">
+    <!-- Suppress the List's default "No data available": Search renders its own
+         intentional empty states ("Type at least 2 characters…" / "No matches."),
+         so an empty results list should render nothing. -->
+    <property name="emptyListTemplate">
+      <Fragment />
+    </property>
     <VStack gap="$space-1" paddingVertical="$space-2" borderBottom="1px solid $borderColor">
       <HStack gap="$space-3" verticalAlignment="start">
         <VStack gap="$space-0_5" width="7rem">

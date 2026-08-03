@@ -8358,6 +8358,58 @@ window.__bramSetTipsEnabled = function (on) {
   return !!on;
 };
 
+// turn-complete-beep: a per-user (localStorage) audio cue when the agent
+// finishes a turn. Default OFF. Per-user, not a project setting — an audio
+// preference must not ride the shared .bram.json.
+window.__bramBeepEnabled = function () {
+  return __bramReadLS('bram.turnCompleteBeep', '0') === '1';
+};
+window.__bramSetBeepEnabled = function (on) {
+  __bramWriteLS('bram.turnCompleteBeep', on ? '1' : '0');
+  if (on) { try { window.__bramSoftBeep(); } catch (e) { /* ignore */ } }  // confirm audibly on enable
+  return !!on;
+};
+// A short, soft sine with a quick attack/release envelope (click-free).
+// One lazily-created AudioContext, resumed on demand (autoplay policy needs
+// a prior user gesture; the user has invariably clicked before a turn ends).
+window.__bramSoftBeep = function () {
+  try {
+    var Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    var ac = window.__bramBeepCtx || (window.__bramBeepCtx = new Ctx());
+    if (ac.state === 'suspended' && ac.resume) { try { ac.resume(); } catch (e) {} }
+    var now = ac.currentTime;
+    var osc = ac.createOscillator();
+    var gain = ac.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = 660;
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.06, now + 0.02);   // soft attack
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.18); // quick release
+    osc.connect(gain); gain.connect(ac.destination);
+    osc.start(now);
+    osc.stop(now + 0.2);
+  } catch (e) { /* audio unavailable: silent, not broken */ }
+};
+// Beep when the agent turn transitions to finished AND the cue is enabled.
+window.__bramBeepOnTurnState = function (newState) {
+  try {
+    if (String(newState) === 'finished' && window.__bramBeepEnabled()) window.__bramSoftBeep();
+  } catch (e) { /* ignore */ }
+};
+// Beep when a permission menu APPEARS (agent needs a decision), gated on the
+// same cue. Transition-only: beep on no-menu -> menu, not on the redetects /
+// label-joins that re-fire the menu event while one is already up.
+window.__bramLastMenuPresent = false;
+window.__bramBeepOnMenu = function (menu) {
+  try {
+    var present = !!(menu && (menu.tool || (menu.options && menu.options.length)));
+    var was = window.__bramLastMenuPresent === true;
+    window.__bramLastMenuPresent = present;
+    if (present && !was && window.__bramBeepEnabled()) window.__bramSoftBeep();
+  } catch (e) { /* ignore */ }
+};
+
 // Relevance gates. A tip with no gate is evergreen (eligible until dismissed).
 // The settings snapshot is the /__settings payload; done-detection for gated
 // tips is the gate itself (opting in retires the tip with no stored state).

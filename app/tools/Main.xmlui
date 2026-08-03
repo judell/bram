@@ -184,6 +184,15 @@
   <ChangeListener
     listenTo="{mainAgentStatus.value &amp;&amp; mainAgentStatus.value.verb}"
     onDidChange="(c) => { if (c.newValue) { lastSeenAgentVerb = c.newValue; } }" />
+  <!-- turn-complete-beep: soft audio cue when the agent finishes a turn OR
+       a permission menu appears, gated on the per-user localStorage
+       preference (default off). -->
+  <ChangeListener
+    listenTo="{mainAgentStatus.value &amp;&amp; mainAgentStatus.value.state}"
+    onDidChange="(c) => window.__bramBeepOnTurnState(c.newValue)" />
+  <ChangeListener
+    listenTo="{footerAgentMenuEvt.value}"
+    onDidChange="() => window.__bramBeepOnMenu(footerAgentMenuEvt.value)" />
   <ChangeListener
     listenTo="{((mainAgentStatus.value &amp;&amp; mainAgentStatus.value.state) || '') + '|' + ((mainAgentStatus.value &amp;&amp; mainAgentStatus.value.provider) || (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || '') + '|' + ((mainAgentStatus.value || enhanceStatus.value) ? '1' : '0')}"
     onDidChange="() => {

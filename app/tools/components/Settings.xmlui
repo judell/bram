@@ -157,6 +157,12 @@
           label="Show tips in the footer"
           initialValue="{window.__bramTipsEnabled ? window.__bramTipsEnabled() : true}"
           onDidChange="(v) => window.__bramSetTipsEnabled(v)" />
+        <!-- turn-complete-beep: per-user (localStorage) audio cue; toggling
+             on plays the beep once as confirmation. -->
+        <Switch
+          label="Soft beep on turn completion"
+          initialValue="{window.__bramBeepEnabled ? window.__bramBeepEnabled() : false}"
+          onDidChange="(v) => window.__bramSetBeepEnabled(v)" />
         <Select
           label="Dismissed tips return after"
           width="14rem"

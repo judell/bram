@@ -11,12 +11,13 @@
     value="{{ Sessions: 'blue', Commits: 'green', Issues: '#c2410c', History: 'purple' }}" />
   <!-- selectedTypes (the facet pills) and mode seed from the URL so an
        Evidence "replay" link (Workspace.xmlui) lands here pre-filled. Absent
-       => the everyday defaults (all buckets, AND mode). These stay locally
-       mutable working copies; $queryParams only changes on navigation, so a
-       fresh replay remounts and re-seeds without clobbering local edits.
+       => the everyday defaults (AND mode; facets per the Settings toggle
+       __bramSearchBadgesInitialAllOn — all four buckets, or none). These stay
+       locally mutable working copies; $queryParams only changes on navigation,
+       so a fresh replay remounts and re-seeds without clobbering local edits.
        See https://docs.xmlui.org/howto/deep-link-to-a-tab-or-section -->
   <variable name="selectedTypes"
-    value="{$queryParams.types ? $queryParams.types.split(',') : ['session', 'commit', 'issue', 'worklist-history']}" />
+    value="{$queryParams.types ? $queryParams.types.split(',') : (window.__bramSearchBadgesInitialAllOn() ? ['session', 'commit', 'issue', 'worklist-history'] : [])}" />
   <variable name="mode" value="{$queryParams.mode || 'and'}" />
   <variable name="ready" value="{!!query &amp;&amp; query.trim().length >= 2}" />
   <variable name="expandedHit" value="{null}" />

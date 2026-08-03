@@ -1467,7 +1467,9 @@ window.settingsInfoBodies = {
     "## Soft beep on turn completion\n\n" +
     "Play a soft beep when a turn finishes.\n\n" +
     "## Dismissed tips return after\n\n" +
-    "How long a dismissed tip stays hidden before showing again.",
+    "How long a dismissed tip stays hidden before showing again.\n\n" +
+    "## Search badges start all on\n\n" +
+    "Whether the Search tab opens with all facet badges selected, or none.",
   ai:
     "## Tool Descriptions\n\n" +
     "A one-line intent header above tool commands in the Transcript, from " +
@@ -8372,6 +8374,17 @@ window.__bramTipsEnabled = function () {
 
 window.__bramSetTipsEnabled = function (on) {
   __bramWriteLS('bram.tipsEnabled', on ? '1' : '0');
+  return !!on;
+};
+
+// Search facet-badge initial state: whether the Search tab opens with all four
+// facets selected (all on, default) or none (all off). Per-user, not a project
+// setting — a personal browse preference must not ride the shared .bram.json.
+window.__bramSearchBadgesInitialAllOn = function () {
+  return __bramReadLS('bram.searchBadgesInitialAllOn', '1') !== '0';
+};
+window.__bramSetSearchBadgesInitialAllOn = function (on) {
+  __bramWriteLS('bram.searchBadgesInitialAllOn', on ? '1' : '0');
   return !!on;
 };
 

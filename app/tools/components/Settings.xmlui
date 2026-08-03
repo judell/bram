@@ -174,6 +174,12 @@
           <Option value="30d" label="1 month" />
           <Option value="forever" label="Never (dismiss forever)" />
         </Select>
+        <!-- search-badges-initial-state: per-user (localStorage). Whether the
+             Search tab opens with all facet badges selected or none. -->
+        <Switch
+          label="Search badges start all on"
+          initialValue="{window.__bramSearchBadgesInitialAllOn ? window.__bramSearchBadgesInitialAllOn() : true}"
+          onDidChange="(v) => window.__bramSetSearchBadgesInitialAllOn(v)" />
       </VStack>
 
       <VStack gap="$space-2">

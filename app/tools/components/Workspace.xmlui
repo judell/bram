@@ -8,6 +8,7 @@
   var.closeIssuesDialog="{null}"
   var.closeIssuesItemRef="{null}"
   var.closeIssuesState="{null}"
+  var.closeIssuesOneShot="{false}"
   var.newItemHelp="{!!$queryParams.addItem}"
   var.newItemSubmitting="{false}"
   var.newItemStartSig="{''}"
@@ -711,7 +712,7 @@
                       label="Approve"
                       size="xs"
                       enabled="{!submitting && (($item.status || 'proposed') === 'applied' || ($item.status || 'proposed') === 'proposed')}"
-                      onClick="(() => { window.__bramIframeTrace('click', {target: 'approve', item: $item.id}); if ($item.status === 'applied' &amp;&amp; $item.closesIssues &amp;&amp; $item.closesIssues.length > 0) { closeIssuesItemRef = $item; closeIssuesState = initCloseIssueState($item.closesIssues); closeIssuesDialog = $item.id; return; } const sentText = (feedbackBox &amp;&amp; feedbackBox.value) || (feedbackDraftsById || {})[$item.id] || ''; const r = window.__bramPrepareWorklistActionSubmission({kind: 'approved', items: worklist.value.items, selectedId: $item.id, rawFeedback: sentText, feedbackDraftsById: feedbackDraftsById || {}, expandedItemIds: expandedItemIds || [], voiceTarget: worklistVoiceTarget || 'message-agent', inflightTarget: 'approve'}); const next = Object.assign({}, r.feedbackDraftsById || {}); feedbackDraftsById = next; if (feedbackBox) feedbackBox.setValue(''); window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds || [], feedbackDraftsById: feedbackDraftsById}); worklistActionResult = r; window.submitAuthorizedWorklistTurn(r, () => { submitting = false; actionProgressScope = ''; actionProgressKind = ''; actionProgressTick = 0; submittedItemId = null; submittedKind = ''; awaitingResponse = false; worklistActionResult = null; }); })()" />
+                      onClick="(() => { window.__bramIframeTrace('click', {target: 'approve', item: $item.id}); if ($item.status === 'applied' &amp;&amp; $item.closesIssues &amp;&amp; $item.closesIssues.length > 0) { closeIssuesOneShot = false; closeIssuesItemRef = $item; closeIssuesState = initCloseIssueState($item.closesIssues); closeIssuesDialog = $item.id; return; } const sentText = (feedbackBox &amp;&amp; feedbackBox.value) || (feedbackDraftsById || {})[$item.id] || ''; const r = window.__bramPrepareWorklistActionSubmission({kind: 'approved', items: worklist.value.items, selectedId: $item.id, rawFeedback: sentText, feedbackDraftsById: feedbackDraftsById || {}, expandedItemIds: expandedItemIds || [], voiceTarget: worklistVoiceTarget || 'message-agent', inflightTarget: 'approve'}); const next = Object.assign({}, r.feedbackDraftsById || {}); feedbackDraftsById = next; if (feedbackBox) feedbackBox.setValue(''); window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds || [], feedbackDraftsById: feedbackDraftsById}); worklistActionResult = r; window.submitAuthorizedWorklistTurn(r, () => { submitting = false; actionProgressScope = ''; actionProgressKind = ''; actionProgressTick = 0; submittedItemId = null; submittedKind = ''; awaitingResponse = false; worklistActionResult = null; }); })()" />
                     <Theme paddingHorizontal-Button-xs="$space-0_5">
                       <Button
                         label="ⓘ"
@@ -719,6 +720,26 @@
                         size="xs"
                         tooltip="What does Approve do?"
                         onClick="approveHelpDialog.open()" />
+                    </Theme>
+                  </HStack>
+                  <HStack
+                    gap="$space-1"
+                    verticalAlignment="center"
+                    when="{worklistConfig.value &amp;&amp; worklistConfig.value.oneClickApproveCommit &amp;&amp; ($item.status || 'proposed') === 'proposed'}">
+                    <Button
+                      label="Approve &amp; commit"
+                      size="xs"
+                      variant="outlined"
+                      enabled="{!submitting}"
+                      tooltip="Apply and commit in one step"
+                      onClick="(() => { window.__bramIframeTrace('click', {target: 'approve-commit', item: $item.id}); if ($item.closesIssues &amp;&amp; $item.closesIssues.length > 0) { closeIssuesOneShot = true; closeIssuesItemRef = $item; closeIssuesState = initCloseIssueState($item.closesIssues); closeIssuesDialog = $item.id; return; } const sentText = (feedbackBox &amp;&amp; feedbackBox.value) || (feedbackDraftsById || {})[$item.id] || ''; const r = window.__bramPrepareWorklistActionSubmission({kind: 'approved', items: worklist.value.items, selectedId: $item.id, rawFeedback: sentText, feedbackDraftsById: feedbackDraftsById || {}, expandedItemIds: expandedItemIds || [], voiceTarget: worklistVoiceTarget || 'message-agent', inflightTarget: 'approve', oneShot: true}); const next = Object.assign({}, r.feedbackDraftsById || {}); feedbackDraftsById = next; if (feedbackBox) feedbackBox.setValue(''); window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds || [], feedbackDraftsById: feedbackDraftsById}); worklistActionResult = r; window.submitAuthorizedWorklistTurn(r, () => { submitting = false; actionProgressScope = ''; actionProgressKind = ''; actionProgressTick = 0; submittedItemId = null; submittedKind = ''; awaitingResponse = false; worklistActionResult = null; }); })()" />
+                    <Theme paddingHorizontal-Button-xs="$space-0_5">
+                      <Button
+                        label="ⓘ"
+                        variant="ghost"
+                        size="xs"
+                        tooltip="What does Approve &amp; commit do?"
+                        onClick="approveCommitHelpDialog.open()" />
                     </Theme>
                   </HStack>
                   <HStack gap="$space-1" verticalAlignment="center">
@@ -960,7 +981,7 @@
     <ModalDialog
       when="{closeIssuesDialog !== null}"
       title="Close referenced issue(s)?"
-      onClose="closeIssuesDialog = null; closeIssuesItemRef = null; closeIssuesState = null">
+      onClose="closeIssuesDialog = null; closeIssuesItemRef = null; closeIssuesState = null; closeIssuesOneShot = false">
       <VStack gap="$space-3" padding="$space-2">
         <Text>
           This commit is flagged as resolving the GitHub issue(s) below.
@@ -996,15 +1017,15 @@
           <Button
             label="Commit and queue close"
             tooltip="Commit now and queue the close; the issue closes automatically on your next push"
-            onClick="const sentId = closeIssuesItemRef &amp;&amp; closeIssuesItemRef.id; const sentText = sentId ? ((feedbackDraftsById || {})[sentId] || '') : ''; const r = window.__bramPrepareCloseIssueWorklistActionSubmission({item: closeIssuesItemRef, closeIssuesState: closeIssuesState, closeIssues: true, feedbackDraftsById: feedbackDraftsById || {}, expandedItemIds: expandedItemIds || [], voiceTarget: worklistVoiceTarget || 'message-agent'}); const next = Object.assign({}, r.feedbackDraftsById || {}); feedbackDraftsById = next; window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds || [], feedbackDraftsById: feedbackDraftsById}); worklistActionResult = r; window.submitAuthorizedWorklistTurn(r, () => { submitting = false; actionProgressScope = ''; actionProgressKind = ''; actionProgressTick = 0; submittedItemId = null; submittedKind = ''; awaitingResponse = false; worklistActionResult = null; }); closeIssuesDialog = null; closeIssuesItemRef = null; closeIssuesState = null" />
+            onClick="const sentId = closeIssuesItemRef &amp;&amp; closeIssuesItemRef.id; const sentText = sentId ? ((feedbackDraftsById || {})[sentId] || '') : ''; const r = window.__bramPrepareCloseIssueWorklistActionSubmission({item: closeIssuesItemRef, closeIssuesState: closeIssuesState, closeIssues: true, feedbackDraftsById: feedbackDraftsById || {}, expandedItemIds: expandedItemIds || [], voiceTarget: worklistVoiceTarget || 'message-agent', oneShot: closeIssuesOneShot}); const next = Object.assign({}, r.feedbackDraftsById || {}); feedbackDraftsById = next; window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds || [], feedbackDraftsById: feedbackDraftsById}); worklistActionResult = r; window.submitAuthorizedWorklistTurn(r, () => { submitting = false; actionProgressScope = ''; actionProgressKind = ''; actionProgressTick = 0; submittedItemId = null; submittedKind = ''; awaitingResponse = false; worklistActionResult = null; }); closeIssuesDialog = null; closeIssuesItemRef = null; closeIssuesState = null; closeIssuesOneShot = false" />
           <Button
             label="Approve without closing"
             variant="outlined"
-            onClick="const sentId = closeIssuesItemRef &amp;&amp; closeIssuesItemRef.id; const sentText = sentId ? ((feedbackDraftsById || {})[sentId] || '') : ''; const r = window.__bramPrepareCloseIssueWorklistActionSubmission({item: closeIssuesItemRef, closeIssues: false, feedbackDraftsById: feedbackDraftsById || {}, expandedItemIds: expandedItemIds || [], voiceTarget: worklistVoiceTarget || 'message-agent'}); const next = Object.assign({}, r.feedbackDraftsById || {}); feedbackDraftsById = next; window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds || [], feedbackDraftsById: feedbackDraftsById}); worklistActionResult = r; window.submitAuthorizedWorklistTurn(r, () => { submitting = false; actionProgressScope = ''; actionProgressKind = ''; actionProgressTick = 0; submittedItemId = null; submittedKind = ''; awaitingResponse = false; worklistActionResult = null; }); closeIssuesDialog = null; closeIssuesItemRef = null; closeIssuesState = null" />
+            onClick="const sentId = closeIssuesItemRef &amp;&amp; closeIssuesItemRef.id; const sentText = sentId ? ((feedbackDraftsById || {})[sentId] || '') : ''; const r = window.__bramPrepareCloseIssueWorklistActionSubmission({item: closeIssuesItemRef, closeIssues: false, feedbackDraftsById: feedbackDraftsById || {}, expandedItemIds: expandedItemIds || [], voiceTarget: worklistVoiceTarget || 'message-agent', oneShot: closeIssuesOneShot}); const next = Object.assign({}, r.feedbackDraftsById || {}); feedbackDraftsById = next; window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds || [], feedbackDraftsById: feedbackDraftsById}); worklistActionResult = r; window.submitAuthorizedWorklistTurn(r, () => { submitting = false; actionProgressScope = ''; actionProgressKind = ''; actionProgressTick = 0; submittedItemId = null; submittedKind = ''; awaitingResponse = false; worklistActionResult = null; }); closeIssuesDialog = null; closeIssuesItemRef = null; closeIssuesState = null; closeIssuesOneShot = false" />
           <Button
             label="Cancel"
             variant="ghost"
-            onClick="closeIssuesDialog = null; closeIssuesItemRef = null; closeIssuesState = null" />
+            onClick="closeIssuesDialog = null; closeIssuesItemRef = null; closeIssuesState = null; closeIssuesOneShot = false" />
         </HStack>
       </VStack>
     </ModalDialog>
@@ -1065,6 +1086,26 @@
 If the item carries `closesIssues` (because the agent detected the commit is likely an issue-closer), Approve on TO COMMIT first opens the close-issue confirm dialog. Any text in the per-item feedback box travels with the approval and gives the agent extra guidance." />
         <HStack>
           <Button label="Got it" onClick="approveHelpDialog.close()" />
+        </HStack>
+      </VStack>
+    </ModalDialog>
+
+    <ModalDialog
+      id="approveCommitHelpDialog"
+      title="Approve &amp; commit">
+      <VStack gap="$space-3" padding="$space-2">
+        <Text>
+          Collapses the two approval gates into one. On a TO APPLY item, the
+          agent applies the proposed edits and creates the commit in a single
+          step — you don't approve the commit separately.
+        </Text>
+        <Markdown content="Use it for small, low-risk changes (a label tweak, a one-line fix) where the separate TO COMMIT review adds ceremony without value. For anything you'd want to eyeball on disk before it's committed, use plain **Approve** and review at TO COMMIT.
+
+If the item carries `closesIssues`, this opens the close-issue confirm dialog first, same as Approve on TO COMMIT. Any text in the per-item feedback box travels with the approval.
+
+Shown only when `worklist.oneClickApproveCommit` is enabled in project config." />
+        <HStack>
+          <Button label="Got it" onClick="approveCommitHelpDialog.close()" />
         </HStack>
       </VStack>
     </ModalDialog>

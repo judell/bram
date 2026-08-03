@@ -1766,11 +1766,11 @@ window.__bramItemGate = function (i) {
   return (((i && i.status) || "proposed") === "applied") ? "to commit" : "to apply";
 };
 
-window.__bramBuildApprovePayload = function (items, selectedId, feedback) {
+window.__bramBuildApprovePayload = function (items, selectedId, feedback, oneShot) {
   __bramAppMark("build-approve-payload");
   return JSON.stringify({
     items: (items || []).filter(function (i) { return i.id === selectedId; })
-      .map(function (i) { return { id: i.id, feedback: feedback, gate: window.__bramItemGate(i) }; }),
+      .map(function (i) { return { id: i.id, feedback: feedback, gate: oneShot ? "apply-and-commit" : window.__bramItemGate(i) }; }),
   });
 };
 
@@ -1796,9 +1796,9 @@ window.__bramBuildDropPayload = function (items, selectedId, feedback) {
   });
 };
 
-window.__bramBuildApproveItems = function (items, selectedId, feedback) {
+window.__bramBuildApproveItems = function (items, selectedId, feedback, oneShot) {
   return (items || []).filter(function (i) { return i.id === selectedId; })
-    .map(function (i) { return { id: i.id, feedback: feedback }; });
+    .map(function (i) { return { id: i.id, feedback: feedback, gate: oneShot ? "apply-and-commit" : window.__bramItemGate(i) }; });
 };
 
 window.__bramBuildDropItems = function (items, selectedId, feedback) {
@@ -1806,10 +1806,10 @@ window.__bramBuildDropItems = function (items, selectedId, feedback) {
     .map(function (i) { return { id: i.id, feedback: feedback }; });
 };
 
-window.__bramBuildSingleItemApprovePayload = function (itemRef, feedback) {
+window.__bramBuildSingleItemApprovePayload = function (itemRef, feedback, oneShot) {
   __bramAppMark("build-single-item-approve-payload");
   return JSON.stringify({
-    items: [{ id: itemRef.id, feedback: feedback, gate: window.__bramItemGate(itemRef) }],
+    items: [{ id: itemRef.id, feedback: feedback, gate: oneShot ? "apply-and-commit" : window.__bramItemGate(itemRef) }],
   });
 };
 
@@ -2355,11 +2355,11 @@ window.__bramPrepareWorklistActionSubmission = function (opts) {
   var turnText = "";
   var authorizationPayload = null;
   if (opts.payloadKind === "single-approve") {
-    turnText = "approved: " + window.__bramBuildSingleItemApprovePayload(opts.itemRef, payloadFeedback);
-    authorizationPayload = { kind: "approved", items: [{ id: opts.itemRef.id, feedback: payloadFeedback }] };
+    turnText = "approved: " + window.__bramBuildSingleItemApprovePayload(opts.itemRef, payloadFeedback, opts.oneShot);
+    authorizationPayload = { kind: "approved", items: [{ id: opts.itemRef.id, feedback: payloadFeedback, gate: opts.oneShot ? "apply-and-commit" : window.__bramItemGate(opts.itemRef) }] };
   } else if (kind === "approved") {
-    turnText = "approved: " + window.__bramBuildApprovePayload(items, selectedId, payloadFeedback);
-    authorizationPayload = { kind: "approved", items: window.__bramBuildApproveItems(items, selectedId, payloadFeedback) };
+    turnText = "approved: " + window.__bramBuildApprovePayload(items, selectedId, payloadFeedback, opts.oneShot);
+    authorizationPayload = { kind: "approved", items: window.__bramBuildApproveItems(items, selectedId, payloadFeedback, opts.oneShot) };
   } else if (kind === "drop") {
     turnText = "drop: " + window.__bramBuildDropPayload(items, selectedId, payloadFeedback);
     authorizationPayload = { kind: "drop", items: window.__bramBuildDropItems(items, selectedId, payloadFeedback) };
@@ -2438,6 +2438,7 @@ window.__bramPrepareCloseIssueWorklistActionSubmission = function (opts) {
     expandedItemIds: opts.expandedItemIds || [],
     voiceTarget: opts.voiceTarget || "message-agent",
     imageAction: imageAction,
+    oneShot: opts.oneShot,
   });
 };
 

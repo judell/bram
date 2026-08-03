@@ -36184,10 +36184,14 @@ fn route_request<R: tauri::Runtime>(
 
     if path == "__worklist-config" {
         let config = project_root(Some(app)).and_then(|root| load_project_config(&root));
-        let enabled = project_config_batch_commit_actions(config);
-        let body = serde_json::json!({ "batchCommitActions": enabled })
-            .to_string()
-            .into_bytes();
+        let enabled = project_config_batch_commit_actions(config.clone());
+        let one_click = project_config_one_click_approve_commit(config);
+        let body = serde_json::json!({
+            "batchCommitActions": enabled,
+            "oneClickApproveCommit": one_click,
+        })
+        .to_string()
+        .into_bytes();
         return (200, "application/json; charset=utf-8", body);
     }
 

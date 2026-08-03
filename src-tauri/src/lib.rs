@@ -129,6 +129,11 @@ struct WorklistAuthorizationRecord {
     // it. #[serde(default)] so pre-H4 auth files load.
     #[serde(default)]
     interrupted_at_ms: Option<i64>,
+    // one-shot Approve & commit (judell/bram#241): set when the approval's
+    // gate was "apply-and-commit". The commit route then accepts still-
+    // `proposed` ids (advance folded into commit) under this single auth read.
+    #[serde(default)]
+    commit_too: bool,
 }
 
 // security-h4: TTL bounding how long an approved/drop authorization stays
@@ -376,6 +381,8 @@ struct ShellConfig {
 struct WorklistConfig {
     #[serde(default, rename = "batchCommitActions")]
     batch_commit_actions: Option<bool>,
+    #[serde(default, rename = "oneClickApproveCommit")]
+    one_click_approve_commit: Option<bool>,
 }
 
 // Optional UI block. `showTargetApp` controls whether the embedded
@@ -13159,6 +13166,13 @@ fn project_config_batch_commit_actions(config: Option<ProjectConfig>) -> bool {
     config
         .and_then(|c| c.worklist)
         .and_then(|w| w.batch_commit_actions)
+        .unwrap_or(false)
+}
+
+fn project_config_one_click_approve_commit(config: Option<ProjectConfig>) -> bool {
+    config
+        .and_then(|c| c.worklist)
+        .and_then(|w| w.one_click_approve_commit)
         .unwrap_or(false)
 }
 
@@ -26697,6 +26711,7 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
             source: "setup".to_string(),
             consumed_at_ms: None,
             interrupted_at_ms: None,
+            commit_too: false,
         };
         let serialized_core = serde_json::to_string_pretty(&core_stub)
             .map_err(|e| format!("serialize worklist authorization stub: {}", e))?;
@@ -32478,6 +32493,7 @@ fn normalize_turn_submission(data: &str) -> String {
 struct ParsedWorklistAuthorization {
     kind: String,
     requests: Vec<(String, Option<String>)>,
+    commit_too: bool,
 }
 
 #[cfg(test)]
@@ -32489,6 +32505,7 @@ fn parse_worklist_authorization_message(text: &str) -> Option<ParsedWorklistAuth
         };
         let value = serde_json::from_str::<serde_json::Value>(rest.trim()).ok()?;
         let mut requests: Vec<(String, Option<String>)> = Vec::new();
+        let mut commit_too = false;
         // Preferred shape (per-item, plus legacy approve which carried
         // top-level feedback): {items: [{id, feedback?}, ...]}.
         if let Some(items) = value.get("items").and_then(|v| v.as_array()) {
@@ -32504,6 +32521,11 @@ fn parse_worklist_authorization_message(text: &str) -> Option<ParsedWorklistAuth
                     .map(str::to_string)
                     .or(Some(String::new()));
                 requests.push((id.to_string(), feedback));
+                if kind == "approved"
+                    && item.get("gate").and_then(|v| v.as_str()) == Some("apply-and-commit")
+                {
+                    commit_too = true;
+                }
             }
         }
         // Legacy drop shape: {ids: [...]} — accept if items[] wasn't present.
@@ -32519,6 +32541,7 @@ fn parse_worklist_authorization_message(text: &str) -> Option<ParsedWorklistAuth
         return Some(ParsedWorklistAuthorization {
             kind: kind.to_string(),
             requests,
+            commit_too,
         });
     }
     None
@@ -32553,9 +32576,14 @@ fn parse_worklist_authorization_payload(
     if requests.is_empty() {
         return Err("no valid worklist authorization items".to_string());
     }
+    let commit_too = kind == "approved"
+        && items.iter().any(|item| {
+            item.get("gate").and_then(|v| v.as_str()) == Some("apply-and-commit")
+        });
     Ok(ParsedWorklistAuthorization {
         kind: kind.to_string(),
         requests,
+        commit_too,
     })
 }
 
@@ -32566,6 +32594,7 @@ fn build_worklist_authorization_record(
     issued_at_ms: i64,
     source: &str,
 ) -> WorklistAuthorizationRecord {
+    let commit_too = parsed.commit_too;
     let mut ids: Vec<String> = Vec::with_capacity(parsed.requests.len());
     let mut items: Vec<serde_json::Value> = Vec::new();
 
@@ -32603,6 +32632,7 @@ fn build_worklist_authorization_record(
         source: source.to_string(),
         consumed_at_ms: None,
         interrupted_at_ms: None,
+        commit_too,
     }
 }
 
@@ -36904,6 +36934,7 @@ fn validate_worklist_commit_paths(paths: &[String]) -> Result<(), String> {
 fn worklist_commit_files_for_ids(
     items: &[serde_json::Value],
     ids: &[String],
+    allow_proposed: bool,
 ) -> Result<Vec<String>, String> {
     let mut files: Vec<String> = Vec::new();
     for id in ids {
@@ -36915,7 +36946,8 @@ fn worklist_commit_files_for_ids(
             .get("status")
             .and_then(|v| v.as_str())
             .unwrap_or("proposed");
-        if status != "applied" {
+        let ok_status = status == "applied" || (allow_proposed && status == "proposed");
+        if !ok_status {
             return Err(format!(
                 "worklist commit requires applied status: {} is {}",
                 id, status
@@ -37429,6 +37461,16 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| serde_json::json!({}));
+    let commit_too = auth.get("commitToo").and_then(|v| v.as_bool()).unwrap_or(false);
+    if commit_too {
+        let config = project_root(Some(app)).and_then(|root| load_project_config(&root));
+        if !project_config_one_click_approve_commit(config) {
+            return worklist_json_error(
+                400,
+                "one-click Approve & commit is disabled (worklist.oneClickApproveCommit); apply and commit as separate steps".to_string(),
+            );
+        }
+    }
     if let Err(e) = ensure_worklist_commit_authorized(&ids, &auth, unix_now_ms()) {
         return worklist_json_error(400, e);
     }
@@ -37443,7 +37485,7 @@ fn handle_worklist_commit<R: tauri::Runtime>(
     let Some(items) = wl.get("items").and_then(|v| v.as_array()) else {
         return worklist_json_error(500, "worklist missing items[]");
     };
-    let mut files = match worklist_commit_files_for_ids(items, &ids) {
+    let mut files = match worklist_commit_files_for_ids(items, &ids, commit_too) {
         Ok(files) => files,
         Err(e) => return worklist_json_error(400, e),
     };
@@ -37600,7 +37642,7 @@ mod worklist_authorization_tests {
         draft_markdown_path, enqueue_pending_worklist_push_mirror_path,
         ensure_no_unrelated_staged_files, ensure_worklist_commit_authorized, feedback_draft_path,
         inflight_claim_fully_covered, installed_twins_for, parse_worklist_authorization_message,
-        WORKLIST_AUTH_TTL_MS,
+        ParsedWorklistAuthorization, WORKLIST_AUTH_TTL_MS,
         parse_worklist_authorization_payload, read_pending_worklist_push_mirrors,
         resource_relative_path, turn_text_has_direct_edit_opt_out,
         validate_post_commit_prune_status, validate_worklist_advance_status,
@@ -37658,6 +37700,64 @@ mod worklist_authorization_tests {
         assert_eq!(record.source, "test-source");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_and_commit_gate_sets_commit_too() {
+        let with_gate = parse_worklist_authorization_message(
+            r#"approved: {"items":[{"id":"x","gate":"apply-and-commit"}]}"#,
+        )
+        .expect("approval parses");
+        assert!(with_gate.commit_too);
+
+        let without_gate =
+            parse_worklist_authorization_message(r#"approved: {"items":[{"id":"x"}]}"#)
+                .expect("approval parses");
+        assert!(!without_gate.commit_too);
+
+        let drop_with_gate = parse_worklist_authorization_message(
+            r#"drop: {"items":[{"id":"x","gate":"apply-and-commit"}]}"#,
+        )
+        .expect("drop parses");
+        assert!(!drop_with_gate.commit_too);
+    }
+
+    #[test]
+    fn commit_files_allows_proposed_only_when_flagged() {
+        let items = vec![
+            json!({"id": "x", "status": "proposed", "files": ["a.rs"]}),
+            json!({"id": "y", "status": "applied", "files": ["b.rs"]}),
+        ];
+
+        let err = worklist_commit_files_for_ids(&items, &ids(&["x"]), false)
+            .expect_err("proposed items are rejected without the flag");
+        assert_eq!(
+            err,
+            "worklist commit requires applied status: x is proposed"
+        );
+
+        let files = worklist_commit_files_for_ids(&items, &ids(&["x"]), true)
+            .expect("proposed items are allowed with the flag");
+        assert_eq!(files, ids(&["a.rs"]));
+
+        let files = worklist_commit_files_for_ids(&items, &ids(&["y"]), false)
+            .expect("applied items are always allowed");
+        assert_eq!(files, ids(&["b.rs"]));
+
+        let files = worklist_commit_files_for_ids(&items, &ids(&["y"]), true)
+            .expect("applied items are allowed with the flag too");
+        assert_eq!(files, ids(&["b.rs"]));
+    }
+
+    #[test]
+    fn build_record_carries_commit_too() {
+        let parsed = ParsedWorklistAuthorization {
+            kind: "approved".to_string(),
+            requests: vec![("x".to_string(), Some(String::new()))],
+            commit_too: true,
+        };
+        let record = build_worklist_authorization_record(parsed, &[], None, 123, "test");
+        assert!(record.commit_too);
     }
 
     #[test]
@@ -37828,11 +37928,11 @@ mod worklist_authorization_tests {
             json!({"id": "b", "status": "proposed", "file": "src/b.rs"}),
         ];
 
-        let files = worklist_commit_files_for_ids(&items, &ids(&["a"]))
+        let files = worklist_commit_files_for_ids(&items, &ids(&["a"]), false)
             .expect("applied item files are collected");
         assert_eq!(files, ids(&["src/a.rs", "docs/a.md"]));
 
-        let err = worklist_commit_files_for_ids(&items, &ids(&["b"]))
+        let err = worklist_commit_files_for_ids(&items, &ids(&["b"]), false)
             .expect_err("proposed items cannot be committed");
         assert_eq!(
             err,

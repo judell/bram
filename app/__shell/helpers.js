@@ -1445,94 +1445,49 @@ window.__bramSaveSplitterSize = function (key, sizes) {
 window.settingsInfoBodies = {
   shell:
     "## Agent command\n\n" +
-    "The agent to launch: `claude` or `codex`.\n\n" +
-    "## Continue most recent session on startup\n\n" +
-    "When on, the agent launches resuming its most recent session " +
-    "(`claude --continue` / `codex resume --last`) instead of starting fresh. " +
-    "Each CLI continues its own latest session natively — no session id needed.\n\n" +
+    "Which agent to launch: `claude` or `codex`.\n\n" +
     "## Arguments\n\n" +
-    "Optional extra launch-time flags passed to the selected agent. Appended " +
-    "after the launch (or continue) command.\n\n" +
+    "Extra launch-time flags for the agent.\n\n" +
     "## First command\n\n" +
-    "An optional command sent to the agent's TUI once it starts, for example " +
-    "`/resume` to open the interactive picker. Empty by default (send nothing).",
+    "A command sent to the agent's TUI on startup (e.g. `/resume`). Empty = none.\n\n" +
+    "## Continue most recent session on startup\n\n" +
+    "Resume the agent's latest session instead of starting fresh.",
   batchCommitActions:
     "## Batch commit actions\n\n" +
-    "Shows Approve all / Drop all when two or more TO COMMIT items are " +
-    "present. Approve all lets the agent commit those items in one turn. " +
-    "Drop all removes them from the worklist; on-disk edits stay unless " +
-    "you ask the agent to discard them.\n\n" +
-    "## Mirroring to GitHub issues\n\n" +
-    "When enabled, issue-linked worklist items post lifecycle comments to " +
-    "GitHub. Bram uses `closesIssues` first, then falls back to an " +
-    "`issue-<number>-...` item id. Batch commits do not auto-close issues.",
+    "Adds Approve all / Drop all when two or more items are TO COMMIT.\n\n" +
+    "## Mirror worklist lifecycle to GitHub issues\n\n" +
+    "Post worklist lifecycle comments to linked GitHub issues.",
   ui:
-    "## Show or Hide Target App\n\n" +
-    "Usually off. Most people run their app in their own browser, so the " +
-    "target-app pane stays hidden and the agent pane fills the space. Turn " +
-    "it on to preview a simple app inside Bram; turn it off to reclaim the " +
-    "room." +
-    "\n\n## Agent-pane hot-reload\n\n" +
-    "Only matters when developing Bram itself: when on, the agent pane " +
-    "reloads automatically as you edit Bram’s own source. Leave it off " +
-    "otherwise.",
+    "## Show target app\n\n" +
+    "Show the embedded target-app preview pane. Usually off.\n\n" +
+    "## Agent-pane hot-reload\n\n" +
+    "Auto-reload the agent pane as you edit Bram's own source. For developing Bram.\n\n" +
+    "## Show tips in the footer\n\n" +
+    "Show rotating tips in the footer.\n\n" +
+    "## Soft beep on turn completion\n\n" +
+    "Play a soft beep when a turn finishes.\n\n" +
+    "## Dismissed tips return after\n\n" +
+    "How long a dismissed tip stays hidden before showing again.",
   ai:
     "## Tool Descriptions\n\n" +
-    "When a tool-use expansion in the Transcript shows a command with no " +
-    "agent-authored intent sentence (or a weak one), Bram asks Claude Haiku " +
-    "for a one-line description and renders it as a `#` header above the " +
-    "command. Eligible visible rows are described eagerly; expanding a row " +
-    "can also request or improve its description. Results are cached, and " +
-    "each call is a fraction of a cent.\n\n" +
-    "Off by default. Turning it on is project-level consent to send the " +
-    "selected tool material to the Anthropic API when `ANTHROPIC_API_KEY` " +
-    "is set in Bram's environment. Depending on the row, that material can " +
-    "include command text, a file diff or written content, a file/search " +
-    "target, the agent's preceding context, and a result excerpt. Bram " +
-    "uses a Rust secret-scanning library to redact common credential shapes " +
-    "before sending, but heuristic " +
-    "redaction cannot guarantee arbitrary content contains no secrets. " +
-    "The key itself is read from the environment only and is never written " +
-    "to `.bram.json`.\n\n" +
-    "**Billing note.** Setting `ANTHROPIC_API_KEY` also affects Claude " +
-    "Code's own billing. If Claude Code prompts you to approve the key and " +
-    "you accept, it authenticates with that key and bills **per-token to " +
-    "your API account** instead of your Max/Pro subscription (an approved " +
-    "API key outranks subscription login). To keep Bram's descriptions on " +
-    "the key while leaving Claude Code on your subscription, run `/config` " +
-    "in the agent and turn OFF \"Use custom API key\" — that rejects the key " +
-    "for Claude Code only; Bram still reads it from the environment. Confirm " +
-    "with `/status`. Docs: https://code.claude.com/docs/en/authentication.md\n\n" +
-    "Per-call cost and redaction count are traced as `[ai-describe]` in " +
-    "resources/bram-traces/bram-trace.log.\n\n" +
-    "Persists in .bram.json under ai.describeCommands.",
+    "A one-line intent header above tool commands in the Transcript, from " +
+    "Claude Haiku. Off by default.\n\n" +
+    "Turning it on sends the selected tool material (command, diff, target, " +
+    "context, result excerpt) to the Anthropic API when `ANTHROPIC_API_KEY` " +
+    "is set. Credential shapes are redacted heuristically — not a guarantee.\n\n" +
+    "Billing: a key Claude Code accepts bills it per-token instead of your " +
+    "subscription. To keep it Bram-only, run `/config` → turn off \"Use " +
+    "custom API key\". Persists in `.bram.json` under `ai.describeCommands`.",
   traces:
     "## Tracing enabled\n\n" +
-    "Master switch for writes to " +
-    "resources/bram-traces/bram-trace.log. When off, every [emit] / " +
-    "[iframe] / [route] line is a no-op regardless of the Inspector " +
-    "trace tap below. If BRAM_TRACE is set in the environment at " +
-    "launch (e.g. BRAM_TRACE=1 cargo run), it wins and this switch is " +
-    "ignored — so CI and explicit launch environments keep behaving the same." +
-    "\n\n## Inspector trace tap\n\n" +
-    "Forwards XMLUI Inspector events " +
-    "(window._xsLogs) from the agent pane into bram-trace.log as " +
-    "[iframe] subkind=inspector-event, so they interleave with host " +
-    "traces live (no Inspector export needed). Capped at 50 entries " +
-    "per 200ms tick; overflow emits subkind=inspector-overflow. " +
-    "Inspector traces are intentionally complete and noisy (one per " +
-    "keystroke, etc.); values pass through Bram's trace sanitizer first. " +
-    "Requires Tracing enabled above." +
-    "\n\n" +
-    "At startup, raw trace archives older than the configured window are " +
-    "sanitized with the host credential redactor and written as gzip files. " +
-    "The raw source is removed only after its sanitized archive is safely " +
-    "installed. Compressed history is retained indefinitely, so storage use " +
-    "is intentionally unbounded. The raw window defaults to 14 days and can " +
-    "be changed from 1 to 3650 days. Redaction is heuristic defense in depth, " +
-    "not proof that arbitrary trace content is secret-free.\n\n" +
-    "These settings persist in .bram.json under traces.enabled, " +
-    "traces.inspectorTap, and traces.archiveAfterDays.",
+    "Master switch for writes to `bram-trace.log`. `BRAM_TRACE` in the " +
+    "environment overrides it.\n\n" +
+    "## Inspector trace tap\n\n" +
+    "Forward XMLUI Inspector events into the trace log. Requires Tracing " +
+    "enabled.\n\n" +
+    "## Keep raw traces for (days)\n\n" +
+    "Raw archives older than this are sanitized and gzipped at startup " +
+    "(1–3650, default 14). Compressed history is kept indefinitely.",
 };
 
 // "Claude Code" for the claude provider, Title-cased provider name

@@ -256,7 +256,11 @@
       value="Settings failed to load." />
 
     <ModalDialog id="settingInfoDialog" title="{infoTitle}">
-      <VStack gap="$space-3" padding="$space-2">
+      <!-- Markdown line-spacing is tuned app-wide in themes/bram.json
+           (marginTop/Bottom-H2-markdown, marginTop/Bottom-Text-markdown).
+           paddingTop 0 keeps the first ## header from stacking the modal
+           title gap on top of the header's own top margin. -->
+      <VStack gap="$space-3" padding="$space-2" paddingTop="0">
         <Markdown content="{infoBody}" />
         <HStack>
           <Button label="Got it" onClick="settingInfoDialog.close()" />

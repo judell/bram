@@ -6410,25 +6410,6 @@ window.__bramSearchTerms = function (query) {
   return out;
 };
 
-// Ordered indices of the projected turns whose text contains ANY search term
-// (case-insensitive). The index IS the List data index, so the caller can
-// List.scrollToIndex() straight to a match. Multi-term to match AND-mode
-// search: a turn holding the terms non-adjacent still counts.
-window.__bramFindMatchingTurnIndices = function (turns, needle) {
-  var terms = window.__bramSearchTerms(needle);
-  if (!terms.length || !turns || !turns.length) return [];
-  var lower = [];
-  for (var k = 0; k < terms.length; k++) lower.push(String(terms[k]).toLowerCase());
-  var out = [];
-  for (var i = 0; i < turns.length; i++) {
-    var t = turns[i];
-    var text = t && t.text ? String(t.text).toLowerCase() : "";
-    for (var j = 0; j < lower.length; j++) {
-      if (text.indexOf(lower[j]) !== -1) { out.push(i); break; }
-    }
-  }
-  return out;
-};
 
 // Step an occurrence count by `dir` (+1 / -1) with wraparound. Returns 0 when
 // there are no matches, so callers never address an empty result set.
@@ -6746,22 +6727,8 @@ window.__bramWithSearch = function (arr, needle, counts, cursor) {
   });
 };
 
-// Decorate SessionDetail's projected turns with the needle (paints every
-// match in each turn) and an __active flag on the turn holding the cursor's
-// match (emphasized + centered). activeIdx is matchIndices[currentMatch].
-window.__bramSessionSearchRows = function (turns, needle, matchIndices, currentMatch) {
-  var arr = Array.isArray(turns) ? turns : [];
-  var n = needle || "";
-  var mi = Array.isArray(matchIndices) ? matchIndices : [];
-  var activeIdx = mi.length ? mi[Number(currentMatch) || 0] : -1;
-  return arr.map(function (t, i) {
-    return Object.assign({}, t, { __needle: n, __active: i === activeIdx });
-  });
-};
-
 // transcript-find-in-page-v2: match scan over transcript EVENTS (the
-// Transcript's row shape) — sibling of __bramFindMatchingTurnIndices, which
-// is turn-shaped (t.text only). Scans the fields the rows actually render,
+// Transcript's row shape). Scans the fields the rows actually render,
 // so a match is a visible match.
 window.__bramFindMatchingEventIndices = function (events, needle) {
   var terms = Array.isArray(needle) ? needle : window.__bramSearchTerms(needle);

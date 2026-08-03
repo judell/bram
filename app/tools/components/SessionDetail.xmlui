@@ -4,15 +4,13 @@
        query. (Prop is `sessionId`, not `id` — `id` is XMLUI's reserved
        component identifier and never arrives as a prop.)
 
-       search-in-view-find: an in-view find toolbar highlights matches and
-       steps among them. The find box is seeded from the optional `query` prop
-       (the search term that produced the hit) but is editable, so the user can
-       also find a *different* term inside the opened session. Highlighting is a
-       first-class xmlui Markdown capability: `highlightText` wraps matches in
-       <mark> via a rehype plugin (works inside code/links), and `highlightActive`
-       makes the active turn's Markdown emphasize + scrollIntoView its match.
-       scrollToIndex first mounts the active turn (virtualization) so the
-       component can then center the exact match. -->
+       findable-list-udc: the occurrence-granular find spine (FindBar, cursor,
+       plan, scroll-to-active) lives in FindableList. SessionDetail supplies the
+       projected turns as data and the per-turn row markup; each turn's canonical
+       marked surface is its `.text` (FindableList's default surface, so no
+       markedText helper). Migrated from the turn-granular matchIndices model to
+       occurrence-granular find (count = total occurrences, ▲▼ steps mark-by-mark,
+       highlightActiveIndex lights the exact mark) — see xmlui-org/xmlui#3713. -->
   <DataSource id="turns" url="/__turns"
     queryParams="{{ id: $props.sessionId, provider: $props.provider }}" when="{!!$props.sessionId}"
     onLoaded="(data) => window.__bramMeasureTurnsRender(window.__bramProjectedSessionTurns(data).length)" />
@@ -23,91 +21,34 @@
        turns.value changes. -->
   <variable name="projectedTurns"
     value="{turns.value ? window.__bramProjectedSessionTurns(turns.value) : []}" />
-  <VStack gap="$space-2" padding="$space-2"
-    var.findText="{$props.query || ''}"
-    var.appliedNeedle="{$props.query || ''}"
-    var.matchIndices="{[]}"
-    var.currentMatch="{0}"
-    var.rows="{[]}">
+  <VStack gap="$space-2" padding="$space-2">
     <Text when="{turns.inProgress &amp;&amp; !turns.loaded}" color="$textColor-secondary" value="Loading…" />
 
-    <!-- Find-in-view toolbar. Two debounced ChangeListeners (not one block:
-         ChangeListener.onDidChange is a sync callback that must be a single
-         arrow expression — same rule the Search page follows) recompute the
-         match set and reset the cursor when the needle or the loaded turns
-         change. A third listener scrolls the virtualized List to the active
-         match whenever the cursor moves — the dateSlider.setValue pattern in
-         Search.xmlui. -->
-    <HStack when="{turns.value}" gap="$space-2" verticalAlignment="center">
-      <FindBar id="findBox" placeholder="Find in transcript…"
-        initialValue="{$props.query || ''}"
-        matchCount="{matchIndices.length}"
-        current="{currentMatch}"
-        showCount="{appliedNeedle &amp;&amp; appliedNeedle.trim().length >= 2}"
-        onNeedleChange="(v) => findText = v"
-        onStep="(d) => currentMatch = window.__bramFindStep(matchIndices, currentMatch, d)" />
-    </HStack>
-    <!-- `initialValue` covers the first mount; these listeners also carry a
-         later outer Search query into a still-mounted first result. TextBox's
-         documented setValue API updates the visible control, while the direct
-         assignment keeps matching independent of event-order details. -->
-    <ChangeListener listenTo="{$props.query || ''}"
-      onDidChange="() => findText = ($props.query || '')" />
-    <ChangeListener listenTo="{$props.query || ''}"
-      onDidChange="() => findBox ? findBox.setValue($props.query || '') : null" />
-    <ChangeListener
-      listenTo="{findText + '|' + projectedTurns.length}"
-      debounceWaitInMs="200"
-      onDidChange="() => matchIndices = window.__bramFindMatchingTurnIndices(projectedTurns, findText)" />
-    <ChangeListener
-      listenTo="{findText + '|' + projectedTurns.length}"
-      debounceWaitInMs="200"
-      onDidChange="() => currentMatch = 0" />
-    <!-- Debounced mirror of the needle drives the <mark> paint, so a huge
-         visible turn isn't re-scanned on every keystroke — only after typing
-         settles, in lockstep with the match recompute above. -->
-    <ChangeListener
-      listenTo="{findText + '|' + projectedTurns.length}"
-      debounceWaitInMs="200"
-      onDidChange="() => appliedNeedle = findText" />
-    <!-- The List row can't see appliedNeedle/matchIndices/currentMatch (outer
-         vars are frozen in the row scope), so thread the search state through
-         the row data and read it via $item. Rebuild when the needle, cursor,
-         or turn count changes — not every render — so the RO-flood fix holds. -->
-    <ChangeListener
-      listenTo="{appliedNeedle + '|' + currentMatch + '|' + projectedTurns.length}"
-      onDidChange="() => rows = window.__bramSessionSearchRows(projectedTurns, appliedNeedle, matchIndices, currentMatch)" />
-    <ChangeListener
-      listenTo="{currentMatch}"
-      onDidChange="() => matchIndices.length ? detailList.scrollToIndex(matchIndices[currentMatch]) : null" />
-    <!-- Fresh search: jump to the first hit even when currentMatch is already 0
-         (so the currentMatch listener above fires no change). scrollToIndex
-         mounts the turn; the active turn's highlightActive then centers it. -->
-    <ChangeListener
-      listenTo="{matchIndices}"
-      onDidChange="() => matchIndices.length ? detailList.scrollToIndex(matchIndices[0]) : null" />
-
-    <!-- Virtualized: List (virtua-backed) renders only the visible turns, so a
-         big transcript no longer mounts thousands of Markdown blocks at once.
-         Needs a bounded height; 400px fits inside Search's expander wrapper.
-         `id` lets the find toolbar drive scrollToIndex. -->
-    <List id="detailList" when="{turns.value}" data="{rows}" height="{$props.height || '400px'}">
-      <VStack gap="$space-0_5" borderTop="1px solid $borderColor" paddingVertical="$space-1">
-        <Text fontSize="$fontSize-xs" fontWeight="$fontWeight-bold"
-          color="{$item.role === 'user' ? '$color-info-700' : '$color-success-700'}"
-          value="{$item.role}" />
-        <!-- Native xmlui highlight: highlightText paints all matches in this
-             turn (debounced needle); highlightActive emphasizes + centers the
-             match on the active turn. -->
-        <Markdown content="{$item.text}"
-          highlightText="{window.__bramSearchTerms($item.__needle)}"
-          highlightActive="{$item.__active}" />
-        <VStack gap="$space-2" when="{$item.images &amp;&amp; $item.images.length > 0}">
-          <Items data="{$item.images}">
-            <Image src="{window.imageSrcForPath($item)}" maxHeight="200px" fit="contain" />
-          </Items>
+    <!-- FindableList owns the find; SessionDetail owns only the row markup.
+         Native xmlui highlight: highlightText paints all matches in this turn
+         (debounced needle inside the UDC); highlightActiveIndex emphasizes +
+         centers the active occurrence. Mounts once turns.value is present (the
+         projectedTurns memo stays the data source — the RO-flood fix). -->
+    <FindableList when="{turns.value}"
+      data="{projectedTurns}"
+      query="{$props.query || ''}"
+      placeholder="Find in transcript…"
+      height="{$props.height || '400px'}">
+      <property name="rowTemplate">
+        <VStack gap="$space-0_5" borderTop="1px solid $borderColor" paddingVertical="$space-1">
+          <Text fontSize="$fontSize-xs" fontWeight="$fontWeight-bold"
+            color="{$item.role === 'user' ? '$color-info-700' : '$color-success-700'}"
+            value="{$item.role}" />
+          <Markdown content="{$item.text}"
+            highlightText="{window.__bramSearchTerms($item.__needle)}"
+            highlightActiveIndex="{$item.__activeOcc}" />
+          <VStack gap="$space-2" when="{$item.images &amp;&amp; $item.images.length > 0}">
+            <Items data="{$item.images}">
+              <Image src="{window.imageSrcForPath($item)}" maxHeight="200px" fit="contain" />
+            </Items>
+          </VStack>
         </VStack>
-      </VStack>
-    </List>
+      </property>
+    </FindableList>
   </VStack>
 </Component>

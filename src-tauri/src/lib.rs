@@ -16134,6 +16134,46 @@ mod search_index_phase_timing_tests {
 
 /// One incremental pass over the current project's Claude sessions. Returns
 /// secret-safe phase timing and count metrics.
+/// Reconcile the search index against the filesystem after the session passes:
+/// drop rows whose transcript file is gone (Claude Code's 30-day sweep, /clear,
+/// a plain delete). Runs with the Sessions bucket, so it fires on the
+/// post-relaunch refresh and each periodic session pass. Cheap: one existence
+/// check per indexed session path. Traced only when it removes something.
+fn run_search_index_prune<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let Some(db) = search_index_db_path(app) else {
+        return;
+    };
+    let Ok(conn) = search_index::open(&db.to_string_lossy()) else {
+        return;
+    };
+    let started = std::time::Instant::now();
+    match search_index::prune_missing_files(&conn) {
+        Ok(removed) if removed > 0 => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "search-index",
+                    &format!(
+                        "op=prune removed={} ms={}",
+                        removed,
+                        started.elapsed().as_millis()
+                    ),
+                );
+            }
+        }
+        Ok(_) => {}
+        Err(e) => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "search-index",
+                    &format!("op=prune-error detail={}", e),
+                );
+            }
+        }
+    }
+}
+
 fn run_search_index_pass<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> Result<SessionIndexPassStats, String> {
@@ -16850,6 +16890,10 @@ fn run_index_buckets<R: tauri::Runtime>(
             IndexBucket::Sessions => {
                 let n = run_and_trace_session_index_pass(app, "claude", run_search_index_pass)
                     + run_and_trace_session_index_pass(app, "codex", run_codex_search_index_pass);
+                // Reconcile deletions (Claude's 30-day sweep etc.) whether or not
+                // any file was (re)indexed this pass — a deletion changes no
+                // surviving file's change-token, so n won't reflect it.
+                run_search_index_prune(app);
                 if n > 0 {
                     added.push((bucket.status_name().to_string(), n));
                 }

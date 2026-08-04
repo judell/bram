@@ -153,6 +153,36 @@ pub fn index_doc(conn: &Connection, row: &IndexRow, mtime: i64, size: i64) -> Re
     Ok(())
 }
 
+/// Reconcile the index against the filesystem: remove rows whose file-backed
+/// source no longer exists. Only `indexed_files.path` values that are absolute
+/// filesystem paths (start with '/') are file-backed — session transcripts
+/// (Claude + Codex). Synthetic keys (`commit:<sha>`, `issue:<n>`,
+/// `history:<ts>`) never start with '/' and are always exempt. Returns the
+/// number of docs pruned.
+///
+/// Needed because the incremental passes only walk *existing* files, so a
+/// deleted transcript (e.g. Claude Code's 30-day cleanup sweep, which a Bram
+/// relaunch triggers) would otherwise leave an orphaned row that surfaces as a
+/// phantom search hit whose detail view is empty (search-index-prune-orphaned-rows).
+pub fn prune_missing_files(conn: &Connection) -> Result<usize> {
+    let mut stmt =
+        conn.prepare("SELECT path, rowid_ref FROM indexed_files WHERE path LIKE '/%'")?;
+    let candidates = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+        .collect::<Result<Vec<(String, i64)>>>()?;
+    drop(stmt);
+    let mut removed = 0usize;
+    for (path, rowid) in candidates {
+        if std::path::Path::new(&path).exists() {
+            continue;
+        }
+        conn.execute("DELETE FROM search_index WHERE rowid = ?1", params![rowid])?;
+        conn.execute("DELETE FROM indexed_files WHERE path = ?1", params![path])?;
+        removed += 1;
+    }
+    Ok(removed)
+}
+
 /// Total indexed rows — for the scan trace.
 pub fn row_count(conn: &Connection) -> Result<i64> {
     conn.query_row("SELECT count(*) FROM search_index", [], |r| r.get(0))
@@ -324,5 +354,33 @@ mod tests {
         assert_eq!(row_count(&conn).unwrap(), 1, "reindex replaces, not appends");
         assert_eq!(query(&conn, "alpha", 10, &[]).unwrap().len(), 0, "old content gone");
         assert_eq!(query(&conn, "beta", 10, &[]).unwrap().len(), 1, "new content present");
+    }
+
+    #[test]
+    fn prune_removes_missing_file_rows_only() {
+        use std::io::Write;
+        let conn = open_in_memory().unwrap();
+
+        // A real, existing transcript path → its row must survive.
+        let mut present = std::env::temp_dir();
+        present.push("bram-prune-present.jsonl");
+        writeln!(std::fs::File::create(&present).unwrap(), "x").unwrap();
+        let present_key = present.to_string_lossy().to_string();
+
+        index_doc(&conn, &row("session", &present_key, "present", "alpha"), 1, 1).unwrap();
+        index_doc(&conn, &row("session", "/no/such/gone-session.jsonl", "gone", "beta"), 1, 1)
+            .unwrap();
+        // Synthetic key (real commit-row format) — no leading '/', must be exempt.
+        index_doc(&conn, &row("commit", "commit:abc123", "abc", "gamma"), 1, 1).unwrap();
+        assert_eq!(row_count(&conn).unwrap(), 3);
+
+        let removed = prune_missing_files(&conn).unwrap();
+        assert_eq!(removed, 1, "only the missing-file row is pruned");
+        assert_eq!(row_count(&conn).unwrap(), 2);
+        assert_eq!(query(&conn, "beta", 10, &[]).unwrap().len(), 0, "gone transcript pruned");
+        assert_eq!(query(&conn, "alpha", 10, &[]).unwrap().len(), 1, "present transcript kept");
+        assert_eq!(query(&conn, "gamma", 10, &[]).unwrap().len(), 1, "synthetic key exempt");
+
+        let _ = std::fs::remove_file(&present);
     }
 }

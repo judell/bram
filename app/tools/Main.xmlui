@@ -583,28 +583,37 @@
              re-render this footer's message composer. The working-verb/spinner
              rationale now lives in FooterAgentStatus.xmlui. Measured by the
              footer-churn / heartbeat-batch instrument. -->
-        <FooterAgentStatus enhanceStatus="{enhanceStatus.value}" />
+        <!-- footer-fixed-width-slots: each dynamic element sits in a
+             fixed-width slot so the row never reflows as the agent-status
+             timer ticks, the chip appears/disappears, or the indexing message
+             flips between count and "Indexing…". -->
+        <HStack width="28rem" verticalAlignment="center">
+          <FooterAgentStatus enhanceStatus="{enhanceStatus.value}" />
+        </HStack>
         <!-- transcript-new-below-badge chip: on the footer's first line,
              right after the agent status verb — "the most obvious place to
              look for status" (third placement per review feedback; bottom
              corner got lost, app header wasn't where the eye goes). One
-             click to the transcript's live edge from any tab. -->
-        <Button
-          when="{transcriptUnseen.value > 0}"
-          label="{'▼ ' + transcriptUnseen.value + ' new'}"
-          size="xs"
-          variant="outlined"
-          marginLeft="$space-4"
-          tooltip="New transcript content below — jump to the live edge"
-          onClick="window.__bramUnseenJump(); navigate('/transcript')" />
+             click to the transcript's live edge from any tab. The slot
+             reserves its width even when the chip is hidden. -->
+        <HStack width="6rem" verticalAlignment="center">
+          <Button
+            when="{transcriptUnseen.value > 0}"
+            label="{'▼ ' + transcriptUnseen.value + ' new'}"
+            size="xs"
+            variant="outlined"
+            tooltip="New transcript content below — jump to the live edge"
+            onClick="window.__bramUnseenJump(); navigate('/transcript')" />
+        </HStack>
         <!-- footer-indexing-status: names the bucket being indexed, or the
              idle doc count + last cycle's per-bucket additions. -->
-        <Text
-          when="{footerIndexStatus.value &amp;&amp; window.__bramFooterIndexLabel(footerIndexStatus.value)}"
-          fontSize="$fontSize-sm"
-          color="$textColor-secondary"
-          marginLeft="$space-4"
-          value="{window.__bramFooterIndexLabel(footerIndexStatus.value)}" />
+        <HStack width="16rem" verticalAlignment="center">
+          <Text
+            when="{footerIndexStatus.value &amp;&amp; window.__bramFooterIndexLabel(footerIndexStatus.value)}"
+            fontSize="$fontSize-sm"
+            color="$textColor-secondary"
+            value="{window.__bramFooterIndexLabel(footerIndexStatus.value)}" />
+        </HStack>
       </HStack>
       <!-- Canonical pending-menu surface: menus render HERE — below the
            status verb, above the message box — the same place on every tab,

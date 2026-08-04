@@ -3,18 +3,20 @@
        the per-chunk reactive churn from bramSubscribePtyThroughput stays
        contained here and does NOT re-render the footer composer / message box.
        Same per-component subscription isolation as PastedImageStrip.xmlui.
-       Fixed 100px box (10-dot max at 8px + 2px gaps) so the footer never
-       shifts; always visible — rests when idle, animates on throughput. -->
+       Fixed 50px box (5-dot max at 8px + 2px gaps) so the footer never
+       shifts; always visible — rests when idle, animates on throughput.
+       Halved from a 10-dot box: throughput rarely drives more than ~3 dots,
+       so 5 keeps headroom while reserving half the width. -->
   <PushSource
     id="ptyThroughputEvt"
     initial="{0}"
     subscribe="{window.bramSubscribePtyThroughput()}" />
   <HStack
-    width="100px"
+    width="50px"
     gap="2px"
     verticalAlignment="center"
     horizontalAlignment="start"
-    var.dots="{Math.max(1, Math.min(10, Math.round(1 + (ptyThroughputEvt.value || 0) * 9)))}"
+    var.dots="{Math.max(1, Math.min(5, Math.round(1 + (ptyThroughputEvt.value || 0) * 4)))}"
     var.active="{(ptyThroughputEvt.value || 0) > 0}"
     animation="{active ? 'fadein' : ''}"
     animationOptions="{{ duration: 1000, reverse: true, loop: true }}">

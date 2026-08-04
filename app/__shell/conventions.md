@@ -410,6 +410,17 @@ round-trip. Its return value is dead weight for an apply — the bodies are
 the proposal you authored. So an apply-approve is one call: edit from the
 proposal, then `mutate op:"advance"`.
 
+**Apply-and-commit gate: skip `advance` — edit, then `worklist-commit`.**
+When an approved item's `gate` is `apply-and-commit` (the user clicked the
+one-click **Approve & commit** button on a `proposed` item — shown only when
+`worklist.oneClickApproveCommit` is enabled), collapse both gates into one
+turn: make the proposed file edits, then call `worklist-commit { ids, message }`
+directly. Do **not** `mutate op:"advance"` first — the host commits the
+still-`proposed` item's files (authorized by the `commitToo` auth record the
+click wrote, the `allow_proposed` path) and prunes, exactly as the commit gate
+does. `closesIssues` / close-on-push behave identically to a normal commit. The
+host sets the sentinel at approval time and `worklist-commit` clears it.
+
 **Commit gate: call `worklist-commit`.** For approved TO COMMIT items,
 send one request with `{ ids, message }`. The host verifies approved auth,
 requires every id to be `applied`, stages only those items' files, refuses
@@ -727,6 +738,11 @@ reference: `docs/apis.md` §11. Agent-side conventions:
   lines, the host itself records the pending close bound to the new SHA;
   the agent does nothing further — closing fires automatically on the
   user's next Push. There is no `issue-close` route to call.
+- **`approved:` (apply-and-commit gate)** → `worklist-commit` with
+  `{ ids, message }` after editing, with **no** `mutate op:"advance"` step.
+  Set by the one-click **Approve & commit** button on a `proposed` item; the
+  host's `commitToo` auth lets `worklist-commit` stage and commit the
+  still-`proposed` files, then prune. See *Transports → Apply-and-commit gate*.
 - **`drop:`** → `resolve` → `mutate op:"prune"`. Drops aren't set at
   approval time, so `resolve` is what raises the spinner.
 - **`iterate:`** → no agent-side bracket needed. The host detects the

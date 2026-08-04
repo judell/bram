@@ -15979,8 +15979,112 @@ fn claude_session_all_text(path: &Path) -> String {
     all
 }
 
-/// All user + agent message text of a Codex session, one message per line.
-/// Codex analog of `claude_session_all_text` (uses `codex_message_text`).
+/// Join the `text` fields of a Codex content/output array (`[{type, text}, …]`),
+/// or return a bare string as-is.
+fn codex_content_text(value: Option<&serde_json::Value>) -> String {
+    match value {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|c| c.get("text").and_then(|v| v.as_str()).map(String::from))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// Searchable text of one Codex session record: prose PLUS tool output.
+/// Unlike `codex_message_text` (event_msg user/agent prose only, kept for the
+/// live grep path), this also pulls the tool records that carry the terms users
+/// search for — `custom_tool_call` inputs, `custom_tool_call_output` output,
+/// `function_call` name/args, and `patch_apply_end` stdout/stderr — so the FTS
+/// index covers what the transcript renders (search-index-codex-tool-output-
+/// coverage). `reasoning` is skipped: its body is `encrypted_content`
+/// (unindexable) and its `summary` is typically empty. Tool parts are capped
+/// like the Claude extractor; prose is uncapped.
+fn codex_message_search_text(record: &serde_json::Value) -> String {
+    let Some(payload) = record.get("payload") else {
+        return String::new();
+    };
+    match payload.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+        "user_message" | "agent_message" => payload
+            .get("message")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_default(),
+        "custom_tool_call" => payload
+            .get("input")
+            .and_then(|v| v.as_str())
+            .map(|s| cap_search_part(s, SEARCH_TOOL_PART_CAP))
+            .unwrap_or_default(),
+        "custom_tool_call_output" => {
+            cap_search_part(&codex_content_text(payload.get("output")), SEARCH_TOOL_PART_CAP)
+        }
+        "function_call" => {
+            let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let args = payload.get("arguments").and_then(|v| v.as_str()).unwrap_or("");
+            let joined = format!("{name} {args}");
+            let trimmed = joined.trim();
+            if trimmed.is_empty() {
+                String::new()
+            } else {
+                cap_search_part(trimmed, SEARCH_TOOL_PART_CAP)
+            }
+        }
+        "patch_apply_end" => {
+            let stdout = payload.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+            let stderr = payload.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+            let joined = if stderr.is_empty() {
+                stdout.to_string()
+            } else {
+                format!("{stdout}\n{stderr}")
+            };
+            cap_search_part(&joined, SEARCH_TOOL_PART_CAP)
+        }
+        _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod codex_extract_tests {
+    use super::*;
+
+    #[test]
+    fn search_text_captures_tool_output_and_skips_encrypted_reasoning() {
+        // A term that appears ONLY in a Codex tool result must be extracted.
+        let out = serde_json::json!({
+            "type": "response_item",
+            "payload": { "type": "custom_tool_call_output",
+                "output": [{ "type": "input_text", "text": "path: resources/feedback-history/ listing" }] }
+        });
+        assert!(codex_message_search_text(&out).contains("feedback-history"));
+
+        // A tool call's command string is captured.
+        let call = serde_json::json!({
+            "type": "response_item",
+            "payload": { "type": "custom_tool_call", "name": "exec",
+                "input": "grep -r feedback-history src/" }
+        });
+        assert!(codex_message_search_text(&call).contains("feedback-history"));
+
+        // Prose still works.
+        let msg = serde_json::json!({
+            "type": "event_msg",
+            "payload": { "type": "agent_message", "message": "done indexing" }
+        });
+        assert_eq!(codex_message_search_text(&msg), "done indexing");
+
+        // Encrypted reasoning yields nothing.
+        let reasoning = serde_json::json!({
+            "type": "response_item",
+            "payload": { "type": "reasoning", "summary": [], "encrypted_content": "gAAAAA" }
+        });
+        assert_eq!(codex_message_search_text(&reasoning), "");
+    }
+}
+
+/// All searchable text of a Codex session — prose plus tool output — one message
+/// per line. Codex analog of `claude_session_all_text`.
 fn codex_session_all_text(path: &Path) -> String {
     let Ok(content) = std::fs::read_to_string(path) else {
         return String::new();
@@ -15990,11 +16094,10 @@ fn codex_session_all_text(path: &Path) -> String {
         let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        if let Some(text) = codex_message_text(&record) {
-            if !text.is_empty() {
-                all.push_str(&text);
-                all.push('\n');
-            }
+        let text = codex_message_search_text(&record);
+        if !text.is_empty() {
+            all.push_str(&text);
+            all.push('\n');
         }
     }
     all

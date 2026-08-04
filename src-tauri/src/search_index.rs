@@ -24,10 +24,12 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Result};
 // cache-first /__issue serving) plus a synthetic "issues:list" row. Existing
 // issue rows carry empty `extra` at the old token, so force a rebuild to
 // backfill them (indexed=0/skipped=230 otherwise).
-// v10: session extraction now includes tool_result / tool_use / thinking text
-// (search-index-tool-output-coverage), so terms visible in a transcript's tool
-// output are searchable. Bump forces a rebuild that back-indexes all sessions.
-const SCHEMA_VERSION: i64 = 10;
+// v10: Claude session extraction includes tool_result / tool_use / thinking
+// text (search-index-tool-output-coverage). v11: Codex extraction includes its
+// tool records too (custom_tool_call[_output], function_call, patch_apply_end —
+// search-index-codex-tool-output-coverage). Each bump forces a rebuild that
+// back-indexes all sessions with the wider coverage.
+const SCHEMA_VERSION: i64 = 11;
 
 /// A row to index. `content` is the searchable text; `file` is the source
 /// file's absolute path (the reindex key); the rest are the #230 common-schema

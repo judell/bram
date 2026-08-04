@@ -113,6 +113,9 @@
     id="worklistConfig"
     url="/__worklist-config" />
   <DataSource
+    id="repoOrigin"
+    url="/__repo/origin" />
+  <DataSource
     id="openIssues"
     url="/__issues"
     when="{newItemHelp}" />
@@ -590,7 +593,9 @@
             value="{window.__bramInflightActionLabel(actionProgressKind) + '.'.repeat(1 + (actionProgressTick % 3))}" />
         </HStack>
         <Items data="{worklist.value.items}">
-          <VStack gap="$space-1">
+          <VStack
+            gap="$space-1"
+            var.issueNumber="{String($item.id || '').startsWith('issue-') ? Number(String($item.id || '').split('-')[1]) : null}">
             <HStack gap="$space-3" verticalAlignment="start">
               <HStack width="1.75em" horizontalAlignment="center" verticalAlignment="center">
                 <Theme size-Spinner="14px">
@@ -796,6 +801,19 @@
                        id::section riding the same expandedItemIds store the
                        outer item chevron uses; open sections re-open on
                        mount, closed is the default. -->
+                  <!-- Keep the external issue action outside the disclosure
+                       summary: a nested link would bubble into ExpandableItem's
+                       summary click target and also toggle Details. Issue-derived
+                       ids follow the canonical issue-N-slug convention. -->
+                  <Link
+                    when="{issueNumber &amp;&amp; repoOrigin.value &amp;&amp; repoOrigin.value.htmlBase}"
+                    noIndicator
+                    onClick="openExternal(repoOrigin.value.htmlBase + '/issues/' + issueNumber)">
+                    <Text
+                      fontSize="$fontSize-sm"
+                      color="$color-primary-600"
+                      value="{'Issue #' + issueNumber + ' ↗'}" />
+                  </Link>
                   <ExpandableItem
                     when="{$item.before || $item.after || $item.diff || window.__bramWorklistItemFiles($item).length > 0}"
                     summary="Details"

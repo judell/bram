@@ -40,7 +40,9 @@
     <VStack gap="$space-1" paddingVertical="$space-2" borderBottom="1px solid $borderColor">
       <HStack gap="$space-3" verticalAlignment="start">
         <VStack gap="$space-0_5" width="7rem">
-          <Badge value="{$item.typeLabel}" colorMap="{typeColors}" />
+          <Theme fontSize-Badge="$fontSize-xs" padding-Badge="$space-0_5 $space-1">
+            <Badge value="{$item.typeLabel}" colorMap="{typeColors}" />
+          </Theme>
           <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{$item.dateLabel}" />
         </VStack>
         <VStack width="*" gap="$space-0_5">

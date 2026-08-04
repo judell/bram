@@ -204,6 +204,7 @@
       hits="{displayed}"
       query="{query.trim()}"
       historyGroup="{historyGroup}"
+      selectionKey="{selectedTypes.slice().sort().join(',')}"
       onRowToggle="(h) => expandedHit = h.expanded ? null : h" />
 
     <ModalDialog id="searchHelpDialog" title="Search help">

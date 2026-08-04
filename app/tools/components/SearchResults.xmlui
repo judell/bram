@@ -30,7 +30,15 @@
        toggle's recomposition then overlap-corrupts the virtualizer's row
        reconciliation, 2026-08-01 screenshot). `key` is unique across all
        four buckets. https://docs.xmlui.org/components/List#idkey -->
-  <List height="100%" data="{$props.hits}" idKey="key">
+  <!-- search-pin-top-on-bucket-toggle: a virtualized List anchors its scroll to
+       a visible row, so toggling a bucket pill off then on (hits shrinks then
+       grows) leaves the user scrolled where the anchor landed instead of at the
+       top. selectionKey (Search.xmlui) changes only on bucket-membership change,
+       so this ChangeListener pins the list back to the top on every toggle and
+       nothing else. https://docs.xmlui.org/components/List#scrolltotop -->
+  <ChangeListener listenTo="{$props.selectionKey}"
+    onDidChange="() => resultsList ? resultsList.scrollToTop() : null" />
+  <List id="resultsList" height="100%" data="{$props.hits}" idKey="key">
     <!-- Suppress the List's default "No data available": Search renders its own
          intentional empty states ("Type at least 2 characters…" / "No matches."),
          so an empty results list should render nothing. -->

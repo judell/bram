@@ -938,6 +938,7 @@
     </VStack>
     </VStack>
 
+    <Theme maxWidth-ModalDialog="85%">
     <ModalDialog
       id="statusProposedHelpDialog"
       title="TO APPLY">
@@ -948,6 +949,7 @@
         </Text>
         <Markdown content="- **Open** the item you want to act on by clicking its chevron (`▶` becomes `▼` when open). Multiple items can stay open at once.
 - Click **Approve** to authorize the edits — the agent applies and the item transitions to TO COMMIT.
+- Click **Approve &amp; commit** to apply the edits and commit them in one step.
 - Click **Drop** to discard the item — it's removed without any file changes.
 - Ask the agent in chat to tweak an item's scope, before/after prose, or split it up — useful when the proposal is *almost* right." />
         <HStack>
@@ -955,6 +957,7 @@
         </HStack>
       </VStack>
     </ModalDialog>
+    </Theme>
 
     <ModalDialog
       id="feedbackProposedHelpDialog"
@@ -1073,6 +1076,7 @@
       </VStack>
     </ModalDialog>
 
+    <Theme maxWidth-ModalDialog="85%">
     <ModalDialog
       id="statusAppliedHelpDialog"
       title="TO COMMIT">
@@ -1083,7 +1087,7 @@
           fluid — you don't have to approve or drop right away. You can:
         </Text>
         <Markdown content="- **Verify** the change actually does what was promised — reload the target app, run the affected feature, read the diff.
-- **Ask for follow-on tweaks** that get folded into the *same* item (the agent expands the item's `after` and applies more edits, the commit you eventually approve covers the whole thing). This is preferred over proposing a sibling item.
+- Click **Iterate** to request follow-on tweaks that get folded into the *same* item; the commit you eventually approve covers the whole change.
 - Click **Approve** when you're satisfied — the agent creates the git commit with the item's prose as the message.
 - Click **Drop** if it turned out wrong — the worklist entry is removed, but **the disk edits stay** (the agent doesn't revert files unilaterally). Ask the agent to *discard those changes if you want them gone* — it knows how to use git commands like `git checkout -- &lt;file&gt;` or `git restore &lt;file&gt;`." />
         <HStack>
@@ -1091,6 +1095,7 @@
         </HStack>
       </VStack>
     </ModalDialog>
+    </Theme>
 
     <ModalDialog
       id="approveHelpDialog"

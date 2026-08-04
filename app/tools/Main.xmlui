@@ -528,7 +528,7 @@
        than invisible. Deep link goes to Settings; scroll-to-field is a later
        refinement (needs a helpers.js scroll helper). -->
   <VStack
-    when="{appInfo.value &amp;&amp; appInfo.value.current &amp;&amp; appInfo.value.current !== toolDescBannerDismissedVersion}"
+    when="{appInfo.value &amp;&amp; appInfo.value.current &amp;&amp; appInfo.value.current !== toolDescBannerDismissedVersion &amp;&amp; !(footerTipSettings.value &amp;&amp; footerTipSettings.value.ai &amp;&amp; footerTipSettings.value.ai.describeCommands)}"
     backgroundColor="$color-info-100"
     padding="$space-2"
     gap="$space-2">

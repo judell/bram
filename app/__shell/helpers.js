@@ -8296,7 +8296,7 @@ window.__bramFooterIndexLabel = function (status) {
   var active = status.active_buckets || [];
   if (active.length) {
     var names = active.map(function (b) { return labels[b] || b; });
-    return '⟳ Indexing ' + names.join(', ') + '…';
+    return 'Indexing ' + names.join(', ') + '…';
   }
   var total = Number(status.total || 0).toLocaleString();
   // The session bucket re-indexes one growing transcript (row replaced, keyed
@@ -8305,9 +8305,9 @@ window.__bramFooterIndexLabel = function (status) {
   var added = (status.last_added || []).filter(function (a) { return a && a.count > 0 && a.bucket !== 'session'; });
   if (added.length) {
     var parts = added.map(function (a) { return '+' + a.count + ' ' + (labels[a.bucket] || a.bucket); });
-    return '⛁ ' + total + ' indexed · ' + parts.join(', ');
+    return total + ' indexed · ' + parts.join(', ');
   }
-  return '⛁ ' + total + ' indexed';
+  return total + ' indexed';
 };
 
 // settings-highlight-deeplink: scroll the setting anchored as

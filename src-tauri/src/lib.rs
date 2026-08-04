@@ -12487,6 +12487,13 @@ fn record_prefixed_inflight_sentinel<R: tauri::Runtime>(
         return;
     }
     write_inflight_claim_sentinel(app, &ids, sentinel_kind);
+    // iterate-writes-feedback-history: record the iterate as a worklist-history
+    // feedback event so it surfaces in the History tab and lights the live
+    // "Indexing history" indicator (approve/drop are separate lifecycle states
+    // that already snapshot via maybe_snapshot_worklist).
+    if sentinel_kind == "iterate" {
+        snapshot_worklist_feedback(app, &ids);
+    }
 }
 
 /// Detect a `skip-worklist:` prefix on the toTurn write path. When
@@ -33711,6 +33718,58 @@ fn maybe_snapshot_worklist<R: tauri::Runtime>(app: &AppHandle<R>) {
     );
 }
 
+// iterate-writes-feedback-history: write a worklist-history snapshot recording a
+// feedback event for the iterated item(s). Called from the iterate hook —
+// unlike maybe_snapshot_worklist, which is diff-based and skips an iterate (no
+// worklist.json change). Writing the file (a) surfaces the feedback in the
+// History tab (the read-time weaver attaches the note to the item's group, and
+// the tab refetches on the resulting worklist-history-changed) and (b) triggers
+// the history index pass so the footer shows live "Indexing history".
+// Best-effort; errors must not break the iterate.
+fn snapshot_worklist_feedback<R: tauri::Runtime>(app: &AppHandle<R>, item_ids: &[String]) {
+    if item_ids.is_empty() {
+        return;
+    }
+    let Some(file) = worklist_file(app) else {
+        return;
+    };
+    let Some(history_dir) = worklist_history_dir(app) else {
+        return;
+    };
+    let current_raw = match std::fs::read_to_string(&file) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let current_raw_doc: serde_json::Value = serde_json::from_str(&current_raw).unwrap_or_default();
+    let drafts_dir = worklist_drafts_dir(app);
+    let current_doc = resolve_worklist_doc_drafts(drafts_dir.as_deref(), &current_raw_doc);
+    let current_effective = serde_json::to_string_pretty(&current_doc)
+        .map(|s| format!("{}\n", s))
+        .unwrap_or(current_raw);
+    let ts = unix_now_ms();
+    let mut md = String::new();
+    md.push_str(&format!(
+        "# Worklist change @ {} ({})\n\n",
+        format_iso_utc(ts),
+        ts
+    ));
+    md.push_str(&format!("**Summary:** {} feedback\n\n", item_ids.len()));
+    md.push_str("## Items feedback\n\n");
+    for id in item_ids {
+        md.push_str(&format!("- `{}` (feedback)\n", id));
+    }
+    if std::fs::create_dir_all(&history_dir).is_err() {
+        return;
+    }
+    let _ = std::fs::write(history_dir.join(format!("{}.json", ts)), &current_effective);
+    let _ = std::fs::write(history_dir.join(format!("{}.md", ts)), &md);
+    eprintln!(
+        "[worklist-history] feedback snapshot @ {} ({} item(s))",
+        ts,
+        item_ids.len()
+    );
+}
+
 fn init_worklist_cache<R: tauri::Runtime>(app: &AppHandle<R>) {
     let Some(file) = worklist_file(app) else {
         return;
@@ -33922,6 +33981,7 @@ fn worklist_history_changelog_items(
             "## Items applied" => String::from("applied"),
             "## Items committed" => String::from("committed"),
             "## Items dropped" => String::from("dropped"),
+            "## Items feedback" => String::from("feedback"),
             _ => section_kind,
         };
         if !line.starts_with("- `") {
@@ -33935,6 +33995,7 @@ fn worklist_history_changelog_items(
                 || after.starts_with(" (applied")
                 || after.starts_with(" (committed")
                 || after.starts_with(" (dropped")
+                || after.starts_with(" (feedback")
                 || after.starts_with(": proposed")
                 || after.starts_with(": applied")
                 || after.starts_with(": committed")
@@ -34802,37 +34863,47 @@ fn feedback_history_by_item<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> HashMap<String, Vec<(i64, String)>> {
     let mut by_item: HashMap<String, Vec<(i64, String)>> = HashMap::new();
-    let Some(dir) = feedback_history_dir(app) else {
-        return by_item;
-    };
-    let Ok(read) = std::fs::read_dir(&dir) else {
-        return by_item;
-    };
-    for entry in read.flatten() {
-        let name = match entry.file_name().into_string() {
-            Ok(s) => s,
-            Err(_) => continue,
+    // iterate-writes-feedback-history: read both feedback-drafts AND
+    // feedback-history. Iterate feedback lands in feedback-drafts and is
+    // promoted to feedback-history only on a later mutate (advance/prune), so
+    // reading history alone hides the latest un-promoted iterate note — which
+    // must appear as the item's newest phase. Promotion MOVES the file, so a
+    // ref normally lives in one dir; the ts dedup below guards a stray overlap.
+    for dir in [feedback_drafts_dir(app), feedback_history_dir(app)]
+        .into_iter()
+        .flatten()
+    {
+        let Ok(read) = std::fs::read_dir(&dir) else {
+            continue;
         };
-        let stem = match name.strip_suffix(".md") {
-            Some(s) => s,
-            None => continue,
-        };
-        let (ts_str, item_id) = match stem.split_once('-') {
-            Some(p) => p,
-            None => continue,
-        };
-        let ts: i64 = match ts_str.parse() {
-            Ok(n) => n,
-            Err(_) => continue,
-        };
-        let body = cap_feedback_body(&std::fs::read_to_string(entry.path()).unwrap_or_default());
-        by_item
-            .entry(item_id.to_string())
-            .or_default()
-            .push((ts, body));
+        for entry in read.flatten() {
+            let name = match entry.file_name().into_string() {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let stem = match name.strip_suffix(".md") {
+                Some(s) => s,
+                None => continue,
+            };
+            let (ts_str, item_id) = match stem.split_once('-') {
+                Some(p) => p,
+                None => continue,
+            };
+            let ts: i64 = match ts_str.parse() {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            let body =
+                cap_feedback_body(&std::fs::read_to_string(entry.path()).unwrap_or_default());
+            by_item
+                .entry(item_id.to_string())
+                .or_default()
+                .push((ts, body));
+        }
     }
     for entries in by_item.values_mut() {
         entries.sort_by(|a, b| a.0.cmp(&b.0));
+        entries.dedup_by(|a, b| a.0 == b.0);
     }
     by_item
 }
@@ -34952,6 +35023,14 @@ fn recent_worklist_history_groups<R: tauri::Runtime>(
                         idx
                     }
                 };
+                // iterate-writes-feedback-history: a "feedback" changelog item
+                // only registers the item's group (done above) so the weaver
+                // below can attach it. The real feedback phase — with the note
+                // body — is woven from feedback-history, so skip pushing a
+                // duplicate empty transition phase here.
+                if changelog_item.kind == "feedback" {
+                    continue;
+                }
                 if let Some(group) = groups.get_mut(group_idx) {
                     group.phases.push(phase);
                     if group.latest_ts == 0 || ts > group.latest_ts {

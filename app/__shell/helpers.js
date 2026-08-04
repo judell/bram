@@ -8306,8 +8306,7 @@ window.addEventListener("unhandledrejection", (e) => {
 
 // footer-indexing-status: format the /__search-index-status payload for the
 // footer's first-row indicator. active_bucket set → "⟳ Indexing <bucket>…";
-// idle with recent additions → "⛁ N indexed · +3 commits, +1 issue"; else
-// "⛁ N indexed". Bucket keys are prettified to plural nouns.
+// idle → "⛁ N indexed". Bucket keys are prettified to plural nouns.
 window.__bramFooterIndexBucketLabels = { session: 'sessions', commit: 'commits', issue: 'issues', 'worklist-history': 'history' };
 window.__bramFooterIndexLabel = function (status) {
   if (!status) return '';
@@ -8317,18 +8316,11 @@ window.__bramFooterIndexLabel = function (status) {
     var names = active.map(function (b) { return labels[b] || b; });
     return 'Indexing ' + names.join(', ') + '…';
   }
-  var total = Number(status.total || 0).toLocaleString();
-  // The session bucket re-indexes one growing transcript (row replaced, keyed
-  // on path), so a "+N sessions" count is meaningless — omit it from the
-  // summary; commit/issue additions are useful here, while history is noise.
-  var added = (status.last_added || []).filter(function (a) {
-    return a && a.count > 0 && a.bucket !== 'session' && a.bucket !== 'worklist-history';
-  });
-  if (added.length) {
-    var parts = added.map(function (a) { return '+' + a.count + ' ' + (labels[a.bucket] || a.bucket); });
-    return total + ' indexed · ' + parts.join(', ');
-  }
-  return total + ' indexed';
+  // Idle: just the indexed total. Per-bucket "+N <bucket>" additions were
+  // dropped as noise (footer-drop-per-bucket-additions; history went first in
+  // 6884b42) — a growing session re-index made "+N sessions" meaningless, and
+  // the commit/issue/history deltas added churn without signal.
+  return Number(status.total || 0).toLocaleString() + ' indexed';
 };
 
 // settings-highlight-deeplink: scroll the setting anchored as

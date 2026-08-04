@@ -15264,6 +15264,117 @@ fn claude_message_text(record: &serde_json::Value) -> String {
     }
 }
 
+/// Per tool/thinking part, cap the searchable text pulled into the index. Tool
+/// output (greps, file reads, diffs) can be huge and low-signal in bulk; this
+/// bounds index bloat while still covering the head of each result. Mirrors the
+/// commit-diff patch caps (search-index-commit-diffs).
+const SEARCH_TOOL_PART_CAP: usize = 16 * 1024;
+
+/// Truncate `s` to at most `cap` bytes on a char boundary (house style: the
+/// same is_char_boundary walk used elsewhere in this file).
+fn cap_search_part(s: &str, cap: usize) -> String {
+    if s.len() <= cap {
+        return s.to_string();
+    }
+    let mut end = cap;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
+/// Collect every string leaf of a JSON value into `out` (recursive) — used to
+/// pull searchable text out of a `tool_use` `input` object (commands, file
+/// paths, patterns) without hard-coding per-tool field names.
+fn collect_json_strings(v: &serde_json::Value, out: &mut String) {
+    match v {
+        serde_json::Value::String(s) => {
+            out.push_str(s);
+            out.push(' ');
+        }
+        serde_json::Value::Array(arr) => {
+            for x in arr {
+                collect_json_strings(x, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (_k, val) in map.iter() {
+                collect_json_strings(val, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The text of a `tool_result` content part: a bare string, or the joined
+/// `text` of its `{type:"text"}` sub-parts.
+fn claude_tool_result_text(part: &serde_json::Value) -> String {
+    match part.get("content") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|c| c.get("text").and_then(|v| v.as_str()).map(String::from))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// Searchable text of one Claude message record: prose PLUS tool output.
+/// Unlike `claude_message_text` (prose only — kept for title extraction and the
+/// live per-query grep path), this also pulls `tool_result` text, `tool_use`
+/// inputs, and `thinking`, so the FTS index covers what the transcript renders.
+/// A term visible only inside a tool result was previously unsearchable
+/// (search-index-tool-output-coverage). Each tool/thinking part is capped.
+fn claude_message_search_text(record: &serde_json::Value) -> String {
+    let Some(content) = record.pointer("/message/content") else {
+        return String::new();
+    };
+    match content {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(arr) => {
+            let mut parts: Vec<String> = Vec::new();
+            for c in arr {
+                match c.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+                    "text" => {
+                        if let Some(t) = c.get("text").and_then(|v| v.as_str()) {
+                            parts.push(t.to_string());
+                        }
+                    }
+                    "thinking" => {
+                        if let Some(t) = c.get("thinking").and_then(|v| v.as_str()) {
+                            parts.push(cap_search_part(t, SEARCH_TOOL_PART_CAP));
+                        }
+                    }
+                    "tool_use" => {
+                        let mut s = String::new();
+                        if let Some(name) = c.get("name").and_then(|v| v.as_str()) {
+                            s.push_str(name);
+                            s.push(' ');
+                        }
+                        if let Some(input) = c.get("input") {
+                            collect_json_strings(input, &mut s);
+                        }
+                        let s = s.trim();
+                        if !s.is_empty() {
+                            parts.push(cap_search_part(s, SEARCH_TOOL_PART_CAP));
+                        }
+                    }
+                    "tool_result" => {
+                        let t = claude_tool_result_text(c);
+                        if !t.is_empty() {
+                            parts.push(cap_search_part(&t, SEARCH_TOOL_PART_CAP));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            parts.join("\n\n")
+        }
+        _ => String::new(),
+    }
+}
+
 fn codex_message_text(record: &serde_json::Value) -> Option<String> {
     if record.get("type").and_then(|v| v.as_str()) != Some("event_msg") {
         return None;
@@ -15859,7 +15970,7 @@ fn claude_session_all_text(path: &Path) -> String {
         if role != "user" && role != "assistant" {
             continue;
         }
-        let text = claude_message_text(&record);
+        let text = claude_message_search_text(&record);
         if !text.is_empty() {
             all.push_str(&text);
             all.push('\n');

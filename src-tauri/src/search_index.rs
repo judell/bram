@@ -24,7 +24,10 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Result};
 // cache-first /__issue serving) plus a synthetic "issues:list" row. Existing
 // issue rows carry empty `extra` at the old token, so force a rebuild to
 // backfill them (indexed=0/skipped=230 otherwise).
-const SCHEMA_VERSION: i64 = 9;
+// v10: session extraction now includes tool_result / tool_use / thinking text
+// (search-index-tool-output-coverage), so terms visible in a transcript's tool
+// output are searchable. Bump forces a rebuild that back-indexes all sessions.
+const SCHEMA_VERSION: i64 = 10;
 
 /// A row to index. `content` is the searchable text; `file` is the source
 /// file's absolute path (the reindex key); the rest are the #230 common-schema

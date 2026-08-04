@@ -233,10 +233,16 @@
             onClick="infoTitle = 'AI'; infoBody = window.settingsInfoBodies.ai; settingInfoDialog.open()" />
           <Heading level="h3">AI</Heading>
         </HStack>
-        <Switch
-          label="Tool Descriptions"
-          initialValue="{settingsDescribeCommands(settingsConfig.value)}"
-          onDidChange="(v) => saveSettings.execute({ ai: { describeCommands: v } })" />
+        <VStack
+          testId="setting-describeCommands"
+          padding="$space-1"
+          borderRadius="$borderRadius"
+          backgroundColor="{highlightKey === 'describeCommands' ? '$color-primary-100' : 'transparent'}">
+          <Switch
+            label="Tool Descriptions"
+            initialValue="{settingsDescribeCommands(settingsConfig.value)}"
+            onDidChange="(v) => saveSettings.execute({ ai: { describeCommands: v } })" />
+        </VStack>
       </VStack>
 
       <ContentSeparator />

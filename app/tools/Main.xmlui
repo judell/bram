@@ -539,7 +539,7 @@
       <Button
         label="Open Settings"
         size="xs"
-        onClick="navigate('/settings')" />
+        onClick="navigate('/settings?highlight=describeCommands')" />
       <SpaceFiller />
       <Button
         label="✕"

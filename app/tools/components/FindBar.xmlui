@@ -33,6 +33,10 @@
     <ChangeListener
       listenTo="{$props.clearRevision}"
       onDidChange="() => findBarBox.setValue('')" />
+    <Button size="xs" variant="ghost" label="✕"
+      enabled="{findBarBox.value &amp;&amp; findBarBox.value.length > 0}"
+      tooltip="Clear find"
+      onClick="findBarBox.setValue(''); emitEvent('needleChange', '')" />
     <Button size="xs" variant="outlined" label="▲"
       enabled="{($props.matchCount || 0) > 0}"
       tooltip="Previous match"

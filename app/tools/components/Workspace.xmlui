@@ -282,7 +282,6 @@
     gap="$space-6"
     onInit="window.__bramWorkspaceMount(worklist)">
     <Theme
-      maxWidth-ModalDialog="50vw"
       backgroundColor-ModalDialog="$color-surface-50"
       backgroundColor-overlay-ModalDialog="rgba(15, 23, 42, 0.42)"
       borderRadius-ModalDialog="$borderRadius-lg"
@@ -938,7 +937,7 @@
     </VStack>
     </VStack>
 
-    <Theme maxWidth-ModalDialog="85%">
+    <Theme maxWidth-ModalDialog="85vw">
     <ModalDialog
       id="statusProposedHelpDialog"
       title="TO APPLY">
@@ -992,7 +991,6 @@
     </ModalDialog>
 
     <Theme
-      maxWidth-ModalDialog="50vw"
       backgroundColor-ModalDialog="$color-surface-50"
       backgroundColor-overlay-ModalDialog="rgba(15, 23, 42, 0.42)"
       borderRadius-ModalDialog="$borderRadius-lg"
@@ -1076,7 +1074,7 @@
       </VStack>
     </ModalDialog>
 
-    <Theme maxWidth-ModalDialog="85%">
+    <Theme maxWidth-ModalDialog="85vw">
     <ModalDialog
       id="statusAppliedHelpDialog"
       title="TO COMMIT">
@@ -1156,7 +1154,6 @@ Iterate is the right move when the agent's first cut is *almost* what you want."
     </ModalDialog>
 
     <Theme
-      maxWidth-ModalDialog="50vw"
       backgroundColor-ModalDialog="$color-surface-50"
       backgroundColor-overlay-ModalDialog="rgba(15, 23, 42, 0.42)"
       borderRadius-ModalDialog="$borderRadius-lg"

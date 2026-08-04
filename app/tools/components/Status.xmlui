@@ -107,6 +107,9 @@
       </VStack>
     </Items>
 
+    <!-- Row-info popups are short (a signal's description); override the global
+         85vw default to a compact 50vw (modals-default-85vw-width iterate). -->
+    <Theme maxWidth-ModalDialog="50vw">
     <ModalDialog
       id="rowInfoDialog"
       title="{rowInfoTitle}">
@@ -117,5 +120,6 @@
         </HStack>
       </VStack>
     </ModalDialog>
+    </Theme>
   </VStack>
 </Component>

@@ -247,7 +247,7 @@
   <!-- issue-221-skill-launcher: pick a project skill, add an optional argument,
        and submit it as a /skill turn. Claude-only (the launch button is gated
        on activeProvider). 85% of the available width so the table has room. -->
-  <Theme maxWidth-ModalDialog="85%">
+  <Theme maxWidth-ModalDialog="85vw">
   <ModalDialog id="skillsDialog" title="Run a skill">
     <VStack gap="$space-3" padding="$space-2">
       <Text

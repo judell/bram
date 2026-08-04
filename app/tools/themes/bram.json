@@ -11,6 +11,7 @@
     "maxWidth-content-App": "100%",
     "maxWidth-App": "100%",
     "maxWidth-content-Footer": "100%",
+    "maxWidth-ModalDialog": "85vw",
     "marginTop-H2-markdown": "$space-3",
     "marginBottom-H2-markdown": "$space-1",
     "marginTop-Text-markdown": "0",

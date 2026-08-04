@@ -110,11 +110,11 @@
               <Text when="{!$item.pushed}" value=" " width="12px" />
               <Text value="{$item.sha.slice(0, 7)}" variant="code" fontSize="$fontSize-xs" color="$textColor-secondary" width="64px" />
               <Text value="{formatDateTime($item.commit.author.date, 'MM-dd HH:mm')}" fontSize="$fontSize-xs" color="$textColor-secondary" overflowMode="none" width="74px" />
-              <HStack width="196px" gap="$space-1" verticalAlignment="center">
+              <HStack width="232px" gap="$space-1" verticalAlignment="center">
                 <Text value="{$item.commit.author.login || $item.commit.author.name}" fontSize="$fontSize-sm" color="$textColor-secondary" width="*" maxLines="1" />
-                <HStack gap="4px" verticalAlignment="center">
-                  <Text value="{'+' + ($item.additions || 0)}" textAlign="right" width="36px" fontFamily="$fontFamily-monospace" fontSize="$fontSize-xs" color="$color-success-700" />
-                  <Text value="{($item.deletions || 0) > 0 ? '-' + $item.deletions : ''}" textAlign="right" width="36px" fontFamily="$fontFamily-monospace" fontSize="$fontSize-xs" color="$color-danger-700" />
+                <HStack gap="8px" verticalAlignment="center">
+                  <Text value="{'+' + ($item.additions || 0)}" textAlign="right" width="64px" fontFamily="$fontFamily-monospace" fontSize="$fontSize-xs" color="$color-success-700" />
+                  <Text value="{($item.deletions || 0) > 0 ? '-' + $item.deletions : ''}" textAlign="right" width="64px" fontFamily="$fontFamily-monospace" fontSize="$fontSize-xs" color="$color-danger-700" />
                 </HStack>
               </HStack>
               <Text

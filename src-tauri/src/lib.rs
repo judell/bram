@@ -15243,27 +15243,6 @@ fn claude_session_title(path: &Path) -> std::io::Result<Option<String>> {
     Ok(custom_title.or(ai_title).or(first_user))
 }
 
-fn claude_message_text(record: &serde_json::Value) -> String {
-    let Some(content) = record.pointer("/message/content") else {
-        return String::new();
-    };
-    match content {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Array(arr) => arr
-            .iter()
-            .filter_map(|c| {
-                if c.get("type").and_then(|v| v.as_str()) == Some("text") {
-                    c.get("text").and_then(|v| v.as_str()).map(String::from)
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n"),
-        _ => String::new(),
-    }
-}
-
 /// Per tool/thinking part, cap the searchable text pulled into the index. Tool
 /// output (greps, file reads, diffs) can be huge and low-signal in bulk; this
 /// bounds index bloat while still covering the head of each result. Mirrors the
@@ -15321,9 +15300,8 @@ fn claude_tool_result_text(part: &serde_json::Value) -> String {
 }
 
 /// Searchable text of one Claude message record: prose PLUS tool output.
-/// Unlike `claude_message_text` (prose only — kept for title extraction and the
-/// live per-query grep path), this also pulls `tool_result` text, `tool_use`
-/// inputs, and `thinking`, so the FTS index covers what the transcript renders.
+/// This pulls `tool_result` text, `tool_use` inputs, and `thinking`, so the FTS
+/// index covers what the transcript renders.
 /// A term visible only inside a tool result was previously unsearchable
 /// (search-index-tool-output-coverage). Each tool/thinking part is capped.
 fn claude_message_search_text(record: &serde_json::Value) -> String {
@@ -15372,20 +15350,6 @@ fn claude_message_search_text(record: &serde_json::Value) -> String {
             parts.join("\n\n")
         }
         _ => String::new(),
-    }
-}
-
-fn codex_message_text(record: &serde_json::Value) -> Option<String> {
-    if record.get("type").and_then(|v| v.as_str()) != Some("event_msg") {
-        return None;
-    }
-    let payload = record.get("payload")?;
-    match payload.get("type").and_then(|v| v.as_str()) {
-        Some("user_message") | Some("agent_message") => payload
-            .get("message")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-        _ => None,
     }
 }
 
@@ -15566,40 +15530,6 @@ fn codex_session_title(path: &Path) -> std::io::Result<Option<String>> {
         return Ok(Some(message.chars().take(120).collect()));
     }
     Ok(None)
-}
-
-fn find_snippets(text: &str, q_lower: &str, max_count: usize) -> Vec<String> {
-    let half: usize = 40;
-    let text_lower = text.to_lowercase();
-    let mut snippets: Vec<String> = Vec::new();
-    let mut search_start: usize = 0;
-    while snippets.len() < max_count && search_start < text.len() {
-        let Some(rel) = text_lower[search_start..].find(q_lower) else {
-            break;
-        };
-        let abs = search_start + rel;
-        let mut s_start = abs.saturating_sub(half);
-        while s_start < text.len() && !text.is_char_boundary(s_start) {
-            s_start += 1;
-        }
-        let mut s_end = (abs + q_lower.len() + half).min(text.len());
-        while s_end > 0 && !text.is_char_boundary(s_end) {
-            s_end -= 1;
-        }
-        if s_start >= s_end {
-            break;
-        }
-        let snippet: String = text[s_start..s_end]
-            .chars()
-            .map(|c| if c.is_whitespace() { ' ' } else { c })
-            .collect::<String>()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        snippets.push(snippet);
-        search_start = abs + q_lower.len();
-    }
-    snippets
 }
 
 /// Cheap enumeration of the current project's Claude session files:
@@ -15872,77 +15802,11 @@ fn session_meta<R: tauri::Runtime>(
     })
 }
 
-fn search_sessions<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    query: &str,
-    limit: usize,
-    preferred: Option<SessionProvider>,
-) -> Result<Vec<serde_json::Value>, String> {
-    let q = query.trim();
-    if q.is_empty() {
-        return Ok(Vec::new());
-    }
-    let q_lower = q.to_lowercase();
-    let bounded_limit = if limit == usize::MAX {
-        None
-    } else {
-        Some(limit)
-    };
-    let (provider, mut sessions) = sessions_for_provider(app, preferred, bounded_limit)?;
-    if bounded_limit.is_none() {
-        sessions.truncate(limit);
-    }
-
-    let mut results: Vec<serde_json::Value> = Vec::new();
-    for session in sessions {
-        let Ok(content) = std::fs::read_to_string(&session.path) else {
-            continue;
-        };
-        let mut all_text = String::new();
-        for line in content.lines() {
-            let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
-                continue;
-            };
-            let text = match provider {
-                SessionProvider::Claude => {
-                    let role = record.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                    if role != "user" && role != "assistant" {
-                        continue;
-                    }
-                    claude_message_text(&record)
-                }
-                SessionProvider::Codex => match codex_message_text(&record) {
-                    Some(text) => text,
-                    None => continue,
-                },
-            };
-            if !text.is_empty() {
-                all_text.push_str(&text);
-                all_text.push('\n');
-            }
-        }
-        let snippets = find_snippets(&all_text, &q_lower, 3);
-        if !snippets.is_empty() {
-            results.push(serde_json::json!({
-                "id": session.id,
-                "title": session.title,
-                "mtime": session.mtime,
-                "size": session.size,
-                "provider": session.provider,
-                "current": false,
-                "snippets": snippets,
-            }));
-        }
-    }
-    Ok(results)
-}
-
 // ---------------------------------------------------------------------------
-// issue-230 unified search: Claude-session indexer driver.
+// issue-230 unified search: session indexer driver.
 //
-// Reuses discover_claude_sessions() + claude_message_text() to feed the FTS5
-// index in search_index.rs. Claude-only for now; Codex is the next item
-// (same DB/API, add discover_codex_sessions() + codex_message_text() here).
+// Provider-specific session discovery and searchable-text extractors feed the
+// shared FTS5 index in search_index.rs.
 // ---------------------------------------------------------------------------
 
 /// The rebuildable index cache for the current project:
@@ -15955,8 +15819,7 @@ fn search_index_db_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf
     Some(dir.join(format!("{}.db", encode_path_for_filename(&root))))
 }
 
-/// Concatenated user+assistant text of a Claude session JSONL — the same
-/// extraction search_sessions() does, factored for the indexer.
+/// Concatenated searchable text of a Claude session JSONL for the FTS index.
 fn claude_session_all_text(path: &Path) -> String {
     let Ok(content) = std::fs::read_to_string(path) else {
         return String::new();
@@ -15994,9 +15857,8 @@ fn codex_content_text(value: Option<&serde_json::Value>) -> String {
 }
 
 /// Searchable text of one Codex session record: prose PLUS tool output.
-/// Unlike `codex_message_text` (event_msg user/agent prose only, kept for the
-/// live grep path), this also pulls the tool records that carry the terms users
-/// search for — `custom_tool_call` inputs, `custom_tool_call_output` output,
+/// This pulls the tool records that carry the terms users search for —
+/// `custom_tool_call` inputs, `custom_tool_call_output` output,
 /// `function_call` name/args, and `patch_apply_end` stdout/stderr — so the FTS
 /// index covers what the transcript renders (search-index-codex-tool-output-
 /// coverage). `reasoning` is skipped: its body is `encrypted_content`
@@ -36624,8 +36486,6 @@ fn route_request<R: tauri::Runtime>(
     if let Some(rest) = path.strip_prefix("__sessions/") {
         let mut provider: Option<SessionProvider> = None;
         let mut session_id = String::new();
-        let mut q = String::new();
-        let mut scope = String::from("recent");
         let mut title = String::new();
         let mut limit: Option<usize> = None;
         for pair in query.split('&') {
@@ -36633,10 +36493,6 @@ fn route_request<R: tauri::Runtime>(
                 provider = SessionProvider::from_str(&percent_decode(v));
             } else if let Some(v) = pair.strip_prefix("id=") {
                 session_id = percent_decode(v);
-            } else if let Some(v) = pair.strip_prefix("q=") {
-                q = percent_decode(v);
-            } else if let Some(v) = pair.strip_prefix("scope=") {
-                scope = percent_decode(v);
             } else if let Some(v) = pair.strip_prefix("title=") {
                 title = percent_decode(v);
             } else if let Some(v) = pair.strip_prefix("limit=") {
@@ -36675,13 +36531,6 @@ fn route_request<R: tauri::Runtime>(
             (
                 "text/plain; charset=utf-8",
                 read_session(app, &session_id, provider),
-            )
-        } else if rest == "search" {
-            let limit = if scope == "all" { usize::MAX } else { 20 };
-            (
-                "application/json; charset=utf-8",
-                search_sessions(app, &q, limit, provider)
-                    .and_then(|entries| serde_json::to_vec(&entries).map_err(|e| e.to_string())),
             )
         } else if rest == "delete" {
             (

@@ -8285,6 +8285,29 @@ window.addEventListener("unhandledrejection", (e) => {
 // deep link (navigate), `url` is external (opened in the system browser via
 // openExternal), neither means the tip is informational text only.
 
+// footer-indexing-status: format the /__search-index-status payload for the
+// footer's first-row indicator. active_bucket set → "⟳ Indexing <bucket>…";
+// idle with recent additions → "⛁ N indexed · +3 commits, +1 issue"; else
+// "⛁ N indexed". Bucket keys are prettified to plural nouns.
+window.__bramFooterIndexBucketLabels = { session: 'sessions', commit: 'commits', issue: 'issues', 'worklist-history': 'history' };
+window.__bramFooterIndexLabel = function (status) {
+  if (!status) return '';
+  var labels = window.__bramFooterIndexBucketLabels;
+  if (status.active_bucket) {
+    return '⟳ Indexing ' + (labels[status.active_bucket] || status.active_bucket) + '…';
+  }
+  var total = Number(status.total || 0).toLocaleString();
+  // The session bucket re-indexes one growing transcript (row replaced, keyed
+  // on path), so a "+N sessions" count is meaningless — omit it from the
+  // summary; only commit/issue/history additions are genuinely new documents.
+  var added = (status.last_added || []).filter(function (a) { return a && a.count > 0 && a.bucket !== 'session'; });
+  if (added.length) {
+    var parts = added.map(function (a) { return '+' + a.count + ' ' + (labels[a.bucket] || a.bucket); });
+    return '⛁ ' + total + ' indexed · ' + parts.join(', ');
+  }
+  return '⛁ ' + total + ' indexed';
+};
+
 window.__bramTipsRegistry = [
   { id: 'tool-descriptions', priority: 10,
     url: 'https://blog.jonudell.net/2026/07/23/agents-that-narrate-their-work-are-the-best-team-players/',

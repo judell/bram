@@ -16451,62 +16451,148 @@ fn run_history_index_pass<R: tauri::Runtime>(
 
 /// Run one bucket pass and trace its outcome. The pass runs even when tracing
 /// is off (indexing must happen regardless); only the trace line is gated.
-fn run_and_trace_index_pass<R, F>(app: &AppHandle<R>, bucket: &str, pass: F)
+// footer-indexing-status: per-bucket indexer status feeding the footer's
+// first-row indicator. `active_bucket` is Some(name) while a live-named cycle's
+// pass runs; `last_added` holds the buckets that gained docs in the most recent
+// cycle that added any (the "done" summary). Written by the background indexer,
+// read by GET /__search-index-status.
+#[derive(Clone, Default)]
+struct SearchIndexStatus {
+    active_bucket: Option<String>,
+    total: i64,
+    last_added: Vec<(String, usize)>,
+}
+
+fn search_index_status_cell() -> &'static Mutex<SearchIndexStatus> {
+    static CELL: OnceLock<Mutex<SearchIndexStatus>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(SearchIndexStatus::default()))
+}
+
+fn search_index_status_snapshot() -> SearchIndexStatus {
+    search_index_status_cell()
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_default()
+}
+
+// Set (or clear) the bucket currently being indexed and push the change so the
+// footer can name it live. Bare signal, same shape as `issues-changed`.
+fn search_index_set_active<R: tauri::Runtime>(app: &AppHandle<R>, bucket: Option<&str>) {
+    if let Ok(mut s) = search_index_status_cell().lock() {
+        s.active_bucket = bucket.map(str::to_string);
+    }
+    emit_replayable_signal(app, "search-index-changed");
+}
+
+// End-of-cycle: clear active_bucket, refresh total, and replace last_added only
+// when this cycle added docs (so the summary persists across idle cycles).
+fn search_index_record_cycle<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    total: i64,
+    added: Vec<(String, usize)>,
+    emit: bool,
+) {
+    if let Ok(mut s) = search_index_status_cell().lock() {
+        s.active_bucket = None;
+        s.total = total;
+        if !added.is_empty() {
+            s.last_added = added;
+        }
+    }
+    if emit {
+        emit_replayable_signal(app, "search-index-changed");
+    }
+}
+
+// Live document count across all buckets (opens the index db; ~one call per 45s
+// cycle and per status request). 0 when the db is absent or unreadable.
+fn search_index_current_total<R: tauri::Runtime>(app: &AppHandle<R>) -> i64 {
+    let Some(db) = search_index_db_path(app) else {
+        return 0;
+    };
+    match search_index::open(&db.to_string_lossy()) {
+        Ok(conn) => search_index::row_count(&conn).unwrap_or(0),
+        Err(_) => 0,
+    }
+}
+
+// Cheap signature that drives live-naming: HEAD movement (a fresh commit) marks
+// a cycle worth naming bucket-by-bucket; cold-start is handled separately (a
+// zero total). Session growth and remote issue edits still surface in the
+// end-of-cycle summary — naming them live every 45s would be noise.
+fn search_index_head_sig<R: tauri::Runtime>(app: &AppHandle<R>) -> String {
+    git_run(app, &["rev-parse", "HEAD"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
+// Returns the pass's `indexed` count (0 on error) and traces the scan when
+// tracing is enabled. The count feeds the footer indexing status, so the pass
+// runs regardless of `bram_trace_enabled()`.
+fn run_and_trace_index_pass<R, F>(app: &AppHandle<R>, bucket: &str, pass: F) -> usize
 where
     R: tauri::Runtime,
     F: Fn(&AppHandle<R>) -> Result<(usize, usize, usize, i64), String>,
 {
-    if !bram_trace_enabled() {
-        let _ = pass(app);
-        return;
-    }
     let started = std::time::Instant::now();
-    match pass(app) {
-        Ok((files, indexed, skipped, rows)) => append_bram_trace_line(
-            app,
-            "search-index",
-            &format!(
-                "op=scan bucket={} files={} indexed={} skipped={} rows={} ms={}",
-                bucket,
-                files,
-                indexed,
-                skipped,
-                rows,
-                started.elapsed().as_millis()
+    let result = pass(app);
+    let indexed = match &result {
+        Ok((_, indexed, _, _)) => *indexed,
+        Err(_) => 0,
+    };
+    if bram_trace_enabled() {
+        match result {
+            Ok((files, idx, skipped, rows)) => append_bram_trace_line(
+                app,
+                "search-index",
+                &format!(
+                    "op=scan bucket={} files={} indexed={} skipped={} rows={} ms={}",
+                    bucket,
+                    files,
+                    idx,
+                    skipped,
+                    rows,
+                    started.elapsed().as_millis()
+                ),
             ),
-        ),
-        Err(e) => append_bram_trace_line(
-            app,
-            "search-index",
-            &format!("op=scan-error bucket={} detail={}", bucket, e),
-        ),
+            Err(e) => append_bram_trace_line(
+                app,
+                "search-index",
+                &format!("op=scan-error bucket={} detail={}", bucket, e),
+            ),
+        }
     }
+    indexed
 }
 
 /// Session passes expose the same aggregate scan fields as the other buckets,
 /// plus their discovery, change-gate, extraction, and SQLite phases.
-fn run_and_trace_session_index_pass<R, F>(app: &AppHandle<R>, bucket: &str, pass: F)
+fn run_and_trace_session_index_pass<R, F>(app: &AppHandle<R>, bucket: &str, pass: F) -> usize
 where
     R: tauri::Runtime,
     F: Fn(&AppHandle<R>) -> Result<SessionIndexPassStats, String>,
 {
-    if !bram_trace_enabled() {
-        let _ = pass(app);
-        return;
-    }
     let started = std::time::Instant::now();
-    match pass(app) {
-        Ok(stats) => append_bram_trace_line(
-            app,
-            "search-index",
-            &format_session_index_scan(bucket, stats, started.elapsed().as_millis()),
-        ),
-        Err(e) => append_bram_trace_line(
-            app,
-            "search-index",
-            &format!("op=scan-error bucket={} detail={}", bucket, e),
-        ),
+    let result = pass(app);
+    let indexed = match &result {
+        Ok(stats) => stats.indexed,
+        Err(_) => 0,
+    };
+    if bram_trace_enabled() {
+        match result {
+            Ok(stats) => append_bram_trace_line(
+                app,
+                "search-index",
+                &format_session_index_scan(bucket, stats, started.elapsed().as_millis()),
+            ),
+            Err(e) => append_bram_trace_line(
+                app,
+                "search-index",
+                &format!("op=scan-error bucket={} detail={}", bucket, e),
+            ),
+        }
     }
+    indexed
 }
 
 /// Background indexer: an initial pass shortly after startup, then a periodic
@@ -16521,12 +16607,62 @@ where
 fn start_search_indexer<R: tauri::Runtime>(app: AppHandle<R>) {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(2));
+        // Seed from the current state so a plain restart (unchanged repo,
+        // populated index) does not trigger a spurious first-cycle name sweep;
+        // a cold (empty) index has total 0 and IS named.
+        let mut prev_sig = search_index_head_sig(&app);
+        let mut prev_total = search_index_current_total(&app);
         loop {
-            run_and_trace_session_index_pass(&app, "claude", run_search_index_pass);
-            run_and_trace_session_index_pass(&app, "codex", run_codex_search_index_pass);
-            run_and_trace_index_pass(&app, "commits", run_commit_index_pass);
-            run_and_trace_index_pass(&app, "worklist-history", run_history_index_pass);
-            run_and_trace_index_pass(&app, "issues", run_issue_index_pass);
+            let sig = search_index_head_sig(&app);
+            // Cold index (empty) or HEAD movement (a fresh commit) is worth
+            // live-naming buckets as each pass runs; idle cycles stay silent so
+            // the footer doesn't flicker "Indexing…" every 45s.
+            let named = prev_total == 0 || sig != prev_sig;
+            prev_sig = sig;
+
+            let mut added: Vec<(String, usize)> = Vec::new();
+
+            if named {
+                search_index_set_active(&app, Some("session"));
+            }
+            let sessions = run_and_trace_session_index_pass(&app, "claude", run_search_index_pass)
+                + run_and_trace_session_index_pass(&app, "codex", run_codex_search_index_pass);
+            if sessions > 0 {
+                added.push(("session".to_string(), sessions));
+            }
+
+            if named {
+                search_index_set_active(&app, Some("commit"));
+            }
+            let commits = run_and_trace_index_pass(&app, "commits", run_commit_index_pass);
+            if commits > 0 {
+                added.push(("commit".to_string(), commits));
+            }
+
+            if named {
+                search_index_set_active(&app, Some("worklist-history"));
+            }
+            let history =
+                run_and_trace_index_pass(&app, "worklist-history", run_history_index_pass);
+            if history > 0 {
+                added.push(("worklist-history".to_string(), history));
+            }
+
+            if named {
+                search_index_set_active(&app, Some("issue"));
+            }
+            let issues = run_and_trace_index_pass(&app, "issues", run_issue_index_pass);
+            if issues > 0 {
+                added.push(("issue".to_string(), issues));
+            }
+
+            let total = search_index_current_total(&app);
+            // Emit on a named cycle (to clear the active bucket) or whenever the
+            // count moved (catches remote issue edits on an unnamed cycle).
+            let emit = named || total != prev_total;
+            prev_total = total;
+            search_index_record_cycle(&app, total, added, emit);
+
             std::thread::sleep(std::time::Duration::from_secs(45));
         }
     });
@@ -34944,6 +35080,23 @@ fn route_request<R: tauri::Runtime>(
         let body =
             serde_json::to_vec(&serde_json::json!({ "content": content.unwrap_or_default() }))
                 .unwrap_or_default();
+        return (200, "application/json; charset=utf-8", body);
+    }
+
+    // footer-indexing-status: compact indexer state for the footer indicator.
+    if path == "__search-index-status" {
+        let snap = search_index_status_snapshot();
+        let body = serde_json::json!({
+            "active_bucket": snap.active_bucket,
+            "total": search_index_current_total(app),
+            "last_added": snap
+                .last_added
+                .iter()
+                .map(|(b, n)| serde_json::json!({ "bucket": b, "count": n }))
+                .collect::<Vec<_>>(),
+        })
+        .to_string()
+        .into_bytes();
         return (200, "application/json; charset=utf-8", body);
     }
 

@@ -98,6 +98,17 @@
   <ChangeListener
     listenTo="{footerSessionsChangedEvt.value &amp;&amp; footerSessionsChangedEvt.value.tick}"
     onDidChange="() => { footerSessions.refetch(); footerAgents.refetch(); }" />
+  <!-- footer-indexing-status: search-indexer state for the first-row
+       indicator. Pushed via search-index-changed (no polling); refetch on
+       its tick. -->
+  <DataSource id="footerIndexStatus" url="/__search-index-status" />
+  <PushSource
+    id="footerIndexChangedEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('search-index-changed')}" />
+  <ChangeListener
+    listenTo="{footerIndexChangedEvt.value &amp;&amp; footerIndexChangedEvt.value.tick}"
+    onDidChange="() => footerIndexStatus.refetch()" />
   <!-- Subagent roster for the footer chips strip, and main-model metadata
        for the footer session line. Refreshed by both session and subagent
        signals: subagent JSONL appends are swallowed by the watcher's
@@ -586,6 +597,14 @@
           marginLeft="$space-4"
           tooltip="New transcript content below — jump to the live edge"
           onClick="window.__bramUnseenJump(); navigate('/transcript')" />
+        <!-- footer-indexing-status: names the bucket being indexed, or the
+             idle doc count + last cycle's per-bucket additions. -->
+        <Text
+          when="{footerIndexStatus.value &amp;&amp; window.__bramFooterIndexLabel(footerIndexStatus.value)}"
+          fontSize="$fontSize-xs"
+          color="$textColor-secondary"
+          marginLeft="$space-4"
+          value="{window.__bramFooterIndexLabel(footerIndexStatus.value)}" />
       </HStack>
       <!-- Canonical pending-menu surface: menus render HERE — below the
            status verb, above the message box — the same place on every tab,

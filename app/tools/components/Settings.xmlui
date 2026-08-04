@@ -7,7 +7,8 @@
   var.archiveDaysDraft="{14}"
   var.archiveDaysSaved="{14}"
   var.infoTitle="{''}"
-  var.infoBody="{''}">
+  var.infoBody="{''}"
+  var.highlightKey="{$queryParams.highlight || ''}">
 
   <DataSource
     id="settingsConfig"
@@ -42,6 +43,18 @@
     <ChangeListener
       listenTo="{settingsChangedEvt.value &amp;&amp; settingsChangedEvt.value.tick}"
       onDidChange="() => { window.__bramIframeTrace('refetch-called', {context: 'settings-changed'}); settingsConfig.refetch(); }" />
+    <!-- settings-highlight-deeplink: on inbound ?highlight=<key>, scroll the
+         matching setting into view. Two triggers cover both arrivals: a fresh
+         mount (settingsConfig loads) and re-targeting while already on the tab
+         (highlightKey changes with the query param, settingsConfig unchanged).
+         The tint itself is reactive on highlightKey (the per-setting wrappers
+         below); the helper retries across frames until the row is laid out. -->
+    <ChangeListener
+      listenTo="{settingsConfig.value}"
+      onDidChange="() => { if (highlightKey) window.__bramHighlightSetting(highlightKey); }" />
+    <ChangeListener
+      listenTo="{highlightKey}"
+      onDidChange="() => { if (highlightKey) window.__bramHighlightSetting(highlightKey); }" />
     <Timer
       interval="500"
       enabled="{traceArchiveStatus.value &amp;&amp; traceArchiveStatus.value.state === 'pending'}"
@@ -123,14 +136,26 @@
             onClick="infoTitle = 'Worklist'; infoBody = window.settingsInfoBodies.batchCommitActions; settingInfoDialog.open()" />
           <Heading level="h3">Worklist</Heading>
         </HStack>
-        <Switch
-          label="Batch commit actions"
-          initialValue="{settingsBatch(settingsConfig.value)}"
-          onDidChange="(v) => saveSettings.execute({ worklist: { batchCommitActions: v } })" />
-        <Switch
-          label="One-click Approve &amp; commit"
-          initialValue="{settingsOneClickApproveCommit(settingsConfig.value)}"
-          onDidChange="(v) => saveSettings.execute({ worklist: { oneClickApproveCommit: v } })" />
+        <VStack
+          testId="setting-batchCommitActions"
+          padding="$space-1"
+          borderRadius="$borderRadius"
+          backgroundColor="{highlightKey === 'batchCommitActions' ? '$color-primary-100' : 'transparent'}">
+          <Switch
+            label="Batch commit actions"
+            initialValue="{settingsBatch(settingsConfig.value)}"
+            onDidChange="(v) => saveSettings.execute({ worklist: { batchCommitActions: v } })" />
+        </VStack>
+        <VStack
+          testId="setting-oneClickApproveCommit"
+          padding="$space-1"
+          borderRadius="$borderRadius"
+          backgroundColor="{highlightKey === 'oneClickApproveCommit' ? '$color-primary-100' : 'transparent'}">
+          <Switch
+            label="One-click Approve &amp; commit"
+            initialValue="{settingsOneClickApproveCommit(settingsConfig.value)}"
+            onDidChange="(v) => saveSettings.execute({ worklist: { oneClickApproveCommit: v } })" />
+        </VStack>
         <Switch
           label="Mirror worklist lifecycle to GitHub issues"
           initialValue="{!!(settingsConfig.value &amp;&amp; settingsConfig.value.mirrorWorklistLifecycleToIssue)}"
@@ -171,17 +196,23 @@
           label="Soft beep on menus and turn completion"
           initialValue="{window.__bramBeepEnabled ? window.__bramBeepEnabled() : false}"
           onDidChange="(v) => window.__bramSetBeepEnabled(v)" />
-        <Select
-          label="Dismissed tips return after"
-          width="14rem"
-          initialValue="{window.__bramTipsDismissInterval ? window.__bramTipsDismissInterval() : '7d'}"
-          onDidChange="(v) => window.__bramSetTipsDismissInterval(v)">
-          <Option value="1m" label="1 minute" />
-          <Option value="1d" label="1 day" />
-          <Option value="7d" label="1 week" />
-          <Option value="30d" label="1 month" />
-          <Option value="forever" label="Never (dismiss forever)" />
-        </Select>
+        <VStack
+          testId="setting-tipsDismissInterval"
+          padding="$space-1"
+          borderRadius="$borderRadius"
+          backgroundColor="{highlightKey === 'tipsDismissInterval' ? '$color-primary-100' : 'transparent'}">
+          <Select
+            label="Dismissed tips return after"
+            width="14rem"
+            initialValue="{window.__bramTipsDismissInterval ? window.__bramTipsDismissInterval() : '7d'}"
+            onDidChange="(v) => window.__bramSetTipsDismissInterval(v)">
+            <Option value="1m" label="1 minute" />
+            <Option value="1d" label="1 day" />
+            <Option value="7d" label="1 week" />
+            <Option value="30d" label="1 month" />
+            <Option value="forever" label="Never (dismiss forever)" />
+          </Select>
+        </VStack>
         <!-- search-badges-initial-state: per-user (localStorage). Whether the
              Search tab opens with all facet badges selected or none. -->
         <Switch

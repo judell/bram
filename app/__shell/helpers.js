@@ -8310,15 +8310,35 @@ window.__bramFooterIndexLabel = function (status) {
   return '⛁ ' + total + ' indexed';
 };
 
+// settings-highlight-deeplink: scroll the setting anchored as
+// data-testid="setting-<key>" into view. Called from Settings when it opens (or
+// is already open and re-targeted) with ?highlight=<key>; the tint itself is
+// reactive markup. Retries across frames until the element is laid out (the
+// settings body renders after settingsConfig loads), then scrolls. Frame-based,
+// bounded; no-op if the key is empty or never appears.
+window.__bramHighlightSetting = function (key) {
+  if (!key) return;
+  var tries = 0;
+  var attempt = function () {
+    var el = document.querySelector('[data-testid="setting-' + key + '"]');
+    if (el && el.scrollIntoView) {
+      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      return;
+    }
+    if (tries++ < 30) requestAnimationFrame(attempt);
+  };
+  requestAnimationFrame(attempt);
+};
+
 window.__bramTipsRegistry = [
   { id: 'tool-descriptions', priority: 10,
     url: 'https://blog.jonudell.net/2026/07/23/agents-that-narrate-their-work-are-the-best-team-players/',
     text: 'Tip: Turn on Tool Descriptions (Settings) to make agentic work more legible.' },
   { id: 'terminal-toggle', priority: 15,
     text: 'Tip: Use the terminal button in the top toolbar to show or hide the terminal.' },
-  { id: 'batch-actions', priority: 20, route: '/settings?from=tip',
+  { id: 'batch-actions', priority: 20, route: '/settings?from=tip&highlight=batchCommitActions',
     text: 'Tip: Batch actions let you approve or drop several worklist items in one click — enable them in Settings → Worklist.' },
-  { id: 'oneclick-approve-commit', priority: 25, route: '/settings?from=tip',
+  { id: 'oneclick-approve-commit', priority: 25, route: '/settings?from=tip&highlight=oneClickApproveCommit',
     text: 'Tip: Enable one-click Approve & commit (Settings → Worklist) to apply and commit a small change in a single click.' },
   { id: 'queue', priority: 30, route: '/queue?from=tip',
     text: 'Tip: The Queue tab lines up notes for the agent while it works — reorder them, dictate by voice, paste images — then send as one message or an iterate.' },
@@ -8343,7 +8363,7 @@ window.__bramTipsRegistry = [
     text: 'Tip: Paste a screenshot to show a UI glitch to the agent — it renders in the Worklist and Transcript so you can both see it.' },
   { id: 'iterate-before-approve', priority: 120,
     text: 'Tip: Use Iterate to refine a proposed or applied item before you click Approve.' },
-  { id: 'tips-dismiss-interval', priority: 130, route: '/settings?from=tip',
+  { id: 'tips-dismiss-interval', priority: 130, route: '/settings?from=tip&highlight=tipsDismissInterval',
     text: "Tip: Use Settings → 'Dismissed tips return after' to control how long a dismissed tip stays hidden." },
 ];
 

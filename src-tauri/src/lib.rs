@@ -16253,6 +16253,11 @@ fn run_commit_index_pass<R: tauri::Runtime>(
     // since most passes see zero new commits.
     if indexed > 0 {
         rebuild_commits_list_cache(app, &conn);
+        // tab-refresh-after-index: the cache is now fresh — re-emit so the
+        // Commits tab refetches the rebuilt list. The watcher's earlier
+        // git-status-changed fired before this rebuild (stale); this is the
+        // emit that carries the new commit, mirroring the issues pass.
+        emit_replayable_signal(app, "git-status-changed");
     }
     let rows = search_index::row_count(&conn).unwrap_or(0);
     Ok((seen, indexed, skipped, rows))
@@ -16445,6 +16450,13 @@ fn run_history_index_pass<R: tauri::Runtime>(
         indexed += 1;
     }
     HISTORY_LAST_MAXMTIME.store(newest, std::sync::atomic::Ordering::Relaxed);
+    if indexed > 0 {
+        // tab-refresh-after-index: dedicated post-index signal so the History
+        // tab refetches /__history-index once the new snapshot is indexed
+        // (mirrors issues-changed; the watcher's worklist-changed fires before
+        // this pass and would refetch stale).
+        emit_replayable_signal(app, "worklist-history-changed");
+    }
     let rows = search_index::row_count(&conn).unwrap_or(0);
     Ok((seen, indexed, skipped, rows))
 }

@@ -11,6 +11,16 @@
        limit 200. Each row carries its full group in `extra`, so the expander
        renders HistoryDetail with no re-fetch. -->
   <DataSource id="historyList" url="/__history-index" queryParams="{{ limit: 300 }}" />
+  <!-- tab-refresh-after-index: the history pass emits worklist-history-changed
+       once a new snapshot is indexed; refetch the list on it so the tab stays
+       live instead of only loading on mount. -->
+  <PushSource
+    id="historyIndexedEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('worklist-history-changed')}" />
+  <ChangeListener
+    listenTo="{historyIndexedEvt.value &amp;&amp; historyIndexedEvt.value.tick}"
+    onDidChange="() => historyList.refetch()" />
   <DataSource
     id="historySearch"
     url="/__search"

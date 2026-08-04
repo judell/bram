@@ -16585,73 +16585,132 @@ where
     indexed
 }
 
-/// Background indexer: an initial pass shortly after startup, then a periodic
-/// incremental rescan (poll by change token) every 45s. Sessions + commits are
-/// cheap (file mtimes / `git log`). Issues run every pass too: the pass is
-/// itself incremental — a cheap `gh` `number,updatedAt` probe, with the
-/// full-detail fetch only for changed/new issues — so a freshly created issue
-/// becomes searchable within one pass (~45s) at roughly one lightweight `gh`
-/// call per pass, far under the authenticated rate limit. (Previously gated to
-/// every 6th pass out of an overcautious rate-limit worry; the incremental
-/// probe makes per-pass safe. See search-index-issues-every-pass.)
+/// Buckets the search indexer can be asked to reindex. Local buckets are
+/// enqueued by watchers on real change events; issues is driven by the thread's
+/// own periodic poll (remote GitHub state has no local trigger).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IndexBucket {
+    Sessions,
+    Commits,
+    History,
+    Issues,
+}
+
+// Sender to the single indexer thread, set when it starts. `search_index_request`
+// posts here; None (indexer not yet started / already exited) makes a request a
+// silent no-op.
+fn search_index_tx_cell() -> &'static Mutex<Option<std::sync::mpsc::Sender<IndexBucket>>> {
+    static CELL: OnceLock<Mutex<Option<std::sync::mpsc::Sender<IndexBucket>>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+// Ask the indexer to reindex a bucket. Called next to the existing change
+// signals (git-state / session / worklist watcher branches). Cheap and
+// non-blocking; redundant requests coalesce in the drain and hit change-token
+// gated passes that no-op when nothing moved.
+fn search_index_request(bucket: IndexBucket) {
+    if let Ok(guard) = search_index_tx_cell().lock() {
+        if let Some(tx) = guard.as_ref() {
+            let _ = tx.send(bucket);
+        }
+    }
+}
+
+// Run the requested buckets' passes, then drive the footer indicator: name the
+// buckets that actually gained docs and hold ~1.5s so the message is
+// perceptible (the passes are sub-second). Buckets that scanned but indexed
+// nothing are not named.
+fn run_index_buckets<R: tauri::Runtime>(app: &AppHandle<R>, buckets: &[IndexBucket]) {
+    let mut added: Vec<(String, usize)> = Vec::new();
+    for bucket in buckets {
+        match bucket {
+            IndexBucket::Sessions => {
+                let n = run_and_trace_session_index_pass(app, "claude", run_search_index_pass)
+                    + run_and_trace_session_index_pass(app, "codex", run_codex_search_index_pass);
+                if n > 0 {
+                    added.push(("session".to_string(), n));
+                }
+            }
+            IndexBucket::Commits => {
+                let n = run_and_trace_index_pass(app, "commits", run_commit_index_pass);
+                if n > 0 {
+                    added.push(("commit".to_string(), n));
+                }
+            }
+            IndexBucket::History => {
+                let n = run_and_trace_index_pass(app, "worklist-history", run_history_index_pass);
+                if n > 0 {
+                    added.push(("worklist-history".to_string(), n));
+                }
+            }
+            IndexBucket::Issues => {
+                let n = run_and_trace_index_pass(app, "issues", run_issue_index_pass);
+                if n > 0 {
+                    added.push(("issue".to_string(), n));
+                }
+            }
+        }
+    }
+    let total = search_index_current_total(app);
+    if added.is_empty() {
+        // Nothing indexed: keep the count fresh, no footer change.
+        search_index_record_cycle(app, total, added, false);
+    } else {
+        let names: Vec<String> = added.iter().map(|(b, _)| b.clone()).collect();
+        search_index_set_active(app, names);
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        search_index_record_cycle(app, total, added, true);
+    }
+}
+
+/// Event-driven search indexer. One thread owns every index write (SQLite is
+/// single-writer). Local buckets (sessions / commits / worklist-history) are
+/// enqueued by the filesystem watchers the instant their source changes, so
+/// edits become searchable within their debounce instead of up to a poll later.
+/// Issues has no local signal (remote GitHub state), so it stays a poll: the
+/// thread's `recv_timeout` fires it every 60s. Passes are change-token gated,
+/// so a redundant enqueue is a cheap no-op.
 fn start_search_indexer<R: tauri::Runtime>(app: AppHandle<R>) {
+    let (tx, rx) = std::sync::mpsc::channel::<IndexBucket>();
+    if let Ok(mut guard) = search_index_tx_cell().lock() {
+        *guard = Some(tx);
+    }
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(2));
-        let mut prev_total = search_index_current_total(&app);
+        // Initial full index (replaces the cold-start branch). No-op per bucket
+        // if already current, so a plain relaunch indexes nothing new.
+        run_index_buckets(
+            &app,
+            &[
+                IndexBucket::Sessions,
+                IndexBucket::Commits,
+                IndexBucket::History,
+                IndexBucket::Issues,
+            ],
+        );
+        let issues_poll = std::time::Duration::from_secs(60);
         loop {
-            // Cold start (empty index): the initial passes are genuinely slow
-            // (indexing everything), so show a generic "Indexing…" across them.
-            let cold = prev_total == 0;
-            if cold {
-                search_index_set_active(
-                    &app,
-                    ["session", "commit", "worklist-history", "issue"]
-                        .iter()
-                        .map(|b| b.to_string())
-                        .collect(),
-                );
+            let first = match rx.recv_timeout(issues_poll) {
+                Ok(bucket) => Some(bucket),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+            let mut wanted: Vec<IndexBucket> = Vec::new();
+            match first {
+                // A watcher request: coalesce the whole burst into one pass per
+                // bucket (a session write fires 2-3 events; a commit several).
+                Some(bucket) => {
+                    wanted.push(bucket);
+                    while let Ok(more) = rx.try_recv() {
+                        if !wanted.contains(&more) {
+                            wanted.push(more);
+                        }
+                    }
+                }
+                // Idle timeout: the residual remote poll.
+                None => wanted.push(IndexBucket::Issues),
             }
-
-            let mut added: Vec<(String, usize)> = Vec::new();
-            let sessions = run_and_trace_session_index_pass(&app, "claude", run_search_index_pass)
-                + run_and_trace_session_index_pass(&app, "codex", run_codex_search_index_pass);
-            if sessions > 0 {
-                added.push(("session".to_string(), sessions));
-            }
-            let commits = run_and_trace_index_pass(&app, "commits", run_commit_index_pass);
-            if commits > 0 {
-                added.push(("commit".to_string(), commits));
-            }
-            let history =
-                run_and_trace_index_pass(&app, "worklist-history", run_history_index_pass);
-            if history > 0 {
-                added.push(("worklist-history".to_string(), history));
-            }
-            let issues = run_and_trace_index_pass(&app, "issues", run_issue_index_pass);
-            if issues > 0 {
-                added.push(("issue".to_string(), issues));
-            }
-
-            let total = search_index_current_total(&app);
-            if !added.is_empty() {
-                // Name the buckets that actually gained docs and hold the
-                // message ~1.5s so it's perceptible — the work itself is real
-                // but sub-second per bucket. Routine scans that indexed nothing
-                // (e.g. the ~1.7s issues probe) are not named, so the row shows
-                // "Indexing…" only on genuine activity, not every 45s.
-                let names: Vec<String> = added.iter().map(|(b, _)| b.clone()).collect();
-                search_index_set_active(&app, names);
-                std::thread::sleep(std::time::Duration::from_millis(1500));
-                search_index_record_cycle(&app, total, added, true);
-            } else {
-                // No new docs: clear any cold-start active state; emit only if
-                // we showed cold-start or the count moved defensively.
-                let emit = cold || total != prev_total;
-                search_index_record_cycle(&app, total, added, emit);
-            }
-            prev_total = total;
-
-            std::thread::sleep(std::time::Duration::from_secs(45));
+            run_index_buckets(&app, &wanted);
         }
     });
 }
@@ -39886,6 +39945,9 @@ pub fn run() {
                         if since.elapsed() >= worklist_debounce {
                             eprintln!("[watcher] change detected, emitting worklist-changed (debounced)");
                             emit_replayable_signal(&app_handle, "worklist-changed");
+                            // Event-driven indexing: worklist-history files are
+                            // written on commit/prune — reindex history now.
+                            search_index_request(IndexBucket::History);
                             pending_worklist_since = None;
                         }
                     }
@@ -40186,6 +40248,11 @@ pub fn run() {
                             claude_sessions_dir.as_ref(),
                             codex_sessions_dir.as_ref(),
                         );
+                        // Event-driven indexing: session JSONL grew — reindex
+                        // sessions. The indexer coalesces the burst and
+                        // serializes passes, so continuous growth is naturally
+                        // debounced (one pass per quiet gap, not per write).
+                        search_index_request(IndexBucket::Sessions);
                         continue;
                     }
 
@@ -40318,6 +40385,9 @@ pub fn run() {
                     if is_git_state_event {
                         trace_dispatch("git-status", &[("source", ".git".to_string())]);
                         emit_replayable_signal(&app_handle, "git-status-changed");
+                        // Event-driven indexing: a commit / ref move is a real
+                        // change signal — reindex commits now instead of polling.
+                        search_index_request(IndexBucket::Commits);
                     }
 
                     // git-status-changed: any project file change that's

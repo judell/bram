@@ -10251,21 +10251,40 @@ fn git_log_recent<R: tauri::Runtime>(app: &AppHandle<R>, count: usize) -> Result
 // refreshes the cache at the moment it creates a commit so the Commits tab
 // updates within event latency instead of waiting an indexer cycle.
 fn rebuild_commits_list_cache<R: tauri::Runtime>(app: &AppHandle<R>, conn: &rusqlite::Connection) {
-    if let Ok(list_bytes) = git_log_recent(app, 100) {
-        let extra = String::from_utf8(list_bytes).unwrap_or_default();
-        if extra.is_empty() {
-            return;
+    match git_log_recent(app, 100) {
+        Ok(list_bytes) => {
+            let extra = String::from_utf8(list_bytes).unwrap_or_default();
+            if extra.is_empty() {
+                return;
+            }
+            let list_row = search_index::IndexRow {
+                kind: "commit-list".to_string(),
+                source: String::new(),
+                date: String::new(),
+                link: String::new(),
+                content: String::new(), // empty: never matches FTS text queries
+                file: "commits:list".to_string(),
+                extra,
+            };
+            let _ = search_index::index_doc(conn, &list_row, 0, 0);
         }
-        let list_row = search_index::IndexRow {
-            kind: "commit-list".to_string(),
-            source: String::new(),
-            date: String::new(),
-            link: String::new(),
-            content: String::new(), // empty: never matches FTS text queries
-            file: "commits:list".to_string(),
-            extra,
-        };
-        let _ = search_index::index_doc(conn, &list_row, 0, 0);
+        // issue-242: a git_log_recent failure (its shortstat + gh-login
+        // resolution can hiccup) used to silently `return`, leaving the old
+        // cache frozen with no trace — the exact failure mode seen on the
+        // v0.3.8 release instance. Trace it so a stale Commits tab is
+        // diagnosable. Mirrors the issues-list-rebuild-error precedent.
+        Err(e) => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "search-index",
+                    &format!(
+                        "op=commits-list-rebuild-error detail={}",
+                        e.replace('\n', " ")
+                    ),
+                );
+            }
+        }
     }
 }
 
@@ -10345,25 +10364,45 @@ fn commits_list_cached<R: tauri::Runtime>(
             if let Ok(Some(extra)) = search_index::get_extra(&conn, "commits:list") {
                 if !extra.is_empty() {
                     if let Ok(mut arr) = serde_json::from_str::<Vec<serde_json::Value>>(&extra) {
-                        // Recompute `pushed` live — cheap and must never be stale.
-                        let unpushed: HashSet<String> =
-                            git_run(app, &["rev-list", "HEAD", "--not", "--remotes=origin"])
-                                .unwrap_or_default()
-                                .lines()
-                                .map(|l| l.trim().to_string())
-                                .filter(|s| !s.is_empty())
-                                .collect();
-                        for c in arr.iter_mut() {
-                            if let Some(sha) =
-                                c.get("sha").and_then(|v| v.as_str()).map(|s| s.to_string())
-                            {
-                                c["pushed"] = serde_json::Value::Bool(!unpushed.contains(&sha));
+                        // issue-242: serve the cache ONLY when its top row is
+                        // the current HEAD. The background rebuild (indexer /
+                        // push path) can miss — most visibly when a rebase
+                        // rewrites SHAs — leaving the cache pointing at orphaned
+                        // commits with the newest missing. A cheap `rev-parse
+                        // HEAD` here detects that and falls through to a live
+                        // git_log_recent build, so the Commits tab is never
+                        // wrong; the cache stays a fast path only while current.
+                        let head_sha = git_run(app, &["rev-parse", "HEAD"])
+                            .unwrap_or_default()
+                            .trim()
+                            .to_string();
+                        let cache_top = arr
+                            .first()
+                            .and_then(|c| c.get("sha"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if !head_sha.is_empty() && cache_top == head_sha {
+                            // Recompute `pushed` live — cheap and must never be stale.
+                            let unpushed: HashSet<String> =
+                                git_run(app, &["rev-list", "HEAD", "--not", "--remotes=origin"])
+                                    .unwrap_or_default()
+                                    .lines()
+                                    .map(|l| l.trim().to_string())
+                                    .filter(|s| !s.is_empty())
+                                    .collect();
+                            for c in arr.iter_mut() {
+                                if let Some(sha) =
+                                    c.get("sha").and_then(|v| v.as_str()).map(|s| s.to_string())
+                                {
+                                    c["pushed"] = serde_json::Value::Bool(!unpushed.contains(&sha));
+                                }
                             }
-                        }
-                        attach_pending_closes(app, &mut arr);
-                        arr.truncate(count);
-                        if let Ok(bytes) = serde_json::to_vec(&arr) {
-                            return Ok(bytes);
+                            attach_pending_closes(app, &mut arr);
+                            arr.truncate(count);
+                            if let Ok(bytes) = serde_json::to_vec(&arr) {
+                                return Ok(bytes);
+                            }
                         }
                     }
                 }
@@ -14264,6 +14303,16 @@ fn git_push_inner(app: &AppHandle, branch: Option<String>) -> Result<(), String>
 }
 
 fn finish_git_push<R: tauri::Runtime>(app: &AppHandle<R>) {
+    // issue-242: rebuild commits:list BEFORE emitting, so the Commits tab's
+    // refetch (driven by git-status-changed) reads a cache that reflects
+    // post-push / post-rebase HEAD. The auto-rebase path rewrites SHAs; without
+    // this the tab keeps showing orphaned pre-rebase rows and misses the newest
+    // commit. Mirrors handle_worklist_commit's rebuild-then-emit.
+    if let Some(db) = search_index_db_path(app) {
+        if let Ok(conn) = search_index::open(&db.to_string_lossy()) {
+            rebuild_commits_list_cache(app, &conn);
+        }
+    }
     emit_replayable_signal(app, "git-status-changed");
     flush_pending_worklist_push_mirrors(app);
     // close-on-push-automatic: after the user's explicit push, close any queued
@@ -16700,6 +16749,16 @@ fn start_search_indexer<R: tauri::Runtime>(app: AppHandle<R>) {
                 IndexBucket::Issues,
             ],
         );
+        // issue-242 recovery: force a commits:list rebuild on every launch. The
+        // pass above only rebuilds when it sees NEW commits (indexed>0), so a
+        // cache left stale by a pre-fix rebase-push (orphaned SHAs, missing
+        // newest) would otherwise survive a relaunch. A single git_log_recent
+        // at startup is cheap and makes relaunch a reliable recovery path.
+        if let Some(db) = search_index_db_path(&app) {
+            if let Ok(conn) = search_index::open(&db.to_string_lossy()) {
+                rebuild_commits_list_cache(&app, &conn);
+            }
+        }
         let issues_poll = std::time::Duration::from_secs(60);
         loop {
             let first = match rx.recv_timeout(issues_poll) {

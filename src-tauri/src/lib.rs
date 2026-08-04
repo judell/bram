@@ -36864,10 +36864,19 @@ fn worklist_item_status_for_id(items: &[serde_json::Value], id: &str) -> String 
 fn validate_post_commit_prune_status(
     op: &str,
     auth_kind: &str,
+    commit_too: bool,
     ids: &[String],
     items: &[serde_json::Value],
 ) -> Result<(), String> {
     if op != "prune" || auth_kind != "approved" {
+        return Ok(());
+    }
+    // The one-click apply-and-commit gate legitimately commits a still-proposed
+    // item's files (worklist_commit_files_for_ids with allow_proposed=commit_too),
+    // so its post-commit prune must accept `proposed` too. Without commit_too the
+    // applied-status guard stands — it blocks pruning an as-yet-unapplied approved
+    // item on the normal apply gate, which would lose the work.
+    if commit_too {
         return Ok(());
     }
     for id in ids {
@@ -37247,6 +37256,7 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| serde_json::json!({}));
+    let commit_too = auth.get("commitToo").and_then(|v| v.as_bool()).unwrap_or(false);
     let auth_kind = match validate_worklist_mutate_authorization(op, &ids, &auth, unix_now_ms()) {
         Ok(kind) => kind,
         Err(e) => {
@@ -37288,7 +37298,7 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
     // allowed when every requested id is already status=applied —
     // blocks an agent from pruning an as-yet-unapplied approved item,
     // which would lose the work.
-    if let Err(e) = validate_post_commit_prune_status(op, &auth_kind, &ids, items) {
+    if let Err(e) = validate_post_commit_prune_status(op, &auth_kind, commit_too, &ids, items) {
         return (
             400,
             "application/json; charset=utf-8",
@@ -38007,16 +38017,26 @@ mod worklist_authorization_tests {
         let proposed_items = vec![json!({"id": "a", "status": "proposed"})];
         let applied_items = vec![json!({"id": "a", "status": "applied"})];
 
-        let err =
-            validate_post_commit_prune_status("prune", "approved", &ids(&["a"]), &proposed_items)
-                .expect_err("approved prune is post-commit only");
+        let err = validate_post_commit_prune_status(
+            "prune",
+            "approved",
+            false,
+            &ids(&["a"]),
+            &proposed_items,
+        )
+        .expect_err("approved prune is post-commit only");
         assert_eq!(
             err,
             "post-commit prune requires applied status: a is proposed"
         );
 
-        validate_post_commit_prune_status("prune", "approved", &ids(&["a"]), &applied_items)
+        validate_post_commit_prune_status("prune", "approved", false, &ids(&["a"]), &applied_items)
             .expect("applied item can be pruned after commit");
+
+        // One-click apply-and-commit (commit_too) prunes a still-proposed item:
+        // the same auth authorized committing it, so the prune must accept it.
+        validate_post_commit_prune_status("prune", "approved", true, &ids(&["a"]), &proposed_items)
+            .expect("commit_too authorizes pruning a proposed item after the one-shot commit");
     }
 
     #[test]

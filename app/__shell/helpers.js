@@ -8293,8 +8293,10 @@ window.__bramFooterIndexBucketLabels = { session: 'sessions', commit: 'commits',
 window.__bramFooterIndexLabel = function (status) {
   if (!status) return '';
   var labels = window.__bramFooterIndexBucketLabels;
-  if (status.active_bucket) {
-    return '⟳ Indexing ' + (labels[status.active_bucket] || status.active_bucket) + '…';
+  var active = status.active_buckets || [];
+  if (active.length) {
+    var names = active.map(function (b) { return labels[b] || b; });
+    return '⟳ Indexing ' + names.join(', ') + '…';
   }
   var total = Number(status.total || 0).toLocaleString();
   // The session bucket re-indexes one growing transcript (row replaced, keyed

@@ -16458,7 +16458,7 @@ fn run_history_index_pass<R: tauri::Runtime>(
 // read by GET /__search-index-status.
 #[derive(Clone, Default)]
 struct SearchIndexStatus {
-    active_bucket: Option<String>,
+    active_buckets: Vec<String>,
     total: i64,
     last_added: Vec<(String, usize)>,
 }
@@ -16475,11 +16475,11 @@ fn search_index_status_snapshot() -> SearchIndexStatus {
         .unwrap_or_default()
 }
 
-// Set (or clear) the bucket currently being indexed and push the change so the
-// footer can name it live. Bare signal, same shape as `issues-changed`.
-fn search_index_set_active<R: tauri::Runtime>(app: &AppHandle<R>, bucket: Option<&str>) {
+// Set the buckets currently being indexed and push the change so the footer can
+// name them. Bare signal, same shape as `issues-changed`.
+fn search_index_set_active<R: tauri::Runtime>(app: &AppHandle<R>, buckets: Vec<String>) {
     if let Ok(mut s) = search_index_status_cell().lock() {
-        s.active_bucket = bucket.map(str::to_string);
+        s.active_buckets = buckets;
     }
     emit_replayable_signal(app, "search-index-changed");
 }
@@ -16493,7 +16493,7 @@ fn search_index_record_cycle<R: tauri::Runtime>(
     emit: bool,
 ) {
     if let Ok(mut s) = search_index_status_cell().lock() {
-        s.active_bucket = None;
+        s.active_buckets = Vec::new();
         s.total = total;
         if !added.is_empty() {
             s.last_added = added;
@@ -16514,16 +16514,6 @@ fn search_index_current_total<R: tauri::Runtime>(app: &AppHandle<R>) -> i64 {
         Ok(conn) => search_index::row_count(&conn).unwrap_or(0),
         Err(_) => 0,
     }
-}
-
-// Cheap signature that drives live-naming: HEAD movement (a fresh commit) marks
-// a cycle worth naming bucket-by-bucket; cold-start is handled separately (a
-// zero total). Session growth and remote issue edits still surface in the
-// end-of-cycle summary — naming them live every 45s would be noise.
-fn search_index_head_sig<R: tauri::Runtime>(app: &AppHandle<R>) -> String {
-    git_run(app, &["rev-parse", "HEAD"])
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
 }
 
 // Returns the pass's `indexed` count (0 on error) and traces the scan when
@@ -16607,49 +16597,35 @@ where
 fn start_search_indexer<R: tauri::Runtime>(app: AppHandle<R>) {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(2));
-        // Seed from the current state so a plain restart (unchanged repo,
-        // populated index) does not trigger a spurious first-cycle name sweep;
-        // a cold (empty) index has total 0 and IS named.
-        let mut prev_sig = search_index_head_sig(&app);
         let mut prev_total = search_index_current_total(&app);
         loop {
-            let sig = search_index_head_sig(&app);
-            // Cold index (empty) or HEAD movement (a fresh commit) is worth
-            // live-naming buckets as each pass runs; idle cycles stay silent so
-            // the footer doesn't flicker "Indexing…" every 45s.
-            let named = prev_total == 0 || sig != prev_sig;
-            prev_sig = sig;
+            // Cold start (empty index): the initial passes are genuinely slow
+            // (indexing everything), so show a generic "Indexing…" across them.
+            let cold = prev_total == 0;
+            if cold {
+                search_index_set_active(
+                    &app,
+                    ["session", "commit", "worklist-history", "issue"]
+                        .iter()
+                        .map(|b| b.to_string())
+                        .collect(),
+                );
+            }
 
             let mut added: Vec<(String, usize)> = Vec::new();
-
-            if named {
-                search_index_set_active(&app, Some("session"));
-            }
             let sessions = run_and_trace_session_index_pass(&app, "claude", run_search_index_pass)
                 + run_and_trace_session_index_pass(&app, "codex", run_codex_search_index_pass);
             if sessions > 0 {
                 added.push(("session".to_string(), sessions));
             }
-
-            if named {
-                search_index_set_active(&app, Some("commit"));
-            }
             let commits = run_and_trace_index_pass(&app, "commits", run_commit_index_pass);
             if commits > 0 {
                 added.push(("commit".to_string(), commits));
-            }
-
-            if named {
-                search_index_set_active(&app, Some("worklist-history"));
             }
             let history =
                 run_and_trace_index_pass(&app, "worklist-history", run_history_index_pass);
             if history > 0 {
                 added.push(("worklist-history".to_string(), history));
-            }
-
-            if named {
-                search_index_set_active(&app, Some("issue"));
             }
             let issues = run_and_trace_index_pass(&app, "issues", run_issue_index_pass);
             if issues > 0 {
@@ -16657,11 +16633,23 @@ fn start_search_indexer<R: tauri::Runtime>(app: AppHandle<R>) {
             }
 
             let total = search_index_current_total(&app);
-            // Emit on a named cycle (to clear the active bucket) or whenever the
-            // count moved (catches remote issue edits on an unnamed cycle).
-            let emit = named || total != prev_total;
+            if !added.is_empty() {
+                // Name the buckets that actually gained docs and hold the
+                // message ~1.5s so it's perceptible — the work itself is real
+                // but sub-second per bucket. Routine scans that indexed nothing
+                // (e.g. the ~1.7s issues probe) are not named, so the row shows
+                // "Indexing…" only on genuine activity, not every 45s.
+                let names: Vec<String> = added.iter().map(|(b, _)| b.clone()).collect();
+                search_index_set_active(&app, names);
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                search_index_record_cycle(&app, total, added, true);
+            } else {
+                // No new docs: clear any cold-start active state; emit only if
+                // we showed cold-start or the count moved defensively.
+                let emit = cold || total != prev_total;
+                search_index_record_cycle(&app, total, added, emit);
+            }
             prev_total = total;
-            search_index_record_cycle(&app, total, added, emit);
 
             std::thread::sleep(std::time::Duration::from_secs(45));
         }
@@ -35087,7 +35075,7 @@ fn route_request<R: tauri::Runtime>(
     if path == "__search-index-status" {
         let snap = search_index_status_snapshot();
         let body = serde_json::json!({
-            "active_bucket": snap.active_bucket,
+            "active_buckets": snap.active_buckets,
             "total": search_index_current_total(app),
             "last_added": snap
                 .last_added

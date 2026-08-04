@@ -601,7 +601,7 @@
              idle doc count + last cycle's per-bucket additions. -->
         <Text
           when="{footerIndexStatus.value &amp;&amp; window.__bramFooterIndexLabel(footerIndexStatus.value)}"
-          fontSize="$fontSize-xs"
+          fontSize="$fontSize-sm"
           color="$textColor-secondary"
           marginLeft="$space-4"
           value="{window.__bramFooterIndexLabel(footerIndexStatus.value)}" />

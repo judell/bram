@@ -172,6 +172,9 @@ function settingsContinueLast(s) {
 function settingsBatch(s) {
   return !!(s && s.worklist && s.worklist.batchCommitActions);
 }
+function settingsOneClickApproveCommit(s) {
+  return !!(s && s.worklist && s.worklist.oneClickApproveCommit);
+}
 function settingsShowTargetApp(s) {
   return !!(s && s.ui && s.ui.showTargetApp);
 }

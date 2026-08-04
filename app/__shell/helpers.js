@@ -1455,6 +1455,8 @@ window.settingsInfoBodies = {
   batchCommitActions:
     "## Batch commit actions\n\n" +
     "Adds Approve all / Drop all when two or more items are TO COMMIT.\n\n" +
+    "## One-click Approve & commit\n\n" +
+    "Adds a per-item Approve & commit button that applies and commits a proposed item in one step — for small, low-risk changes.\n\n" +
     "## Mirror worklist lifecycle to GitHub issues\n\n" +
     "Post worklist lifecycle comments to linked GitHub issues.",
   ui:
@@ -8291,6 +8293,8 @@ window.__bramTipsRegistry = [
     text: 'Tip: Use the terminal button in the top toolbar to show or hide the terminal.' },
   { id: 'batch-actions', priority: 20, route: '/settings?from=tip',
     text: 'Tip: Batch actions let you approve or drop several worklist items in one click — enable them in Settings → Worklist.' },
+  { id: 'oneclick-approve-commit', priority: 25, route: '/settings?from=tip',
+    text: 'Tip: Enable one-click Approve & commit (Settings → Worklist) to apply and commit a small change in a single click.' },
   { id: 'queue', priority: 30, route: '/queue?from=tip',
     text: 'Tip: The Queue tab lines up notes for the agent while it works — reorder them, dictate by voice, paste images — then send as one message or an iterate.' },
   { id: 'session-rename', priority: 40, route: '/sessions?from=tip',
@@ -8449,6 +8453,7 @@ function __bramTipEligible(tip, settings) {
   var s = settings || {};
   if (tip.id === 'tool-descriptions') return !(s.ai && s.ai.describeCommands);
   if (tip.id === 'batch-actions') return !(s.worklist && s.worklist.batchCommitActions);
+  if (tip.id === 'oneclick-approve-commit') return !(s.worklist && s.worklist.oneClickApproveCommit);
   return true;
 }
 

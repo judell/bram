@@ -128,6 +128,10 @@
           initialValue="{settingsBatch(settingsConfig.value)}"
           onDidChange="(v) => saveSettings.execute({ worklist: { batchCommitActions: v } })" />
         <Switch
+          label="One-click Approve &amp; commit"
+          initialValue="{settingsOneClickApproveCommit(settingsConfig.value)}"
+          onDidChange="(v) => saveSettings.execute({ worklist: { oneClickApproveCommit: v } })" />
+        <Switch
           label="Mirror worklist lifecycle to GitHub issues"
           initialValue="{!!(settingsConfig.value &amp;&amp; settingsConfig.value.mirrorWorklistLifecycleToIssue)}"
           onDidChange="(v) => saveSettings.execute({ mirrorWorklistLifecycleToIssue: v })" />

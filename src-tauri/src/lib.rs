@@ -13395,6 +13395,7 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
     // commands, diffs, written content, context, or result excerpts to an
     // external model. Only an explicit project setting enables the route.
     let describe_commands = project_config_describe_commands(config.clone());
+    let one_click_approve_commit = project_config_one_click_approve_commit(config.clone());
     let (
         agent,
         args,
@@ -13475,7 +13476,7 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
     serde_json::json!({
         "mirrorWorklistLifecycleToIssue": mirror_worklist_lifecycle_to_issue,
         "shell": { "agent": agent, "args": args, "firstCommand": first_command, "continueLast": continue_last },
-        "worklist": { "batchCommitActions": batch },
+        "worklist": { "batchCommitActions": batch, "oneClickApproveCommit": one_click_approve_commit },
         "ui": { "showTargetApp": show_target_app, "toolsPaneHotReload": tools_pane_hot_reload },
         "traces": {
             "enabled": tracing_enabled,

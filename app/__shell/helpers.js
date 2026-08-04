@@ -6350,20 +6350,39 @@ window.__bramProjectedSessionTurns = function (payload) {
 };
 
 // ---- In-view find (search-in-view-find) ----
-// Search terms for the in-view find, mirroring /__search's modes: a
-// double-quoted query is ONE phrase; otherwise whitespace-split into terms
-// >= 2 chars. Returns an array (possibly single-element or empty) suitable for
-// Markdown's multi-term highlightText (xmlui #3675), so the in-view find keeps
-// step with AND-mode search, which matches non-adjacent terms.
+// Search terms for the in-view find. A double-quoted query is ONE literal
+// phrase; otherwise the query is split into terms >= 2 chars on every run of
+// non-alphanumeric characters. Returns an array (possibly single-element or
+// empty) suitable for Markdown's multi-term highlightText (xmlui #3675). The
+// split deliberately breaks a punctuated query like `feedback-history` into
+// separate terms so the in-view find surfaces the tokens the outer /__search
+// matched on. It does NOT reproduce FTS5's matching; it only keeps the in-view
+// find from being stricter than the search that surfaced the row (details in
+// the function body).
 window.__bramSearchTerms = function (query) {
   var s = (query == null ? "" : String(query)).trim();
   if (s.length < 2) return [];
+  // A double-quoted query is the literal-phrase escape hatch: return it
+  // verbatim, unsplit, for an exact-substring find.
   if (s.charAt(0) === '"' && s.charAt(s.length - 1) === '"') {
     var inner = s.slice(1, -1).trim();
     return inner.length >= 2 ? [inner] : [];
   }
+  // Split into terms on every run of non-alphanumeric characters, not just
+  // whitespace. Why: for a punctuated query like `feedback-history`, the outer
+  // /__search wraps it as the FTS5 phrase "feedback-history", which unicode61
+  // tokenizes to the ADJACENT token pair `feedback history` (punctuation-
+  // insensitive) — so the outer search matches a session that only ever writes
+  // "feedback history" with a space. A whitespace-only split left the same
+  // query as one literal substring here, so the in-view find reported "No
+  // matches" on a row the outer search had legitimately surfaced. Splitting on
+  // punctuation lets the multi-term count/highlight path mark `feedback` and
+  // `history` separately. This is deliberately MORE FORGIVING than the outer
+  // search: it highlights the tokens independently rather than reproducing
+  // FTS5's adjacent phrase, which keeps the find from ever being stricter than
+  // the search above it (a superset of marks, never an empty one).
   var out = [];
-  var parts = s.split(/\s+/);
+  var parts = s.split(/[^\p{L}\p{N}]+/u);
   for (var i = 0; i < parts.length; i++) {
     if (parts[i].length >= 2) out.push(parts[i]);
   }

@@ -1,54 +1,225 @@
 <Component name="SessionDetail">
   <!-- issue-230 shared detail: session transcript via projected turns.
        Internal only — no external link. Props: sessionId, provider, height,
-       query. (Prop is `sessionId`, not `id` — `id` is XMLUI's reserved
-       component identifier and never arrives as a prop.)
+       query.
 
-       findable-list-udc: the occurrence-granular find spine (FindBar, cursor,
-       plan, scroll-to-active) lives in FindableList. SessionDetail supplies the
-       projected turns as data and the per-turn row markup; each turn's canonical
-       marked surface is its `.text` (FindableList's default surface, so no
-       markedText helper). Migrated from the turn-granular matchIndices model to
-       occurrence-granular find (count = total occurrences, ▲▼ steps mark-by-mark,
-       highlightActiveIndex lights the exact mark) — see xmlui-org/xmlui#3713. -->
+       sessiondetail-render-tool-entries: renders ENTRY-granular (like the live
+       Transcript), not turn-granular. Each turn's `.entries` (text / tool /
+       thinking / images / notification) are flattened by
+       `__bramTranscriptEventsFromTurns` and rendered by kind, with tool/thinking
+       folded (expand via `__bramExpandTool` / `__bramToggleInArray`). The find
+       runs over the same entries through `__bramTranscriptFindPlan`, so tool
+       output — which the search index now covers — is both shown and findable
+       here (previously SessionDetail rendered only `$item.text`, leaving tool
+       turns blank and unfindable). Provider-agnostic: /__turns normalizes Claude
+       and Codex into the same entry shape. -->
   <DataSource id="turns" url="/__turns"
     queryParams="{{ id: $props.sessionId, provider: $props.provider }}" when="{!!$props.sessionId}"
     onLoaded="(data) => window.__bramMeasureTurnsRender(window.__bramProjectedSessionTurns(data).length)" />
-  <!-- Memoize the projected turns into a stable reference. Calling the
-       projection inline in List's `data` returns a NEW array every render, so
-       virtua sees "new data" → remounts all rows → RO fires → re-render → an
-       87/sec resizeobserver-flood. The variable only recomputes when
-       turns.value changes. -->
-  <variable name="projectedTurns"
-    value="{turns.value ? window.__bramProjectedSessionTurns(turns.value) : []}" />
-  <VStack gap="$space-2" padding="$space-2">
+
+  <!-- Flatten the projected turns into the Transcript's entry event list.
+       Memoized into a stable reference: recomputes only when turns.value
+       changes (avoids the virtua remount / RO-flood a new array each render
+       would cause). -->
+  <variable name="events"
+    value="{turns.value ? window.__bramTranscriptEventsFromTurns(turns.value, null) : []}" />
+
+  <!-- Find state. findPlan is COMPUTED (not set in a ChangeListener) so a query
+       SEEDED at mount (search deep-link) evaluates immediately — a ChangeListener
+       fires on change, not at mount (see FindableList.xmlui). -->
+  <variable name="findText" value="{$props.query || ''}" />
+  <variable name="appliedNeedle" value="{$props.query || ''}" />
+  <variable name="findCursor" value="{0}" />
+  <variable name="findPlan"
+    value="{window.__bramTranscriptFindPlan ? window.__bramTranscriptFindPlan(events, appliedNeedle, findCursor) : null}" />
+
+  <VStack gap="$space-2" padding="$space-2" height="{$props.height || '400px'}">
     <Text when="{turns.inProgress &amp;&amp; !turns.loaded}" color="$textColor-secondary" value="Loading…" />
 
-    <!-- FindableList owns the find; SessionDetail owns only the row markup.
-         Native xmlui highlight: highlightText paints all matches in this turn
-         (debounced needle inside the UDC); highlightActiveIndex emphasizes +
-         centers the active occurrence. Mounts once turns.value is present (the
-         projectedTurns memo stays the data source — the RO-flood fix). -->
-    <FindableList when="{turns.value}"
-      data="{projectedTurns}"
-      query="{$props.query || ''}"
+    <FindBar id="findBar"
       placeholder="Find in transcript…"
-      height="{$props.height || '400px'}">
-      <property name="rowTemplate">
-        <VStack gap="$space-0_5" borderTop="1px solid $borderColor" paddingVertical="$space-1">
-          <Text fontSize="$fontSize-xs" fontWeight="$fontWeight-bold"
-            color="{$item.role === 'user' ? '$color-info-700' : '$color-success-700'}"
-            value="{$item.role}" />
-          <Markdown content="{$item.text}"
+      initialValue="{$props.query || ''}"
+      matchCount="{findPlan ? findPlan.total : 0}"
+      current="{findCursor}"
+      showCount="{findText.trim().length >= 2}"
+      onNeedleChange="(v) => findText = v"
+      onStep="(d) => findCursor = window.__bramFindCursorStep(findPlan ? findPlan.total : 0, findCursor, d)" />
+
+    <!-- Deep-link / filter seed: replay $props.query after mount. -->
+    <ChangeListener listenTo="{$props.query || ''}"
+      onDidChange="() => findText = ($props.query || '')" />
+    <ChangeListener listenTo="{$props.query || ''}"
+      onDidChange="() => findBar ? findBar.setValue($props.query || '') : null" />
+
+    <!-- Needle settles -> reset cursor + apply (two listeners: onDidChange must
+         be a single arrow expression, not a statement block). -->
+    <ChangeListener listenTo="{findText}" debounceWaitInMs="200"
+      onDidChange="() => findCursor = 0" />
+    <ChangeListener listenTo="{findText}" debounceWaitInMs="200"
+      onDidChange="() => appliedNeedle = findText" />
+
+    <!-- Active match changed: scroll the List to that entry. -->
+    <ChangeListener
+      listenTo="{(findPlan &amp;&amp; findPlan.total) ? findPlan.activeEventIndex : -1}"
+      onDidChange="() => (findPlan &amp;&amp; findPlan.total) ? sessionList.scrollToIndex(findPlan.activeEventIndex) : null" />
+    <ChangeListener
+      listenTo="{(findPlan &amp;&amp; findPlan.total) ? findPlan.cursor : -1}"
+      onDidChange="() => window.__bramRevealActiveMark()" />
+
+    <!-- Explicit maxHeight makes the List its own bounded scroller; height="*"
+         alone gets dropped and the overflow wrapper grows to full content
+         height, overlapping the outer Sessions list (FindableList.xmlui's
+         documented trap). var.expanded is declared HERE (not at component root)
+         so the itemTemplate's onClick handlers can assign it — a component-level
+         <variable> is not an lvalue in the item scope (Transcript.xmlui:129). -->
+    <List id="sessionList"
+      height="*"
+      maxHeight="{$props.height || '400px'}"
+      var.expanded="{[]}"
+      data="{(findPlan &amp;&amp; findPlan.rows) || events}"
+      idKey="{findPlan ? '__findKey' : 'id'}">
+      <property name="emptyListTemplate"><Fragment/></property>
+      <VStack gap="$space-1" paddingVertical="$space-1" borderBottom="1px solid $borderColor">
+          <!-- user message -->
+          <VStack
+            when="{$item.kind === 'user'}"
+            backgroundColor="$color-surface-100"
+            padding="$space-2"
+            borderRadius="$borderRadius"
+            gap="$space-1">
+            <Text value="You" fontWeight="bold" color="$color-primary-600" fontSize="$fontSize-sm" />
+            <Markdown content="{$item.text}"
+              highlightText="{window.__bramSearchTerms($item.__needle)}"
+              highlightActiveIndex="{$item.__activeOcc}" />
+          </VStack>
+          <!-- assistant text -->
+          <Markdown
+            when="{$item.kind === 'text'}"
+            content="{$item.text}"
             highlightText="{window.__bramSearchTerms($item.__needle)}"
             highlightActiveIndex="{$item.__activeOcc}" />
-          <VStack gap="$space-2" when="{$item.images &amp;&amp; $item.images.length > 0}">
-            <Items data="{$item.images}">
-              <Image src="{window.imageSrcForPath($item)}" maxHeight="200px" fit="contain" />
+          <!-- task notification -->
+          <Text
+            when="{$item.kind === 'notification'}"
+            fontSize="$fontSize-sm"
+            fontStyle="italic"
+            color="$textColor-secondary"
+            value="{'🔔 ' + $item.text}" />
+          <Markdown
+            when="{$item.kind === 'notification' &amp;&amp; $item.__findPreview}"
+            fontSize="$fontSize-sm"
+            color="$textColor-secondary"
+            content="{window.__bramMarkdownLiteral($item.__findPreview)}"
+            highlightText="{window.__bramSearchTerms($item.__needle)}"
+            highlightActiveIndex="{$item.__activeOcc}" />
+          <!-- image strip -->
+          <VStack
+            when="{$item.kind === 'images'}"
+            gap="$space-2"
+            paddingVertical="$space-1">
+            <Items data="{$item.images || []}">
+              <Image src="{window.imageSrcForPath($item)}" maxHeight="220px" fit="contain" />
             </Items>
           </VStack>
-        </VStack>
-      </property>
-    </FindableList>
+          <!-- thinking (foldable) -->
+          <VStack when="{$item.kind === 'thinking'}" gap="$space-0_5">
+            <Link noIndicator="true" onClick="expanded = window.__bramToggleInArray(expanded, $item.id)">
+              <Text
+                fontSize="$fontSize-sm"
+                fontStyle="italic"
+                color="$textColor-secondary"
+                value="{((expanded || []).includes($item.id) ? '▾' : '▸') + '  💭 thinking'}" />
+            </Link>
+            <Markdown
+              when="{$item.__findPreview}"
+              fontSize="$fontSize-sm"
+              color="$textColor-secondary"
+              content="{window.__bramMarkdownLiteral($item.__findPreview)}"
+              highlightText="{window.__bramSearchTerms($item.__needle)}"
+              highlightActiveIndex="{$item.__activeOcc}" />
+            <VStack
+              when="{(expanded || []).includes($item.id)}"
+              backgroundColor="$color-surface-50"
+              padding="$space-2"
+              borderRadius="$borderRadius">
+              <Markdown content="{$item.text}"
+                highlightText="{$item.__findPreview ? [] : window.__bramSearchTerms($item.__needle)}" />
+            </VStack>
+          </VStack>
+          <!-- tool call (foldable) -->
+          <VStack when="{$item.kind === 'tool'}" gap="$space-0_5">
+            <Link noIndicator="true" onClick="expanded = window.__bramExpandTool(expanded, $item)">
+              <HStack gap="$space-1" verticalAlignment="center">
+                <Text
+                  fontSize="$fontSize-sm"
+                  fontWeight="bold"
+                  tooltip="{($item.commandDisplay || $item.summary || '').slice(0, 500)}"
+                  value="{((expanded || []).includes($item.id) ? '▾' : '▸') + '  🔧 ' + $item.name + ($item.nameDetail ? ' (' + $item.nameDetail + ')' : '')}" />
+                <Text
+                  when="{$item.aiDescription}"
+                  fontSize="$fontSize-sm"
+                  color="$textColor-secondary"
+                  maxLines="1"
+                  tooltip="{($item.commandDisplay || $item.summary || '').slice(0, 500)}"
+                  value="{'— ' + $item.aiDescription}" />
+                <Text
+                  when="{!$item.aiDescription &amp;&amp; $item.summary &amp;&amp; $item.summary !== $item.name}"
+                  fontSize="$fontSize-sm"
+                  color="$textColor-secondary"
+                  tooltip="{($item.commandDisplay || $item.summary || '').slice(0, 500)}"
+                  value="{$item.summary}" />
+              </HStack>
+            </Link>
+            <!-- Compact find preview: always rendered while finding so every
+                 counted match has a visible <mark>, even if it's only in the
+                 folded body. -->
+            <Markdown
+              when="{$item.__findPreview}"
+              fontSize="$fontSize-sm"
+              color="$textColor-secondary"
+              content="{window.__bramMarkdownLiteral($item.__findPreview)}"
+              highlightText="{window.__bramSearchTerms($item.__needle)}"
+              highlightActiveIndex="{$item.__activeOcc}" />
+            <VStack
+              when="{(expanded || []).includes($item.id)}"
+              gap="$space-1"
+              backgroundColor="$color-surface-50"
+              padding="$space-2"
+              borderRadius="$borderRadius">
+              <DiffView
+                when="{$item.commandDisplay &amp;&amp; $item.name === 'apply_patch'}"
+                compact="true"
+                text="{$item.commandDisplay}" />
+              <Markdown
+                when="{window.__bramShowToolCommand ? window.__bramShowToolCommand($item) : (($item.commandDisplay || $item.summary) &amp;&amp; ($item.name !== 'apply_patch' || !$item.commandDisplay))}"
+                overflowMode="scroll"
+                content="{window.__bramFormatToolCommand($item.commandDisplay || $item.summary, $item.aiDescription || $item.description)}"
+                highlightText="{$item.__findPreview ? [] : window.__bramSearchTerms($item.__needle)}" />
+              <Markdown
+                when="{$item.commandMarkdown}"
+                overflowMode="flow"
+                content="{$item.commandMarkdown}" />
+              <DiffView
+                when="{$item.diff}"
+                compact="true"
+                text="{$item.diff}" />
+              <Markdown
+                when="{$item.result &amp;&amp; !$item.isError &amp;&amp; window.__bramFormatToolResult}"
+                overflowMode="{window.__bramFreeformResultMode ? window.__bramFreeformResultMode($item) : 'scroll'}"
+                breakMode="word"
+                content="{window.__bramFormatToolResult($item.result, $item.name, $item.summary)}" />
+              <Text
+                when="{$item.result &amp;&amp; ($item.isError || !window.__bramFormatToolResult)}"
+                fontFamily="$fontFamily-monospace"
+                fontSize="$fontSize-xs"
+                color="{$item.isError ? '$color-danger-600' : '$textColor-secondary'}"
+                value="{$item.result}" />
+              <SubagentPeek
+                when="{$item.agentId}"
+                agentId="{$item.agentId}" />
+            </VStack>
+          </VStack>
+      </VStack>
+    </List>
   </VStack>
 </Component>

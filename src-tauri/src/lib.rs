@@ -19277,7 +19277,7 @@ mod conversation_state_tests {
 // helper chain (~400 LOC of JSONL walking and shape-massaging) with a
 // host-side derivation that emits the same structured array Transcript
 // renders against today. Pure functions first, then the route entry
-// points (/__turns via read_projected_turns, and read_tool_detail).
+// point (/__turns via read_projected_turns).
 //
 // Output shape (must match the iframe so Transcript.xmlui doesn't
 // need to change other than its DataSource binding):
@@ -19706,28 +19706,6 @@ fn st_is_error_result(block: &serde_json::Value) -> bool {
     let (text, structured_error, _) =
         st_normalize_structured_tool_result(&st_raw_tool_result_text(&content));
     structured_error || text.starts_with("Error:") || text.starts_with("<tool_use_error>")
-}
-
-fn st_extract_lines(text: &str, cap: usize) -> Option<serde_json::Value> {
-    if text.is_empty() {
-        return None;
-    }
-    let all: Vec<&str> = text.split('\n').collect();
-    let lines: Vec<&str> = all.iter().take(cap).copied().collect();
-    let remaining = all.len().saturating_sub(cap);
-    Some(serde_json::json!({
-        "lines": lines,
-        "remaining": remaining,
-    }))
-}
-
-fn st_extract_tool_result(block: &serde_json::Value, cap: usize) -> serde_json::Value {
-    let content = block
-        .get("content")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    let text = st_tool_result_text(&content);
-    st_extract_lines(&text, cap).unwrap_or(serde_json::Value::Null)
 }
 
 fn st_clip_80(s: &str) -> String {
@@ -25303,78 +25281,6 @@ fn read_projected_turns<R: tauri::Runtime>(
 // Single-tool lookup: scan all JSONL records for the tool_use (or codex
 // function_call) by id, plus its matching tool_result, return
 // { input, result }. result is { lines, remaining } or null.
-fn read_tool_detail<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    tool_id: &str,
-) -> Result<Vec<u8>, String> {
-    if tool_id.is_empty() {
-        return Ok(b"null".to_vec());
-    }
-    let Some(path) = active_session_path(app)? else {
-        return Ok(b"null".to_vec());
-    };
-    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let mut input: Option<serde_json::Value> = None;
-    let mut result: Option<serde_json::Value> = None;
-    let mut diff: Option<String> = None;
-    for line in text.lines() {
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(r) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        if let Some(arr) = r
-            .get("message")
-            .and_then(|m| m.get("content"))
-            .and_then(|c| c.as_array())
-        {
-            for c in arr {
-                let c_typ = c.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                if c_typ == "tool_use" && c.get("id").and_then(|v| v.as_str()) == Some(tool_id) {
-                    let tool_input = c
-                        .get("input")
-                        .cloned()
-                        .unwrap_or_else(|| serde_json::json!({}));
-                    let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                    let tool_diff = st_edit_tool_diff(name, &tool_input);
-                    if !tool_diff.is_empty() {
-                        diff = Some(tool_diff);
-                    }
-                    input = Some(tool_input);
-                } else if c_typ == "tool_result"
-                    && c.get("tool_use_id").and_then(|v| v.as_str()) == Some(tool_id)
-                {
-                    result = Some(st_extract_tool_result(c, 20));
-                }
-            }
-        } else if r.get("type").and_then(|v| v.as_str()) == Some("response_item") {
-            if let Some(p) = r.get("payload") {
-                let p_typ = p.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                let call_id = p.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
-                if (p_typ == "function_call" || p_typ == "custom_tool_call") && call_id == tool_id {
-                    input = Some(st_codex_tool_input(p));
-                } else if (p_typ == "function_call_output" || p_typ == "custom_tool_call_output")
-                    && call_id == tool_id
-                {
-                    if let Some((text, _errored, _structured)) = st_codex_tool_output(p) {
-                        result =
-                            Some(st_extract_lines(&text, 20).unwrap_or(serde_json::Value::Null));
-                    }
-                }
-            }
-        }
-        if input.is_some() && result.is_some() {
-            break;
-        }
-    }
-    let body = serde_json::json!({
-        "input": input.unwrap_or_else(|| serde_json::json!({})),
-        "result": result.unwrap_or(serde_json::Value::Null),
-        "diff": diff,
-    });
-    serde_json::to_vec(&body).map_err(|e| e.to_string())
-}
 
 // Cheap variant for polling: just the file size + mtime. Lets Transcript
 // detect changes without re-fetching the full (multi-MB) JSONL each
@@ -36466,22 +36372,6 @@ fn route_request<R: tauri::Runtime>(
     // Full input + result for a single
     // tool by id. Mirrors getToolDetail(jsonlText, toolId). Returns
     // {input, result} or null.
-    if path == "__tool-detail" {
-        let mut tool_id = String::new();
-        for pair in query.split('&') {
-            if let Some(v) = pair.strip_prefix("id=") {
-                tool_id = percent_decode(v);
-                break;
-            }
-        }
-        return match read_tool_detail(app, &tool_id) {
-            Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
-            Err(e) => {
-                eprintln!("[http /__tool-detail] {}", e);
-                (500, "text/plain; charset=utf-8", e.into_bytes())
-            }
-        };
-    }
 
     if let Some(rest) = path.strip_prefix("__sessions/") {
         let mut provider: Option<SessionProvider> = None;

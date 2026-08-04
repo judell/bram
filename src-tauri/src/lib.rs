@@ -16649,12 +16649,45 @@ where
 /// Buckets the search indexer can be asked to reindex. Local buckets are
 /// enqueued by watchers on real change events; issues is driven by the thread's
 /// own periodic poll (remote GitHub state has no local trigger).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum IndexBucket {
     Sessions,
     Commits,
     History,
     Issues,
+}
+
+impl IndexBucket {
+    fn status_name(self) -> &'static str {
+        match self {
+            Self::Sessions => "session",
+            Self::Commits => "commit",
+            Self::History => "worklist-history",
+            Self::Issues => "issue",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IndexRunDisplay {
+    // A filesystem watcher requested local work: show it while it runs.
+    LiveLocal,
+    // Startup and the periodic remote issue poll stay quiet unless docs change.
+    QuietUnlessAdded,
+}
+
+fn live_index_bucket_names(
+    buckets: &[IndexBucket],
+    display: IndexRunDisplay,
+) -> Vec<String> {
+    if display != IndexRunDisplay::LiveLocal {
+        return Vec::new();
+    }
+    buckets
+        .iter()
+        .filter(|bucket| **bucket != IndexBucket::Issues)
+        .map(|bucket| bucket.status_name().to_string())
+        .collect()
 }
 
 // Sender to the single indexer thread, set when it starts. `search_index_request`
@@ -16677,11 +16710,22 @@ fn search_index_request(bucket: IndexBucket) {
     }
 }
 
-// Run the requested buckets' passes, then drive the footer indicator: name the
-// buckets that actually gained docs and hold ~1.5s so the message is
-// perceptible (the passes are sub-second). Buckets that scanned but indexed
-// nothing are not named.
-fn run_index_buckets<R: tauri::Runtime>(app: &AppHandle<R>, buckets: &[IndexBucket]) {
+// Run the requested buckets' passes and drive the footer indicator. Watcher-
+// triggered local passes are named before work starts and stay visible for at
+// least ~1.5s. Startup and the periodic issue poll remain quiet unless they
+// actually add documents.
+fn run_index_buckets<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    buckets: &[IndexBucket],
+    display: IndexRunDisplay,
+) {
+    let live_names = live_index_bucket_names(buckets, display);
+    let live_started = if live_names.is_empty() {
+        None
+    } else {
+        search_index_set_active(app, live_names);
+        Some(std::time::Instant::now())
+    };
     let mut added: Vec<(String, usize)> = Vec::new();
     for bucket in buckets {
         match bucket {
@@ -16689,31 +16733,37 @@ fn run_index_buckets<R: tauri::Runtime>(app: &AppHandle<R>, buckets: &[IndexBuck
                 let n = run_and_trace_session_index_pass(app, "claude", run_search_index_pass)
                     + run_and_trace_session_index_pass(app, "codex", run_codex_search_index_pass);
                 if n > 0 {
-                    added.push(("session".to_string(), n));
+                    added.push((bucket.status_name().to_string(), n));
                 }
             }
             IndexBucket::Commits => {
                 let n = run_and_trace_index_pass(app, "commits", run_commit_index_pass);
                 if n > 0 {
-                    added.push(("commit".to_string(), n));
+                    added.push((bucket.status_name().to_string(), n));
                 }
             }
             IndexBucket::History => {
                 let n = run_and_trace_index_pass(app, "worklist-history", run_history_index_pass);
                 if n > 0 {
-                    added.push(("worklist-history".to_string(), n));
+                    added.push((bucket.status_name().to_string(), n));
                 }
             }
             IndexBucket::Issues => {
                 let n = run_and_trace_index_pass(app, "issues", run_issue_index_pass);
                 if n > 0 {
-                    added.push(("issue".to_string(), n));
+                    added.push((bucket.status_name().to_string(), n));
                 }
             }
         }
     }
     let total = search_index_current_total(app);
-    if added.is_empty() {
+    if let Some(started) = live_started {
+        let minimum = std::time::Duration::from_millis(1500);
+        if let Some(remaining) = minimum.checked_sub(started.elapsed()) {
+            std::thread::sleep(remaining);
+        }
+        search_index_record_cycle(app, total, added, true);
+    } else if added.is_empty() {
         // Nothing indexed: keep the count fresh, no footer change.
         search_index_record_cycle(app, total, added, false);
     } else {
@@ -16748,6 +16798,7 @@ fn start_search_indexer<R: tauri::Runtime>(app: AppHandle<R>) {
                 IndexBucket::History,
                 IndexBucket::Issues,
             ],
+            IndexRunDisplay::QuietUnlessAdded,
         );
         // issue-242 recovery: force a commits:list rebuild on every launch. The
         // pass above only rebuilds when it sees NEW commits (indexed>0), so a
@@ -16766,6 +16817,11 @@ fn start_search_indexer<R: tauri::Runtime>(app: AppHandle<R>) {
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             };
+            let display = if first.is_some() {
+                IndexRunDisplay::LiveLocal
+            } else {
+                IndexRunDisplay::QuietUnlessAdded
+            };
             let mut wanted: Vec<IndexBucket> = Vec::new();
             match first {
                 // A watcher request: coalesce the whole burst into one pass per
@@ -16781,9 +16837,47 @@ fn start_search_indexer<R: tauri::Runtime>(app: AppHandle<R>) {
                 // Idle timeout: the residual remote poll.
                 None => wanted.push(IndexBucket::Issues),
             }
-            run_index_buckets(&app, &wanted);
+            run_index_buckets(&app, &wanted, display);
         }
     });
+}
+
+#[cfg(test)]
+mod index_run_display_tests {
+    use super::{live_index_bucket_names, IndexBucket, IndexRunDisplay};
+
+    #[test]
+    fn watcher_triggered_local_buckets_are_live() {
+        assert_eq!(
+            live_index_bucket_names(
+                &[
+                    IndexBucket::Sessions,
+                    IndexBucket::Commits,
+                    IndexBucket::History,
+                ],
+                IndexRunDisplay::LiveLocal,
+            ),
+            vec!["session", "commit", "worklist-history"]
+        );
+    }
+
+    #[test]
+    fn startup_and_periodic_runs_do_not_start_a_live_indicator() {
+        assert!(live_index_bucket_names(
+            &[IndexBucket::Issues],
+            IndexRunDisplay::QuietUnlessAdded,
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn remote_issues_are_not_presented_as_event_triggered_local_work() {
+        assert!(live_index_bucket_names(
+            &[IndexBucket::Issues],
+            IndexRunDisplay::LiveLocal,
+        )
+        .is_empty());
+    }
 }
 
 /// Wrap raw user text as a single quoted FTS5 phrase so arbitrary input is a

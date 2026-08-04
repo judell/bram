@@ -8301,8 +8301,10 @@ window.__bramFooterIndexLabel = function (status) {
   var total = Number(status.total || 0).toLocaleString();
   // The session bucket re-indexes one growing transcript (row replaced, keyed
   // on path), so a "+N sessions" count is meaningless — omit it from the
-  // summary; only commit/issue/history additions are genuinely new documents.
-  var added = (status.last_added || []).filter(function (a) { return a && a.count > 0 && a.bucket !== 'session'; });
+  // summary; commit/issue additions are useful here, while history is noise.
+  var added = (status.last_added || []).filter(function (a) {
+    return a && a.count > 0 && a.bucket !== 'session' && a.bucket !== 'worklist-history';
+  });
   if (added.length) {
     var parts = added.map(function (a) { return '+' + a.count + ' ' + (labels[a.bucket] || a.bucket); });
     return total + ' indexed · ' + parts.join(', ');

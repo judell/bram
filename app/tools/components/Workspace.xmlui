@@ -814,12 +814,13 @@
                       color="$color-primary-600"
                       value="{'Issue #' + issueNumber + ' ↗'}" />
                   </Link>
-                  <ExpandableItem
-                    when="{$item.before || $item.after || $item.diff || window.__bramWorklistItemFiles($item).length > 0}"
-                    summary="Details"
-                    initiallyExpanded="{(expandedItemIds || []).includes($item.id + '::details')}"
-                    onExpandedChange="(open) => { expandedItemIds = open ? (expandedItemIds || []).filter(k => k !== $item.id + '::details').concat([$item.id + '::details']) : (expandedItemIds || []).filter(k => k !== $item.id + '::details'); window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds, feedbackDraftsById: feedbackDraftsById || {}}) }"
-                    fullWidthSummary="true">
+                  <Theme paddingLeft-summary-ExpandableItem="0">
+                    <ExpandableItem
+                      when="{$item.before || $item.after || $item.diff || window.__bramWorklistItemFiles($item).length > 0}"
+                      summary="Details"
+                      initiallyExpanded="{(expandedItemIds || []).includes($item.id + '::details')}"
+                      onExpandedChange="(open) => { expandedItemIds = open ? (expandedItemIds || []).filter(k => k !== $item.id + '::details').concat([$item.id + '::details']) : (expandedItemIds || []).filter(k => k !== $item.id + '::details'); window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds, feedbackDraftsById: feedbackDraftsById || {}}) }"
+                      fullWidthSummary="true">
                     <VStack gap="$space-2">
                       <ExpandableItem
                         when="{window.__bramWorklistItemFiles($item).length > 0}"
@@ -923,7 +924,8 @@
                         </VStack>
                       </ExpandableItem>
                     </VStack>
-                  </ExpandableItem>
+                    </ExpandableItem>
+                  </Theme>
                 </VStack>
               </VStack>
             </HStack>

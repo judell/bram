@@ -164,25 +164,25 @@
     </HStack>
 
     <HStack gap="$space-3" verticalAlignment="center">
-      <Link noIndicator onClick="selectedTypes = window.__bramToggleType(selectedTypes, 'session', !selectedTypes.includes('session'))">
+      <Link noIndicator tooltip="{selectedTypes.includes('session') ? 'Hide session matches' : 'Show session matches'}" onClick="selectedTypes = window.__bramToggleType(selectedTypes, 'session', !selectedTypes.includes('session'))">
         <HStack gap="$space-1" verticalAlignment="center" opacity="{selectedTypes.includes('session') ? 1 : 0.4}">
           <Badge value="Sessions" colorMap="{facetColors}" />
           <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{(rSession.value || []).length}" />
         </HStack>
       </Link>
-      <Link noIndicator onClick="selectedTypes = window.__bramToggleType(selectedTypes, 'commit', !selectedTypes.includes('commit'))">
+      <Link noIndicator tooltip="{selectedTypes.includes('commit') ? 'Hide commit matches' : 'Show commit matches'}" onClick="selectedTypes = window.__bramToggleType(selectedTypes, 'commit', !selectedTypes.includes('commit'))">
         <HStack gap="$space-1" verticalAlignment="center" opacity="{selectedTypes.includes('commit') ? 1 : 0.4}">
           <Badge value="Commits" colorMap="{facetColors}" />
           <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{(rCommit.value || []).length}" />
         </HStack>
       </Link>
-      <Link noIndicator onClick="selectedTypes = window.__bramToggleType(selectedTypes, 'issue', !selectedTypes.includes('issue'))">
+      <Link noIndicator tooltip="{selectedTypes.includes('issue') ? 'Hide issue matches' : 'Show issue matches'}" onClick="selectedTypes = window.__bramToggleType(selectedTypes, 'issue', !selectedTypes.includes('issue'))">
         <HStack gap="$space-1" verticalAlignment="center" opacity="{selectedTypes.includes('issue') ? 1 : 0.4}">
           <Badge value="Issues" colorMap="{facetColors}" />
           <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{(rIssue.value || []).length}" />
         </HStack>
       </Link>
-      <Link noIndicator onClick="selectedTypes = window.__bramToggleType(selectedTypes, 'worklist-history', !selectedTypes.includes('worklist-history'))">
+      <Link noIndicator tooltip="{selectedTypes.includes('worklist-history') ? 'Hide history matches' : 'Show history matches'}" onClick="selectedTypes = window.__bramToggleType(selectedTypes, 'worklist-history', !selectedTypes.includes('worklist-history'))">
         <HStack gap="$space-1" verticalAlignment="center" opacity="{selectedTypes.includes('worklist-history') ? 1 : 0.4}">
           <Badge value="History" colorMap="{facetColors}" />
           <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{(rHistory.value || []).length}" />
@@ -193,9 +193,6 @@
     <Text when="{!ready}"
       color="$textColor-secondary"
       value="Type at least 2 characters to search the index." />
-    <Text when="{ready &amp;&amp; rSession.loaded &amp;&amp; rCommit.loaded &amp;&amp; rIssue.loaded &amp;&amp; rHistory.loaded &amp;&amp; displayed.length === 0}"
-      color="$textColor-secondary"
-      value="No matches." />
 
     <!-- search-rows-confinement + search-results-virtualize: rows render
          behind the SearchResults boundary (probe receipts in its header),

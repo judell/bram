@@ -224,7 +224,6 @@ How queries work:
 - Click the colored pills to include or exclude a bucket; each shows its own hit count.
 - When results span dates, drag the two-handled slider to narrow the time window.
 - Click any result title to expand its full detail inline; click again to collapse.
-- Evidence replay links (from Worklist items) arrive here pre-filled. A non-default match mode (raw / prefix / phrase) shows as a badge next to the box with a one-click reset back to normal AND matching.
 - Matching is keyword-based, not semantic: zero hits means those exact words were not found in the index — not proof the thing never happened. Try fewer or different terms." />
       </VStack>
     </ModalDialog>

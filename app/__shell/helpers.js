@@ -7390,7 +7390,12 @@ window.__bramExpandTool = function (arr, item) {
   // xmlui-probe trace lines (op=eval|stmt|action) synchronously via
   // logToHost → invoke, so a hang in the ensuing re-render names its exact
   // site — the trace stream ends AT the hanging statement/binding/action.
-  try { window.__xmluiEvalTraceUntil = performance.now() + 1500; } catch (e) {}
+  // Default OFF in shipped Bram (gate-eval-trace-probe-arming): the probe
+  // now rides in the vendored bundle, so an unconditional arm would build
+  // ~1,300 detail strings per expand feeding a sink that drops them (traces
+  // off) or floods the trace log (traces on). Set window.__bramEvalProbeArm
+  // = true from the console to restore the expand-trigger while hunting.
+  try { if (window.__bramEvalProbeArm) window.__xmluiEvalTraceUntil = performance.now() + 1500; } catch (e) {}
   var next = window.__bramToggleInArray(arr, item && item.id);
   try {
     var opening = item && item.id && (next || []).indexOf(item.id) >= 0;

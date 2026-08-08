@@ -23581,19 +23581,44 @@ fn audit_ledger_cell() -> &'static Mutex<()> {
     AUDIT_LEDGER_LOCK.get_or_init(|| Mutex::new(()))
 }
 
-// Pure: stamp `record` with `atMs` / `at`, serialize compact, and redact.
+// Pure: stamp `record` with `atMs` / `at`, redact string values
+// per-field, and serialize compact. Per-field rather than whole-line
+// because the redactor's token patterns match any 40-char hex string —
+// which is exactly a git SHA: the ledger's first live commit record
+// masked its own sha (audit-ledger-preserve-sha). The `sha` field is
+// host-authored from `git rev-parse`, structurally not a secret, and is
+// the ledger's primary lookup key, so it is exempt; every other string
+// (and string-array element) still redacts.
 // Returns a single line with no trailing newline.
 fn audit_record_line(record: &serde_json::Value, at_ms: i64) -> String {
     let mut stamped = record.clone();
     if let Some(obj) = stamped.as_object_mut() {
+        for (key, value) in obj.iter_mut() {
+            if key != "sha" {
+                audit_redact_value(value);
+            }
+        }
         obj.insert("atMs".to_string(), serde_json::json!(at_ms));
         obj.insert(
             "at".to_string(),
             serde_json::json!(format_iso_utc_ms(at_ms)),
         );
     }
-    let line = stamped.to_string();
-    redact_sensitive_text(&line).0
+    stamped.to_string()
+}
+
+fn audit_redact_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(s) => {
+            *s = redact_sensitive_text(s).0;
+        }
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                audit_redact_value(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn audit_authorization_record(
@@ -38976,8 +39001,13 @@ mod audit_ledger_tests {
 
     #[test]
     fn audit_commit_record_shape() {
+        // A real 40-hex-char SHA: the redactor's token patterns match
+        // this shape, and the first live commit record masked its own
+        // sha (audit-ledger-preserve-sha). The exempt field must
+        // survive audit_record_line intact.
+        let sha = "3e28389ac4bd2d6b8666aa78a849b471cd17ef58";
         let rec = audit_commit_record(
-            "abc123",
+            sha,
             "main",
             &["x".to_string()],
             &["app/a.js".to_string()],
@@ -38987,7 +39017,7 @@ mod audit_ledger_tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&line).expect("audit line must be valid JSON");
         assert_eq!(parsed["kind"], "commit");
-        assert_eq!(parsed["sha"], "abc123");
+        assert_eq!(parsed["sha"], sha);
         assert_eq!(parsed["branch"], "main");
         assert_eq!(parsed["itemIds"], serde_json::json!(["x"]));
         assert_eq!(parsed["stagedPaths"], serde_json::json!(["app/a.js"]));

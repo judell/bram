@@ -1413,15 +1413,25 @@ fn grid_menu_recently_dismissed(grid_labels: Option<&Vec<String>>) -> bool {
         .ok()
         .and_then(|s| {
             s.as_ref().map(|d| {
-                let dl: Vec<String> = d
-                    .option_labels
-                    .iter()
-                    .map(|l| normalized_menu_label(l))
-                    .collect();
-                dl.len() == gl.len() && gl.iter().all(|g| dl.contains(g))
+                grid_menu_dismissed_label_match(&d.option_labels, gl).is_some()
             })
         })
         .unwrap_or(false)
+}
+
+fn grid_menu_dismissed_label_match(
+    dismissed_labels: &[String],
+    grid_labels: &[String],
+) -> Option<&'static str> {
+    let dismissed: Vec<String> = dismissed_labels
+        .iter()
+        .map(|label| normalized_menu_label(label))
+        .collect();
+    let grid: Vec<String> = grid_labels
+        .iter()
+        .map(|label| normalized_menu_label(label))
+        .collect();
+    menu_labels_match(&dismissed, &grid)
 }
 
 fn grid_options_preserving_answer_keys(
@@ -8215,7 +8225,7 @@ fn pty_menu_held_cell() -> &'static Mutex<Option<std::time::Instant>> {
 // menu's identity: its inferred tool and its option-label set (the
 // "fingerprint", read verbatim from the terminal grid). When a re-detect
 // arrives while armed, two comparisons are made against the dismissed menu:
-// `labels_match` (identical fingerprint) and `tool_match` (identical
+// `label_match` (`exact`, `prefix`, or None) and `tool_match` (identical
 // inferred tool). The fingerprint is ground truth; the tool is a
 // byte-pattern guess (f5c9342ee lineage — the 2026-08-08 17:05 ghost was a
 // Read menu's stale pixels re-detected as "Bash" with an identical
@@ -8240,12 +8250,59 @@ fn pty_menu_held_cell() -> &'static Mutex<Option<std::time::Instant>> {
 //   post-dismiss-fingerprint-mismatch trace line.
 // - "pass" (labels differ, tool differs): no relationship to the dismissed
 //   menu at all — a fully unrelated prompt. Shown, silently.
-fn dismiss_suppressor_gate(tool_match: bool, labels_match: bool) -> &'static str {
-    match (labels_match, tool_match) {
+fn dismiss_suppressor_gate(tool_match: bool, label_match: Option<&str>) -> &'static str {
+    match (label_match.is_some(), tool_match) {
         (true, true) => "engage",
         (true, false) => "engage-cross-tool",
         (false, true) => "fingerprint-mismatch",
         (false, false) => "pass",
+    }
+}
+
+// dismiss-suppressor-prefix-tolerant-labels: match two option-label sets
+// tolerating mid-paint truncation. Grid snapshots sample xterm's buffer
+// while ink repaints frame-by-frame, so a capture can cut a label mid-word
+// ("ye" for "Yes", "…don't ask again for: " cut at the grant scope) or
+// drop trailing options entirely (a 3-option menu captured as 2) — the
+// 2026-08-08 19:27/19:37 specimens. EITHER side may be the truncated one:
+// the armed fingerprint itself can come from a mid-paint sighting.
+//
+// Returns Some("exact") for the original same-count containment match,
+// Some("prefix") when the shorter list's labels are each a
+// prefix-or-equal of the corresponding longer list's labels in order
+// (list-prefix for missing trailing options, per-label prefix for cut
+// labels), None otherwise. Empty sides never match, and a genuinely
+// different same-shape menu diverges inside its option-2 scope text
+// ("…for: sysctl *" vs "…for: system_profiler …" — neither a prefix of
+// the other), so prefix-merging only unites truncations. Callers apply
+// this only within the post-dismissal arming window, which bounds the
+// residual false-positive risk the same way 849e328 bounded cross-tool.
+fn menu_labels_match(armed: &[String], captured: &[String]) -> Option<&'static str> {
+    if armed.is_empty()
+        || captured.is_empty()
+        || armed
+            .iter()
+            .chain(captured.iter())
+            .any(|label| label.trim().is_empty())
+    {
+        return None;
+    }
+    if armed.len() == captured.len() && captured.iter().all(|c| armed.contains(c)) {
+        return Some("exact");
+    }
+    let (short, long) = if armed.len() <= captured.len() {
+        (armed, captured)
+    } else {
+        (captured, armed)
+    };
+    let pairwise_prefix = short.iter().zip(long.iter()).all(|(a, b)| {
+        let (sp, lp) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+        !sp.is_empty() && lp.starts_with(sp.as_str())
+    });
+    if pairwise_prefix {
+        Some("prefix")
+    } else {
+        None
     }
 }
 
@@ -8720,13 +8777,16 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                         (&d.signature, &new_menu.tool_call_signature),
                         (Some(a), Some(b)) if a == b
                     );
-                    let labels_match = d.option_labels.len() == new_menu.options.len()
-                        && new_menu
-                            .options
-                            .iter()
-                            .all(|o| d.option_labels.contains(&o.label));
+                    let captured_labels: Vec<String> = new_menu
+                        .options
+                        .iter()
+                        .map(|o| o.label.clone())
+                        .collect();
+                    let label_match_kind =
+                        menu_labels_match(&d.option_labels, &captured_labels);
+                    let label_match = label_match_kind.unwrap_or("none");
                     let tool_match = d.tool == new_menu.tool;
-                    let gate = dismiss_suppressor_gate(tool_match, labels_match);
+                    let gate = dismiss_suppressor_gate(tool_match, label_match_kind);
                     let cross_tool = gate == "engage-cross-tool";
                     let option_summary = new_menu
                         .options
@@ -8804,9 +8864,10 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                                     app,
                                     "pty-menu",
                                     &format!(
-                                        "state=shown tool={} reason=post-absence-reappear cross_tool={} elapsed_ms={} new_options=[{}]{}{}",
+                                        "state=shown tool={} reason=post-absence-reappear cross_tool={} label_match={} elapsed_ms={} new_options=[{}]{}{}",
                                         new_menu.tool,
                                         cross_tool,
+                                        label_match,
                                         d.when.elapsed().as_millis(),
                                         option_summary,
                                         signature_summary,
@@ -8825,7 +8886,7 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                                     app,
                                     "pty-menu",
                                     &format!(
-                                        "state=suppressed tool={} reason={} cross_tool={} elapsed_ms={} new_options=[{}]{}{}",
+                                        "state=suppressed tool={} reason={} cross_tool={} label_match={} elapsed_ms={} new_options=[{}]{}{}",
                                         new_menu.tool,
                                         match decision {
                                             FenceDecision::SuppressPreResult => {
@@ -8837,6 +8898,7 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                                             _ => "pre-absence-redetect",
                                         },
                                         cross_tool,
+                                        label_match,
                                         d.when.elapsed().as_millis(),
                                         option_summary,
                                         signature_summary,
@@ -39809,27 +39871,159 @@ mod dismiss_suppressor_gate_tests {
     // fingerprint F, stale pixels re-detected as Bash with fingerprint F.
     #[test]
     fn identical_fingerprint_engages_across_tools() {
-        assert_eq!(dismiss_suppressor_gate(false, true), "engage-cross-tool");
+        assert_eq!(
+            dismiss_suppressor_gate(false, Some("exact")),
+            "engage-cross-tool"
+        );
     }
 
     // Should suppress: the ordinary same-tool re-detect, unchanged.
     #[test]
     fn identical_fingerprint_same_tool_engages() {
-        assert_eq!(dismiss_suppressor_gate(true, true), "engage");
+        assert_eq!(dismiss_suppressor_gate(true, Some("exact")), "engage");
+    }
+
+    // A mid-paint prefix match takes the same suppression path; the match
+    // kind remains explicit for trace and gate tests.
+    #[test]
+    fn prefix_fingerprint_engages() {
+        assert_eq!(dismiss_suppressor_gate(true, Some("prefix")), "engage");
+        assert_eq!(
+            dismiss_suppressor_gate(false, Some("prefix")),
+            "engage-cross-tool"
+        );
     }
 
     // Should NOT suppress: same tool, different labels — the #193
     // genuinely-new-menu class the labels gate was built for.
     #[test]
     fn different_fingerprint_same_tool_shows() {
-        assert_eq!(dismiss_suppressor_gate(true, false), "fingerprint-mismatch");
+        assert_eq!(dismiss_suppressor_gate(true, None), "fingerprint-mismatch");
     }
 
     // Should NOT suppress: different tool AND different labels — a fully
     // unrelated prompt, exactly what the old tool gate protected.
     #[test]
     fn unrelated_prompt_passes() {
-        assert_eq!(dismiss_suppressor_gate(false, false), "pass");
+        assert_eq!(dismiss_suppressor_gate(false, None), "pass");
+    }
+}
+
+#[cfg(test)]
+mod menu_labels_match_tests {
+    use super::{grid_menu_dismissed_label_match, menu_labels_match};
+
+    fn labels(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn identical_sets_match_exact() {
+        let a = labels(&["Yes", "Yes, and don't ask again for: sysctl *", "No"]);
+        assert_eq!(menu_labels_match(&a, &a.clone()), Some("exact"));
+    }
+
+    // 2026-08-08 19:27:37 specimen: option 2 captured mid-word as "ye".
+    #[test]
+    fn cut_label_matches_as_prefix() {
+        let armed = labels(&[
+            "Yes",
+            "Yes, and don't ask again for: system_profiler SPHardwareDataType *",
+            "No",
+        ]);
+        let captured = labels(&["Yes", "Ye", "No"]);
+        assert_eq!(menu_labels_match(&armed, &captured), Some("prefix"));
+    }
+
+    // 19:27:38 specimen: label cut exactly at the grant scope.
+    #[test]
+    fn scope_truncated_label_matches_as_prefix() {
+        let armed = labels(&[
+            "Yes",
+            "Yes, and don't ask again for: system_profiler SPHardwareDataType *",
+            "No",
+        ]);
+        let captured = labels(&["Yes", "Yes, and don't ask again for: ", "No"]);
+        assert_eq!(menu_labels_match(&armed, &captured), Some("prefix"));
+    }
+
+    // 19:37:26 specimen: a 3-option menu captured with 2 options.
+    #[test]
+    fn missing_trailing_option_matches_as_prefix() {
+        let armed = labels(&[
+            "Yes",
+            "Yes, and always allow access to Downloads/ from this project",
+            "No",
+        ]);
+        let captured = labels(&[
+            "Yes",
+            "Yes, and always allow access to Downloads/ from this project",
+        ]);
+        assert_eq!(menu_labels_match(&armed, &captured), Some("prefix"));
+    }
+
+    // The armed side may be the truncated one — it too comes from a grid
+    // sighting.
+    #[test]
+    fn truncated_armed_side_also_matches() {
+        let armed = labels(&["Yes", "Ye"]);
+        let captured = labels(&["Yes", "Yes, and don't ask again for: sysctl *", "No"]);
+        assert_eq!(menu_labels_match(&armed, &captured), Some("prefix"));
+    }
+
+    // The grid-rescue anti-ghost gate must use the same tolerant match; this
+    // is the call site that prevents answered-claim rescue churn.
+    #[test]
+    fn grid_dismissed_gate_accepts_normalized_truncated_repaint() {
+        let dismissed = labels(&[
+            "Yes",
+            "Yes, and don't ask again for: system_profiler SPHardwareDataType *",
+            "No",
+        ]);
+        let grid = labels(&["yes", "ye"]);
+
+        assert_eq!(
+            grid_menu_dismissed_label_match(&dismissed, &grid),
+            Some("prefix")
+        );
+    }
+
+    // A genuinely different same-shape menu diverges inside option 2's
+    // scope text — must NOT merge.
+    #[test]
+    fn different_command_scope_does_not_match() {
+        let armed = labels(&[
+            "Yes",
+            "Yes, and don't ask again for: system_profiler SPHardwareDataType *",
+            "No",
+        ]);
+        let captured = labels(&[
+            "Yes",
+            "Yes, and don't ask again for: sysctl *",
+            "No",
+        ]);
+        assert_eq!(menu_labels_match(&armed, &captured), None);
+    }
+
+    #[test]
+    fn unrelated_and_empty_sets_do_not_match() {
+        let armed = labels(&["Yes", "No"]);
+        assert_eq!(
+            menu_labels_match(&armed, &labels(&["Review hooks", "Trust all"])),
+            None
+        );
+        assert_eq!(menu_labels_match(&armed, &labels(&[])), None);
+        assert_eq!(menu_labels_match(&labels(&[]), &armed), None);
+        // An empty captured label must not prefix-match everything.
+        assert_eq!(menu_labels_match(&armed, &labels(&["Yes", ""])), None);
+        assert_eq!(
+            menu_labels_match(&labels(&["Yes", ""]), &labels(&["Yes", ""])),
+            None
+        );
+        assert_eq!(
+            menu_labels_match(&labels(&["Yes", " "]), &labels(&["Yes", "No"])),
+            None
+        );
     }
 }
 

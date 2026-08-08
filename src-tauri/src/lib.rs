@@ -9577,13 +9577,14 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
             let now = unix_now_ms();
             let last_sup = LAST_SUPERSEDE_MS.load(std::sync::atomic::Ordering::Relaxed);
             let supersede_age_ms = if last_sup > 0 { now - last_sup } else { -1 };
-            let id_source = if answered_id.is_some() {
-                "pending-call"
-            } else if resolved_id.is_some() {
-                "resolved"
-            } else {
-                "none"
-            };
+            // Report the chooser's verdict (answer-binding-stale-id-under-
+            // churn) so the corrected branch is greppable.
+            let (_, id_source) = choose_answer_binding_id(
+                resolved_id.clone(),
+                answered_id.clone(),
+                pending_lookup.signature.as_deref(),
+                &tool,
+            );
             append_bram_trace_line(
                 app,
                 "prompt-lifecycle",
@@ -9600,15 +9601,24 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
             );
         }
         // transcript-render-menu-answers: bind the chosen label to the
-        // answered call. Prefer the pending-call lookup (matches the
-        // suppressor's identity); a hook-claimed prompt's own id is the
-        // fallback under record-flush lag. No id at all is the normal
-        // record-flush race (the tool_use lands only after approval): store
-        // the answer on an exact displayed claim, using the singleton stash
-        // only when no claim identity exists.
+        // answered call. The displayed prompt's own id (hook claim) is
+        // authoritative; the pending-call lookup is a fallback for
+        // claimless prompts only, and only when its tool matches — see
+        // choose_answer_binding_id (answer-binding-stale-id-under-churn:
+        // the lookup returns the OLDEST unresolved tool_use, which under
+        // prompt churn is a stale long-runner, e.g. the running Agent
+        // dispatch that three different prompts' answers bound to on
+        // 2026-08-08). No usable id: store the answer on an exact
+        // displayed claim, using the singleton stash only when no claim
+        // identity exists.
         let answer_recorded_at_click = match chosen_label.as_deref() {
             Some(label) => {
-                let id = answered_id.clone().or_else(|| resolved_id.clone());
+                let (id, bind_src) = choose_answer_binding_id(
+                    resolved_id.clone(),
+                    answered_id.clone(),
+                    pending_lookup.signature.as_deref(),
+                    &tool,
+                );
                 match id {
                     Some(id) => {
                         record_menu_answer(app, &id, label, "click");
@@ -9624,7 +9634,11 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
                                 &tool,
                                 label,
                                 signature.as_deref(),
-                                "no-tool-use-id",
+                                if bind_src == "pending-call-tool-mismatch" {
+                                    "pending-call-tool-mismatch"
+                                } else {
+                                    "no-tool-use-id"
+                                },
                             );
                         }
                         false
@@ -24715,6 +24729,44 @@ fn describe_overlay_snapshot() -> std::collections::HashMap<String, String> {
         .unwrap_or_default()
 }
 
+// answer-binding-stale-id-under-churn: choose which tool_use id a menu
+// answer binds to. The displayed prompt's own id (hook claim) is
+// authoritative. The pending-call lookup scans for the transcript's
+// OLDEST unresolved tool_use — under prompt churn that is a stale
+// long-runner (2026-08-08 specimen: three prompts' answers, Agent /
+// Bash / Agent, all bound to the still-running Agent dispatch's id) —
+// so it is only a fallback for claimless prompts, and only when its
+// `Tool(...)` signature prefix matches the displayed tool. On mismatch
+// the caller stashes the label for clear-time binding instead of
+// recording a wrong id. Returns (chosen id, id_source verdict for the
+// answer-at-click trace).
+fn choose_answer_binding_id(
+    displayed_claim_id: Option<String>,
+    pending_call_id: Option<String>,
+    pending_call_signature: Option<&str>,
+    displayed_tool: &str,
+) -> (Option<String>, &'static str) {
+    if displayed_claim_id.is_some() {
+        return (displayed_claim_id, "displayed-claim");
+    }
+    match pending_call_id {
+        Some(id) => {
+            let tool_matches = pending_call_signature
+                .map(|s| {
+                    s.starts_with(displayed_tool)
+                        && s[displayed_tool.len()..].starts_with('(')
+                })
+                .unwrap_or(false);
+            if tool_matches {
+                (Some(id), "pending-call")
+            } else {
+                (None, "pending-call-tool-mismatch")
+            }
+        }
+        None => (None, "none"),
+    }
+}
+
 // menu-answer overlay (transcript-render-menu-answers): the label the
 // user chose when answering a pane/terminal menu, keyed by the answered
 // call's tool_use id. Recorded at user-input dismissal (pty_menu_clear),
@@ -39104,6 +39156,72 @@ mod audit_ledger_tests {
         });
         let line = audit_record_line(&rec, 42);
         assert!(!line.contains(&secret));
+    }
+}
+
+#[cfg(test)]
+mod answer_binding_tests {
+    use super::choose_answer_binding_id;
+
+    // The 2026-08-08 05:23:45 churn specimen: a hook-claimed Bash prompt
+    // (own id) answered while the pending-call lookup returns the
+    // still-running Agent dispatch. The displayed claim's id must win.
+    #[test]
+    fn displayed_claim_id_wins_over_stale_pending_call() {
+        let (id, src) = choose_answer_binding_id(
+            Some("toolu_01LAokoVfLG6HB36dZofVJpX".to_string()),
+            Some("toolu_013PiPf8VNgHcFeNCT7j5KDZ".to_string()),
+            Some("Agent(general-purpose: implement the thing)"),
+            "Bash",
+        );
+        assert_eq!(id.as_deref(), Some("toolu_01LAokoVfLG6HB36dZofVJpX"));
+        assert_eq!(src, "displayed-claim");
+    }
+
+    // A claimless Bash prompt while the oldest unresolved call is the
+    // Agent dispatch: binding nothing (stash for clear-time binding)
+    // beats binding the wrong id.
+    #[test]
+    fn claimless_prompt_rejects_mismatched_pending_call() {
+        let (id, src) = choose_answer_binding_id(
+            None,
+            Some("toolu_013PiPf8VNgHcFeNCT7j5KDZ".to_string()),
+            Some("Agent(general-purpose: implement the thing)"),
+            "Bash",
+        );
+        assert_eq!(id, None);
+        assert_eq!(src, "pending-call-tool-mismatch");
+    }
+
+    // The record-flush-lag case the pending-call preference existed
+    // for: a claimless Bash prompt whose pending call IS the Bash call.
+    #[test]
+    fn claimless_prompt_keeps_matching_pending_call() {
+        let (id, src) = choose_answer_binding_id(
+            None,
+            Some("toolu_bash".to_string()),
+            Some("Bash(jq -r '.x' file.json)"),
+            "Bash",
+        );
+        assert_eq!(id.as_deref(), Some("toolu_bash"));
+        assert_eq!(src, "pending-call");
+    }
+
+    // No signature at all: the pending call's tool cannot be confirmed,
+    // so it must not bind.
+    #[test]
+    fn claimless_prompt_rejects_unverifiable_pending_call() {
+        let (id, src) =
+            choose_answer_binding_id(None, Some("toolu_x".to_string()), None, "Bash");
+        assert_eq!(id, None);
+        assert_eq!(src, "pending-call-tool-mismatch");
+    }
+
+    #[test]
+    fn nothing_available_binds_nothing() {
+        let (id, src) = choose_answer_binding_id(None, None, None, "Bash");
+        assert_eq!(id, None);
+        assert_eq!(src, "none");
     }
 }
 

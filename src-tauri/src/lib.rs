@@ -10464,11 +10464,19 @@ const GH_ISSUE_LIST_LIMIT: usize = 500;
 fn build_issues_list<R: tauri::Runtime>(app: &AppHandle<R>, limit: usize) -> Result<Vec<u8>, String> {
     let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
     let repo_slug = repo_owner_name(app);
+    // issues-list-error-envelope-poisons-cache: adapter failure propagates
+    // as Err. The old `Ok("[]")` envelope here made one transient gh
+    // failure indistinguishable from an issueless repo — the cache writers
+    // stored `[]` as truth and cleared the #235 staleness marker, so the
+    // rebuild-error → marker → retry machinery never fired and the empty
+    // list was sticky until a manual fresh=1 (2026-08-08 incident). The
+    // render-something envelope now lives at the serving edge
+    // (gh_issues_list's live-build tail) where it can't be cached.
     let mut issues = match forge_adapter(app).issues_list(&root, limit) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("{}", e);
-            return Ok(b"[]".to_vec());
+            return Err(e);
         }
     };
     for issue in &mut issues {
@@ -10479,9 +10487,29 @@ fn build_issues_list<R: tauri::Runtime>(app: &AppHandle<R>, limit: usize) -> Res
 
 // Writes the issues:list cache row and clears the staleness marker, so
 // /__issues serves cache-first, byte-identical to a live build (#235).
-fn cache_issues_list_row(conn: &rusqlite::Connection, list_json: &str) {
+fn cache_issues_list_row(conn: &rusqlite::Connection, list_json: &str) -> &'static str {
     if list_json.is_empty() {
-        return;
+        return "skipped-empty";
+    }
+    // Contradiction guard (issues-list-error-envelope-poisons-cache): an
+    // empty list for a repo whose index holds issue docs is almost
+    // certainly a failed fetch that slipped past error propagation, not a
+    // repo that lost every issue at once. Refuse the overwrite, keep the
+    // prior good row serving, and set the staleness marker so the next
+    // pass retries. A genuinely issueless repo (no issue docs) still
+    // caches `[]` normally.
+    if list_json.trim() == "[]" {
+        let issue_docs: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM search_index WHERE file LIKE 'issue:%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if issue_docs > 0 {
+            set_issues_list_stale(conn, true);
+            return "empty-contradiction";
+        }
     }
     let list_row = search_index::IndexRow {
         kind: "issue-list".to_string(),
@@ -10494,6 +10522,7 @@ fn cache_issues_list_row(conn: &rusqlite::Connection, list_json: &str) {
     };
     let _ = search_index::index_doc(conn, &list_row, 0, 0);
     set_issues_list_stale(conn, false);
+    "cached"
 }
 
 // Staleness marker for the issues:list cache: non-empty extra means the last
@@ -10539,7 +10568,14 @@ fn gh_issues_list<R: tauri::Runtime>(
                 if let Some(db) = search_index_db_path(app) {
                     if let Ok(conn) = search_index::open(&db.to_string_lossy()) {
                         if let Ok(s) = std::str::from_utf8(&full) {
-                            cache_issues_list_row(&conn, s);
+                            let status = cache_issues_list_row(&conn, s);
+                            if status == "empty-contradiction" {
+                                append_bram_trace_line(
+                                    app,
+                                    "search-index",
+                                    "op=issues-list-empty-contradiction via=fresh",
+                                );
+                            }
                         }
                     }
                 }
@@ -10576,12 +10612,24 @@ fn gh_issues_list<R: tauri::Runtime>(
             }
         }
     }
-    build_issues_list(app, limit)
+    // Serving-edge envelope (issues-list-error-envelope-poisons-cache): a
+    // failed live build renders as an empty list rather than a 500, but the
+    // failure never enters the cache — only this response.
+    match build_issues_list(app, limit) {
+        Ok(bytes) => Ok(bytes),
+        Err(e) => {
+            eprintln!("[/__issues] live build failed, serving []: {}", e);
+            Ok(b"[]".to_vec())
+        }
+    }
 }
 
 // Shell out to `gh issue view <number> --json ...`, enrich, and return the
-// raw JSON bytes. Same failure envelope as build_issues_list — empty object
-// on any error so the frontend can render something rather than 500.
+// raw JSON bytes. Empty-object-on-error envelope so the frontend can render
+// something rather than 500 — safe here because a single issue view is
+// never cached (build_issues_list dropped its matching envelope in
+// issues-list-error-envelope-poisons-cache precisely because its output IS
+// cached).
 fn build_enriched_issue<R: tauri::Runtime>(app: &AppHandle<R>, number: u64) -> Result<Vec<u8>, String> {
     let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
     let adapter = forge_adapter(app);
@@ -16627,7 +16675,17 @@ fn run_issue_index_pass<R: tauri::Runtime>(
                     append_bram_trace_line(app, "search-index", "op=issues-list-rebuild-retry");
                     emit_replayable_signal(app, "issues-changed");
                 }
-                cache_issues_list_row(&conn, &String::from_utf8(list_bytes).unwrap_or_default());
+                let status = cache_issues_list_row(
+                    &conn,
+                    &String::from_utf8(list_bytes).unwrap_or_default(),
+                );
+                if status == "empty-contradiction" {
+                    append_bram_trace_line(
+                        app,
+                        "search-index",
+                        "op=issues-list-empty-contradiction via=rebuild",
+                    );
+                }
             }
             Err(e) => {
                 append_bram_trace_line(
@@ -39300,6 +39358,68 @@ mod answer_binding_tests {
         let (id, src) = choose_answer_binding_id(None, None, None, "Bash");
         assert_eq!(id, None);
         assert_eq!(src, "none");
+    }
+}
+
+#[cfg(test)]
+mod issues_list_cache_tests {
+    use super::{cache_issues_list_row, issues_list_stale};
+    use crate::search_index;
+
+    fn mem_conn() -> rusqlite::Connection {
+        search_index::open(":memory:").expect("in-memory index")
+    }
+
+    fn insert_issue_doc(conn: &rusqlite::Connection) {
+        let row = search_index::IndexRow {
+            kind: "issue".to_string(),
+            source: String::new(),
+            date: "1".to_string(),
+            link: String::new(),
+            content: "an issue".to_string(),
+            file: "issue:1".to_string(),
+            extra: String::new(),
+        };
+        search_index::index_doc(conn, &row, 1, 0).expect("index issue doc");
+    }
+
+    // The 2026-08-08 poison shape: an empty list arriving while issue docs
+    // exist must be refused and flagged stale, leaving any prior row alone.
+    #[test]
+    fn empty_list_with_issue_docs_is_refused_and_marked_stale() {
+        let conn = mem_conn();
+        insert_issue_doc(&conn);
+        assert_eq!(cache_issues_list_row(&conn, "[3 real issues]"), "cached");
+        assert_eq!(cache_issues_list_row(&conn, "[]"), "empty-contradiction");
+        assert_eq!(
+            search_index::get_extra(&conn, "issues:list").unwrap().as_deref(),
+            Some("[3 real issues]"),
+            "prior good row must keep serving"
+        );
+        assert!(issues_list_stale(&conn), "stale marker must arm the retry");
+    }
+
+    // A genuinely issueless repo still caches [] normally.
+    #[test]
+    fn empty_list_without_issue_docs_caches_normally() {
+        let conn = mem_conn();
+        assert_eq!(cache_issues_list_row(&conn, "[]"), "cached");
+        assert_eq!(
+            search_index::get_extra(&conn, "issues:list").unwrap().as_deref(),
+            Some("[]")
+        );
+        assert!(!issues_list_stale(&conn));
+    }
+
+    // A successful non-empty rebuild clears a pending stale marker.
+    #[test]
+    fn good_list_clears_stale_marker() {
+        let conn = mem_conn();
+        insert_issue_doc(&conn);
+        assert_eq!(cache_issues_list_row(&conn, "[]"), "empty-contradiction");
+        assert!(issues_list_stale(&conn));
+        assert_eq!(cache_issues_list_row(&conn, "[1 issue]"), "cached");
+        assert!(!issues_list_stale(&conn));
     }
 }
 

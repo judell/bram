@@ -185,7 +185,7 @@
     <Text
       when="{repoOrigin.value &amp;&amp; repoOrigin.value.htmlBase &amp;&amp; issuesFirstPage.loaded &amp;&amp; !issuesFirstPage.inProgress &amp;&amp; (!issuesSource || issuesSource.length === 0)}"
       color="$textColor-secondary">
-      No issues found. (Either the repo has none, or `{(repoOrigin.value &amp;&amp; repoOrigin.value.cli) || 'gh'}` is not installed / authenticated.)
+      No issues found. (The repo may have none, `{(repoOrigin.value &amp;&amp; repoOrigin.value.cli) || 'gh'}` may not be installed / authenticated, or the last fetch failed — it will retry shortly.)
     </Text>
 
     <VStack gap="0" width="100%" when="{pageIssues.length > 0}">

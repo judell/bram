@@ -7930,6 +7930,47 @@ fn pty_menu_held_cell() -> &'static Mutex<Option<std::time::Instant>> {
 // ("1. Yes" + "2. Yes" within proximity); transitions PTY_MENU accordingly.
 // Logs every state transition to stderr so failures-to-render can be
 // correlated against actual detector activity.
+// dismiss-suppressor-fingerprint-primary: the four-way post-dismiss gate
+// contract as a pure function so both validation directions are unit-pinned.
+//
+// Inputs. When a menu is answered/dismissed, the suppressor arms with that
+// menu's identity: its inferred tool and its option-label set (the
+// "fingerprint", read verbatim from the terminal grid). When a re-detect
+// arrives while armed, two comparisons are made against the dismissed menu:
+// `labels_match` (identical fingerprint) and `tool_match` (identical
+// inferred tool). The fingerprint is ground truth; the tool is a
+// byte-pattern guess (f5c9342ee lineage — the 2026-08-08 17:05 ghost was a
+// Read menu's stale pixels re-detected as "Bash" with an identical
+// fingerprint).
+//
+// Verdicts:
+//
+// - "engage" (labels match, tool matches): this is the just-dismissed menu,
+//   identically fingerprinted and identically attributed. Enter the
+//   suppression machinery — NOT an unconditional suppress: the flicker
+//   guard / absence fence (fence_decision) still decides between
+//   suppressing stale pixels and admitting a genuine reappearance
+//   (post-absence-reappear).
+// - "engage-cross-tool" (labels match, tool differs): same fingerprint but
+//   the byte-pattern inference attributed a different tool. Treated exactly
+//   as "engage", because the label set is what the user actually saw and
+//   answered — tool inference does not get to overrule it. This is the
+//   ghost class this change exists for; traced with cross_tool=true.
+// - "fingerprint-mismatch" (labels differ, tool matches): same tool but a
+//   different option set — a genuinely NEW menu, not a stale re-read (the
+//   #193 over-fire class the labels gate was built for). Shown, with a
+//   post-dismiss-fingerprint-mismatch trace line.
+// - "pass" (labels differ, tool differs): no relationship to the dismissed
+//   menu at all — a fully unrelated prompt. Shown, silently.
+fn dismiss_suppressor_gate(tool_match: bool, labels_match: bool) -> &'static str {
+    match (labels_match, tool_match) {
+        (true, true) => "engage",
+        (true, false) => "engage-cross-tool",
+        (false, true) => "fingerprint-mismatch",
+        (false, false) => "pass",
+    }
+}
+
 fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
     // session-rotation-self-diagnose: stamp the last PTY output time so a
     // rotation can report how long the terminal was silent beforehand (a long
@@ -8384,11 +8425,19 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
     if let Some(ref new_menu) = detected {
         if let Ok(suppressed) = pty_menu_suppressed_cell().lock() {
             if let Some(d) = suppressed.as_ref() {
-                if d.tool == new_menu.tool {
-                    // Fingerprint gate (#193): act only when this is the
-                    // *identical* just-dismissed menu (matching signature, or
-                    // matching option-label set when no signature). A genuinely
-                    // different same-tool menu passes through untouched.
+                // dismiss-suppressor-fingerprint-primary: the fingerprint
+                // (option-label set) is the primary key; the inferred tool is
+                // corroborative only. The old outer `d.tool == new_menu.tool`
+                // gate skipped the whole suppression machinery when a
+                // byte-pattern re-detect misinferred the tool — 2026-08-08
+                // 17:05 specimen: a just-answered Read menu's stale pixels
+                // re-detected as tool=Bash with the IDENTICAL fingerprint
+                // sailed past the armed suppressor, re-showed as a ghost, and
+                // the user's answer to the ghost landed in the composer as a
+                // stray "2" turn. Same lesson as f5c9342ee's absence-fence
+                // change: byte-pattern tool inference is not reliable enough
+                // to gate identity.
+                {
                     let sig_match = matches!(
                         (&d.signature, &new_menu.tool_call_signature),
                         (Some(a), Some(b)) if a == b
@@ -8398,6 +8447,9 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                             .options
                             .iter()
                             .all(|o| d.option_labels.contains(&o.label));
+                    let tool_match = d.tool == new_menu.tool;
+                    let gate = dismiss_suppressor_gate(tool_match, labels_match);
+                    let cross_tool = gate == "engage-cross-tool";
                     let option_summary = new_menu
                         .options
                         .iter()
@@ -8428,7 +8480,7 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                     // absence was never observed). Labels must match for the
                     // suppression path to engage; sig_match is corroborative
                     // only and is traced on the mismatch branch.
-                    if labels_match {
+                    if matches!(gate, "engage" | "engage-cross-tool") {
                         // Flicker guard (flicker-robust-absence-fence): a
                         // mid-repaint frame can set the absence fence while
                         // the answered menu's pixels are still coming back —
@@ -8474,8 +8526,9 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                                     app,
                                     "pty-menu",
                                     &format!(
-                                        "state=shown tool={} reason=post-absence-reappear elapsed_ms={} new_options=[{}]{}{}",
+                                        "state=shown tool={} reason=post-absence-reappear cross_tool={} elapsed_ms={} new_options=[{}]{}{}",
                                         new_menu.tool,
+                                        cross_tool,
                                         d.when.elapsed().as_millis(),
                                         option_summary,
                                         signature_summary,
@@ -8494,7 +8547,7 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                                     app,
                                     "pty-menu",
                                     &format!(
-                                        "state=suppressed tool={} reason={} elapsed_ms={} new_options=[{}]{}{}",
+                                        "state=suppressed tool={} reason={} cross_tool={} elapsed_ms={} new_options=[{}]{}{}",
                                         new_menu.tool,
                                         match decision {
                                             FenceDecision::SuppressPreResult => {
@@ -8505,6 +8558,7 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                                             }
                                             _ => "pre-absence-redetect",
                                         },
+                                        cross_tool,
                                         d.when.elapsed().as_millis(),
                                         option_summary,
                                         signature_summary,
@@ -8514,13 +8568,15 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                             }
                             detected = None;
                         }
-                    } else if bram_trace_enabled() {
+                    } else if gate == "fingerprint-mismatch" && bram_trace_enabled() {
                         // Same tool but the label set differs: a genuinely
                         // new menu, not a stale re-read. Let it through
                         // (this is the #193 over-fire the old tool-only key
                         // hit). sig_match=true here means the signature
                         // binding disagreed with the screen — the parallel-
-                        // pending misattribution signature.
+                        // pending misattribution signature. Different tool
+                        // AND different labels needs no trace: a fully
+                        // unrelated prompt, passed through as always.
                         append_bram_trace_line(
                             app,
                             "pty-menu",
@@ -39358,6 +39414,38 @@ mod answer_binding_tests {
         let (id, src) = choose_answer_binding_id(None, None, None, "Bash");
         assert_eq!(id, None);
         assert_eq!(src, "none");
+    }
+}
+
+#[cfg(test)]
+mod dismiss_suppressor_gate_tests {
+    use super::dismiss_suppressor_gate;
+
+    // Should suppress: the 2026-08-08 17:05 ghost — armed for Read with
+    // fingerprint F, stale pixels re-detected as Bash with fingerprint F.
+    #[test]
+    fn identical_fingerprint_engages_across_tools() {
+        assert_eq!(dismiss_suppressor_gate(false, true), "engage-cross-tool");
+    }
+
+    // Should suppress: the ordinary same-tool re-detect, unchanged.
+    #[test]
+    fn identical_fingerprint_same_tool_engages() {
+        assert_eq!(dismiss_suppressor_gate(true, true), "engage");
+    }
+
+    // Should NOT suppress: same tool, different labels — the #193
+    // genuinely-new-menu class the labels gate was built for.
+    #[test]
+    fn different_fingerprint_same_tool_shows() {
+        assert_eq!(dismiss_suppressor_gate(true, false), "fingerprint-mismatch");
+    }
+
+    // Should NOT suppress: different tool AND different labels — a fully
+    // unrelated prompt, exactly what the old tool gate protected.
+    #[test]
+    fn unrelated_prompt_passes() {
+        assert_eq!(dismiss_suppressor_gate(false, false), "pass");
     }
 }
 

@@ -3986,6 +3986,105 @@ window.subscribeTauriEvent("__bramNativeToolbarPtyMenuUnsub",
   window.parent.postMessage({ type: "bram-terminal-visibility-request" }, "*");
 })();
 
+// Host terminal-attention + parent terminal-visibility join (issue-234).
+// The Rust host owns the no-open-turn + byte-silent + prompt-shape
+// predicate (`terminal-attention-changed`); main.js owns terminal
+// visibility. This isolated bridge derives the footer banner's displayed
+// state: active only when BOTH the host says an unattended prompt is
+// showing AND the terminal pane is hidden. Deliberately simpler than the
+// suspicious-silence bridge just above (no per-episode dismissal, no
+// self-test hook, no explicit "reopen dismisses it" bookkeeping) because
+// this banner has no dismiss button — it clears itself the moment either
+// side of the join goes false (host clear on PTY activity, or the terminal
+// becoming visible), so there is no dismissed-episode state to track.
+(function () {
+  var subscribers = new Set();
+  var hostValue = null;
+  var terminalHidden = null;
+  var lastValue = { active: false, shape: null, terminalHidden: null };
+  var lastSignature = "";
+  var hostSubscribed = false;
+
+  var derivedValue = function () {
+    var active = !!(hostValue && hostValue.active && terminalHidden === true);
+    return Object.assign({}, hostValue || {}, {
+      active: active,
+      terminalHidden: terminalHidden,
+    });
+  };
+  var notify = function () {
+    var next = derivedValue();
+    var signature = JSON.stringify(next);
+    if (signature === lastSignature) return;
+    var wasActive = !!(lastValue && lastValue.active);
+    lastSignature = signature;
+    lastValue = next;
+    if (wasActive !== !!next.active) {
+      window.__bramIframeTrace("terminal-attention", {
+        op: next.active ? "warn" : "cleared",
+        terminalHidden: terminalHidden,
+        shape: next.shape || "",
+        atMs: next.atMs || 0,
+      });
+    }
+    subscribers.forEach(function (fn) {
+      try { fn(); } catch (e) { console.error("[bram] terminal-attention subscriber threw:", e); }
+    });
+  };
+
+  // Duplicated rather than shared with the suspicious-silence listener
+  // above: each footer bridge in this file owns its own isolated
+  // "bram-terminal-visibility" listener so one subscriber's derived-state
+  // recompute never depends on another's internal ordering. Same
+  // per-component-isolation rationale as FooterAgentStatus.xmlui's PushSource
+  // split.
+  window.addEventListener("message", function (event) {
+    var data = event && event.data;
+    if (!data || event.source !== window.parent) return;
+    if (data.type !== "bram-terminal-visibility") return;
+    terminalHidden = !!data.hidden;
+    notify();
+  });
+
+  var ensureHostSubscribed = function () {
+    if (hostSubscribed) return;
+    hostSubscribed = true;
+    window.subscribeTauriEvent(
+      "__bramNativeTerminalAttentionUnsub",
+      "terminal-attention-changed",
+      function (event) {
+        hostValue = (event && event.payload) || null;
+        notify();
+      }
+    );
+  };
+
+  window.bramSubscribeTerminalAttention = (function () {
+    var factory;
+    return function () {
+      if (factory) return factory;
+      ensureHostSubscribed();
+      factory = function (emit) {
+        var fire = function () { emit(lastValue); };
+        subscribers.add(fire);
+        fire();
+        return function () { subscribers.delete(fire); };
+      };
+      return factory;
+    };
+  })();
+
+  // Banner button (issue-234 iterate): reveal the terminal from the pane,
+  // via the parent's existing bram-open-terminal handler (the
+  // suspicious-silence button's mechanism). No episode bookkeeping — the
+  // reveal flips terminalHidden, which alone clears the derived banner.
+  window.__bramOpenTerminalForAttention = function () {
+    window.parent.postMessage({ type: "bram-open-terminal" }, "*");
+  };
+
+  window.parent.postMessage({ type: "bram-terminal-visibility-request" }, "*");
+})();
+
 // External-driven PTY-throughput bridge (transcript-nav-activity-sparkline).
 // The host emits `pty-throughput` a few times/sec with a 0..1 intensity
 // derived from the byte rate flowing through the PTY reader loop. Subscribers

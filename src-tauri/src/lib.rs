@@ -5194,6 +5194,250 @@ mod reveal_floor_tests {
     }
 }
 
+// issue-234 terminal-attention banner: an unattended interactive prompt at
+// agent *boot* (Codex's hooks re-trust prompt after a Bram upgrade is the
+// motivating specimen) is invisible when the terminal pane is hidden and
+// structurally outside the reveal-floor observer's turn-gated predicate
+// (that one requires an open turn; a boot prompt has none). This detector
+// lives beside reveal-floor in the same pty-throughput ticker and answers a
+// narrower question: no open turn + PTY byte-silence past a flat threshold +
+// a *prompt-shaped* tail. Terminal-pane visibility is parent-window truth
+// that only the client-side bridge (helpers.js) has, so this host predicate
+// intentionally does not gate on it -- the host fires/clears on its own
+// evidence, and the client derives the banner's displayed state as
+// `host.active && terminalHidden === true`.
+const TERMINAL_ATTENTION_SILENT_MS: i64 = 10_000;
+const TERMINAL_ATTENTION_TAIL_CHARS: usize = 1200;
+const TERMINAL_ATTENTION_PREVIEW_CHARS: usize = 160;
+
+// Scope: one classified shape today (the table is deliberately a single
+// row) plus a candidate inventory. Adding a sibling shape later is one
+// table entry plus a test -- see terminal_attention_tests below. What else
+// might belong here (login prompts, resume pickers, ...) is answered
+// empirically by the `op=candidate` observe-only trace line, never guessed
+// at up front.
+fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> {
+    // Markers are lowercase; the tail is lowercased once before matching.
+    // Two generations of the Codex hooks re-trust phrasing are covered:
+    // the 2026-07-28 incident's "Hooks need review / Trust all and
+    // continue" (#234) and the current singular form captured live by the
+    // candidate inventory on 2026-08-08 18:15:45 — "1 hook needs review
+    // before it can r[un] · Hook 1 · new" — which the incident-derived
+    // markers missed on the banner's first live test. Marker upkeep is
+    // specimen-driven: every entry here must trace to a logged
+    // op=candidate or incident capture, never speculation.
+    const HOOKS_TRUST_MARKERS: &[&str] = &[
+        "hooks need review",
+        "hook needs review",
+        "trust all and continue",
+        "press enter to confirm or esc to go back",
+    ];
+    let lower = stripped_tail.to_lowercase();
+    if HOOKS_TRUST_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
+        return Some("hooks-trust");
+    }
+    None
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum TerminalAttentionTransition {
+    Fire { shape: &'static str },
+    Clear { reason: &'static str },
+    Candidate { preview: String },
+}
+
+#[derive(Debug)]
+struct TerminalAttentionTracker {
+    silent_ms: i64,
+    active: bool,
+    shape: Option<&'static str>,
+    // Guards both the Fire and the observe-only Candidate paths to at most
+    // one evaluation per continuous silence episode. Byte-silence means the
+    // tail can't have changed since the last evaluation, so re-checking
+    // every tick would be pure waste on the (overwhelmingly common) idle
+    // case -- this flag is what keeps the detector from touching PTY_TAIL
+    // on every 300ms tick.
+    episode_evaluated: bool,
+}
+
+impl TerminalAttentionTracker {
+    fn new() -> Self {
+        Self {
+            silent_ms: 0,
+            active: false,
+            shape: None,
+            episode_evaluated: false,
+        }
+    }
+
+    // `tail_fn` is invoked at most once per tick, and only on the tick that
+    // actually needs the PTY tail (the threshold-crossing tick of a new
+    // silence episode) -- callers should pass a closure over
+    // `pty_tail_snippet`, not a pre-computed string, so the lock + copy +
+    // ANSI-strip cost is paid only when this detector has something to
+    // decide.
+    fn step<F: FnOnce() -> String>(
+        &mut self,
+        authoritative_open: bool,
+        bytes: usize,
+        tail_fn: F,
+    ) -> Vec<TerminalAttentionTransition> {
+        let mut out = Vec::new();
+
+        if bytes > 0 {
+            self.silent_ms = 0;
+            self.episode_evaluated = false;
+            if self.active {
+                out.push(TerminalAttentionTransition::Clear { reason: "activity" });
+                self.active = false;
+                self.shape = None;
+            }
+            return out;
+        }
+
+        if authoritative_open {
+            // The "no open turn" precondition doesn't hold -- don't accrue
+            // silence toward a fire while a turn is genuinely running. A
+            // real turn opening virtually always also produces PTY bytes at
+            // or before this point, so an already-active state is cleared
+            // via the activity path above in practice; this branch exists
+            // to stop silence from accruing across an open turn, not to
+            // manufacture an extra clear reason beyond what the item specs.
+            self.silent_ms = 0;
+            self.episode_evaluated = false;
+            return out;
+        }
+
+        self.silent_ms = self.silent_ms.saturating_add(REVEAL_FLOOR_TICK_MS);
+        if self.episode_evaluated || self.silent_ms < TERMINAL_ATTENTION_SILENT_MS {
+            return out;
+        }
+        self.episode_evaluated = true;
+
+        if self.active {
+            // Already firing; nothing new until an activity tick clears it.
+            return out;
+        }
+
+        let tail = tail_fn();
+        match terminal_attention_prompt_shape(&tail) {
+            Some(shape) => {
+                self.active = true;
+                self.shape = Some(shape);
+                out.push(TerminalAttentionTransition::Fire { shape });
+            }
+            None => {
+                let preview = bram_trace_preview(&tail, TERMINAL_ATTENTION_PREVIEW_CHARS);
+                out.push(TerminalAttentionTransition::Candidate { preview });
+            }
+        }
+        out
+    }
+}
+
+fn trace_terminal_attention_transition<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    transition: &TerminalAttentionTransition,
+    tracker: &TerminalAttentionTracker,
+) {
+    if !bram_trace_enabled() {
+        return;
+    }
+    match transition {
+        TerminalAttentionTransition::Fire { shape } => append_bram_trace_line(
+            app,
+            "terminal-attention",
+            &format!("op=fire shape={} silence_ms={}", shape, tracker.silent_ms),
+        ),
+        TerminalAttentionTransition::Clear { reason } => append_bram_trace_line(
+            app,
+            "terminal-attention",
+            &format!("op=clear reason={}", reason),
+        ),
+        TerminalAttentionTransition::Candidate { preview } => append_bram_trace_line(
+            app,
+            "terminal-attention",
+            &format!("op=candidate preview={}", preview),
+        ),
+    }
+}
+
+// Mirrors emit_terminal_suspicious_silence: a replayable payload (via
+// emit_replayable_payload / remember_tauri_event) so a just-booted iframe
+// sees a pre-existing fire, not only a live transition. The state + this
+// emit fire regardless of bram_trace_enabled() -- the banner must work with
+// traces off; only the `[terminal-attention]` trace lines above are gated.
+fn emit_terminal_attention<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    active: bool,
+    shape: Option<&str>,
+    now_ms: i64,
+) {
+    emit_replayable_payload(
+        app,
+        "terminal-attention-changed",
+        serde_json::json!({
+            "active": active,
+            "shape": shape,
+            "atMs": now_ms,
+        }),
+    );
+}
+
+#[cfg(test)]
+mod terminal_attention_tests {
+    use super::terminal_attention_prompt_shape;
+
+    #[test]
+    fn hooks_trust_markers_classify() {
+        assert_eq!(
+            terminal_attention_prompt_shape(
+                "Hooks need review before this session can continue."
+            ),
+            Some("hooks-trust")
+        );
+        // The live 2026-08-08 18:15:45 candidate capture — current Codex
+        // phrasing (singular, hard-wrapped mid-word by the grid), which the
+        // incident-derived markers missed on the banner's first field test.
+        assert_eq!(
+            terminal_attention_prompt_shape(
+                "PreToolUse hooks1 hook needs review before it can r[!] Hook 1 \u{b7} newEventPreToolUseMatcher^(apply_patch|Bash|Write|Edit|mcp__.*)$SourceUser config - ~/.codex/con"
+            ),
+            Some("hooks-trust")
+        );
+        assert_eq!(
+            terminal_attention_prompt_shape("Press enter to confirm or esc to go back"),
+            Some("hooks-trust")
+        );
+        assert_eq!(
+            terminal_attention_prompt_shape(
+                "1. Review hooks 2. Trust all and continue 3. Continue without trusting"
+            ),
+            Some("hooks-trust")
+        );
+    }
+
+    #[test]
+    fn plain_shell_tails_do_not_classify() {
+        assert_eq!(terminal_attention_prompt_shape("~/bram$ "), None);
+        assert_eq!(terminal_attention_prompt_shape("jonudell@mac bram % "), None);
+        assert_eq!(
+            terminal_attention_prompt_shape(
+                "I've read the file and will now make the requested edit to lib.rs."
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn empty_tail_is_none() {
+        assert_eq!(terminal_attention_prompt_shape(""), None);
+    }
+}
+
 // Cached snapshot of the Claude PTY's rotating status line ("Meandering…
 // (1m 53s · ↓ 5.8k tokens)"). Surfaced via /__agent-status and the
 // `agent-status-changed` Tauri event so the Worklist tab can render a
@@ -11872,6 +12116,10 @@ fn pty_spawn(
             // Terminal visibility remains parent-window truth and gates the
             // warning in helpers.js, so this host loop never polls WebView DOM.
             let mut reveal_floor = RevealFloorTracker::new();
+            // issue-234 terminal-attention: sibling detector on the same
+            // ticker, narrower and turn-agnostic (see the tracker doc
+            // comment above its definition).
+            let mut terminal_attention = TerminalAttentionTracker::new();
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(TICK_MS));
                 let bytes = pty_throughput_bytes().swap(0, Ordering::Relaxed);
@@ -11993,6 +12241,32 @@ fn pty_spawn(
                             &input,
                         ),
                         _ => {}
+                    }
+                }
+                for transition in
+                    terminal_attention.step(authoritative_open, bytes, || {
+                        pty_tail_snippet(TERMINAL_ATTENTION_TAIL_CHARS)
+                    })
+                {
+                    trace_terminal_attention_transition(
+                        &app_for_throughput,
+                        &transition,
+                        &terminal_attention,
+                    );
+                    match transition {
+                        TerminalAttentionTransition::Fire { shape } => emit_terminal_attention(
+                            &app_for_throughput,
+                            true,
+                            Some(shape),
+                            now_ms,
+                        ),
+                        TerminalAttentionTransition::Clear { .. } => emit_terminal_attention(
+                            &app_for_throughput,
+                            false,
+                            None,
+                            now_ms,
+                        ),
+                        TerminalAttentionTransition::Candidate { .. } => {}
                     }
                 }
             }

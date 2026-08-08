@@ -152,6 +152,18 @@
   <ChangeListener
     listenTo="{sendRestoreEvt.value &amp;&amp; sendRestoreEvt.value.tick}"
     onDidChange="() => window.__bramApplySendRestore(sendRestoreEvt.value, footerComposerBox)" />
+  <!-- issue-234 terminal-attention banner: host-detected unattended boot
+       prompt (no open turn + PTY byte-silence + prompt-shaped tail),
+       joined client-side with terminal-pane visibility — only the parent
+       shell knows that half. Sibling to the suspicious-silence PushSource
+       in FooterAgentStatus.xmlui, but declared here (not per-component)
+       because the banner itself renders in this footer, beside the
+       send-ledger notice below. The source is push-only; it adds no
+       polling or independent refresh loop. -->
+  <PushSource
+    id="terminalAttentionEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTerminalAttention()}" />
   <!-- toast-issue-closed-on-push: toast when the user's Push auto-closes a
        queued issue. Host emits issues-closed-on-push after the close flush. -->
   <PushSource
@@ -814,6 +826,31 @@
             size="xs"
             tooltip="Dismiss this notice"
             onClick="sendNoticeDismissed = window.__bramDismissSendNotice(window.__bramSendLedgerNoticeKey(sendLedgerDs.value))" />
+        </HStack>
+      </VStack>
+      <!-- Terminal-attention banner (issue-234): fires only when the host
+           detector is active AND the terminal pane is hidden (derived in
+           the bramSubscribeTerminalAttention bridge, helpers.js). No
+           dismiss button by design — it clears itself on PTY activity
+           (host-side) or when the terminal becomes visible (client-side
+           join), so there is nothing to hand-dismiss. -->
+      <VStack
+        when="{terminalAttentionEvt.value &amp;&amp; terminalAttentionEvt.value.active}"
+        padding="$space-2"
+        gap="$space-1"
+        backgroundColor="$color-warn-50"
+        borderTop="1px solid $color-warn-200">
+        <HStack gap="$space-2" verticalAlignment="center">
+          <Text
+            fontSize="$fontSize-sm"
+            width="*"
+            color="$color-warn-700"
+            value="The terminal is waiting at a prompt Bram can't answer." />
+          <Button
+            label="Open terminal"
+            variant="outlined"
+            size="xs"
+            onClick="window.__bramOpenTerminalForAttention()" />
         </HStack>
       </VStack>
       <!-- issue-231 footer tips: one context-driven, dismissible Tip line at

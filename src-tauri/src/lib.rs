@@ -1467,30 +1467,38 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
     // (adopt-grid-labels-on-join: the grid's own phrasing is authoritative
     // for what an option grants; Bram's synthesized labels can understate
     // rule scope — 2026-07-19 pmset specimen).
-    let grid_view: Option<(Vec<String>, String, Vec<MenuOption>, bool)> =
-        latest_grid_menu_cell().lock().ok().and_then(|g| {
-            g.as_ref()
-                .filter(|s| {
-                    (unix_now_ms() as u128).saturating_sub(s.ts_ms) < CLAIM_JOIN_GRID_FRESH_MS
-                })
-                .map(|s| {
-                    let labels: Vec<String> = s
-                        .options
-                        .iter()
-                        .map(|o| normalized_menu_label(&o.label))
-                        .collect();
-                    let scene = normalized_menu_label(&format!(
-                        "{} {}",
-                        s.header,
-                        s.above.join(" ")
-                    ));
-                    (labels, scene, s.options.clone(), s.picker)
-                })
+    let grid_view: Option<(
+        Vec<String>,
+        String,
+        Vec<MenuOption>,
+        bool,
+        Vec<String>,
+        String,
+    )> = latest_grid_menu_cell().lock().ok().and_then(|g| {
+        g.as_ref()
+            .filter(|s| (unix_now_ms() as u128).saturating_sub(s.ts_ms) < CLAIM_JOIN_GRID_FRESH_MS)
+            .map(|s| {
+                let labels: Vec<String> = s
+                    .options
+                    .iter()
+                    .map(|o| normalized_menu_label(&o.label))
+                    .collect();
+                let scene = normalized_menu_label(&format!("{} {}", s.header, s.above.join(" ")));
+                (
+                    labels,
+                    scene,
+                    s.options.clone(),
+                    s.picker,
+                    s.above.clone(),
+                    s.header.clone(),
+                )
+            })
+    });
+    let joined: Option<(&HookMenuClaim, &'static str)> =
+        grid_view.as_ref().and_then(|(gl, scene, _, _, _, _)| {
+            select_grid_joined_claim(&selectable_claims, gl, scene)
         });
-    let joined: Option<(&HookMenuClaim, &'static str)> = grid_view
-        .as_ref()
-        .and_then(|(gl, scene, _, _)| select_grid_joined_claim(&selectable_claims, gl, scene));
-    let grid_labels = grid_view.as_ref().map(|(gl, _, _, _)| gl);
+    let grid_labels = grid_view.as_ref().map(|(gl, _, _, _, _, _)| gl);
     // Optimistic single-claim display: PermissionRequest fires BEFORE the
     // prompt renders, so the grid can't corroborate the very first claim
     // yet. The claim-add path schedules a short coalescing window; only a
@@ -1551,7 +1559,7 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
     // same-tool prompts are structurally safe — prompt B's own claim
     // arrives at pose time, making the queue ambiguous → bare.
     let tool_join: Result<&HookMenuClaim, &'static str> = match grid_view.as_ref() {
-        Some((_, _, _, true)) => Err("picker"),
+        Some((_, _, _, true, _, _)) => Err("picker"),
         Some(_) => {
             let answered_id: Option<String> = pty_menu_suppressed_cell()
                 .lock()
@@ -1610,7 +1618,7 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
         Show::Nothing => None,
         Show::Claim(claim, how) => {
             let mut menu = claim.menu.clone();
-            if let Some((_, _, raw, _)) = grid_view.as_ref() {
+            if let Some((_, _, raw, _, _, _)) = grid_view.as_ref() {
                 menu.options = grid_options_preserving_answer_keys(&menu.options, raw);
             }
             let labels: Vec<String> = menu
@@ -1621,26 +1629,13 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
             Some((menu, labels, claim.id_key.clone(), how, claim.tool_use_id.clone()))
         }
         Show::Grid => {
-            let (_, _, raw, is_picker) = grid_view.as_ref().unwrap();
+            let (_, _, raw, is_picker, above, header) = grid_view.as_ref().unwrap();
             // A bare rescue: no claim could be promoted (tool-join handles
-            // the enriched case with full claim identity), so the grid's
-            // own options render alone under the inferred-tool header.
-            let menu = PtyMenu {
-                // detect-session-resume-picker: a grid-classified picker
-                // (session resume et al) is a CLI prompt, not a tool
-                // approval — label it Picker so the pane and the
-                // send-gate's hold trace name it truthfully instead of
-                // the grid-rescue "Bash" default.
-                tool: if *is_picker { "Picker" } else { "Bash" }.to_string(),
-                text: String::new(),
-                options: raw.clone(),
-                tool_call_signature: None,
-                tool_call_diff: None,
-                tool_call_content: None,
-                cache_source: Some("grid-rescue".to_string()),
-                at_host_ms: Some(now),
-                signature_source: Some("grid"),
-            };
+            // the enriched case with full claim identity), so use the same
+            // fresh grid snapshot for both its options and command preview.
+            // Pickers keep options-only rendering because their options are
+            // the content rather than a tool approval.
+            let menu = grid_rescue_menu(raw, *is_picker, above, header, now);
             let labels: Vec<String> = menu
                 .options
                 .iter()
@@ -4584,7 +4579,7 @@ fn grid_menu_line_is_command_chrome(line: &str) -> bool {
         return true;
     }
     let lc = trimmed.to_lowercase();
-    if lc == "bash command"
+    if lc.starts_with("bash command")
         || lc.contains("would you like")
         || lc.contains("do you want")
         || lc.contains("requires approval")
@@ -4638,6 +4633,45 @@ fn grid_menu_command_preview(grid_above: &[String], grid_header: &str) -> String
         command = grid_header.trim().to_string();
     }
     command
+}
+
+fn grid_rescue_menu(
+    options: &[MenuOption],
+    is_picker: bool,
+    grid_above: &[String],
+    grid_header: &str,
+    now: i64,
+) -> PtyMenu {
+    PtyMenu {
+        // detect-session-resume-picker: a grid-classified picker (session
+        // resume et al) is a CLI prompt, not a tool approval — label it
+        // Picker and leave its content in the options instead of inventing a
+        // command preview.
+        tool: if is_picker { "Picker" } else { "Bash" }.to_string(),
+        text: if is_picker {
+            String::new()
+        } else {
+            // Suppress the header-echo fallback (2026-08-08 field capture:
+            // a mid-paint grid snapshot had no command lines, so the
+            // preview fell back to the header and the card echoed "Do you
+            // want to proceed?" — restating the question is worse than no
+            // preview). A produced preview that is itself menu chrome
+            // renders as nothing; options-only beats the echo.
+            let preview = grid_menu_command_preview(grid_above, grid_header);
+            if grid_menu_line_is_command_chrome(&preview) {
+                String::new()
+            } else {
+                preview
+            }
+        },
+        options: options.to_vec(),
+        tool_call_signature: None,
+        tool_call_diff: None,
+        tool_call_content: None,
+        cache_source: Some("grid-rescue".to_string()),
+        at_host_ms: Some(now),
+        signature_source: Some("grid"),
+    }
 }
 
 // True when the grid snapshot is positively a Bash approval menu. Gates the
@@ -31908,6 +31942,82 @@ mod pty_menu_tests {
         assert_eq!(
             super::grid_menu_command_preview(&above, "Bash command"),
             "$ rg -n \"grid-menu\" src-tauri/src/lib.rs"
+        );
+    }
+
+    #[test]
+    fn grid_menu_command_preview_filters_subagent_bash_title() {
+        let above = vec![
+            "Bash command · from the general-purpose agent".to_string(),
+            "────".to_string(),
+            "$ python scripts/backfill_scraper_feeds.py --dry-run".to_string(),
+            "Do you want to proceed?".to_string(),
+        ];
+
+        assert_eq!(
+            super::grid_menu_command_preview(&above, "Do you want to proceed?"),
+            "$ python scripts/backfill_scraper_feeds.py --dry-run"
+        );
+    }
+
+    #[test]
+    fn grid_rescue_carries_command_preview_but_picker_does_not() {
+        let options = vec![super::MenuOption {
+            key: "1".to_string(),
+            label: "Yes".to_string(),
+            answer_keys: None,
+            description: None,
+        }];
+        let above = vec![
+            "Bash command · from the general-purpose agent".to_string(),
+            "$ python scripts/backfill_scraper_feeds.py --dry-run".to_string(),
+            "Do you want to proceed?".to_string(),
+        ];
+
+        let rescue = super::grid_rescue_menu(
+            &options,
+            false,
+            &above,
+            "Do you want to proceed?",
+            123,
+        );
+        assert_eq!(rescue.tool, "Bash");
+        assert_eq!(
+            rescue.text,
+            "$ python scripts/backfill_scraper_feeds.py --dry-run"
+        );
+        assert_eq!(rescue.options.len(), 1);
+        assert_eq!(rescue.cache_source.as_deref(), Some("grid-rescue"));
+
+        let picker = super::grid_rescue_menu(&options, true, &above, "Resume session", 123);
+        assert_eq!(picker.tool, "Picker");
+        assert!(picker.text.is_empty());
+    }
+
+    // The 2026-08-08 field capture: a mid-paint grid snapshot with no
+    // command lines made grid_menu_command_preview fall back to the header,
+    // and the pane's preview box echoed "Do you want to proceed?". The
+    // rescue must render options-only instead of restating the question.
+    #[test]
+    fn grid_rescue_suppresses_header_echo_preview() {
+        let options = vec![super::MenuOption {
+            key: "1".to_string(),
+            label: "Yes".to_string(),
+            answer_keys: None,
+            description: None,
+        }];
+        let chrome_only = vec!["Do you want to proceed?".to_string(), "────".to_string()];
+        let rescue = super::grid_rescue_menu(
+            &options,
+            false,
+            &chrome_only,
+            "Do you want to proceed?",
+            123,
+        );
+        assert_eq!(rescue.tool, "Bash");
+        assert!(
+            rescue.text.is_empty(),
+            "chrome-shaped fallback must not become a preview"
         );
     }
 

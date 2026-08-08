@@ -1005,7 +1005,7 @@ If the item carries `closesIssues` (because the agent detected the commit is lik
 
 If the item carries `closesIssues`, this opens the close-issue confirm dialog first, same as Approve on TO COMMIT. Any text in the per-item feedback box travels with the approval.
 
-Shown only when `worklist.oneClickApproveCommit` is enabled in project config." />
+On by default; turn it off with the **One-click Approve &amp; commit** switch in the Settings tab (`worklist.oneClickApproveCommit: false`)." />
         <HStack>
           <Button label="Got it" onClick="approveCommitHelpDialog.close()" />
         </HStack>

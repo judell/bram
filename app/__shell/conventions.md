@@ -412,8 +412,8 @@ proposal, then `mutate op:"advance"`.
 
 **Apply-and-commit gate: skip `advance` — edit, then `worklist-commit`.**
 When an approved item's `gate` is `apply-and-commit` (the user clicked the
-one-click **Approve & commit** button on a `proposed` item — shown only when
-`worklist.oneClickApproveCommit` is enabled), collapse both gates into one
+one-click **Approve & commit** button on a `proposed` item — shown unless
+`worklist.oneClickApproveCommit` is set to `false`; on by default), collapse both gates into one
 turn: make the proposed file edits, then call `worklist-commit { ids, message }`
 directly. Do **not** `mutate op:"advance"` first — the host commits the
 still-`proposed` item's files (authorized by the `commitToo` auth record the

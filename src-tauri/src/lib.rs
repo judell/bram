@@ -13215,11 +13215,15 @@ fn project_config_batch_commit_actions(config: Option<ProjectConfig>) -> bool {
         .unwrap_or(false)
 }
 
+// Default ON: the Approve & commit button shows on proposed items unless
+// the project explicitly sets `worklist.oneClickApproveCommit: false`
+// (Settings → One-click Approve & commit). The two-stage Approve →
+// TO COMMIT flow remains available alongside it either way.
 fn project_config_one_click_approve_commit(config: Option<ProjectConfig>) -> bool {
     config
         .and_then(|c| c.worklist)
         .and_then(|w| w.one_click_approve_commit)
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 fn project_config_mirror_worklist_lifecycle_to_issue(config: Option<ProjectConfig>) -> bool {

@@ -178,23 +178,14 @@ struct PendingIssueClose {
     created_at_ms: i64,
 }
 
+// Single opt-out phrase (opt-out-single-phrase-and-audit): narrowed from a
+// seven-phrase list to the one explicit phrase, mirrored verbatim in
+// claude-worklist-guard.py's and codex-worklist-guard.py's
+// _OPT_OUT_PATTERNS. The Skip worklist button / `skip-worklist:` prefix
+// remain a separate, non-verbal route unaffected by this function.
 fn turn_text_has_direct_edit_opt_out(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("just do it")
-        || lower.contains("skip the worklist")
-        || lower.contains("inline fix")
-        || lower.contains("inline the fix")
-        || lower.contains("don't bother with the worklist")
-        || lower.contains("dont bother with the worklist")
-        || lower.contains("commit this directly")
-        || lower.contains("commit that directly")
-        || lower.contains("commit it directly")
-        || lower.contains("commit directly, no worklist")
-        || lower.contains("commit directly. no worklist")
-        || lower.contains("commit directly no worklist")
-        || lower.contains("no worklist for this")
-        || lower.contains("no worklist for that")
-        || lower.contains("no worklist here")
 }
 
 // Cross-platform home directory: $HOME on Unix, %USERPROFILE% on Windows.
@@ -23581,6 +23572,18 @@ fn audit_ledger_cell() -> &'static Mutex<()> {
     AUDIT_LEDGER_LOCK.get_or_init(|| Mutex::new(()))
 }
 
+// Process-local dedup cell for POST /__audit/direct-edit
+// (opt-out-single-phrase-and-audit). The Claude worklist guard fires once
+// per tool call inside an opted-out turn, so it would POST this route
+// several times for one turn; the ledger's contract is one direct-edit
+// record per turn. Holds the last-seen `turnKey` (a hash of the matched
+// user message, stable across the turn's tool calls) — a repeat is
+// deduped without appending.
+static AUDIT_DIRECT_EDIT_LAST_TURN_KEY: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+fn audit_direct_edit_last_turn_key_cell() -> &'static Mutex<Option<String>> {
+    AUDIT_DIRECT_EDIT_LAST_TURN_KEY.get_or_init(|| Mutex::new(None))
+}
+
 // Pure: stamp `record` with `atMs` / `at`, redact string values
 // per-field, and serialize compact. Per-field rather than whole-line
 // because the redactor's token patterns match any 40-char hex string —
@@ -37326,6 +37329,71 @@ fn handle_queue_save<R: tauri::Runtime>(
     }
 }
 
+// POST /__audit/direct-edit — audit-only breadcrumb route
+// (opt-out-single-phrase-and-audit). Codex prose opt-outs already record a
+// `direct-edit` audit line via the host `toTurn` matcher
+// (record_codex_direct_edit_authorization); the Claude worklist guard has
+// no equivalent host chokepoint on its opt-out allow path, so it POSTs
+// here instead. Body: {"provider", "source", "turnKey"}. This route MUST
+// NOT write resources/.worklist-authorization.json — it never authorizes
+// anything, it only records that the guard already allowed a direct edit.
+fn handle_audit_direct_edit<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    body: &[u8],
+) -> (u16, &'static str, Vec<u8>) {
+    let v: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                400,
+                "application/json; charset=utf-8",
+                format!("{{\"error\":\"invalid JSON: {}\"}}", e).into_bytes(),
+            );
+        }
+    };
+    let provider = v
+        .get("provider")
+        .and_then(|p| p.as_str())
+        .unwrap_or("")
+        .to_string();
+    let source = v
+        .get("source")
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("claude-guard-opt-out")
+        .to_string();
+    let turn_key = v
+        .get("turnKey")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if !turn_key.is_empty() {
+        if let Ok(mut last) = audit_direct_edit_last_turn_key_cell().lock() {
+            if last.as_deref() == Some(turn_key.as_str()) {
+                return (
+                    200,
+                    "application/json; charset=utf-8",
+                    b"{\"ok\":true,\"deduped\":true}".to_vec(),
+                );
+            }
+            *last = Some(turn_key);
+        }
+    }
+
+    let mut rec = audit_authorization_record("direct-edit", &[] as &[String], &source, false);
+    if let Some(obj) = rec.as_object_mut() {
+        obj.insert("provider".to_string(), serde_json::json!(provider));
+    }
+    append_audit_record(app, rec);
+
+    (
+        200,
+        "application/json; charset=utf-8",
+        b"{\"ok\":true}".to_vec(),
+    )
+}
+
 fn handle_iterate_end<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
@@ -38455,13 +38523,14 @@ mod worklist_authorization_tests {
     }
 
     #[test]
-    fn direct_edit_opt_out_matches_explicit_phrases_only() {
+    fn direct_edit_opt_out_matches_explicit_phrase_only() {
         assert!(turn_text_has_direct_edit_opt_out(
             "create foo.bar on the Desktop. just do it."
         ));
-        assert!(turn_text_has_direct_edit_opt_out("Skip the worklist"));
-        assert!(turn_text_has_direct_edit_opt_out("commit this directly"));
-        assert!(turn_text_has_direct_edit_opt_out("no worklist here"));
+        // Retired phrases (opt-out-single-phrase-and-audit) no longer opt out.
+        assert!(!turn_text_has_direct_edit_opt_out("Skip the worklist"));
+        assert!(!turn_text_has_direct_edit_opt_out("commit this directly"));
+        assert!(!turn_text_has_direct_edit_opt_out("no worklist here"));
         assert!(!turn_text_has_direct_edit_opt_out("looks good"));
         assert!(!turn_text_has_direct_edit_opt_out("go ahead"));
     }
@@ -39439,6 +39508,14 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             let mut buf = Vec::new();
             let _ = request.as_reader().read_to_end(&mut buf);
             handle_worklist_commit(app, &buf)
+        }
+    } else if path == "__audit/direct-edit" {
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            let mut buf = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut buf);
+            handle_audit_direct_edit(app, &buf)
         }
     } else if path == "__describe-command" {
         if method != "POST" {

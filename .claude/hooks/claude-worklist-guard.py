@@ -11,16 +11,16 @@ Two responsibilities:
 2. Writes/Edits to any OTHER file in the project — require the target file
    to be covered by a proposed/applied item in resources/worklist.json, OR
    a fresh direct-edit bypass record in resources/.worklist-authorization.json,
-   OR an explicit opt-out phrase in the last user message ("just do it",
-   "commit directly, no worklist", "inline the fix", "skip the worklist",
-   "no worklist for this/that"). Mirrors the coverage check the codex-side
-   hook (app/provider-hooks/codex-worklist-guard.py) does for apply_patch.
+   OR the single explicit opt-out phrase "just do it" in the last user
+   message. Mirrors the coverage check the codex-side hook
+   (app/provider-hooks/codex-worklist-guard.py) does for apply_patch.
 
 If the project lacks resources/.worklist-authorization.json (the managed-repo
 marker Bram Setup writes), the hook exits 0 (allow) — Claude
 sessions in unmanaged repos run as if no hook were installed.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -207,20 +207,15 @@ def _trace_hook(event, tool, target, decision, reason, cwd=None):
     _post_hook_trace("claude-worklist-guard.py", event, tool, target, decision, reason, cwd)
 
 
-# Opt-out phrases that authorize a one-turn direct edit. Matched
-# case-insensitively against the last user message. Kept narrow and
-# explicit — anything ambiguous ("looks good", "go ahead") is NOT here,
-# matching the conventions' "Don't infer commit/drop/advance from feedback"
-# rule. Each pattern requires the user to type something obviously about
-# bypassing the worklist; passive approval doesn't count.
+# The single opt-out phrase that authorizes a one-turn direct edit. Matched
+# case-insensitively against the last user message. Narrowed from a
+# seven-regex list (opt-out-single-phrase-and-audit) to one explicit phrase
+# — anything ambiguous ("looks good", "go ahead") is NOT here, matching the
+# conventions' "Don't infer commit/drop/advance from feedback" rule. The
+# non-verbal route (the Skip worklist button / `skip-worklist:` prefix)
+# is unaffected and lives in the host, not here.
 _OPT_OUT_PATTERNS = [
     re.compile(r"\bjust do it\b", re.IGNORECASE),
-    re.compile(r"\bcommit\s+(this|that|it)\s+directly\b", re.IGNORECASE),
-    re.compile(r"\bcommit directly[,\.\s]+no worklist\b", re.IGNORECASE),
-    re.compile(r"\bno worklist\s+(for\s+(this|that)|here)\b", re.IGNORECASE),
-    re.compile(r"\bskip the worklist\b", re.IGNORECASE),
-    re.compile(r"\binline (the )?fix\b", re.IGNORECASE),
-    re.compile(r"\bdon'?t bother with the worklist\b", re.IGNORECASE),
 ]
 
 
@@ -262,6 +257,35 @@ def has_opt_out(msg):
     if not isinstance(msg, str):
         return False
     return any(rx.search(msg) for rx in _OPT_OUT_PATTERNS)
+
+
+def _post_direct_edit_audit_breadcrumb(project_root, last_msg):
+    """Best-effort breadcrumb POST to /__audit/direct-edit so a Claude
+    prose opt-out lands in the audit ledger the same way a Codex prose
+    opt-out or the Skip worklist button already does (opt-out-single-
+    phrase-and-audit). Mirrors the fire-and-forget pattern in
+    claude-permission-menu-hook.py: short timeout, silent failure — the
+    guard must never block or fail a tool call because Bram is down."""
+    try:
+        with open(os.path.join(project_root, "resources", ".bram-port")) as f:
+            port = int(f.read().strip())
+        turn_key = hashlib.sha256(last_msg.encode("utf-8")).hexdigest()
+        body = json.dumps(
+            {
+                "provider": "claude",
+                "source": "claude-guard-opt-out",
+                "turnKey": turn_key,
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            "http://127.0.0.1:%d/__audit/direct-edit" % port,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=0.4).read()
+    except Exception:
+        pass
 
 
 def find_project_root(start):
@@ -378,14 +402,14 @@ def deny_coverage(target_rel, opt_out_attempted):
         f"  - Propose the change in resources/worklist.json first (item with "
         f"file=\"{target_rel}\", non-empty before and after, status proposed). "
         f"Wait for the user's approved: payload, then retry.\n"
-        f"  - Opt-out phrases the user can type to authorize a direct edit: "
-        f"\"just do it\", \"commit this directly\", \"no worklist for this\", "
-        f"\"skip the worklist\", \"inline the fix\"."
+        f"  - The user can authorize a direct edit by ending their message "
+        f"with \"just do it\", or by clicking the Skip worklist button."
     )
     if opt_out_attempted:
         msg += (
             "\n  - (Detected what looked like opt-out language, but it didn't "
-            "match the expected phrasing. Be explicit.)"
+            "match the expected phrasing. The verbal opt-out is exactly "
+            "\"just do it\"; otherwise use the Skip worklist button.)"
         )
     _trace_hook(
         "PreToolUse",
@@ -697,6 +721,7 @@ def main():
         sys.exit(0)
     last_msg = last_user_text(payload.get("transcript_path", ""))
     if has_opt_out(last_msg):
+        _post_direct_edit_audit_breadcrumb(project_root, last_msg)
         _trace_hook("PreToolUse", tool_name, rel, "allow", "opt-out-phrase")
         sys.exit(0)
     deny_coverage(rel, opt_out_attempted=("worklist" in (last_msg or "").lower()

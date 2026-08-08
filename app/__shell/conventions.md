@@ -123,17 +123,29 @@ audit trail for what landed and why.
 Skip the worklist only in these specific contexts, never because the
 change is "small":
 
-- **Explicit user opt-out in this turn.** The user ends with
-"just do it" or "skip the worklist". The opt-out must be in the same turn
- as the change request — don't carry it forward across turns or infer it from past patterns.
- Both Claude and Codex honor the same phrase list, but along different paths:
+- **Explicit user opt-out in this turn.** The user ends their message with
+ the single phrase "just do it" (case-insensitive). The opt-out must be in
+ the same turn as the change request — don't carry it forward across turns
+ or infer it from past patterns. Retired phrases ("skip the worklist",
+ "commit this directly", "inline the fix", "no worklist for this", "don't
+ bother with the worklist") no longer opt out — narrowed
+ (opt-out-single-phrase-and-audit) from a seven-regex list to one explicit
+ phrase, to cut the risk of an accidental match in ordinary prose. Both
+ Claude and Codex honor the same phrase, but along different paths:
  Claude's guard matches `_OPT_OUT_PATTERNS` against `transcript_path` on every
  `PreToolUse` and allows inline; for Codex, Bram's host-side `toTurn` path
- matches the same list and writes a one-turn `direct-edit` record
+ matches the same phrase and writes a one-turn `direct-edit` record
  (`kind:"direct-edit"`, `paths:["*"]`, 1h TTL) to
  `resources/.worklist-authorization.json`, which the single Codex
- `PreToolUse` hook reads via `fresh_bypass()`. The phrases themselves are
+ `PreToolUse` hook reads via `fresh_bypass()`. The phrase itself is
  identical, so the user-facing contract is the same regardless of agent.
+ Codex prose opt-outs record a `direct-edit` line in the audit ledger via
+ that same host `toTurn` path; Claude prose opt-outs have no equivalent
+ host chokepoint on their allow path, so the Claude guard instead POSTs a
+ best-effort breadcrumb to `POST /__audit/direct-edit` right before
+ allowing — one `direct-edit` audit-ledger record per opted-out turn,
+ deduped host-side so the guard's per-tool-call firing doesn't produce
+ duplicates.
 
 - **`skip-worklist:` structured prefix on this turn.** The user's
   turn begins literally with `skip-worklist: ` followed by the

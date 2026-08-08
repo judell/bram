@@ -732,11 +732,13 @@ def self_test():
             [],
         )
 
-        # Opt-out parity (#186): matching phrases write a fresh
-        # kind:"direct-edit" record at AUTH_REL, others don't.
+        # Opt-out parity (#186; narrowed to a single phrase by
+        # opt-out-single-phrase-and-audit): matching the one phrase
+        # writes a fresh kind:"direct-edit" record at AUTH_REL, retired
+        # phrases no longer do.
         assert has_opt_out("just do it")
-        assert has_opt_out("Skip the worklist")
-        assert has_opt_out("commit this directly")
+        assert not has_opt_out("Skip the worklist")
+        assert not has_opt_out("commit this directly")
         assert not has_opt_out("looks good")
         assert not has_opt_out("go ahead and merge")
         assert not has_opt_out("")
@@ -893,19 +895,13 @@ def looks_like_change_request(prompt):
     return bool(_CHANGE_KEYWORDS.search(prompt))
 
 
-# Opt-out phrases that authorize a one-turn direct edit. Mirrors Claude's
+# Opt-out phrase that authorizes a one-turn direct edit. Mirrors Claude's
 # _OPT_OUT_PATTERNS verbatim so the user-facing contract is identical
 # regardless of agent. Anything ambiguous ("looks good", "go ahead") is
 # deliberately NOT here — matches the conventions' "Don't infer
 # commit/drop/advance from feedback" rule.
 _OPT_OUT_PATTERNS = [
     re.compile(r"\bjust do it\b", re.IGNORECASE),
-    re.compile(r"\bcommit\s+(this|that|it)\s+directly\b", re.IGNORECASE),
-    re.compile(r"\bcommit directly[,\.\s]+no worklist\b", re.IGNORECASE),
-    re.compile(r"\bno worklist\s+(for\s+(this|that)|here)\b", re.IGNORECASE),
-    re.compile(r"\bskip the worklist\b", re.IGNORECASE),
-    re.compile(r"\binline (the )?fix\b", re.IGNORECASE),
-    re.compile(r"\bdon'?t bother with the worklist\b", re.IGNORECASE),
 ]
 
 

@@ -997,20 +997,28 @@ function __gridDetectMenu(rows) {
       if (/Esc to cancel|esc to cancel|Press enter to confirm/i.test(t))
         inOption = false;
       else {
-        // wrap-aware option parser (tool-join iterate): a row can only
-        // CONTINUE an option label if the row it extends actually filled
-        // the terminal width — soft wraps and ink's hard-wrapped layout
-        // both fill the row before spilling. A short anchor ("  3. No")
-        // cannot wrap, so an unnumbered row after it is stale frame
-        // debris; appending it corrupted the label to "Nommands"
-        // (2026-07-24 04:55 specimen, wrapped option 2 + repaint).
-        // Ignoring debris keeps inOption so a following numbered option
-        // still parses; worst case is a truncated label, never a blend.
+        // wrap-aware option parser (grid-menu-join-word-wrapped-labels):
+        // accept xterm soft wraps, full-width anchors, and Ink's hard
+        // word-boundary wraps. Ink moves a long next token wholesale even
+        // when the anchor row itself is well short of the edge; that is a
+        // genuine continuation iff the first token would not have fit on
+        // the anchor. A short anchor ("  3. No") plus a short repaint
+        // fragment still fails every signal, preserving the guard against
+        // the historical "Nommands" debris join (2026-07-24 04:55).
         const prev = opts[opts.length - 1];
         const anchor = rows[prev.rowEnd] ? rows[prev.rowEnd].text : "";
         const cols = (typeof term !== "undefined" && term && term.cols) || 80;
-        if (anchor.length >= cols - 2) {
-          prev.label += " " + t.trim();
+        const firstWord = t.trim().split(/\s+/, 1)[0] || "";
+        const softWrapped = !!rows[r].wrapped;
+        const filledAnchor = anchor.length >= cols - 2;
+        const wordBoundaryWrapped =
+          firstWord.length > 0 && anchor.length + 1 + firstWord.length >= cols - 2;
+        if (softWrapped || filledAnchor || wordBoundaryWrapped) {
+          // Ink also treats a slash as a legal hard-wrap boundary inside a
+          // token (for example `/usr/` + `bin/stat`). Preserve that token;
+          // ordinary word-boundary wraps still need the separating space.
+          const separator = /[\\/]$/.test(anchor.trimEnd()) ? "" : " ";
+          prev.label += separator + t.trim();
           prev.rowEnd = r;
         }
       }

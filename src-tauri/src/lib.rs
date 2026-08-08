@@ -12540,8 +12540,25 @@ fn record_skip_worklist_authorization<R: tauri::Runtime>(app: &AppHandle<R>, tur
         );
     }
     if let Ok(body) = serde_json::to_string_pretty(&record) {
-        if let Err(e) = std::fs::write(&path, format!("{}\n", body)) {
-            eprintln!("[worklist-auth] write {} failed: {}", path.display(), e);
+        match std::fs::write(&path, format!("{}\n", body)) {
+            Ok(()) => {
+                let provider = current_provider(app)
+                    .map(session_provider_label)
+                    .unwrap_or_default();
+                let mut rec = audit_authorization_record(
+                    "direct-edit",
+                    &[] as &[String],
+                    "host-skip-worklist-prefix",
+                    false,
+                );
+                if let Some(obj) = rec.as_object_mut() {
+                    obj.insert("provider".to_string(), serde_json::json!(provider));
+                }
+                append_audit_record(app, rec);
+            }
+            Err(e) => {
+                eprintln!("[worklist-auth] write {} failed: {}", path.display(), e);
+            }
         }
     }
 }
@@ -23547,6 +23564,101 @@ fn append_strand_forensics_line<R: tauri::Runtime>(app: &AppHandle<R>, body: &st
     }
 }
 
+// issue-229 lean audit ledger: always-on, append-only JSONL record of
+// authorization decisions and Bram-gated commits at
+// resources/audit-ledger.jsonl (gitignored: machine-local operational
+// evidence, deliberately untracked). NOT gated by bram_trace_enabled()
+// — traces off must not disable it. Best-effort like strand-forensics:
+// an append failure logs to stderr and never fails the approval or
+// commit it records ("always-on" means ungated, not fail-closed or
+// tamper-evident). Metadata only — no request text, feedback, commit
+// messages, diffs, or file contents; the serialized line still passes
+// the credential redactor as defense in depth. Appends serialize
+// through a process-local mutex so concurrent host actions cannot
+// interleave lines.
+static AUDIT_LEDGER_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+fn audit_ledger_cell() -> &'static Mutex<()> {
+    AUDIT_LEDGER_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+// Pure: stamp `record` with `atMs` / `at`, serialize compact, and redact.
+// Returns a single line with no trailing newline.
+fn audit_record_line(record: &serde_json::Value, at_ms: i64) -> String {
+    let mut stamped = record.clone();
+    if let Some(obj) = stamped.as_object_mut() {
+        obj.insert("atMs".to_string(), serde_json::json!(at_ms));
+        obj.insert(
+            "at".to_string(),
+            serde_json::json!(format_iso_utc_ms(at_ms)),
+        );
+    }
+    let line = stamped.to_string();
+    redact_sensitive_text(&line).0
+}
+
+fn audit_authorization_record(
+    decision: &str,
+    ids: &[String],
+    source: &str,
+    apply_and_commit: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "authorization",
+        "decision": decision,
+        "itemIds": ids,
+        "source": source,
+        "applyAndCommit": apply_and_commit,
+    })
+}
+
+fn audit_commit_record(
+    sha: &str,
+    branch: &str,
+    ids: &[String],
+    staged_paths: &[String],
+    authorization: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "commit",
+        "sha": sha,
+        "branch": branch,
+        "itemIds": ids,
+        "stagedPaths": staged_paths,
+        "authorization": authorization,
+    })
+}
+
+// Append one record to resources/audit-ledger.jsonl. Best-effort: on any
+// failure, log to stderr and return — never propagate, never fail the
+// approval or commit that triggered the append.
+fn append_audit_record<R: tauri::Runtime>(app: &AppHandle<R>, record: serde_json::Value) {
+    let Some(root) = project_root(Some(app)) else {
+        return;
+    };
+    let line = audit_record_line(&record, unix_now_ms());
+    let _guard = audit_ledger_cell().lock();
+    let dir = root.join("resources");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("[audit-ledger] create {} failed: {}", dir.display(), e);
+        return;
+    }
+    let path = dir.join("audit-ledger.jsonl");
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(mut f) => {
+            if let Err(e) = writeln!(f, "{}", line) {
+                eprintln!("[audit-ledger] append {} failed: {}", path.display(), e);
+            }
+        }
+        Err(e) => {
+            eprintln!("[audit-ledger] append {} failed: {}", path.display(), e);
+        }
+    }
+}
+
 fn turn_state_provider_str() -> String {
     turn_state_cell()
         .lock()
@@ -33105,6 +33217,10 @@ fn write_worklist_authorization_record<R: tauri::Runtime>(
         eprintln!("[worklist-auth] write {} failed: {}", path.display(), e);
         return Err(format!("write {}: {}", path.display(), e));
     }
+    append_audit_record(
+        app,
+        audit_authorization_record(&record.kind, &record.ids, &record.source, record.commit_too),
+    );
     Ok(record)
 }
 
@@ -33209,7 +33325,18 @@ fn record_codex_direct_edit_authorization<R: tauri::Runtime>(app: &AppHandle<R>,
     };
     if let Err(e) = std::fs::write(&path, format!("{}\n", body)) {
         eprintln!("[worklist-auth] write {} failed: {}", path.display(), e);
+        return;
     }
+    let mut rec = audit_authorization_record(
+        "direct-edit",
+        &[] as &[String],
+        "host-to-turn-opt-out",
+        false,
+    );
+    if let Some(obj) = rec.as_object_mut() {
+        obj.insert("provider".to_string(), serde_json::json!("codex"));
+    }
+    append_audit_record(app, rec);
 }
 
 fn read_active_worklist_authorization<R: tauri::Runtime>(
@@ -38047,6 +38174,25 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         }
     };
 
+    let branch = git_run(app, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let committed_paths: Vec<String> = files
+        .iter()
+        .filter(|f| staged_after.contains(f))
+        .cloned()
+        .collect();
+    append_audit_record(
+        app,
+        audit_commit_record(
+            &sha,
+            &branch,
+            &ids,
+            &committed_paths,
+            if commit_too { "apply-and-commit" } else { "approved" },
+        ),
+    );
+
     // close-on-push-automatic: record the commit-gate dialog's close-issue
     // selections as pending closes bound to this SHA. Nothing closes now; the
     // user's next Push triggers flush_pending_issue_closes.
@@ -38801,6 +38947,64 @@ mod project_config_tests {
         assert!(
             legacy_hook_referencing_sources(&sources, "hooks/worklist-guard.py").is_empty()
         );
+    }
+}
+
+#[cfg(test)]
+mod audit_ledger_tests {
+    use super::{audit_authorization_record, audit_commit_record, audit_record_line};
+
+    #[test]
+    fn audit_record_line_is_single_line_stamped_json() {
+        let rec = audit_authorization_record(
+            "approved",
+            &["a".to_string(), "b".to_string()],
+            "worklist-action-command",
+            true,
+        );
+        let line = audit_record_line(&rec, 1234);
+        assert!(!line.contains('\n'));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&line).expect("audit line must be valid JSON");
+        assert_eq!(parsed["atMs"], 1234);
+        assert!(parsed["at"].as_str().is_some_and(|s| !s.is_empty()));
+        assert_eq!(parsed["kind"], "authorization");
+        assert_eq!(parsed["decision"], "approved");
+        assert_eq!(parsed["itemIds"], serde_json::json!(["a", "b"]));
+        assert_eq!(parsed["applyAndCommit"], true);
+    }
+
+    #[test]
+    fn audit_commit_record_shape() {
+        let rec = audit_commit_record(
+            "abc123",
+            "main",
+            &["x".to_string()],
+            &["app/a.js".to_string()],
+            "apply-and-commit",
+        );
+        let line = audit_record_line(&rec, 5678);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&line).expect("audit line must be valid JSON");
+        assert_eq!(parsed["kind"], "commit");
+        assert_eq!(parsed["sha"], "abc123");
+        assert_eq!(parsed["branch"], "main");
+        assert_eq!(parsed["itemIds"], serde_json::json!(["x"]));
+        assert_eq!(parsed["stagedPaths"], serde_json::json!(["app/a.js"]));
+        assert_eq!(parsed["authorization"], "apply-and-commit");
+        assert_eq!(parsed["atMs"], 5678);
+    }
+
+    #[test]
+    fn audit_record_line_redacts_credentials() {
+        let secret = format!("sk-ant-{}", "a".repeat(90));
+        let rec = serde_json::json!({
+            "kind": "authorization",
+            "decision": "approved",
+            "source": secret,
+        });
+        let line = audit_record_line(&rec, 42);
+        assert!(!line.contains(&secret));
     }
 }
 

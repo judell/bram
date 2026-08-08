@@ -90,7 +90,7 @@ day, **M** = half to two days, **L** = more than two days.
 | M1 | Guard fails **open** when Python is missing; Setup surfaces `python: missing` (`lib.rs:28122`) but does not hard-block. | **OPEN (partial).** Make Setup refuse to manage a repo when `python3` is absent. Effort S. #119. |
 | M2 | Terminal I/O previews leak secrets. | **DONE** (`issue-114-secret-safe-observability`) — previews pass through the `loomweave-scanner`-backed host redactor before escaping/truncation. |
 | M3 | PTY child inherits the full host env (`ANTHROPIC_API_KEY`/`GITHUB_TOKEN`); the agent can `echo` them. | **WON'T-DO (reframed).** An opt-in env-stripping feature was built, tested, and dropped: an agent whose job is running the shell re-sources profile-exported secrets (`~/.bashrc`) through its per-command tool shells, which Bram doesn't control, and the agent's own required auth must stay. The mitigation is **environment hygiene** — keep secrets out of the ambient env (keychain, per-project `.env`, native tool auth like `gh`/`codex`/`supabase login`) — which is guidance, not code. |
-| M4 | No durable, always-on record of commit/approval; a successful commit emits no trace line and the auth record is consumed-on-read. | **SPLIT to #229** (auditability). A distinct concern from secrets hygiene; deferred. Lean version = one always-on line at the commit/approval chokepoint; full = hash-chained ledger + route/Status. Value scales with shared-use / demonstrability. |
+| M4 | No durable, always-on record of commit/approval; a successful commit emits no trace line and the auth record is consumed-on-read. | **LEAN VERSION SHIPPED** (#229). Always-on, append-only JSONL ledger (`resources/audit-ledger.jsonl`, untracked) written at the authorization and commit chokepoints — metadata only (decision, item ids, source, sha, branch, staged paths), credential-redacted, best-effort (ungated by traces, but not fail-closed and not tamper-evident). Full version — hash chaining / tamper evidence, push + issue-close events, `/__audit` route, Status surface — remains deferred under #229. |
 | M5 | Codex Bash gate path-blindness. | **NEEDS CONFIRMATION.** The Codex guard now has both `covered_paths` (`codex-worklist-guard.py:202`) and `_BASH_WRITE_PATTERNS` (`:306`); whether it intersects write targets with covered paths (vs. "any coverage passes") is unverified. #119. |
 | M6 | `open_url` opened any `file://` in its default app. | **DONE** — `open_url` enforces a URL allowlist; `file://` is not permitted (`lib.rs:14205`). |
 | M7 | `/__issue/comment` posts directly with only the frontend `enabled` binding as the gate. | **OPEN.** Route has no independent host auth check (`lib.rs:33200`). (The close path was resolved by H5.) Effort S. #121. |
@@ -112,14 +112,16 @@ day, **M** = half to two days, **L** = more than two days.
 
 The Phase 0/1 quick wins, the root fix, H6 (CORS), and the #114 secrets-
 hygiene work have all landed (C1/C2/C3/H1/H2/H3/H6/M2/M6/M8/L1/L5/L6);
-M3 was reframed as won't-do and M4 (auditability) split to #229. The
-remaining work, in priority order:
+M3 was reframed as won't-do and M4 (auditability)'s lean version shipped
+under #229 (always-on JSONL ledger; hash-chained/tamper-evident version
+remains deferred). The remaining work, in priority order:
 
 1. **Confirm M5** (Codex path intersection) and **close M1** (Setup hard-fail on
    missing Python). (#119)
 2. **M7** — an independent host check on `/__issue/comment`. (#121)
-3. **Auditability** — durable approval/mutation ledger, when shared-use or
-   demonstrability warrants it. (#229)
+3. **Auditability (full version)** — hash-chained/tamper-evident ledger,
+   push + issue-close events, `/__audit` route, Status surface, when
+   shared-use or demonstrability warrants it. (#229)
 4. **Cleanups:** L2/L3 path-param guards, L4 `mcp__*` matcher, and per-command
    trust-boundary docs in `docs/apis.md`. (#110, #119, #113)
 
@@ -136,8 +138,10 @@ remaining work, in priority order:
   Secrets-hygiene tranche complete (M2, M8, L1, L6, + a Tool-Descriptions
   billing warning). M3 (env stripping) reframed as won't-do — the mitigation is
   environment hygiene (keep secrets out of the ambient env), guidance not code.
-  Auditability (M4) split to **#229** (deferred). Heuristic redaction cannot
-  prove arbitrary content secret-free. **#114 CLOSED on the hygiene win.**
+  Auditability (M4)'s lean version — the always-on `resources/audit-ledger.jsonl`
+  — shipped under **#229**; the hash-chained/tamper-evident full version
+  remains deferred there. Heuristic redaction cannot prove arbitrary content
+  secret-free. **#114 CLOSED on the hygiene win.**
 - **#112 — PTY / shell injection (closed).** H1 and H2 resolved.
 - **#113 — host-side IPC scoping.** C1 (the structural fix), C2, and H6 (CORS
   restricted to the shell origin) all landed; a same-user local process is the

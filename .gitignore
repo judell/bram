@@ -60,6 +60,11 @@ resources/.worklist-issue-close.json
 resources/.pending-session-title.json
 resources/.bram-queue.json
 
+# issue-229 lean audit ledger: machine-local, append-only record of
+# authorization decisions and Bram-gated commits. Untracked by design —
+# tracking it would dirty the tree after every gated commit.
+resources/audit-ledger.jsonl
+
 # Local startup forensics dumps; per-restart, not shared.
 resources/startup-traces/
 

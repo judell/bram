@@ -1,4 +1,7 @@
 {
+  "xmluiConfig": {
+    "compileScripts": true
+  },
   "appGlobals": {
     "xsVerbose": true,
     "xsVerboseLogMax": 200,

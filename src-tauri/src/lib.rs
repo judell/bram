@@ -33517,21 +33517,28 @@ mod worklist_doc_tests {
             "files": ["docs/a.md"],
         });
         let resolved = resolve_worklist_item_draft(Some(&dir), &item);
-        let inline_equivalent = json!({
+        let resolved_equivalent = json!({
             "id": "draft-item",
             "status": "proposed",
             "files": ["docs/a.md"],
             "before": "metadata only",
             "after": "resolved prose",
+            "citations": [],
+            "_citationsMissing": true,
         });
 
         assert_eq!(
             resolved.get("before").and_then(|v| v.as_str()),
             Some("metadata only")
         );
+        assert_eq!(resolved.get("citations"), Some(&json!([])));
+        assert_eq!(
+            resolved.get("_citationsMissing").and_then(|v| v.as_bool()),
+            Some(true)
+        );
         assert_eq!(
             canonical_item_hash(&resolved),
-            canonical_item_hash(&inline_equivalent)
+            canonical_item_hash(&resolved_equivalent)
         );
 
         let _ = fs::remove_dir_all(&dir);

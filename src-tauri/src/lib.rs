@@ -994,6 +994,21 @@ fn prompt_history_push(rec: serde_json::Value) {
 // supersede_age_ms means a click may have raced the churn.
 static LAST_SUPERSEDE_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
+// menu-echo-numeral-turn-observer: identity of the most recent prompt
+// resolution (any outcome), so a menu-answer-shaped PTY write arriving
+// just after a prompt vanished can name which prompt the keystroke was
+// probably aimed at. Observe-only correlation state.
+#[derive(Clone)]
+struct LastResolvedPromptInfo {
+    at_ms: i64,
+    prompt_id: String,
+    tool: String,
+    outcome: String,
+    labels: String,
+}
+static LAST_RESOLVED_PROMPT: std::sync::Mutex<Option<LastResolvedPromptInfo>> =
+    std::sync::Mutex::new(None);
+
 fn prompt_shown<R: tauri::Runtime>(
     app: &AppHandle<R>,
     tool: &str,
@@ -1089,6 +1104,15 @@ fn prompt_resolved<R: tauri::Runtime>(
     let now = unix_now_ms();
     if outcome == "superseded" {
         LAST_SUPERSEDE_MS.store(now, std::sync::atomic::Ordering::Relaxed);
+    }
+    if let Ok(mut last) = LAST_RESOLVED_PROMPT.lock() {
+        *last = Some(LastResolvedPromptInfo {
+            at_ms: now,
+            prompt_id: o.prompt_id.clone(),
+            tool: o.tool.clone(),
+            outcome: outcome.to_string(),
+            labels: labels_preview(&o.labels),
+        });
     }
     let rec = serde_json::json!({
         "event": "prompt-resolved",
@@ -12109,6 +12133,59 @@ mod pty_escape_source_tests {
     }
 }
 
+// menu-echo-numeral-turn-observer: classify a PTY write as
+// menu-answer-shaped. A pane menu button sends "<digit>\r" in one
+// write; a typed key arrives as a lone "<digit>" (its Enter comes
+// separately). Anything else is not a candidate.
+fn menu_echo_numeral_shape(data: &str) -> Option<&'static str> {
+    let (body, shape) = match data.strip_suffix('\r') {
+        Some(b) => (b, "digit-cr"),
+        None => (data, "digit"),
+    };
+    let mut chars = body.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) if c.is_ascii_digit() && c != '0' => Some(shape),
+        _ => None,
+    }
+}
+
+// menu-echo-numeral-turn-observer (observe-only): a menu-answer-shaped
+// write arriving while NO menu is displayed, shortly after a prompt
+// resolution, is the stray-turn candidate — a keystroke aimed at a
+// prompt that was answered or superseded before the input landed
+// (seventeen bare "1"/"2" turns on 2026-08-08, clustered in subagent
+// prompt churn where surfaces superseded 59-103ms after showing).
+// Logs the correlation; changes nothing. Graduation criteria live in
+// the worklist draft (menu-echo-numeral-turn-observer).
+const MENU_ECHO_OBSERVE_WINDOW_MS: i64 = 10_000;
+fn menu_echo_turn_observe<R: tauri::Runtime>(app: &AppHandle<R>, data: &str, caller_hint: &str) {
+    if !bram_trace_enabled() {
+        return;
+    }
+    let Some(shape) = menu_echo_numeral_shape(data) else {
+        return;
+    };
+    if turn_state_menu_present() {
+        return; // a live menu is showing — this is a normal answer
+    }
+    let last = LAST_RESOLVED_PROMPT.lock().ok().and_then(|l| l.clone());
+    let Some(last) = last else {
+        return;
+    };
+    let elapsed = unix_now_ms() - last.at_ms;
+    if !(0..=MENU_ECHO_OBSERVE_WINDOW_MS).contains(&elapsed) {
+        return;
+    }
+    append_bram_trace_line(
+        app,
+        "menu-echo-turn",
+        &format!(
+            "op=would-suppress shape={} caller_hint={} elapsed_ms={} prompt_id={} tool={} outcome={} labels=[{}]",
+            shape, caller_hint, elapsed, last.prompt_id, last.tool, last.outcome, last.labels,
+        ),
+    );
+}
+
 // Shared body of `pty_write` so the disk-mediated relay (#86) can write
 // queued intents through the same trace + menu-clear + auth-record
 // pipeline as direct callers. `caller_hint` flows into the `[pty-out]`
@@ -12133,6 +12210,7 @@ fn pty_write_internal<R: tauri::Runtime>(
             ),
         );
     }
+    menu_echo_turn_observe(app, data, caller_hint);
     if !data.is_empty() {
         // \x1b[O (focus-out) and \x1b[I (focus-in) are pure focus-tracking
         // escape sequences that xterm.js emits as side effects of its
@@ -39222,6 +39300,33 @@ mod answer_binding_tests {
         let (id, src) = choose_answer_binding_id(None, None, None, "Bash");
         assert_eq!(id, None);
         assert_eq!(src, "none");
+    }
+}
+
+#[cfg(test)]
+mod menu_echo_shape_tests {
+    use super::menu_echo_numeral_shape;
+
+    #[test]
+    fn pane_click_shape_is_digit_cr() {
+        assert_eq!(menu_echo_numeral_shape("1\r"), Some("digit-cr"));
+        assert_eq!(menu_echo_numeral_shape("3\r"), Some("digit-cr"));
+    }
+
+    #[test]
+    fn typed_key_shape_is_digit() {
+        assert_eq!(menu_echo_numeral_shape("2"), Some("digit"));
+    }
+
+    #[test]
+    fn non_candidates_are_ignored() {
+        assert_eq!(menu_echo_numeral_shape("0"), None); // no menu option 0
+        assert_eq!(menu_echo_numeral_shape("12"), None);
+        assert_eq!(menu_echo_numeral_shape("a"), None);
+        assert_eq!(menu_echo_numeral_shape("1\n"), None);
+        assert_eq!(menu_echo_numeral_shape(""), None);
+        assert_eq!(menu_echo_numeral_shape("\r"), None);
+        assert_eq!(menu_echo_numeral_shape("approved: {}"), None);
     }
 }
 

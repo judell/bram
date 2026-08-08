@@ -95,11 +95,6 @@ iframe.pane-tools {
   width: 100%;
 }
 
-.pane-tools.hidden,
-.h-splitter.hidden {
-  display: none;
-}
-
 .splitter {
   flex: 0 0 6px;
   background: #333;

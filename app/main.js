@@ -690,7 +690,6 @@ const SHELL_SPLITTER_KEY = "bram.splitter.shell";
 const TOOLS_ROUTE_KEY = "bram.tools.route";
 const LEGACY_TOOLS_ROUTE_KEY = "xmlui-desktop.tools.route";
 const TOOLS_ROUTE_POLL_MS = 500;
-const TOOLS_HIDDEN_KEY = "bram.tools.hidden";
 
 const logShellEvent = (payload) => {
   try {
@@ -768,39 +767,15 @@ const tracePaneReload = (stage, fields = {}) => {
   });
 })();
 
-// Bottom-toolbar drawer toggle. v1 has a single "tools" button — later
-// stages will add per-tool buttons (Workspace, Sessions) that swap the
-// tools iframe's hash route while keeping the drawer open.
-(() => {
-  const btn = document.getElementById("toggle-tools");
-  const tools = document.getElementById("tools-pane");
-  const hSplitter = document.getElementById("h-splitter");
-  if (!btn || !tools || !hSplitter) return;
-  try {
-    const hidden = localStorage.getItem(TOOLS_HIDDEN_KEY) === "1";
-    tools.classList.toggle("hidden", hidden);
-    hSplitter.classList.toggle("hidden", hidden);
-    logShellEvent({
-      kind: "tools-drawer-restore",
-      hidden,
-      at: new Date().toISOString(),
-    });
-  } catch {}
-  btn.addEventListener("click", () => {
-    const opening = tools.classList.contains("hidden");
-    const hidden = !opening;
-    tools.classList.toggle("hidden", hidden);
-    hSplitter.classList.toggle("hidden", hidden);
-    try {
-      localStorage.setItem(TOOLS_HIDDEN_KEY, hidden ? "1" : "0");
-    } catch {}
-    logShellEvent({
-      kind: "tools-drawer-save",
-      hidden,
-      at: new Date().toISOString(),
-    });
-  });
-})();
+// The tools drawer is always visible. The old "agent tools" toolbar
+// toggle persisted a hidden state in localStorage that survived every
+// reset short of DevTools surgery and presented as a broken app
+// (Andrew's 2026-08-07 blank-pane outage); the feature existed only to
+// maximize an embedded target app, a minority case not worth durable
+// invisible state. Clear any stale key so stuck installs self-heal.
+try {
+  localStorage.removeItem("bram.tools.hidden");
+} catch {}
 
 // PTY wiring: stdout from Rust arrives over a Channel; stdin goes via invoke.
 // https://v2.tauri.app/develop/calling-frontend/#channels
@@ -1810,8 +1785,8 @@ listen("pty-send-sent", (e) => {
     function onLoad() {
       newTools.removeEventListener("load", onLoad);
       // Promote: inherit the live class/style and the id, then replace
-      // in the same DOM position. The toggle-tools button keeps working
-      // because it queries by id on each click.
+      // in the same DOM position. The h-splitter drag handler keeps
+      // working because it re-queries by id on each pointerdown.
       newTools.className = oldTools.className;
       newTools.style.cssText = oldTools.style.cssText;
       newTools.id = "tools-pane";

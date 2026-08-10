@@ -1,0 +1,45 @@
+<Component name="Tips">
+  <!-- tips-page-enumerate-registry: the full tip catalog in one place.
+       The footer (Main.xmlui, issue-231) rotates ONE tip at a time from
+       window.__bramTipsRegistry and owns the dismiss/Next lifecycle;
+       this page is a read-only enumeration of the same registry, in its
+       authored priority order. Action buttons reuse the footer's
+       dispatch: internal `route` navigates, external `url` opens in the
+       system browser. The muted "dismissed" tag reads the same
+       per-tip dismissal state the footer's picker consults. -->
+  <VStack padding="$space-4" gap="$space-3">
+    <H2>Tips</H2>
+    <Text
+      fontSize="$fontSize-sm"
+      color="$textColor-secondary"
+      value="Everything the footer tip line rotates through, in one place. Dismissed tips stay listed here." />
+    <Items data="{window.__bramTipsRegistry}">
+      <VStack
+        padding="$space-2"
+        gap="$space-1"
+        borderBottom="1px solid $borderColor">
+        <HStack gap="$space-2" verticalAlignment="center">
+          <Text width="*" value="{$item.text}" />
+          <Text
+            when="{window.__bramTipDismissed($item.id)}"
+            fontSize="$fontSize-xs"
+            color="$textColor-secondary"
+            fontStyle="italic"
+            value="dismissed" />
+          <Button
+            when="{$item.route}"
+            label="Open"
+            variant="outlined"
+            size="xs"
+            onClick="navigate($item.route)" />
+          <Button
+            when="{$item.url}"
+            label="Learn more"
+            variant="outlined"
+            size="xs"
+            onClick="openExternal($item.url)" />
+        </HStack>
+      </VStack>
+    </Items>
+  </VStack>
+</Component>

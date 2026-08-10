@@ -16590,10 +16590,11 @@ fn search_index_db_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf
 }
 
 /// Concatenated searchable text of a Claude session JSONL for the FTS index.
-fn claude_session_all_text(path: &Path) -> String {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return String::new();
-    };
+// Per-line extractor: each Claude JSONL record → its searchable text.
+// Shared by the full and incremental (search-index-claude-extract-
+// incremental) paths so both produce byte-identical output for the same
+// input bytes.
+fn extract_claude_text_from(content: &str) -> String {
     let mut all = String::new();
     for line in content.lines() {
         let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -16610,6 +16611,68 @@ fn claude_session_all_text(path: &Path) -> String {
         }
     }
     all
+}
+
+// Pure core of the incremental extractor (search-index-claude-extract-
+// incremental). Given the previously-consumed byte offset + accumulated
+// text (or None for a cold parse) and the current full file content, return
+// the new (offset, text). The active session grows by appended JSONL lines,
+// so a warm call parses only the bytes after the last complete line already
+// consumed; a cache miss, a shrink (rotation/rewrite), or a boundary
+// mismatch falls back to a full parse. Only complete (newline-terminated)
+// lines are consumed — a half-written trailing line is deferred to the next
+// pass. By construction the warm result byte-matches a cold parse of the
+// same content (unit-tested). Assumes append-only session JSONL (Claude
+// compaction appends a summary record, it does not rewrite the prefix).
+fn claude_incremental_extract(cached: Option<(usize, &str)>, content: &str) -> (usize, String) {
+    if let Some((off, acc)) = cached {
+        if off <= content.len() && content.is_char_boundary(off) {
+            let suffix = &content[off..];
+            return match suffix.rfind('\n') {
+                Some(nl) => (off + nl + 1, format!("{}{}", acc, extract_claude_text_from(&suffix[..=nl]))),
+                None => (off, acc.to_string()),
+            };
+        }
+    }
+    let off = content.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    (off, extract_claude_text_from(&content[..off]))
+}
+
+// path -> (parsed byte offset at a line boundary, accumulated extracted text)
+static CLAUDE_EXTRACT_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, (usize, String)>>,
+> = std::sync::OnceLock::new();
+fn claude_extract_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, (usize, String)>> {
+    CLAUDE_EXTRACT_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+// Extract searchable text for one Claude session, reusing the parse of the
+// unchanged prefix across indexer passes (search-index-claude-extract-
+// incremental). The whole-file read is cheap (~ms for 1 MB); the cost this
+// removes is re-running the per-line serde parse over the already-seen
+// prefix (extract_ms ~1.2s → single digits on the active 854-turn session,
+// which was pinning ./bram at ~171% CPU and starving the webview).
+fn claude_session_all_text(path: &Path) -> String {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
+    let key = path.to_string_lossy().to_string();
+    let Ok(mut cache) = claude_extract_cache().lock() else {
+        // Poisoned lock: fall back to a cold parse, uncached.
+        return claude_incremental_extract(None, &content).1;
+    };
+    let cached = cache.get(&key).map(|(o, t)| (*o, t.as_str()));
+    let (off, text) = claude_incremental_extract(cached, &content);
+    // Bound the cache: only the active session is re-indexed repeatedly;
+    // inactive sessions get one entry each and never update. Clear past a
+    // generous cap (one extra cold parse per session after a clear —
+    // correct, just uncached that once).
+    if cache.len() > 256 {
+        cache.clear();
+    }
+    cache.insert(key, (off, text.clone()));
+    text
 }
 
 /// Join the `text` fields of a Codex content/output array (`[{type, text}, …]`),
@@ -16712,6 +16775,70 @@ mod codex_extract_tests {
             "payload": { "type": "reasoning", "summary": [], "encrypted_content": "gAAAAA" }
         });
         assert_eq!(codex_message_search_text(&reasoning), "");
+    }
+}
+
+#[cfg(test)]
+mod claude_extract_incremental_tests {
+    use super::claude_incremental_extract;
+
+    fn rec(role: &str, text: &str) -> String {
+        format!(
+            "{{\"type\":\"{}\",\"message\":{{\"content\":\"{}\"}}}}",
+            role, text
+        )
+    }
+
+    // The core guard: a warm append must byte-match a cold parse of the same
+    // content (the correctness contract in the worklist draft).
+    #[test]
+    fn warm_append_byte_matches_cold_parse() {
+        let f1 = format!("{}\n{}\n", rec("user", "alpha"), rec("assistant", "beta"));
+        let (o1, t1) = claude_incremental_extract(None, &f1);
+        assert_eq!(t1, "alpha\nbeta\n");
+        assert_eq!(o1, f1.len());
+
+        let f2 = format!("{}{}\n", f1, rec("user", "gamma"));
+        let (o2, t2) = claude_incremental_extract(Some((o1, &t1)), &f2);
+        let (_, cold) = claude_incremental_extract(None, &f2);
+        assert_eq!(t2, cold, "warm append must byte-match cold parse");
+        assert_eq!(t2, "alpha\nbeta\ngamma\n");
+        assert_eq!(o2, f2.len());
+    }
+
+    // A half-written trailing line (no newline yet) is deferred, then picked
+    // up once its newline lands.
+    #[test]
+    fn trailing_partial_line_is_deferred() {
+        let f = format!("{}\n{}", rec("user", "alpha"), rec("assistant", "partial"));
+        let (off, t) = claude_incremental_extract(None, &f);
+        assert_eq!(t, "alpha\n");
+        assert!(off < f.len());
+
+        let f2 = format!("{}\n", f);
+        let (_, t2) = claude_incremental_extract(Some((off, &t)), &f2);
+        assert_eq!(t2, "alpha\npartial\n");
+    }
+
+    // A shrink (size < cached offset) forces a full re-parse, not a stale
+    // append.
+    #[test]
+    fn shrink_forces_full_reparse() {
+        let f1 = format!("{}\n{}\n", rec("user", "alpha"), rec("assistant", "beta"));
+        let (o1, t1) = claude_incremental_extract(None, &f1);
+        let f2 = format!("{}\n", rec("user", "fresh"));
+        let (_, t2) = claude_incremental_extract(Some((o1, &t1)), &f2);
+        assert_eq!(t2, "fresh\n");
+    }
+
+    // No new complete line since the last consume → unchanged text, same
+    // offset (the common quiescent-active-session tick).
+    #[test]
+    fn no_new_line_returns_cached_unchanged() {
+        let f1 = format!("{}\n", rec("user", "alpha"));
+        let (o1, t1) = claude_incremental_extract(None, &f1);
+        let (o2, t2) = claude_incremental_extract(Some((o1, &t1)), &f1);
+        assert_eq!((o1, &t1), (o2, &t2));
     }
 }
 

@@ -15974,43 +15974,113 @@ fn claude_sessions_dir_lookup<R: tauri::Runtime>(
 //      generated an ai-title).
 // All title-record scans walk the whole file so a custom-title or ai-title
 // appended after compaction still wins.
-fn claude_session_title(path: &Path) -> std::io::Result<Option<String>> {
-    let reader = BufReader::new(std::fs::File::open(path)?);
-    let mut custom_title: Option<String> = None;
-    let mut ai_title: Option<String> = None;
-    let mut first_user: Option<String> = None;
-    for line in reader.lines() {
-        let line = line?;
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(record) = serde_json::from_str::<serde_json::Value>(&line) else {
+// Accumulated title candidates for a Claude session
+// (search-index-claude-title-incremental). `custom`/`ai` take the LAST
+// occurrence (a later /title wins), `first_user` the FIRST — both stable
+// under suffix-append, which is what makes the scan incremental.
+#[derive(Clone, Default)]
+struct ClaudeTitleState {
+    custom: Option<String>,
+    ai: Option<String>,
+    first_user: Option<String>,
+}
+impl ClaudeTitleState {
+    fn resolved(&self) -> Option<String> {
+        self.custom
+            .clone()
+            .or_else(|| self.ai.clone())
+            .or_else(|| self.first_user.clone())
+    }
+}
+
+// Fold complete (newline-terminated) lines into the title state. Same record
+// handling as the original whole-file scan, so the resolved title byte-matches
+// a cold parse of the same bytes.
+fn apply_claude_title_lines(state: &mut ClaudeTitleState, slice: &str) {
+    for line in slice.lines() {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
         match record.get("type").and_then(|v| v.as_str()) {
             Some("custom-title") => {
                 if let Some(t) = record.get("customTitle").and_then(|v| v.as_str()) {
-                    custom_title = Some(t.to_string());
+                    state.custom = Some(t.to_string());
                 }
             }
             Some("ai-title") => {
                 if let Some(t) = record.get("aiTitle").and_then(|v| v.as_str()) {
-                    ai_title = Some(t.to_string());
+                    state.ai = Some(t.to_string());
                 }
             }
-            Some("user") if first_user.is_none() => {
+            Some("user") if state.first_user.is_none() => {
                 if let Some(content) = record.pointer("/message/content") {
                     let text = match content {
                         serde_json::Value::String(s) => s.clone(),
                         _ => content.to_string(),
                     };
-                    first_user = Some(text.chars().take(120).collect());
+                    state.first_user = Some(text.chars().take(120).collect());
                 }
             }
             _ => {}
         }
     }
-    Ok(custom_title.or(ai_title).or(first_user))
+}
+
+// Pure incremental title core (search-index-claude-title-incremental).
+// Twin of claude_incremental_extract: a warm call folds only the appended
+// complete lines into the cached title state; cache miss / shrink / boundary
+// mismatch re-parse in full. A mid-session custom-title (later /title) is
+// picked up because the suffix is scanned and `custom` overwrites; a
+// half-written trailing line is deferred. The active session grows every
+// pass, so this — not an mtime cache — is what makes the title scan cheap
+// (it re-parsed the whole file each pass, the residual extract_ms after the
+// text fix).
+fn claude_incremental_title(
+    cached: Option<(usize, &ClaudeTitleState)>,
+    content: &str,
+) -> (usize, ClaudeTitleState) {
+    if let Some((off, state)) = cached {
+        if off <= content.len() && content.is_char_boundary(off) {
+            let suffix = &content[off..];
+            return match suffix.rfind('\n') {
+                Some(nl) => {
+                    let mut s = state.clone();
+                    apply_claude_title_lines(&mut s, &suffix[..=nl]);
+                    (off + nl + 1, s)
+                }
+                None => (off, state.clone()),
+            };
+        }
+    }
+    let off = content.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let mut s = ClaudeTitleState::default();
+    apply_claude_title_lines(&mut s, &content[..off]);
+    (off, s)
+}
+
+// path -> (parsed byte offset at a line boundary, accumulated title state)
+static CLAUDE_TITLE_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, (usize, ClaudeTitleState)>>,
+> = std::sync::OnceLock::new();
+fn claude_title_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, (usize, ClaudeTitleState)>> {
+    CLAUDE_TITLE_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn claude_session_title(path: &Path) -> std::io::Result<Option<String>> {
+    let content = std::fs::read_to_string(path)?;
+    let key = path.to_string_lossy().to_string();
+    let Ok(mut cache) = claude_title_cache().lock() else {
+        return Ok(claude_incremental_title(None, &content).1.resolved());
+    };
+    let cached = cache.get(&key).map(|(o, s)| (*o, s));
+    let (off, state) = claude_incremental_title(cached, &content);
+    if cache.len() > 256 {
+        cache.clear();
+    }
+    let title = state.resolved();
+    cache.insert(key, (off, state));
+    Ok(title)
 }
 
 /// Per tool/thinking part, cap the searchable text pulled into the index. Tool
@@ -16901,6 +16971,67 @@ mod codex_meta_cache_tests {
         assert!(!codex_meta_cache_fresh(Some((100u128, 4096u64)), 101, 4096)); // touched
         assert!(!codex_meta_cache_fresh(Some((100u128, 4096u64)), 100, 8192)); // grew
         assert!(!codex_meta_cache_fresh(None, 100, 4096)); // cold
+    }
+}
+
+#[cfg(test)]
+mod claude_title_incremental_tests {
+    use super::claude_incremental_title;
+
+    fn user(text: &str) -> String {
+        format!(r#"{{"type":"user","message":{{"content":"{}"}}}}"#, text)
+    }
+    fn custom(t: &str) -> String {
+        format!(r#"{{"type":"custom-title","customTitle":"{}"}}"#, t)
+    }
+    fn ai(t: &str) -> String {
+        format!(r#"{{"type":"ai-title","aiTitle":"{}"}}"#, t)
+    }
+
+    #[test]
+    fn first_user_is_the_title_absent_custom_or_ai() {
+        let f = format!("{}\n", user("hello world"));
+        let (_, s) = claude_incremental_title(None, &f);
+        assert_eq!(s.resolved().as_deref(), Some("hello world"));
+    }
+
+    // A later /title (custom-title) mid-session must win, and the warm result
+    // must byte-match a cold parse (the draft's correctness contract).
+    #[test]
+    fn warm_append_custom_title_wins_and_matches_cold() {
+        let base = format!("{}\n", user("q1"));
+        let (o1, s1) = claude_incremental_title(None, &base);
+        assert_eq!(s1.resolved().as_deref(), Some("q1"));
+
+        let grown = format!("{}{}\n", base, custom("Renamed"));
+        let (_, s2) = claude_incremental_title(Some((o1, &s1)), &grown);
+        let (_, cold) = claude_incremental_title(None, &grown);
+        assert_eq!(s2.resolved(), cold.resolved());
+        assert_eq!(s2.resolved().as_deref(), Some("Renamed"));
+    }
+
+    // Priority holds across an append: ai beats first_user, custom beats ai.
+    #[test]
+    fn priority_custom_over_ai_over_first_user() {
+        let f = format!("{}\n{}\n", user("q"), ai("AiTitle"));
+        let (o, s) = claude_incremental_title(None, &f);
+        assert_eq!(s.resolved().as_deref(), Some("AiTitle"));
+
+        let grown = format!("{}{}\n", f, custom("Custom"));
+        let (_, s2) = claude_incremental_title(Some((o, &s)), &grown);
+        assert_eq!(s2.resolved().as_deref(), Some("Custom"));
+    }
+
+    // A shrink (rotation/rewrite) re-parses in full, not a stale carry-over.
+    #[test]
+    fn shrink_forces_full_reparse() {
+        let f1 = format!("{}\n{}\n", custom("Old"), user("q"));
+        let (o1, s1) = claude_incremental_title(None, &f1);
+        assert_eq!(s1.resolved().as_deref(), Some("Old"));
+
+        let f2 = format!("{}\n", user("fresh"));
+        let (_, s2) = claude_incremental_title(Some((o1, &s1)), &f2);
+        assert_eq!(s2.resolved().as_deref(), Some("fresh"));
     }
 }
 

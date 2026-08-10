@@ -39917,6 +39917,27 @@ mod dismiss_suppressor_gate_tests {
 }
 
 #[cfg(test)]
+mod describe_error_retryable_tests {
+    use super::describe_error_retryable;
+
+    #[test]
+    fn persistent_statuses_do_not_retry() {
+        // Billing 400 (the 2026-08-10 credit-less-key storm), bad key 401,
+        // forbidden 403.
+        assert!(!describe_error_retryable(400));
+        assert!(!describe_error_retryable(401));
+        assert!(!describe_error_retryable(403));
+    }
+
+    #[test]
+    fn transient_statuses_keep_retrying() {
+        for s in [408, 409, 429, 500, 502, 503, 529] {
+            assert!(describe_error_retryable(s), "status {} should retry", s);
+        }
+    }
+}
+
+#[cfg(test)]
 mod menu_labels_match_tests {
     use super::{grid_menu_dismissed_label_match, menu_labels_match};
 
@@ -40136,6 +40157,18 @@ mod menu_echo_shape_tests {
 // response to trigger its /__turns refetch — a describe completion
 // doesn't change the session file, so the slim tick's zero-delta
 // suppression would swallow a host-side signal.
+// describe-latch-persistent-api-errors: classify an upstream describe
+// failure as retryable. Persistent conditions (bad request / billing 400,
+// auth 401, forbidden 403) will not recover within a session, so the client
+// latches and stops the eager-scan re-POST storm (3,704 identical 400s in
+// one session on a credit-less key, 2026-08-10). Transient conditions
+// (408, 409, 429, all 5xx, and the non-HTTP transport/parse/empty one-offs)
+// may recover, so the client keeps retrying. A manual tool-row expand
+// bypasses the latch regardless, so a fixed key revives without relaunch.
+fn describe_error_retryable(status: u16) -> bool {
+    !matches!(status, 400 | 401 | 403)
+}
+
 fn handle_describe_command<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
@@ -40348,7 +40381,11 @@ fn handle_describe_command<R: tauri::Runtime>(
                     code, ms, id, detail_line
                 ),
             );
-            let body = serde_json::json!({ "ok": false, "reason": format!("api status {}", code) });
+            let body = serde_json::json!({
+                "ok": false,
+                "reason": format!("api status {}", code),
+                "retryable": describe_error_retryable(code),
+            });
             return (502, JSON, body.to_string().into_bytes());
         }
         Err(e) => {
@@ -40357,7 +40394,11 @@ fn handle_describe_command<R: tauri::Runtime>(
                 "ai-describe",
                 &format!("op=error status=transport ms={} id={} detail={}", ms, id, e),
             );
-            return (502, JSON, br#"{"ok":false,"reason":"transport"}"#.to_vec());
+            return (
+                502,
+                JSON,
+                br#"{"ok":false,"reason":"transport","retryable":true}"#.to_vec(),
+            );
         }
     };
     let payload: serde_json::Value = match resp
@@ -40372,7 +40413,11 @@ fn handle_describe_command<R: tauri::Runtime>(
                 "ai-describe",
                 &format!("op=error status=parse ms={} id={}", ms, id),
             );
-            return (502, JSON, br#"{"ok":false,"reason":"parse"}"#.to_vec());
+            return (
+                502,
+                JSON,
+                br#"{"ok":false,"reason":"parse","retryable":true}"#.to_vec(),
+            );
         }
     };
     let desc = payload
@@ -40394,7 +40439,11 @@ fn handle_describe_command<R: tauri::Runtime>(
             "ai-describe",
             &format!("op=error status=empty ms={} id={}", ms, id),
         );
-        return (502, JSON, br#"{"ok":false,"reason":"empty"}"#.to_vec());
+        return (
+            502,
+            JSON,
+            br#"{"ok":false,"reason":"empty","retryable":true}"#.to_vec(),
+        );
     }
     let input_tokens = payload
         .get("usage")

@@ -7682,12 +7682,25 @@ window.__bramRequestCommandDescription = function (item, onDone, fromHold) {
         // with the overlay applied.
         window.__bramPatchProjectedToolDescription(id, res.description);
       } else {
-        // Feature off: latch so the eager scan stops re-POSTing every
-        // broadcast; a manual expand bypasses the latch and can revive.
-        if (res && (res.reason === "disabled" || res.reason === "no-key")) {
+        // Latch so the eager scan stops re-POSTing every broadcast; a
+        // manual expand bypasses the latch and can revive. Feature off
+        // (disabled/no-key) OR a persistent API error the host marked
+        // non-retryable (billing 400 / auth 401 / 403 —
+        // describe-latch-persistent-api-errors: a credit-less key produced
+        // 3,704 identical 400s in one session because this branch used to
+        // only latch disabled/no-key). Transient errors (429/5xx/transport)
+        // arrive retryable !== false and keep retrying.
+        if (
+          res &&
+          (res.reason === "disabled" ||
+            res.reason === "no-key" ||
+            res.retryable === false)
+        ) {
           window.__bramDescribeUnavailable = true;
         }
-        // Allow a retry on a later expand (disabled/no-key/error).
+        // Allow a retry on a later expand (disabled/no-key/persistent/
+        // transient error all clear the per-id guard; the latch above,
+        // when set, is what actually stops the eager re-POST).
         delete window.__bramDescribeRequested[id];
       }
       done();

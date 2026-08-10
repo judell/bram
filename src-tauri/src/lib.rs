@@ -16179,7 +16179,86 @@ fn collect_codex_session_paths(dir: &Path, paths: &mut Vec<PathBuf>) -> Result<(
     Ok(())
 }
 
+// search-index-codex-discover-bounded: the codex discovery walk opened each
+// project rollout up to THREE times per pass — codex_session_meta (cwd
+// filter), codex_session_has_real_user_activity (200-line scan), and
+// codex_session_title (fallback whole-file scan) — costing discover_ms ~1s+
+// on a large history and, with the claude extract fix, the top indexer cost.
+// Each read is gated below by a per-file (mtime, size) change token: a
+// rollout's session_meta / activity / title are stable while its file is
+// unchanged, so a quiescent tree drops from opens to a stat + cache hit.
+
+// True when a cached entry is still valid for the current file's change
+// token. Nanosecond mtime + size: size alone catches every append; the
+// nanosecond mtime additionally catches an in-place same-size edit that a
+// seconds-granularity stamp would miss.
+fn codex_meta_cache_fresh(cached: Option<(u128, u64)>, mtime: u128, size: u64) -> bool {
+    cached == Some((mtime, size))
+}
+
+// (nanosecond mtime, size) change token, or None when the file can't be
+// stat'd (then the caller reads uncached).
+fn codex_file_change_token(path: &Path) -> Option<(u128, u64)> {
+    let m = path.metadata().ok()?;
+    let mtime = m
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    Some((mtime, m.len()))
+}
+
+// Generic mtime-gated per-file read cache. Returns the cached value when the
+// file's (mtime, size) is unchanged; otherwise runs `read`, caches, returns.
+// Each caller owns a distinct static cache (distinct T). Bounded: a large
+// history accumulates paths, so clear past a generous cap (one extra read
+// per file after a clear — correct, just uncached that once).
+fn codex_cached_read<T: Clone>(
+    cache: &std::sync::Mutex<std::collections::HashMap<String, (u128, u64, T)>>,
+    path: &Path,
+    read: impl FnOnce(&Path) -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let Some((mtime, size)) = codex_file_change_token(path) else {
+        return read(path);
+    };
+    let key = path.to_string_lossy().to_string();
+    if let Ok(c) = cache.lock() {
+        if let Some((cm, cs, v)) = c.get(&key) {
+            if codex_meta_cache_fresh(Some((*cm, *cs)), mtime, size) {
+                return Ok(v.clone());
+            }
+        }
+    }
+    let v = read(path)?;
+    if let Ok(mut c) = cache.lock() {
+        if c.len() > 2048 {
+            c.clear();
+        }
+        c.insert(key, (mtime, size, v.clone()));
+    }
+    Ok(v)
+}
+
+type CodexMetaCache<T> = std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, (u128, u64, T)>>,
+>;
+
+static CODEX_META_CACHE: CodexMetaCache<Option<(String, String)>> = std::sync::OnceLock::new();
+fn codex_meta_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, (u128, u64, Option<(String, String)>)>>
+{
+    CODEX_META_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+// mtime-gated codex session meta: the project-cwd filter read, cached so a
+// quiescent tree skips the open. The `session_meta` record is in the file
+// head, written once — immutable per (mtime, size).
 fn codex_session_meta(path: &Path) -> std::io::Result<Option<(String, String)>> {
+    codex_cached_read(codex_meta_cache(), path, codex_session_meta_read)
+}
+
+fn codex_session_meta_read(path: &Path) -> std::io::Result<Option<(String, String)>> {
     let reader = BufReader::new(std::fs::File::open(path)?);
     for line in reader.lines().take(20) {
         let line = line?;
@@ -16249,7 +16328,25 @@ fn codex_payload_has_real_user_activity(payload: &serde_json::Value) -> bool {
         .unwrap_or(false)
 }
 
+// mtime-gated activity check (search-index-codex-discover-bounded). The
+// bigger of the discovery reads — 200 lines per project candidate every
+// pass. Activity is append-only (once real, stays real), so a same-(mtime,
+// size) file's verdict is unchanged; a bootstrap-only session that later
+// gains activity bumps mtime+size and re-reads.
+static CODEX_ACTIVITY_CACHE: CodexMetaCache<bool> = std::sync::OnceLock::new();
+fn codex_activity_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, (u128, u64, bool)>> {
+    CODEX_ACTIVITY_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
 fn codex_session_has_real_user_activity(path: &Path) -> std::io::Result<bool> {
+    codex_cached_read(
+        codex_activity_cache(),
+        path,
+        codex_session_has_real_user_activity_read,
+    )
+}
+
+fn codex_session_has_real_user_activity_read(path: &Path) -> std::io::Result<bool> {
     let reader = BufReader::new(std::fs::File::open(path)?);
     for line in reader.lines().take(200) {
         let line = line?;
@@ -16272,7 +16369,19 @@ fn codex_session_has_real_user_activity(path: &Path) -> std::io::Result<bool> {
     Ok(false)
 }
 
+// mtime-gated title (search-index-codex-discover-bounded). A whole-file
+// fallback scan, used only when the title index misses; cache it on the same
+// (mtime, size) gate so a repeat discovery of an unchanged session is free.
+static CODEX_TITLE_CACHE: CodexMetaCache<Option<String>> = std::sync::OnceLock::new();
+fn codex_title_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, (u128, u64, Option<String>)>> {
+    CODEX_TITLE_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
 fn codex_session_title(path: &Path) -> std::io::Result<Option<String>> {
+    codex_cached_read(codex_title_cache(), path, codex_session_title_read)
+}
+
+fn codex_session_title_read(path: &Path) -> std::io::Result<Option<String>> {
     let reader = BufReader::new(std::fs::File::open(path)?);
     for line in reader.lines() {
         let line = line?;
@@ -16775,6 +16884,23 @@ mod codex_extract_tests {
             "payload": { "type": "reasoning", "summary": [], "encrypted_content": "gAAAAA" }
         });
         assert_eq!(codex_message_search_text(&reasoning), "");
+    }
+}
+
+#[cfg(test)]
+mod codex_meta_cache_tests {
+    use super::codex_meta_cache_fresh;
+
+    #[test]
+    fn same_mtime_and_size_is_fresh() {
+        assert!(codex_meta_cache_fresh(Some((100u128, 4096u64)), 100, 4096));
+    }
+
+    #[test]
+    fn changed_mtime_or_size_is_stale() {
+        assert!(!codex_meta_cache_fresh(Some((100u128, 4096u64)), 101, 4096)); // touched
+        assert!(!codex_meta_cache_fresh(Some((100u128, 4096u64)), 100, 8192)); // grew
+        assert!(!codex_meta_cache_fresh(None, 100, 4096)); // cold
     }
 }
 

@@ -8785,6 +8785,38 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                     let label_match_kind =
                         menu_labels_match(&d.option_labels, &captured_labels);
                     let label_match = label_match_kind.unwrap_or("none");
+                    // suppressor-label-normalization-divergence-observe: the
+                    // suppressor matches RAW labels; the grid-rescue wrapper
+                    // (grid_menu_dismissed_label_match) normalizes both sides
+                    // first. Compute the normalized verdict on the same inputs
+                    // and log when the two disagree — observe-only, behavior
+                    // still follows the raw verdict. raw=none/norm=some means
+                    // the raw gate leaked a ghost the normalized gate catches;
+                    // raw=some/norm=none means it over-suppressed. Zero over a
+                    // soak → the asymmetry is benign. Emitted only on
+                    // disagreement, so steady-state noise is zero.
+                    if bram_trace_enabled() {
+                        let norm = |v: &[String]| {
+                            v.iter()
+                                .map(|s| normalized_menu_label(s))
+                                .collect::<Vec<_>>()
+                        };
+                        let norm_kind = menu_labels_match(
+                            &norm(&d.option_labels),
+                            &norm(&captured_labels),
+                        )
+                        .unwrap_or("none");
+                        if norm_kind != label_match {
+                            append_bram_trace_line(
+                                app,
+                                "pty-menu",
+                                &format!(
+                                    "op=label-norm-divergence raw={} norm={} tool={}",
+                                    label_match, norm_kind, new_menu.tool
+                                ),
+                            );
+                        }
+                    }
                     let tool_match = d.tool == new_menu.tool;
                     let gate = dismiss_suppressor_gate(tool_match, label_match_kind);
                     let cross_tool = gate == "engage-cross-tool";

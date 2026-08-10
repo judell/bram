@@ -551,6 +551,41 @@ document
     );
   };
 
+  // A deliberate, inert self-test for the compaction-in-progress banner
+  // (compaction-in-progress-banner). Modeled on
+  // postSuspiciousSilenceSelfTest above: posts a synthetic
+  // "bram-compaction-test" active:true straight to the tools iframe (the
+  // bridge in helpers.js treats it exactly like a real `compaction-changed`
+  // host payload), then after a short delay posts active:false so the
+  // banner's auto-clear is exercisable too, without waiting for a real
+  // compaction or touching the live turn / host detector.
+  const postCompactionSelfTest = () => {
+    const tools = document.getElementById("tools-pane");
+    if (!tools || !tools.contentWindow) return;
+    const at = Date.now();
+    invoke("log_from_right_pane", {
+      payload: {
+        kind: "iframe-trace",
+        subkind: "compaction",
+        context: "parent",
+        op: "self-test-dispatched",
+        atMs: at,
+      },
+    }).catch(() => {});
+    tools.contentWindow.postMessage(
+      { type: "bram-compaction-test", active: true, provider: "self-test", atMs: at },
+      "*",
+    );
+    setTimeout(() => {
+      const toolsNow = document.getElementById("tools-pane");
+      if (!toolsNow || !toolsNow.contentWindow) return;
+      toolsNow.contentWindow.postMessage(
+        { type: "bram-compaction-test", active: false, provider: "self-test", atMs: at },
+        "*",
+      );
+    }, 4000);
+  };
+
   const apply = (hidden, source, persist) => {
     const wasHidden = document.body.classList.contains("terminal-hidden");
     document.body.classList.toggle("terminal-hidden", hidden);
@@ -596,6 +631,10 @@ document
     // modifying the live turn or weakening the host detector.
     if (hidden && event.shiftKey) {
       postSuspiciousSilenceSelfTest();
+    }
+    // Same idea, distinct modifier, for the compaction-in-progress banner.
+    if (hidden && event.altKey) {
+      postCompactionSelfTest();
     }
   });
 

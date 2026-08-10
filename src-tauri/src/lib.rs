@@ -5482,6 +5482,150 @@ mod terminal_attention_tests {
     }
 }
 
+// compaction-in-progress-banner: a hidden terminal that is compacting
+// context looks identical to a frozen agent -- there is no PTY silence to
+// hang a detector on. Compaction actively prints a spinner, so `bytes > 0`
+// on essentially every tick while it runs; the terminal_attention detector
+// just above is structurally the wrong tool (it fires on byte-SILENCE and
+// would never trigger, then immediately clear on any activity tick). This
+// is a sibling, text-PRESENCE detector on the same pty-throughput ticker:
+// fire when the live tail contains the provider's compaction progress
+// line, clear the instant it no longer does (compaction finished). Anchor
+// pinned from the rotated trace archives: both Claude and Codex print
+// "Compacting conversation" (Codex's full line is "Compacting
+// conversation…"; Claude's spinner carries the same substring) during
+// compaction, and no ordinary prose merely *discussing* compaction matches
+// it (case-sensitive, not the bare word "compaction").
+const COMPACTION_TAIL_CHARS: usize = 600;
+
+fn compaction_progress_shape(stripped_tail: &str) -> bool {
+    stripped_tail.contains("Compacting conversation")
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum CompactionTransition {
+    Fire,
+    Clear { reason: &'static str },
+}
+
+#[derive(Debug)]
+struct CompactionTracker {
+    active: bool,
+}
+
+impl CompactionTracker {
+    fn new() -> Self {
+        Self { active: false }
+    }
+
+    // `tail_fn` is invoked at most once per tick, and only when `bytes > 0`
+    // -- on pure silence nothing about the tail could have changed, so
+    // there is nothing to re-evaluate (unlike terminal_attention, silence
+    // here is not itself informative: it just means "no new frame", and an
+    // already-active episode simply stays active until the next tick with
+    // output shows the shape gone).
+    fn step<F: FnOnce() -> String>(&mut self, bytes: usize, tail_fn: F) -> Vec<CompactionTransition> {
+        let mut out = Vec::new();
+        if bytes == 0 {
+            return out;
+        }
+        let tail = tail_fn();
+        let matches = compaction_progress_shape(&tail);
+        if matches && !self.active {
+            self.active = true;
+            out.push(CompactionTransition::Fire);
+        } else if !matches && self.active {
+            self.active = false;
+            out.push(CompactionTransition::Clear {
+                reason: "compaction-done",
+            });
+        }
+        out
+    }
+}
+
+fn trace_compaction_transition<R: tauri::Runtime>(app: &AppHandle<R>, transition: &CompactionTransition) {
+    if !bram_trace_enabled() {
+        return;
+    }
+    match transition {
+        CompactionTransition::Fire => {
+            append_bram_trace_line(app, "compaction", "op=fire reason=shape-present")
+        }
+        CompactionTransition::Clear { reason } => {
+            append_bram_trace_line(app, "compaction", &format!("op=clear reason={}", reason))
+        }
+    }
+}
+
+// Mirrors emit_terminal_attention: a replayable payload (via
+// emit_replayable_payload) so a just-booted iframe sees a pre-existing
+// fire, not only a live transition. State + this emit fire regardless of
+// bram_trace_enabled() -- the banner must work with traces off; only the
+// `[compaction]` trace lines above are gated. `provider` is whatever the
+// ticker's turn-state snapshot currently reports (same source
+// terminal_attention's caller uses), not tracked inside CompactionTracker
+// itself.
+fn emit_compaction<R: tauri::Runtime>(app: &AppHandle<R>, active: bool, provider: &str, now_ms: i64) {
+    emit_replayable_payload(
+        app,
+        "compaction-changed",
+        serde_json::json!({
+            "active": active,
+            "provider": provider,
+            "atMs": now_ms,
+        }),
+    );
+}
+
+#[cfg(test)]
+mod compaction_shape_tests {
+    use super::{CompactionTracker, CompactionTransition};
+    use super::compaction_progress_shape;
+
+    #[test]
+    fn provider_progress_lines_classify() {
+        assert!(compaction_progress_shape("Compacting conversation…"));
+        assert!(compaction_progress_shape(
+            "…\x1b[2Kframe garbage Compacting conversation… 1234 tokens"
+        ));
+    }
+
+    #[test]
+    fn ordinary_prose_does_not_classify() {
+        assert!(!compaction_progress_shape("let's discuss compaction"));
+        assert!(!compaction_progress_shape("Compacting metadata"));
+        assert!(!compaction_progress_shape(""));
+        // Case-sensitive: a lowercase "compacting conversation" (unlikely in
+        // practice, but the match is deliberately exact-case) should not
+        // fire either.
+        assert!(!compaction_progress_shape("compacting conversation"));
+    }
+
+    #[test]
+    fn tracker_fires_on_present_then_clears_on_absent() {
+        let mut tracker = CompactionTracker::new();
+        assert_eq!(
+            tracker.step(64, || "Compacting conversation… 500 tokens".to_string()),
+            vec![CompactionTransition::Fire]
+        );
+        // Still compacting on the next tick with output -- no repeat fire.
+        assert_eq!(
+            tracker.step(64, || "Compacting conversation… 900 tokens".to_string()),
+            Vec::<CompactionTransition>::new()
+        );
+        // Silence mid-compaction: nothing to evaluate, stays active.
+        assert_eq!(tracker.step(0, || unreachable!("tail_fn must not run on silence")), Vec::<CompactionTransition>::new());
+        // Compaction finished -- the tail no longer carries the shape.
+        assert_eq!(
+            tracker.step(32, || "~/bram$ ".to_string()),
+            vec![CompactionTransition::Clear {
+                reason: "compaction-done"
+            }]
+        );
+    }
+}
+
 // Cached snapshot of the Claude PTY's rotating status line ("Meandering…
 // (1m 53s · ↓ 5.8k tokens)"). Surfaced via /__agent-status and the
 // `agent-status-changed` Tauri event so the Worklist tab can render a
@@ -12248,6 +12392,11 @@ fn pty_spawn(
             // ticker, narrower and turn-agnostic (see the tracker doc
             // comment above its definition).
             let mut terminal_attention = TerminalAttentionTracker::new();
+            // compaction-in-progress-banner: text-PRESENCE sibling on the
+            // same ticker (see the tracker doc comment above its
+            // definition) -- structurally different from terminal_attention
+            // above, which gates on byte-silence.
+            let mut compaction = CompactionTracker::new();
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(TICK_MS));
                 let bytes = pty_throughput_bytes().swap(0, Ordering::Relaxed);
@@ -12395,6 +12544,17 @@ fn pty_spawn(
                             now_ms,
                         ),
                         TerminalAttentionTransition::Candidate { .. } => {}
+                    }
+                }
+                for transition in compaction.step(bytes, || pty_tail_snippet(COMPACTION_TAIL_CHARS)) {
+                    trace_compaction_transition(&app_for_throughput, &transition);
+                    match transition {
+                        CompactionTransition::Fire => {
+                            emit_compaction(&app_for_throughput, true, &provider, now_ms)
+                        }
+                        CompactionTransition::Clear { .. } => {
+                            emit_compaction(&app_for_throughput, false, &provider, now_ms)
+                        }
                     }
                 }
             }

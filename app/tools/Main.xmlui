@@ -164,6 +164,15 @@
     id="terminalAttentionEvt"
     initial="{null}"
     subscribe="{window.bramSubscribeTerminalAttention()}" />
+  <!-- compaction-in-progress-banner: host-detected active compaction (a
+       text-PRESENCE match on the live PTY tail — NOT the byte-silence
+       terminal_attention path above), joined client-side with
+       terminal-pane visibility and an episode-keyed dismiss — see
+       bramSubscribeCompaction, helpers.js. -->
+  <PushSource
+    id="compactionEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeCompaction()}" />
   <!-- toast-issue-closed-on-push: toast when the user's Push auto-closes a
        queued issue. Host emits issues-closed-on-push after the close flush. -->
   <PushSource
@@ -853,6 +862,39 @@
             variant="outlined"
             size="xs"
             onClick="window.__bramOpenTerminalForAttention()" />
+        </HStack>
+      </VStack>
+      <!-- Compaction-in-progress banner (compaction-in-progress-banner):
+           fires when the host's CompactionTracker sees the live PTY tail
+           CONTAINS the provider's "Compacting conversation" progress line
+           AND the terminal pane is hidden (derived in the
+           bramSubscribeCompaction bridge, helpers.js). This is a
+           text-PRESENCE detector, not terminal_attention's byte-silence
+           one — compaction actively prints a spinner, so it auto-clears
+           the moment the tail no longer shows that line (compaction
+           finished). Informational, not a warning: compaction is
+           autonomous and needs no answer, so this uses the info palette
+           (not warn) and, unlike the terminal-attention banner above,
+           carries a ✕ dismiss (send-ledger-notice idiom) that hides only
+           the current episode — a later compaction re-shows it. -->
+      <VStack
+        when="{compactionEvt.value &amp;&amp; compactionEvt.value.active}"
+        padding="$space-2"
+        gap="$space-1"
+        backgroundColor="$color-info-50"
+        borderTop="1px solid $color-info-200">
+        <HStack gap="$space-2" verticalAlignment="center">
+          <Text
+            fontSize="$fontSize-sm"
+            width="*"
+            color="$color-info-700"
+            value="Compacting context — the agent will resume shortly." />
+          <Button
+            label="✕"
+            variant="ghost"
+            size="xs"
+            tooltip="Dismiss this notice"
+            onClick="window.__bramDismissCompaction()" />
         </HStack>
       </VStack>
       <!-- issue-231 footer tips: one context-driven, dismissible Tip line at

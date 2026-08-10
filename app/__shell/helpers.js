@@ -4085,6 +4085,132 @@ window.subscribeTauriEvent("__bramNativeToolbarPtyMenuUnsub",
   window.parent.postMessage({ type: "bram-terminal-visibility-request" }, "*");
 })();
 
+// Host compaction + parent terminal-visibility join
+// (compaction-in-progress-banner). The Rust host owns a text-PRESENCE
+// detector (`compaction-changed`) that is deliberately NOT the
+// terminal-attention byte-silence path above: compaction actively prints a
+// spinner, so it fires when the live PTY tail CONTAINS the provider's
+// "Compacting conversation" progress line and clears the instant it no
+// longer does. This bridge derives the footer banner's displayed state
+// (active only when BOTH the host says compaction is in progress AND the
+// terminal pane is hidden — same join shape as terminal-attention above)
+// and layers an episode-keyed dismiss on top, modeled on the
+// suspicious-silence bridge further up this file: a ✕ click suppresses
+// only the CURRENT compaction episode, and the next compaction (a fresh
+// host Fire, which carries a new `atMs`) re-shows the banner. The host
+// payload has no explicit episode id, so `atMs` — stable for the whole
+// active span since the host only emits on Fire/Clear, not continuously —
+// stands in as the episode key.
+(function () {
+  var subscribers = new Set();
+  var hostValue = null;
+  var terminalHidden = null;
+  var suppressedEpisode = "";
+  var lastValue = { active: false, provider: "", terminalHidden: null };
+  var lastSignature = "";
+  var hostSubscribed = false;
+
+  var episodeOf = function (value) {
+    return value && value.active ? String(value.atMs || "") : "";
+  };
+  var derivedValue = function () {
+    var episode = episodeOf(hostValue);
+    var active = !!(hostValue && hostValue.active && terminalHidden === true &&
+      (!suppressedEpisode || suppressedEpisode !== episode));
+    return Object.assign({}, hostValue || {}, {
+      active: active,
+      terminalHidden: terminalHidden,
+    });
+  };
+  var notify = function () {
+    var next = derivedValue();
+    var signature = JSON.stringify(next);
+    if (signature === lastSignature) return;
+    var wasActive = !!(lastValue && lastValue.active);
+    lastSignature = signature;
+    lastValue = next;
+    if (wasActive !== !!next.active) {
+      window.__bramIframeTrace("compaction", {
+        op: next.active ? "warn" : "cleared",
+        terminalHidden: terminalHidden,
+        provider: next.provider || "",
+        atMs: next.atMs || 0,
+      });
+    }
+    subscribers.forEach(function (fn) {
+      try { fn(); } catch (e) { console.error("[bram] compaction subscriber threw:", e); }
+    });
+  };
+
+  // Duplicated rather than shared with the other footer bridges above:
+  // each owns its own isolated "bram-terminal-visibility" listener so one
+  // subscriber's derived-state recompute never depends on another's
+  // internal ordering. Same per-component-isolation rationale as
+  // FooterAgentStatus.xmlui's PushSource split.
+  window.addEventListener("message", function (event) {
+    var data = event && event.data;
+    if (!data || event.source !== window.parent) return;
+    if (data.type === "bram-compaction-test") {
+      // Self-test hook (compaction-in-progress-banner testing), dispatched
+      // by app/main.js's postCompactionSelfTest -- parallel to the
+      // suspicious-silence self-test above, but posted directly as a fake
+      // host payload rather than routed through a real Tauri event.
+      hostValue = {
+        active: !!data.active,
+        provider: data.provider || "self-test",
+        atMs: Number(data.atMs) || Date.now(),
+      };
+      if (!hostValue.active) suppressedEpisode = "";
+      notify();
+      return;
+    }
+    if (data.type !== "bram-terminal-visibility") return;
+    terminalHidden = !!data.hidden;
+    notify();
+  });
+
+  var ensureHostSubscribed = function () {
+    if (hostSubscribed) return;
+    hostSubscribed = true;
+    window.subscribeTauriEvent(
+      "__bramCompactionUnsub",
+      "compaction-changed",
+      function (event) {
+        hostValue = (event && event.payload) || null;
+        if (!hostValue || !hostValue.active) suppressedEpisode = "";
+        notify();
+      }
+    );
+  };
+
+  window.bramSubscribeCompaction = (function () {
+    var factory;
+    return function () {
+      if (factory) return factory;
+      ensureHostSubscribed();
+      factory = function (emit) {
+        var fire = function () { emit(lastValue); };
+        subscribers.add(fire);
+        fire();
+        return function () { subscribers.delete(fire); };
+      };
+      return factory;
+    };
+  })();
+
+  // Banner ✕ (compaction-in-progress-banner): suppress only the episode
+  // active right now. A later compaction fires a new `atMs`, a new
+  // episode key, and re-shows the banner unconditionally.
+  window.__bramDismissCompaction = function () {
+    if (hostValue && hostValue.active) {
+      suppressedEpisode = episodeOf(hostValue);
+      notify();
+    }
+  };
+
+  window.parent.postMessage({ type: "bram-terminal-visibility-request" }, "*");
+})();
+
 // External-driven PTY-throughput bridge (transcript-nav-activity-sparkline).
 // The host emits `pty-throughput` a few times/sec with a 0..1 intensity
 // derived from the byte rate flowing through the PTY reader loop. Subscribers

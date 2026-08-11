@@ -1,4 +1,4 @@
-<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{window.__bramRestoreUpdateBannerDismissed ? window.__bramRestoreUpdateBannerDismissed() : ''}" var.toolDescBannerDismissedVersion="{window.__bramRestoreToolDescBannerDismissed ? window.__bramRestoreToolDescBannerDismissed() : ''}" var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.footerVoiceRecording="{false}" var.headerInflightTick="{0}" var.agentSwitcherSelected="{'claude'}" var.agentSwitching="{false}" var.composerFocused="{false}" var.transcriptAgentId="{''}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}" var.dismissedAgentIds="{window.__bramRestoreDismissedAgents()}"
+<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{window.__bramRestoreUpdateBannerDismissed ? window.__bramRestoreUpdateBannerDismissed() : ''}" var.toolDescBannerDismissedVersion="{window.__bramRestoreToolDescBannerDismissed ? window.__bramRestoreToolDescBannerDismissed() : ''}" var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.footerVoiceRecording="{false}" var.headerInflightTick="{0}" var.agentSwitching="{false}" var.composerFocused="{false}" var.transcriptAgentId="{''}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}" var.dismissedAgentIds="{window.__bramRestoreDismissedAgents()}"
   onInit="startBramLatestJsonlPush(() => (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || '')">
   <PushSource
     id="mainAgentStatus"
@@ -79,10 +79,6 @@
        or next. One-shot fetch, no polling. -->
   <DataSource id="footerTipSettings" url="/__settings" />
   <variable name="footerTipTick" value="{0}" />
-  <DataSource
-    id="headerSettings"
-    url="/__settings"
-    onLoaded="(v) => window.__bramInitAgentSwitcher(null, settingsAgent(v), agentSwitching, (next) => agentSwitcherSelected = next)" />
   <LocalLinkPreview />
   <!-- Live session meta for the footer echo (mirrors Transcript's source):
        /__sessions/list flags the current session; refetch on changes so the
@@ -428,12 +424,12 @@
       <HStack gap="$space-0_5" verticalAlignment="center" width="100%">
         <RadioGroup
           id="agentSwitcherSelect"
-          when="{headerSettings.loaded}"
+          when="{(mainAgentStatus.value &amp;&amp; mainAgentStatus.value.provider) || (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider)}"
           orientation="horizontal"
-          initialValue="{window.__bramAgentSwitcherInitialProvider(settingsAgent(headerSettings.value))}"
+          initialValue="{(mainAgentStatus.value &amp;&amp; mainAgentStatus.value.provider) || (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider)}"
           enabled="{!agentSwitching}"
           tooltip="{agentSwitching ? 'Agent switch in progress' : 'Switch terminal agent'}"
-          onDidChange="(next) => window.__bramHandleAgentSwitcherChange(next, agentSwitcherSelected, agentSwitcherSelect, (v) => agentSwitcherSelected = v, (v) => agentSwitching = v, toast)">
+          onDidChange="(next) => window.__bramHandleAgentSwitcherChange(next, (mainAgentStatus.value &amp;&amp; mainAgentStatus.value.provider) || (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || '', agentSwitcherSelect, (v) => agentSwitching = v, toast)">
           <Option value="claude" label="Claude" />
           <Option value="codex" label="Codex" />
         </RadioGroup>

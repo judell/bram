@@ -166,8 +166,10 @@ function settingsArgs(s) {
 function settingsFirstCommand(s) {
   return (s && s.shell && s.shell.firstCommand !== undefined && s.shell.firstCommand !== null) ? s.shell.firstCommand : '';
 }
-function settingsContinueLast(s) {
-  return !!(s && s.shell && s.shell.continueLast);
+function settingsStartupPolicy(s) {
+  const policy = s && s.shell && s.shell.startupPolicy;
+  if (policy === 'lastActive' || policy === 'agentRecent' || policy === 'newSession') return policy;
+  return (s && s.shell && s.shell.continueLast === false) ? 'newSession' : 'agentRecent';
 }
 function settingsBatch(s) {
   return !!(s && s.worklist && s.worklist.batchCommitActions);

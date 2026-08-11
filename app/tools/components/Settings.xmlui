@@ -1,56 +1,46 @@
 <Component
   name="Settings"
-  var.agentDraft="{''}"
-  var.argsDraft="{''}"
-  var.firstDraft="{''}"
-  var.continueDraft="{false}"
-  var.archiveDaysDraft="{14}"
-  var.archiveDaysSaved="{14}"
   var.infoTitle="{''}"
   var.infoBody="{''}"
   var.highlightKey="{$queryParams.highlight || ''}">
-
-  <DataSource
-    id="settingsConfig"
-    url="/__settings"
-    onLoaded="(v) => { agentDraft = settingsAgent(v); argsDraft = settingsArgs(v); firstDraft = settingsFirstCommand(v); continueDraft = settingsContinueLast(v); const days = Number((v &amp;&amp; v.traces &amp;&amp; v.traces.archiveAfterDays) || 14); archiveDaysSaved = days; if (!saveArchiveSettings.inProgress) archiveDaysDraft = days; }" />
 
   <APICall
     id="saveSettings"
     method="post"
     url="/__settings"
-    body="{$param}"
-    onSuccess="settingsConfig.refetch()" />
+    body="{$param}" />
 
   <APICall
     id="saveArchiveSettings"
     method="post"
     url="/__settings"
-    body="{$param}"
-    onSuccess="archiveDaysSaved = Number(archiveDaysDraft); settingsConfig.refetch()" />
+    body="{$param}" />
 
   <DataSource
     id="traceArchiveStatus"
     url="/__trace-archive-status" />
 
+  <PushSource
+    id="settingsChangedEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('settings-changed')}" />
+
   <VStack
     padding="$space-6"
-    gap="$space-5">
-    <PushSource
-      id="settingsChangedEvt"
-      initial="{null}"
-      subscribe="{window.bramSubscribeTauriEvent('settings-changed')}" />
-    <ChangeListener
-      listenTo="{settingsChangedEvt.value &amp;&amp; settingsChangedEvt.value.tick}"
-      onDidChange="() => { window.__bramIframeTrace('refetch-called', {context: 'settings-changed'}); settingsConfig.refetch(); }" />
+    gap="$space-5"
+    var.settingsValue="{settingsChangedEvt.value &amp;&amp; settingsChangedEvt.value.payload}">
+    <!-- XMLUI expressions and form initialValue props are reactive. Derive the
+         canonical snapshot directly from PushSource instead of copying it via
+         Lifecycle and imperative setValue calls.
+         https://docs.xmlui.org/howto/derive-a-value-from-multiple-sources
+         https://docs.xmlui.org/howto/set-the-initial-value-of-a-select-from-fetched-data -->
     <!-- settings-highlight-deeplink: on inbound ?highlight=<key>, scroll the
-         matching setting into view. Two triggers cover both arrivals: a fresh
-         mount (settingsConfig loads) and re-targeting while already on the tab
-         (highlightKey changes with the query param, settingsConfig unchanged).
+         matching setting into view. Two triggers cover both arrivals: the
+         pushed settings snapshot and re-targeting while already on the tab.
          The tint itself is reactive on highlightKey (the per-setting wrappers
          below); the helper retries across frames until the row is laid out. -->
     <ChangeListener
-      listenTo="{settingsConfig.value}"
+      listenTo="{settingsValue}"
       onDidChange="() => { if (highlightKey) window.__bramHighlightSetting(highlightKey); }" />
     <ChangeListener
       listenTo="{highlightKey}"
@@ -72,55 +62,71 @@
       color="$textColor-secondary"
       value="Mirrors .bram.json in the project root. Changes save immediately and persist there." />
 
-    <VStack when="{settingsConfig.value}" gap="$space-5">
-
-      <VStack gap="$space-2">
+    <VStack when="{settingsValue}" gap="$space-5">
+      <VStack gap="$space-3">
         <HStack gap="$space-2" verticalAlignment="center">
           <Button
             icon="info"
             size="xs"
             variant="ghost"
-            tooltip="About Shell"
-            onClick="infoTitle = 'Shell'; infoBody = window.settingsInfoBodies.shell; settingInfoDialog.open()" />
-          <Heading level="h3">Shell</Heading>
+            tooltip="About Agent"
+            onClick="infoTitle = 'Agent'; infoBody = window.settingsInfoBodies.shell; settingInfoDialog.open()" />
+          <Heading level="h3">Agent</Heading>
         </HStack>
-        <Select
+        <RadioGroup
           id="agentBox"
-          width="25%"
-          initialValue="{settingsAgent(settingsConfig.value)}"
-          onDidChange="(v) => agentDraft = v">
+          orientation="horizontal"
+          initialValue="{settingsAgent(settingsValue)}">
           <Option value="claude" label="Claude" />
           <Option value="codex" label="Codex" />
-        </Select>
-        <TextBox
-          id="argsBox"
-          width="25%"
-          placeholder="optional launch arguments"
-          initialValue="{settingsArgs(settingsConfig.value)}"
-          autoComplete="off"
-          autoCorrect="{false}"
-          spellCheck="{false}"
-          autoCapitalize="off"
-          onDidChange="(v) => argsDraft = v" />
-        <TextBox
-          id="firstCommandBox"
-          width="25%"
-          placeholder="optional first command"
-          initialValue="{settingsFirstCommand(settingsConfig.value)}"
-          autoComplete="off"
-          autoCorrect="{false}"
-          spellCheck="{false}"
-          autoCapitalize="off"
-          onDidChange="(v) => firstDraft = v" />
-        <Switch
-          label="Continue most recent session on startup"
-          initialValue="{settingsContinueLast(settingsConfig.value)}"
-          onDidChange="(v) => continueDraft = v" />
+        </RadioGroup>
+        <Select
+          id="startupPolicyBox"
+          label="On Bram launch"
+          labelPosition="start"
+          labelWidth="10rem"
+          width="50%"
+          initialValue="{settingsStartupPolicy(settingsValue)}"
+          data="{[
+            { value: 'agentRecent', label: 'Resume selected agent’s most recent session' },
+            { value: 'lastActive', label: 'Resume most-recently-active agent’s session' },
+            { value: 'newSession', label: 'Start a new session' }
+          ]}" />
+        <!-- data keeps the option lookup stable while the pushed canonical
+             settings snapshot updates this control with setValue.
+             https://docs.xmlui.org/components/Select#data -->
+        <Theme paddingLeft-summary-ExpandableItem="0">
+          <ExpandableItem
+            summary="Advanced"
+            initiallyExpanded="{false}"
+            contentWidth="50%">
+            <VStack gap="$space-2">
+              <TextBox
+                id="argsBox"
+                label="Launch arguments"
+                placeholder="{agentBox.value === 'claude' ? 'e.g. --model sonnet' : 'e.g. --sandbox workspace-write'}"
+                initialValue="{settingsArgs(settingsValue)}"
+                autoComplete="off"
+                autoCorrect="{false}"
+                spellCheck="{false}"
+                autoCapitalize="off" />
+              <TextBox
+                id="firstCommandBox"
+                label="First command"
+                placeholder="{agentBox.value === 'claude' ? 'e.g. Summarize this project' : 'e.g. Review the current changes'}"
+                initialValue="{settingsFirstCommand(settingsValue)}"
+                autoComplete="off"
+                autoCorrect="{false}"
+                spellCheck="{false}"
+                autoCapitalize="off" />
+            </VStack>
+          </ExpandableItem>
+        </Theme>
         <HStack>
           <Button
             label="Save"
-            enabled="{(agentDraft !== settingsAgent(settingsConfig.value) || argsDraft !== settingsArgs(settingsConfig.value) || firstDraft !== settingsFirstCommand(settingsConfig.value) || continueDraft !== settingsContinueLast(settingsConfig.value)) &amp;&amp; agentDraft.trim().length > 0}"
-            onClick="saveSettings.execute({ shell: { agent: agentDraft, args: argsDraft, firstCommand: firstDraft, continueLast: continueDraft } })" />
+            enabled="{window.__bramSettingsAgentFormDirty(settingsValue, agentBox, startupPolicyBox, argsBox, firstCommandBox)}"
+            onClick="saveSettings.execute(window.__bramSettingsShellUpdate(settingsValue, agentBox, startupPolicyBox, argsBox, firstCommandBox))" />
         </HStack>
       </VStack>
 
@@ -142,8 +148,9 @@
           borderRadius="$borderRadius"
           backgroundColor="{highlightKey === 'batchCommitActions' ? '$color-primary-100' : 'transparent'}">
           <Switch
+            id="batchActionsSwitch"
             label="Batch commit actions"
-            initialValue="{settingsBatch(settingsConfig.value)}"
+            initialValue="{settingsBatch(settingsValue)}"
             onDidChange="(v) => saveSettings.execute({ worklist: { batchCommitActions: v } })" />
         </VStack>
         <VStack
@@ -152,13 +159,15 @@
           borderRadius="$borderRadius"
           backgroundColor="{highlightKey === 'oneClickApproveCommit' ? '$color-primary-100' : 'transparent'}">
           <Switch
+            id="oneClickSwitch"
             label="One-click Approve &amp; commit"
-            initialValue="{settingsOneClickApproveCommit(settingsConfig.value)}"
+            initialValue="{settingsOneClickApproveCommit(settingsValue)}"
             onDidChange="(v) => saveSettings.execute({ worklist: { oneClickApproveCommit: v } })" />
         </VStack>
         <Switch
+          id="mirrorIssuesSwitch"
           label="Mirror worklist lifecycle to GitHub issues"
-          initialValue="{!!(settingsConfig.value &amp;&amp; settingsConfig.value.mirrorWorklistLifecycleToIssue)}"
+          initialValue="{!!(settingsValue &amp;&amp; settingsValue.mirrorWorklistLifecycleToIssue)}"
           onDidChange="(v) => saveSettings.execute({ mirrorWorklistLifecycleToIssue: v })" />
       </VStack>
 
@@ -175,12 +184,14 @@
           <Heading level="h3">UI</Heading>
         </HStack>
         <Switch
+          id="targetAppSwitch"
           label="Show target app"
-          initialValue="{settingsShowTargetApp(settingsConfig.value)}"
+          initialValue="{settingsShowTargetApp(settingsValue)}"
           onDidChange="(v) => saveSettings.execute({ ui: { showTargetApp: v } })" />
         <Switch
+          id="hotReloadSwitch"
           label="Agent-pane hot-reload"
-          initialValue="{settingsToolsPaneHotReload(settingsConfig.value)}"
+          initialValue="{settingsToolsPaneHotReload(settingsValue)}"
           onDidChange="(v) => saveSettings.execute({ ui: { toolsPaneHotReload: v } })" />
         <!-- issue-231: per-user preferences, localStorage-backed (not project
              settings) — tips dismissal state is per-user too. The interval
@@ -239,8 +250,9 @@
           borderRadius="$borderRadius"
           backgroundColor="{highlightKey === 'describeCommands' ? '$color-primary-100' : 'transparent'}">
           <Switch
+            id="descriptionsSwitch"
             label="Tool Descriptions"
-            initialValue="{settingsDescribeCommands(settingsConfig.value)}"
+            initialValue="{settingsDescribeCommands(settingsValue)}"
             onDidChange="(v) => saveSettings.execute({ ai: { describeCommands: v } })" />
         </VStack>
       </VStack>
@@ -258,27 +270,29 @@
           <Heading level="h3">Traces</Heading>
         </HStack>
         <Switch
+          id="tracingSwitch"
           label="Tracing enabled"
-          initialValue="{settingsTracingEnabled(settingsConfig.value)}"
+          initialValue="{settingsTracingEnabled(settingsValue)}"
           onDidChange="(v) => saveSettings.execute({ traces: { enabled: v } })" />
         <Switch
+          id="inspectorTapSwitch"
           label="Inspector trace tap"
-          initialValue="{settingsInspectorTap(settingsConfig.value)}"
+          initialValue="{settingsInspectorTap(settingsValue)}"
           onDidChange="(v) => saveSettings.execute({ traces: { inspectorTap: v } })" />
         <VStack gap="$space-2" width="12rem">
           <NumberBox
+            id="archiveDaysBox"
             label="Keep raw traces for (days)"
             width="100%"
             integersOnly="{true}"
             minValue="{1}"
             maxValue="{3650}"
-            initialValue="{settingsConfig.value.traces.archiveAfterDays || 14}"
-            onDidChange="(v) => archiveDaysDraft = v" />
+            initialValue="{settingsValue.traces.archiveAfterDays || 14}" />
           <HStack>
             <Button
               label="Save"
-              enabled="{!saveArchiveSettings.inProgress &amp;&amp; Number.isInteger(Number(archiveDaysDraft)) &amp;&amp; Number(archiveDaysDraft) >= 1 &amp;&amp; Number(archiveDaysDraft) &lt;= 3650 &amp;&amp; Number(archiveDaysDraft) !== Number(archiveDaysSaved)}"
-              onClick="saveArchiveSettings.execute({ traces: { archiveAfterDays: Number(archiveDaysDraft) } })" />
+              enabled="{window.__bramArchiveSettingsCanSave(settingsValue, archiveDaysBox, saveArchiveSettings.inProgress)}"
+              onClick="saveArchiveSettings.execute(window.__bramArchiveSettingsUpdate(settingsValue, archiveDaysBox))" />
           </HStack>
         </VStack>
         <Text
@@ -305,10 +319,10 @@
     </VStack>
 
     <Text
-      when="{settingsConfig.error}"
-      color="$color-danger-700"
+      when="{!settingsValue}"
+      color="$textColor-secondary"
       fontSize="$fontSize-sm"
-      value="Settings failed to load." />
+      value="Loading settings…" />
 
     <ModalDialog id="settingInfoDialog" title="{infoTitle}">
       <!-- Markdown line-spacing is tuned app-wide in themes/bram.json

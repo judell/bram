@@ -678,51 +678,11 @@ window.sendKeys = function (text) {
     } catch (le) {}
   });
 };
-window.__bramAgentProviderFromSettings = function (agentSetting) {
-  var s = String(agentSetting || "").toLowerCase();
-  return s.indexOf("codex") >= 0 ? "codex" : "claude";
-};
-window.__bramAgentSwitcherOptions = function () {
-  return [
-    { value: "claude", label: "Claude" },
-    { value: "codex", label: "Codex" },
-  ];
-};
-window.__bramAgentSwitcherInitialProvider = function (agentSetting) {
-  try {
-    var saved = window.sessionStorage && sessionStorage.getItem("bram.agentSwitcher.provider");
-    if (saved === "codex" || saved === "claude") return saved;
-  } catch (e) {}
-  return window.__bramAgentProviderFromSettings(agentSetting);
-};
 window.__bramAgentSwitcherTrace = function (stage, fields) {
   try {
     var payload = Object.assign({ stage: stage, at: new Date().toISOString() }, fields || {});
     window.__bramIframeTrace("agent-switcher", payload);
   } catch (e) {}
-};
-window.__bramInitAgentSwitcher = function (select, agentSetting, switching, setSelected) {
-  var key = window.__bramAgentSwitcherInitialProvider(agentSetting);
-  window.__bramAgentSwitcherTrace("settings-loaded", {
-    provider: key,
-    switching: !!switching,
-    hasSelect: !!select,
-    agentSetting: String(agentSetting || ""),
-  });
-  if (switching) return key;
-  if (typeof setSelected === "function") setSelected(key);
-  if (select && typeof select.setValue === "function") {
-    select.setValue(key);
-    window.__bramAgentSwitcherTrace("select-set-value", { provider: key });
-  }
-  return key;
-};
-window.__bramRememberAgentSwitcherProvider = function (provider) {
-  var key = String(provider || "").toLowerCase() === "codex" ? "codex" : "claude";
-  try {
-    if (window.sessionStorage) sessionStorage.setItem("bram.agentSwitcher.provider", key);
-  } catch (e) {}
-  return key;
 };
 window.__bramAgentSwitcherLabel = function (provider) {
   return String(provider || "").toLowerCase() === "codex" ? "Codex" : "Claude";
@@ -752,14 +712,12 @@ window.__bramSwitchAgent = function (provider) {
     throw e;
   });
 };
-window.__bramHandleAgentSwitcherChange = function (next, previous, select, setSelected, setSwitching, toastApi) {
+window.__bramHandleAgentSwitcherChange = function (next, previous, select, setSwitching, toastApi) {
   var key = String(next || "").toLowerCase() === "codex" ? "codex" : (String(next || "").toLowerCase() === "claude" ? "claude" : "");
   var prev = String(previous || "").toLowerCase() === "codex" ? "codex" : "claude";
   window.__bramAgentSwitcherTrace("change", { next: key, previous: prev, hasSelect: !!select });
   if (!key || key === prev) return;
   if (typeof setSwitching === "function") setSwitching(true);
-  if (typeof setSelected === "function") setSelected(key);
-  window.__bramRememberAgentSwitcherProvider(key);
   window.__bramSwitchAgent(key).then(function () {
     window.__bramAgentSwitcherTrace("complete", { provider: key });
     if (typeof setSwitching === "function") setSwitching(false);
@@ -769,8 +727,6 @@ window.__bramHandleAgentSwitcherChange = function (next, previous, select, setSe
       previous: prev,
       error: String((e && e.message) || e),
     });
-    window.__bramRememberAgentSwitcherProvider(prev);
-    if (typeof setSelected === "function") setSelected(prev);
     if (select && typeof select.setValue === "function") select.setValue(prev);
     if (typeof setSwitching === "function") setSwitching(false);
     try {
@@ -1444,14 +1400,14 @@ window.__bramSaveSplitterSize = function (key, sizes) {
 // stays inline in Settings since it's a single consumer.
 window.settingsInfoBodies = {
   shell:
-    "## Agent command\n\n" +
-    "Which agent to launch: `claude` or `codex`.\n\n" +
-    "## Arguments\n\n" +
-    "Extra launch-time flags for the agent.\n\n" +
-    "## First command\n\n" +
-    "A command sent to the agent's TUI on startup (e.g. `/resume`). Empty = none.\n\n" +
-    "## Continue most recent session on startup\n\n" +
-    "Resume the agent's latest session instead of starting fresh.",
+    "## Agent\n\n" +
+    "The default agent used by agent-scoped launch choices and as the fallback when no valid last-active Bram session exists.\n\n" +
+    "## On Bram launch\n\n" +
+    "**Resume selected agent's most recent session** uses the Agent selection above.\n\n" +
+    "**Resume most-recently-active agent's session** reopens the exact Claude or Codex session Bram was actually using before shutdown.\n\n" +
+    "**Start a new session** starts the selected Agent fresh.\n\n" +
+    "## Advanced\n\n" +
+    "Launch arguments are extra CLI flags. First command is sent to the agent's TUI after startup. Both apply whichever startup choice is used.",
   batchCommitActions:
     "## Batch commit actions\n\n" +
     "Adds Approve all / Drop all when two or more items are TO COMMIT.\n\n" +
@@ -1492,6 +1448,77 @@ window.settingsInfoBodies = {
     "## Keep raw traces for (days)\n\n" +
     "Raw archives older than this are sanitized and gzipped at startup " +
     "(1–3650, default 14). Compressed history is kept indefinitely.",
+};
+
+// Settings.xmlui receives the complete canonical view through PushSource.
+// Form controls hold drafts; their reactive initialValue bindings advance only
+// when the corresponding canonical field changes.
+window.__bramSettingsFields = function (settings) {
+  var s = settings || {};
+  var shell = s.shell || {};
+  var worklist = s.worklist || {};
+  var ui = s.ui || {};
+  var ai = s.ai || {};
+  var traces = s.traces || {};
+  var policy = shell.startupPolicy;
+  if (policy !== "lastActive" && policy !== "agentRecent" && policy !== "newSession") {
+    policy = shell.continueLast === false ? "newSession" : "agentRecent";
+  }
+  return {
+    agent: shell.agent === "codex" ? "codex" : "claude",
+    startup: policy,
+    args: shell.args == null ? "" : String(shell.args),
+    first: shell.firstCommand == null ? "" : String(shell.firstCommand),
+    archiveDays: Number(traces.archiveAfterDays || 14),
+    batch: !!worklist.batchCommitActions,
+    oneClick: worklist.oneClickApproveCommit !== false,
+    mirrorIssues: !!s.mirrorWorklistLifecycleToIssue,
+    targetApp: !!ui.showTargetApp,
+    hotReload: !!ui.toolsPaneHotReload,
+    descriptions: !!ai.describeCommands,
+    tracing: !!traces.enabled,
+    inspectorTap: !!traces.inspectorTap,
+  };
+};
+
+window.__bramSettingsControlValue = function (control, fallback) {
+  if (!control || control.value === undefined || control.value === null) return fallback;
+  return control.value;
+};
+
+window.__bramSettingsAgentFormDirty = function (settings, agent, startup, args, first) {
+  if (!settings) return false;
+  var saved = window.__bramSettingsFields(settings);
+  var agentValue = window.__bramSettingsControlValue(agent, saved.agent);
+  return String(agentValue).trim().length > 0 && (
+    agentValue !== saved.agent ||
+    window.__bramSettingsControlValue(startup, saved.startup) !== saved.startup ||
+    window.__bramSettingsControlValue(args, saved.args) !== saved.args ||
+    window.__bramSettingsControlValue(first, saved.first) !== saved.first
+  );
+};
+
+window.__bramSettingsShellUpdate = function (settings, agent, startup, args, first) {
+  var saved = window.__bramSettingsFields(settings);
+  return {
+    shell: {
+      agent: window.__bramSettingsControlValue(agent, saved.agent),
+      startupPolicy: window.__bramSettingsControlValue(startup, saved.startup),
+      args: window.__bramSettingsControlValue(args, saved.args),
+      firstCommand: window.__bramSettingsControlValue(first, saved.first),
+    },
+  };
+};
+
+window.__bramArchiveSettingsCanSave = function (settings, control, inProgress) {
+  var saved = window.__bramSettingsFields(settings).archiveDays;
+  var value = Number(window.__bramSettingsControlValue(control, saved));
+  return !inProgress && Number.isInteger(value) && value >= 1 && value <= 3650 && value !== saved;
+};
+
+window.__bramArchiveSettingsUpdate = function (settings, control) {
+  var saved = window.__bramSettingsFields(settings).archiveDays;
+  return { traces: { archiveAfterDays: Number(window.__bramSettingsControlValue(control, saved)) } };
 };
 
 // "Claude Code" for the claude provider, Title-cased provider name

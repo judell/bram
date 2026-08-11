@@ -366,6 +366,10 @@ struct ShellConfig {
     // `codex resume --last`) instead of a fresh `claude` / `codex`.
     #[serde(default, rename = "continueLast")]
     continue_last: Option<bool>,
+    // Startup behavior is independent of the default provider. Older configs
+    // omit this key and migrate through `continueLast` at read time.
+    #[serde(default, rename = "startupPolicy")]
+    startup_policy: Option<String>,
 }
 
 #[derive(Default, Clone, serde::Deserialize)]
@@ -3310,17 +3314,30 @@ fn emit_talk_session_changed_for_provider<R: tauri::Runtime>(
         // zero-delta ticks: watchers fire 2-3 events per write, and on a
         // multi-MB session each redundant refetch costs real main-thread
         // time (2026-07-07 codex esc wedge).
-        let (sid, len) = latest_session_path_for_provider(app, provider)
-            .unwrap_or(None)
+        let latest_path = latest_session_path_for_provider(app, provider).unwrap_or(None);
+        let (sid, len) = latest_path
+            .as_ref()
             .map(|p| {
                 let sid = p
                     .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_default();
-                let len = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+                let len = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
                 (sid, len)
             })
             .unwrap_or((String::new(), 0));
+        // Bram-level last-active state advances only with the foreground
+        // provider. Watchers also emit for inactive-provider files, so writing
+        // every observed session here would redefine "last active" as merely
+        // "last file touched" and revive the original conflation.
+        if current_provider(app) == Some(provider) {
+            if let Some(session_id) = latest_path
+                .as_deref()
+                .and_then(|path| session_id_for_path(provider, path))
+            {
+                remember_last_active_session(app, provider, &session_id);
+            }
+        }
         merge_json_object_fields(
             &mut payload,
             &serde_json::json!({
@@ -12728,14 +12745,24 @@ fn pty_spawn(
         }
     });
 
-    // Auto-launch the selected provider at the bash prompt. The legacy
-    // `shell.agent` setting is now used to choose the default provider
-    // (Codex when it names Codex; Claude otherwise). Bash buffers input
-    // until interactive; if rcfile init is still running, these keystrokes
-    // queue and run as the first command.
-    let provider = configured_agent_provider(&app);
-    let base_command = if configured_continue_last(&app) {
-        agent_resume_command(provider, "")
+    // Auto-launch policy is separate from the configured default provider:
+    // Bram may resume the exact provider/session it was actually using when
+    // the prior run ended, resume the configured provider's most recent
+    // session, or start that provider fresh (agent-startup-session-policy).
+    // Bash buffers input until interactive; if rcfile init is still running,
+    // these keystrokes queue and run as the first command.
+    let configured_provider = SessionProvider::from_str(configured_agent_provider(&app))
+        .unwrap_or(SessionProvider::Claude);
+    let startup_policy = configured_startup_policy(&app);
+    let last_active = if startup_policy == AgentStartupPolicy::LastActive {
+        validated_last_active_session(&app)
+    } else {
+        None
+    };
+    let launch = resolve_agent_startup_launch(startup_policy, configured_provider, last_active);
+    let provider = session_provider_label(launch.provider);
+    let base_command = if launch.resume {
+        agent_resume_command(provider, launch.session_id.as_deref().unwrap_or(""))
     } else {
         agent_launch_command(provider).map(str::to_string)
     };
@@ -12754,11 +12781,25 @@ fn pty_spawn(
                 append_bram_trace_line(
                     &app,
                     "agent-switch",
-                    &format!("op=autostart provider={} command={}", provider, command),
+                    &format!(
+                        "op=autostart provider={} policy={} exact_session={} fallback={} command={}",
+                        provider,
+                        startup_policy.as_str(),
+                        launch.session_id.as_deref().unwrap_or(""),
+                        launch.fallback,
+                        command
+                    ),
                 );
             }
-            if let Some(session_provider) = SessionProvider::from_str(provider) {
-                set_current_provider(&app, session_provider, "autostart");
+            set_current_provider(&app, launch.provider, "autostart");
+            if let Some(session_id) = launch.session_id.as_deref() {
+                if launch.provider == SessionProvider::Codex {
+                    let _ = pin_codex_reload_target(&app, session_id);
+                }
+                // Make the exact resumed conversation current immediately;
+                // neither CLI is guaranteed to touch its JSONL before the
+                // tools pane asks for the first transcript.
+                resync_transcript_to_session(&app, launch.provider, session_id);
             }
             schedule_agent_switch_refresh(app.clone(), provider, "autostart");
             schedule_agent_first_command(app.clone(), "autostart");
@@ -13446,23 +13487,17 @@ fn switch_agent(
         "claude" | "claud" => "claude",
         other => return Err(format!("unknown agent provider: {}", other)),
     };
-    let base_command = if configured_continue_last(&app) {
-        // A pinned codex session outranks `resume --last`: after a
-        // cross-provider round-trip, codex must reopen the session Bram
-        // is displaying, not codex's own idea of most-recent. The
-        // 2026-07-07 flip-back had the switch resume the 36 MB rollout
-        // while the pane showed the pinned one, and the two sessions'
-        // mtimes then raced for "latest".
-        if provider_key == "codex" {
-            match codex_reload_target(&app) {
-                Some(target) => agent_resume_command("codex", &target.id),
-                None => agent_resume_command("codex", ""),
-            }
-        } else {
-            agent_resume_command(provider_key, "")
+    // Header switching is always "return to that agent", independent of the
+    // On Bram launch policy. A pinned codex session outranks `resume --last`:
+    // after a cross-provider round-trip, codex must reopen the session Bram is
+    // displaying, not codex's own idea of most-recent.
+    let base_command = if provider_key == "codex" {
+        match codex_reload_target(&app) {
+            Some(target) => agent_resume_command("codex", &target.id),
+            None => agent_resume_command("codex", ""),
         }
     } else {
-        agent_launch_command(provider_key).map(str::to_string)
+        agent_resume_command(provider_key, "")
     }
     .ok_or("unknown agent provider")?;
     let args = configured_agent_args(&app);
@@ -14065,6 +14100,194 @@ fn agent_resume_command(provider: &str, session_id: &str) -> Option<String> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AgentStartupPolicy {
+    LastActive,
+    AgentRecent,
+    NewSession,
+}
+
+impl AgentStartupPolicy {
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "lastActive" => Some(Self::LastActive),
+            "agentRecent" => Some(Self::AgentRecent),
+            "newSession" => Some(Self::NewSession),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::LastActive => "lastActive",
+            Self::AgentRecent => "agentRecent",
+            Self::NewSession => "newSession",
+        }
+    }
+}
+
+fn startup_policy_from_shell(shell: Option<&ShellConfig>) -> AgentStartupPolicy {
+    if let Some(policy) = shell
+        .and_then(|s| s.startup_policy.as_deref())
+        .and_then(AgentStartupPolicy::from_str)
+    {
+        return policy;
+    }
+    // Backward-compatible migration: the old checkbox meant "resume this
+    // configured agent's latest session". Its historical default was ON.
+    if shell.and_then(|s| s.continue_last).unwrap_or(true) {
+        AgentStartupPolicy::AgentRecent
+    } else {
+        AgentStartupPolicy::NewSession
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AgentStartupLaunch {
+    provider: SessionProvider,
+    session_id: Option<String>,
+    resume: bool,
+    fallback: bool,
+}
+
+fn resolve_agent_startup_launch(
+    policy: AgentStartupPolicy,
+    configured_provider: SessionProvider,
+    last_active: Option<(SessionProvider, String)>,
+) -> AgentStartupLaunch {
+    match policy {
+        AgentStartupPolicy::LastActive => match last_active {
+            Some((provider, session_id)) => AgentStartupLaunch {
+                provider,
+                session_id: Some(session_id),
+                resume: true,
+                fallback: false,
+            },
+            None => AgentStartupLaunch {
+                provider: configured_provider,
+                session_id: None,
+                resume: true,
+                fallback: true,
+            },
+        },
+        AgentStartupPolicy::AgentRecent => AgentStartupLaunch {
+            provider: configured_provider,
+            session_id: None,
+            resume: true,
+            fallback: false,
+        },
+        AgentStartupPolicy::NewSession => AgentStartupLaunch {
+            provider: configured_provider,
+            session_id: None,
+            resume: false,
+            fallback: false,
+        },
+    }
+}
+
+#[cfg(test)]
+mod agent_startup_policy_tests {
+    use super::{
+        merge_settings_into_config, resolve_agent_startup_launch, settings_view_from_config,
+        startup_policy_from_shell, AgentStartupPolicy, ProjectConfig, SessionProvider,
+        ShellConfig,
+    };
+
+    fn shell(json: &str) -> ShellConfig {
+        serde_json::from_str(json).expect("valid shell config")
+    }
+
+    #[test]
+    fn legacy_continue_last_migrates_without_changing_behavior() {
+        assert_eq!(
+            startup_policy_from_shell(Some(&shell(r#"{"continueLast":true}"#))),
+            AgentStartupPolicy::AgentRecent
+        );
+        assert_eq!(
+            startup_policy_from_shell(Some(&shell(r#"{"continueLast":false}"#))),
+            AgentStartupPolicy::NewSession
+        );
+        assert_eq!(
+            startup_policy_from_shell(None),
+            AgentStartupPolicy::AgentRecent
+        );
+    }
+
+    #[test]
+    fn explicit_startup_policy_overrides_legacy_toggle() {
+        let config = shell(r#"{"continueLast":false,"startupPolicy":"lastActive"}"#);
+        assert_eq!(
+            startup_policy_from_shell(Some(&config)),
+            AgentStartupPolicy::LastActive
+        );
+    }
+
+    #[test]
+    fn last_active_launch_can_override_the_configured_provider() {
+        let launch = resolve_agent_startup_launch(
+            AgentStartupPolicy::LastActive,
+            SessionProvider::Claude,
+            Some((SessionProvider::Codex, "codex-session-123".to_string())),
+        );
+        assert_eq!(launch.provider, SessionProvider::Codex);
+        assert_eq!(launch.session_id.as_deref(), Some("codex-session-123"));
+        assert!(launch.resume);
+        assert!(!launch.fallback);
+    }
+
+    #[test]
+    fn missing_last_active_resumes_the_configured_agents_recent_session() {
+        let launch = resolve_agent_startup_launch(
+            AgentStartupPolicy::LastActive,
+            SessionProvider::Claude,
+            None,
+        );
+        assert_eq!(launch.provider, SessionProvider::Claude);
+        assert_eq!(launch.session_id, None);
+        assert!(launch.resume);
+        assert!(launch.fallback);
+    }
+
+    #[test]
+    fn new_session_is_fresh_and_agent_scoped() {
+        let launch = resolve_agent_startup_launch(
+            AgentStartupPolicy::NewSession,
+            SessionProvider::Codex,
+            Some((SessionProvider::Claude, "ignored".to_string())),
+        );
+        assert_eq!(launch.provider, SessionProvider::Codex);
+        assert!(!launch.resume);
+        assert_eq!(launch.session_id, None);
+    }
+
+    #[test]
+    fn settings_view_exposes_resolved_migration_and_partial_save_preserves_advanced() {
+        let legacy = serde_json::from_str::<ProjectConfig>(
+            r#"{"shell":{"agent":"claude","args":"--flag","firstCommand":"/status","continueLast":true}}"#,
+        )
+        .unwrap();
+        let view = settings_view_from_config(Some(legacy));
+        assert_eq!(view["shell"]["startupPolicy"], "agentRecent");
+
+        let existing = serde_json::json!({
+            "shell": {
+                "agent": "claude",
+                "args": "--flag",
+                "firstCommand": "/status",
+                "continueLast": true
+            }
+        });
+        let update = serde_json::json!({
+            "shell": { "agent": "codex", "startupPolicy": "lastActive" }
+        });
+        let merged = merge_settings_into_config(existing, &update);
+        assert_eq!(merged["shell"]["agent"], "codex");
+        assert_eq!(merged["shell"]["startupPolicy"], "lastActive");
+        assert_eq!(merged["shell"]["args"], "--flag");
+        assert_eq!(merged["shell"]["firstCommand"], "/status");
+    }
+}
+
 fn trace_agent_pty_step<R: tauri::Runtime>(
     app: &AppHandle<R>,
     op: &str,
@@ -14095,26 +14318,19 @@ fn configured_agent_args<R: tauri::Runtime>(app: &AppHandle<R>) -> String {
         .unwrap_or_default()
 }
 
+fn configured_startup_policy<R: tauri::Runtime>(app: &AppHandle<R>) -> AgentStartupPolicy {
+    let config = project_root(Some(app)).and_then(|root| load_project_config(&root));
+    startup_policy_from_shell(config.as_ref().and_then(|c| c.shell.as_ref()))
+}
+
 // The optional first command to type into a freshly-started agent once it
 // settles. Absent key -> "" (send nothing); resume is driven by the explicit
-// Continue toggle (configured_continue_last), not by auto-typing `/resume`.
+// startup policy, not by auto-typing `/resume`.
 fn configured_first_command<R: tauri::Runtime>(app: &AppHandle<R>) -> String {
     project_root(Some(app))
         .and_then(|root| load_project_config(&root))
         .and_then(|cfg| cfg.shell.and_then(|s| s.first_command))
         .unwrap_or_default()
-}
-
-// Whether autostart / provider-switch should launch the provider's "continue
-// most recent session" form. Absent key -> false (fresh launch).
-fn configured_continue_last<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
-    project_root(Some(app))
-        .and_then(|root| load_project_config(&root))
-        .and_then(|cfg| cfg.shell.and_then(|s| s.continue_last))
-        // continue-last-session-default-on: resume the most recent session
-        // unless a project explicitly opts out. A fresh launch on every
-        // restart silently drops context and drove the pa11 rotation cascade.
-        .unwrap_or(true)
 }
 
 // After a fresh launch (autostart / switch), wait for the agent's TUI to
@@ -14216,7 +14432,7 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
         agent,
         args,
         first_command,
-        continue_last,
+        startup_policy,
         batch,
         show_target_app,
         tools_pane_hot_reload,
@@ -14245,13 +14461,7 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
                     .as_ref()
                     .and_then(|s| s.first_command.clone())
                     .unwrap_or_default(),
-                // Default ON (continue-last-session-default-on) — resume unless
-                // explicitly opted out; keeps the Settings toggle matching the
-                // runtime default in configured_continue_last.
-                shell
-                    .as_ref()
-                    .and_then(|s| s.continue_last)
-                    .unwrap_or(true),
+                startup_policy_from_shell(shell.as_ref()).as_str().to_string(),
                 c.worklist
                     .and_then(|w| w.batch_commit_actions)
                     .unwrap_or(false),
@@ -14278,7 +14488,7 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
             "claude".to_string(),
             "".to_string(),
             "".to_string(),
-            false,
+            AgentStartupPolicy::AgentRecent.as_str().to_string(),
             false,
             false,
             false,
@@ -14291,7 +14501,15 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
     };
     serde_json::json!({
         "mirrorWorklistLifecycleToIssue": mirror_worklist_lifecycle_to_issue,
-        "shell": { "agent": agent, "args": args, "firstCommand": first_command, "continueLast": continue_last },
+        "shell": {
+            "agent": agent,
+            "args": args,
+            "firstCommand": first_command,
+            "startupPolicy": startup_policy,
+            // Compatibility for older tools panes during an upgrade. New code
+            // reads startupPolicy; old code still sees its familiar boolean.
+            "continueLast": startup_policy != AgentStartupPolicy::NewSession.as_str()
+        },
         "worklist": { "batchCommitActions": batch, "oneClickApproveCommit": one_click_approve_commit },
         "ui": { "showTargetApp": show_target_app, "toolsPaneHotReload": tools_pane_hot_reload },
         "traces": {
@@ -14302,6 +14520,26 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
         "menus": { "parseAndDisplay": menus_parse },
         "ai": { "describeCommands": describe_commands },
     })
+}
+
+// Settings are host-owned state. Publish the complete normalized view so
+// XMLUI consumers can use PushSource as their canonical snapshot instead of
+// treating the event as an invalidation tick followed by another GET. The
+// POST path publishes immediately; the config watcher sees the same atomic
+// write shortly afterward, so suppress that identical echo here.
+fn emit_settings_changed<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    settings: &serde_json::Value,
+) {
+    let unchanged = last_tauri_events_cell()
+        .lock()
+        .ok()
+        .and_then(|events| events.get("settings-changed").cloned())
+        .map(|last| last.payload == *settings)
+        .unwrap_or(false);
+    if !unchanged {
+        emit_replayable_payload(app, "settings-changed", settings);
+    }
 }
 
 fn is_project_config_path(path: &Path) -> bool {
@@ -14683,11 +14921,8 @@ fn handle_project_config_reload<R: tauri::Runtime>(app_handle: &AppHandle<R>, pr
     // because the watcher then went idle.
     emit_replayable_signal(&app_handle, "right-pane-reload");
 
-    emit_replayable_payload(
-        app_handle,
-        "settings-changed",
-        settings_view_from_config(new_cfg),
-    );
+    let settings = settings_view_from_config(new_cfg);
+    emit_settings_changed(app_handle, &settings);
 }
 
 #[derive(serde::Serialize)]
@@ -15661,9 +15896,9 @@ fn handle_settings_post<R: tauri::Runtime>(
     if let Err(e) = write_settings_to_config(&root, &update) {
         return (500, "text/plain; charset=utf-8", e.into_bytes());
     }
-    // Return the freshly merged view rather than echoing the POST body so
-    // the form sees the same shape it gets from GET. The filesystem watcher
-    // will also emit `settings-changed`; the duplicate refresh is harmless.
+    // Publish and return the freshly merged view rather than echoing the POST
+    // body. PushSource consumers see the canonical state immediately; the
+    // filesystem watcher echo is deduplicated by emit_settings_changed.
     let config = load_project_config(&root);
     if let Some(enabled) = config
         .as_ref()
@@ -15686,7 +15921,9 @@ fn handle_settings_post<R: tauri::Runtime>(
             .and_then(|m| m.hook_driven)
             .unwrap_or(true),
     );
-    let body = settings_view_from_config(config).to_string().into_bytes();
+    let settings = settings_view_from_config(config);
+    emit_settings_changed(app, &settings);
+    let body = settings.to_string().into_bytes();
     (200, "application/json; charset=utf-8", body)
 }
 
@@ -15785,7 +16022,7 @@ struct SessionEntry {
     current: bool,
 }
 
-#[derive(Clone, Copy, serde::Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 enum SessionProvider {
     Claude,
@@ -15843,6 +16080,124 @@ fn current_provider<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<SessionProv
     let content = std::fs::read_to_string(path).ok()?;
     let record = serde_json::from_str::<serde_json::Value>(&content).ok()?;
     SessionProvider::from_str(record.get("provider")?.as_str()?)
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct LastActiveSessionRecord {
+    provider: String,
+    session_id: String,
+    updated_at_ms: i64,
+}
+
+fn last_active_session_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+    let root = project_root(Some(app)).ok_or("could not resolve project root")?;
+    let abs = strip_unc_prefix(root.canonicalize().map_err(|e| e.to_string())?);
+    let encoded = encode_path_for_filename(&abs);
+    let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+    Ok(cache_dir
+        .join("last-active-session")
+        .join(format!("{}.json", encoded)))
+}
+
+fn read_last_active_session<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Option<LastActiveSessionRecord> {
+    let path = last_active_session_path(app).ok()?;
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn last_active_session_cache_cell() -> &'static Mutex<Option<LastActiveSessionRecord>> {
+    static CELL: OnceLock<Mutex<Option<LastActiveSessionRecord>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+fn remember_last_active_session<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    provider: SessionProvider,
+    session_id: &str,
+) {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return;
+    }
+    let provider_label = session_provider_label(provider).to_string();
+    let mut cached = match last_active_session_cache_cell().lock() {
+        Ok(guard) => guard,
+        Err(error) => error.into_inner(),
+    };
+    if cached.is_none() {
+        *cached = read_last_active_session(app);
+    }
+    if cached.as_ref().is_some_and(|record| {
+        record.provider == provider_label && record.session_id == session_id
+    }) {
+        return;
+    }
+    let record = LastActiveSessionRecord {
+        provider: provider_label.clone(),
+        session_id: session_id.to_string(),
+        updated_at_ms: unix_now_ms(),
+    };
+    let write_result = last_active_session_path(app).and_then(|path| {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let text = serde_json::to_string_pretty(&record).map_err(|e| e.to_string())?;
+        atomic_write_text(&path, &format!("{}\n", text))
+    });
+    if write_result.is_ok() {
+        *cached = Some(record);
+    }
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "agent-switch",
+            &format!(
+                "op=remember-last-active provider={} session={} result={}",
+                provider_label,
+                session_id,
+                if write_result.is_ok() { "ok" } else { "error" }
+            ),
+        );
+    }
+}
+
+fn validated_last_active_session<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Option<(SessionProvider, String)> {
+    let record = read_last_active_session(app)?;
+    let provider = SessionProvider::from_str(&record.provider)?;
+    if record.session_id.is_empty()
+        || session_path_for_id(app, provider, &record.session_id).is_none()
+    {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "agent-switch",
+                &format!(
+                    "op=last-active-invalid provider={} session={}",
+                    record.provider, record.session_id
+                ),
+            );
+        }
+        return None;
+    }
+    Some((provider, record.session_id))
+}
+
+fn session_id_for_path(provider: SessionProvider, path: &Path) -> Option<String> {
+    match provider {
+        SessionProvider::Claude => path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(str::to_string),
+        SessionProvider::Codex => codex_session_meta(path)
+            .ok()
+            .flatten()
+            .map(|(id, _)| id),
+    }
 }
 
 fn active_agent_hint_mtime<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<std::time::SystemTime> {
@@ -42170,6 +42525,11 @@ pub fn run() {
             // Seed a replayable talk-session tick before the tools iframe
             // subscribes; /__startup-ready replays this event on boot.
             emit_talk_session_changed(app.handle());
+            // Seed host-owned settings for the same late-subscriber case.
+            // Settings.xmlui consumes this full payload directly through a
+            // PushSource, so it has no bootstrap DataSource fallback.
+            let initial_settings = settings_view_from_config(load_project_config(&proj_root));
+            emit_settings_changed(app.handle(), &initial_settings);
             // Watch contract: events are emitted on two channels, NOT one.
             //   - "right-pane-reload" fires for changes inside proj_root only;
             //     main.js reloads the right-pane iframe alone. The agent

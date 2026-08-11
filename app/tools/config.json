@@ -1,6 +1,6 @@
 {
   "xmluiConfig": {
-    "compileScripts": true
+    "compileScripts": false
   },
   "appGlobals": {
     "xsVerbose": true,

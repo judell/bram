@@ -63,8 +63,15 @@
       value="Mirrors .bram.json in the project root. Changes save immediately and persist there." />
 
     <VStack when="{settingsValue}" gap="$space-5">
-      <VStack gap="$space-3">
-        <HStack gap="$space-2" verticalAlignment="center">
+      <VStack gap="$space-4">
+        <HStack
+          width="fit-content"
+          gap="$space-1"
+          verticalAlignment="center"
+          paddingHorizontal="$space-2"
+          paddingVertical="$space-1"
+          borderRadius="$borderRadius"
+          backgroundColor="$color-surface-100">
           <Button
             icon="info"
             size="xs"
@@ -132,8 +139,15 @@
 
       <ContentSeparator />
 
-      <VStack gap="$space-2">
-        <HStack gap="$space-2" verticalAlignment="center">
+      <VStack gap="$space-4">
+        <HStack
+          width="fit-content"
+          gap="$space-1"
+          verticalAlignment="center"
+          paddingHorizontal="$space-2"
+          paddingVertical="$space-1"
+          borderRadius="$borderRadius"
+          backgroundColor="$color-surface-100">
           <Button
             icon="info"
             size="xs"
@@ -173,8 +187,15 @@
 
       <ContentSeparator />
 
-      <VStack gap="$space-2">
-        <HStack gap="$space-2" verticalAlignment="center">
+      <VStack gap="$space-4">
+        <HStack
+          width="fit-content"
+          gap="$space-1"
+          verticalAlignment="center"
+          paddingHorizontal="$space-2"
+          paddingVertical="$space-1"
+          borderRadius="$borderRadius"
+          backgroundColor="$color-surface-100">
           <Button
             icon="info"
             size="xs"
@@ -234,8 +255,15 @@
 
       <ContentSeparator />
 
-      <VStack gap="$space-2">
-        <HStack gap="$space-2" verticalAlignment="center">
+      <VStack gap="$space-4">
+        <HStack
+          width="fit-content"
+          gap="$space-1"
+          verticalAlignment="center"
+          paddingHorizontal="$space-2"
+          paddingVertical="$space-1"
+          borderRadius="$borderRadius"
+          backgroundColor="$color-surface-100">
           <Button
             icon="info"
             size="xs"
@@ -259,8 +287,15 @@
 
       <ContentSeparator />
 
-      <VStack gap="$space-2">
-        <HStack gap="$space-2" verticalAlignment="center">
+      <VStack gap="$space-4">
+        <HStack
+          width="fit-content"
+          gap="$space-1"
+          verticalAlignment="center"
+          paddingHorizontal="$space-2"
+          paddingVertical="$space-1"
+          borderRadius="$borderRadius"
+          backgroundColor="$color-surface-100">
           <Button
             icon="info"
             size="xs"

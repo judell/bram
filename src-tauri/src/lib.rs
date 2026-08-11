@@ -21284,6 +21284,36 @@ fn st_codex_tool_summary(payload: &serde_json::Value) -> String {
     let raw_name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let full_name = st_codex_tool_name(payload);
     let input = st_codex_tool_input(payload);
+    // Codex's continuation tool is an implementation detail unless its
+    // structured payload is translated into user-facing progress. Keep the
+    // cell id for correlation, but explain what it represents and bound the
+    // wait so a collapsed transcript row does not look like an unexplained
+    // stall (codex-wait-context-summary).
+    if raw_name == "wait" {
+        let cell = input
+            .get("cell_id")
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.is_empty());
+        let mut summary = match cell {
+            Some(id) => format!("monitoring background task {}", id),
+            None => "monitoring background task".to_string(),
+        };
+        if let Some(ms) = input.get("yield_time_ms").and_then(|v| v.as_u64()) {
+            if ms > 0 {
+                if ms % 1000 == 0 {
+                    let seconds = ms / 1000;
+                    summary.push_str(&format!(
+                        " for up to {} second{}",
+                        seconds,
+                        if seconds == 1 { "" } else { "s" }
+                    ));
+                } else {
+                    summary.push_str(&format!(" for up to {} ms", ms));
+                }
+            }
+        }
+        return summary;
+    }
     if raw_name == "exec_command" {
         if let Some(cmd) = input.get("cmd").and_then(|v| v.as_str()) {
             if cmd.chars().count() > 80 {
@@ -21991,11 +22021,132 @@ mod apply_patch_diff_tests {
 mod codex_unified_exec_tests {
     use super::{
         st_codex_exec_cmds, st_codex_tool_command_display, st_codex_tool_name,
-        st_codex_tool_output, st_codex_tool_summary, st_parse_lines_to_turns,
+        st_codex_running_cell_id, st_codex_tool_output, st_codex_tool_summary,
+        st_parse_lines_to_turns,
     };
 
     fn exec_call(input: &str) -> serde_json::Value {
         serde_json::json!({ "type": "custom_tool_call", "name": "exec", "input": input })
+    }
+
+    fn function_call(name: &str, arguments: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function_call",
+            "name": name,
+            "arguments": arguments.to_string()
+        })
+    }
+
+    #[test]
+    fn wait_summary_explains_the_background_task_and_deadline() {
+        let call = function_call(
+            "wait",
+            serde_json::json!({
+                "cell_id": "7",
+                "yield_time_ms": 35_000,
+                "max_tokens": 6_000
+            }),
+        );
+        assert_eq!(
+            st_codex_tool_summary(&call),
+            "monitoring background task 7 for up to 35 seconds"
+        );
+    }
+
+    #[test]
+    fn wait_summary_remains_clear_without_a_deadline() {
+        let call = function_call("wait", serde_json::json!({ "cell_id": "cell-a" }));
+        assert_eq!(
+            st_codex_tool_summary(&call),
+            "monitoring background task cell-a"
+        );
+    }
+
+    #[test]
+    fn wait_argument_names_do_not_specialize_unrelated_tools() {
+        let call = function_call(
+            "other_tool",
+            serde_json::json!({ "cell_id": "7", "yield_time_ms": 35_000 }),
+        );
+        assert_eq!(st_codex_tool_summary(&call), "other_tool");
+    }
+
+    #[test]
+    fn running_cell_id_requires_the_tool_runner_sentence() {
+        assert_eq!(
+            st_codex_running_cell_id(
+                "Script running with cell ID 7\nWall time 10.0 seconds\nOutput:\n"
+            ),
+            Some("7".to_string())
+        );
+        assert_eq!(st_codex_running_cell_id("cell ID 7"), None);
+        assert_eq!(st_codex_running_cell_id("Script running with cell ID "), None);
+    }
+
+    #[test]
+    fn projected_wait_expansion_shows_the_originating_command() {
+        let exec_call = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "call_id": "call_exec",
+                "name": "exec",
+                "input": "const r = await tools.exec_command({cmd:\"sleep 15\"}); text(r.output);"
+            }
+        });
+        let exec_output = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "call_exec",
+                "output": r#"{"chunk_id":"abc","output":"Script running with cell ID 7\nWall time 10.0 seconds\nOutput:\n"}"#
+            }
+        });
+        let wait_call = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "call_id": "call_wait",
+                "name": "wait",
+                "arguments": "{\"cell_id\":\"7\",\"yield_time_ms\":10000}"
+            }
+        });
+        let turns = st_parse_lines_to_turns(&format!(
+            "{exec_call}\n{exec_output}\n{wait_call}"
+        ));
+        let entry = turns
+            .iter()
+            .flat_map(|turn| {
+                turn.get("entries")
+                    .and_then(|value| value.as_array())
+                    .into_iter()
+                    .flatten()
+            })
+            .find(|entry| entry.get("id").and_then(|value| value.as_str()) == Some("call_wait"))
+            .expect("projected wait entry");
+        assert_eq!(entry["commandDisplay"], "sleep 15");
+        assert_eq!(
+            entry["description"],
+            "This check is monitoring background task 7 for up to 10 seconds; original command shown below."
+        );
+    }
+
+    #[test]
+    fn projected_wait_expansion_has_a_useful_uncorrelated_fallback() {
+        let wait_call = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "call_id": "call_wait",
+                "name": "wait",
+                "arguments": "{\"cell_id\":\"19\",\"yield_time_ms\":35000}"
+            }
+        });
+        let turns = st_parse_lines_to_turns(&wait_call.to_string());
+        let entry = &turns[0]["entries"][0];
+        let display = entry["commandDisplay"].as_str().unwrap_or("");
+        assert!(display.contains("monitoring background task 19 for up to 35 seconds"));
+        assert!(display.contains("Original command unavailable"));
     }
 
     #[test]
@@ -22644,6 +22795,20 @@ fn st_codex_tool_command_markdown(payload: &serde_json::Value) -> String {
     String::new()
 }
 
+// A unified exec that outlives its initial yield reports the continuation
+// handle in its normalized output. Keep this parsing deliberately tied to the
+// user-facing sentence emitted by the tool runner; arbitrary numeric output
+// must never turn an unrelated command into a background task.
+fn st_codex_running_cell_id(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("Script running with cell ID ")
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+    })
+}
+
 // Codex records synthetic context/instruction blocks (AGENTS.md payloads,
 // sandbox boilerplate, turn-abort markers) as ordinary user messages.
 // Suppress them in the projection so every display surface skips them the
@@ -22949,6 +23114,11 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
     // originating entry.
     let mut tool_entry_locations: std::collections::HashMap<String, (usize, usize)> =
         std::collections::HashMap::new();
+    // Unified exec continuations refer only to a cell id. Correlate that id
+    // with the originating command while walking the JSONL so a later wait
+    // expansion can explain what it is actually monitoring.
+    let mut codex_background_commands: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     for line in jsonl_text.lines() {
         if line.is_empty() {
             continue;
@@ -23183,6 +23353,32 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
                     let id = p.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
                     let name = st_codex_tool_name(p);
                     let summary = st_codex_tool_summary(p);
+                    let mut command_display = st_codex_tool_command_display(p);
+                    let mut description = String::new();
+                    if p.get("name").and_then(|v| v.as_str()) == Some("wait") {
+                        let input = st_codex_tool_input(p);
+                        let cell_id = input
+                            .get("cell_id")
+                            .and_then(|v| v.as_str())
+                            .filter(|v| !v.is_empty());
+                        if let Some(command) =
+                            cell_id.and_then(|cell| codex_background_commands.get(cell))
+                        {
+                            command_display = command.clone();
+                            description = format!(
+                                "This check is {}; original command shown below.",
+                                summary
+                            );
+                        } else {
+                            // Incremental projection can begin after the exec
+                            // that created the cell. Keep the row informative
+                            // instead of restoring the former blank expansion.
+                            command_display = format!(
+                                "```text\n{}\nOriginal command unavailable in this transcript window.\n```",
+                                summary
+                            );
+                        }
+                    }
                     // transcript-search-tool-rendering: same Search
                     // projection as the Claude side. Codex may use legacy
                     // exec_command(input.cmd) or unified exec(input=JS).
@@ -23198,9 +23394,10 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
                         "id": id,
                         "name": proj_name,
                         "summary": summary,
-                        "commandDisplay": st_codex_tool_command_display(p),
+                        "commandDisplay": command_display,
                         "commandMarkdown": st_codex_tool_command_markdown(p),
                         "nameDetail": name_detail,
+                        "description": description,
                     });
                     let entry_idx = entries.len();
                     entries.push(entry);
@@ -23211,6 +23408,8 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
                     let id = p.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
                     if let Some((turn_idx, entry_idx)) = tool_entry_locations.get(id).copied() {
                         if let Some((text, errored, structured)) = st_codex_tool_output(p) {
+                            let running_cell_id = st_codex_running_cell_id(&text);
+                            let mut background_command: Option<(String, String)> = None;
                             let first_line = text
                                 .split('\n')
                                 .next()
@@ -23228,6 +23427,32 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
                                         .get_mut(entry_idx)
                                         .and_then(|e| e.as_object_mut())
                                     {
+                                        if let Some(cell_id) = running_cell_id.as_ref() {
+                                            let entry_name = entry_obj
+                                                .get("name")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("");
+                                            if entry_name == "exec"
+                                                || entry_name == "exec_command"
+                                            {
+                                                let command = entry_obj
+                                                    .get("commandDisplay")
+                                                    .and_then(|v| v.as_str())
+                                                    .filter(|v| !v.is_empty())
+                                                    .or_else(|| {
+                                                        entry_obj
+                                                            .get("summary")
+                                                            .and_then(|v| v.as_str())
+                                                            .filter(|v| !v.is_empty())
+                                                    });
+                                                if let Some(command) = command {
+                                                    background_command = Some((
+                                                        cell_id.clone(),
+                                                        command.to_string(),
+                                                    ));
+                                                }
+                                            }
+                                        }
                                         entry_obj.insert(
                                             "result".to_string(),
                                             serde_json::Value::String(st_cap_chars(&text, 4000)),
@@ -23252,6 +23477,9 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
                                         }
                                     }
                                 }
+                            }
+                            if let Some((cell_id, command)) = background_command {
+                                codex_background_commands.insert(cell_id, command);
                             }
                         }
                     }

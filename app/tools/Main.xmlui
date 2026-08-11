@@ -426,19 +426,17 @@
   <AppHeader>
     <Theme fontSize-Button="$fontSize-md">
       <HStack gap="$space-0_5" verticalAlignment="center" width="100%">
-        <Select
+        <RadioGroup
           id="agentSwitcherSelect"
           when="{headerSettings.loaded}"
-          width="9rem"
+          orientation="horizontal"
           initialValue="{window.__bramAgentSwitcherInitialProvider(settingsAgent(headerSettings.value))}"
           enabled="{!agentSwitching}"
-          inProgress="{agentSwitching}"
-          inProgressNotificationMessage="Switching agent"
           tooltip="{agentSwitching ? 'Agent switch in progress' : 'Switch terminal agent'}"
           onDidChange="(next) => window.__bramHandleAgentSwitcherChange(next, agentSwitcherSelected, agentSwitcherSelect, (v) => agentSwitcherSelected = v, (v) => agentSwitching = v, toast)">
           <Option value="claude" label="Claude" />
           <Option value="codex" label="Codex" />
-        </Select>
+        </RadioGroup>
         <SpaceFiller />
         <Text
           when="{headerInflightClaim.value &amp;&amp; headerInflightClaim.value.ids &amp;&amp; headerInflightClaim.value.ids.length > 0}"

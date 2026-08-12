@@ -157,20 +157,6 @@ function buildCloseIssueLines(state) {
 // window-global script needed. App.mark pushes a `kind: "app:mark"`
 // record with `ts` (Unix ms) and `perfTs` to the inspector buffer,
 // directly mergeable with bram-trace.log on the same Unix-ms clock.
-function settingsAgent(s) {
-  return (s && s.shell && s.shell.agent) || '';
-}
-function settingsArgs(s) {
-  return (s && s.shell && s.shell.args !== undefined && s.shell.args !== null) ? s.shell.args : '';
-}
-function settingsFirstCommand(s) {
-  return (s && s.shell && s.shell.firstCommand !== undefined && s.shell.firstCommand !== null) ? s.shell.firstCommand : '';
-}
-function settingsStartupPolicy(s) {
-  const policy = s && s.shell && s.shell.startupPolicy;
-  if (policy === 'lastActive' || policy === 'agentRecent' || policy === 'newSession') return policy;
-  return (s && s.shell && s.shell.continueLast === false) ? 'newSession' : 'agentRecent';
-}
 function settingsBatch(s) {
   return !!(s && s.worklist && s.worklist.batchCommitActions);
 }

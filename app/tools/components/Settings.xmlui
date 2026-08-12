@@ -10,12 +10,6 @@
     url="/__settings"
     body="{$param}" />
 
-  <APICall
-    id="saveArchiveSettings"
-    method="post"
-    url="/__settings"
-    body="{$param}" />
-
   <DataSource
     id="traceArchiveStatus"
     url="/__trace-archive-status" />
@@ -29,11 +23,10 @@
     padding="$space-6"
     gap="$space-5"
     var.settingsValue="{settingsChangedEvt.value &amp;&amp; settingsChangedEvt.value.payload}">
-    <!-- XMLUI expressions and form initialValue props are reactive. Derive the
-         canonical snapshot directly from PushSource instead of copying it via
-         Lifecycle and imperative setValue calls.
-         https://docs.xmlui.org/howto/derive-a-value-from-multiple-sources
-         https://docs.xmlui.org/howto/set-the-initial-value-of-a-select-from-fetched-data -->
+    <!-- Each explicit-save group is a scoped Form. A successful POST installs
+         its canonical response with reset(data); pushed snapshots reset only a
+         pristine form, so they cannot overwrite a dirty draft.
+         https://www.xmlui.org/docs/reference/components/Form#reset -->
     <!-- settings-highlight-deeplink: on inbound ?highlight=<key>, scroll the
          matching setting into view. Two triggers cover both arrivals: the
          pushed settings snapshot and re-targeting while already on the tab.
@@ -60,7 +53,7 @@
     <Text
       fontSize="$fontSize-sm"
       color="$textColor-secondary"
-      value="Mirrors .bram.json in the project root. Changes save immediately and persist there." />
+      value="Mirrors .bram.json in the project root. Most changes save immediately; agent and retention changes require Save. All changes persist there." />
 
     <VStack when="{settingsValue}" gap="$space-5">
       <VStack gap="$space-4">
@@ -80,61 +73,69 @@
             onClick="infoTitle = 'Agent'; infoBody = window.settingsInfoBodies.shell; settingInfoDialog.open()" />
           <Heading level="h3">Agent</Heading>
         </HStack>
-        <RadioGroup
-          id="agentBox"
-          orientation="horizontal"
-          initialValue="{settingsAgent(settingsValue)}">
-          <Option value="claude" label="Claude" />
-          <Option value="codex" label="Codex" />
-        </RadioGroup>
-        <Select
-          id="startupPolicyBox"
-          label="On Bram launch"
-          labelPosition="start"
-          labelWidth="10rem"
-          width="50%"
-          initialValue="{settingsStartupPolicy(settingsValue)}"
-          data="{[
-            { value: 'agentRecent', label: 'Resume selected agent’s most recent session' },
-            { value: 'lastActive', label: 'Resume most-recently-active agent’s session' },
-            { value: 'newSession', label: 'Start a new session' }
-          ]}" />
-        <!-- data keeps the option lookup stable while the pushed canonical
-             settings snapshot updates this control with setValue.
-             https://docs.xmlui.org/components/Select#data -->
-        <Theme paddingLeft-summary-ExpandableItem="0">
-          <ExpandableItem
-            summary="Advanced"
-            initiallyExpanded="{false}"
-            contentWidth="50%">
-            <VStack gap="$space-2">
-              <TextBox
-                id="argsBox"
-                label="Launch arguments"
-                placeholder="{agentBox.value === 'claude' ? 'e.g. --model sonnet' : 'e.g. --sandbox workspace-write'}"
-                initialValue="{settingsArgs(settingsValue)}"
-                autoComplete="off"
-                autoCorrect="{false}"
-                spellCheck="{false}"
-                autoCapitalize="off" />
-              <TextBox
-                id="firstCommandBox"
-                label="First command"
-                placeholder="{agentBox.value === 'claude' ? 'e.g. Summarize this project' : 'e.g. Review the current changes'}"
-                initialValue="{settingsFirstCommand(settingsValue)}"
-                autoComplete="off"
-                autoCorrect="{false}"
-                spellCheck="{false}"
-                autoCapitalize="off" />
-            </VStack>
-          </ExpandableItem>
-        </Theme>
-        <HStack>
-          <Button
-            label="Save"
-            enabled="{window.__bramSettingsAgentFormDirty(settingsValue, agentBox, startupPolicyBox, argsBox, firstCommandBox)}"
-            onClick="saveSettings.execute(window.__bramSettingsShellUpdate(settingsValue, agentBox, startupPolicyBox, argsBox, firstCommandBox))" />
-        </HStack>
+        <Form
+          id="agentSettingsForm"
+          testId="settings-agent-form"
+          data="{window.__bramSettingsFormData(settingsValue, 'shell')}"
+          submitUrl="/__settings"
+          submitMethod="post"
+          cancelLabel=""
+          saveLabel="Save agent changes"
+          saveInProgressLabel="Saving…"
+          hideButtonRowUntilDirty="{true}"
+          marginRight-submitButton="auto"
+          onWillSubmit="(data) => window.__bramSettingsSectionUpdate('shell', data)"
+          onSuccess="(response) => window.__bramAdoptSettingsForm(agentSettingsForm, response, 'shell')">
+          <RadioGroup
+            id="agentBox"
+            bindTo="agent"
+            orientation="horizontal">
+            <Option value="claude" label="Claude" />
+            <Option value="codex" label="Codex" />
+          </RadioGroup>
+          <Select
+            id="startupPolicyBox"
+            bindTo="startupPolicy"
+            label="On Bram launch"
+            labelPosition="start"
+            labelWidth="10rem"
+            width="70%"
+            data="{[
+              { value: 'agentRecent', label: 'Resume selected agent’s most recent session' },
+              { value: 'lastActive', label: 'Resume most-recently-active agent’s session' },
+              { value: 'newSession', label: 'Start a new session' }
+            ]}" />
+          <Theme paddingLeft-summary-ExpandableItem="0">
+            <ExpandableItem
+              summary="Advanced"
+              initiallyExpanded="{false}"
+              contentWidth="50%">
+              <VStack gap="$space-2">
+                <TextBox
+                  id="argsBox"
+                  bindTo="args"
+                  label="Launch arguments"
+                  placeholder="{agentBox.value === 'claude' ? 'e.g. --model sonnet' : 'e.g. --sandbox workspace-write'}"
+                  autoComplete="off"
+                  autoCorrect="{false}"
+                  spellCheck="{false}"
+                  autoCapitalize="off" />
+                <TextBox
+                  id="firstCommandBox"
+                  bindTo="firstCommand"
+                  label="First command"
+                  placeholder="{agentBox.value === 'claude' ? 'e.g. Summarize this project' : 'e.g. Review the current changes'}"
+                  autoComplete="off"
+                  autoCorrect="{false}"
+                  spellCheck="{false}"
+                  autoCapitalize="off" />
+              </VStack>
+            </ExpandableItem>
+          </Theme>
+        </Form>
+        <ChangeListener
+          listenTo="{settingsValue}"
+          onDidChange="window.__bramSyncSettingsForm(settingsValue, agentSettingsForm, 'shell')" />
       </VStack>
 
       <ContentSeparator />
@@ -314,22 +315,32 @@
           label="Inspector trace tap"
           initialValue="{settingsInspectorTap(settingsValue)}"
           onDidChange="(v) => saveSettings.execute({ traces: { inspectorTap: v } })" />
-        <VStack gap="$space-2" width="12rem">
+        <Form
+          id="archiveSettingsForm"
+          testId="settings-archive-form"
+          width="12rem"
+          data="{window.__bramSettingsFormData(settingsValue, 'traces')}"
+          submitUrl="/__settings"
+          submitMethod="post"
+          cancelLabel=""
+          saveLabel="Save retention change"
+          saveInProgressLabel="Saving…"
+          hideButtonRowUntilDirty="{true}"
+          marginRight-submitButton="auto"
+          onWillSubmit="(data) => window.__bramSettingsSectionUpdate('traces', data)"
+          onSuccess="(response) => window.__bramAdoptSettingsForm(archiveSettingsForm, response, 'traces')">
           <NumberBox
             id="archiveDaysBox"
+            bindTo="archiveAfterDays"
             label="Keep raw traces for (days)"
             width="100%"
             integersOnly="{true}"
             minValue="{1}"
-            maxValue="{3650}"
-            initialValue="{settingsValue.traces.archiveAfterDays || 14}" />
-          <HStack>
-            <Button
-              label="Save"
-              enabled="{window.__bramArchiveSettingsCanSave(settingsValue, archiveDaysBox, saveArchiveSettings.inProgress)}"
-              onClick="saveArchiveSettings.execute(window.__bramArchiveSettingsUpdate(settingsValue, archiveDaysBox))" />
-          </HStack>
-        </VStack>
+            maxValue="{3650}" />
+        </Form>
+        <ChangeListener
+          listenTo="{settingsValue}"
+          onDidChange="window.__bramSyncSettingsForm(settingsValue, archiveSettingsForm, 'traces')" />
         <Text
           fontSize="$fontSize-xs"
           color="$textColor-secondary"

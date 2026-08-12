@@ -126,6 +126,40 @@ class HowtoDoc:
     title_tokens: frozenset[str]
 
 
+@dataclasses.dataclass(frozen=True)
+class SearchSignal:
+    """One schema-v2 `search_query` analytics record: the search OUTCOME."""
+
+    timestamp: dt.datetime
+    query: str
+    confidence: str
+    top_score: float
+    score_gap: float
+    title_match_count: int
+    # salient_* fields (xmlui-mcp #12): match counts scoped to the query's
+    # salient terms, so generic tokens (button, list, form) no longer inflate
+    # them. `salient_title_match_count` falls back to the any-term
+    # `title_match_count` for pre-#12 records that lack it.
+    salient_title_match_count: int
+    salient_content_match_count: int
+    # term_coverage (xmlui-mcp #13): per-term (term, title_matches,
+    # content_matches) for every kept token. Generic-immune, and the only
+    # place the content-gap tell lives cleanly: a term with title=0 AND
+    # content=0 is absent from the whole result set. Empty for pre-#13 records.
+    term_coverage: tuple
+    matched_file_count: int
+    yielded_results: bool
+    corpus_version: str
+
+    def absent_terms(self) -> list[str]:
+        """Query terms absent from every result (title=0 and content=0)."""
+        return [
+            term
+            for term, title_matches, content_matches in self.term_coverage
+            if title_matches == 0 and content_matches == 0
+        ]
+
+
 class SearchFailure(RuntimeError):
     pass
 
@@ -584,6 +618,299 @@ def classify(
     return "missing", reasons
 
 
+def load_search_signals(
+    path: Path, since: dt.datetime | None = None
+) -> dict[str, SearchSignal]:
+    """Latest schema-v2 `search_query` record per query text.
+
+    Schema-v2 records carry `top_score`; older records don't, so that key gates
+    membership. `dict` preserves insertion order and the last write wins, so a
+    re-run of the same query keeps its most recent (post-fix) outcome.
+    """
+    out: dict[str, SearchSignal] = {}
+    with path.open(encoding="utf-8") as stream:
+        for line in stream:
+            try:
+                record = json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if record.get("type") != "search_query" or record.get("top_score") is None:
+                continue
+            query = str(record.get("query") or "").strip()
+            if not query:
+                continue
+            try:
+                timestamp = parse_timestamp(str(record.get("timestamp") or ""))
+            except ValueError:
+                continue
+            if since is not None and timestamp < since:
+                continue
+            out[query] = SearchSignal(
+                timestamp=timestamp,
+                query=query,
+                confidence=str(record.get("confidence") or ""),
+                top_score=float(record.get("top_score") or 0.0),
+                score_gap=float(record.get("score_gap") or 0.0),
+                title_match_count=int(record.get("title_match_count") or 0),
+                salient_title_match_count=int(
+                    record.get("salient_title_match_count")
+                    if record.get("salient_title_match_count") is not None
+                    else (record.get("title_match_count") or 0)
+                ),
+                salient_content_match_count=int(
+                    record.get("salient_content_match_count") or 0
+                ),
+                term_coverage=tuple(
+                    (
+                        str(entry.get("term") or ""),
+                        int(entry.get("title_matches") or 0),
+                        int(entry.get("content_matches") or 0),
+                    )
+                    for entry in (record.get("term_coverage") or [])
+                    if isinstance(entry, dict)
+                ),
+                matched_file_count=int(record.get("matched_file_count") or 0),
+                yielded_results=bool(record.get("yielded_results", True)),
+                corpus_version=str(record.get("corpus_version") or ""),
+            )
+    return out
+
+
+# signal_verdict thresholds, calibrated against the live analytics tape.
+STANDOUT_TOP = 7.0  # a strong lexical top hit
+STANDOUT_GAP = 3.0  # ...clearly ahead of the #2 result
+WEAK_TOP = 2.5      # essentially nothing matched
+
+
+def signal_verdict(signal: SearchSignal) -> tuple[bool, str, str]:
+    """(is_gap_candidate, lean, note) from the recorded search outcome alone.
+
+    Since xmlui-mcp #12 the record carries salient-term-scoped match counts, so
+    the content-vs-discoverability split is now a record-level signal rather
+    than pure guesswork: a salient term in a title or a non-trivially-ranked
+    body means a relevant doc exists (discoverability); its absence everywhere
+    means no doc exists (content).
+
+    Primary content-gap detector (xmlui-mcp #13 `term_coverage`): a query term
+    with title=0 AND content=0 is absent from the entire result set. This is
+    generic-immune (a chrome word like "button" is never absent) and needs no
+    corpus statistics, so it is the most reliable content-gap tell — it catches
+    "restore scroll position" via `restore` being absent.
+
+    Since xmlui-mcp #14 the aggregate `salient_*` counts are derived
+    consistently with `term_coverage` (they no longer contradict it — the old
+    single rarity-picked salient term is gone), so the finer discoverability
+    split below is a near-verdict. The one residual the counts cannot resolve:
+    an incidental body mention (e.g. a "clipboard" icon name, content=1) is
+    indistinguishable from real coverage, so a case like "copy to the clipboard"
+    still needs the top-hit URL to confirm. The lean stays a strong hint, not a
+    hard verdict.
+    """
+    if signal.confidence == "high":
+        return (
+            False,
+            "covered",
+            "confidence=high — term-coverage guard confirmed a salient-term title match",
+        )
+    if not signal.yielded_results:
+        return (True, "content", "search yielded no results")
+    if signal.confidence == "low":
+        # A high top_score on a low record is the off-salient filename-match
+        # signature (e.g. "record voice input" -> set-width-for-input-fields);
+        # the guard already decided no on-topic title exists, so never promote.
+        return (
+            True,
+            "content",
+            f"confidence=low — top={signal.top_score:.1f} is a non-salient match; "
+            "the guard found no on-topic title",
+        )
+    # confidence == medium: guard withheld high, so the salient term is not in
+    # the top title. None of these are confidently covered.
+    if signal.top_score >= STANDOUT_TOP and signal.score_gap >= STANDOUT_GAP:
+        return (
+            True,
+            "verify-standout",
+            f"strong lexical top ({signal.top_score:.1f}, gap {signal.score_gap:.2f}) "
+            "but guard withheld high — verify the top doc actually answers the query",
+        )
+    # term_coverage content-gap tell: a query term absent from every result.
+    # Checked before the salient split because it is generic-immune and
+    # independent of the salient aggregates — it stays right even where an
+    # incidental body mention would otherwise read as coverage.
+    absent = signal.absent_terms()
+    if absent:
+        return (
+            True,
+            "content",
+            f"term_coverage: {', '.join(absent[:3])} absent from all results "
+            "(title=0, content=0) — no doc covers this",
+        )
+    # An on-topic doc exists when a salient term is in a title, or in the body
+    # of a doc that actually ranks (a trivially-weak body echo, top < WEAK_TOP,
+    # is not a real match — that separates a genuine content gap like
+    # "restore scroll position" from a poorly-titled real doc like fit-content).
+    if signal.salient_title_match_count > 0:
+        return (
+            True,
+            "discoverability",
+            f"salient term in {signal.salient_title_match_count} title(s) but guard "
+            "withheld high — a relevant doc exists; likely a ranking/titling gap",
+        )
+    if signal.salient_content_match_count > 0 and signal.top_score >= WEAK_TOP:
+        return (
+            True,
+            "discoverability",
+            f"salient term in {signal.salient_content_match_count} doc body(ies), none "
+            f"in a title (top={signal.top_score:.1f}) — a relevant doc exists but is "
+            "poorly titled; retitle/cross-link",
+        )
+    return (
+        True,
+        "content",
+        f"no salient title match and no non-trivial body match "
+        f"(top={signal.top_score:.1f}, salient_content={signal.salient_content_match_count}) "
+        "— likely no doc on this topic",
+    )
+
+
+_LEAN_CLASSIFICATION = {
+    "verify-standout": "needs-review",
+    "discoverability": "discoverability-only",
+    "content": "missing",
+}
+
+
+def classify_signal(
+    signal: SearchSignal,
+    lean: str,
+    note: str,
+    hits: Sequence[dict],
+    matches: Sequence[dict],
+    search_error: str | None = None,
+) -> tuple[str, list[str]]:
+    """Classification for a confidence-nominated query.
+
+    The class comes from the record's `lean`, never from a local corpus
+    re-rank: `howto_matches` on generic query tokens is noisier than the MCP's
+    own ranking (it false-positives, e.g. virtualize -> find-in-page). Corpus
+    matches and project hits are surfaced as evidence only. Project-memory
+    reversal / runtime markers still override, matching the episode path.
+    """
+    if search_error:
+        return _LEAN_CLASSIFICATION.get(lean, "missing"), [note, search_error]
+    reasons = [note]
+    reversal = _marker_hit(hits, REVERSAL_MARKERS)
+    if reversal:
+        marker, hit = reversal
+        return "contradicted-or-reversed", [
+            note,
+            f"indexed {hit.get('type', 'memory')} evidence contains reversal marker: {marker!r}",
+        ]
+    runtime = _marker_hit(hits, RUNTIME_MARKERS)
+    if runtime:
+        marker, hit = runtime
+        return "runtime-contract-test", [
+            note,
+            f"indexed {hit.get('type', 'memory')} evidence contains runtime marker: {marker!r}",
+            "verify current behavior before documenting a workaround",
+        ]
+    if hits:
+        reasons.append(f"SQLite search returned {len(hits)} corroborating project hit(s)")
+    else:
+        reasons.append("no corroborating project-memory hit (nominated from search outcome)")
+    if matches:
+        reasons.append(
+            f"corpus candidate (title-token overlap, not a verdict): {matches[0]['title']}"
+        )
+    return _LEAN_CLASSIFICATION.get(lean, "missing"), reasons
+
+
+def analyze_signals(
+    signals: dict[str, SearchSignal],
+    docs: Sequence[HowtoDoc],
+    *,
+    endpoint: str | None,
+    types: str,
+    search_limit: int,
+    opener: Callable = urllib.request.urlopen,
+) -> list[dict]:
+    rows: list[dict] = []
+    for query, signal in signals.items():
+        is_gap, lean, note = signal_verdict(signal)
+        if not is_gap:
+            continue
+        terms = nominate_terms([query])
+        matches = howto_matches(terms, docs)
+        hits: list[dict] = []
+        used_terms = list(terms)
+        search_attempts: list[str] = []
+        error_text = None
+        if endpoint:
+            try:
+                hits, used_terms, search_attempts = query_search_ladder(
+                    endpoint, terms, types=types, limit=search_limit, opener=opener
+                )
+            except SearchFailure as error:
+                error_text = str(error)
+        else:
+            error_text = "SQLite search disabled"
+        classification, reasons = classify_signal(
+            signal, lean, note, hits, matches, error_text
+        )
+        # Rank weaker matches (likelier gaps) first within a class; low
+        # confidence adds urgency.
+        score = int(max(0, round(10 - signal.top_score))) + (
+            3 if signal.confidence == "low" else 0
+        )
+        rows.append(
+            {
+                "classification": classification,
+                "reasons": reasons,
+                "source": "confidence",
+                "start": signal.timestamp.isoformat(),
+                "end": signal.timestamp.isoformat(),
+                "score": score,
+                "occurrence_days": 1,
+                "terms": terms,
+                "search_query": " ".join(used_terms),
+                "search_attempts": search_attempts,
+                "signal": {
+                    "query": query,
+                    "confidence": signal.confidence,
+                    "top_score": signal.top_score,
+                    "score_gap": signal.score_gap,
+                    "title_match_count": signal.title_match_count,
+                    "salient_title_match_count": signal.salient_title_match_count,
+                    "salient_content_match_count": signal.salient_content_match_count,
+                    "absent_terms": signal.absent_terms(),
+                    "matched_file_count": signal.matched_file_count,
+                    "yielded_results": signal.yielded_results,
+                    "lean": lean,
+                    "note": note,
+                },
+                "behavior": {
+                    "howto_queries": [query],
+                    "rephrases": 0,
+                    "repeated_queries": 0,
+                    "components": [],
+                    "example_queries": [],
+                    "source_reads": [],
+                    "howto_reads": [],
+                },
+                "howto_matches": matches,
+                "search_hits": [
+                    {
+                        key: hit.get(key)
+                        for key in ("type", "key", "source", "date", "link", "snippet")
+                    }
+                    for hit in hits
+                ],
+                "search_error": error_text,
+            }
+        )
+    return rows
+
+
 def analyze(
     episodes: Sequence[Episode],
     docs: Sequence[HowtoDoc],
@@ -651,10 +978,11 @@ def analyze(
 CLASSIFICATION_PRIORITY = {
     "runtime-contract-test": 0,
     "missing": 1,
-    "discoverability-only": 2,
-    "contradicted-or-reversed": 3,
-    "unconfirmed": 4,
-    "already-covered": 5,
+    "needs-review": 2,
+    "discoverability-only": 3,
+    "contradicted-or-reversed": 4,
+    "unconfirmed": 5,
+    "already-covered": 6,
 }
 
 
@@ -669,12 +997,14 @@ def sort_rows(rows: list[dict]) -> list[dict]:
     return rows
 
 
-def render_text(rows: Sequence[dict], metadata: dict) -> None:
-    print("XMLUI how-to gap miner")
+def render_text(
+    rows: Sequence[dict], metadata: dict, title: str = "XMLUI how-to gap miner"
+) -> None:
+    print(title)
     print(f"analytics: {metadata['analytics']}")
     print(f"how-tos:  {metadata['howto_dir']} ({metadata['howto_count']} docs)")
     print(f"search:   {metadata['search_endpoint'] or 'disabled'}")
-    print(f"episodes: {metadata['episode_count']} nominated, {len(rows)} reported")
+    print(f"candidates: {len(rows)} reported")
     for index, row in enumerate(rows, 1):
         behavior = row["behavior"]
         print()
@@ -698,6 +1028,17 @@ def render_text(rows: Sequence[dict], metadata: dict) -> None:
             f"sqlite_hits={len(row['search_hits'])}",
         ]
         print(f"    behavior: {', '.join(signals)}")
+        signal = row.get("signal")
+        if signal:
+            print(
+                f"    signal: conf={signal['confidence']} top={signal['top_score']:.2f} "
+                f"gap={signal['score_gap']:.2f} "
+                f"salient_title={signal.get('salient_title_match_count', 0)} "
+                f"salient_body={signal.get('salient_content_match_count', 0)} "
+                f"absent={signal.get('absent_terms') or '-'} "
+                f"[{signal['lean']}]"
+            )
+            print(f"    signal-note: {signal['note']}")
         for reason in row["reasons"]:
             print(f"    reason: {reason}")
         for match in row["howto_matches"][:3]:
@@ -733,6 +1074,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--types", default=DEFAULT_TYPES)
     parser.add_argument("--since", help="ISO timestamp/date lower bound")
+    parser.add_argument(
+        "--source",
+        choices=("episode", "confidence", "both"),
+        default="both",
+        help="nominate from behavioral episodes, confidence search outcomes, or both",
+    )
     parser.add_argument("--gap-minutes", type=float, default=20)
     parser.add_argument("--fallback-minutes", type=float, default=10)
     parser.add_argument("--min-score", type=int, default=3)
@@ -755,14 +1102,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ValueError as error:
         print(f"invalid --since value: {error}", file=sys.stderr)
         return 2
-    events = load_events(analytics, since)
-    episodes = build_episodes(
-        events,
-        topic_gap=dt.timedelta(minutes=args.gap_minutes),
-        fallback_window=dt.timedelta(minutes=args.fallback_minutes),
-    )
-    episodes = [episode for episode in episodes if episode.score >= args.min_score]
-    episodes = episodes[: max(0, args.top)]
     docs = load_howtos(howto_dir)
     endpoint = None
     endpoint_error = None
@@ -771,31 +1110,90 @@ def main(argv: Sequence[str] | None = None) -> int:
             endpoint = search_endpoint(args.search_url, args.port_file)
         except SearchFailure as error:
             endpoint_error = str(error)
-    rows = analyze(
-        episodes,
-        docs,
-        endpoint=endpoint,
-        types=args.types,
-        search_limit=args.search_limit,
-    )
-    if endpoint_error:
-        for row in rows:
-            row["classification"] = "unconfirmed"
-            row["search_error"] = endpoint_error
-            row["reasons"] = [endpoint_error]
-    sort_rows(rows)
+
+    source = args.source
+    episode_rows: list[dict] = []
+    confidence_rows: list[dict] = []
+    episode_count = 0
+    signal_count = 0
+
+    if source in ("episode", "both"):
+        events = load_events(analytics, since)
+        episodes = build_episodes(
+            events,
+            topic_gap=dt.timedelta(minutes=args.gap_minutes),
+            fallback_window=dt.timedelta(minutes=args.fallback_minutes),
+        )
+        episodes = [episode for episode in episodes if episode.score >= args.min_score]
+        episodes = episodes[: max(0, args.top)]
+        episode_count = len(episodes)
+        episode_rows = analyze(
+            episodes,
+            docs,
+            endpoint=endpoint,
+            types=args.types,
+            search_limit=args.search_limit,
+        )
+        if endpoint_error:
+            for row in episode_rows:
+                row["classification"] = "unconfirmed"
+                row["search_error"] = endpoint_error
+                row["reasons"] = [endpoint_error]
+        sort_rows(episode_rows)
+
+    if source in ("confidence", "both"):
+        signals = load_search_signals(analytics, since)
+        signal_count = len(signals)
+        confidence_rows = analyze_signals(
+            signals,
+            docs,
+            endpoint=endpoint,
+            types=args.types,
+            search_limit=args.search_limit,
+        )
+        if endpoint_error:
+            for row in confidence_rows:
+                row["search_error"] = endpoint_error
+                row["reasons"] = row["reasons"] + [endpoint_error]
+        sort_rows(confidence_rows)
+        confidence_rows = confidence_rows[: max(0, args.top)]
+
     metadata = {
         "analytics": str(analytics),
         "howto_dir": str(howto_dir),
         "howto_count": len(docs),
         "search_endpoint": endpoint,
-        "episode_count": len(episodes),
-        "method": "MCP nomination -> Bram SQLite validation -> current-corpus reconciliation",
+        "source": source,
+        "episode_count": episode_count,
+        "signal_count": signal_count,
+        "method": "MCP outcome/behavior nomination -> Bram SQLite validation -> current-corpus reconciliation",
     }
     if args.as_json:
-        print(json.dumps({"metadata": metadata, "candidates": rows}, indent=2))
+        print(
+            json.dumps(
+                {
+                    "metadata": metadata,
+                    "confidence_candidates": confidence_rows,
+                    "episode_candidates": episode_rows,
+                },
+                indent=2,
+            )
+        )
     else:
-        render_text(rows, metadata)
+        if source in ("confidence", "both"):
+            render_text(
+                confidence_rows,
+                metadata,
+                title="XMLUI how-to gap miner — confidence-nominated gaps",
+            )
+        if source in ("episode", "both"):
+            if source == "both":
+                print()
+            render_text(
+                episode_rows,
+                metadata,
+                title="XMLUI how-to gap miner — behavior-nominated episodes",
+            )
     return 0
 
 

@@ -6080,17 +6080,178 @@ fn shell_basename(command: &str) -> &str {
 
 fn unwrap_codex_shell_command(command: &str) -> Option<String> {
     let words = split_shell_words_limited(command, 3);
+    if words.len() >= 3 {
+        let shell = shell_basename(&words[0]);
+        let flag = words[1].as_str();
+        let is_shell = matches!(shell, "bash" | "sh" | "zsh");
+        let is_command_flag = flag.starts_with('-') && flag.contains('c');
+        if is_shell && is_command_flag && !words[2].trim().is_empty() {
+            return Some(words[2].trim().to_string());
+        }
+    }
+    unwrap_windows_shell_command(command)
+}
+
+// codex-windows-shell-unwrap: PowerShell/cmd wrapper shapes, matched case-
+// insensitively with any `.exe` suffix stripped. PowerShell preamble flags
+// are skipped up to the command flag; `-EncodedCommand` is base64-encoded
+// UTF-16LE. `-File` runs a script from disk, not an inline command — None.
+fn unwrap_windows_shell_command(command: &str) -> Option<String> {
+    let words = split_shell_words_limited(command, 64);
     if words.len() < 3 {
         return None;
     }
-    let shell = shell_basename(&words[0]);
-    let flag = words[1].as_str();
-    let is_shell = matches!(shell, "bash" | "sh" | "zsh");
-    let is_command_flag = flag.starts_with('-') && flag.contains('c');
-    if is_shell && is_command_flag && !words[2].trim().is_empty() {
-        Some(words[2].trim().to_string())
-    } else {
-        None
+    let mut shell = shell_basename(&words[0]).to_ascii_lowercase();
+    if let Some(stripped) = shell.strip_suffix(".exe") {
+        shell = stripped.to_string();
+    }
+    match shell.as_str() {
+        "powershell" | "pwsh" => {
+            let mut i = 1;
+            while i < words.len() {
+                let flag = words[i].to_ascii_lowercase();
+                match flag.as_str() {
+                    "-command" | "-c" => {
+                        let rest = words[i + 1..].join(" ");
+                        let rest = rest.trim();
+                        return if rest.is_empty() {
+                            None
+                        } else {
+                            Some(rest.to_string())
+                        };
+                    }
+                    "-encodedcommand" | "-enc" | "-ec" | "-e" => {
+                        return words
+                            .get(i + 1)
+                            .and_then(|b64| st_decode_base64(b64))
+                            .and_then(|bytes| st_utf16le_to_string(&bytes));
+                    }
+                    "-file" => return None,
+                    "-executionpolicy" | "-windowstyle" | "-version" | "-outputformat"
+                    | "-inputformat" | "-psconsolefile" => i += 2,
+                    f if f.starts_with('-') => i += 1,
+                    _ => return None,
+                }
+            }
+            None
+        }
+        "cmd" => {
+            let flag = words[1].to_ascii_lowercase();
+            if flag == "/c" || flag == "/k" {
+                let rest = words[2..].join(" ");
+                let rest = rest.trim();
+                if rest.is_empty() {
+                    None
+                } else {
+                    Some(rest.to_string())
+                }
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn st_decode_base64(input: &str) -> Option<Vec<u8>> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut vals: Vec<u32> = Vec::new();
+    for ch in input.bytes() {
+        if ch == b'=' || ch.is_ascii_whitespace() {
+            continue;
+        }
+        vals.push(ALPHABET.iter().position(|&a| a == ch)? as u32);
+    }
+    let mut out = Vec::with_capacity(vals.len() * 3 / 4);
+    for chunk in vals.chunks(4) {
+        let mut acc = 0u32;
+        for (idx, v) in chunk.iter().enumerate() {
+            acc |= v << (18 - 6 * idx);
+        }
+        for b in 0..(chunk.len() * 6 / 8) {
+            out.push(((acc >> (16 - 8 * b)) & 0xff) as u8);
+        }
+    }
+    Some(out)
+}
+
+fn st_utf16le_to_string(bytes: &[u8]) -> Option<String> {
+    if bytes.len() % 2 != 0 {
+        return None;
+    }
+    let units: Vec<u16> = bytes
+        .chunks(2)
+        .map(|p| u16::from_le_bytes([p[0], p[1]]))
+        .collect();
+    String::from_utf16(&units).ok()
+}
+
+#[cfg(test)]
+mod codex_windows_shell_tests {
+    use super::{st_codex_tool_command_display, unwrap_codex_shell_command};
+
+    #[test]
+    fn posix_bash_unwrap_unchanged() {
+        assert_eq!(
+            unwrap_codex_shell_command("/bin/bash -lc 'git status'").as_deref(),
+            Some("git status")
+        );
+    }
+
+    #[test]
+    fn powershell_command_flag_with_preamble_unwraps() {
+        assert_eq!(
+            unwrap_codex_shell_command(r#"PowerShell.exe -NoProfile -Command "git status""#)
+                .as_deref(),
+            Some("git status")
+        );
+    }
+
+    #[test]
+    fn pwsh_short_flag_unwraps() {
+        assert_eq!(
+            unwrap_codex_shell_command(r#"pwsh -c "rg -n TODO src""#).as_deref(),
+            Some("rg -n TODO src")
+        );
+    }
+
+    #[test]
+    fn cmd_slash_c_unwraps() {
+        assert_eq!(
+            unwrap_codex_shell_command("cmd /c dir /s").as_deref(),
+            Some("dir /s")
+        );
+    }
+
+    #[test]
+    fn encoded_command_decodes_utf16le_base64() {
+        assert_eq!(
+            unwrap_codex_shell_command("powershell -EncodedCommand ZwBpAHQAIABzAHQAYQB0AHUAcwA=")
+                .as_deref(),
+            Some("git status")
+        );
+    }
+
+    #[test]
+    fn unknown_wrapper_stays_none() {
+        assert_eq!(unwrap_codex_shell_command("python -c 'print(1)'"), None);
+    }
+
+    // Pinned to the 2026-08-13 record from a native-Windows Codex session:
+    // function_call name="shell_command", arguments carrying `command`
+    // (raw PowerShell script, no wrapper), `workdir`, `timeout_ms`.
+    #[test]
+    fn shell_command_payload_projects_command_display() {
+        let call = serde_json::json!({
+            "type": "function_call",
+            "name": "shell_command",
+            "arguments": "{\"command\":\"$file = 'C:\\\\Users\\\\jon\\\\x.jsonl'\\nSelect-String -Path $file -Pattern 'shell_command'\",\"workdir\":\"C:\\\\Users\\\\jon\\\\bram\",\"timeout_ms\":10000}"
+        });
+        let display = st_codex_tool_command_display(&call);
+        assert!(
+            display.contains("Select-String -Path $file"),
+            "display: {display}"
+        );
     }
 }
 
@@ -21635,6 +21796,19 @@ fn exec_wrapped_apply_patch(script: &str) -> Option<String> {
     None
 }
 
+// codex-windows-shell-command: newer Codex CLIs (first seen on native
+// Windows, 2026-08-13) emit function_call name="shell_command" whose input
+// carries the script text in `command` (plus workdir/timeout_ms) — the exec
+// family's third shape, beside exec_command's `cmd` and unified exec's JS
+// script. One accessor so every name-gated site treats them alike.
+fn st_codex_exec_cmd_field<'a>(name: &str, input: &'a serde_json::Value) -> Option<&'a str> {
+    match name {
+        "exec_command" => input.get("cmd").and_then(|v| v.as_str()),
+        "shell_command" => input.get("command").and_then(|v| v.as_str()),
+        _ => None,
+    }
+}
+
 fn st_codex_tool_summary(payload: &serde_json::Value) -> String {
     let raw_name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let full_name = st_codex_tool_name(payload);
@@ -21669,14 +21843,12 @@ fn st_codex_tool_summary(payload: &serde_json::Value) -> String {
         }
         return summary;
     }
-    if raw_name == "exec_command" {
-        if let Some(cmd) = input.get("cmd").and_then(|v| v.as_str()) {
-            if cmd.chars().count() > 80 {
-                let truncated: String = cmd.chars().take(80).collect();
-                return format!("{}…", truncated);
-            }
-            return cmd.to_string();
+    if let Some(cmd) = st_codex_exec_cmd_field(raw_name, &input) {
+        if cmd.chars().count() > 80 {
+            let truncated: String = cmd.chars().take(80).collect();
+            return format!("{}…", truncated);
         }
+        return cmd.to_string();
     }
     // Unified exec: summarize by the first embedded shell command (or the
     // first non-empty script line as a fallback), truncated like above.
@@ -22928,8 +23100,12 @@ fn st_extract_search_queries(cmd: &str) -> Vec<String> {
 fn st_codex_search_queries(payload: &serde_json::Value) -> Option<Vec<String>> {
     let input = st_codex_tool_input(payload);
     match payload.get("name").and_then(|v| v.as_str()).unwrap_or("") {
-        "exec_command" => {
-            let cmd = input.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
+        "exec_command" | "shell_command" => {
+            let cmd = st_codex_exec_cmd_field(
+                payload.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                &input,
+            )
+            .unwrap_or("");
             cmd.contains("/__search")
                 .then(|| st_extract_search_queries(cmd))
         }
@@ -23050,10 +23226,8 @@ mod codex_search_projection_tests {
 fn st_codex_name_detail(payload: &serde_json::Value) -> String {
     let input = st_codex_tool_input(payload);
     let raw_name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
-    if raw_name == "exec_command" {
-        if let Some(cmd) = input.get("cmd").and_then(|v| v.as_str()) {
-            return st_bash_command_words(cmd);
-        }
+    if let Some(cmd) = st_codex_exec_cmd_field(raw_name, &input) {
+        return st_bash_command_words(cmd);
     }
     if raw_name == "exec" {
         if let Some(script) = input.as_str() {
@@ -23069,13 +23243,19 @@ fn st_codex_name_detail(payload: &serde_json::Value) -> String {
 fn st_codex_tool_command_display(payload: &serde_json::Value) -> String {
     let input = st_codex_tool_input(payload);
     let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
-    if name == "exec_command" {
-        if let Some(cmd) = input.get("cmd").and_then(|v| v.as_str()) {
-            if let Some((display, _)) = st_bash_markdown_heredoc(cmd) {
-                return display;
-            }
-            return st_line_oriented_command_display(cmd);
+    if let Some(cmd) = st_codex_exec_cmd_field(name, &input) {
+        // codex-windows-shell-command: shell_command may still arrive
+        // shell-wrapped on POSIX Codex; unwrap before display (a no-op for
+        // the raw PowerShell text Windows Codex records).
+        let cmd = if name == "shell_command" {
+            unwrap_codex_shell_command(cmd).unwrap_or_else(|| cmd.to_string())
+        } else {
+            cmd.to_string()
+        };
+        if let Some((display, _)) = st_bash_markdown_heredoc(&cmd) {
+            return display;
         }
+        return st_line_oriented_command_display(&cmd);
     }
     if name == "apply_patch" {
         if let Some(patch) = input.as_str() {
@@ -23124,10 +23304,8 @@ fn st_codex_tool_command_display(payload: &serde_json::Value) -> String {
 fn st_codex_tool_command_markdown(payload: &serde_json::Value) -> String {
     let input = st_codex_tool_input(payload);
     let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
-    if name == "exec_command" {
-        return input
-            .get("cmd")
-            .and_then(|v| v.as_str())
+    if matches!(name, "exec_command" | "shell_command") {
+        return st_codex_exec_cmd_field(name, &input)
             .and_then(|cmd| st_bash_markdown_heredoc(cmd).map(|(_, markdown)| markdown))
             .unwrap_or_default();
     }

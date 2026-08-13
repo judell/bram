@@ -730,6 +730,22 @@ audit trail in worklist drafts and commit messages still carries the
 full story; narration is the live, one-line version so the user can
 follow (and redirect) work in flight.
 
+### Cross-project pivots
+
+When the user pivots the conversation to work on a different project
+("let's look at ~/other-app"), flag the boundary before proceeding and
+offer the choice: a quick read-only look from here, or a handoff to that
+project's own session. Sustained investigation, issue filing, and
+follow-up work belong in the target project's session, because project
+memory — session transcripts, the `/__search` index, worklist history —
+is scoped by working directory and records work where it *runs*, not
+where it belongs: the home project's index fills with foreign content
+while the target project keeps no record the work happened. If the user
+chooses to proceed from the current session anyway, make any artifact
+left in the target project (issue, doc, commit message) self-contained —
+carry the evidence inline rather than pointing at the wrong project's
+transcript.
+
 
 ## Host-managed inflight sentinel
 

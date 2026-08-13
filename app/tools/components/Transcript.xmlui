@@ -86,11 +86,16 @@
        ignored by the viewport switch — on a multi-MB session those
        redundant fetches froze the shared webview main thread and wedged
        the terminal (2026-07-07 codex esc wedge, third recurrence). -->
+  <!-- subagent-transcript-describe: each load/refetch feeds the payload to
+       the eager-describe scan (the main-projection scan never sees this
+       stream). Completions come back via the flush's refetch thunk — the
+       host injects cached descriptions on every /__turns?agent= fetch. -->
   <DataSource
     id="subagentTurns"
     url="/__turns"
     queryParams="{{ agent: $props.agentId }}"
-    when="{!!$props.agentId}" />
+    when="{!!$props.agentId}"
+    onLoaded="(data) => window.__bramEagerDescribeSubagent(data, () => subagentTurns.refetch())" />
   <PushSource
     id="transcriptSubagentsChangedEvt"
     initial="{null}"

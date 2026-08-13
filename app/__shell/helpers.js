@@ -5057,6 +5057,16 @@ window.__bramBroadcastProjectedTurns = function (payload, reason) {
 // large session. The queue is rebuilt per broadcast; per-id dedupe and
 // the host result cache make that free.
 var __bramDescribeQueue = [];
+// subagent-transcript-describe: the chip-selected subagent view keeps
+// its own queue — main-projection scans rebuild __bramDescribeQueue
+// wholesale on every broadcast and would drop subagent entries. The
+// pump drains main first (visibility-ordered), then subagent. Delivery
+// for subagent entries is a refetch of the subagent DataSource (the
+// host injects cached descriptions via apply_describe_overlay), fired
+// from the flush when it completes ids this view requested.
+var __bramSubagentDescribeQueue = [];
+var __bramSubagentDescribeIds = {};
+var __bramSubagentDescribeRefetch = null;
 var __bramDescribeInFlight = 0;
 var __BRAM_DESCRIBE_CONCURRENCY = 3;
 // The List is virtualized: only near-viewport rows exist in the DOM,
@@ -5130,8 +5140,11 @@ function __bramPumpDescribeQueue() {
       });
     } catch (eT) { /* ignore */ }
   }
-  while (__bramDescribeInFlight < __BRAM_DESCRIBE_CONCURRENCY && __bramDescribeQueue.length) {
-    var e = __bramDescribeQueue.shift();
+  while (__bramDescribeInFlight < __BRAM_DESCRIBE_CONCURRENCY &&
+         (__bramDescribeQueue.length || __bramSubagentDescribeQueue.length)) {
+    var e = __bramDescribeQueue.length
+      ? __bramDescribeQueue.shift()
+      : __bramSubagentDescribeQueue.shift();
     if (!e || !e.id || window.__bramDescribeRequested[e.id]) continue;
     __bramDescribeInFlight++;
     window.__bramRequestCommandDescription(e, function () {
@@ -5141,7 +5154,8 @@ function __bramPumpDescribeQueue() {
   }
 }
 setInterval(function () {
-  if (__bramDescribeQueue.length && !window.__bramDescribeUnavailable) {
+  if ((__bramDescribeQueue.length || __bramSubagentDescribeQueue.length) &&
+      !window.__bramDescribeUnavailable) {
     __bramPumpDescribeQueue();
   }
 }, 1500);
@@ -5187,6 +5201,39 @@ function __bramEagerDescribe(payload) {
     __bramPumpDescribeQueue();
   } catch (err) {}
 }
+
+// subagent-transcript-describe: same scan as __bramEagerDescribe, over the
+// subagent DataSource payload ({sid, agentId, turns, ...}). Replaces the
+// subagent queue wholesale per call (the payload is the whole transcript);
+// dedupe against __bramDescribeRequested keeps main/subagent entries from
+// double-requesting. The refetch thunk is how a completed description
+// reaches the view — see the flush hook.
+window.__bramEagerDescribeSubagent = function (payload, refetch) {
+  try {
+    if (window.__bramDescribeUnavailable) return;
+    if (!payload || !payload.turns) return;
+    if (window.location.pathname.indexOf("/tools/") === -1) return;
+    if (typeof refetch === "function") __bramSubagentDescribeRefetch = refetch;
+    var turns = payload.turns;
+    var queue = [];
+    for (var i = turns.length - 1; i >= 0; i--) {
+      var entries = (turns[i] && turns[i].entries) || [];
+      for (var k = entries.length - 1; k >= 0; k--) {
+        var e = entries[k];
+        if (!e || e.kind !== "tool" || !e.id) continue;
+        if (e.aiDescription) continue;
+        if (!window.__bramDescribeMaterial(e)) continue;
+        if (window.__bramDescribeRequested[e.id]) continue;
+        queue.push(e);
+      }
+    }
+    __bramSubagentDescribeQueue = queue;
+    for (var q = 0; q < queue.length; q++) {
+      __bramSubagentDescribeIds[queue[q].id] = true;
+    }
+    __bramPumpDescribeQueue();
+  } catch (err) {}
+};
 
 // Splice a latest=N window onto the accumulated full projection
 // (bound-turns-projection-and-gate-edit-hints). Returns null when the
@@ -5253,6 +5300,22 @@ window.__bramFlushDescribePatches = function () {
   __describePendingPatches = {};
   var ids = Object.keys(pending);
   if (!ids.length) return;
+  // subagent-transcript-describe: descriptions for subagent entries are
+  // delivered host-side (apply_describe_overlay on /__turns?agent=...);
+  // the client's job is one refetch per flush window. This must run
+  // before the main-projection early returns below.
+  try {
+    var subHit = false;
+    for (var si = 0; si < ids.length; si++) {
+      if (__bramSubagentDescribeIds[ids[si]]) {
+        subHit = true;
+        delete __bramSubagentDescribeIds[ids[si]];
+      }
+    }
+    if (subHit && typeof __bramSubagentDescribeRefetch === "function") {
+      __bramSubagentDescribeRefetch();
+    }
+  } catch (subErr) { /* ignore */ }
   var prev = __projectedTurnsValue;
   if (!prev || !prev.turns) return;
   var turns = prev.turns;
@@ -5459,8 +5522,8 @@ window.bramSubscribeProjectedLastExchange = (function () {
       if (!t) return "";
       var a = (t.lastAssistantText && t.lastAssistantText.text) || "";
       var ex = t.lastExchange || {};
-      return a + " " + (ex.userText || "") + " " +
-        (ex.assistantText || "") + " " + ((ex.userImages || []).length);
+      return a + "\u0000" + (ex.userText || "") + "\u0000" +
+        (ex.assistantText || "") + "\u0000" + ((ex.userImages || []).length);
     };
     var recompute = function (v) {
       var next = window.__bramProjectedLastExchange(v);

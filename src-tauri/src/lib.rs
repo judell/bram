@@ -27598,8 +27598,6 @@ const PTY_INTENT_REL: &str = "resources/.pty-intent.jsonl";
 // there's no shebang resolution and no chmod, so we invoke through the
 // `py` launcher — it ships with the python.org installer and resolves
 // Python via the registry, independent of PATH.
-#[cfg(windows)]
-const ENHANCE_HOOK_COMMAND: &str = "py -3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-worklist-guard.py\"";
 #[cfg(not(windows))]
 const ENHANCE_HOOK_COMMAND: &str = "$CLAUDE_PROJECT_DIR/.claude/hooks/claude-worklist-guard.py";
 // Permission-menu surfacing hook (menus.hookDriven). Installed and registered
@@ -27609,16 +27607,139 @@ const ENHANCE_HOOK_COMMAND: &str = "$CLAUDE_PROJECT_DIR/.claude/hooks/claude-wor
 // app/provider-hooks/claude-permission-menu-hook.py.
 const ENHANCE_MENU_HOOK_SCRIPT_REL: &str = ".claude/hooks/claude-permission-menu-hook.py";
 const ENHANCE_MENU_HOOK_BUNDLE_REL: &str = "provider-hooks/claude-permission-menu-hook.py";
-#[cfg(windows)]
-const ENHANCE_MENU_HOOK_COMMAND: &str =
-    "py -3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-permission-menu-hook.py\"";
 #[cfg(not(windows))]
 const ENHANCE_MENU_HOOK_COMMAND: &str = "$CLAUDE_PROJECT_DIR/.claude/hooks/claude-permission-menu-hook.py";
+
+// issue-247: resolve a working Python 3 by EXECUTION, not presence. On
+// Windows, PATH presence lies — the Microsoft Store ships zero-byte
+// python.exe/python3.exe aliases that are not Python. Probing each
+// candidate with `-c "import sys; print(sys.executable)"` rejects the
+// stubs mechanically (they cannot execute the program) and returns the
+// real absolute interpreter path even when discovered via the `py -3`
+// launcher, so hook commands can embed a PATH-independent absolute path
+// that quotes identically under cmd, PowerShell, and the agent CLIs'
+// hook shells. One resolver feeds setup and status so they cannot
+// disagree (#247).
+fn probe_python_candidate(cmd: &str, pre_args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new(cmd)
+        .args(pre_args)
+        .args(["-c", "import sys; print(sys.executable)"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if path.is_empty() || !std::path::Path::new(&path).exists() {
+        return None;
+    }
+    Some(path)
+}
+
+fn resolve_hook_python() -> Option<String> {
+    #[cfg(windows)]
+    {
+        probe_python_candidate("py", &["-3"])
+            .or_else(|| probe_python_candidate("python", &[]))
+            .or_else(|| probe_python_candidate("python3", &[]))
+            .or_else(|| {
+                // python.org's per-user default location, reachable when
+                // neither the launcher nor add-to-PATH was selected during
+                // install.
+                let root = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
+                    .join("Programs")
+                    .join("Python");
+                let mut exes: Vec<std::path::PathBuf> = std::fs::read_dir(&root)
+                    .ok()?
+                    .flatten()
+                    .filter(|e| {
+                        e.file_name()
+                            .to_string_lossy()
+                            .to_ascii_lowercase()
+                            .starts_with("python3")
+                    })
+                    .map(|e| e.path().join("python.exe"))
+                    .filter(|p| p.exists())
+                    .collect();
+                exes.sort();
+                let exe = exes.pop()?;
+                probe_python_candidate(&exe.to_string_lossy(), &[])
+            })
+    }
+    #[cfg(not(windows))]
+    {
+        probe_python_candidate("python3", &[]).or_else(|| probe_python_candidate("python", &[]))
+    }
+}
+
+// Setup-result warning for the missing-runtime gate; one string so the
+// Claude and Codex arms cannot drift apart.
+const HOOK_PYTHON_MISSING_WARNING: &str = "hooks not installed: no Python 3 runtime found \
+(checked the py launcher, python, python3, and %LOCALAPPDATA%\\Programs\\Python on Windows). \
+Install Python 3 from python.org, then re-run Setup.";
+
+// Claude hook command strings. POSIX runs the scripts via shebang, exactly
+// as before; Windows embeds the resolved absolute interpreter (issue-247).
+// None means no usable Python — callers skip installation and surface
+// HOOK_PYTHON_MISSING_WARNING instead of installing a command that fails
+// on every hook invocation.
+fn claude_hook_commands(hook_python: Option<&str>) -> Option<(String, String)> {
+    #[cfg(windows)]
+    {
+        let py = hook_python?;
+        Some((
+            format!(
+                "\"{}\" \"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-worklist-guard.py\"",
+                py
+            ),
+            format!(
+                "\"{}\" \"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-permission-menu-hook.py\"",
+                py
+            ),
+        ))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = hook_python;
+        Some((
+            ENHANCE_HOOK_COMMAND.to_string(),
+            ENHANCE_MENU_HOOK_COMMAND.to_string(),
+        ))
+    }
+}
 // Presence of this file in the project root means the project IS the Bram
 // source repo (it bundles the conventions). enhance_status treats it as a
 // valid sidecar location; run_enhance skips the parts that would otherwise
 // self-overwrite the source.
 const ENHANCE_SOURCE_BUNDLE_REL: &str = "app/__shell/conventions.md";
+
+
+#[cfg(test)]
+mod hook_python_resolver_tests {
+    use super::{claude_hook_commands, probe_python_candidate};
+
+    #[test]
+    fn probe_rejects_missing_binary() {
+        assert_eq!(
+            probe_python_candidate("bram-definitely-not-a-real-command", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn probe_rejects_non_python_binary() {
+        // `true` exits 0 but prints nothing — empty output must not count.
+        assert_eq!(probe_python_candidate("true", &[]), None);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn posix_commands_ignore_python_and_stay_shebang_based() {
+        let (guard, menu) = claude_hook_commands(None).expect("posix always yields commands");
+        assert!(guard.contains("claude-worklist-guard.py"), "guard: {guard}");
+        assert!(menu.contains("claude-permission-menu-hook.py"), "menu: {menu}");
+    }
+}
 
 fn settings_has_worklist_guard_hook(settings_path: &Path) -> bool {
     let content = match std::fs::read_to_string(settings_path) {
@@ -27927,7 +28048,10 @@ fn merge_claude_curl_allowlist_into_settings(settings_path: &Path) -> Result<boo
 // removed and the correct entry is appended. Returns Ok(true) if any
 // change was made, Ok(false) if the settings already had the exact
 // entry and nothing needed migrating.
-fn merge_worklist_guard_into_settings(settings_path: &Path) -> Result<bool, String> {
+fn merge_worklist_guard_into_settings(
+    settings_path: &Path,
+    expected_command: &str,
+) -> Result<bool, String> {
     let existing = std::fs::read_to_string(settings_path).unwrap_or_default();
     let mut value: serde_json::Value = if existing.trim().is_empty() {
         serde_json::json!({})
@@ -27964,9 +28088,9 @@ fn merge_worklist_guard_into_settings(settings_path: &Path) -> Result<bool, Stri
     let pre_arr = pre.as_array_mut().unwrap();
 
     // Drop worklist-guard.py entries whose command differs from the
-    // current platform's ENHANCE_HOOK_COMMAND. Migrates an existing
-    // bare-path Windows install to `py -3 ...` (and would also handle
-    // the reverse if a project moved between platforms).
+    // currently expected command. Migrates legacy installs (bare-path
+    // Windows, `py -3 ...`) to the resolved-interpreter form, and would
+    // also handle a project moving between platforms.
     let mut migrated = false;
     pre_arr.retain_mut(|entry| {
         let Some(hooks_arr) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
@@ -27977,7 +28101,7 @@ fn merge_worklist_guard_into_settings(settings_path: &Path) -> Result<bool, Stri
             let Some(cmd) = h.get("command").and_then(|c| c.as_str()) else {
                 return true;
             };
-            !(cmd.contains("worklist-guard.py") && cmd != ENHANCE_HOOK_COMMAND)
+            !(cmd.contains("worklist-guard.py") && cmd != expected_command)
         });
         if hooks_arr.len() != before {
             migrated = true;
@@ -27993,7 +28117,7 @@ fn merge_worklist_guard_into_settings(settings_path: &Path) -> Result<bool, Stri
                 hs.iter().any(|h| {
                     h.get("command")
                         .and_then(|c| c.as_str())
-                        .map(|s| s == ENHANCE_HOOK_COMMAND)
+                        .map(|s| s == expected_command)
                         .unwrap_or(false)
                 })
             })
@@ -28007,7 +28131,7 @@ fn merge_worklist_guard_into_settings(settings_path: &Path) -> Result<bool, Stri
             "matcher": "Write|Edit",
             "hooks": [{
                 "type": "command",
-                "command": ENHANCE_HOOK_COMMAND,
+                "command": expected_command,
             }]
         }));
     }
@@ -28088,7 +28212,10 @@ fn merge_command_hook_into_event(
 // PostToolUse is the answer; catching every tool (incl. dynamic mcp__* names)
 // beats missing one and stranding a menu. Idempotent + migration-tolerant,
 // mirroring merge_worklist_guard_into_settings. Ok(true) if anything changed.
-fn merge_permission_menu_hook_into_settings(settings_path: &Path) -> Result<bool, String> {
+fn merge_permission_menu_hook_into_settings(
+    settings_path: &Path,
+    menu_command: &str,
+) -> Result<bool, String> {
     let existing = std::fs::read_to_string(settings_path).unwrap_or_default();
     let mut value: serde_json::Value = if existing.trim().is_empty() {
         serde_json::json!({})
@@ -28119,14 +28246,14 @@ fn merge_permission_menu_hook_into_settings(settings_path: &Path) -> Result<bool
         hooks_obj,
         "PermissionRequest",
         ".*",
-        ENHANCE_MENU_HOOK_COMMAND,
+        menu_command,
         marker,
     );
     changed |= merge_command_hook_into_event(
         hooks_obj,
         "PostToolUse",
         ".*",
-        ENHANCE_MENU_HOOK_COMMAND,
+        menu_command,
         marker,
     );
     // Claude Code emits PermissionDenied on No/Esc answers; Codex does not
@@ -28135,7 +28262,7 @@ fn merge_permission_menu_hook_into_settings(settings_path: &Path) -> Result<bool
         hooks_obj,
         "PermissionDenied",
         ".*",
-        ENHANCE_MENU_HOOK_COMMAND,
+        menu_command,
         marker,
     );
     // Family B: AskUserQuestion arrives via PreToolUse (not PermissionRequest),
@@ -28144,7 +28271,7 @@ fn merge_permission_menu_hook_into_settings(settings_path: &Path) -> Result<bool
         hooks_obj,
         "PreToolUse",
         "AskUserQuestion",
-        ENHANCE_MENU_HOOK_COMMAND,
+        menu_command,
         marker,
     );
     if !changed {
@@ -28713,18 +28840,29 @@ fn codex_instr_block_current(config_path: &Path) -> bool {
     .unwrap_or(false)
 }
 
-fn codex_hook_toml_block(script_path: &Path, menu_script_path: &Path) -> String {
+fn codex_hook_toml_block(
+    script_path: &Path,
+    menu_script_path: &Path,
+    hook_python: Option<&str>,
+) -> Option<String> {
     let script_str = script_path.display().to_string();
     let menu_script_str = menu_script_path.display().to_string();
+    // issue-247: Windows embeds the resolved absolute interpreter instead
+    // of the `py -3` launcher; None = no usable Python, no block.
     #[cfg(windows)]
-    let command_line = format!("py -3 \"{}\"", script_str.replace('"', "\\\""));
+    let (command_line, menu_command_line) = {
+        let py = hook_python?.replace('"', "\\\"");
+        (
+            format!("\"{}\" \"{}\"", py, script_str.replace('"', "\\\"")),
+            format!("\"{}\" \"{}\"", py, menu_script_str.replace('"', "\\\"")),
+        )
+    };
     #[cfg(not(windows))]
-    let command_line = script_str.clone();
-    #[cfg(windows)]
-    let menu_command_line = format!("py -3 \"{}\"", menu_script_str.replace('"', "\\\""));
-    #[cfg(not(windows))]
-    let menu_command_line = menu_script_str.clone();
-    format!(
+    let (command_line, menu_command_line) = {
+        let _ = hook_python;
+        (script_str.clone(), menu_script_str.clone())
+    };
+    Some(format!(
         "{start}\n\
          [[hooks.PreToolUse]]\n\
          matcher = \"^(apply_patch|Bash|Write|Edit|mcp__.*)$\"\n\
@@ -28757,7 +28895,7 @@ fn codex_hook_toml_block(script_path: &Path, menu_script_path: &Path) -> String 
         end = ENHANCE_CODEX_TOML_MARKER_END,
         command_quoted = toml_basic_string(&command_line),
         menu_command_quoted = toml_basic_string(&menu_command_line),
-    )
+    ))
 }
 
 fn normalize_codex_hook_block_for_currentness(block: &str) -> String {
@@ -28792,8 +28930,13 @@ fn codex_hook_block_current(
     config_path: &Path,
     script_path: &Path,
     menu_script_path: &Path,
+    hook_python: Option<&str>,
 ) -> bool {
-    let expected = codex_hook_toml_block(script_path, menu_script_path);
+    // issue-247: no resolvable Python means no valid expected block, so an
+    // installed block (necessarily broken) reads as stale/unregistered.
+    let Some(expected) = codex_hook_toml_block(script_path, menu_script_path, hook_python) else {
+        return false;
+    };
     let Ok(disk) = std::fs::read_to_string(config_path) else {
         return false;
     };
@@ -28826,7 +28969,8 @@ mod codex_hook_currentness_tests {
     fn codex_hook_currentness_allows_trusted_hook_state_inside_marker_block() {
         let script = PathBuf::from("/Users/example/.bram/codex-worklist-guard.py");
         let menu_script = PathBuf::from("/Users/example/.bram/codex-permission-menu-hook.py");
-        let block = codex_hook_toml_block(&script, &menu_script);
+        let block = codex_hook_toml_block(&script, &menu_script, None)
+            .expect("posix block needs no python");
         let with_state = block.replace(
             ENHANCE_CODEX_TOML_MARKER_END,
             "[hooks.state]\n\n[hooks.state.\"/Users/example/.codex/config.toml:pre_tool_use:0:0\"]\ntrusted_hash = \"sha256:pre\"\n\n[hooks.state.\"/Users/example/.codex/config.toml:permission_request:0:0\"]\ntrusted_hash = \"sha256:permission\"\n# bram:end",
@@ -28836,7 +28980,8 @@ mod codex_hook_currentness_tests {
         assert!(codex_hook_block_current(
             &config_path,
             &script,
-            &menu_script
+            &menu_script,
+            None
         ));
     }
 
@@ -28844,7 +28989,9 @@ mod codex_hook_currentness_tests {
     fn codex_hook_currentness_rejects_stale_permission_denied_hook() {
         let script = PathBuf::from("/Users/example/.bram/codex-worklist-guard.py");
         let menu_script = PathBuf::from("/Users/example/.bram/codex-permission-menu-hook.py");
-        let block = codex_hook_toml_block(&script, &menu_script).replace(
+        let block = codex_hook_toml_block(&script, &menu_script, None)
+            .expect("posix block needs no python")
+            .replace(
             ENHANCE_CODEX_TOML_MARKER_END,
             "[[hooks.PermissionDenied]]\nmatcher = \"^(Bash|apply_patch|Write|Edit|mcp__.*)$\"\n\n[[hooks.PermissionDenied.hooks]]\ntype = \"command\"\ncommand = \"/Users/example/.bram/codex-permission-menu-hook.py\"\ntimeout = 2\nstatusMessage = \"Bram permission menu clear\"\n# bram:end",
         );
@@ -28853,7 +29000,8 @@ mod codex_hook_currentness_tests {
         assert!(!codex_hook_block_current(
             &config_path,
             &script,
-            &menu_script
+            &menu_script,
+            None
         ));
     }
 }
@@ -28923,13 +29071,14 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         .unwrap_or(false);
     let codex_agents_current = codex_agents_block_current(app, &codex_agents, is_source_repo);
     let codex_config_path = home_dir().map(|h| h.join(ENHANCE_CODEX_CONFIG_REL));
+    let hook_python = resolve_hook_python();
     let codex_hook_block_current = match (
         codex_config_path.as_ref(),
         codex_hook_script.as_ref(),
         codex_menu_hook_script.as_ref(),
     ) {
         (Some(config), Some(hook), Some(menu_hook)) => {
-            codex_hook_block_current(config, hook, menu_hook)
+            codex_hook_block_current(config, hook, menu_hook, hook_python.as_deref())
         }
         _ => false,
     };
@@ -29421,8 +29570,20 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
     let settings_path = proj.join(ENHANCE_SETTINGS_REL);
     prune_proposal_guard_from_settings(&settings_path)?;
     merge_claude_curl_allowlist_into_settings(&settings_path)?;
-    merge_worklist_guard_into_settings(&settings_path)?;
-    merge_permission_menu_hook_into_settings(&settings_path)?;
+    // issue-247: resolve the hook runtime once; setup and status share the
+    // resolver so they cannot disagree. No usable Python -> skip hook
+    // registration entirely and surface one named warning instead of
+    // installing commands that fail on every hook invocation.
+    let hook_python = resolve_hook_python();
+    match claude_hook_commands(hook_python.as_deref()) {
+        Some((guard_command, menu_command)) => {
+            merge_worklist_guard_into_settings(&settings_path, &guard_command)?;
+            merge_permission_menu_hook_into_settings(&settings_path, &menu_command)?;
+        }
+        None => {
+            skipped.push(HOOK_PYTHON_MISSING_WARNING.to_string());
+        }
+    }
     wrote.push(settings_path.display().to_string());
 
     // CLAUDE.md marker block — skipped on the source repo.
@@ -29454,7 +29615,7 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
 
     // Codex user-global hook install. Runs unconditionally (incl. source repo)
     // because the install is keyed to $HOME, not the project.
-    let codex_hook_install = install_codex_worklist_guard(app)?;
+    let codex_hook_install = install_codex_worklist_guard(app, hook_python.as_deref())?;
     for path in &codex_hook_install.wrote {
         wrote.push(path.clone());
     }
@@ -29507,6 +29668,7 @@ struct CodexHookInstall {
 
 fn install_codex_worklist_guard<R: tauri::Runtime>(
     app: &AppHandle<R>,
+    hook_python: Option<&str>,
 ) -> Result<CodexHookInstall, String> {
     let home = home_dir().ok_or("no HOME or USERPROFILE")?;
     let is_source_repo = project_root(Some(app))
@@ -29592,7 +29754,7 @@ fn install_codex_worklist_guard<R: tauri::Runtime>(
     // be rendered in the developer-role context part, higher priority than
     // AGENTS.md (which is user-role). install_codex_developer_instructions
     // writes that field; this function only installs the runtime backstop.
-    let toml_block = codex_hook_toml_block(&script_path, &menu_script_path);
+    let toml_block = codex_hook_toml_block(&script_path, &menu_script_path, hook_python);
 
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)
@@ -29604,19 +29766,34 @@ fn install_codex_worklist_guard<R: tauri::Runtime>(
         ENHANCE_CODEX_LEGACY_TOML_MARKER_START,
         ENHANCE_CODEX_LEGACY_TOML_MARKER_END,
     );
-    let new_content = if let Some(start_idx) = cleaned.find(ENHANCE_CODEX_TOML_MARKER_START) {
-        let tail = &cleaned[start_idx..];
-        let end_offset = tail
-            .find(ENHANCE_CODEX_TOML_MARKER_END)
-            .map(|i| start_idx + i + ENHANCE_CODEX_TOML_MARKER_END.len())
-            .unwrap_or(cleaned.len());
-        let mut s = cleaned.clone();
-        s.replace_range(start_idx..end_offset, &toml_block);
-        s
-    } else if cleaned.trim().is_empty() {
-        format!("{}\n", toml_block)
-    } else {
-        format!("{}\n\n{}\n", cleaned.trim_end(), toml_block)
+    let new_content = match &toml_block {
+        // issue-247: no usable Python. Remove any previously installed Bram
+        // hook block (its command fails on every invocation) instead of
+        // leaving noisy per-tool-call failures, and surface the warning.
+        None => {
+            skipped.push(HOOK_PYTHON_MISSING_WARNING.to_string());
+            strip_marker_block(
+                &cleaned,
+                ENHANCE_CODEX_TOML_MARKER_START,
+                ENHANCE_CODEX_TOML_MARKER_END,
+            )
+        }
+        Some(toml_block) => {
+            if let Some(start_idx) = cleaned.find(ENHANCE_CODEX_TOML_MARKER_START) {
+                let tail = &cleaned[start_idx..];
+                let end_offset = tail
+                    .find(ENHANCE_CODEX_TOML_MARKER_END)
+                    .map(|i| start_idx + i + ENHANCE_CODEX_TOML_MARKER_END.len())
+                    .unwrap_or(cleaned.len());
+                let mut s = cleaned.clone();
+                s.replace_range(start_idx..end_offset, toml_block);
+                s
+            } else if cleaned.trim().is_empty() {
+                format!("{}\n", toml_block)
+            } else {
+                format!("{}\n\n{}\n", cleaned.trim_end(), toml_block)
+            }
+        }
     };
     // Force-write the merged result so bundle-format changes (matcher regex,
     // timeout, command shape) land on existing installs. The strip-and-insert
@@ -32338,9 +32515,12 @@ fn agent_coordination_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_j
                         let menu_hook_path =
                             home_dir().map(|h| h.join(ENHANCE_CODEX_MENU_HOOK_INSTALL_REL));
                         let current = match (hook_path.as_ref(), menu_hook_path.as_ref()) {
-                            (Some(hook), Some(menu_hook)) => {
-                                codex_hook_block_current(&path, hook, menu_hook)
-                            }
+                            (Some(hook), Some(menu_hook)) => codex_hook_block_current(
+                                &path,
+                                hook,
+                                menu_hook,
+                                resolve_hook_python().as_deref(),
+                            ),
                             _ => false,
                         };
                         rows.push(json!({
@@ -32552,11 +32732,9 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
         .and_then(|v| v.get("modifiedIso").and_then(|p| p.as_str()))
         .unwrap_or("");
     let project_root_path = project_root(Some(app));
-    let python_found = if cfg!(windows) {
-        command_found("py", &["-3", "--version"])
-    } else {
-        command_found("which", &["python3"])
-    };
+    // issue-247: same probe-by-execution resolver setup uses, so status and
+    // setup cannot disagree. Presence checks lie on Windows (Store stubs).
+    let python_found = resolve_hook_python();
     let claude_hook = project_root_path
         .as_ref()
         .map(|p| p.join(ENHANCE_HOOK_SCRIPT_REL));
@@ -32576,14 +32754,16 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
         .as_ref()
         .zip(codex_hook.as_ref())
         .zip(codex_menu_hook.as_ref())
-        .map(|((config, hook), menu_hook)| codex_hook_block_current(config, hook, menu_hook))
+        .map(|((config, hook), menu_hook)| {
+            codex_hook_block_current(config, hook, menu_hook, python_found.as_deref())
+        })
         .unwrap_or(false);
     let hooks_rows = vec![
         serde_json::json!({
             "signal": "Python 3",
             "level": if python_found.is_some() { "ok" } else { "warn" },
             "state": if python_found.is_some() { "found" } else { "missing" },
-            "detail": python_found.clone().unwrap_or_else(|| "Hooks silently inert - install Python 3".to_string()),
+            "detail": python_found.clone().unwrap_or_else(|| "Hooks require Python 3 and none was found (on Windows: install from python.org, which includes the py launcher; the Microsoft Store PATH aliases are not Python). Re-run Setup after installing.".to_string()),
             "seen": "",
         }),
         serde_json::json!({

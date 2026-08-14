@@ -28,42 +28,37 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: PowerShell install examples collect the complete script
+      - name: Windows install examples use validated shell entry paths
         shell: powershell
         run: |
           $ExamplePaths = @("README.md", ".github/release-body-template.md")
           foreach ($Path in $ExamplePaths) {
-            $InstallLines = @(
+            $PowerShellLines = @(
               Get-Content -Path $Path |
-                Where-Object { $_ -match 'install\.ps1' -and $_ -match '\biex\b' }
-            )
-            if ($InstallLines.Count -ne 2) {
-              throw "Expected PowerShell and Command Prompt install examples in $Path."
-            }
-            $UnsafeLines = @(
-              $InstallLines |
-                Where-Object { $_ -notmatch '\|\s*Out-String\s*\|\s*iex' }
-            )
-            if ($UnsafeLines.Count -gt 0) {
-              throw "PowerShell install example streams lines directly to iex in $Path."
-            }
-            $DirectLines = @(
-              $InstallLines |
                 Where-Object {
                   $_ -match '^\s*irm\s+https://.+/install\.ps1\s*\|\s*Out-String\s*\|\s*iex\s*$'
                 }
             )
-            if ($DirectLines.Count -ne 1) {
+            if ($PowerShellLines.Count -ne 1) {
               throw "Expected one direct PowerShell install example in $Path."
             }
             $CmdLines = @(
-              $InstallLines |
+              Get-Content -Path $Path |
                 Where-Object {
-                  $_ -match '^\s*powershell\.exe\s+-NoProfile\s+-ExecutionPolicy\s+Bypass\s+-Command\s+"irm\s+https://.+/install\.ps1\s*\|\s*Out-String\s*\|\s*iex"\s*$'
+                  $_ -match '^\s*curl\.exe\s+-fsSL\s+https://.+/install\.ps1\s+-o\s+"%TEMP%\\bram-install\.ps1"\s+&&\s+powershell\.exe\s+-NoProfile\s+-ExecutionPolicy\s+Bypass\s+-File\s+"%TEMP%\\bram-install\.ps1"\s+&&\s+del\s+"%TEMP%\\bram-install\.ps1"\s*$'
                 }
             )
             if ($CmdLines.Count -ne 1) {
               throw "Expected one Command Prompt install example in $Path."
+            }
+            $BlockedLines = @(
+              Get-Content -Path $Path |
+                Where-Object {
+                  $_ -match 'powershell\.exe.*-Command.*\birm\b.*\biex\b'
+                }
+            )
+            if ($BlockedLines.Count -gt 0) {
+              throw "Blocked child-PowerShell download cradle remains in $Path."
             }
           }
 
@@ -71,13 +66,17 @@ jobs:
           # Validation mode exits after architecture selection, before network
           # or filesystem work.
           $env:BRAM_INSTALL_VALIDATE_ONLY = "1"
+          $TempInstaller = Join-Path $env:TEMP "bram-install-validation.ps1"
           try {
             $PowerShellResult = Get-Content -Path "install.ps1" | Out-String | iex
             if (($PowerShellResult | Out-String).Trim() -ne "bram-windows-amd64.zip") {
               throw "Direct PowerShell installer validation selected '$PowerShellResult'."
             }
 
-            $CmdResult = & cmd.exe /d /s /c 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Get-Content install.ps1 | Out-String | iex"'
+            $InstallerPath = (Resolve-Path -LiteralPath "install.ps1").Path
+            $InstallerUri = ([System.Uri]$InstallerPath).AbsoluteUri
+            $CmdCommand = 'curl.exe -fsSL "{0}" -o "%TEMP%\bram-install-validation.ps1" && powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%TEMP%\bram-install-validation.ps1" && del "%TEMP%\bram-install-validation.ps1"' -f $InstallerUri
+            $CmdResult = & cmd.exe /d /s /c $CmdCommand
             if ($LASTEXITCODE -ne 0) {
               throw "Command Prompt installer validation exited $LASTEXITCODE."
             }
@@ -85,6 +84,7 @@ jobs:
               throw "Command Prompt installer validation selected '$CmdResult'."
             }
           } finally {
+            Remove-Item -LiteralPath $TempInstaller -Force -ErrorAction SilentlyContinue
             Remove-Item Env:BRAM_INSTALL_VALIDATE_ONLY -ErrorAction SilentlyContinue
           }
 

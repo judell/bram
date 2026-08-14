@@ -39,7 +39,7 @@ irm https://github.com/judell/bram/releases/download/${TAG}/install.ps1 | Out-St
 From Command Prompt:
 
 ```batch
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/judell/bram/releases/download/${TAG}/install.ps1 | Out-String | iex"
+curl.exe -fsSL https://github.com/judell/bram/releases/download/${TAG}/install.ps1 -o "%TEMP%\bram-install.ps1" && powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%TEMP%\bram-install.ps1" && del "%TEMP%\bram-install.ps1"
 ```
 
 Downloads `bram-windows-amd64.zip`, verifies its SHA256, extracts `bram.exe` to `~/bin`, and adds `~/bin` to your user `PATH`.

@@ -24,8 +24,42 @@ jobs:
           diff -q .claude/hooks/claude-permission-menu-hook.py \
                   app/provider-hooks/claude-permission-menu-hook.py
 
+  verify-windows-installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: PowerShell install examples collect the complete script
+        shell: powershell
+        run: |
+          $ExamplePaths = @("README.md", ".github/release-body-template.md")
+          foreach ($Path in $ExamplePaths) {
+            $InstallLines = @(
+              Get-Content -Path $Path |
+                Where-Object { $_ -match 'install\.ps1' -and $_ -match '\biex\b' }
+            )
+            if ($InstallLines.Count -eq 0) {
+              throw "No PowerShell install example found in $Path."
+            }
+            $UnsafeLines = @(
+              $InstallLines |
+                Where-Object { $_ -notmatch '\|\s*Out-String\s*\|\s*iex' }
+            )
+            if ($UnsafeLines.Count -gt 0) {
+              throw "PowerShell install example streams lines directly to iex in $Path."
+            }
+          }
+
+          # Get-Content emulates a response enumerated as separate lines by
+          # Windows PowerShell 5.1. Out-String must collect those lines before
+          # the installer is parsed as one script.
+          $Collected = Get-Content -Path "install.ps1" | Out-String
+          if ($Collected -isnot [string]) {
+            throw "Installer pipeline did not produce one collected string."
+          }
+          [void][ScriptBlock]::Create($Collected)
+
   create-release:
-    needs: verify
+    needs: [verify, verify-windows-installer]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4

@@ -31,7 +31,7 @@ bram --help
 ### Windows
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/judell/bram/releases/download/${TAG}/install.ps1 | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/judell/bram/releases/download/${TAG}/install.ps1 | Out-String | iex"
 ```
 
 Downloads `bram-windows-amd64.zip`, verifies its SHA256, extracts `bram.exe` to `~/bin`, and adds `~/bin` to your user `PATH`.

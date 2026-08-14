@@ -27513,6 +27513,7 @@ const ENHANCE_CODEX_AGENTS_REL: &str = "AGENTS.md";
 const ENHANCE_CODEX_BUNDLE_REL: &str = "shell/codex-startup-instructions.md";
 const ENHANCE_HOOK_SCRIPT_REL: &str = ".claude/hooks/claude-worklist-guard.py";
 const ENHANCE_SETTINGS_REL: &str = ".claude/settings.json";
+const ENHANCE_SETTINGS_LOCAL_REL: &str = ".claude/settings.local.json";
 const ENHANCE_HOOK_BUNDLE_REL: &str = "provider-hooks/claude-worklist-guard.py";
 // Codex's worklist guard runs as a PreToolUse hook in codex's user-global
 // config. The bundle ships with Bram and is copied to
@@ -27707,6 +27708,24 @@ fn claude_hook_commands(hook_python: Option<&str>) -> Option<(String, String)> {
         ))
     }
 }
+
+fn claude_hook_settings_rel() -> &'static str {
+    #[cfg(windows)]
+    {
+        // Windows hook commands embed the resolved absolute Python path
+        // (issue-247), so they belong in the ignored machine-local settings
+        // file rather than the tracked project settings file (issue-249).
+        ENHANCE_SETTINGS_LOCAL_REL
+    }
+    #[cfg(not(windows))]
+    {
+        ENHANCE_SETTINGS_REL
+    }
+}
+
+fn claude_hook_settings_path(proj: &Path) -> PathBuf {
+    proj.join(claude_hook_settings_rel())
+}
 // Presence of this file in the project root means the project IS the Bram
 // source repo (it bundles the conventions). enhance_status treats it as a
 // valid sidecar location; run_enhance skips the parts that would otherwise
@@ -27716,8 +27735,13 @@ const ENHANCE_SOURCE_BUNDLE_REL: &str = "app/__shell/conventions.md";
 
 #[cfg(test)]
 mod hook_python_resolver_tests {
-    use super::{probe_python_candidate, settings_event_hook_current};
+    use super::{
+        claude_hook_settings_path, claude_hook_settings_rel, probe_python_candidate,
+        prune_claude_hook_commands_from_settings, settings_event_hook_current,
+        settings_has_worklist_guard_hook, ENHANCE_SETTINGS_LOCAL_REL, ENHANCE_SETTINGS_REL,
+    };
     use serde_json::json;
+    use std::fs;
 
     #[test]
     fn probe_rejects_missing_binary() {
@@ -27905,6 +27929,109 @@ mod hook_python_resolver_tests {
         assert!(!guard.starts_with("& "), "guard: {guard}");
         assert!(!menu.starts_with("& "), "menu: {menu}");
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_claude_hook_settings_are_machine_local() {
+        assert_eq!(claude_hook_settings_rel(), ENHANCE_SETTINGS_LOCAL_REL);
+        let proj = std::env::temp_dir().join(format!(
+            "bram-hook-settings-path-{}",
+            std::process::id()
+        ));
+        assert_eq!(
+            claude_hook_settings_path(&proj),
+            proj.join(ENHANCE_SETTINGS_LOCAL_REL)
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn posix_claude_hook_settings_remain_project_settings() {
+        assert_eq!(claude_hook_settings_rel(), ENHANCE_SETTINGS_REL);
+    }
+
+    #[test]
+    fn prune_claude_hook_commands_removes_bram_hooks_only() {
+        let dir = std::env::temp_dir().join(format!(
+            "bram-prune-claude-hooks-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        fs::write(
+            &path,
+            r#"{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:\\Python313\\python.exe\" \"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-worklist-guard.py\""
+          },
+          {
+            "type": "command",
+            "command": "echo keep"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:\\Python313\\python.exe\" \"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-permission-menu-hook.py\""
+          }
+        ]
+      }
+    ]
+  }
+}
+"#,
+        )
+        .unwrap();
+
+        assert!(prune_claude_hook_commands_from_settings(&path).unwrap());
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(!after.contains("claude-worklist-guard.py"), "{after}");
+        assert!(!after.contains("claude-permission-menu-hook.py"), "{after}");
+        assert!(after.contains("echo keep"), "{after}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_tracked_settings_hook_command_does_not_make_hook_current() {
+        let dir = std::env::temp_dir().join(format!(
+            "bram-hook-currentness-{}",
+            std::process::id()
+        ));
+        let tracked = dir.join(ENHANCE_SETTINGS_REL);
+        fs::create_dir_all(tracked.parent().unwrap()).unwrap();
+        let expected = "\"C:\\Users\\jon\\AppData\\Local\\Programs\\Python\\Python313\\python.exe\" \"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-worklist-guard.py\"";
+        let settings = json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Write|Edit",
+                    "hooks": [{
+                        "type": "command",
+                        "command": expected
+                    }]
+                }]
+            }
+        });
+        fs::write(&tracked, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
+
+        assert!(settings_has_worklist_guard_hook(&tracked, Some(expected)));
+        assert!(!settings_has_worklist_guard_hook(
+            &claude_hook_settings_path(&dir),
+            Some(expected)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
 
 fn settings_event_has_marker(value: &serde_json::Value, event: &str, marker: &str) -> bool {
@@ -28043,8 +28170,8 @@ fn claude_settings_sources(proj: &Path) -> Vec<(String, PathBuf)> {
             proj.join(ENHANCE_SETTINGS_REL),
         ),
         (
-            format!("{}/.claude/settings.local.json", proj.display()),
-            proj.join(".claude/settings.local.json"),
+            format!("{}/{}", proj.display(), ENHANCE_SETTINGS_LOCAL_REL),
+            proj.join(ENHANCE_SETTINGS_LOCAL_REL),
         ),
     ];
     if let Some(home) = home_dir() {
@@ -28177,6 +28304,54 @@ fn prune_proposal_guard_from_settings(settings_path: &Path) -> Result<bool, Stri
         }
         !hooks_arr.is_empty()
     });
+    if !changed {
+        return Ok(false);
+    }
+    let serialized = serde_json::to_string_pretty(&value)
+        .map_err(|e| format!("serialize settings.json: {}", e))?;
+    std::fs::write(settings_path, format!("{}\n", serialized))
+        .map_err(|e| format!("write {}: {}", settings_path.display(), e))?;
+    Ok(true)
+}
+
+fn prune_claude_hook_commands_from_settings(settings_path: &Path) -> Result<bool, String> {
+    let existing = match std::fs::read_to_string(settings_path) {
+        Ok(s) => s,
+        Err(_) => return Ok(false),
+    };
+    if existing.trim().is_empty() {
+        return Ok(false);
+    }
+    let mut value: serde_json::Value = serde_json::from_str(&existing)
+        .map_err(|e| format!("parse {}: {}", settings_path.display(), e))?;
+    let Some(hooks_obj) = value.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
+        return Ok(false);
+    };
+    let mut changed = false;
+    for event_value in hooks_obj.values_mut() {
+        let Some(event_arr) = event_value.as_array_mut() else {
+            continue;
+        };
+        event_arr.retain_mut(|entry| {
+            let Some(hooks_arr) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
+                return true;
+            };
+            let before = hooks_arr.len();
+            hooks_arr.retain(|h| {
+                !h.get("command")
+                    .and_then(|c| c.as_str())
+                    .map(|cmd| {
+                        cmd.contains("claude-worklist-guard.py")
+                            || cmd.contains("claude-permission-menu-hook.py")
+                    })
+                    .unwrap_or(false)
+            });
+            if hooks_arr.len() != before {
+                changed = true;
+            }
+            !hooks_arr.is_empty()
+        });
+    }
     if !changed {
         return Ok(false);
     }
@@ -29266,7 +29441,7 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
     let codex_agents = proj.join(ENHANCE_CODEX_AGENTS_REL);
     let sidecar = proj.join(ENHANCE_SIDECAR_REL);
     let hook_script = proj.join(ENHANCE_HOOK_SCRIPT_REL);
-    let settings = proj.join(ENHANCE_SETTINGS_REL);
+    let settings = claude_hook_settings_path(&proj);
     let worklist_auth = proj.join(WORKLIST_AUTH_REL);
     let codex_hook_script = home_dir().map(|h| h.join(ENHANCE_CODEX_HOOK_INSTALL_REL));
     let codex_menu_hook_script = home_dir().map(|h| h.join(ENHANCE_CODEX_MENU_HOOK_INSTALL_REL));
@@ -29820,11 +29995,19 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
         }
     }
 
-    // Register hook in settings.json (idempotent merge). Prune any
+    // Register hooks in the platform-appropriate Claude settings source
+    // (idempotent merge). On Windows the commands contain a resolved
+    // machine-local Python path, so they live in settings.local.json (#249).
+    // Prune any
     // pre-rename proposal-guard.py PreToolUse entries first so upgraded
     // projects don't end up running both hooks on every Write/Edit.
     let settings_path = proj.join(ENHANCE_SETTINGS_REL);
+    let hook_settings_path = claude_hook_settings_path(&proj);
     prune_proposal_guard_from_settings(&settings_path)?;
+    if hook_settings_path != settings_path {
+        prune_proposal_guard_from_settings(&hook_settings_path)?;
+        prune_claude_hook_commands_from_settings(&settings_path)?;
+    }
     merge_claude_curl_allowlist_into_settings(&settings_path)?;
     // issue-247: resolve the hook runtime once; setup and status share the
     // resolver so they cannot disagree. No usable Python -> skip hook
@@ -29833,14 +30016,17 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
     let hook_python = resolve_hook_python();
     match claude_hook_commands(hook_python.as_deref()) {
         Some((guard_command, menu_command)) => {
-            merge_worklist_guard_into_settings(&settings_path, &guard_command)?;
-            merge_permission_menu_hook_into_settings(&settings_path, &menu_command)?;
+            merge_worklist_guard_into_settings(&hook_settings_path, &guard_command)?;
+            merge_permission_menu_hook_into_settings(&hook_settings_path, &menu_command)?;
         }
         None => {
             skipped.push(HOOK_PYTHON_MISSING_WARNING.to_string());
         }
     }
     wrote.push(settings_path.display().to_string());
+    if hook_settings_path != settings_path {
+        wrote.push(hook_settings_path.display().to_string());
+    }
 
     // CLAUDE.md marker block — skipped on the source repo.
     let claude_md_path = proj.join("CLAUDE.md");
@@ -32566,7 +32752,7 @@ fn agent_coordination_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_j
 
     // --- settings.json hook registration ---
     {
-        let path = proj.join(ENHANCE_SETTINGS_REL);
+        let path = claude_hook_settings_path(&proj);
         let seen = file_modified_iso(&path);
         let exists = path.exists();
         let hook_python = resolve_hook_python();
@@ -32575,7 +32761,7 @@ fn agent_coordination_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_j
         let registered = settings_has_worklist_guard_hook(&path, expected_guard_command);
         let marker_present = settings_has_worklist_guard_marker(&path);
         rows.push(json!({
-            "signal": ENHANCE_SETTINGS_REL,
+            "signal": claude_hook_settings_rel(),
             "level": if registered { "ok" } else { "warn" },
             "state": if registered { "registered" } else if marker_present { "stale" } else if exists { "not-registered" } else { "missing" },
             "detail": if registered {
@@ -32583,9 +32769,9 @@ fn agent_coordination_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_j
             } else if marker_present {
                 "claude-worklist-guard.py is registered but its command is stale. Re-run Setup."
             } else if exists {
-                "settings.json present but claude-worklist-guard.py (Claude worklist guard) is not registered"
+                "Claude hook settings file present but claude-worklist-guard.py (Claude worklist guard) is not registered"
             } else {
-                "settings.json not present"
+                "Claude hook settings file not present"
             },
             "seen": seen,
         }));
@@ -33002,7 +33188,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
         .map(|p| p.join(ENHANCE_HOOK_SCRIPT_REL));
     let claude_settings = project_root_path
         .as_ref()
-        .map(|p| p.join(".claude/settings.json"));
+        .map(|p| claude_hook_settings_path(p));
     let claude_hook_exists = claude_hook.as_ref().map_or(false, |p| p.exists());
     let claude_commands = claude_hook_commands(python_found.as_deref());
     let expected_guard_command = claude_commands.as_ref().map(|(guard, _)| guard.as_str());
@@ -33037,7 +33223,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
             "signal": "Claude hook",
             "level": if claude_hook_exists && claude_registered { "ok" } else { "warn" },
             "state": if claude_hook_exists && claude_registered { "registered" } else if claude_hook_exists && claude_marker_present { "stale" } else if claude_hook_exists { "unregistered" } else { "missing" },
-            "detail": if !claude_hook_exists { "Hook file missing" } else if claude_marker_present && !claude_registered { "Hook file present and registered, but settings.json command is stale. Re-run Setup." } else if !claude_registered { "Hook file present but not registered in settings.json" } else { "Hook file installed and registered" },
+            "detail": if !claude_hook_exists { "Hook file missing" } else if claude_marker_present && !claude_registered { "Hook file present and registered, but Claude hook settings command is stale. Re-run Setup." } else if !claude_registered { "Hook file present but not registered in Claude hook settings" } else { "Hook file installed and registered" },
             "seen": claude_hook.as_ref().map(|p| file_modified_iso(p)).unwrap_or_default(),
         }),
         serde_json::json!({

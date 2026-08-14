@@ -5112,7 +5112,7 @@ function __bramPumpDescribeQueue() {
   var __pumpVia = "";
   var __pumpVisible = 0;
   try {
-    if (__bramDescribeQueue.length) {
+    if (__bramDescribeQueue.length || __bramSubagentDescribeQueue.length) {
       __pumpVia = (window.__bramVisibleRange && window.__bramVisibleRange.startIndex >= 0)
         ? "range" : "dom-scrape";
     }
@@ -5136,6 +5136,7 @@ function __bramPumpDescribeQueue() {
         via: __pumpVia,
         visible: __pumpVisible,
         queue: __bramDescribeQueue.length,
+        subQueue: __bramSubagentDescribeQueue.length,
         route: __pumpRoute,
       });
     } catch (eT) { /* ignore */ }
@@ -5214,11 +5215,14 @@ window.__bramEagerDescribeSubagent = function (payload, refetch) {
     if (!payload || !payload.turns) return;
     if (window.location.pathname.indexOf("/tools/") === -1) return;
     if (typeof refetch === "function") __bramSubagentDescribeRefetch = refetch;
+    var __subScanT0 = Date.now();
+    var __subScanEntries = 0;
     var turns = payload.turns;
     var queue = [];
     for (var i = turns.length - 1; i >= 0; i--) {
       var entries = (turns[i] && turns[i].entries) || [];
       for (var k = entries.length - 1; k >= 0; k--) {
+        __subScanEntries++;
         var e = entries[k];
         if (!e || e.kind !== "tool" || !e.id) continue;
         if (e.aiDescription) continue;
@@ -5231,6 +5235,16 @@ window.__bramEagerDescribeSubagent = function (payload, refetch) {
     for (var q = 0; q < queue.length; q++) {
       __bramSubagentDescribeIds[queue[q].id] = true;
     }
+    try {
+      window.__bramIframeTrace("describe-scan", {
+        op: "scan-subagent",
+        agentId: String(payload.agentId || ""),
+        ms: Date.now() - __subScanT0,
+        turns: turns.length,
+        entries: __subScanEntries,
+        queued: queue.length,
+      });
+    } catch (eT) { /* ignore */ }
     __bramPumpDescribeQueue();
   } catch (err) {}
 };
@@ -5305,14 +5319,20 @@ window.__bramFlushDescribePatches = function () {
   // the client's job is one refetch per flush window. This must run
   // before the main-projection early returns below.
   try {
-    var subHit = false;
+    var subMatched = 0;
     for (var si = 0; si < ids.length; si++) {
       if (__bramSubagentDescribeIds[ids[si]]) {
-        subHit = true;
+        subMatched++;
         delete __bramSubagentDescribeIds[ids[si]];
       }
     }
-    if (subHit && typeof __bramSubagentDescribeRefetch === "function") {
+    if (subMatched && typeof __bramSubagentDescribeRefetch === "function") {
+      try {
+        window.__bramIframeTrace("describe-patch", {
+          stage: "subagent-refetch",
+          patches: subMatched,
+        });
+      } catch (subTraceErr) { /* ignore */ }
       __bramSubagentDescribeRefetch();
     }
   } catch (subErr) { /* ignore */ }

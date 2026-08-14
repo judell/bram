@@ -294,7 +294,7 @@ dependencies = [
 
 [[package]]
 name = "bram"
-version = "0.3.12"
+version = "0.3.13"
 dependencies = [
  "flate2",
  "include_dir",

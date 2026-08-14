@@ -15,7 +15,8 @@ in ~/.codex/config.toml can route writes through mcp__filesystem__write_text_fil
 entirely.
 
 Response on block (stdout JSON):
-  {"permissionDecision":"deny","permissionDecisionReason":"<non-empty>"}
+  {"hookSpecificOutput":{"hookEventName":"PreToolUse",
+   "permissionDecision":"deny","permissionDecisionReason":"<non-empty>"}}
 
 Default (allow): exit 0 with no output.
 
@@ -128,6 +129,16 @@ def allow(reason="passed-checks"):
     sys.exit(0)
 
 
+def pre_tool_use_deny_response(reason):
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason or "blocked",
+        }
+    }
+
+
 def deny(reason):
     _trace_hook(
         _HOOK_CTX["event"] or "PreToolUse",
@@ -138,15 +149,15 @@ def deny(reason):
         # full message goes to stderr below for codex to surface.
         (reason or "").splitlines()[0][:120] if reason else "blocked",
     )
-    # Codex PreToolUse contract: exit code 2 + reason on stderr.
-    # The flat {"permissionDecision":"deny",...} JSON the Claude hook
-    # emits is invalid PreToolUse output for codex — codex rejects
-    # it, logs "PreToolUse hook (failed)", and the tool call proceeds
-    # instead of being blocked. exit(2)+stderr is universally
-    # supported and avoids any JSON nesting ambiguity.
-    sys.stderr.write((reason or "blocked") + "\n")
+    message = reason or "blocked"
+    # Codex's structured PreToolUse contract is the reliable denial path for
+    # nested code-mode calls. The hook process itself succeeds after emitting
+    # the decision; stderr remains a human-readable diagnostic channel.
+    sys.stdout.write(json.dumps(pre_tool_use_deny_response(message)) + "\n")
+    sys.stdout.flush()
+    sys.stderr.write(message + "\n")
     sys.stderr.flush()
-    sys.exit(2)
+    sys.exit(0)
 
 
 def load_json(path):
@@ -660,6 +671,15 @@ def _self_test_replacement_patch(old_content, new_content):
 
 
 def self_test():
+    denied = pre_tool_use_deny_response("test denial")
+    assert denied == {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": "test denial",
+        }
+    }
+
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         (root / "resources").mkdir()

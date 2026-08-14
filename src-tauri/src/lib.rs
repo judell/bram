@@ -21673,58 +21673,276 @@ fn st_codex_tool_input(payload: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({})
 }
 
-// Codex "unified exec" (custom_tool_call, name="exec", CLI upgrade — NOT
-// model-specific): `input` is a JS orchestration script that calls
-// `tools.exec_command({cmd:"..."})`, possibly several times. Extract each
-// embedded shell command, quote/escape-aware, so the display shows the
-// actual commands instead of the raw JS. Empty when none found (caller
-// falls back to the raw script). Transitional: the legacy
-// function_call/exec_command path is untouched.
-fn st_codex_exec_cmds(input: &str) -> Vec<String> {
-    let chars: Vec<char> = input.chars().collect();
-    let mut out: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] == 'c'
-            && chars.get(i + 1) == Some(&'m')
-            && chars.get(i + 2) == Some(&'d')
-            && chars.get(i + 3) == Some(&':')
-        {
-            let mut j = i + 4;
-            while chars.get(j) == Some(&' ') {
-                j += 1;
-            }
-            if chars.get(j) == Some(&'"') {
-                j += 1;
-                let mut val = String::new();
-                while j < chars.len() {
-                    let c = chars[j];
-                    if c == '\\' {
-                        if let Some(&n) = chars.get(j + 1) {
-                            val.push(match n {
-                                '"' => '"',
-                                '\\' => '\\',
-                                'n' => '\n',
-                                't' => '\t',
-                                other => other,
-                            });
-                            j += 2;
-                            continue;
-                        }
-                    }
-                    if c == '"' {
-                        j += 1;
-                        break;
-                    }
-                    val.push(c);
-                    j += 1;
+fn st_codex_js_string_at(script: &str, start: usize) -> Option<(String, usize)> {
+    let bytes = script.as_bytes();
+    let quote = *bytes.get(start)?;
+    if quote != b'"' && quote != b'\'' && quote != b'`' {
+        return None;
+    }
+    let mut value = String::new();
+    let mut index = start + 1;
+    while index < bytes.len() {
+        if bytes[index] == quote {
+            return Some((value, index + 1));
+        }
+        if bytes[index] == b'\\' {
+            index += 1;
+            let escaped = *bytes.get(index)?;
+            match escaped {
+                b'n' => value.push('\n'),
+                b'r' => value.push('\r'),
+                b't' => value.push('\t'),
+                b'b' => value.push('\u{0008}'),
+                b'f' => value.push('\u{000C}'),
+                b'u' => {
+                    let hex = script.get(index + 1..index + 5)?;
+                    let codepoint = u32::from_str_radix(hex, 16).ok()?;
+                    value.push(char::from_u32(codepoint)?);
+                    index += 4;
                 }
-                out.push(val);
-                i = j;
+                other => value.push(other as char),
+            }
+            index += 1;
+            continue;
+        }
+        let character = script.get(index..)?.chars().next()?;
+        value.push(character);
+        index += character.len_utf8();
+    }
+    None
+}
+
+fn st_codex_js_object_end(script: &str, start: usize) -> Option<usize> {
+    let bytes = script.as_bytes();
+    if bytes.get(start) != Some(&b'{') {
+        return None;
+    }
+    let mut closers = Vec::new();
+    let mut index = start;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' | b'\'' | b'`' => {
+                index = st_codex_js_string_at(script, index)?.1;
                 continue;
             }
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+                continue;
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                while index + 1 < bytes.len()
+                    && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
+                {
+                    index += 1;
+                }
+                if index + 1 >= bytes.len() {
+                    return None;
+                }
+                index += 2;
+                continue;
+            }
+            b'{' => closers.push(b'}'),
+            b'[' => closers.push(b']'),
+            b'(' => closers.push(b')'),
+            b'}' | b']' | b')' => {
+                if closers.pop() != Some(bytes[index]) {
+                    return None;
+                }
+                if closers.is_empty() {
+                    return Some(index + 1);
+                }
+            }
+            _ => {}
         }
-        i += 1;
+        index += 1;
+    }
+    None
+}
+
+fn st_codex_js_object_string_field(object: &str, key: &str) -> Option<String> {
+    let bytes = object.as_bytes();
+    if bytes.first() != Some(&b'{') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' | b'\'' | b'`' => {
+                let (candidate, end) = st_codex_js_string_at(object, index)?;
+                if depth == 1 {
+                    let mut colon = end;
+                    while bytes.get(colon).is_some_and(u8::is_ascii_whitespace) {
+                        colon += 1;
+                    }
+                    if bytes.get(colon) == Some(&b':') && candidate == key {
+                        let mut value_start = colon + 1;
+                        while bytes
+                            .get(value_start)
+                            .is_some_and(u8::is_ascii_whitespace)
+                        {
+                            value_start += 1;
+                        }
+                        if bytes.get(value_start) == Some(&b'`') {
+                            return None;
+                        }
+                        return st_codex_js_string_at(object, value_start)
+                            .map(|(value, _)| value);
+                    }
+                }
+                index = end;
+                continue;
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+                continue;
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                while index + 1 < bytes.len()
+                    && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
+                {
+                    index += 1;
+                }
+                if index + 1 >= bytes.len() {
+                    return None;
+                }
+                index += 2;
+                continue;
+            }
+            b'{' | b'[' | b'(' => depth += 1,
+            b'}' | b']' | b')' => depth = depth.checked_sub(1)?,
+            byte if depth == 1 && (byte.is_ascii_alphabetic() || byte == b'_') => {
+                let start = index;
+                index += 1;
+                while bytes
+                    .get(index)
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                {
+                    index += 1;
+                }
+                let candidate = object.get(start..index)?;
+                let mut colon = index;
+                while bytes.get(colon).is_some_and(u8::is_ascii_whitespace) {
+                    colon += 1;
+                }
+                if bytes.get(colon) == Some(&b':') && candidate == key {
+                    let mut value_start = colon + 1;
+                    while bytes
+                        .get(value_start)
+                        .is_some_and(u8::is_ascii_whitespace)
+                    {
+                        value_start += 1;
+                    }
+                    if bytes.get(value_start) == Some(&b'`') {
+                        return None;
+                    }
+                    return st_codex_js_string_at(object, value_start)
+                        .map(|(value, _)| value);
+                }
+                continue;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+// Codex "unified exec" (custom_tool_call, name="exec", CLI upgrade — NOT
+// model-specific): `input` is a JS orchestration script that calls either
+// `tools.exec_command({cmd:"..."})` or `tools.shell_command({command:"..."})`.
+// Read only literal fields from those call objects; dynamic or malformed
+// shapes return no commands so callers retain the raw-script fallback.
+fn st_codex_exec_cmds(input: &str) -> Vec<String> {
+    const CALLS: [(&str, &str, bool); 2] = [
+        ("tools.exec_command", "cmd", false),
+        ("tools.shell_command", "command", true),
+    ];
+    let bytes = input.as_bytes();
+    let mut out = Vec::new();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' | b'\'' | b'`' => {
+                let Some((_, end)) = st_codex_js_string_at(input, index) else {
+                    return Vec::new();
+                };
+                index = end;
+                continue;
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+                continue;
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                while index + 1 < bytes.len()
+                    && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
+                {
+                    index += 1;
+                }
+                if index + 1 >= bytes.len() {
+                    return Vec::new();
+                }
+                index += 2;
+                continue;
+            }
+            _ => {}
+        }
+
+        let matched = CALLS.iter().find(|(marker, _, _)| {
+            bytes[index..].starts_with(marker.as_bytes())
+                && bytes
+                    .get(index + marker.len())
+                    .map(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
+                    .unwrap_or(true)
+        });
+        let Some((marker, field, unwrap_shell)) = matched else {
+            index += 1;
+            continue;
+        };
+        let mut object_start = index + marker.len();
+        while bytes
+            .get(object_start)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            object_start += 1;
+        }
+        if bytes.get(object_start) != Some(&b'(') {
+            index += marker.len();
+            continue;
+        }
+        object_start += 1;
+        while bytes
+            .get(object_start)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            object_start += 1;
+        }
+        let Some(object_end) = st_codex_js_object_end(input, object_start) else {
+            return Vec::new();
+        };
+        let object = input.get(object_start..object_end).unwrap_or_default();
+        if let Some(command) = st_codex_js_object_string_field(object, field) {
+            let command = if *unwrap_shell {
+                unwrap_codex_shell_command(&command).unwrap_or(command)
+            } else {
+                command
+            };
+            out.push(command);
+        }
+        index = object_end;
     }
     out
 }
@@ -22547,9 +22765,9 @@ mod apply_patch_diff_tests {
 #[cfg(test)]
 mod codex_unified_exec_tests {
     use super::{
-        st_codex_exec_cmds, st_codex_tool_command_display, st_codex_tool_name,
-        st_codex_running_cell_id, st_codex_tool_output, st_codex_tool_summary,
-        st_parse_lines_to_turns,
+        st_codex_exec_cmds, st_codex_name_detail, st_codex_running_cell_id,
+        st_codex_tool_command_display, st_codex_tool_name, st_codex_tool_output,
+        st_codex_tool_summary, st_parse_lines_to_turns,
     };
 
     fn exec_call(input: &str) -> serde_json::Value {
@@ -22736,6 +22954,86 @@ mod codex_unified_exec_tests {
         assert_eq!(cmds.len(), 2);
         assert_eq!(cmds[0], "git status --short");
         assert_eq!(cmds[1], "rg -n \"GPT-5\\.5\" app");
+    }
+
+    #[test]
+    fn nested_shell_command_live_windows_records_project_inner_commands() {
+        let fixtures = [
+            (
+                r#"const a = await tools.shell_command({
+  command: "Write-Output 'CODEX_GATE3_NATIVE_20260813'",
+  workdir: "C:\\Users\\jon\\bram",
+  timeout_ms: 10000
+});
+text(a);
+"#,
+                "Write-Output 'CODEX_GATE3_NATIVE_20260813'",
+                "Write-Output",
+            ),
+            (
+                r#"const b = await tools.shell_command({
+  command: "powershell.exe -NoProfile -Command \"Write-Output 'CODEX_GATE3_POWERSHELL_WRAPPED_20260813'\"",
+  workdir: "C:\\Users\\jon\\bram",
+  timeout_ms: 10000
+});
+text(b);
+"#,
+                "Write-Output 'CODEX_GATE3_POWERSHELL_WRAPPED_20260813'",
+                "Write-Output",
+            ),
+            (
+                r#"const c = await tools.shell_command({
+  command: "cmd.exe /c \"echo CODEX_GATE3_CMD_WRAPPED_20260813\"",
+  workdir: "C:\\Users\\jon\\bram",
+  timeout_ms: 10000
+});
+text(c);
+"#,
+                "echo CODEX_GATE3_CMD_WRAPPED_20260813",
+                "echo",
+            ),
+        ];
+
+        for (script, expected_command, expected_detail) in fixtures {
+            let call = exec_call(script);
+            assert_eq!(st_codex_exec_cmds(script), [expected_command]);
+            assert_eq!(st_codex_tool_command_display(&call), expected_command);
+            assert_eq!(st_codex_tool_summary(&call), expected_command);
+            assert_eq!(st_codex_name_detail(&call), expected_detail);
+
+            let record = serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "call_id": "call_shell",
+                    "name": "exec",
+                    "input": script
+                }
+            });
+            let turns = st_parse_lines_to_turns(&record.to_string());
+            let entry = &turns[0]["entries"][0];
+            // Eager AI descriptions require both a stable id and non-empty
+            // command material; preserve those projection prerequisites.
+            assert_eq!(entry["id"], "call_shell");
+            assert_eq!(entry["name"], "exec");
+            assert_eq!(entry["commandDisplay"], expected_command);
+            assert_eq!(entry["nameDetail"], expected_detail);
+        }
+    }
+
+    #[test]
+    fn nested_shell_command_dynamic_input_keeps_raw_script_fallback() {
+        for script in [
+            "const command = buildCommand();\nawait tools.shell_command({command});",
+            "await tools.shell_command({command: `echo ${value}`});",
+            "const example = `tools.shell_command({command: \"echo not-run\"})`;",
+            "await tools.shell_command({command: \"echo malformed\")",
+        ] {
+            let call = exec_call(script);
+            assert!(st_codex_exec_cmds(script).is_empty());
+            assert_eq!(st_codex_tool_command_display(&call), script);
+            assert!(st_codex_name_detail(&call).is_empty());
+        }
     }
 
     #[test]
@@ -27710,17 +28008,11 @@ fn claude_hook_commands(hook_python: Option<&str>) -> Option<(String, String)> {
 }
 
 fn claude_hook_settings_rel() -> &'static str {
-    #[cfg(windows)]
-    {
-        // Windows hook commands embed the resolved absolute Python path
-        // (issue-247), so they belong in the ignored machine-local settings
-        // file rather than the tracked project settings file (issue-249).
-        ENHANCE_SETTINGS_LOCAL_REL
-    }
-    #[cfg(not(windows))]
-    {
-        ENHANCE_SETTINGS_REL
-    }
+    // Hook registration is installed state, even when the POSIX command is
+    // portable. Keeping it in the ignored project-local settings layer means
+    // Setup never churns tracked configuration when a machine installs,
+    // migrates, or removes Bram hooks (#249).
+    ENHANCE_SETTINGS_LOCAL_REL
 }
 
 fn claude_hook_settings_path(proj: &Path) -> PathBuf {
@@ -27930,9 +28222,8 @@ mod hook_python_resolver_tests {
         assert!(!menu.starts_with("& "), "menu: {menu}");
     }
 
-    #[cfg(windows)]
     #[test]
-    fn windows_claude_hook_settings_are_machine_local() {
+    fn claude_hook_settings_are_machine_local_on_every_platform() {
         assert_eq!(claude_hook_settings_rel(), ENHANCE_SETTINGS_LOCAL_REL);
         let proj = std::env::temp_dir().join(format!(
             "bram-hook-settings-path-{}",
@@ -27942,12 +28233,6 @@ mod hook_python_resolver_tests {
             claude_hook_settings_path(&proj),
             proj.join(ENHANCE_SETTINGS_LOCAL_REL)
         );
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn posix_claude_hook_settings_remain_project_settings() {
-        assert_eq!(claude_hook_settings_rel(), ENHANCE_SETTINGS_REL);
     }
 
     #[test]
@@ -27968,7 +28253,7 @@ mod hook_python_resolver_tests {
         "hooks": [
           {
             "type": "command",
-            "command": "\"C:\\Python313\\python.exe\" \"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-worklist-guard.py\""
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/worklist-guard.py"
           },
           {
             "type": "command",
@@ -27987,6 +28272,18 @@ mod hook_python_resolver_tests {
           }
         ]
       }
+    ],
+    "PermissionRequest": [],
+    "PermissionDenied": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo keep denied"
+          }
+        ]
+      }
     ]
   }
 }
@@ -27998,20 +28295,62 @@ mod hook_python_resolver_tests {
         let after = fs::read_to_string(&path).unwrap();
         assert!(!after.contains("claude-worklist-guard.py"), "{after}");
         assert!(!after.contains("claude-permission-menu-hook.py"), "{after}");
+        assert!(!after.contains("hooks/worklist-guard.py"), "{after}");
         assert!(after.contains("echo keep"), "{after}");
+        assert!(after.contains("echo keep denied"), "{after}");
+        let value: serde_json::Value = serde_json::from_str(&after).unwrap();
+        let hooks = value["hooks"].as_object().unwrap();
+        assert!(!hooks.contains_key("PostToolUse"), "{after}");
+        assert!(!hooks.contains_key("PermissionRequest"), "{after}");
+        assert!(hooks.contains_key("PreToolUse"), "{after}");
+        assert!(hooks.contains_key("PermissionDenied"), "{after}");
+        assert!(!prune_claude_hook_commands_from_settings(&path).unwrap());
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[cfg(windows)]
     #[test]
-    fn windows_tracked_settings_hook_command_does_not_make_hook_current() {
+    fn prune_claude_hook_commands_removes_empty_hooks_container() {
+        let dir = std::env::temp_dir().join(format!(
+            "bram-prune-only-claude-hooks-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let settings = json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Write|Edit",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/claude-worklist-guard.py"
+                    }]
+                }],
+                "PostToolUse": []
+            },
+            "permissions": { "allow": ["Bash(echo keep)"] }
+        });
+        fs::write(&path, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
+
+        assert!(prune_claude_hook_commands_from_settings(&path).unwrap());
+        let after = fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&after).unwrap();
+        assert!(value.get("hooks").is_none(), "{after}");
+        assert_eq!(value["permissions"]["allow"][0], "Bash(echo keep)");
+        assert!(!prune_claude_hook_commands_from_settings(&path).unwrap());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tracked_settings_hook_command_does_not_make_hook_current() {
         let dir = std::env::temp_dir().join(format!(
             "bram-hook-currentness-{}",
             std::process::id()
         ));
         let tracked = dir.join(ENHANCE_SETTINGS_REL);
         fs::create_dir_all(tracked.parent().unwrap()).unwrap();
-        let expected = "\"C:\\Users\\jon\\AppData\\Local\\Programs\\Python\\Python313\\python.exe\" \"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-worklist-guard.py\"";
+        let expected = super::claude_hook_commands(Some("C:\\Python313\\python.exe"))
+            .unwrap()
+            .0;
         let settings = json!({
             "hooks": {
                 "PreToolUse": [{
@@ -28025,10 +28364,10 @@ mod hook_python_resolver_tests {
         });
         fs::write(&tracked, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
 
-        assert!(settings_has_worklist_guard_hook(&tracked, Some(expected)));
+        assert!(settings_has_worklist_guard_hook(&tracked, Some(&expected)));
         assert!(!settings_has_worklist_guard_hook(
             &claude_hook_settings_path(&dir),
-            Some(expected)
+            Some(&expected)
         ));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -28147,10 +28486,10 @@ fn settings_has_worklist_guard_marker(settings_path: &Path) -> bool {
 // failure mode: a pre-#217 entry in his global file, satisfied by the shim
 // for weeks, then a prune keyed off the project file alone deleted the
 // shim and every Write/Edit in every project was blocked by hook spawn
-// failure. Bram never rewrites the global or local file (not ours), so a
-// stale non-project reference holds the prune back and is surfaced as a
-// named drift warning instead (stderr here; Setup result via
-// stale_legacy_hook_reference_warnings).
+// failure. Setup migrates both project settings sources, but never rewrites
+// the user-global file. A stale global reference therefore holds the prune
+// back and is surfaced as a named drift warning instead (stderr here; Setup
+// result via stale_legacy_hook_reference_warnings).
 
 const LEGACY_CLAUDE_HOOKS: [(&str, &str); 2] = [
     (".claude/hooks/worklist-guard.py", "hooks/worklist-guard.py"),
@@ -28218,13 +28557,13 @@ fn prune_legacy_claude_hooks(proj: &Path) {
 }
 
 // Setup-result drift warnings (issue-227): name every settings source Bram
-// does not own that still references a retired legacy hook. The project
-// settings.json is excluded — Setup itself migrates that file, so a stale
-// reference there is fixed by the very Setup run that would report it.
+// does not own that still references a retired legacy hook. Both project
+// settings files are excluded because Setup migrates them before collecting
+// warnings; only the user-global source remains outside Bram's ownership.
 fn stale_legacy_hook_reference_warnings(proj: &Path) -> Vec<String> {
     let sources: Vec<(String, String)> = claude_settings_sources(proj)
         .into_iter()
-        .skip(1) // project settings.json is Setup-managed, not drift
+        .skip(2) // both project settings files are Setup-managed
         .map(|(label, path)| (label, std::fs::read_to_string(&path).unwrap_or_default()))
         .collect();
     let mut warnings = Vec::new();
@@ -28324,33 +28663,48 @@ fn prune_claude_hook_commands_from_settings(settings_path: &Path) -> Result<bool
     }
     let mut value: serde_json::Value = serde_json::from_str(&existing)
         .map_err(|e| format!("parse {}: {}", settings_path.display(), e))?;
-    let Some(hooks_obj) = value.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
-        return Ok(false);
-    };
     let mut changed = false;
-    for event_value in hooks_obj.values_mut() {
-        let Some(event_arr) = event_value.as_array_mut() else {
-            continue;
+    let remove_hooks_container = {
+        let Some(hooks_obj) = value.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
+            return Ok(false);
         };
-        event_arr.retain_mut(|entry| {
-            let Some(hooks_arr) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
+        hooks_obj.retain(|_, event_value| {
+            let Some(event_arr) = event_value.as_array_mut() else {
                 return true;
             };
-            let before = hooks_arr.len();
-            hooks_arr.retain(|h| {
-                !h.get("command")
-                    .and_then(|c| c.as_str())
-                    .map(|cmd| {
-                        cmd.contains("claude-worklist-guard.py")
-                            || cmd.contains("claude-permission-menu-hook.py")
-                    })
-                    .unwrap_or(false)
+            event_arr.retain_mut(|entry| {
+                let Some(hooks_arr) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
+                    return true;
+                };
+                let before = hooks_arr.len();
+                hooks_arr.retain(|h| {
+                    !h.get("command")
+                        .and_then(|c| c.as_str())
+                        .map(|cmd| {
+                            cmd.contains("claude-worklist-guard.py")
+                                || cmd.contains("claude-permission-menu-hook.py")
+                                || cmd.contains("hooks/worklist-guard.py")
+                                || cmd.contains("hooks/permission-menu-hook.py")
+                        })
+                        .unwrap_or(false)
+                });
+                if hooks_arr.len() != before {
+                    changed = true;
+                }
+                !hooks_arr.is_empty()
             });
-            if hooks_arr.len() != before {
+            if event_arr.is_empty() {
                 changed = true;
+                false
+            } else {
+                true
             }
-            !hooks_arr.is_empty()
         });
+        hooks_obj.is_empty()
+    };
+    if remove_hooks_container {
+        value.as_object_mut().unwrap().remove("hooks");
+        changed = true;
     }
     if !changed {
         return Ok(false);
@@ -29434,6 +29788,111 @@ mod codex_hook_currentness_tests {
     }
 }
 
+#[cfg(test)]
+mod codex_hook_response_contract_tests {
+    use super::{resolve_hook_python, ENHANCE_CODEX_HOOK_BUNDLE_REL};
+    use serde_json::json;
+    use std::fs;
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Output, Stdio};
+
+    fn fixture_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "bram-codex-hook-contract-{}-{}",
+            std::process::id(),
+            name
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("resources")).expect("create guard fixture");
+        fs::write(
+            root.join("resources/.worklist-authorization.json"),
+            "{}\n",
+        )
+        .expect("write managed-repo marker");
+        fs::write(
+            root.join("resources/worklist.json"),
+            "{\"items\":[],\"version\":0}\n",
+        )
+        .expect("write empty worklist");
+        root
+    }
+
+    fn run_guard(root: &Path, payload: &serde_json::Value) -> Output {
+        let python = resolve_hook_python().expect("hook contract test requires Python 3");
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("app")
+            .join(ENHANCE_CODEX_HOOK_BUNDLE_REL);
+        let mut child = Command::new(python)
+            .arg(script)
+            .current_dir(root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("launch canonical Codex guard");
+        child
+            .stdin
+            .take()
+            .expect("guard stdin")
+            .write_all(payload.to_string().as_bytes())
+            .expect("write guard payload");
+        child.wait_with_output().expect("wait for Codex guard")
+    }
+
+    #[test]
+    fn deny_emits_nested_pretooluse_contract() {
+        let root = fixture_root("deny");
+        let payload = json!({
+            "cwd": root,
+            "hook_event_name": "PreToolUse",
+            "tool_name": "apply_patch",
+            "tool_input": {
+                "input": "*** Begin Patch\n*** Add File: unauthorized.txt\n+blocked\n*** End Patch"
+            }
+        });
+        let output = run_guard(&root, &payload);
+        assert!(output.status.success(), "status: {}", output.status);
+        let response: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("deny stdout is JSON");
+        assert!(response.get("permissionDecision").is_none(), "{response}");
+        assert_eq!(
+            response["hookSpecificOutput"]["hookEventName"],
+            "PreToolUse"
+        );
+        assert_eq!(
+            response["hookSpecificOutput"]["permissionDecision"],
+            "deny"
+        );
+        let reason = response["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or("");
+        assert!(reason.contains("unauthorized.txt"), "{reason}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("decision=deny"), "{stderr}");
+        assert!(stderr.contains(reason), "{stderr}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn allow_remains_success_with_empty_stdout() {
+        let root = fixture_root("allow");
+        let payload = json!({
+            "cwd": root,
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": { "command": "git status --short" }
+        });
+        let output = run_guard(&root, &payload);
+        assert!(output.status.success(), "status: {}", output.status);
+        assert!(output.stdout.is_empty(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("decision=allow"), "{stderr}");
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
 fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String> {
     use serde_json::json;
     let proj = project_root(Some(app)).ok_or("no project root")?;
@@ -29995,19 +30454,16 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
         }
     }
 
-    // Register hooks in the platform-appropriate Claude settings source
-    // (idempotent merge). On Windows the commands contain a resolved
-    // machine-local Python path, so they live in settings.local.json (#249).
-    // Prune any
-    // pre-rename proposal-guard.py PreToolUse entries first so upgraded
-    // projects don't end up running both hooks on every Write/Edit.
+    // Register hooks in ignored project-local settings on every platform.
+    // Hook registration is installed state even when the POSIX command is
+    // portable; tracked settings remain shared configuration only (#249).
+    // Prune Bram's registrations from tracked settings, including legacy
+    // names, before merging the current commands into the local file.
     let settings_path = proj.join(ENHANCE_SETTINGS_REL);
     let hook_settings_path = claude_hook_settings_path(&proj);
     prune_proposal_guard_from_settings(&settings_path)?;
-    if hook_settings_path != settings_path {
-        prune_proposal_guard_from_settings(&hook_settings_path)?;
-        prune_claude_hook_commands_from_settings(&settings_path)?;
-    }
+    prune_proposal_guard_from_settings(&hook_settings_path)?;
+    prune_claude_hook_commands_from_settings(&settings_path)?;
     merge_claude_curl_allowlist_into_settings(&settings_path)?;
     // issue-247: resolve the hook runtime once; setup and status share the
     // resolver so they cannot disagree. No usable Python -> skip hook
@@ -30024,9 +30480,7 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
         }
     }
     wrote.push(settings_path.display().to_string());
-    if hook_settings_path != settings_path {
-        wrote.push(hook_settings_path.display().to_string());
-    }
+    wrote.push(hook_settings_path.display().to_string());
 
     // CLAUDE.md marker block — skipped on the source repo.
     let claude_md_path = proj.join("CLAUDE.md");
@@ -30069,9 +30523,8 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
     // verifying developer-role context is salient enough on its own.
     install_codex_developer_instructions()?;
 
-    // issue-227: surface stale legacy-hook references in settings files Bram
-    // does not own (user-global, settings.local.json). These block the #217
-    // shim prune; Setup cannot fix them, only name them.
+    // issue-227: surface stale legacy-hook references in user-global settings.
+    // These block the #217 shim prune; Setup cannot fix them, only name them.
     for warning in stale_legacy_hook_reference_warnings(&proj) {
         skipped.push(warning);
     }
@@ -32408,22 +32861,6 @@ fn file_modified_iso(path: &Path) -> String {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| format_iso_utc_ms(d.as_millis() as i64))
         .unwrap_or_default()
-}
-
-fn command_found(cmd: &str, args: &[&str]) -> Option<String> {
-    let out = std::process::Command::new(cmd).args(args).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-    if !stdout.is_empty() {
-        Some(stdout)
-    } else if !stderr.is_empty() {
-        Some(stderr)
-    } else {
-        Some(cmd.to_string())
-    }
 }
 
 fn worklist_item_files(item: &serde_json::Value) -> Vec<String> {

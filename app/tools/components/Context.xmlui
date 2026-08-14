@@ -2,7 +2,6 @@
   var.selectedPath="{null}"
   var.selectedDisplay="{null}"
   var.selectedLine="{null}"
-  var.searchDraft=""
   var.searchQuery="">
 
   <DataSource id="ctxList" url="/__context/list" queryParams="{{ provider: activeProvider || '' }}" />
@@ -17,10 +16,6 @@
     queryParams="{{ q: searchQuery, provider: activeProvider || '' }}"
     when="{!!searchQuery &amp;&amp; searchQuery.trim().length >= 2}" />
 
-  <ChangeListener
-    listenTo="{searchDraft}"
-    debounceWaitInMs="250"
-    onDidChange="searchQuery = searchDraft" />
   <ChangeListener
     listenTo="{activeProvider}"
     onDidChange="selectedPath = null; selectedDisplay = null; selectedLine = null" />
@@ -47,24 +42,12 @@
           tooltip="About Context"
           onClick="contextInfoDialog.open()" />
         <SpaceFiller />
-        <HStack gap="$space-1" verticalAlignment="center" width="*" maxWidth="20rem">
-          <TextBox
-            id="searchBox"
-            placeholder="Search..."
-            width="*"
-            initialValue="{searchDraft}"
-            autoComplete="off"
-            autoCorrect="{false}"
-            spellCheck="{false}"
-            autoCapitalize="off"
-            onDidChange="(v) => { searchDraft = v }" />
-          <Button
-            label="✕"
-            variant="ghost"
-            size="xs"
-            tooltip="Clear search"
-            onClick="searchBox.setValue(''); searchDraft = ''; searchQuery = ''; selectedPath = null; selectedDisplay = null; selectedLine = null" />
-        </HStack>
+        <SearchBox
+          id="contextSearchBox"
+          boxWidth="20rem"
+          placeholder="Search..."
+          onQueryChange="(q) => searchQuery = q"
+          onClear="searchQuery = ''; selectedPath = null; selectedDisplay = null; selectedLine = null" />
       </HStack>
 
       <VStack

@@ -1,0 +1,110 @@
+<Component
+  name="IsolatedDraftEditor"
+  var.voiceRecording="{false}"
+  var.lastCommittedValue="{$props.initialValue || ''}"
+  var.commitTick="{0}">
+  <!-- Keep the TextArea's hot value and caret behind this component boundary.
+       Parents receive only committed values and can read/write imperatively.
+       https://docs.xmlui.org/howto/confine-a-hot-input-to-its-own-component
+       https://docs.xmlui.org/howto/expose-a-method-from-a-component -->
+  <PushSource
+    when="{!!$props.voiceTarget}"
+    id="voiceArrival"
+    initial="{null}"
+    subscribe="{window.bramSubscribeVoiceArrival()}" />
+  <ChangeListener
+    when="{!!$props.voiceTarget}"
+    listenTo="{voiceArrival.value &amp;&amp; voiceArrival.value.at}">
+    <event name="didChange">
+      const ev = voiceArrival.value || null;
+      const transcript = (ev &amp;&amp; ev.transcript) || '';
+      const target = (ev &amp;&amp; ev.meta &amp;&amp; ev.meta.target) || '';
+      if (target === $props.voiceTarget) {
+        if (transcript) {
+          const nextValue = window.__bramAppendVoiceToBox(editorBox, transcript);
+          if (nextValue !== false) {
+            emitEvent('commit', nextValue);
+            lastCommittedValue = nextValue;
+          }
+        }
+        voiceRecording = false;
+        worklistVoiceRecordingActive = false;
+        commitTick = commitTick + 1;
+      }
+    </event>
+  </ChangeListener>
+
+  <VStack width="100%" gap="$space-1">
+    <HStack width="100%" gap="$space-2" verticalAlignment="{$props.verticalAlignment || 'center'}">
+      <TextArea
+        id="editorBox"
+        initialValue="{$props.initialValue || ''}"
+        placeholder="{$props.placeholder || ''}"
+        autoFocus="{!!$props.autoFocus}"
+        autoComplete="off"
+        autoCorrect="{false}"
+        spellCheck="{false}"
+        autoCapitalize="off"
+        resize="{$props.resize || 'vertical'}"
+        minRows="{$props.minRows || 2}"
+        maxRows="{$props.maxRows || 16}"
+        width="*"
+        enabled="{$props.enabled !== false}">
+        <event name="gotFocus">
+          if ($props.voiceTarget || $props.pasteTarget) setWorklistVoiceTarget($props.voiceTarget || $props.pasteTarget);
+        </event>
+        <event name="lostFocus">
+          const nextValue = editorBox.value || '';
+          if (nextValue !== lastCommittedValue) {
+            emitEvent('commit', nextValue);
+            lastCommittedValue = nextValue;
+            commitTick = commitTick + 1;
+          }
+        </event>
+      </TextArea>
+      <Button
+        when="{!!$props.voiceTarget}"
+        label="{voiceRecording ? (worklistVoiceRecordingActive ? '⏹' : '⏳') : '🎤'}"
+        variant="{$props.voiceVariant || 'outlined'}"
+        size="{$props.voiceSize || 'sm'}"
+        tooltip="{$props.voiceTooltip || 'Dictate'}"
+        enabled="{$props.enabled !== false &amp;&amp; !isWorklistVoiceProcessingTarget($props.voiceTarget) &amp;&amp; (!worklistVoiceRecordingActive || worklistVoiceTarget === $props.voiceTarget) &amp;&amp; (!voiceRecording || worklistVoiceRecordingActive)}">
+        <event name="click">
+          setWorklistVoiceTarget($props.voiceTarget);
+          voiceRecording = toggleVoiceForCurrentTarget(voiceRecording);
+        </event>
+      </Button>
+      <Theme when="{!!$props.voiceTarget}" size-Spinner="14px">
+        <Spinner when="{isWorklistVoiceProcessingTarget($props.voiceTarget)}" />
+      </Theme>
+    </HStack>
+    <PastedImageStrip
+      when="{!!$props.pasteTarget}"
+      target="{$props.pasteTarget}" />
+  </VStack>
+
+  <method name="getValue">
+    return editorBox.value || '';
+  </method>
+  <method name="setValue">
+    (value) => { const nextValue = value || ''; editorBox.setValue(nextValue); lastCommittedValue = nextValue; commitTick = commitTick + 1; }
+  </method>
+  <method name="clear">
+    editorBox.setValue('');
+    lastCommittedValue = '';
+    commitTick = commitTick + 1;
+  </method>
+  <method name="focus">
+    editorBox.focus();
+  </method>
+  <method name="append">
+    (value) => window.__bramAppendVoiceToBox(editorBox, value || '')
+  </method>
+  <method name="commit">
+    const nextValue = editorBox.value || '';
+    emitEvent('commit', nextValue);
+    lastCommittedValue = nextValue;
+    commitTick = commitTick + 1;
+    return nextValue;
+  </method>
+</Component>

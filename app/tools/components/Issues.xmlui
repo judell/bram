@@ -8,8 +8,6 @@
   var.closingIssue="{false}"
   var.newIssueStartSig="{''}"
   var.newIssueTurnEnded="{false}"
-  var.newIssueText="{''}"
-  var.newIssueVoiceRecording="{false}"
   var.lastIssuesSig="{''}"
   var.issueRefreshTick="{0}"
   var.sortField="updatedAt"
@@ -89,51 +87,33 @@
   <ModalDialog
     when="{showNewIssueHint}"
     title="File an issue"
-    onClose="showNewIssueHint = false; newIssueText = ''; newIssueVoiceRecording = false; setWorklistVoiceTarget('message-agent')">
+    onClose="showNewIssueHint = false; newIssueEditor.clear(); setWorklistVoiceTarget('message-agent')">
     <VStack gap="$space-3" padding="$space-2">
       <Text>
         It's helpful to write down the ideas you'll send to the Worklist. Agents can express ideas as GitHub issues where you, your agents, collaborators, and their agents can all share persistent and durable context.
       </Text>
       <VStack gap="$space-2" paddingTop="$space-2" borderTop="1px solid $borderColor">
         <Text fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" value="Ask the agent to file an issue" />
-        <ChangeListener
-          listenTo="{worklistVoiceSeq}"
-          onDidChange="() => { if (worklistVoiceText &amp;&amp; worklistVoiceTarget === 'new-issue') { appendVoiceTranscript(newIssueBox, worklistVoiceText); newIssueText = newIssueBox.value || ''; } newIssueVoiceRecording = false; worklistVoiceRecordingActive = false; }" />
-        <HStack gap="$space-2" verticalAlignment="start">
-          <TextArea
-            id="newIssueBox"
-            initialValue="{newIssueText}"
-            placeholder="Describe what the issue should cover"
-            autoFocus="true"
-            autoComplete="off"
-            autoCorrect="{false}"
-            spellCheck="{false}"
-            autoCapitalize="off"
-            resize="vertical"
-            minRows="4"
-            maxRows="16"
-            width="*"
-            onInit="setWorklistVoiceTarget('new-issue')"
-            onGotFocus="setWorklistVoiceTarget('new-issue')"
-            onDidChange="(v) => { newIssueText = v; setWorklistVoiceTarget('new-issue'); }" />
-          <Button
-            label="{newIssueVoiceRecording ? (worklistVoiceRecordingActive ? '⏹' : '⏳') : '🎤'}"
-            variant="{newIssueVoiceRecording ? 'solid' : 'outlined'}"
-            enabled="{!isWorklistVoiceProcessingTarget('new-issue')}"
-            onClick="setWorklistVoiceTarget('new-issue'); newIssueVoiceRecording = toggleVoiceForCurrentTarget(newIssueVoiceRecording)" />
-          <Theme size-Spinner="14px">
-            <Spinner when="{isWorklistVoiceProcessingTarget('new-issue')}" />
-          </Theme>
-        </HStack>
+        <IsolatedDraftEditor
+          id="newIssueEditor"
+          placeholder="Describe what the issue should cover"
+          autoFocus="true"
+          resize="vertical"
+          minRows="4"
+          maxRows="16"
+          width="100%"
+          voiceTarget="new-issue"
+          voiceTooltip="Dictate issue request"
+          verticalAlignment="start" />
         <HStack gap="$space-2">
           <Button
             label="Send"
-            enabled="{!newIssueSubmitting &amp;&amp; newIssueText &amp;&amp; newIssueText.trim().length > 0}"
-            onClick="newIssueStartSig = lastIssuesSig; newIssueTurnEnded = false; newIssueSubmitting = true; toTurn('File an issue (forge CLI: ' + ((repoOrigin.value &amp;&amp; repoOrigin.value.cli) || 'gh') + '): ' + (newIssueText || '').trim()); showNewIssueHint = false; newIssueText = ''; newIssueVoiceRecording = false; setWorklistVoiceTarget('message-agent')" />
+            enabled="{!newIssueSubmitting}"
+            onClick="const text = (newIssueEditor.getValue() || '').trim(); if (text) { newIssueStartSig = lastIssuesSig; newIssueTurnEnded = false; newIssueSubmitting = true; toTurn('File an issue (forge CLI: ' + ((repoOrigin.value &amp;&amp; repoOrigin.value.cli) || 'gh') + '): ' + text); showNewIssueHint = false; newIssueEditor.clear(); setWorklistVoiceTarget('message-agent'); }" />
           <Button
             label="Cancel"
             variant="ghost"
-            onClick="showNewIssueHint = false; newIssueText = ''; newIssueVoiceRecording = false; setWorklistVoiceTarget('message-agent')" />
+            onClick="showNewIssueHint = false; newIssueEditor.clear(); setWorklistVoiceTarget('message-agent')" />
         </HStack>
       </VStack>
     </VStack>

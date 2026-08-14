@@ -14,7 +14,6 @@
   var.newItemStartSig="{''}"
   var.newItemTurnEnded="{false}"
   var.newItemIssue="{null}"
-  var.newItemVoiceRecording="{false}"
   var.inflightTick="{0}"
   var.actionProgressTick="{0}"
   var.actionProgressKind="{''}"
@@ -900,17 +899,15 @@
                 Closes #{issue.number}{issue.title ? ' — ' + issue.title : ''}
               </Text>
             </HStack>
-            <TextArea
+            <IsolatedDraftEditor
+              id="closeIssueEditor"
+              initialValue="{(closeIssuesState &amp;&amp; closeIssuesState[issue.number] &amp;&amp; closeIssuesState[issue.number].comment) || ''}"
               placeholder="Optional close comment for #{issue.number}"
-              autoComplete="off"
-              autoCorrect="{false}"
-              spellCheck="{false}"
-              autoCapitalize="off"
               resize="vertical"
               minRows="1"
               maxRows="8"
               width="100%"
-              onDidChange="(v) => closeIssuesState = setCloseIssueComment(closeIssuesState, issue.number, v)" />
+              onCommit="(v) => closeIssuesState = setCloseIssueComment(closeIssuesState, issue.number, v)" />
           </VStack>
         </Items>
         <HStack gap="$space-2" paddingTop="$space-3" borderTop="1px solid $borderColor">
@@ -1044,7 +1041,7 @@ Iterate is the right move when the agent's first cut is *almost* what you want."
     <ModalDialog
       when="{newItemHelp}"
       title="Add a worklist item"
-      onClose="newItemHelp = false; newItemIssue = null; newItemVoiceRecording = false; setWorklistVoiceTarget('message-agent'); newItemBox.setValue(''); if ($queryParams.addItem) navigate('/worklist')">
+      onClose="newItemHelp = false; newItemIssue = null; setWorklistVoiceTarget('message-agent'); newItemEditor.clear(); if ($queryParams.addItem) navigate('/worklist')">
       <VStack gap="$space-3" padding="$space-2">
         <Text>
           The worklist is how you and the agent coordinate multi-step work.
@@ -1067,9 +1064,6 @@ Before you `Approve` a `TO-APPLY` item you can `Iterate` to refine the proposal.
           borderRadius="$borderRadius"
           backgroundColor="$backgroundColor-primary">
           <Text fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" value="Ask the agent to propose an item" />
-          <ChangeListener
-            listenTo="{voiceArrival.value &amp;&amp; voiceArrival.value.at}"
-            onDidChange="() => { const ev = voiceArrival.value || null; const t = (ev &amp;&amp; ev.transcript) || ''; const target = (ev &amp;&amp; ev.meta &amp;&amp; ev.meta.target) || ''; if (target === 'new-item') { if (t &amp;&amp; newItemBox) window.__bramAppendVoiceToBox(newItemBox, t); newItemVoiceRecording = false; worklistVoiceRecordingActive = false; } }" />
           <HStack
             when="{newItemHelp &amp;&amp; !openIssues.value}"
             gap="$space-2"
@@ -1083,43 +1077,27 @@ Before you `Approve` a `TO-APPLY` item you can `Iterate` to refine the proposal.
             data="{((openIssues.value) || []).filter(i => i.state === 'OPEN').map(i => ({value: i.number, label: '#' + i.number + ' ' + i.title}))}"
             initialValue="{newItemIssue}"
             onDidChange="(v) => newItemIssue = v" />
-          <HStack gap="$space-2" verticalAlignment="center">
-            <TextArea
-              id="newItemBox"
-              placeholder="Describe what the item should change"
-              autoFocus="true"
-              autoComplete="off"
-              autoCorrect="{false}"
-              spellCheck="{false}"
-              autoCapitalize="off"
-              resize="vertical"
-              minRows="4"
-              maxRows="16"
-              width="*"
-              onInit="setWorklistVoiceTarget('new-item')"
-              onGotFocus="setWorklistVoiceTarget('new-item')" />
-            <Button
-              label="{newItemVoiceRecording ? (worklistVoiceRecordingActive ? '⏹' : '⏳') : '🎤'}"
-              variant="{newItemVoiceRecording ? 'solid' : 'outlined'}"
-              enabled="{!isWorklistVoiceProcessingTarget('new-item') &amp;&amp; (!newItemVoiceRecording || worklistVoiceRecordingActive)}"
-              onClick="setWorklistVoiceTarget('new-item'); newItemVoiceRecording = toggleVoiceForCurrentTarget(newItemVoiceRecording)" />
-            <Theme size-Spinner="14px">
-              <Spinner when="{isWorklistVoiceProcessingTarget('new-item')}" />
-            </Theme>
-          </HStack>
-          <!-- Image-paste strip on New Item (queue-items-voice-and-image-paste
-               transplant): the box above sets the new-item paste target on
-               focus, so a pasted image stages here; Send embeds it via
-               __bramWithStagedImageMarkers. -->
-          <PastedImageStrip target="new-item" />
+          <IsolatedDraftEditor
+            id="newItemEditor"
+            placeholder="Describe what the item should change"
+            autoFocus="true"
+            resize="vertical"
+            minRows="4"
+            maxRows="16"
+            width="100%"
+            voiceTarget="new-item"
+            pasteTarget="new-item"
+            voiceTooltip="Dictate worklist item"
+            verticalAlignment="start" />
           <HStack gap="$space-2">
             <Button
               label="Send"
-              enabled="{!newItemSubmitting &amp;&amp; (!!newItemIssue || (newItemBox.value &amp;&amp; newItemBox.value.trim().length > 0))}"
+              enabled="{!newItemSubmitting}"
               onClick="(() => {
                 const issuesArr = (openIssues.value) || [];
                 const issueObj = newItemIssue ? issuesArr.find(i => String(i.number) === String(newItemIssue)) : null;
-                const text = (newItemBox.value || '').trim();
+                const text = (newItemEditor.getValue() || '').trim();
+                if (!issueObj &amp;&amp; !text) return;
                 let msg;
                 if (issueObj &amp;&amp; text) { msg = 'Propose a worklist item to address #' + issueObj.number + ' (' + issueObj.title + '): ' + text; }
                 else if (issueObj) { msg = 'Propose a worklist item to address #' + issueObj.number + ' (' + issueObj.title + ').'; }
@@ -1132,13 +1110,13 @@ Before you `Approve` a `TO-APPLY` item you can `Iterate` to refine the proposal.
                 messageSentAtText = new Date().toLocaleTimeString();
                 awaitingResponse = true;
                 toTurn(window.__bramWithStagedImageMarkers(msg, 'new-item'));
-                newItemHelp = false; newItemIssue = null; newItemVoiceRecording = false; setWorklistVoiceTarget('message-agent'); newItemBox.setValue('');
+                newItemHelp = false; newItemIssue = null; setWorklistVoiceTarget('message-agent'); newItemEditor.clear();
                 if ($queryParams.addItem) navigate('/worklist');
               })()" />
             <Button
               label="Cancel"
               variant="ghost"
-              onClick="newItemHelp = false; newItemIssue = null; newItemVoiceRecording = false; setWorklistVoiceTarget('message-agent'); newItemBox.setValue(''); if ($queryParams.addItem) navigate('/worklist')" />
+              onClick="newItemHelp = false; newItemIssue = null; setWorklistVoiceTarget('message-agent'); newItemEditor.clear(); if ($queryParams.addItem) navigate('/worklist')" />
           </HStack>
         </VStack>
       </VStack>

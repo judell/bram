@@ -1,7 +1,5 @@
 <Component name="AgentMessageQueue"
-  var.entries="{null}"
-  var.queueVoiceRecording="{false}"
-  var.queueVoiceRecordingItemId="{''}">
+  var.entries="{null}">
 
   <!-- issue-90-q-page: a durable scratch queue. Notes accumulate while the
        agent works; each is re-editable in place and sent manually as a
@@ -37,11 +35,6 @@
     id="queueMenuEvt"
     initial="{null}"
     subscribe="{window.bramSubscribeAgentMenu()}" />
-  <PushSource
-    id="voiceArrival"
-    initial="{null}"
-    subscribe="{window.bramSubscribeVoiceArrival()}" />
-
   <!-- Phase-0 observe (queue-send-readiness-desync): trace every readiness-input
        transition so a lit-but-dead Send can be diagnosed at a turn boundary —
        whether queueAgentStatus.value is itself stale, or the header/button
@@ -102,38 +95,22 @@
         verticalAlignment="start"
         paddingVertical="$space-2">
         <VStack width="*" gap="$space-0_5">
-          <TextArea
-            id="queueBox"
+          <IsolatedDraftEditor
+            id="queueEditor"
             placeholder="Type a note, paste a screenshot (Ctrl-V/Cmd-V), or dictate with the mic."
             initialValue="{$item.text}"
             resize="vertical"
             minRows="2"
             maxRows="16"
             width="100%"
-            onGotFocus="setWorklistVoiceTarget('queue-item:' + $item.id)"
-            onDidChange="(v) => { entries = window.__bramQueueUpdate(entries, $itemIndex, v) }" />
-          <!-- Image-paste strip per queue item (queue-items-voice-and-image-paste):
-               focusing the box above sets the paste target to queue-item:<id>,
-               so a pasted image stages here and this strip shows it; the send
-               embeds it via __bramWithStagedImageMarkers. Ephemeral (in-memory)
-               like the Worklist strip — not yet persisted across reload. -->
-          <PastedImageStrip target="{'queue-item:' + $item.id}" />
-          <!-- Voice note per queue item (queue-items-voice-and-image-paste):
-               reuse the global voice pipeline with a queue-item:<id> target,
-               the same pattern as the Worklist feedback boxes. On arrival for
-               THIS item, append to its box and fold the new value into the
-               entry data so it persists. -->
-          <ChangeListener
-            listenTo="{voiceArrival.value &amp;&amp; voiceArrival.value.at}"
-            onDidChange="() => { const ev = voiceArrival.value || null; const t = (ev &amp;&amp; ev.transcript) || ''; const target = (ev &amp;&amp; ev.meta &amp;&amp; ev.meta.target) || ''; if (target === ('queue-item:' + $item.id)) { if (t) { const nv = window.__bramAppendVoiceToBox(queueBox, t); if (nv !== false) { entries = window.__bramQueueUpdate(entries, $itemIndex, nv); } } queueVoiceRecording = false; queueVoiceRecordingItemId = ''; worklistVoiceRecordingActive = false; } }" />
+            voiceTarget="{'queue-item:' + $item.id}"
+            pasteTarget="{'queue-item:' + $item.id}"
+            voiceVariant="ghost"
+            voiceSize="xs"
+            voiceTooltip="Voice note"
+            verticalAlignment="start"
+            onCommit="(v) => entries = window.__bramQueueUpdate(entries, $itemIndex, v)" />
           <HStack gap="$space-2" verticalAlignment="center">
-            <Button
-              size="xs"
-              variant="ghost"
-              label="{queueVoiceRecording &amp;&amp; queueVoiceRecordingItemId === $item.id ? (worklistVoiceRecordingActive ? '⏹' : '⏳') : '🎤'}"
-              tooltip="Voice note"
-              enabled="{!isWorklistVoiceProcessingTarget('queue-item:' + $item.id) &amp;&amp; (!queueVoiceRecording || (queueVoiceRecordingItemId === $item.id &amp;&amp; worklistVoiceRecordingActive))}"
-              onClick="setWorklistVoiceTarget('queue-item:' + $item.id); if (!queueVoiceRecording) queueVoiceRecordingItemId = $item.id; queueVoiceRecording = toggleVoiceForCurrentTarget(queueVoiceRecording)" />
             <Text
               fontSize="$fontSize-xs"
               color="$textColor-secondary"
@@ -171,9 +148,9 @@
               label="Send"
               size="xs"
               opacity="{window.__bramQueueReady(queueAgentStatus.value, queueMenuEvt.value) ? 1 : 0.45}"
-              enabled="{window.__bramQueueCanSendWhenReady($item, window.__bramQueueReady(queueAgentStatus.value, queueMenuEvt.value), (queueWorklist.value &amp;&amp; queueWorklist.value.items) || [])}"
+              enabled="{window.__bramQueueReady(queueAgentStatus.value, queueMenuEvt.value) &amp;&amp; (window.__bramQueueSendMode($item) !== 'iterate' || ((queueWorklist.value &amp;&amp; queueWorklist.value.items) || []).some(i => i.id === String($item.targetItemId || '')))}"
               tooltip="Send this note to the agent as a fresh turn"
-              onClick="entries = window.__bramQueueSend(entries, $itemIndex, (queueWorklist.value &amp;&amp; queueWorklist.value.items) || []); navigate(window.__bramQueueSendMode($item) === 'iterate' ? '/worklist' : '/transcript')" />
+              onClick="const draft = (queueEditor.getValue() || '').trim(); if (draft) { const withDraft = window.__bramQueueUpdate(entries, $itemIndex, draft); entries = window.__bramQueueSend(withDraft, $itemIndex, (queueWorklist.value &amp;&amp; queueWorklist.value.items) || []); navigate(window.__bramQueueSendMode($item) === 'iterate' ? '/worklist' : '/transcript'); }" />
             <Button
               label="Delete"
               size="xs"

@@ -1,4 +1,4 @@
-<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{window.__bramRestoreUpdateBannerDismissed ? window.__bramRestoreUpdateBannerDismissed() : ''}" var.toolDescBannerDismissedVersion="{window.__bramRestoreToolDescBannerDismissed ? window.__bramRestoreToolDescBannerDismissed() : ''}" var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.footerVoiceRecording="{false}" var.headerInflightTick="{0}" var.agentSwitching="{false}" var.composerFocused="{false}" var.transcriptAgentId="{''}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}" var.dismissedAgentIds="{window.__bramRestoreDismissedAgents()}"
+<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{window.__bramRestoreUpdateBannerDismissed ? window.__bramRestoreUpdateBannerDismissed() : ''}" var.toolDescBannerDismissedVersion="{window.__bramRestoreToolDescBannerDismissed ? window.__bramRestoreToolDescBannerDismissed() : ''}" var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.headerInflightTick="{0}" var.agentSwitching="{false}" var.transcriptAgentId="{''}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}" var.dismissedAgentIds="{window.__bramRestoreDismissedAgents()}"
   onInit="startBramLatestJsonlPush(() => (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || '')">
   <PushSource
     id="mainAgentStatus"
@@ -25,10 +25,6 @@
     initial="{null}"
     subscribe="{window.bramSubscribeRightPaneSize()}" />
   <PushSource
-    id="footerVoiceArrival"
-    initial="{null}"
-    subscribe="{window.bramSubscribeVoiceArrival()}" />
-  <PushSource
     id="whisperNotice"
     initial="{null}"
     subscribe="{window.bramSubscribeWhisperUnavailable()}" />
@@ -42,9 +38,6 @@
   <ChangeListener
     listenTo="{voiceBusyNotice.value &amp;&amp; voiceBusyNotice.value.at}"
     onDidChange="(c) => { if (c.newValue) { toast('A voice recording is already in progress. Return to that recording to stop it.'); } }" />
-  <ChangeListener
-    listenTo="{footerVoiceArrival.value &amp;&amp; footerVoiceArrival.value.at}"
-    onDidChange="() => { const ev = footerVoiceArrival.value || null; const t = (ev &amp;&amp; ev.transcript) || ''; const target = (ev &amp;&amp; ev.meta &amp;&amp; ev.meta.target) || ''; if (target === 'message-agent') { if (t &amp;&amp; footerComposerBox) window.__bramAppendVoiceToBox(footerComposerBox, t); footerVoiceRecording = false; worklistVoiceRecordingActive = false; } }" />
   <ChangeListener
     listenTo="{enhanceStatusEvt.value}"
     onDidChange="() => { window.__bramIframeTrace('refetch-called', {context: 'enhance-status-changed'}); enhanceStatus.refetch(); startBramLatestJsonlPush(() => (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || ''); }" />
@@ -141,13 +134,6 @@
   <ChangeListener
     listenTo="{sendLedgerEvt.value &amp;&amp; sendLedgerEvt.value.tick}"
     onDidChange="() => sendLedgerDs.refetch()" />
-  <PushSource
-    id="sendRestoreEvt"
-    initial="{null}"
-    subscribe="{window.bramSubscribeTauriEvent('send-restore')}" />
-  <ChangeListener
-    listenTo="{sendRestoreEvt.value &amp;&amp; sendRestoreEvt.value.tick}"
-    onDidChange="() => window.__bramApplySendRestore(sendRestoreEvt.value, footerComposerBox)" />
   <!-- issue-234 terminal-attention banner: host-detected unattended boot
        prompt (no open turn + PTY byte-silence + prompt-shaped tail),
        joined client-side with terminal-pane visibility — only the parent
@@ -186,16 +172,6 @@
   <ChangeListener
     listenTo="{mainAgentStatus.value &amp;&amp; mainAgentStatus.value.state}"
     onDidChange="() => { footerSessions.refetch(); footerAgents.refetch(); }" />
-  <!-- Footer perf instrument (instrument-footer-composer-rerender): count how
-       often the shared footer scope's sources change while the message composer
-       is focused, to correlate with heartbeat-batch drift during a typing
-       burst. Relocated/removed by the isolate-footer-composer fix. -->
-  <ChangeListener
-    listenTo="{mainAgentStatus.value}"
-    onDidChange="() => __bramTraceFooterChurn('agent-status', composerFocused)" />
-  <ChangeListener
-    listenTo="{footerSessions.value}"
-    onDidChange="() => __bramTraceFooterChurn('session', composerFocused)" />
   <APICall
     id="restartServer"
     url="/__restart-server"
@@ -638,89 +614,12 @@
            Worklist-dock mount (AgentMenuView is self-gating on menu and
            owns its preview modal, so the footer mount is drop-in). -->
       <AgentMenuView menu="{footerAgentMenuEvt.value}" surface="footer" />
-      <!-- Form exists only for Enter-to-send: TextArea enterSubmits prompts
-           the parent Form to submit, and TextArea exposes no standalone Enter
-           event. See https://docs.xmlui.org/components/TextArea#entersubmits .
-           Enter and the Send button each run the submit block directly. -->
-      <Form
-        width="100%"
-        onSubmit="const m = (footerComposerBox &amp;&amp; footerComposerBox.value || '').trim(); if (m) { window.__bramPrepareWorklistMessageSubmission({text: m, voiceTarget: 'message-agent'}); footerComposerBox.setValue(''); }">
-        <property name="buttonRowTemplate"><Fragment/></property>
-        <HStack width="100%" gap="$space-2" verticalAlignment="center">
-          <Button
-            label="{footerVoiceRecording ? (worklistVoiceRecordingActive ? '⏹' : '⏳') : '🎤'}"
-            variant="ghost"
-            size="xs"
-            width="2.5rem"
-            tooltip="Voice message"
-            enabled="{!isWorklistVoiceProcessingTarget('message-agent') &amp;&amp; (!footerVoiceRecording || worklistVoiceRecordingActive)}"
-            onClick="setWorklistVoiceTarget('message-agent'); footerVoiceRecording = toggleVoiceForCurrentTarget(footerVoiceRecording)" />
-          <TextArea
-            id="footerComposerBox"
-            placeholder="Message agent: Enter sends, Shift+Enter newline, Ctrl-V/Cmd-V paste screenshot."
-            enterSubmits="true"
-            autoSize="true"
-            minRows="2"
-            maxRows="4"
-            width="*"
-            onGotFocus="setWorklistVoiceTarget('message-agent'); setFocusedFeedbackItemId(''); composerFocused = true"
-            onLostFocus="composerFocused = false" />
-          <VStack width="8rem" horizontalAlignment="start" itemWidth="fit-content" gap="$space-1">
-            <Button
-              label="send"
-              variant="ghost"
-              size="xs"
-              tooltip="Send message to agent"
-              onClick="const m = (footerComposerBox &amp;&amp; footerComposerBox.value || '').trim(); if (m) { window.__bramPrepareWorklistMessageSubmission({text: m, voiceTarget: 'message-agent'}); footerComposerBox.setValue(''); }" />
-            <Button
-              label="skip worklist"
-              variant="ghost"
-              size="xs"
-              tooltip="Send message prefixed with skip-worklist:"
-              onClick="const m = (footerComposerBox &amp;&amp; footerComposerBox.value || '').trim(); if (m) { window.__bramPrepareWorklistMessageSubmission({text: m, mode: 'skip-worklist', voiceTarget: 'message-agent'}); footerComposerBox.setValue(''); }" />
-            <Button
-              label="esc"
-              variant="ghost"
-              size="xs"
-              tooltip="Send the Escape key"
-              onClick="escToolbarClick()" />
-            <Button
-              when="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider === 'claude'}"
-              label="skills"
-              variant="ghost"
-              size="xs"
-              tooltip="Launch a project skill (.claude/skills)"
-              onClick="skillsList.refetch(); skillsDialog.open()" />
-          </VStack>
-          <!-- transcript-scroll-gestures: quick top/bottom jumps, shown only
-               on the Transcript page ($pathname per
-               https://docs.xmlui.org/howto/add-a-skip-link-to-main-content).
-               Up at the stack's top corner, down at its bottom corner. Down
-               re-arms follow; up jumps without re-arming so new arrivals do
-               not yank the view back while reading the start. Dispatch rides
-               the mount-registered closures in helpers.js because the footer
-               cannot reach the Transcript's list id directly. -->
-          <VStack
-            when="{$pathname === '/transcript'}"
-            width="2rem"
-            gap="$space-1"
-            horizontalAlignment="center">
-            <Button
-              label="▲"
-              variant="ghost"
-              size="xs"
-              tooltip="Scroll transcript to top"
-              onClick="window.__bramTranscriptScroll('top')" />
-            <Button
-              label="▼"
-              variant="ghost"
-              size="xs"
-              tooltip="Scroll transcript to bottom"
-              onClick="window.__bramTranscriptScroll('bottom')" />
-          </VStack>
-        </HStack>
-      </Form>
-      <PastedImageStrip target="message-agent" />
+      <!-- The hot TextArea is isolated from this App-scope footer. Props flow
+           down only when provider state changes; the low-frequency Skills
+           request flows up as a component event. -->
+      <MessageAgentComposer
+        activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}"
+        onSkillsRequested="window.__bramOpenSkillsLauncher(skillsList, skillsDialog)" />
       <!-- Subagent chips strip (surface-subagent-activity-in-pane):
            shown only when the active session has subagents. Clicking a
            chip swaps the Transcript viewport to that agent's stream;

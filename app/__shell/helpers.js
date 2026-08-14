@@ -1256,6 +1256,105 @@ window.__bramFlushWorklistDraft = __bramFlushWorklistDraft;
 
 window.addEventListener("beforeunload", __bramFlushWorklistDraft);
 
+// Message Agent composer fast path. Normal typing pays only the existing
+// debounced draft-persistence call plus one false branch. The frame probe is
+// opt-in so performance instrumentation cannot itself tax ordinary input:
+// call `window.__bramArmMessageAgentPerf()` in the Inspector console, type a
+// representative burst, then blur the box (or call
+// `window.__bramFlushMessageAgentPerf('manual')`). One aggregate trace is
+// emitted; no message text or per-key trace leaves the iframe.
+var __bramMessageAgentPerf = {
+  armed: false,
+  pending: 0,
+  samples: [],
+  startedAt: 0,
+};
+
+function __bramMessageAgentPerfSummary() {
+  var values = __bramMessageAgentPerf.samples.slice().sort(function (a, b) { return a - b; });
+  var count = values.length;
+  function percentile(p) {
+    if (!count) return 0;
+    return values[Math.min(count - 1, Math.floor((count - 1) * p))];
+  }
+  var sum = values.reduce(function (n, value) { return n + value; }, 0);
+  return {
+    samples: count,
+    pending: __bramMessageAgentPerf.pending,
+    meanMs: count ? Math.round((sum / count) * 10) / 10 : 0,
+    medianMs: Math.round(percentile(0.5) * 10) / 10,
+    p95Ms: Math.round(percentile(0.95) * 10) / 10,
+    maxMs: count ? Math.round(values[count - 1] * 10) / 10 : 0,
+    over16Ms: values.filter(function (value) { return value > 16.7; }).length,
+    over33Ms: values.filter(function (value) { return value > 33.4; }).length,
+    durationMs: __bramMessageAgentPerf.startedAt
+      ? Math.max(0, Math.round(performance.now() - __bramMessageAgentPerf.startedAt))
+      : 0,
+  };
+}
+
+window.__bramArmMessageAgentPerf = function () {
+  __bramMessageAgentPerf.armed = true;
+  __bramMessageAgentPerf.pending = 0;
+  __bramMessageAgentPerf.samples = [];
+  __bramMessageAgentPerf.startedAt = performance.now();
+  return true;
+};
+
+window.__bramMessageAgentPerfSnapshot = function () {
+  return __bramMessageAgentPerfSummary();
+};
+
+window.__bramFlushMessageAgentPerf = function (reason) {
+  if (!__bramMessageAgentPerf.armed) return null;
+  var summary = __bramMessageAgentPerfSummary();
+  __bramMessageAgentPerf.armed = false;
+  window.__bramIframeTrace("message-agent-latency", Object.assign({
+    stage: "change-to-frame",
+    reason: reason || "manual",
+  }, summary));
+  return summary;
+};
+
+window.__bramMessageAgentInputChanged = function (text) {
+  window.__bramPersistWorklistDraft(text);
+  if (!__bramMessageAgentPerf.armed || typeof requestAnimationFrame !== "function") return;
+  var started = performance.now();
+  __bramMessageAgentPerf.pending += 1;
+  requestAnimationFrame(function () {
+    __bramMessageAgentPerf.pending = Math.max(0, __bramMessageAgentPerf.pending - 1);
+    if (!__bramMessageAgentPerf.armed) return;
+    if (__bramMessageAgentPerf.samples.length < 500) {
+      __bramMessageAgentPerf.samples.push(performance.now() - started);
+    }
+  });
+};
+
+window.__bramMessageAgentBlur = function () {
+  __bramFlushWorklistDraft();
+  return window.__bramFlushMessageAgentPerf("blur");
+};
+
+window.__bramSubmitMessageAgentComposer = function (box, mode) {
+  var message = "";
+  try { message = String((box && box.value) || "").trim(); } catch (e) {}
+  if (!message) return false;
+  var result = window.__bramPrepareWorklistMessageSubmission({
+    text: message,
+    mode: mode || "",
+    voiceTarget: "message-agent",
+  });
+  if (!result || !result.submitted) return false;
+  try { if (box && typeof box.setValue === "function") box.setValue(""); } catch (e) {}
+  window.__bramClearWorklistDraft();
+  return true;
+};
+
+window.__bramOpenSkillsLauncher = function (skillsList, skillsDialog) {
+  try { if (skillsList && typeof skillsList.refetch === "function") skillsList.refetch(); } catch (e) {}
+  try { if (skillsDialog && typeof skillsDialog.open === "function") skillsDialog.open(); } catch (e) {}
+};
+
 // Worklist UI state model is now multi-expand: any number of items can be
 // "open" simultaneously, each with its own feedback-draft text. State shape:
 //   { expandedItemIds: string[], feedbackDraftsById: Record<string, string> }
@@ -7636,7 +7735,7 @@ window.__bramApplySendRestore = function (snapshot, box) {
   } else {
     merged = existing + "\n\n" + text;
   }
-  try { window.localStorage.setItem("bram.worklistMessageDraft", merged); } catch (e) {}
+  __bramWriteLS("bram.worklistMessageDraft", merged);
   if (box && typeof box.setValue === "function") {
     try { box.setValue(merged); } catch (e) {}
   }

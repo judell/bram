@@ -1,0 +1,113 @@
+<Component
+  name="MessageAgentComposer"
+  var.voiceRecording="{false}"
+  var.skillsRequestTick="{0}">
+  <!-- A user-defined component is the deliberate performance boundary: the
+       TextArea's high-frequency internal state cannot invalidate Main.xmlui's
+       App-scope footer sources, listeners, pages, or status bindings. See
+       https://docs.xmlui.org/howto/confine-a-hot-input-to-its-own-component . -->
+  <PushSource
+    id="voiceArrival"
+    initial="{null}"
+    subscribe="{window.bramSubscribeVoiceArrival()}" />
+  <ChangeListener
+    listenTo="{voiceArrival.value &amp;&amp; voiceArrival.value.at}"
+    onDidChange="() => { const ev = voiceArrival.value || null; const t = (ev &amp;&amp; ev.transcript) || ''; const target = (ev &amp;&amp; ev.meta &amp;&amp; ev.meta.target) || ''; if (target === 'message-agent') { if (t &amp;&amp; composerBox) window.__bramAppendVoiceToBox(composerBox, t); voiceRecording = false; worklistVoiceRecordingActive = false; } }" />
+  <PushSource
+    id="sendRestore"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('send-restore')}" />
+  <ChangeListener
+    listenTo="{sendRestore.value &amp;&amp; sendRestore.value.tick}"
+    onDidChange="() => window.__bramApplySendRestore(sendRestore.value, composerBox)" />
+
+  <!-- Form is retained only for TextArea.enterSubmits. Draft persistence is
+       debounced in helpers.js; blur and submit flush/clear explicitly. -->
+  <Form
+    width="100%"
+    onSubmit="window.__bramSubmitMessageAgentComposer(composerBox, '')">
+    <property name="buttonRowTemplate"><Fragment/></property>
+    <HStack width="100%" gap="$space-2" verticalAlignment="center">
+      <Button
+        label="{voiceRecording ? (worklistVoiceRecordingActive ? '⏹' : '⏳') : '🎤'}"
+        variant="ghost"
+        size="xs"
+        width="2.5rem"
+        tooltip="Voice message"
+        enabled="{!isWorklistVoiceProcessingTarget('message-agent') &amp;&amp; (!voiceRecording || worklistVoiceRecordingActive)}">
+        <event name="click">
+          setWorklistVoiceTarget('message-agent');
+          voiceRecording = toggleVoiceForCurrentTarget(voiceRecording);
+        </event>
+      </Button>
+      <TextArea
+        id="composerBox"
+        initialValue="{window.__bramRestoreWorklistDraft()}"
+        placeholder="Message agent: Enter sends, Shift+Enter newline, Ctrl-V/Cmd-V paste screenshot."
+        enterSubmits="true"
+        autoSize="true"
+        minRows="2"
+        maxRows="4"
+        width="*"
+        onDidChange="(value) => window.__bramMessageAgentInputChanged(value)">
+        <event name="gotFocus">
+          setWorklistVoiceTarget('message-agent');
+          setFocusedFeedbackItemId('');
+        </event>
+        <event name="lostFocus">
+          window.__bramMessageAgentBlur();
+        </event>
+      </TextArea>
+      <VStack width="8rem" horizontalAlignment="start" itemWidth="fit-content" gap="$space-1">
+        <Button
+          label="send"
+          variant="ghost"
+          size="xs"
+          tooltip="Send message to agent"
+          onClick="window.__bramSubmitMessageAgentComposer(composerBox, '')" />
+        <Button
+          label="skip worklist"
+          variant="ghost"
+          size="xs"
+          tooltip="Send message prefixed with skip-worklist:"
+          onClick="window.__bramSubmitMessageAgentComposer(composerBox, 'skip-worklist')" />
+        <Button
+          label="esc"
+          variant="ghost"
+          size="xs"
+          tooltip="Send the Escape key"
+          onClick="escToolbarClick()" />
+        <Button
+          when="{$props.activeProvider === 'claude'}"
+          label="skills"
+          variant="ghost"
+          size="xs"
+          tooltip="Launch a project skill (.claude/skills)">
+          <event name="click">
+            emitEvent('skillsRequested');
+            skillsRequestTick = skillsRequestTick + 1;
+          </event>
+        </Button>
+      </VStack>
+      <VStack
+        when="{$pathname === '/transcript'}"
+        width="2rem"
+        gap="$space-1"
+        horizontalAlignment="center">
+        <Button
+          label="▲"
+          variant="ghost"
+          size="xs"
+          tooltip="Scroll transcript to top"
+          onClick="window.__bramTranscriptScroll('top')" />
+        <Button
+          label="▼"
+          variant="ghost"
+          size="xs"
+          tooltip="Scroll transcript to bottom"
+          onClick="window.__bramTranscriptScroll('bottom')" />
+      </VStack>
+    </HStack>
+  </Form>
+  <PastedImageStrip target="message-agent" />
+</Component>

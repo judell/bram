@@ -27,9 +27,11 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Result};
 // v10: Claude session extraction includes tool_result / tool_use / thinking
 // text (search-index-tool-output-coverage). v11: Codex extraction includes its
 // tool records too (custom_tool_call[_output], function_call, patch_apply_end —
-// search-index-codex-tool-output-coverage). Each bump forces a rebuild that
-// back-indexes all sessions with the wider coverage.
-const SCHEMA_VERSION: i64 = 11;
+// search-index-codex-tool-output-coverage). v12 adds a lower-weight `intent`
+// column for already-cached Haiku descriptions plus a `session_tools` routing
+// table for targeted refreshes. Each bump forces a rebuild that back-indexes
+// all sessions with the wider coverage.
+const SCHEMA_VERSION: i64 = 12;
 
 /// A row to index. `content` is the searchable text; `file` is the source
 /// file's absolute path (the reindex key); the rest are the #230 common-schema
@@ -42,7 +44,12 @@ pub struct IndexRow {
     pub date: String,
     pub link: String,
     pub content: String,
+    /// Supplemental generated intent text, weighted below primary content.
+    pub intent: String,
     pub file: String,
+    /// Tool-call ids found in this session. `None` preserves an existing
+    /// mapping during an intent-only refresh; non-session rows also use None.
+    pub tool_ids: Option<Vec<String>>,
     /// Self-contained structured detail for the hit (e.g. the serialized
     /// WorklistHistoryGroup), so the expander needs no re-fetch. Empty for
     /// buckets whose detail is fetched live.
@@ -91,7 +98,9 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version != SCHEMA_VERSION {
         conn.execute_batch(
-            "DROP TABLE IF EXISTS search_index; DROP TABLE IF EXISTS indexed_files;",
+            "DROP TABLE IF EXISTS search_index; \
+             DROP TABLE IF EXISTS indexed_files; \
+             DROP TABLE IF EXISTS session_tools;",
         )?;
     }
     // `file` is UNINDEXED: stored (so we could show/debug it) but not
@@ -99,10 +108,15 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
     // compiled in — which the smoke test relies on.
     conn.execute_batch(
         "CREATE VIRTUAL TABLE IF NOT EXISTS search_index \
-           USING fts5(type, source, date, link, content, file UNINDEXED, extra UNINDEXED, tokenize='unicode61'); \
+           USING fts5(type, source, date, link, content, intent, file UNINDEXED, extra UNINDEXED, tokenize='unicode61'); \
          CREATE TABLE IF NOT EXISTS indexed_files( \
            path TEXT PRIMARY KEY, mtime INTEGER, size INTEGER, \
-           rowid_ref INTEGER, indexed_at INTEGER);",
+           rowid_ref INTEGER, indexed_at INTEGER); \
+         CREATE TABLE IF NOT EXISTS session_tools( \
+           tool_id TEXT NOT NULL, session_path TEXT NOT NULL, \
+           PRIMARY KEY(tool_id, session_path)); \
+         CREATE INDEX IF NOT EXISTS session_tools_path \
+           ON session_tools(session_path);",
     )?;
     if version != SCHEMA_VERSION {
         conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
@@ -131,7 +145,8 @@ pub fn needs_index(conn: &Connection, path: &str, mtime: i64, size: i64) -> Resu
 /// the key's prior row (by stored rowid) before inserting, then records the
 /// change token (`mtime`) + `size` so the next pass can skip it unchanged.
 pub fn index_doc(conn: &Connection, row: &IndexRow, mtime: i64, size: i64) -> Result<()> {
-    let existing: Option<i64> = conn
+    let tx = conn.unchecked_transaction()?;
+    let existing: Option<i64> = tx
         .query_row(
             "SELECT rowid_ref FROM indexed_files WHERE path = ?1",
             params![row.file],
@@ -139,20 +154,65 @@ pub fn index_doc(conn: &Connection, row: &IndexRow, mtime: i64, size: i64) -> Re
         )
         .optional()?;
     if let Some(old) = existing {
-        conn.execute("DELETE FROM search_index WHERE rowid = ?1", params![old])?;
+        tx.execute("DELETE FROM search_index WHERE rowid = ?1", params![old])?;
     }
-    conn.execute(
-        "INSERT INTO search_index(type, source, date, link, content, file, extra) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![row.kind, row.source, row.date, row.link, row.content, row.file, row.extra],
+    tx.execute(
+        "INSERT INTO search_index(type, source, date, link, content, intent, file, extra) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            row.kind,
+            row.source,
+            row.date,
+            row.link,
+            row.content,
+            row.intent,
+            row.file,
+            row.extra
+        ],
     )?;
-    let new_rowid = conn.last_insert_rowid();
-    conn.execute(
+    let new_rowid = tx.last_insert_rowid();
+    tx.execute(
         "INSERT OR REPLACE INTO indexed_files(path, mtime, size, rowid_ref, indexed_at) \
          VALUES (?1, ?2, ?3, ?4, CAST(strftime('%s','now') AS INTEGER))",
         params![row.file, mtime, size, new_rowid],
     )?;
-    Ok(())
+    if row.kind == "session" {
+        if let Some(tool_ids) = &row.tool_ids {
+            tx.execute(
+                "DELETE FROM session_tools WHERE session_path = ?1",
+                params![row.file],
+            )?;
+            {
+                let mut insert_tool = tx.prepare_cached(
+                    "INSERT OR IGNORE INTO session_tools(tool_id, session_path) VALUES (?1, ?2)",
+                )?;
+                for tool_id in tool_ids {
+                    insert_tool.execute(params![tool_id, row.file])?;
+                }
+            }
+        }
+    }
+    tx.commit()
+}
+
+/// Resolve cached-description tool ids to the session documents that contain
+/// them. This is read by the single indexer thread before a targeted refresh.
+pub fn session_paths_for_tools(conn: &Connection, tool_ids: &[String]) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    let mut stmt = conn.prepare(
+        "SELECT session_path FROM session_tools WHERE tool_id = ?1 ORDER BY session_path",
+    )?;
+    for tool_id in tool_ids {
+        let paths = stmt
+            .query_map(params![tool_id], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>>>()?;
+        for path in paths {
+            if !out.contains(&path) {
+                out.push(path);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Reconcile the index against the filesystem: remove rows whose file-backed
@@ -180,6 +240,10 @@ pub fn prune_missing_files(conn: &Connection) -> Result<usize> {
         }
         conn.execute("DELETE FROM search_index WHERE rowid = ?1", params![rowid])?;
         conn.execute("DELETE FROM indexed_files WHERE path = ?1", params![path])?;
+        conn.execute(
+            "DELETE FROM session_tools WHERE session_path = ?1",
+            params![path],
+        )?;
         removed += 1;
     }
     Ok(removed)
@@ -229,15 +293,15 @@ pub fn list_by_type(conn: &Connection, kind: &str, limit: usize) -> Result<Vec<H
 }
 
 /// Full-text query across buckets, `bm25`-ranked (best first), with a
-/// highlighted `snippet()` of the matched `content` column (index 4). `q` must
-/// be a valid FTS5 MATCH expression — callers sanitize raw user input. When
-/// `types` is non-empty, results are restricted to those `type` values (the
-/// Search page's facet filter).
+/// highlighted `snippet()` from the best matching column. Existing columns
+/// retain weight 1.0; generated intent is deliberately supplemental at 0.35.
+/// `q` must be a valid FTS5 MATCH expression — callers sanitize raw user input.
+/// When `types` is non-empty, results are restricted to those `type` values.
 pub fn query(conn: &Connection, q: &str, limit: usize, types: &[String]) -> Result<Vec<Hit>> {
     let mut sql = String::from(
         "SELECT type, source, date, link, \
-                snippet(search_index, 4, '[', ']', '…', 40), \
-                bm25(search_index), file, extra \
+                snippet(search_index, -1, '[', ']', '…', 40), \
+                bm25(search_index, 1.0, 1.0, 1.0, 1.0, 1.0, 0.35), file, extra \
          FROM search_index WHERE search_index MATCH ?",
     );
     let mut args: Vec<Value> = vec![Value::Text(q.to_string())];
@@ -252,7 +316,9 @@ pub fn query(conn: &Connection, q: &str, limit: usize, types: &[String]) -> Resu
         }
         sql.push(')');
     }
-    sql.push_str(" ORDER BY bm25(search_index) LIMIT ?");
+    sql.push_str(
+        " ORDER BY bm25(search_index, 1.0, 1.0, 1.0, 1.0, 1.0, 0.35) LIMIT ?",
+    );
     args.push(Value::Integer(limit as i64));
 
     let mut stmt = conn.prepare(&sql)?;
@@ -303,7 +369,9 @@ mod tests {
             date: "2026-07-25".into(),
             link: format!("/{kind}"),
             content: content.into(),
+            intent: String::new(),
             file: file.into(),
+            tool_ids: None,
             extra: String::new(),
         }
     }
@@ -356,6 +424,67 @@ mod tests {
         assert_eq!(row_count(&conn).unwrap(), 1, "reindex replaces, not appends");
         assert_eq!(query(&conn, "alpha", 10, &[]).unwrap().len(), 0, "old content gone");
         assert_eq!(query(&conn, "beta", 10, &[]).unwrap().len(), 1, "new content present");
+    }
+
+    #[test]
+    fn generated_intent_is_searchable_but_ranked_below_primary_content() {
+        let conn = open_in_memory().unwrap();
+        let raw = row("session", "/s/raw.jsonl", "raw", "inspect durable cache");
+        index_doc(&conn, &raw, 1, 1).unwrap();
+        let mut enriched = row(
+            "session",
+            "/s/intent.jsonl",
+            "intent",
+            "unrelated primary words",
+        );
+        enriched.intent = "inspect durable cache".to_string();
+        index_doc(&conn, &enriched, 1, 1).unwrap();
+
+        let hits = query(&conn, "inspect", 10, &["session".to_string()]).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(
+            hits[0].key, "/s/raw.jsonl",
+            "raw transcript text should rank first"
+        );
+        assert!(
+            hits.iter()
+                .find(|h| h.key == "/s/intent.jsonl")
+                .unwrap()
+                .snippet
+                .contains("[inspect]"),
+            "an intent-only match should provide a visible highlighted snippet"
+        );
+    }
+
+    #[test]
+    fn session_tool_mapping_tracks_replacement_and_supports_targeting() {
+        let conn = open_in_memory().unwrap();
+        let mut first = row("session", "/s/1.jsonl", "one", "alpha");
+        first.tool_ids = Some(vec!["tool-a".into(), "tool-b".into()]);
+        index_doc(&conn, &first, 1, 1).unwrap();
+        assert_eq!(
+            session_paths_for_tools(&conn, &["tool-b".into()]).unwrap(),
+            vec!["/s/1.jsonl"]
+        );
+
+        let mut replacement = row("session", "/s/1.jsonl", "one", "beta");
+        replacement.tool_ids = Some(vec!["tool-c".into()]);
+        index_doc(&conn, &replacement, 2, 2).unwrap();
+        assert!(session_paths_for_tools(&conn, &["tool-b".into()])
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            session_paths_for_tools(&conn, &["tool-c".into()]).unwrap(),
+            vec!["/s/1.jsonl"]
+        );
+
+        let intent_only = row("session", "/s/1.jsonl", "one", "gamma");
+        index_doc(&conn, &intent_only, 2, 2).unwrap();
+        assert_eq!(
+            session_paths_for_tools(&conn, &["tool-c".into()]).unwrap(),
+            vec!["/s/1.jsonl"],
+            "intent-only row replacement must preserve the routing map"
+        );
     }
 
     #[test]

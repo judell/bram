@@ -11042,7 +11042,9 @@ fn rebuild_commits_list_cache<R: tauri::Runtime>(app: &AppHandle<R>, conn: &rusq
                 date: String::new(),
                 link: String::new(),
                 content: String::new(), // empty: never matches FTS text queries
+                intent: String::new(),
                 file: "commits:list".to_string(),
+                tool_ids: None,
                 extra,
             };
             let _ = search_index::index_doc(conn, &list_row, 0, 0);
@@ -11267,7 +11269,9 @@ fn cache_issues_list_row(conn: &rusqlite::Connection, list_json: &str) -> &'stat
         date: String::new(),
         link: String::new(),
         content: String::new(), // empty: never matches FTS text queries
+        intent: String::new(),
         file: "issues:list".to_string(),
+        tool_ids: None,
         extra: list_json.to_string(),
     };
     let _ = search_index::index_doc(conn, &list_row, 0, 0);
@@ -11286,7 +11290,9 @@ fn set_issues_list_stale(conn: &rusqlite::Connection, stale: bool) {
         date: String::new(),
         link: String::new(),
         content: String::new(),
+        intent: String::new(),
         file: "issues:list:stale".to_string(),
+        tool_ids: None,
         extra: if stale { "1".to_string() } else { String::new() },
     };
     let _ = search_index::index_doc(conn, &row, 0, 0);
@@ -17284,13 +17290,17 @@ fn search_index_db_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf
     Some(dir.join(format!("{}.db", encode_path_for_filename(&root))))
 }
 
-/// Concatenated searchable text of a Claude session JSONL for the FTS index.
-// Per-line extractor: each Claude JSONL record → its searchable text.
-// Shared by the full and incremental (search-index-claude-extract-
-// incremental) paths so both produce byte-identical output for the same
-// input bytes.
-fn extract_claude_text_from(content: &str) -> String {
-    let mut all = String::new();
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct SessionSearchExtraction {
+    content: String,
+    tool_ids: Vec<String>,
+}
+
+/// Concatenated searchable text and tool-call ids from Claude session JSONL.
+// Shared by the full and incremental paths so both produce byte-identical
+// searchable text and the same routing ids for the same input bytes.
+fn extract_claude_search_from(content: &str) -> SessionSearchExtraction {
+    let mut out = SessionSearchExtraction::default();
     for line in content.lines() {
         let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -17301,11 +17311,22 @@ fn extract_claude_text_from(content: &str) -> String {
         }
         let text = claude_message_search_text(&record);
         if !text.is_empty() {
-            all.push_str(&text);
-            all.push('\n');
+            out.content.push_str(&text);
+            out.content.push('\n');
+        }
+        if let Some(parts) = record.pointer("/message/content").and_then(|v| v.as_array()) {
+            for part in parts {
+                if part.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
+                    if let Some(id) = part.get("id").and_then(|v| v.as_str()) {
+                        if !id.is_empty() {
+                            out.tool_ids.push(id.to_string());
+                        }
+                    }
+                }
+            }
         }
     }
-    all
+    out
 }
 
 // Pure core of the incremental extractor (search-index-claude-extract-
@@ -17319,26 +17340,37 @@ fn extract_claude_text_from(content: &str) -> String {
 // pass. By construction the warm result byte-matches a cold parse of the
 // same content (unit-tested). Assumes append-only session JSONL (Claude
 // compaction appends a summary record, it does not rewrite the prefix).
-fn claude_incremental_extract(cached: Option<(usize, &str)>, content: &str) -> (usize, String) {
+fn claude_incremental_extract(
+    cached: Option<(usize, &SessionSearchExtraction)>,
+    content: &str,
+) -> (usize, SessionSearchExtraction) {
     if let Some((off, acc)) = cached {
         if off <= content.len() && content.is_char_boundary(off) {
             let suffix = &content[off..];
             return match suffix.rfind('\n') {
-                Some(nl) => (off + nl + 1, format!("{}{}", acc, extract_claude_text_from(&suffix[..=nl]))),
-                None => (off, acc.to_string()),
+                Some(nl) => {
+                    let appended = extract_claude_search_from(&suffix[..=nl]);
+                    let mut merged = acc.clone();
+                    merged.content.push_str(&appended.content);
+                    merged.tool_ids.extend(appended.tool_ids);
+                    (off + nl + 1, merged)
+                }
+                None => (off, acc.clone()),
             };
         }
     }
     let off = content.rfind('\n').map(|i| i + 1).unwrap_or(0);
-    (off, extract_claude_text_from(&content[..off]))
+    (off, extract_claude_search_from(&content[..off]))
 }
 
-// path -> (parsed byte offset at a line boundary, accumulated extracted text)
+// path -> (parsed byte offset at a line boundary, accumulated search data)
 static CLAUDE_EXTRACT_CACHE: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashMap<String, (usize, String)>>,
+    std::sync::Mutex<std::collections::HashMap<String, (usize, SessionSearchExtraction)>>,
 > = std::sync::OnceLock::new();
 fn claude_extract_cache(
-) -> &'static std::sync::Mutex<std::collections::HashMap<String, (usize, String)>> {
+) -> &'static std::sync::Mutex<
+    std::collections::HashMap<String, (usize, SessionSearchExtraction)>,
+> {
     CLAUDE_EXTRACT_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -17348,17 +17380,17 @@ fn claude_extract_cache(
 // removes is re-running the per-line serde parse over the already-seen
 // prefix (extract_ms ~1.2s → single digits on the active 854-turn session,
 // which was pinning ./bram at ~171% CPU and starving the webview).
-fn claude_session_all_text(path: &Path) -> String {
+fn claude_session_search_data(path: &Path) -> SessionSearchExtraction {
     let Ok(content) = std::fs::read_to_string(path) else {
-        return String::new();
+        return SessionSearchExtraction::default();
     };
     let key = path.to_string_lossy().to_string();
     let Ok(mut cache) = claude_extract_cache().lock() else {
         // Poisoned lock: fall back to a cold parse, uncached.
         return claude_incremental_extract(None, &content).1;
     };
-    let cached = cache.get(&key).map(|(o, t)| (*o, t.as_str()));
-    let (off, text) = claude_incremental_extract(cached, &content);
+    let cached = cache.get(&key).map(|(o, data)| (*o, data));
+    let (off, data) = claude_incremental_extract(cached, &content);
     // Bound the cache: only the active session is re-indexed repeatedly;
     // inactive sessions get one entry each and never update. Clear past a
     // generous cap (one extra cold parse per session after a clear —
@@ -17366,8 +17398,8 @@ fn claude_session_all_text(path: &Path) -> String {
     if cache.len() > 256 {
         cache.clear();
     }
-    cache.insert(key, (off, text.clone()));
-    text
+    cache.insert(key, (off, data.clone()));
+    data
 }
 
 /// Join the `text` fields of a Codex content/output array (`[{type, text}, …]`),
@@ -17471,6 +17503,65 @@ mod codex_extract_tests {
         });
         assert_eq!(codex_message_search_text(&reasoning), "");
     }
+
+    #[test]
+    fn search_extraction_carries_tool_call_ids_for_targeted_intent_refresh() {
+        let jsonl = concat!(
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"call_id\":\"call-a\",\"name\":\"exec\",\"input\":\"rg needle\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"call_id\":\"call-b\",\"name\":\"read_file\",\"arguments\":\"{}\"}}\n"
+        );
+        let extracted = extract_codex_search_from(jsonl);
+        assert_eq!(extracted.tool_ids, vec!["call-a", "call-b"]);
+        assert!(extracted.content.contains("rg needle"));
+    }
+}
+
+#[cfg(test)]
+mod session_intent_text_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn cached_descriptions_are_deduped_by_tool_id_and_missing_ids_are_free() {
+        let descriptions = HashMap::from([
+            ("tool-a".to_string(), "Search source files".to_string()),
+            ("tool-b".to_string(), "Inspect the durable cache".to_string()),
+        ]);
+        let ids = vec![
+            "tool-a".to_string(),
+            "tool-a".to_string(),
+            "missing".to_string(),
+            "tool-b".to_string(),
+        ];
+        let lookup_calls = Cell::new(0usize);
+        let (text, count) = session_intent_text(&ids, |id| {
+            lookup_calls.set(lookup_calls.get() + 1);
+            descriptions.get(id).cloned()
+        });
+        assert_eq!(count, 2);
+        assert_eq!(text, "Search source files\nInspect the durable cache\n");
+        assert_eq!(
+            lookup_calls.get(),
+            3,
+            "lookup cost follows unique session tool ids, not cache size"
+        );
+    }
+
+    #[test]
+    fn existing_session_detail_surface_displays_and_finds_intent_text() {
+        let detail = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../app/tools/components/SessionDetail.xmlui"
+        ));
+        let helpers = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../app/__shell/helpers.js"
+        ));
+        assert!(detail.contains("when=\"{$item.aiDescription}\""));
+        assert!(detail.contains("value=\"{'— ' + $item.aiDescription}\""));
+        assert!(detail.contains("$item.__findPreview"));
+        assert!(helpers.contains("ev.aiDescription"));
+    }
 }
 
 #[cfg(test)]
@@ -17562,20 +17653,28 @@ mod claude_extract_incremental_tests {
         )
     }
 
+    fn tool(id: &str, command: &str) -> String {
+        format!(
+            "{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"id\":\"{}\",\"name\":\"Bash\",\"input\":{{\"command\":\"{}\"}}}}]}}}}",
+            id, command
+        )
+    }
+
     // The core guard: a warm append must byte-match a cold parse of the same
     // content (the correctness contract in the worklist draft).
     #[test]
     fn warm_append_byte_matches_cold_parse() {
         let f1 = format!("{}\n{}\n", rec("user", "alpha"), rec("assistant", "beta"));
         let (o1, t1) = claude_incremental_extract(None, &f1);
-        assert_eq!(t1, "alpha\nbeta\n");
+        assert_eq!(t1.content, "alpha\nbeta\n");
         assert_eq!(o1, f1.len());
 
-        let f2 = format!("{}{}\n", f1, rec("user", "gamma"));
+        let f2 = format!("{}{}\n{}\n", f1, rec("user", "gamma"), tool("tool-1", "rg needle"));
         let (o2, t2) = claude_incremental_extract(Some((o1, &t1)), &f2);
         let (_, cold) = claude_incremental_extract(None, &f2);
         assert_eq!(t2, cold, "warm append must byte-match cold parse");
-        assert_eq!(t2, "alpha\nbeta\ngamma\n");
+        assert_eq!(t2.content, "alpha\nbeta\ngamma\nBash rg needle\n");
+        assert_eq!(t2.tool_ids, vec!["tool-1"]);
         assert_eq!(o2, f2.len());
     }
 
@@ -17585,12 +17684,12 @@ mod claude_extract_incremental_tests {
     fn trailing_partial_line_is_deferred() {
         let f = format!("{}\n{}", rec("user", "alpha"), rec("assistant", "partial"));
         let (off, t) = claude_incremental_extract(None, &f);
-        assert_eq!(t, "alpha\n");
+        assert_eq!(t.content, "alpha\n");
         assert!(off < f.len());
 
         let f2 = format!("{}\n", f);
         let (_, t2) = claude_incremental_extract(Some((off, &t)), &f2);
-        assert_eq!(t2, "alpha\npartial\n");
+        assert_eq!(t2.content, "alpha\npartial\n");
     }
 
     // A shrink (size < cached offset) forces a full re-parse, not a stale
@@ -17601,7 +17700,7 @@ mod claude_extract_incremental_tests {
         let (o1, t1) = claude_incremental_extract(None, &f1);
         let f2 = format!("{}\n", rec("user", "fresh"));
         let (_, t2) = claude_incremental_extract(Some((o1, &t1)), &f2);
-        assert_eq!(t2, "fresh\n");
+        assert_eq!(t2.content, "fresh\n");
     }
 
     // No new complete line since the last consume → unchanged text, same
@@ -17615,24 +17714,60 @@ mod claude_extract_incremental_tests {
     }
 }
 
-/// All searchable text of a Codex session — prose plus tool output — one message
-/// per line. Codex analog of `claude_session_all_text`.
-fn codex_session_all_text(path: &Path) -> String {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return String::new();
-    };
-    let mut all = String::new();
+/// Searchable Codex prose/tool output plus tool-call ids used to route cached
+/// intent refreshes back to the owning session.
+fn extract_codex_search_from(content: &str) -> SessionSearchExtraction {
+    let mut out = SessionSearchExtraction::default();
     for line in content.lines() {
         let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
         let text = codex_message_search_text(&record);
         if !text.is_empty() {
-            all.push_str(&text);
-            all.push('\n');
+            out.content.push_str(&text);
+            out.content.push('\n');
+        }
+        if let Some(payload) = record.get("payload") {
+            let kind = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if kind == "function_call" || kind == "custom_tool_call" {
+                if let Some(id) = payload.get("call_id").and_then(|v| v.as_str()) {
+                    if !id.is_empty() {
+                        out.tool_ids.push(id.to_string());
+                    }
+                }
+            }
         }
     }
-    all
+    out
+}
+
+fn codex_session_search_data(path: &Path) -> SessionSearchExtraction {
+    std::fs::read_to_string(path)
+        .map(|content| extract_codex_search_from(&content))
+        .unwrap_or_default()
+}
+
+fn session_intent_text<F>(tool_ids: &[String], mut lookup: F) -> (String, usize)
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let mut seen = HashSet::new();
+    let mut text = String::new();
+    let mut matched = 0usize;
+    for id in tool_ids {
+        if !seen.insert(id.as_str()) {
+            continue;
+        }
+        if let Some(description) = lookup(id) {
+            if description.is_empty() {
+                continue;
+            }
+            text.push_str(&description);
+            text.push('\n');
+            matched += 1;
+        }
+    }
+    (text, matched)
 }
 
 /// Phase-resolved metrics for a Claude/Codex session-index pass. Fields are
@@ -17645,10 +17780,14 @@ struct SessionIndexPassStats {
     skipped: usize,
     rows: i64,
     indexed_bytes: u64,
+    intent_descriptions: usize,
+    intent_bytes: u64,
+    forced: usize,
     open_ms: u128,
     discover_ms: u128,
     gate_ms: u128,
     extract_ms: u128,
+    intent_ms: u128,
     write_ms: u128,
     count_ms: u128,
 }
@@ -17660,17 +17799,22 @@ fn format_session_index_scan(
 ) -> String {
     format!(
         "op=scan bucket={} files={} indexed={} skipped={} rows={} indexed_bytes={} \
-         open_ms={} discover_ms={} gate_ms={} extract_ms={} write_ms={} count_ms={} ms={}",
+         intent_descriptions={} intent_bytes={} forced={} open_ms={} discover_ms={} \
+         gate_ms={} extract_ms={} intent_ms={} write_ms={} count_ms={} ms={}",
         bucket,
         stats.files,
         stats.indexed,
         stats.skipped,
         stats.rows,
         stats.indexed_bytes,
+        stats.intent_descriptions,
+        stats.intent_bytes,
+        stats.forced,
         stats.open_ms,
         stats.discover_ms,
         stats.gate_ms,
         stats.extract_ms,
+        stats.intent_ms,
         stats.write_ms,
         stats.count_ms,
         total_ms
@@ -17732,10 +17876,14 @@ mod search_index_phase_timing_tests {
                 skipped: 245,
                 rows: 2805,
                 indexed_bytes: 1_048_576,
+                intent_descriptions: 3,
+                intent_bytes: 144,
+                forced: 1,
                 open_ms: 2,
                 discover_ms: 7,
                 gate_ms: 11,
                 extract_ms: 31,
+                intent_ms: 2,
                 write_ms: 13,
                 count_ms: 1,
             },
@@ -17744,7 +17892,8 @@ mod search_index_phase_timing_tests {
         assert_eq!(
             line,
             "op=scan bucket=codex files=246 indexed=1 skipped=245 rows=2805 \
-             indexed_bytes=1048576 open_ms=2 discover_ms=7 gate_ms=11 extract_ms=31 \
+             indexed_bytes=1048576 intent_descriptions=3 intent_bytes=144 forced=1 \
+             open_ms=2 discover_ms=7 gate_ms=11 extract_ms=31 intent_ms=2 \
              write_ms=13 count_ms=1 ms=65"
         );
     }
@@ -17812,6 +17961,15 @@ fn run_search_index_prune<R: tauri::Runtime>(app: &AppHandle<R>) {
 fn run_search_index_pass<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> Result<SessionIndexPassStats, String> {
+    run_search_index_pass_filtered(app, None, false, true)
+}
+
+fn run_search_index_pass_filtered<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    force_paths: Option<&HashSet<String>>,
+    force_all: bool,
+    refresh_tool_map: bool,
+) -> Result<SessionIndexPassStats, String> {
     let mut stats = SessionIndexPassStats::default();
     let open_started = std::time::Instant::now();
     let db = search_index_db_path(app).ok_or("no index db path")?;
@@ -17824,24 +17982,50 @@ fn run_search_index_pass<R: tauri::Runtime>(
     let files_vec = discover_claude_session_files(app)?;
     stats.discover_ms = discover_started.elapsed().as_millis();
     stats.files = files_vec.len();
+    let intent_started = std::time::Instant::now();
+    let intent_model = current_describe_model(app);
+    if let Ok(guard) = describe_cache_guard(app, &intent_model) {
+        drop(guard);
+    }
+    let mut intent_elapsed = intent_started.elapsed();
     let mut gate_elapsed = std::time::Duration::ZERO;
     let mut extract_elapsed = std::time::Duration::ZERO;
     let mut write_elapsed = std::time::Duration::ZERO;
     for (path, mtime_u, size_u, id) in files_vec {
         let path_str = path.to_string_lossy().to_string();
         let (mtime, size) = (mtime_u as i64, size_u as i64);
+        let forced = force_all
+            || force_paths
+                .map(|paths| paths.contains(&path_str))
+                .unwrap_or(false);
+        if force_paths.is_some() && !forced {
+            stats.skipped += 1;
+            continue;
+        }
         let gate_started = std::time::Instant::now();
-        let needs_index =
-            search_index::needs_index(&conn, &path_str, mtime, size).unwrap_or(true);
+        let needs_index = forced
+            || search_index::needs_index(&conn, &path_str, mtime, size).unwrap_or(true);
         gate_elapsed += gate_started.elapsed();
         if !needs_index {
             stats.skipped += 1;
             continue;
         }
+        if forced {
+            stats.forced += 1;
+        }
         let extract_started = std::time::Instant::now();
         let title = claude_session_title(&path).ok().flatten().unwrap_or(id);
-        let content = claude_session_all_text(&path);
-        stats.indexed_bytes = stats.indexed_bytes.saturating_add(content.len() as u64);
+        let extracted = claude_session_search_data(&path);
+        stats.indexed_bytes = stats
+            .indexed_bytes
+            .saturating_add(extracted.content.len() as u64);
+        extract_elapsed += extract_started.elapsed();
+        let intent_started = std::time::Instant::now();
+        let (intent, intent_descriptions) =
+            cached_session_intent_text(app, &intent_model, &extracted.tool_ids);
+        intent_elapsed += intent_started.elapsed();
+        stats.intent_descriptions += intent_descriptions;
+        stats.intent_bytes = stats.intent_bytes.saturating_add(intent.len() as u64);
         let row = search_index::IndexRow {
             kind: "session".to_string(),
             // Carry provider + file size alongside the title (mirrors the
@@ -17857,11 +18041,12 @@ fn run_search_index_pass<R: tauri::Runtime>(
             // Internal tab route; exact-session deep-link is deferred. The
             // expander derives id from the doc key (file basename) for /__turns.
             link: "/sessions".to_string(),
-            content,
+            content: extracted.content,
+            intent,
             file: path_str,
+            tool_ids: refresh_tool_map.then_some(extracted.tool_ids),
             extra: String::new(),
         };
-        extract_elapsed += extract_started.elapsed();
         // Index even empty-content sessions so the next pass skips them.
         let write_started = std::time::Instant::now();
         search_index::index_doc(&conn, &row, mtime, size).map_err(|e| e.to_string())?;
@@ -17870,6 +18055,7 @@ fn run_search_index_pass<R: tauri::Runtime>(
     }
     stats.gate_ms = gate_elapsed.as_millis();
     stats.extract_ms = extract_elapsed.as_millis();
+    stats.intent_ms = intent_elapsed.as_millis();
     stats.write_ms = write_elapsed.as_millis();
     let count_started = std::time::Instant::now();
     stats.rows = search_index::row_count(&conn).unwrap_or(0);
@@ -17884,6 +18070,15 @@ fn run_search_index_pass<R: tauri::Runtime>(
 fn run_codex_search_index_pass<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> Result<SessionIndexPassStats, String> {
+    run_codex_search_index_pass_filtered(app, None, false, true)
+}
+
+fn run_codex_search_index_pass_filtered<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    force_paths: Option<&HashSet<String>>,
+    force_all: bool,
+    refresh_tool_map: bool,
+) -> Result<SessionIndexPassStats, String> {
     let mut stats = SessionIndexPassStats::default();
     let open_started = std::time::Instant::now();
     let db = search_index_db_path(app).ok_or("no index db path")?;
@@ -17893,23 +18088,49 @@ fn run_codex_search_index_pass<R: tauri::Runtime>(
     let sessions = discover_codex_sessions(app, None)?;
     stats.discover_ms = discover_started.elapsed().as_millis();
     stats.files = sessions.len();
+    let intent_started = std::time::Instant::now();
+    let intent_model = current_describe_model(app);
+    if let Ok(guard) = describe_cache_guard(app, &intent_model) {
+        drop(guard);
+    }
+    let mut intent_elapsed = intent_started.elapsed();
     let mut gate_elapsed = std::time::Duration::ZERO;
     let mut extract_elapsed = std::time::Duration::ZERO;
     let mut write_elapsed = std::time::Duration::ZERO;
     for s in sessions {
         let path_str = s.path.to_string_lossy().to_string();
         let (mtime, size) = (s.mtime as i64, s.size as i64);
+        let forced = force_all
+            || force_paths
+                .map(|paths| paths.contains(&path_str))
+                .unwrap_or(false);
+        if force_paths.is_some() && !forced {
+            stats.skipped += 1;
+            continue;
+        }
         let gate_started = std::time::Instant::now();
-        let needs_index =
-            search_index::needs_index(&conn, &path_str, mtime, size).unwrap_or(true);
+        let needs_index = forced
+            || search_index::needs_index(&conn, &path_str, mtime, size).unwrap_or(true);
         gate_elapsed += gate_started.elapsed();
         if !needs_index {
             stats.skipped += 1;
             continue;
         }
+        if forced {
+            stats.forced += 1;
+        }
         let extract_started = std::time::Instant::now();
-        let content = codex_session_all_text(&s.path);
-        stats.indexed_bytes = stats.indexed_bytes.saturating_add(content.len() as u64);
+        let extracted = codex_session_search_data(&s.path);
+        stats.indexed_bytes = stats
+            .indexed_bytes
+            .saturating_add(extracted.content.len() as u64);
+        extract_elapsed += extract_started.elapsed();
+        let intent_started = std::time::Instant::now();
+        let (intent, intent_descriptions) =
+            cached_session_intent_text(app, &intent_model, &extracted.tool_ids);
+        intent_elapsed += intent_started.elapsed();
+        stats.intent_descriptions += intent_descriptions;
+        stats.intent_bytes = stats.intent_bytes.saturating_add(intent.len() as u64);
         let row = search_index::IndexRow {
             kind: "session".to_string(),
             source: format!(
@@ -17920,11 +18141,12 @@ fn run_codex_search_index_pass<R: tauri::Runtime>(
             ),
             date: mtime.to_string(),
             link: "/sessions".to_string(),
-            content,
+            content: extracted.content,
+            intent,
             file: path_str,
+            tool_ids: refresh_tool_map.then_some(extracted.tool_ids),
             extra: String::new(),
         };
-        extract_elapsed += extract_started.elapsed();
         let write_started = std::time::Instant::now();
         search_index::index_doc(&conn, &row, mtime, size).map_err(|e| e.to_string())?;
         write_elapsed += write_started.elapsed();
@@ -17932,6 +18154,7 @@ fn run_codex_search_index_pass<R: tauri::Runtime>(
     }
     stats.gate_ms = gate_elapsed.as_millis();
     stats.extract_ms = extract_elapsed.as_millis();
+    stats.intent_ms = intent_elapsed.as_millis();
     stats.write_ms = write_elapsed.as_millis();
     let count_started = std::time::Instant::now();
     stats.rows = search_index::row_count(&conn).unwrap_or(0);
@@ -18082,7 +18305,9 @@ fn run_commit_index_pass<R: tauri::Runtime>(
             date: token.to_string(),
             link,
             content: format!("{}\n{}\n{}\n{}", subject, body, author, patch),
+            intent: String::new(),
             file: key,
+            tool_ids: None,
             extra: String::new(),
         };
         search_index::index_doc(&conn, &row, token, COMMIT_DIFF_SCHEMA)
@@ -18166,7 +18391,9 @@ fn run_issue_index_pass<R: tauri::Runtime>(
             date: token.to_string(),
             link: url,
             content,
+            intent: String::new(),
             file: key,
+            tool_ids: None,
             extra,
         };
         search_index::index_doc(&conn, &row, token, 0).map_err(|e| e.to_string())?;
@@ -18293,7 +18520,9 @@ fn run_history_index_pass<R: tauri::Runtime>(
             // its own "view commit".
             link: String::new(),
             content,
+            intent: String::new(),
             file: key,
+            tool_ids: None,
             // Self-contained detail: the group the pass already built, so the
             // Search expander renders it directly (no recency-limited re-fetch).
             extra: serde_json::to_string(&g).unwrap_or_default(),
@@ -18455,6 +18684,7 @@ where
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum IndexBucket {
     Sessions,
+    SessionIntents,
     Commits,
     History,
     Issues,
@@ -18463,7 +18693,7 @@ enum IndexBucket {
 impl IndexBucket {
     fn status_name(self) -> &'static str {
         match self {
-            Self::Sessions => "session",
+            Self::Sessions | Self::SessionIntents => "session",
             Self::Commits => "commit",
             Self::History => "worklist-history",
             Self::Issues => "issue",
@@ -18486,11 +18716,57 @@ fn live_index_bucket_names(
     if display != IndexRunDisplay::LiveLocal {
         return Vec::new();
     }
-    buckets
-        .iter()
-        .filter(|bucket| **bucket != IndexBucket::Issues)
-        .map(|bucket| bucket.status_name().to_string())
-        .collect()
+    let mut names = Vec::new();
+    for bucket in buckets.iter().filter(|bucket| **bucket != IndexBucket::Issues) {
+        let name = bucket.status_name().to_string();
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+#[derive(Default)]
+struct PendingSearchIntentRefresh {
+    tool_ids: HashSet<String>,
+    path_hints: HashSet<String>,
+    all_sessions: bool,
+}
+
+fn pending_search_intent_refresh() -> &'static Mutex<PendingSearchIntentRefresh> {
+    static CELL: OnceLock<Mutex<PendingSearchIntentRefresh>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(PendingSearchIntentRefresh::default()))
+}
+
+fn queue_search_intent_refresh(
+    tool_ids: &[String],
+    path_hint: Option<String>,
+    all_sessions: bool,
+) {
+    if let Ok(mut pending) = pending_search_intent_refresh().lock() {
+        pending.tool_ids.extend(tool_ids.iter().cloned());
+        if let Some(path) = path_hint.filter(|path| !path.is_empty()) {
+            pending.path_hints.insert(path);
+        }
+        pending.all_sessions |= all_sessions;
+    }
+    search_index_request(IndexBucket::SessionIntents);
+}
+
+fn take_search_intent_refresh() -> PendingSearchIntentRefresh {
+    pending_search_intent_refresh()
+        .lock()
+        .map(|mut pending| std::mem::take(&mut *pending))
+        .unwrap_or_default()
+}
+
+fn has_pending_search_intent_refresh() -> bool {
+    pending_search_intent_refresh()
+        .lock()
+        .map(|pending| {
+            pending.all_sessions || !pending.tool_ids.is_empty() || !pending.path_hints.is_empty()
+        })
+        .unwrap_or(false)
 }
 
 // Sender to the single indexer thread, set when it starts. `search_index_request`
@@ -18511,6 +18787,74 @@ fn search_index_request(bucket: IndexBucket) {
             let _ = tx.send(bucket);
         }
     }
+}
+
+fn run_session_intent_refresh<R: tauri::Runtime>(app: &AppHandle<R>) -> usize {
+    let refresh = take_search_intent_refresh();
+    if !refresh.all_sessions && refresh.tool_ids.is_empty() && refresh.path_hints.is_empty() {
+        return 0;
+    }
+    let requested = refresh.tool_ids.len();
+    let hints = refresh.path_hints.len();
+    let resolve_started = std::time::Instant::now();
+    let mut paths = refresh.path_hints;
+    if !refresh.all_sessions && !refresh.tool_ids.is_empty() {
+        if let Some(db) = search_index_db_path(app) {
+            if let Ok(conn) = search_index::open(&db.to_string_lossy()) {
+                if let Ok(mapped) = search_index::session_paths_for_tools(
+                    &conn,
+                    &refresh.tool_ids.into_iter().collect::<Vec<_>>(),
+                ) {
+                    paths.extend(mapped);
+                }
+            }
+        }
+    }
+    let resolve_ms = resolve_started.elapsed().as_millis();
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "search-index",
+            &format!(
+                "op=intent-refresh requested={} hints={} paths={} all={} resolve_ms={}",
+                requested,
+                hints,
+                paths.len(),
+                if refresh.all_sessions { 1 } else { 0 },
+                resolve_ms
+            ),
+        );
+    }
+    if paths.is_empty() && !refresh.all_sessions {
+        return 0;
+    }
+    let mut indexed = 0usize;
+    let codex_paths: HashSet<String> = paths
+        .iter()
+        .filter(|path| {
+            Path::new(path)
+                .components()
+                .any(|component| component.as_os_str() == ".codex")
+        })
+        .cloned()
+        .collect();
+    let claude_paths: HashSet<String> = paths.difference(&codex_paths).cloned().collect();
+    if refresh.all_sessions || !claude_paths.is_empty() {
+        indexed += run_and_trace_session_index_pass(app, "claude-intent", |app| {
+            run_search_index_pass_filtered(app, Some(&claude_paths), refresh.all_sessions, false)
+        });
+    }
+    if refresh.all_sessions || !codex_paths.is_empty() {
+        indexed += run_and_trace_session_index_pass(app, "codex-intent", |app| {
+            run_codex_search_index_pass_filtered(
+                app,
+                Some(&codex_paths),
+                refresh.all_sessions,
+                false,
+            )
+        });
+    }
+    indexed
 }
 
 // Run the requested buckets' passes and drive the footer indicator. Watcher-
@@ -18539,6 +18883,12 @@ fn run_index_buckets<R: tauri::Runtime>(
                 // any file was (re)indexed this pass — a deletion changes no
                 // surviving file's change-token, so n won't reflect it.
                 run_search_index_prune(app);
+                if n > 0 {
+                    added.push((bucket.status_name().to_string(), n));
+                }
+            }
+            IndexBucket::SessionIntents => {
+                let n = run_session_intent_refresh(app);
                 if n > 0 {
                     added.push((bucket.status_name().to_string(), n));
                 }
@@ -18591,7 +18941,13 @@ fn run_index_buckets<R: tauri::Runtime>(
 fn start_search_indexer<R: tauri::Runtime>(app: AppHandle<R>) {
     let (tx, rx) = std::sync::mpsc::channel::<IndexBucket>();
     if let Ok(mut guard) = search_index_tx_cell().lock() {
-        *guard = Some(tx);
+        *guard = Some(tx.clone());
+    }
+    // A lazy describe-cache load can invalidate intent rows before this thread
+    // is installed. The pending state is durable in-process; wake the new
+    // owner so that early reset is not lost.
+    if has_pending_search_intent_refresh() {
+        let _ = tx.send(IndexBucket::SessionIntents);
     }
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(2));
@@ -18659,6 +19015,7 @@ mod index_run_display_tests {
             live_index_bucket_names(
                 &[
                     IndexBucket::Sessions,
+                    IndexBucket::SessionIntents,
                     IndexBucket::Commits,
                     IndexBucket::History,
                 ],
@@ -26900,6 +27257,27 @@ struct ProjectedTurnsCacheEntry {
 static PROJECTED_TURNS_CACHE: std::sync::Mutex<Option<ProjectedTurnsCacheEntry>> =
     std::sync::Mutex::new(None);
 
+// A describe request originates from a projected main-session tool row. Keep
+// its already-parsed session path as the fast routing hint for a targeted FTS
+// intent refresh; subagent-only rows intentionally return None because
+// subagent transcripts are not standalone session-index documents.
+fn projected_session_path_for_tool(tool_id: &str) -> Option<String> {
+    let guard = PROJECTED_TURNS_CACHE.lock().ok()?;
+    let cached = guard.as_ref()?;
+    let found = cached.turns.iter().any(|turn| {
+        turn.get("entries")
+            .and_then(|v| v.as_array())
+            .map(|entries| {
+                entries.iter().any(|entry| {
+                    entry.get("kind").and_then(|v| v.as_str()) == Some("tool")
+                        && entry.get("id").and_then(|v| v.as_str()) == Some(tool_id)
+                })
+            })
+            .unwrap_or(false)
+    });
+    found.then(|| cached.path.to_string_lossy().to_string())
+}
+
 const PROJECTED_TURNS_INCREMENTAL_OVERLAP_BYTES: u64 = 1024 * 1024;
 
 // ai-describe cache (persist-tool-description-cache): generated one-line
@@ -26931,6 +27309,7 @@ struct DescribeCacheEntry {
 struct DescribeCache {
     path: PathBuf,
     model: String,
+    invalidated_rows: usize,
     // Keep the request key beside the description so a model/prompt-input
     // change cannot hit merely because the tool-use id stayed the same.
     by_id: std::collections::HashMap<String, (String, String)>,
@@ -26943,6 +27322,7 @@ impl DescribeCache {
         Self {
             path,
             model: model.to_string(),
+            invalidated_rows: 0,
             by_id: std::collections::HashMap::new(),
             by_key: std::collections::HashMap::new(),
             records: std::collections::HashMap::new(),
@@ -26955,7 +27335,8 @@ impl DescribeCache {
         // A model or prompt-schema change is a clean invalidation. Keeping
         // only the active namespace also makes the 5,000-row bound global
         // for this project's dedicated cache instead of per past model.
-        conn.execute(
+        cache.invalidated_rows = conn
+            .execute(
             "DELETE FROM tool_descriptions WHERE model <> ?1 OR prompt_schema_version <> ?2",
             rusqlite::params![model, i64::from(DESCRIBE_PROMPT_SCHEMA_VERSION)],
         )
@@ -27014,7 +27395,7 @@ impl DescribeCache {
         description: &str,
         touched_at_ms: i64,
         limit: usize,
-    ) {
+    ) -> Vec<String> {
         self.records.insert(
             id.to_string(),
             DescribeCacheEntry {
@@ -27024,6 +27405,7 @@ impl DescribeCache {
                 touched_at_ms,
             },
         );
+        let mut evicted = Vec::new();
         if self.records.len() > limit {
             let mut oldest: Vec<(i64, String)> = self
                 .records
@@ -27034,19 +27416,21 @@ impl DescribeCache {
             let remove = self.records.len() - limit;
             for (_, id) in oldest.into_iter().take(remove) {
                 self.records.remove(&id);
+                evicted.push(id);
             }
         }
         self.rebuild_indexes();
+        evicted
     }
 
-    fn record(&mut self, id: &str, key: &str, description: &str) {
+    fn record(&mut self, id: &str, key: &str, description: &str) -> Vec<String> {
         self.record_with_limit(
             id,
             key,
             description,
             unix_now_ms(),
             DESCRIBE_CACHE_MAX_ENTRIES,
-        );
+        )
     }
 
     fn persist_entry(&self, id: &str) -> Result<(), String> {
@@ -27229,12 +27613,24 @@ fn describe_cache_guard<R: tauri::Runtime>(
     if needs_load {
         let cache = DescribeCache::load(path, model)?;
         let entries = cache.records.len();
+        let invalidated_rows = cache.invalidated_rows;
         *guard = Some(cache);
         append_bram_trace_line(
             app,
             "ai-describe",
             &format!("op=cache-load model={} entries={}", model, entries),
         );
+        if invalidated_rows > 0 {
+            queue_search_intent_refresh(&[], None, true);
+            append_bram_trace_line(
+                app,
+                "search-index",
+                &format!(
+                    "op=intent-invalidate reason=describe-namespace rows={}",
+                    invalidated_rows
+                ),
+            );
+        }
     }
     Ok(guard)
 }
@@ -27294,11 +27690,15 @@ fn build_describe_prompt(
 
 // Snapshot of by_id for the projection overlay. Loading is lazy so cached
 // descriptions are available on the first projection after a Bram restart.
+fn current_describe_model<R: tauri::Runtime>(app: &AppHandle<R>) -> String {
+    let config = project_root(Some(app)).and_then(|root| load_project_config(&root));
+    describe_model(config.as_ref())
+}
+
 fn describe_overlay_snapshot<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> std::collections::HashMap<String, String> {
-    let config = project_root(Some(app)).and_then(|root| load_project_config(&root));
-    let model = describe_model(config.as_ref());
+    let model = current_describe_model(app);
     describe_cache_guard(app, &model)
         .ok()
         .and_then(|guard| {
@@ -27308,6 +27708,26 @@ fn describe_overlay_snapshot<R: tauri::Runtime>(
                     .iter()
                     .map(|(id, (_, description))| (id.clone(), description.clone()))
                     .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
+// Search indexing looks up only the ids present in the session being written;
+// it never clones the full (up to 5,000-row) overlay. The lock is held only for
+// these O(tool ids) in-memory lookups, not transcript extraction or SQLite I/O.
+fn cached_session_intent_text<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    model: &str,
+    tool_ids: &[String],
+) -> (String, usize) {
+    describe_cache_guard(app, model)
+        .ok()
+        .and_then(|guard| {
+            guard.as_ref().map(|cache| {
+                session_intent_text(tool_ids, |id| {
+                    cache.by_id.get(id).map(|(_, description)| description.clone())
+                })
             })
         })
         .unwrap_or_default()
@@ -43276,7 +43696,9 @@ mod issues_list_cache_tests {
             date: "1".to_string(),
             link: String::new(),
             content: "an issue".to_string(),
+            intent: String::new(),
             file: "issue:1".to_string(),
+            tool_ids: None,
             extra: String::new(),
         };
         search_index::index_doc(conn, &row, 1, 0).expect("index issue doc");
@@ -43498,10 +43920,11 @@ fn handle_describe_command<R: tauri::Runtime>(
         let id_hit = cache.by_id.get(id).and_then(|(stored_key, description)| {
             (stored_key == &cache_key).then(|| description.clone())
         });
+        let mut refresh_ids = Vec::new();
         let (hit, source) = if let Some(description) = id_hit {
             (Some(description), "id")
         } else if let Some(description) = cache.by_key.get(&cache_key).cloned() {
-            cache.record(id, &cache_key, &description);
+            let evicted = cache.record(id, &cache_key, &description);
             if let Err(error) = cache.persist_entry(id) {
                 append_bram_trace_line(
                     app,
@@ -43509,11 +43932,17 @@ fn handle_describe_command<R: tauri::Runtime>(
                     &format!("op=cache-write-error id={} detail={}", id, error),
                 );
             }
+            refresh_ids.push(id.to_string());
+            refresh_ids.extend(evicted);
             (Some(description), "key")
         } else {
             (None, "")
         };
         if let Some(desc) = hit {
+            if !refresh_ids.is_empty() {
+                let hint = projected_session_path_for_tool(id);
+                queue_search_intent_refresh(&refresh_ids, hint, false);
+            }
             append_bram_trace_line(
                 app,
                 "ai-describe",
@@ -43665,10 +44094,11 @@ fn handle_describe_command<R: tauri::Runtime>(
         .and_then(|u| u.get("cache_read_input_tokens"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
+    let mut refresh_ids = Vec::new();
     match describe_cache_guard(app, &model) {
         Ok(mut guard) => {
             let cache = guard.as_mut().expect("describe cache initialized");
-            cache.record(id, &cache_key, &desc);
+            let evicted = cache.record(id, &cache_key, &desc);
             if let Err(error) = cache.persist_entry(id) {
                 append_bram_trace_line(
                     app,
@@ -43676,12 +44106,18 @@ fn handle_describe_command<R: tauri::Runtime>(
                     &format!("op=cache-write-error id={} detail={}", id, error),
                 );
             }
+            refresh_ids.push(id.to_string());
+            refresh_ids.extend(evicted);
         }
         Err(error) => append_bram_trace_line(
             app,
             "ai-describe",
             &format!("op=cache-write-error id={} detail={}", id, error),
         ),
+    }
+    if !refresh_ids.is_empty() {
+        let hint = projected_session_path_for_tool(id);
+        queue_search_intent_refresh(&refresh_ids, hint, false);
     }
     // Main-view refresh is caller-driven (helpers.js awaits this response
     // and refetches /__turns). Subagent views refetch on subagents-changed,

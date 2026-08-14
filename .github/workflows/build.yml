@@ -37,8 +37,8 @@ jobs:
               Get-Content -Path $Path |
                 Where-Object { $_ -match 'install\.ps1' -and $_ -match '\biex\b' }
             )
-            if ($InstallLines.Count -eq 0) {
-              throw "No PowerShell install example found in $Path."
+            if ($InstallLines.Count -ne 2) {
+              throw "Expected PowerShell and Command Prompt install examples in $Path."
             }
             $UnsafeLines = @(
               $InstallLines |
@@ -46,6 +46,24 @@ jobs:
             )
             if ($UnsafeLines.Count -gt 0) {
               throw "PowerShell install example streams lines directly to iex in $Path."
+            }
+            $DirectLines = @(
+              $InstallLines |
+                Where-Object {
+                  $_ -match '^\s*irm\s+https://.+/install\.ps1\s*\|\s*Out-String\s*\|\s*iex\s*$'
+                }
+            )
+            if ($DirectLines.Count -ne 1) {
+              throw "Expected one direct PowerShell install example in $Path."
+            }
+            $CmdLines = @(
+              $InstallLines |
+                Where-Object {
+                  $_ -match '^\s*powershell\.exe\s+-NoProfile\s+-ExecutionPolicy\s+Bypass\s+-Command\s+"irm\s+https://.+/install\.ps1\s*\|\s*Out-String\s*\|\s*iex"\s*$'
+                }
+            )
+            if ($CmdLines.Count -ne 1) {
+              throw "Expected one Command Prompt install example in $Path."
             }
           }
 

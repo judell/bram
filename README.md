@@ -157,8 +157,16 @@ The script detects your platform, verifies the archive's SHA256 against the publ
 
 ### Windows
 
+From PowerShell:
+
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/judell/bram/releases/latest/download/install.ps1 | Out-String | iex"
+irm https://github.com/judell/bram/releases/latest/download/install.ps1 | Out-String | iex
+```
+
+From Command Prompt:
+
+```batch
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/judell/bram/releases/latest/download/install.ps1 | Out-String | iex"
 ```
 
 Downloads `bram-windows-amd64.zip`, verifies its SHA256, extracts `bram.exe` to `~/bin`, and adds `~/bin` to your user `PATH`.

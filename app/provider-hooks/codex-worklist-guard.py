@@ -972,8 +972,20 @@ def handle_user_prompt_submit(payload, cwd):
 def main():
     try:
         payload = json.load(sys.stdin)
-    except Exception:
-        allow()
+    except Exception as exc:
+        # issue-249 follow-up (codex-guard-stdin-fail-closed): this used to
+        # fail OPEN (allow) so a Codex payload-format change would not brick
+        # tool calls. That is the quiet-and-open tradeoff the cp1252 episode
+        # argued against: a guard that cannot read its input cannot certify
+        # safety. Deny loudly instead -- a format change should surface as an
+        # immediately-reported block, not a silent enforcement hole.
+        _HOOK_CTX["event"] = "PreToolUse"
+        deny(
+            "Blocked: the Bram worklist guard could not parse its hook "
+            "payload (unparseable stdin: %s). This is a guard/runtime "
+            "issue, not a policy decision; please report it."
+            % type(exc).__name__
+        )
 
     cwd = payload.get("cwd") or os.getcwd()
     event_name = payload.get("hook_event_name") or ""

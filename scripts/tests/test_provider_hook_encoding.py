@@ -47,6 +47,47 @@ def run_guard(payload, cwd):
     return proc.returncode, proc.stdout, proc.stderr
 
 
+CODEX_GUARD = HOOKS_DIR / "codex-worklist-guard.py"
+
+
+def run_hook_raw(script, raw_stdin, cwd):
+    """Run a hook script with raw (possibly malformed) stdin."""
+    proc = subprocess.run(
+        [sys.executable, str(script)],
+        input=raw_stdin,
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+class UnparseableStdinFailsClosed(unittest.TestCase):
+    """A guard that cannot parse its payload must deny, not allow.
+
+    The Codex guard used to catch the stdin parse failure and allow() --
+    a deliberate quiet-open that the issue-249 fail-closed wrapper never
+    saw, because the exception was swallowed inside main(). The Claude
+    guard's bare parse already escapes to its wrapper, which denies via
+    exit 2. Both directions pinned here (judell/bram#249).
+    """
+
+    def test_codex_guard_denies_malformed_stdin(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            code, out, err = run_hook_raw(CODEX_GUARD, "this is not json{{{", cwd)
+        self.assertEqual(code, 0, err)
+        decision = json.loads(out.strip().splitlines()[-1])
+        self.assertEqual(
+            decision["hookSpecificOutput"]["permissionDecision"], "deny", out
+        )
+        self.assertIn("unparseable stdin", err)
+
+    def test_claude_guard_denies_malformed_stdin(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            code, out, err = run_hook_raw(GUARD, "this is not json{{{", cwd)
+        self.assertEqual(code, 2, "wrapper must deny via exit 2; stderr: %s" % err)
+
+
 class SourceScan(unittest.TestCase):
     """Every open() in the provider hooks names an encoding.
 

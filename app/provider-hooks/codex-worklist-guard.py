@@ -30,6 +30,8 @@ import json
 import os
 import re
 import sys
+
+NL = chr(10)
 import tempfile
 import urllib.request
 import time
@@ -69,7 +71,7 @@ def _post_hook_trace(event, tool, target, decision, reason, cwd):
         while True:
             candidate = os.path.join(cur, "resources", ".bram-port")
             if os.path.exists(candidate):
-                with open(candidate) as f:
+                with open(candidate, encoding="utf-8") as f:
                     port = int(f.read().strip())
                 break
             parent = os.path.dirname(cur)
@@ -162,7 +164,7 @@ def deny(reason):
 
 def load_json(path):
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return None
@@ -198,7 +200,7 @@ def items_by_id_from_content(content):
 
 def current_worklist_text(cwd):
     try:
-        with open(os.path.join(cwd, WORKLIST_REL)) as f:
+        with open(os.path.join(cwd, WORKLIST_REL), encoding="utf-8") as f:
             return f.read()
     except Exception:
         return ""
@@ -944,7 +946,7 @@ def write_direct_edit_record(cwd):
     directory = os.path.dirname(path) or "."
     fd, tmp = tempfile.mkstemp(prefix=".auth-", dir=directory)
     try:
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(rec, f)
         os.replace(tmp, path)
     except Exception:
@@ -1200,4 +1202,35 @@ if __name__ == "__main__":
         self_test()
         print("codex-worklist-guard self-test passed")
         sys.exit(0)
-    main()
+    try:
+        main()
+    except SystemExit:
+        # main() signals its decision by exiting; never convert that.
+        raise
+    except BaseException as exc:  # noqa: BLE001 - deliberate catch-all
+        # Fail closed -- rationale in the matching block of
+        # claude-worklist-guard.py. Codex treats a non-zero exit as "hook
+        # failed, proceed" and honors the structured hookSpecificOutput deny
+        # at exit 0, so emit that shape rather than exiting non-zero.
+        summary = "%s: %s" % (type(exc).__name__, exc)
+        try:
+            _trace_hook(
+                _HOOK_CTX.get("event") or "PreToolUse",
+                _HOOK_CTX.get("tool") or "",
+                _HOOK_CTX.get("target") or "",
+                "error",
+                summary[:200],
+            )
+        except BaseException:
+            pass
+        message = (
+            "Blocked: the Bram worklist guard failed and denied by default. "
+            + summary[:500]
+            + ". This is a guard bug, not a policy decision; please report it."
+        )
+        try:
+            print(json.dumps(pre_tool_use_deny_response(message)))
+        except BaseException:
+            pass
+        sys.stderr.write(message + NL)
+        sys.exit(0)

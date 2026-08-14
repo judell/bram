@@ -51,7 +51,7 @@ def _breadcrumb(root, event, tool, extra=""):
                 return
         except OSError:
             pass
-        with open(path, "a") as f:
+        with open(path, "a", encoding="utf-8") as f:
             f.write(
                 "%s claude %s %s%s\n"
                 % (
@@ -78,7 +78,7 @@ def _project_root(payload):
 
 def _port(root):
     try:
-        with open(os.path.join(root, PORT_REL)) as f:
+        with open(os.path.join(root, PORT_REL), encoding="utf-8") as f:
             return int(f.read().strip())
     except Exception:
         return None

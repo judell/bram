@@ -25,6 +25,8 @@ import json
 import os
 import re
 import sys
+
+NL = chr(10)
 import time
 import urllib.request
 from datetime import datetime, timezone
@@ -149,7 +151,7 @@ def _post_hook_trace(script, event, tool, target, decision, reason, cwd):
         while True:
             candidate = os.path.join(cur, "resources", ".bram-port")
             if os.path.exists(candidate):
-                with open(candidate) as f:
+                with open(candidate, encoding="utf-8") as f:
                     port = int(f.read().strip())
                 break
             parent = os.path.dirname(cur)
@@ -230,7 +232,7 @@ def last_user_text(transcript_path):
     if not transcript_path or not os.path.exists(transcript_path):
         return ""
     last = ""
-    with open(transcript_path) as f:
+    with open(transcript_path, encoding="utf-8", errors="replace") as f:
         for line in f:
             try:
                 m = json.loads(line)
@@ -267,7 +269,9 @@ def _post_direct_edit_audit_breadcrumb(project_root, last_msg):
     claude-permission-menu-hook.py: short timeout, silent failure — the
     guard must never block or fail a tool call because Bram is down."""
     try:
-        with open(os.path.join(project_root, "resources", ".bram-port")) as f:
+        with open(
+            os.path.join(project_root, "resources", ".bram-port"), encoding="utf-8"
+        ) as f:
             port = int(f.read().strip())
         turn_key = hashlib.sha256(last_msg.encode("utf-8")).hexdigest()
         body = json.dumps(
@@ -358,7 +362,7 @@ def worklist_items_with_inline_prose(content):
 def worklist_covered_files(project_root):
     """Set of project-relative paths covered by proposed/applied items."""
     try:
-        with open(os.path.join(project_root, WORKLIST_REL)) as f:
+        with open(os.path.join(project_root, WORKLIST_REL), encoding="utf-8") as f:
             data = json.load(f)
     except Exception:
         return set()
@@ -381,7 +385,7 @@ def fresh_bypass(project_root, path_rel):
     """True iff the auth record carries a recent direct-edit bypass
     covering path_rel."""
     try:
-        with open(os.path.join(project_root, AUTH_REL)) as f:
+        with open(os.path.join(project_root, AUTH_REL), encoding="utf-8") as f:
             rec = json.load(f)
     except Exception:
         return False
@@ -674,7 +678,7 @@ def main():
     if rel == WORKLIST_REL:
         if not os.path.exists(fp):
             emit_allow_for_lifecycle(rel, "worklist-bootstrap")
-        with open(fp) as f:
+        with open(fp, encoding="utf-8") as f:
             old = f.read()
         if payload["tool_name"] == "Write":
             new = ti.get("content", "")
@@ -733,4 +737,41 @@ if __name__ == "__main__":
         self_test()
         print("worklist-guard self-test passed")
         sys.exit(0)
-    main()
+    try:
+        main()
+    except SystemExit:
+        # main() signals its decision by exiting; never convert that.
+        raise
+    except BaseException as exc:  # noqa: BLE001 - deliberate catch-all
+        # Fail closed. A crashing guard exits non-zero-but-not-2, which the
+        # provider reads as "hook failed, proceed" -- an enforcement bypass
+        # that leaves no receipt, because the crash happens upstream of the
+        # guard's own instrumentation. That is exactly how the cp1252
+        # transcript crash hid on Windows (judell/bram#249): registered,
+        # reported healthy by Setup and Status, never once enforcing.
+        #
+        # Blocking on a bug is a visible nuisance reported in minutes;
+        # allowing on a bug is an invisible hole. Prefer the nuisance. The
+        # permission-menu hook deliberately stays fail-open: it is
+        # observe-only and must never gate a tool call.
+        summary = "%s: %s" % (type(exc).__name__, exc)
+        try:
+            _trace_hook(
+                os.environ.get("__BRAM_TRACE_EVENT", "PreToolUse"),
+                os.environ.get("__BRAM_TRACE_TOOL", ""),
+                "",
+                "error",
+                summary[:200],
+            )
+        except BaseException:
+            pass
+        sys.stderr.write(
+            "Blocked: the Bram worklist guard failed and denied by default."
+            + NL
+            + "  - "
+            + summary[:500]
+            + NL
+            + "  - This is a guard bug, not a policy decision. Please report it."
+            + NL
+        )
+        sys.exit(2)

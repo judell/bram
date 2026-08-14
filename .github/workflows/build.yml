@@ -67,14 +67,26 @@ jobs:
             }
           }
 
-          # Get-Content emulates a response enumerated as separate lines by
-          # Windows PowerShell 5.1. Out-String must collect those lines before
-          # the installer is parsed as one script.
-          $Collected = Get-Content -Path "install.ps1" | Out-String
-          if ($Collected -isnot [string]) {
-            throw "Installer pipeline did not produce one collected string."
+          # Execute the actual installer through both documented entry paths.
+          # Validation mode exits after architecture selection, before network
+          # or filesystem work.
+          $env:BRAM_INSTALL_VALIDATE_ONLY = "1"
+          try {
+            $PowerShellResult = Get-Content -Path "install.ps1" | Out-String | iex
+            if (($PowerShellResult | Out-String).Trim() -ne "bram-windows-amd64.zip") {
+              throw "Direct PowerShell installer validation selected '$PowerShellResult'."
+            }
+
+            $CmdResult = & cmd.exe /d /s /c 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Get-Content install.ps1 | Out-String | iex"'
+            if ($LASTEXITCODE -ne 0) {
+              throw "Command Prompt installer validation exited $LASTEXITCODE."
+            }
+            if (($CmdResult | Out-String).Trim() -ne "bram-windows-amd64.zip") {
+              throw "Command Prompt installer validation selected '$CmdResult'."
+            }
+          } finally {
+            Remove-Item Env:BRAM_INSTALL_VALIDATE_ONLY -ErrorAction SilentlyContinue
           }
-          [void][ScriptBlock]::Create($Collected)
 
   create-release:
     needs: [verify, verify-windows-installer]

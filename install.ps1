@@ -21,11 +21,41 @@ if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
   throw "Bram install: install.ps1 is only supported on Windows."
 }
 
-switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
-  "X64" { $Artifact = "bram-windows-amd64.zip" }
-  default {
-    throw "Bram install: unsupported Windows architecture $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)."
+function Get-WindowsArchitecture {
+  $Candidates = @(
+    [System.Environment]::GetEnvironmentVariable("PROCESSOR_ARCHITEW6432", [System.EnvironmentVariableTarget]::Process),
+    [System.Environment]::GetEnvironmentVariable("PROCESSOR_ARCHITECTURE", [System.EnvironmentVariableTarget]::Process)
+  )
+  foreach ($Candidate in $Candidates) {
+    if (-not [string]::IsNullOrWhiteSpace($Candidate)) {
+      return $Candidate.Trim().ToUpperInvariant()
+    }
   }
+
+  try {
+    $RuntimeArchitecture = [string][System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+    if (-not [string]::IsNullOrWhiteSpace($RuntimeArchitecture)) {
+      return $RuntimeArchitecture.Trim().ToUpperInvariant()
+    }
+  } catch {
+    # The process environment probes above support Windows PowerShell 5.1.
+  }
+  return ""
+}
+
+$Architecture = Get-WindowsArchitecture
+switch ($Architecture) {
+  { $_ -in @("AMD64", "X64") } { $Artifact = "bram-windows-amd64.zip" }
+  default {
+    $NativeArchitecture = [System.Environment]::GetEnvironmentVariable("PROCESSOR_ARCHITEW6432", [System.EnvironmentVariableTarget]::Process)
+    $ProcessArchitecture = [System.Environment]::GetEnvironmentVariable("PROCESSOR_ARCHITECTURE", [System.EnvironmentVariableTarget]::Process)
+    throw "Bram install: unsupported Windows architecture '$Architecture' (PROCESSOR_ARCHITEW6432='$NativeArchitecture', PROCESSOR_ARCHITECTURE='$ProcessArchitecture')."
+  }
+}
+
+if ($env:BRAM_INSTALL_VALIDATE_ONLY -eq "1") {
+  Write-Output $Artifact
+  return
 }
 
 if ($BaseUrl) {

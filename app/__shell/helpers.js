@@ -5041,31 +5041,24 @@ window.__bramBroadcastProjectedTurns = function (payload, reason) {
   } catch (eB) { /* ignore */ }
 };
 
-// promote-tool-descriptions-to-row (eager): request descriptions as
-// command-bearing rows ARRIVE instead of waiting for a click-expand —
-// the row leads with intent, hover shows the raw command. Bounded to
-// the newest turns so loading a large session cannot fire a historical
-// describe burst; per-id dedupe (plus the host cache) keeps re-broadcasts
-// free, and the unavailable latch (set on a disabled/no-key answer)
-// stops eager re-POST churn on installs with the feature off — a manual
-// expand still tries, and any success clears the latch.
-// Full-transcript coverage, NEWEST FIRST: what the user sees at the
-// bottom adjusts immediately; backscroll fills in as the queue drains.
-// Cost is accepted (per 2026-07-22 direction); responsiveness is
-// protected by pacing — a bounded-concurrency queue instead of firing
-// hundreds of requests (and hundreds of full re-renders) at once on a
-// large session. The queue is rebuilt per broadcast; per-id dedupe and
-// the host result cache make that free.
+// promote-tool-descriptions-to-row (eager): request descriptions only as
+// genuinely new command-bearing rows ARRIVE. The first projection for a
+// session is the historical baseline: cached descriptions render through
+// the host overlay, but uncached history is left for manual expand. This
+// prevents a Bram restart or an old-session open from replaying the whole
+// transcript through Haiku. Subsequent rows retain the existing visibility
+// ordering, bounded concurrency, typing hold, and per-id dedupe.
 var __bramDescribeQueue = [];
+var __bramDescribeBaseline = { stream: "", initialized: false, complete: false, seen: {} };
 // subagent-transcript-describe: the chip-selected subagent view keeps
-// its own queue — main-projection scans rebuild __bramDescribeQueue
-// wholesale on every broadcast and would drop subagent entries. The
-// pump drains main first (visibility-ordered), then subagent. Delivery
+// its own queue so main-session rotation cannot drop subagent entries.
+// The pump drains main first (visibility-ordered), then subagent. Delivery
 // for subagent entries is a refetch of the subagent DataSource (the
 // host injects cached descriptions via apply_describe_overlay), fired
 // from the flush when it completes ids this view requested.
 var __bramSubagentDescribeQueue = [];
 var __bramSubagentDescribeIds = {};
+var __bramSubagentDescribeBaselines = {};
 var __bramSubagentDescribeRefetch = null;
 var __bramDescribeInFlight = 0;
 var __BRAM_DESCRIBE_CONCURRENCY = 3;
@@ -5160,33 +5153,82 @@ setInterval(function () {
     __bramPumpDescribeQueue();
   }
 }, 1500);
+
+// Return describable rows that appeared after this stream's historical
+// frontier. Main projections can initially be a latest=N suffix; until a
+// windowStart=0 payload arrives, every newly revealed id is still baseline.
+// Rows without material remain unseen so a streaming update can make them
+// eligible later. The helper is exported for focused regression tests.
+window.__bramCollectNewDescribeRows = function (payload, state, stream) {
+  var turns = (payload && payload.turns) || [];
+  var reset = !state.initialized || state.stream !== stream;
+  if (reset) {
+    state.stream = stream;
+    state.initialized = true;
+    state.complete = false;
+    state.seen = {};
+  }
+  var baseline = reset || !state.complete;
+  var queue = [];
+  var entriesSeen = 0;
+  for (var i = turns.length - 1; i >= 0; i--) {
+    var entries = (turns[i] && turns[i].entries) || [];
+    for (var k = entries.length - 1; k >= 0; k--) {
+      entriesSeen++;
+      var e = entries[k];
+      if (!e || e.kind !== "tool" || !e.id) continue;
+      if (state.seen[e.id]) continue;
+      if (baseline || e.aiDescription) {
+        state.seen[e.id] = true;
+        continue;
+      }
+      if (!window.__bramDescribeMaterial(e)) continue;
+      state.seen[e.id] = true;
+      if (!window.__bramDescribeRequested[e.id]) queue.push(e);
+    }
+  }
+  // Subagent payloads and older hosts omit windowStart because they always
+  // carry the full transcript. Main windowed payloads complete the frontier
+  // only when the prefix has arrived.
+  if (!payload || typeof payload.windowStart !== "number" || payload.windowStart === 0) {
+    state.complete = true;
+  }
+  return { queue: queue, reset: reset, baseline: baseline, entries: entriesSeen };
+};
+
+// A transient request failure must reopen the frontier entry so the next
+// projection can queue it again. Persistent failures stay seen and rely on
+// manual expand, matching the unavailable latch's existing contract.
+window.__bramForgetDescribeSeen = function (id) {
+  if (!id) return;
+  try { delete __bramDescribeBaseline.seen[id]; } catch (e) {}
+  try {
+    var streams = Object.keys(__bramSubagentDescribeBaselines);
+    for (var i = 0; i < streams.length; i++) {
+      delete __bramSubagentDescribeBaselines[streams[i]].seen[id];
+    }
+  } catch (e) {}
+};
+
 function __bramEagerDescribe(payload) {
   try {
     if (window.__bramDescribeUnavailable) return;
     if (!payload || !payload.turns) return;
     if (window.location.pathname.indexOf("/tools/") === -1) return;
-    // eager-describe-scan-instrumentation: this full walk runs inside
-    // EVERY broadcast (O(turns x entries) + a material string-probe per
-    // undescribed entry) — the last unbracketed O(session) cost in the
-    // broadcast chain (round-3 suspect for the 17.5s zero-subscriber
-    // settle, 2026-07-30 22:49 boot). op=scan quantifies it per pass.
+    // The scan still walks the projection to recognize unseen ids, but only
+    // post-frontier rows can enter the API queue. op=scan exposes whether a
+    // payload was baseline and how many genuinely new rows it added.
     var __scanT0 = Date.now();
-    var __scanEntries = 0;
     var turns = payload.turns;
-    var queue = [];
-    for (var i = turns.length - 1; i >= 0; i--) {
-      var entries = (turns[i] && turns[i].entries) || [];
-      for (var k = entries.length - 1; k >= 0; k--) {
-        __scanEntries++;
-        var e = entries[k];
-        if (!e || e.kind !== "tool" || !e.id) continue;
-        if (e.aiDescription) continue;
-        if (!window.__bramDescribeMaterial(e)) continue;
-        if (window.__bramDescribeRequested[e.id]) continue;
-        queue.push(e);
-      }
+    var collected = window.__bramCollectNewDescribeRows(
+      payload,
+      __bramDescribeBaseline,
+      String(payload.sid || "")
+    );
+    if (collected.reset) __bramDescribeQueue = [];
+    if (collected.queue.length) {
+      __bramDescribeQueue = __bramDescribeQueue.concat(collected.queue);
     }
-    __bramDescribeQueue = queue;
     try {
       var __scanRoute = "";
       try { __scanRoute = String(location.hash || ""); } catch (eR) { /* ignore */ }
@@ -5194,8 +5236,9 @@ function __bramEagerDescribe(payload) {
         op: "scan",
         ms: Date.now() - __scanT0,
         turns: turns.length,
-        entries: __scanEntries,
-        queued: queue.length,
+        entries: collected.entries,
+        queued: collected.queue.length,
+        baseline: collected.baseline ? 1 : 0,
         route: __scanRoute,
       });
     } catch (eT) { /* ignore */ }
@@ -5203,12 +5246,10 @@ function __bramEagerDescribe(payload) {
   } catch (err) {}
 }
 
-// subagent-transcript-describe: same scan as __bramEagerDescribe, over the
-// subagent DataSource payload ({sid, agentId, turns, ...}). Replaces the
-// subagent queue wholesale per call (the payload is the whole transcript);
-// dedupe against __bramDescribeRequested keeps main/subagent entries from
-// double-requesting. The refetch thunk is how a completed description
-// reaches the view — see the flush hook.
+// subagent-transcript-describe: each sid/agent stream gets the same first-view
+// historical frontier. Queues are retained across chip switches so a row
+// already classified as new cannot be dropped before the pump requests it.
+// The refetch thunk is how a completed description reaches the active view.
 window.__bramEagerDescribeSubagent = function (payload, refetch) {
   try {
     if (window.__bramDescribeUnavailable) return;
@@ -5216,24 +5257,19 @@ window.__bramEagerDescribeSubagent = function (payload, refetch) {
     if (window.location.pathname.indexOf("/tools/") === -1) return;
     if (typeof refetch === "function") __bramSubagentDescribeRefetch = refetch;
     var __subScanT0 = Date.now();
-    var __subScanEntries = 0;
     var turns = payload.turns;
-    var queue = [];
-    for (var i = turns.length - 1; i >= 0; i--) {
-      var entries = (turns[i] && turns[i].entries) || [];
-      for (var k = entries.length - 1; k >= 0; k--) {
-        __subScanEntries++;
-        var e = entries[k];
-        if (!e || e.kind !== "tool" || !e.id) continue;
-        if (e.aiDescription) continue;
-        if (!window.__bramDescribeMaterial(e)) continue;
-        if (window.__bramDescribeRequested[e.id]) continue;
-        queue.push(e);
-      }
+    var stream = String(payload.sid || "") + "\u0001" + String(payload.agentId || "");
+    var state = __bramSubagentDescribeBaselines[stream];
+    if (!state) {
+      state = { stream: stream, initialized: false, complete: false, seen: {} };
+      __bramSubagentDescribeBaselines[stream] = state;
     }
-    __bramSubagentDescribeQueue = queue;
-    for (var q = 0; q < queue.length; q++) {
-      __bramSubagentDescribeIds[queue[q].id] = true;
+    var collected = window.__bramCollectNewDescribeRows(payload, state, stream);
+    if (collected.queue.length) {
+      __bramSubagentDescribeQueue = __bramSubagentDescribeQueue.concat(collected.queue);
+    }
+    for (var q = 0; q < collected.queue.length; q++) {
+      __bramSubagentDescribeIds[collected.queue[q].id] = true;
     }
     try {
       window.__bramIframeTrace("describe-scan", {
@@ -5241,8 +5277,9 @@ window.__bramEagerDescribeSubagent = function (payload, refetch) {
         agentId: String(payload.agentId || ""),
         ms: Date.now() - __subScanT0,
         turns: turns.length,
-        entries: __subScanEntries,
-        queued: queue.length,
+        entries: collected.entries,
+        queued: collected.queue.length,
+        baseline: collected.baseline ? 1 : 0,
       });
     } catch (eT) { /* ignore */ }
     __bramPumpDescribeQueue();
@@ -7728,7 +7765,7 @@ window.__bramExpandTool = function (arr, item) {
 // turn (the 2026-07-09 ctx=0 finding — same-turn-only lookup found
 // nothing on codex). A user turn is an acceptable source too: when a
 // command directly answers the user's request, that request IS the
-// intent. Lookback bounded to 4 turns; tail-capped to 500 chars so the
+// intent. Lookback bounded to 4 turns; tail-capped to 400 chars so the
 // sentence closest to the call survives. Empty when the entry isn't in
 // the main projection (e.g. subagent views).
 window.__bramDescribeContextForTool = function (toolId) {
@@ -7758,7 +7795,7 @@ window.__bramDescribeContextForTool = function (toolId) {
         ei = ((turns[ti] && turns[ti].entries) || []).length - 1;
         back += 1;
       }
-      return prose.length > 500 ? prose.slice(-500) : prose;
+      return prose.length > 400 ? prose.slice(-400) : prose;
     }
   }
   return "";
@@ -7862,18 +7899,20 @@ window.__bramRequestCommandDescription = function (item, onDone, fromHold) {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         id: id,
-        name: item.name || "",
+        // These client slices mirror the host budget to avoid oversized
+        // transport. The Rust handler remains authoritative and applies
+        // Unicode-safe caps after redaction and before hashing/API submission.
+        name: String(item.name || "").slice(0, 80),
         // Material, not just commandDisplay (describe-edit-write-rows):
-        // diffs and patches can be large — cap client-side; the host
-        // caps context/result but not command.
-        command: (window.__bramDescribeMaterial(item) || "").slice(0, 4000),
-        description: item.description || "",
+        // diffs and patches can be large, so bound every prompt field.
+        command: (window.__bramDescribeMaterial(item) || "").slice(0, 2000),
+        description: String(item.description || "").slice(0, 240),
         // Intent prose + result head (iterate 2026-07-08): the agent's
         // stated reason for the call and what it produced — Haiku
         // describes intent, not just syntax. Both capped; the host
         // re-caps defensively.
         context: window.__bramDescribeContextForTool(id),
-        result: String(item.result || "").slice(0, 400),
+        result: String(item.result || "").slice(0, 240),
       }),
     })
     .then(function (r) { return r.json(); })
@@ -7904,6 +7943,8 @@ window.__bramRequestCommandDescription = function (item, onDone, fromHold) {
             res.retryable === false)
         ) {
           window.__bramDescribeUnavailable = true;
+        } else {
+          window.__bramForgetDescribeSeen(id);
         }
         // Allow a retry on a later expand (disabled/no-key/persistent/
         // transient error all clear the per-id guard; the latch above,
@@ -7915,6 +7956,7 @@ window.__bramRequestCommandDescription = function (item, onDone, fromHold) {
     .catch(function () {
       __bramDescribeLoadDone();
       delete window.__bramDescribeRequested[id];
+      window.__bramForgetDescribeSeen(id);
       done();
     });
 };

@@ -24856,7 +24856,7 @@ fn read_subagent_turns<R: tauri::Runtime>(
     };
     let mut turns = st_parse_lines_to_turns(&text);
     project_user_turns(app, &mut turns);
-    apply_describe_overlay(&mut turns, &describe_overlay_snapshot());
+    apply_describe_overlay(&mut turns, &describe_overlay_snapshot(app));
     apply_menu_answer_overlay(&mut turns, &menu_answer_overlay_snapshot());
     let sid = session_path
         .file_stem()
@@ -26902,27 +26902,414 @@ static PROJECTED_TURNS_CACHE: std::sync::Mutex<Option<ProjectedTurnsCacheEntry>>
 
 const PROJECTED_TURNS_INCREMENTAL_OVERLAP_BYTES: u64 = 1024 * 1024;
 
-// ai-describe cache (haiku-command-descriptions): Haiku-synthesized
-// one-line intent headers for tool expansions. `by_id` (tool_use id →
-// description) feeds the projection overlay below; `by_key` (command +
-// existing description → description) dedupes API calls when the same
-// command recurs under different tool_use ids. In-memory only — a Bram
-// restart re-describes on the next expand, which is fine at Haiku cost.
-#[derive(Default)]
-struct DescribeCache {
-    by_id: std::collections::HashMap<String, String>,
-    by_key: std::collections::HashMap<String, String>,
+// ai-describe cache (persist-tool-description-cache): generated one-line
+// intent headers survive Bram restarts in a bounded, project/model-scoped
+// SQLite cache under app_cache_dir. Only opaque request hashes, tool-use ids,
+// and generated descriptions are persisted — never prompt material. The
+// prompt schema version invalidates both paths and keys when behavior changes.
+const DESCRIBE_CACHE_SCHEMA_VERSION: u32 = 1;
+const DESCRIBE_PROMPT_SCHEMA_VERSION: u32 = 1;
+const DESCRIBE_CACHE_MAX_ENTRIES: usize = 5_000;
+
+// One authoritative server-side prompt budget. Client slices remain only as
+// transport safeguards; the host always applies these char-boundary-safe caps
+// after redaction and before cache-key derivation and request construction.
+const DESCRIBE_TOOL_NAME_MAX_CHARS: usize = 80;
+const DESCRIBE_COMMAND_MAX_CHARS: usize = 2_000;
+const DESCRIBE_EXISTING_MAX_CHARS: usize = 240;
+const DESCRIBE_CONTEXT_MAX_CHARS: usize = 400;
+const DESCRIBE_RESULT_MAX_CHARS: usize = 240;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DescribeCacheEntry {
+    id: String,
+    key: String,
+    description: String,
+    touched_at_ms: i64,
 }
+
+struct DescribeCache {
+    path: PathBuf,
+    model: String,
+    // Keep the request key beside the description so a model/prompt-input
+    // change cannot hit merely because the tool-use id stayed the same.
+    by_id: std::collections::HashMap<String, (String, String)>,
+    by_key: std::collections::HashMap<String, String>,
+    records: std::collections::HashMap<String, DescribeCacheEntry>,
+}
+
+impl DescribeCache {
+    fn empty(path: PathBuf, model: &str) -> Self {
+        Self {
+            path,
+            model: model.to_string(),
+            by_id: std::collections::HashMap::new(),
+            by_key: std::collections::HashMap::new(),
+            records: std::collections::HashMap::new(),
+        }
+    }
+
+    fn load(path: PathBuf, model: &str) -> Result<Self, String> {
+        let mut cache = Self::empty(path.clone(), model);
+        let conn = describe_cache_connection(&path)?;
+        // A model or prompt-schema change is a clean invalidation. Keeping
+        // only the active namespace also makes the 5,000-row bound global
+        // for this project's dedicated cache instead of per past model.
+        conn.execute(
+            "DELETE FROM tool_descriptions WHERE model <> ?1 OR prompt_schema_version <> ?2",
+            rusqlite::params![model, i64::from(DESCRIBE_PROMPT_SCHEMA_VERSION)],
+        )
+        .map_err(|e| format!("prune describe cache namespaces: {}", e))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, request_key, description, touched_at_ms \
+                 FROM tool_descriptions \
+                 WHERE model = ?1 AND prompt_schema_version = ?2 \
+                 ORDER BY touched_at_ms ASC, id ASC",
+            )
+            .map_err(|e| format!("prepare describe cache load: {}", e))?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![model, i64::from(DESCRIBE_PROMPT_SCHEMA_VERSION)],
+                |row| {
+                    Ok(DescribeCacheEntry {
+                        id: row.get(0)?,
+                        key: row.get(1)?,
+                        description: row.get(2)?,
+                        touched_at_ms: row.get(3)?,
+                    })
+                },
+            )
+            .map_err(|e| format!("query describe cache: {}", e))?;
+        for row in rows {
+            let entry = row.map_err(|e| format!("read describe cache row: {}", e))?;
+            if !entry.id.is_empty() && !entry.key.is_empty() && !entry.description.is_empty() {
+                cache.records.insert(entry.id.clone(), entry);
+            }
+        }
+        cache.rebuild_indexes();
+        Ok(cache)
+    }
+
+    fn rebuild_indexes(&mut self) {
+        self.by_id.clear();
+        self.by_key.clear();
+        let mut entries: Vec<&DescribeCacheEntry> = self.records.values().collect();
+        entries.sort_by_key(|entry| (entry.touched_at_ms, entry.id.as_str()));
+        for entry in entries {
+            self.by_id.insert(
+                entry.id.clone(),
+                (entry.key.clone(), entry.description.clone()),
+            );
+            // Newest record for an identical request wins deterministically.
+            self.by_key
+                .insert(entry.key.clone(), entry.description.clone());
+        }
+    }
+
+    fn record_with_limit(
+        &mut self,
+        id: &str,
+        key: &str,
+        description: &str,
+        touched_at_ms: i64,
+        limit: usize,
+    ) {
+        self.records.insert(
+            id.to_string(),
+            DescribeCacheEntry {
+                id: id.to_string(),
+                key: key.to_string(),
+                description: description.to_string(),
+                touched_at_ms,
+            },
+        );
+        if self.records.len() > limit {
+            let mut oldest: Vec<(i64, String)> = self
+                .records
+                .values()
+                .map(|entry| (entry.touched_at_ms, entry.id.clone()))
+                .collect();
+            oldest.sort();
+            let remove = self.records.len() - limit;
+            for (_, id) in oldest.into_iter().take(remove) {
+                self.records.remove(&id);
+            }
+        }
+        self.rebuild_indexes();
+    }
+
+    fn record(&mut self, id: &str, key: &str, description: &str) {
+        self.record_with_limit(
+            id,
+            key,
+            description,
+            unix_now_ms(),
+            DESCRIBE_CACHE_MAX_ENTRIES,
+        );
+    }
+
+    fn persist_entry(&self, id: &str) -> Result<(), String> {
+        self.persist_entry_with_limit(id, DESCRIBE_CACHE_MAX_ENTRIES)
+    }
+
+    fn persist_entry_with_limit(&self, id: &str, limit: usize) -> Result<(), String> {
+        let entry = self
+            .records
+            .get(id)
+            .ok_or_else(|| format!("missing describe cache entry {}", id))?;
+        let mut conn = describe_cache_connection(&self.path)?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("begin describe cache transaction: {}", e))?;
+        tx.execute(
+            "INSERT INTO tool_descriptions \
+               (model, prompt_schema_version, id, request_key, description, touched_at_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+             ON CONFLICT(model, prompt_schema_version, id) DO UPDATE SET \
+               request_key = excluded.request_key, \
+               description = excluded.description, \
+               touched_at_ms = excluded.touched_at_ms",
+            rusqlite::params![
+                self.model,
+                i64::from(DESCRIBE_PROMPT_SCHEMA_VERSION),
+                entry.id,
+                entry.key,
+                entry.description,
+                entry.touched_at_ms,
+            ],
+        )
+        .map_err(|e| format!("upsert describe cache entry: {}", e))?;
+        tx.execute(
+            "DELETE FROM tool_descriptions WHERE rowid IN (\
+               SELECT rowid FROM tool_descriptions \
+               ORDER BY touched_at_ms DESC, id DESC \
+               LIMIT -1 OFFSET ?1\
+             )",
+            rusqlite::params![limit as i64],
+        )
+        .map_err(|e| format!("evict describe cache entries: {}", e))?;
+        tx.commit()
+            .map_err(|e| format!("commit describe cache entry: {}", e))
+    }
+}
+
+fn describe_cache_connection(path: &Path) -> Result<rusqlite::Connection, String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create {}: {}", parent.display(), e))?;
+    }
+    let conn = rusqlite::Connection::open(path)
+        .map_err(|e| format!("open describe cache {}: {}", path.display(), e))?;
+    let _ = conn.pragma_update(None, "journal_mode", "WAL");
+    conn.busy_timeout(std::time::Duration::from_secs(2))
+        .map_err(|e| format!("configure describe cache timeout: {}", e))?;
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|e| format!("read describe cache schema: {}", e))?;
+    if version != i64::from(DESCRIBE_CACHE_SCHEMA_VERSION) {
+        conn.execute_batch("DROP TABLE IF EXISTS tool_descriptions;")
+            .map_err(|e| format!("reset describe cache schema: {}", e))?;
+    }
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS tool_descriptions( \
+           model TEXT NOT NULL, \
+           prompt_schema_version INTEGER NOT NULL, \
+           id TEXT NOT NULL, \
+           request_key TEXT NOT NULL, \
+           description TEXT NOT NULL, \
+           touched_at_ms INTEGER NOT NULL, \
+           PRIMARY KEY(model, prompt_schema_version, id)); \
+         CREATE INDEX IF NOT EXISTS tool_descriptions_request_key \
+           ON tool_descriptions(model, prompt_schema_version, request_key);",
+    )
+    .map_err(|e| format!("create describe cache schema: {}", e))?;
+    if version != i64::from(DESCRIBE_CACHE_SCHEMA_VERSION) {
+        conn.pragma_update(None, "user_version", DESCRIBE_CACHE_SCHEMA_VERSION)
+            .map_err(|e| format!("write describe cache schema: {}", e))?;
+    }
+    Ok(conn)
+}
+
 static DESCRIBE_CACHE: std::sync::Mutex<Option<DescribeCache>> = std::sync::Mutex::new(None);
 
-// Snapshot of by_id for the projection overlay. Empty map when nothing
-// has been described this run — the common case, which the overlay
-// callers use to skip cloning entirely.
-fn describe_overlay_snapshot() -> std::collections::HashMap<String, String> {
-    DESCRIBE_CACHE
+fn describe_model(config: Option<&ProjectConfig>) -> String {
+    config
+        .and_then(|c| c.ai.as_ref())
+        .and_then(|a| a.model.as_ref())
+        .filter(|model| !model.trim().is_empty())
+        .cloned()
+        .unwrap_or_else(|| "claude-haiku-4-5".to_string())
+}
+
+// Stable length-delimited dual-FNV hash: deterministic across processes and
+// opaque in the cache file. This is an identity/dedupe key, not a security
+// primitive; redaction happens before prompt fields reach it.
+fn describe_stable_hash(parts: &[&str]) -> String {
+    fn mix(mut hash: u64, bytes: &[u8]) -> u64 {
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash
+    }
+    let mut left = 0xcbf29ce484222325u64;
+    let mut right = 0x84222325cbf29ce4u64;
+    for part in parts {
+        let len = (part.len() as u64).to_le_bytes();
+        left = mix(mix(left, &len), part.as_bytes());
+        right = mix(mix(right, &len), part.as_bytes());
+    }
+    format!("{:016x}{:016x}", left, right)
+}
+
+fn describe_cache_key(
+    model: &str,
+    tool_name: &str,
+    command: &str,
+    existing: &str,
+    context: &str,
+    result: &str,
+) -> String {
+    describe_cache_key_for_version(
+        DESCRIBE_PROMPT_SCHEMA_VERSION,
+        model,
+        tool_name,
+        command,
+        existing,
+        context,
+        result,
+    )
+}
+
+fn describe_cache_key_for_version(
+    prompt_version: u32,
+    model: &str,
+    tool_name: &str,
+    command: &str,
+    existing: &str,
+    context: &str,
+    result: &str,
+) -> String {
+    let prompt_version = prompt_version.to_string();
+    describe_stable_hash(&[
+        &prompt_version,
+        model,
+        tool_name,
+        command,
+        existing,
+        context,
+        result,
+    ])
+}
+
+fn describe_cache_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+    let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
+    let canonical = strip_unc_prefix(root.canonicalize().unwrap_or(root));
+    let project_text = canonical.to_string_lossy().to_string();
+    let project_key = describe_stable_hash(&[&project_text]);
+    let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+    Ok(cache_dir
+        .join("tool-descriptions")
+        .join(format!("{}.db", project_key)))
+}
+
+fn describe_cache_guard<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    model: &str,
+) -> Result<std::sync::MutexGuard<'static, Option<DescribeCache>>, String> {
+    let path = describe_cache_path(app)?;
+    let mut guard = DESCRIBE_CACHE
         .lock()
+        .map_err(|_| "describe cache lock poisoned".to_string())?;
+    let needs_load = guard
+        .as_ref()
+        .map(|cache| cache.path != path || cache.model != model)
+        .unwrap_or(true);
+    if needs_load {
+        let cache = DescribeCache::load(path, model)?;
+        let entries = cache.records.len();
+        *guard = Some(cache);
+        append_bram_trace_line(
+            app,
+            "ai-describe",
+            &format!("op=cache-load model={} entries={}", model, entries),
+        );
+    }
+    Ok(guard)
+}
+
+fn cap_chars_head(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
+fn cap_chars_tail(value: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let start = chars.len().saturating_sub(max_chars);
+    chars[start..].iter().collect()
+}
+
+fn build_describe_prompt(
+    tool_name: &str,
+    command: &str,
+    existing: &str,
+    context: &str,
+    result_head: &str,
+) -> String {
+    let mut prompt = String::from(
+        "You are writing the one-line intent header shown above a command, \
+         file change, or file access in a developer-tool log.\n\n",
+    );
+    if !tool_name.is_empty() {
+        prompt.push_str(&format!("Tool: {}\n\n", tool_name));
+    }
+    prompt.push_str(&format!("<command>\n{}\n</command>\n", command));
+    if !context.is_empty() {
+        prompt.push_str(&format!(
+            "\nWhat the agent said just before running it:\n<agent_context>\n{}\n</agent_context>\n",
+            context
+        ));
+    }
+    if !result_head.is_empty() {
+        prompt.push_str(&format!(
+            "\nFirst lines of the command's output:\n<result>\n{}\n</result>\n",
+            result_head
+        ));
+    }
+    if !existing.is_empty() {
+        prompt.push_str(&format!(
+            "\nThe agent also authored this description; if it is accurate and concise, \
+             return it unchanged, otherwise improve it:\n<description>\n{}\n</description>\n",
+            existing
+        ));
+    }
+    prompt.push_str(
+        "\nWrite a one-line description (under 12 words, active voice, name the \
+         specific target) of what this command does — prefer the agent's stated \
+         intent over a mechanical paraphrase. Return only the description line — \
+         no quotes, no trailing period.",
+    );
+    prompt
+}
+
+// Snapshot of by_id for the projection overlay. Loading is lazy so cached
+// descriptions are available on the first projection after a Bram restart.
+fn describe_overlay_snapshot<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> std::collections::HashMap<String, String> {
+    let config = project_root(Some(app)).and_then(|root| load_project_config(&root));
+    let model = describe_model(config.as_ref());
+    describe_cache_guard(app, &model)
         .ok()
-        .and_then(|g| g.as_ref().map(|c| c.by_id.clone()))
+        .and_then(|guard| {
+            guard.as_ref().map(|cache| {
+                cache
+                    .by_id
+                    .iter()
+                    .map(|(id, (_, description))| (id.clone(), description.clone()))
+                    .collect()
+            })
+        })
         .unwrap_or_default()
 }
 
@@ -27451,6 +27838,7 @@ fn try_incremental_projected_turns<R: tauri::Runtime>(
     }
     if entry.mtime == mtime {
         return Some(projected_turns_body(
+            app,
             &entry.sid,
             entry.provider_label,
             &entry.turns,
@@ -27493,7 +27881,7 @@ fn try_incremental_projected_turns<R: tauri::Runtime>(
             ),
         );
     }
-    let body = projected_turns_body(&sid, provider_label, &merged, latest);
+    let body = projected_turns_body(app, &sid, provider_label, &merged, latest);
     if body.is_ok() {
         if let Ok(mut guard) = PROJECTED_TURNS_CACHE.lock() {
             *guard = Some(ProjectedTurnsCacheEntry {
@@ -27513,7 +27901,8 @@ fn try_incremental_projected_turns<R: tauri::Runtime>(
 // with `windowStart`/`total` so the iframe can splice the window onto its
 // accumulated history and detect gaps/rotation; full requests ship
 // windowStart=0.
-fn projected_turns_body(
+fn projected_turns_body<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     sid: &str,
     provider_label: &str,
     turns: &[serde_json::Value],
@@ -27527,7 +27916,7 @@ fn projected_turns_body(
     // clone only happens when something has been described or answered
     // this run; otherwise the zero-copy slice path below serializes as
     // before.
-    let overlay = describe_overlay_snapshot();
+    let overlay = describe_overlay_snapshot(app);
     let answers = menu_answer_overlay_snapshot();
     if !overlay.is_empty() || !answers.is_empty() {
         let mut window: Vec<serde_json::Value> = turns[window_start..].to_vec();
@@ -27593,6 +27982,7 @@ fn read_projected_turns<R: tauri::Runtime>(
         if let Some(entry) = guard.as_ref() {
             if entry.path == path && entry.mtime == mtime {
                 return projected_turns_body(
+                    app,
                     &entry.sid,
                     entry.provider_label,
                     &entry.turns,
@@ -27636,7 +28026,7 @@ fn read_projected_turns<R: tauri::Runtime>(
         "claude"
     };
     let serialize_started = std::time::Instant::now();
-    let bytes = projected_turns_body(&sid, provider_label, &turns, latest)?;
+    let bytes = projected_turns_body(app, &sid, provider_label, &turns, latest)?;
     let serialize_ms = serialize_started.elapsed().as_millis();
     let summary = format!(
         "op=rebuild sid={} provider={} src_bytes={} read_ms={} parse_ms={} project_ms={} serialize_ms={} turns={} window={} body_bytes={} total_ms={}",
@@ -42521,6 +42911,238 @@ mod describe_error_retryable_tests {
 }
 
 #[cfg(test)]
+mod describe_cache_tests {
+    use super::{
+        build_describe_prompt, cap_chars_head, cap_chars_tail, describe_cache_connection,
+        describe_cache_key, describe_cache_key_for_version, DescribeCache,
+        DESCRIBE_COMMAND_MAX_CHARS, DESCRIBE_CONTEXT_MAX_CHARS, DESCRIBE_EXISTING_MAX_CHARS,
+        DESCRIBE_PROMPT_SCHEMA_VERSION, DESCRIBE_RESULT_MAX_CHARS, DESCRIBE_TOOL_NAME_MAX_CHARS,
+    };
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_DB: AtomicUsize = AtomicUsize::new(0);
+
+    struct TempDb(PathBuf);
+
+    impl TempDb {
+        fn new(label: &str) -> Self {
+            let n = NEXT_DB.fetch_add(1, Ordering::SeqCst);
+            Self(std::env::temp_dir().join(format!(
+                "bram-describe-cache-{}-{}-{}.db",
+                label,
+                std::process::id(),
+                n
+            )))
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+            let _ = std::fs::remove_file(format!("{}-wal", self.0.display()));
+            let _ = std::fs::remove_file(format!("{}-shm", self.0.display()));
+        }
+    }
+
+    #[test]
+    fn caps_are_unicode_safe_and_prompt_stays_bounded() {
+        assert_eq!(cap_chars_head("a🦀bc", 3), "a🦀b");
+        assert_eq!(cap_chars_tail("a🦀bc", 3), "🦀bc");
+
+        let long = "x".repeat(10_000);
+        let tool = cap_chars_head(&long, DESCRIBE_TOOL_NAME_MAX_CHARS);
+        let command = cap_chars_head(&long, DESCRIBE_COMMAND_MAX_CHARS);
+        let existing = cap_chars_head(&long, DESCRIBE_EXISTING_MAX_CHARS);
+        let context = cap_chars_tail(&long, DESCRIBE_CONTEXT_MAX_CHARS);
+        let result = cap_chars_head(&long, DESCRIBE_RESULT_MAX_CHARS);
+        assert_eq!(tool.chars().count(), DESCRIBE_TOOL_NAME_MAX_CHARS);
+        assert_eq!(command.chars().count(), DESCRIBE_COMMAND_MAX_CHARS);
+        assert_eq!(existing.chars().count(), DESCRIBE_EXISTING_MAX_CHARS);
+        assert_eq!(context.chars().count(), DESCRIBE_CONTEXT_MAX_CHARS);
+        assert_eq!(result.chars().count(), DESCRIBE_RESULT_MAX_CHARS);
+
+        let prompt = build_describe_prompt(&tool, &command, &existing, &context, &result);
+        assert!(
+            prompt.chars().count() < 4_096,
+            "maximal ASCII prompt should remain below 4,096 characters"
+        );
+    }
+
+    #[test]
+    fn cache_key_covers_every_prompt_input_model_and_schema() {
+        let base = describe_cache_key_for_version(1, "model", "tool", "cmd", "desc", "ctx", "out");
+        for changed in [
+            describe_cache_key_for_version(2, "model", "tool", "cmd", "desc", "ctx", "out"),
+            describe_cache_key_for_version(1, "other", "tool", "cmd", "desc", "ctx", "out"),
+            describe_cache_key_for_version(1, "model", "other", "cmd", "desc", "ctx", "out"),
+            describe_cache_key_for_version(1, "model", "tool", "other", "desc", "ctx", "out"),
+            describe_cache_key_for_version(1, "model", "tool", "cmd", "other", "ctx", "out"),
+            describe_cache_key_for_version(1, "model", "tool", "cmd", "desc", "other", "out"),
+            describe_cache_key_for_version(1, "model", "tool", "cmd", "desc", "ctx", "other"),
+        ] {
+            assert_ne!(base, changed);
+        }
+        assert_eq!(base.len(), 32);
+        assert_eq!(
+            describe_cache_key_for_version(1, "model", "tool", "cmd", "desc", "ctx", "out"),
+            base
+        );
+    }
+
+    #[test]
+    fn sqlite_round_trip_persists_only_opaque_identity_and_description() {
+        let db = TempDb::new("round-trip");
+        let model = "claude-haiku-4-5";
+        let raw_material = "TOP_SECRET_COMMAND_MATERIAL";
+        let key = describe_cache_key(model, "Bash", raw_material, "", "", "");
+        let mut cache = DescribeCache::empty(db.path().to_path_buf(), model);
+        cache.record("tool-1", &key, "Inspect the cache behavior");
+        cache.persist_entry("tool-1").expect("persist entry");
+
+        let loaded = DescribeCache::load(db.path().to_path_buf(), model).expect("reload cache");
+        assert_eq!(
+            loaded.by_id.get("tool-1"),
+            Some(&(key.clone(), "Inspect the cache behavior".to_string()))
+        );
+        assert_eq!(
+            loaded.by_key.get(&key).map(String::as_str),
+            Some("Inspect the cache behavior")
+        );
+
+        let conn = describe_cache_connection(db.path()).expect("open cache db");
+        let stored: String = conn
+            .query_row(
+                "SELECT model || id || request_key || description FROM tool_descriptions",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read stored fields");
+        assert!(!stored.contains(raw_material));
+        assert!(stored.contains(&key));
+    }
+
+    #[test]
+    fn model_and_prompt_schema_changes_invalidate_rows() {
+        let db = TempDb::new("invalidate");
+        let mut cache = DescribeCache::empty(db.path().to_path_buf(), "model-a");
+        cache.record("tool-1", "opaque-key", "A description");
+        cache.persist_entry("tool-1").expect("persist model A");
+
+        let model_b = DescribeCache::load(db.path().to_path_buf(), "model-b").expect("load B");
+        assert!(model_b.records.is_empty());
+
+        let conn = describe_cache_connection(db.path()).expect("open cache db");
+        conn.execute(
+            "INSERT INTO tool_descriptions \
+               (model, prompt_schema_version, id, request_key, description, touched_at_ms) \
+             VALUES (?1, ?2, 'old-schema', 'old-key', 'old description', 1)",
+            rusqlite::params!["model-b", i64::from(DESCRIBE_PROMPT_SCHEMA_VERSION) + 1],
+        )
+        .expect("insert stale prompt row");
+        drop(conn);
+        let reloaded = DescribeCache::load(db.path().to_path_buf(), "model-b").expect("reload B");
+        assert!(reloaded.records.is_empty());
+    }
+
+    #[test]
+    fn oldest_entries_are_evicted_at_the_bound() {
+        let db = TempDb::new("evict");
+        let mut cache = DescribeCache::empty(db.path().to_path_buf(), "model");
+        cache.record_with_limit("old", "k1", "one", 1, 2);
+        cache
+            .persist_entry_with_limit("old", 2)
+            .expect("persist old");
+        cache.record_with_limit("middle", "k2", "two", 2, 2);
+        cache
+            .persist_entry_with_limit("middle", 2)
+            .expect("persist middle");
+        cache.record_with_limit("new", "k3", "three", 3, 2);
+        cache
+            .persist_entry_with_limit("new", 2)
+            .expect("persist new");
+        assert!(!cache.records.contains_key("old"));
+        assert!(cache.records.contains_key("middle"));
+        assert!(cache.records.contains_key("new"));
+        let loaded = DescribeCache::load(db.path().to_path_buf(), "model").expect("reload cache");
+        assert!(!loaded.records.contains_key("old"));
+        assert!(loaded.records.contains_key("middle"));
+        assert!(loaded.records.contains_key("new"));
+    }
+}
+
+#[cfg(test)]
+mod describe_frontier_js_tests {
+    #[test]
+    fn historical_baseline_is_quiet_and_new_rows_queue_once() {
+        let helpers = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../app/__shell/helpers.js"
+        ));
+        let start_marker = "window.__bramCollectNewDescribeRows = function";
+        let end_marker = "\n};\n\nfunction __bramEagerDescribe";
+        let start = helpers.find(start_marker).expect("frontier helper start");
+        let tail = &helpers[start..];
+        let end = tail.find(end_marker).expect("frontier helper end") + 3;
+
+        let mut script = String::from(
+            "global.window = {\n\
+               __bramDescribeMaterial: function (e) { return e.material || ''; },\n\
+               __bramDescribeRequested: {}\n\
+             };\n",
+        );
+        script.push_str(&tail[..end]);
+        script.push_str(
+            r#"
+function tool(id, material, aiDescription) {
+  return { kind: 'tool', id: id, material: material || '', aiDescription: aiDescription || '' };
+}
+function payload(sid, rows, windowStart) {
+  var p = { sid: sid, turns: [{ entries: rows }] };
+  if (windowStart !== undefined) p.windowStart = windowStart;
+  return p;
+}
+function ok(value, message) { if (!value) throw new Error(message); }
+var state = { stream: '', initialized: false, complete: false, seen: {} };
+var first = window.__bramCollectNewDescribeRows(payload('s1', [tool('old-a', 'a'), tool('old-b', 'b')], 0), state, 's1');
+ok(first.baseline && first.queue.length === 0, 'initial history must be a quiet baseline');
+var appended = window.__bramCollectNewDescribeRows(payload('s1', [tool('old-a', 'a'), tool('old-b', 'b'), tool('new-c', 'c')], 0), state, 's1');
+ok(!appended.baseline && appended.queue.length === 1 && appended.queue[0].id === 'new-c', 'one appended row must queue');
+var repeated = window.__bramCollectNewDescribeRows(payload('s1', [tool('old-a', 'a'), tool('old-b', 'b'), tool('new-c', 'c')], 0), state, 's1');
+ok(repeated.queue.length === 0, 'rebroadcast must not queue twice');
+var cached = window.__bramCollectNewDescribeRows(payload('s1', [tool('cached-d', 'd', 'cached')], 0), state, 's1');
+ok(cached.queue.length === 0, 'overlay-described row must stay quiet');
+var pending = window.__bramCollectNewDescribeRows(payload('s1', [tool('streaming-e', '')], 0), state, 's1');
+ok(pending.queue.length === 0, 'material-less row must wait');
+var ready = window.__bramCollectNewDescribeRows(payload('s1', [tool('streaming-e', 'e')], 0), state, 's1');
+ok(ready.queue.length === 1, 'streaming row must queue when material arrives');
+var rotated = window.__bramCollectNewDescribeRows(payload('s2', [tool('old-z', 'z')], 0), state, 's2');
+ok(rotated.baseline && rotated.queue.length === 0, 'session rotation must establish a new baseline');
+var windowed = { stream: '', initialized: false, complete: false, seen: {} };
+ok(window.__bramCollectNewDescribeRows(payload('s3', [tool('tail', 't')], 8), windowed, 's3').queue.length === 0, 'initial suffix must be baseline');
+ok(window.__bramCollectNewDescribeRows(payload('s3', [tool('tail', 't'), tool('arrived-before-prefix', 'n')], 8), windowed, 's3').queue.length === 0, 'frontier stays quiet until prefix arrives');
+ok(window.__bramCollectNewDescribeRows(payload('s3', [tool('historic-prefix', 'h'), tool('tail', 't'), tool('arrived-before-prefix', 'n')], 0), windowed, 's3').queue.length === 0, 'revealed prefix is historical');
+ok(window.__bramCollectNewDescribeRows(payload('s3', [tool('historic-prefix', 'h'), tool('tail', 't'), tool('arrived-before-prefix', 'n'), tool('after-frontier', 'x')], 0), windowed, 's3').queue.length === 1, 'post-frontier row queues');
+"#,
+        );
+        let output = std::process::Command::new("node")
+            .arg("-e")
+            .arg(script)
+            .output()
+            .expect("node is required by the Bram frontend toolchain");
+        assert!(
+            output.status.success(),
+            "frontier JS test failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[cfg(test)]
 mod menu_labels_match_tests {
     use super::{grid_menu_dismissed_label_match, menu_labels_match};
 
@@ -42808,27 +43430,14 @@ fn handle_describe_command<R: tauri::Runtime>(
         );
         return (200, JSON, br#"{"ok":false,"reason":"disabled"}"#.to_vec());
     }
-    let key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
-    if key.trim().is_empty() {
-        append_bram_trace_line(
-            app,
-            "ai-describe",
-            &format!("op=skip reason=no-key id={}", id),
-        );
-        return (200, JSON, br#"{"ok":false,"reason":"no-key"}"#.to_vec());
-    }
-    let model = config
-        .and_then(|c| c.ai)
-        .and_then(|a| a.model)
-        .filter(|m| !m.trim().is_empty())
-        .unwrap_or_else(|| "claude-haiku-4-5".to_string());
+    let model = describe_model(config.as_ref());
     // Optional context riders (iterate 2026-07-08 "what could we send to
     // make best use of it"): the tool name, the agent's prose immediately
     // before the call (its stated intent — the highest-signal input), and
-    // the head of the command's output. Caller caps them; re-cap here so
-    // the payload stays bounded regardless of caller. Char-boundary-safe
-    // truncation: context keeps its TAIL (the sentence nearest the call),
-    // result keeps its HEAD.
+    // the head of the command's output. The host owns the authoritative
+    // budget so every caller gets the same bounded, char-boundary-safe
+    // prompt. Context keeps its TAIL (the sentence nearest the call);
+    // every other field keeps its HEAD.
     let tool_name_raw = parsed
         .get("name")
         .and_then(|v| v.as_str())
@@ -42839,55 +43448,89 @@ fn handle_describe_command<R: tauri::Runtime>(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .trim();
-    let context_raw_capped: String = {
-        let chars: Vec<char> = context_raw.chars().collect();
-        let start = chars.len().saturating_sub(800);
-        chars[start..].iter().collect()
-    };
-    let result_head_raw: String = parsed
+    let result_raw = parsed
         .get("result")
         .and_then(|v| v.as_str())
         .unwrap_or("")
-        .trim()
-        .chars()
-        .take(600)
-        .collect();
-    let (command, command_redactions) = redact_sensitive_text(command_raw);
-    let (existing, existing_redactions) = redact_sensitive_text(existing_raw);
-    let (tool_name, tool_name_redactions) = redact_sensitive_text(tool_name_raw);
-    let (context, context_redactions) = redact_sensitive_text(&context_raw_capped);
-    let (result_head, result_redactions) = redact_sensitive_text(&result_head_raw);
+        .trim();
+    let (command_redacted, command_redactions) = redact_sensitive_text(command_raw.trim());
+    let (existing_redacted, existing_redactions) = redact_sensitive_text(existing_raw);
+    let (tool_name_redacted, tool_name_redactions) = redact_sensitive_text(tool_name_raw);
+    let (context_redacted, context_redactions) = redact_sensitive_text(context_raw);
+    let (result_redacted, result_redactions) = redact_sensitive_text(result_raw);
+    // Re-cap after redaction because a replacement marker can be longer than
+    // the matched secret. These are the exact fields hashed and sent.
+    let command = cap_chars_head(&command_redacted, DESCRIBE_COMMAND_MAX_CHARS);
+    let existing = cap_chars_head(&existing_redacted, DESCRIBE_EXISTING_MAX_CHARS);
+    let tool_name = cap_chars_head(&tool_name_redacted, DESCRIBE_TOOL_NAME_MAX_CHARS);
+    let context = cap_chars_tail(&context_redacted, DESCRIBE_CONTEXT_MAX_CHARS);
+    let result_head = cap_chars_head(&result_redacted, DESCRIBE_RESULT_MAX_CHARS);
     let redactions = command_redactions
         + existing_redactions
         + tool_name_redactions
         + context_redactions
         + result_redactions;
-    // Cache: id hit means this exact expansion was already described;
-    // key hit means an identical payload (command + description + context
-    // + result head) was described under another tool_use id — reuse
-    // without an API call. Context participates in the key because it
-    // changes the intended output: the same command run for different
-    // reasons should describe differently.
-    let cache_key = format!(
-        "{}\u{1}{}\u{1}{}\u{1}{}",
-        command, existing, context, result_head
+    // Both lookup paths require the complete effective prompt identity.
+    // The key includes model and prompt schema as well as every bounded,
+    // redacted field, so neither a reused id nor a repeated command can
+    // return a description generated for different inputs.
+    let cache_key = describe_cache_key(
+        &model,
+        &tool_name,
+        &command,
+        &existing,
+        &context,
+        &result_head,
     );
     {
-        let Ok(mut guard) = DESCRIBE_CACHE.lock() else {
-            return (500, JSON, br#"{"ok":false,"reason":"cache lock"}"#.to_vec());
+        let mut guard = match describe_cache_guard(app, &model) {
+            Ok(guard) => guard,
+            Err(reason) => {
+                append_bram_trace_line(
+                    app,
+                    "ai-describe",
+                    &format!("op=error status=cache id={} detail={}", id, reason),
+                );
+                return (500, JSON, br#"{"ok":false,"reason":"cache"}"#.to_vec());
+            }
         };
-        let cache = guard.get_or_insert_with(DescribeCache::default);
-        let hit = cache
-            .by_id
-            .get(id)
-            .cloned()
-            .or_else(|| cache.by_key.get(&cache_key).cloned());
+        let cache = guard.as_mut().expect("describe cache initialized");
+        let id_hit = cache.by_id.get(id).and_then(|(stored_key, description)| {
+            (stored_key == &cache_key).then(|| description.clone())
+        });
+        let (hit, source) = if let Some(description) = id_hit {
+            (Some(description), "id")
+        } else if let Some(description) = cache.by_key.get(&cache_key).cloned() {
+            cache.record(id, &cache_key, &description);
+            if let Err(error) = cache.persist_entry(id) {
+                append_bram_trace_line(
+                    app,
+                    "ai-describe",
+                    &format!("op=cache-write-error id={} detail={}", id, error),
+                );
+            }
+            (Some(description), "key")
+        } else {
+            (None, "")
+        };
         if let Some(desc) = hit {
-            cache.by_id.insert(id.to_string(), desc.clone());
-            append_bram_trace_line(app, "ai-describe", &format!("op=hit id={}", id));
+            append_bram_trace_line(
+                app,
+                "ai-describe",
+                &format!("op=hit source={} model={} id={}", source, model, id),
+            );
             let body = serde_json::json!({ "ok": true, "description": desc, "cached": true });
             return (200, JSON, body.to_string().into_bytes());
         }
+    }
+    let key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+    if key.trim().is_empty() {
+        append_bram_trace_line(
+            app,
+            "ai-describe",
+            &format!("op=skip reason=no-key id={}", id),
+        );
+        return (200, JSON, br#"{"ok":false,"reason":"no-key"}"#.to_vec());
     }
     // Prompt shape grown from the 2026-07-08 Haiku feasibility test (12
     // real Codex exec_command samples, 11/12 shippable on command text
@@ -42900,39 +43543,13 @@ fn handle_describe_command<R: tauri::Runtime>(
     // shell command, a file diff/patch, written content, or a file/search
     // target (Read/Grep/Glob) — say so, so Haiku doesn't describe a diff
     // or a path as a command.
-    let mut prompt = String::from(
-        "You are writing the one-line intent header shown above a command, \
-         file change, or file access in a developer-tool log.\n\n",
-    );
-    if !tool_name.is_empty() {
-        prompt.push_str(&format!("Tool: {}\n\n", tool_name));
-    }
-    prompt.push_str(&format!("<command>\n{}\n</command>\n", command));
-    if !context.is_empty() {
-        prompt.push_str(&format!(
-            "\nWhat the agent said just before running it:\n<agent_context>\n{}\n</agent_context>\n",
-            context
-        ));
-    }
-    if !result_head.is_empty() {
-        prompt.push_str(&format!(
-            "\nFirst lines of the command's output:\n<result>\n{}\n</result>\n",
-            result_head
-        ));
-    }
-    if !existing.is_empty() {
-        prompt.push_str(&format!(
-            "\nThe agent also authored this description; if it is accurate and concise, \
-             return it unchanged, otherwise improve it:\n<description>\n{}\n</description>\n",
-            existing
-        ));
-    }
-    prompt.push_str(
-        "\nWrite a one-line description (under 12 words, active voice, name the \
-         specific target) of what this command does — prefer the agent's stated \
-         intent over a mechanical paraphrase. Return only the description line — \
-         no quotes, no trailing period.",
-    );
+    let prompt = build_describe_prompt(&tool_name, &command, &existing, &context, &result_head);
+    let prompt_chars = prompt.chars().count();
+    let command_chars = command.chars().count();
+    let tool_chars = tool_name.chars().count();
+    let existing_chars = existing.chars().count();
+    let context_chars = context.chars().count();
+    let result_chars = result_head.chars().count();
     let req_body = serde_json::json!({
         "model": model,
         "max_tokens": 100,
@@ -43038,25 +43655,62 @@ fn handle_describe_command<R: tauri::Runtime>(
         .and_then(|u| u.get("output_tokens"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    if let Ok(mut guard) = DESCRIBE_CACHE.lock() {
-        let cache = guard.get_or_insert_with(DescribeCache::default);
-        cache.by_id.insert(id.to_string(), desc.clone());
-        cache.by_key.insert(cache_key, desc.clone());
+    let cache_write_tokens = payload
+        .get("usage")
+        .and_then(|u| u.get("cache_creation_input_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let cache_read_tokens = payload
+        .get("usage")
+        .and_then(|u| u.get("cache_read_input_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    match describe_cache_guard(app, &model) {
+        Ok(mut guard) => {
+            let cache = guard.as_mut().expect("describe cache initialized");
+            cache.record(id, &cache_key, &desc);
+            if let Err(error) = cache.persist_entry(id) {
+                append_bram_trace_line(
+                    app,
+                    "ai-describe",
+                    &format!("op=cache-write-error id={} detail={}", id, error),
+                );
+            }
+        }
+        Err(error) => append_bram_trace_line(
+            app,
+            "ai-describe",
+            &format!("op=cache-write-error id={} detail={}", id, error),
+        ),
     }
     // Main-view refresh is caller-driven (helpers.js awaits this response
     // and refetches /__turns). Subagent views refetch on subagents-changed,
     // which nothing else fires for a finished agent — nudge it here so a
     // described row in a subagent transcript re-renders too.
     emit_replayable_signal(app, "subagents-changed");
+    // Reduction baseline captured before this cache/frontier shipped:
+    // Anthropic's 2026-08-01..14 Haiku chart showed ~49M total tokens; a
+    // 2026-08-14 20:25:57Z..20:53:00Z local backfill window made 73 calls,
+    // 34,769 input + 1,166 output tokens (input p50=382, p95=1,413,
+    // max=1,639). The content-free size/cache fields below make the same
+    // distribution and avoided API-cache behavior measurable after restart.
     append_bram_trace_line(
         app,
         "ai-describe",
         &format!(
-            "op=call ms={} model={} input_tokens={} output_tokens={} upgraded={} ctx={} result={} redactions={} concurrent={} id={}",
+            "op=call ms={} model={} input_tokens={} output_tokens={} cache_write_tokens={} cache_read_tokens={} prompt_chars={} command_chars={} tool_chars={} existing_chars={} context_chars={} result_chars={} upgraded={} ctx={} result={} redactions={} concurrent={} id={}",
             ms,
             model,
             input_tokens,
             output_tokens,
+            cache_write_tokens,
+            cache_read_tokens,
+            prompt_chars,
+            command_chars,
+            tool_chars,
+            existing_chars,
+            context_chars,
+            result_chars,
             if existing.is_empty() { 0 } else { 1 },
             if context.is_empty() { 0 } else { 1 },
             if result_head.is_empty() { 0 } else { 1 },

@@ -20,7 +20,6 @@
     value="{$queryParams.types ? $queryParams.types.split(',') : (window.__bramSearchBadgesInitialAllOn() ? ['session', 'commit', 'issue', 'worklist-history'] : [])}" />
   <variable name="mode" value="{$queryParams.mode || 'and'}" />
   <variable name="ready" value="{!!query &amp;&amp; query.trim().length >= 2}" />
-  <variable name="expandedHit" value="{null}" />
   <!-- Selected date window [lo, hi] (epoch seconds); null = no date filter. -->
   <variable name="dateFilter" value="{null}" />
 
@@ -73,16 +72,13 @@
       .slice(0, 100)
       .map(h => Object.assign({}, h, {
         typeLabel: h.type === 'worklist-history' ? 'history' : h.type,
-        dateLabel: h.date ? formatDateTime(new Date(Number(h.date) * 1000), 'yyyy-MM-dd HH:mm') : '',
-        expanded: !!(expandedHit &amp;&amp; expandedHit.key === h.key)
+        dateLabel: h.date ? formatDateTime(new Date(Number(h.date) * 1000), 'yyyy-MM-dd HH:mm') : ''
       }))
   }" />
 
-  <!-- Open the relevance winner only after all four facet requests for the
-       current query settle. During a refetch this key falls back to empty,
-       which collapses the stale result; when the new values land it changes
-       once to the trimmed query and opens displayed[0]. Manual row toggles do
-       not change this key, so they are not immediately undone. -->
+  <!-- SearchResults owns expansion below this DataSource scope. This settled
+       query is only a readiness prop: its transient empty value must not write
+       parent state or retrigger the four facet signatures. -->
   <variable name="settledQuery" value="{
     ready
       &amp;&amp; rSession.loaded &amp;&amp; rCommit.loaded &amp;&amp; rIssue.loaded &amp;&amp; rHistory.loaded
@@ -90,15 +86,6 @@
       ? query.trim()
       : ''
   }" />
-  <ChangeListener listenTo="{settledQuery}"
-    debounceWaitInMs="1"
-    onDidChange="() => expandedHit = settledQuery &amp;&amp; displayed.length ? displayed[0] : null" />
-
-  <!-- History detail rides on the hit itself: /__search returns the full
-       WorklistHistoryGroup in `extra` (indexed once), so the expander renders it
-       directly — no recency-limited re-fetch that missed older items. -->
-  <variable name="historyGroup"
-    value="{(expandedHit &amp;&amp; expandedHit.type === 'worklist-history') ? (expandedHit.extra || null) : null}" />
 
   <!-- search-results-virtualize: the page no longer scrolls — the results
        List inside SearchResults is the sole scroller (Transcript's star-fill
@@ -128,7 +115,7 @@
         initialValue="{query}"
         inProgress="{rSession.inProgress || rCommit.inProgress || rIssue.inProgress || rHistory.inProgress}"
         onQueryChange="(q) => query = q"
-        onClear="query = ''; expandedHit = null" />
+        onClear="query = ''" />
       <!-- Active-mode indicator: shown only when a replay link arrived with a
            non-default mode (raw/phrase/prefix). The generic Search UI keeps no
            permanent mode dropdown by design (quote-for-phrase is the everyday
@@ -203,9 +190,8 @@
       height="*"
       hits="{displayed}"
       query="{query.trim()}"
-      historyGroup="{historyGroup}"
-      selectionKey="{selectedTypes.slice().sort().join(',')}"
-      onRowToggle="(h) => expandedHit = h.expanded ? null : h" />
+      settledQuery="{settledQuery}"
+      selectionKey="{selectedTypes.slice().sort().join(',')}" />
 
     <ModalDialog id="searchHelpDialog" title="Search help">
       <VStack gap="$space-3" padding="$space-2">

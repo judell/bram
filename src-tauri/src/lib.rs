@@ -28353,13 +28353,22 @@ mod hook_python_resolver_tests {
             .0;
         let settings = json!({
             "hooks": {
-                "PreToolUse": [{
-                    "matcher": "Write|Edit",
-                    "hooks": [{
-                        "type": "command",
-                        "command": expected
-                    }]
-                }]
+                "PreToolUse": [
+                    {
+                        "matcher": "Write",
+                        "hooks": [{
+                            "type": "command",
+                            "command": expected
+                        }]
+                    },
+                    {
+                        "matcher": "Edit",
+                        "hooks": [{
+                            "type": "command",
+                            "command": expected
+                        }]
+                    }
+                ]
             }
         });
         fs::write(&tracked, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
@@ -28369,6 +28378,101 @@ mod hook_python_resolver_tests {
             &claude_hook_settings_path(&dir),
             Some(&expected)
         ));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // #249: the list form carries the correct command, so a command-equality
+    // check alone calls it current and Setup never migrates it — while on
+    // 2.1.232/win32 it is never invoked.
+    #[test]
+    fn legacy_list_matcher_is_not_current() {
+        let dir = std::env::temp_dir().join(format!(
+            "bram-legacy-list-matcher-{}",
+            std::process::id()
+        ));
+        let path = dir.join("settings.json");
+        fs::create_dir_all(&dir).unwrap();
+        let expected = super::claude_hook_commands(Some("C:\\Python313\\python.exe"))
+            .unwrap()
+            .0;
+        let settings = json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Write|Edit",
+                    "hooks": [{ "type": "command", "command": expected }]
+                }]
+            }
+        });
+        fs::write(&path, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
+        assert!(!settings_has_worklist_guard_hook(&path, Some(&expected)));
+
+        // Only one of the two required matchers is also stale.
+        let partial = json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Write",
+                    "hooks": [{ "type": "command", "command": expected }]
+                }]
+            }
+        });
+        fs::write(&path, serde_json::to_string_pretty(&partial).unwrap()).unwrap();
+        assert!(!settings_has_worklist_guard_hook(&path, Some(&expected)));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_guard_registers_literal_matchers_and_migrates_list_form() {
+        let dir = std::env::temp_dir().join(format!(
+            "bram-guard-matcher-split-{}",
+            std::process::id()
+        ));
+        let path = dir.join("settings.json");
+        fs::create_dir_all(&dir).unwrap();
+        let expected = super::claude_hook_commands(Some("C:\\Python313\\python.exe"))
+            .unwrap()
+            .0;
+
+        // Legacy list-form entry carrying the guard alongside a user hook.
+        let legacy = json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Write|Edit",
+                    "hooks": [
+                        { "type": "command", "command": expected },
+                        { "type": "command", "command": "echo keep" }
+                    ]
+                }]
+            }
+        });
+        fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
+
+        assert!(super::merge_worklist_guard_into_settings(&path, &expected).unwrap());
+        let after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let arr = after["hooks"]["PreToolUse"].as_array().unwrap();
+
+        // The user's co-registered hook survives under its original matcher.
+        let kept = arr.iter().find(|e| e["matcher"] == "Write|Edit").unwrap();
+        let kept_cmds: Vec<&str> = kept["hooks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["command"].as_str().unwrap())
+            .collect();
+        assert_eq!(kept_cmds, vec!["echo keep"]);
+
+        // The guard is now registered under each literal matcher.
+        for matcher in super::CLAUDE_GUARD_MATCHERS {
+            let entry = arr
+                .iter()
+                .find(|e| e["matcher"] == matcher)
+                .unwrap_or_else(|| panic!("missing matcher {matcher}"));
+            assert_eq!(entry["hooks"][0]["command"].as_str().unwrap(), expected);
+        }
+        assert!(settings_has_worklist_guard_hook(&path, Some(&expected)));
+
+        // Idempotent: a second merge over the split shape writes nothing.
+        assert!(!super::merge_worklist_guard_into_settings(&path, &expected).unwrap());
         let _ = fs::remove_dir_all(&dir);
     }
 }
@@ -28433,6 +28537,56 @@ fn settings_event_hook_current(
     exact_present && !stale_marker_present
 }
 
+// Matchers the Claude worklist guard is registered under. Single literal tool
+// names are the one matcher shape that behaves identically under every
+// semantics Claude Code has implemented (exact string, list of exact strings,
+// and regex). The documented list form "Write|Edit" works on 2.1.220/darwin but
+// silently matches nothing on 2.1.232/win32, leaving the guard registered but
+// never invoked — unauthorized writes were not blocked (judell/bram#249).
+const CLAUDE_GUARD_MATCHERS: [&str; 2] = ["Write", "Edit"];
+
+// True iff the guard is registered under every matcher in
+// CLAUDE_GUARD_MATCHERS with `expected_command`, and no guard command sits
+// under any other matcher.
+//
+// This is separate from the command-equality check because a legacy list-form
+// entry ("Write|Edit") carries the *correct* command — command equality alone
+// reads it as current, so `claudeNeedsSetup` stays false, Setup never runs, and
+// the migration that would split it never fires. Same class of bug as the
+// presence-based check that hid the stale `py -3` commands in #247.
+fn guard_matcher_shape_current(value: &serde_json::Value, expected_command: &str) -> bool {
+    let Some(arr) = value
+        .get("hooks")
+        .and_then(|h| h.get("PreToolUse"))
+        .and_then(|p| p.as_array())
+    else {
+        return false;
+    };
+    let mut seen: Vec<&str> = Vec::new();
+    for entry in arr {
+        let Some(hooks) = entry.get("hooks").and_then(|h| h.as_array()) else {
+            continue;
+        };
+        let carries_guard = hooks
+            .iter()
+            .any(|h| h.get("command").and_then(|c| c.as_str()) == Some(expected_command));
+        if !carries_guard {
+            continue;
+        }
+        match entry.get("matcher").and_then(|m| m.as_str()) {
+            Some(m) if CLAUDE_GUARD_MATCHERS.contains(&m) => {
+                if !seen.contains(&m) {
+                    seen.push(m);
+                }
+            }
+            // Guard registered under an unexpected matcher (legacy "Write|Edit",
+            // or no matcher at all) — stale, needs migration.
+            _ => return false,
+        }
+    }
+    seen.len() == CLAUDE_GUARD_MATCHERS.len()
+}
+
 fn settings_has_worklist_guard_hook(
     settings_path: &Path,
     expected_command: Option<&str>,
@@ -28445,12 +28599,18 @@ fn settings_has_worklist_guard_hook(
         Ok(v) => v,
         Err(_) => return false,
     };
-    settings_event_hook_current(
+    if !settings_event_hook_current(
         &value,
         "PreToolUse",
         "claude-worklist-guard.py",
         expected_command,
-    )
+    ) {
+        return false;
+    }
+    match expected_command {
+        Some(cmd) => guard_matcher_shape_current(&value, cmd),
+        None => false,
+    }
 }
 
 fn settings_has_worklist_guard_marker(settings_path: &Path) -> bool {
@@ -28830,12 +28990,25 @@ fn merge_worklist_guard_into_settings(
     }
     let pre_arr = pre.as_array_mut().unwrap();
 
-    // Drop worklist-guard.py entries whose command differs from the
-    // currently expected command. Migrates legacy installs (bare-path
-    // Windows, `py -3 ...`) to the resolved-interpreter form, and would
-    // also handle a project moving between platforms.
+    // Drop worklist-guard.py entries that are stale in either dimension:
+    //
+    // - command differs from the currently expected command — migrates legacy
+    //   installs (bare-path Windows, `py -3 ...`) to the resolved-interpreter
+    //   form, and handles a project moving between platforms;
+    // - matcher is not one of CLAUDE_GUARD_MATCHERS — migrates the legacy
+    //   list form ("Write|Edit"), which carries the right command but is never
+    //   invoked on some Claude Code builds (#249).
+    //
+    // Only the guard's own command is removed; any co-registered user hook in
+    // the same entry survives, and the entry itself is dropped only once it
+    // holds nothing else.
     let mut migrated = false;
     pre_arr.retain_mut(|entry| {
+        let matcher_ok = entry
+            .get("matcher")
+            .and_then(|m| m.as_str())
+            .map(|m| CLAUDE_GUARD_MATCHERS.contains(&m))
+            .unwrap_or(false);
         let Some(hooks_arr) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
             return true;
         };
@@ -28844,7 +29017,7 @@ fn merge_worklist_guard_into_settings(
             let Some(cmd) = h.get("command").and_then(|c| c.as_str()) else {
                 return true;
             };
-            !(cmd.contains("worklist-guard.py") && cmd != expected_command)
+            !(cmd.contains("worklist-guard.py") && (cmd != expected_command || !matcher_ok))
         });
         if hooks_arr.len() != before {
             migrated = true;
@@ -28852,31 +29025,34 @@ fn merge_worklist_guard_into_settings(
         !hooks_arr.is_empty()
     });
 
-    let exact_present = pre_arr.iter().any(|entry| {
-        entry
-            .get("hooks")
-            .and_then(|h| h.as_array())
-            .map(|hs| {
-                hs.iter().any(|h| {
-                    h.get("command")
-                        .and_then(|c| c.as_str())
-                        .map(|s| s == expected_command)
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false)
-    });
-    if exact_present && !migrated {
-        return Ok(false);
+    // Register under each literal matcher independently.
+    let mut added = false;
+    for matcher in CLAUDE_GUARD_MATCHERS {
+        let present = pre_arr.iter().any(|entry| {
+            entry.get("matcher").and_then(|m| m.as_str()) == Some(matcher)
+                && entry
+                    .get("hooks")
+                    .and_then(|h| h.as_array())
+                    .map(|hs| {
+                        hs.iter().any(|h| {
+                            h.get("command").and_then(|c| c.as_str()) == Some(expected_command)
+                        })
+                    })
+                    .unwrap_or(false)
+        });
+        if !present {
+            pre_arr.push(serde_json::json!({
+                "matcher": matcher,
+                "hooks": [{
+                    "type": "command",
+                    "command": expected_command,
+                }]
+            }));
+            added = true;
+        }
     }
-    if !exact_present {
-        pre_arr.push(serde_json::json!({
-            "matcher": "Write|Edit",
-            "hooks": [{
-                "type": "command",
-                "command": expected_command,
-            }]
-        }));
+    if !added && !migrated {
+        return Ok(false);
     }
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent)

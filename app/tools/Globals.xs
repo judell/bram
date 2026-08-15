@@ -29,6 +29,48 @@ function paragraphsContaining(text, query) {
   return hits.length > 0 ? hits.join('\n\n') : text;
 }
 
+// Split an FTS5 search snippet into render segments [{ text, hit }] so hit
+// rows can highlight matched terms (SearchResults.xmlui). The server marks
+// matches with single [ / ] chars (snippet(search_index, -1, '[', ']', '…',
+// 40) in search_index.rs), but project content is full of LITERAL brackets
+// ([ai-describe], [iframe], trace subkinds...), so a bracketed span counts
+// as a match only when its inner text STARTS WITH one of the query's terms
+// (case-insensitive); any other bracket is literal content and stays in the
+// text. Marker chars are stripped from hit segments; literal brackets are
+// preserved.
+function snippetSegments(snippet, query) {
+  const text = snippet || '';
+  const terms = (query || '')
+    .replace(/"/g, ' ')
+    .split(/\s+/)
+    .filter((t) => t.length >= 2)
+    .map((t) => t.toLowerCase());
+  const segs = [];
+  let plain = '';
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '[' && terms.length) {
+      const close = text.indexOf(']', i + 1);
+      if (close > i) {
+        const inner = text.slice(i + 1, close);
+        const lower = inner.toLowerCase();
+        const isHit = terms.filter((t) => lower.indexOf(t) === 0).length > 0;
+        if (isHit) {
+          if (plain) { segs.push({ text: plain, hit: false }); plain = ''; }
+          segs.push({ text: inner, hit: true });
+          i = close + 1;
+          continue;
+        }
+      }
+    }
+    plain += ch;
+    i += 1;
+  }
+  if (plain) segs.push({ text: plain, hit: false });
+  return segs;
+}
+
 function statusSectionSubhead(title) {
   const descriptions = {
     'Startup Run': 'first-minute load',

@@ -132,7 +132,8 @@
       .slice(0, 100)
       .map(h => Object.assign({}, h, {
         typeLabel: h.type === 'worklist-history' ? 'history' : h.type,
-        dateLabel: h.date ? formatDateTime(new Date(Number(h.date) * 1000), 'yyyy-MM-dd HH:mm') : ''
+        dateLabel: h.date ? formatDateTime(new Date(Number(h.date) * 1000), 'yyyy-MM-dd HH:mm') : '',
+        snippetSegs: snippetSegments(h.snippet, query.trim())
       }))
   }" />
 
@@ -214,7 +215,7 @@
            buttons don't stick to the header") so bucket toggles stay reachable
            while scrolled deep in results. paddingTop separates them from the
            query/slider block (commit-gate feedback). -->
-      <HStack gap="$space-3" verticalAlignment="center" paddingTop="$space-2">
+      <HStack gap="$space-3" verticalAlignment="center" paddingTop="$space-2" paddingBottom="$space-2">
         <Link noIndicator tooltip="{selectedTypes.includes('session') ? 'Hide session matches' : 'Show session matches'}" onClick="selectedTypes = window.__bramToggleType(selectedTypes, 'session', !selectedTypes.includes('session'))">
           <HStack gap="$space-1" verticalAlignment="center" opacity="{selectedTypes.includes('session') ? 1 : 0.4}">
             <Badge value="Sessions" colorMap="{facetColors}" />

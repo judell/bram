@@ -1,46 +1,23 @@
-<Component name="SearchResults" var.expansion="{['', null]}">
+<Component name="SearchResults" var.selectedHit="{null}">
   <!-- search-rows-confinement: the result rows live behind this component
        boundary so bindings re-evaluate on THIS component's prop changes
        only. Before: rows sat in Search's container scope, and any state
        change there — a composer keystroke, a loader flap — re-evaluated
        every row binding (probe capture 2026-07-31: 5 composer
        COMPONENT_STATE_CHANGED actions cascaded ~950 row evaluations each;
-       see xmlui-org/xmlui#3710 and the confine-a-hot-input howto,
-       applied here to the victims rather than the hot source).
-       Rows arrive as a precomputed view-model (typeLabel/dateLabel baked
-       by Search once per result set — formatDateTime is not in scope
-       here, by design). Expansion is deliberately local: writing it cannot
-       invalidate Search's four parent DataSource signatures. -->
+       see xmlui-org/xmlui#3710 and the confine-a-hot-input howto).
+       Rows arrive as a precomputed view-model (typeLabel/dateLabel/
+       snippetSegs baked by Search once per result set). -->
   <variable name="typeColors"
     value="{{ session: 'blue', commit: 'green', issue: '#c2410c', history: 'purple' }}" />
-  <!-- expansion = ['', currently open row key]. Expansion is manual-only:
-       the auto-open-top-hit latch was removed at the 2026-08-14 iterate
-       ("autoexpand still troublesome") — the search-date/search-expand soak
-       showed it firing on every settle transition during typing, popping
-       rows open unbidden. The first slot is retained so a click-time
-       assignment shape stays unchanged. A query change collapses whatever
-       is open. -->
-  <variable name="displayed" value="{
-    ($props.hits || []).map(h => Object.assign({}, h, {
-      expanded: expansion[1] === h.key
-    }))
-  }" />
+  <!-- search-hit-hover-and-modal-expansion: the inline expander is gone.
+       Clicking anywhere on a row opens the per-type detail in the modal
+       below; rows keep uniform heights, so the virtualizer never reflows
+       on open/close — retiring the expansion-driven scroll-disruption
+       class and the expansion-state-in-row-data workaround it required.
+       A query change invalidates the open detail; close the modal. -->
   <ChangeListener listenTo="{$props.query || ''}"
-    onDidChange="() => expansion = ['', null]" />
-  <!-- search-results-virtualize: List, not Items — ~10 rows in the DOM
-       regardless of result count. The 2026-07-31 Timelines recording showed
-       per-keystroke frames Layout-dominated: the auto-growing composer
-       forces synchronous layout, and 100 materialized rows made each pass
-       250-1300ms. With no firm height, List intentionally uses its outside
-       scroll mode and virtualizes against Bram's whole-page App scroller;
-       Search's StickySection is a sibling above it. This is the whole-page
-       counterpart to the bounded-toolbar pattern:
-       https://docs.xmlui.org/howto/pin-a-toolbar-above-a-bounded-scroll-region -->
-  <!-- idKey="key": hit ids are unreliable across buckets (issue hits carry
-       id="" — every issue row would share one empty identity, and a pill
-       toggle's recomposition then overlap-corrupts the virtualizer's row
-       reconciliation, 2026-08-01 screenshot). `key` is unique across all
-       four buckets. https://docs.xmlui.org/components/List#idkey -->
+    onDidChange="() => selectedHit = null" />
   <!-- search-pin-top-on-bucket-toggle: a virtualized List anchors its scroll to
        a visible row, so toggling a bucket pill off then on (hits shrinks then
        grows) leaves the user scrolled where the anchor landed instead of at the
@@ -51,68 +28,106 @@
        content appearing above the list after mount (the date-slider block on
        settle) leaves it stale and the pin lands short — the "slight unwanted
        scroll" of the 2026-08-14 iterate (useStartMargin, ListReact.tsx;
-       upstream candidate). window.scrollAllToTop pins the App scroller itself. -->
-  <!-- Debounced like Search's filter/query pin: the 2026-08-15 03:02 trace
-       showed undebounced via=buckets pins firing 1-16ms after the displayed
-       recompute — inside the same frame as the data change, so virtua's
-       re-anchor correction landed after the pin and dragged the page back
-       down (the "overlap on toggle" report). 250ms fires past the re-anchor. -->
+       upstream candidate). window.scrollAllToTop pins the App scroller itself.
+       Debounced past virtua's re-anchor (the 2026-08-15 03:02 trace showed
+       undebounced pins firing 1-16ms after the displayed recompute, inside
+       the same frame as the data change, so the re-anchor landed after the
+       pin and dragged the page back down). -->
   <ChangeListener listenTo="{$props.selectionKey}"
     debounceWaitInMs="250"
     onDidChange="() => { window.scrollAllToTop(); window.__bramIframeTrace('search-date', {op: 'pin-top', via: 'buckets'}) }" />
-  <List id="resultsList" data="{displayed}" idKey="key">
-    <!-- Suppress the List's default "No data available": Search renders its own
-         intentional empty states ("Type at least 2 characters…" / "No matches."),
-         so an empty results list should render nothing. -->
-    <property name="emptyListTemplate">
-      <Fragment />
-    </property>
-    <VStack gap="$space-1" paddingVertical="$space-2" borderBottom="1px solid $borderColor">
-      <HStack gap="$space-3" verticalAlignment="start">
-        <VStack gap="$space-0_5" width="7rem">
-          <!-- Compact row metadata; facet badges remain at the default size.
-               https://docs.xmlui.org/howto/theme-badge-colors-and-sizes -->
-          <Theme fontSize-Badge="0.7rem"
-            paddingHorizontal-Badge="$space-0_5" paddingVertical-Badge="0">
-            <Badge value="{$item.typeLabel}" colorMap="{typeColors}" />
-          </Theme>
-          <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{$item.dateLabel}" />
-        </VStack>
-        <VStack width="*" gap="$space-0_5">
-          <Link noIndicator onClick="expansion = [expansion[0], $item.expanded ? null : $item.key]">
+  <!-- search-results-virtualize: List, not Items — ~10 rows in the DOM
+       regardless of result count (2026-07-31 Timelines recording: 100
+       materialized rows made Layout-dominated frames of 250-1300ms). With no
+       firm height, List intentionally uses its outside scroll mode and
+       virtualizes against Bram's whole-page App scroller; Search's
+       StickySection is a sibling above it.
+       https://docs.xmlui.org/howto/pin-a-toolbar-above-a-bounded-scroll-region -->
+  <!-- idKey="key": hit ids are unreliable across buckets (issue hits carry
+       id="" — every issue row would share one empty identity, and a pill
+       toggle's recomposition then overlap-corrupts the virtualizer's row
+       reconciliation, 2026-08-01 screenshot). `key` is unique across all
+       four buckets. https://docs.xmlui.org/components/List#idkey -->
+  <!-- Each row is a Card: the hover background signals the whole row is
+       clickable (badge, date, title, snippet alike), and click opens the
+       detail modal. Card is the XMLUI-native hover surface —
+       https://docs.xmlui.org/howto/style-card-appearance,
+       https://docs.xmlui.org/howto/render-a-flat-list-with-custom-cards -->
+  <Theme backgroundColor-Card="$color-surface-50"
+    backgroundColor-Card--hover="$color-surface-100"
+    padding-Card="$space-2" boxShadow-Card="none">
+    <List id="resultsList" data="{$props.hits || []}" idKey="key">
+      <!-- Suppress the List's default "No data available": Search renders its own
+           intentional empty states ("Type at least 2 characters…" / "No matches."),
+           so an empty results list should render nothing. -->
+      <property name="emptyListTemplate">
+        <Fragment />
+      </property>
+      <Card onClick="selectedHit = $item">
+        <HStack gap="$space-3" verticalAlignment="start">
+          <VStack gap="$space-0_5" width="7rem">
+            <!-- Compact row metadata; facet badges remain at the default size.
+                 https://docs.xmlui.org/howto/theme-badge-colors-and-sizes -->
+            <Theme fontSize-Badge="0.7rem"
+              paddingHorizontal-Badge="$space-0_5" paddingVertical-Badge="0">
+              <Badge value="{$item.typeLabel}" colorMap="{typeColors}" />
+            </Theme>
+            <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{$item.dateLabel}" />
+          </VStack>
+          <VStack width="*" gap="$space-0_5">
             <Text maxLines="1" fontWeight="$fontWeight-bold" value="{$item.source}" />
-          </Link>
-          <Text when="{!$item.expanded}"
-            fontSize="$fontSize-sm" color="$textColor-secondary" value="…{$item.snippet}…" />
-        </VStack>
-      </HStack>
+            <!-- Snippet with matched terms highlighted: segments precomputed
+                 by snippetSegments (Globals.xs) from the server's FTS5
+                 [ / ] markers, term-verified against the query so literal
+                 brackets in content stay literal. Outer Text (line box,
+                 pre-wrap) hosting inline segment Texts so a highlighted
+                 match stays whole mid-word — the DiffView pattern
+                 (judell/bram#239). Passive-match yellow matches the
+                 find-in-diff marks (rgba(250, 204, 21, 0.45)). -->
+            <Text width="100%" whiteSpace="pre-wrap"
+              fontSize="$fontSize-sm" color="$textColor-secondary">
+              <Items data="{$item.snippetSegs}">
+                <Text inline="true" whiteSpace="pre-wrap"
+                  fontSize="$fontSize-sm" color="$textColor-secondary"
+                  backgroundColor="{$item.hit ? 'rgba(250, 204, 21, 0.45)' : 'transparent'}"
+                  value="{$item.text}" />
+              </Items>
+            </Text>
+          </VStack>
+        </HStack>
+      </Card>
+    </List>
+  </Theme>
 
-      <!-- Inline expander: real per-type source (the detail components are
-           themselves UDCs, confined already). Expansion state rides IN the
-           row data ($item.expanded, baked locally), not a component prop:
-           virtualized List rows re-render on data-array identity change,
-           not on outer prop change — a prop-keyed expander froze at its
-           first paint (2026-07-31 "cannot collapse the auto-expand").
-           https://docs.xmlui.org/howto/keep-per-item-state-in-a-loop -->
-      <VStack when="{$item.expanded}"
-        gap="$space-2" paddingLeft="7rem" paddingTop="$space-1">
-        <VStack when="{$item.type === 'session'}">
-          <SessionDetail sessionId="{$item.id}" provider="{$item.provider || 'claude'}"
-            query="{$props.query}" />
-        </VStack>
-        <VStack when="{$item.type === 'commit'}">
-          <CommitDetail sha="{($item.key || '').split(':')[1]}" url="{$item.link}"
-            query="{$props.query}" />
-        </VStack>
-        <VStack when="{$item.type === 'issue'}">
-          <IssueDetail number="{($item.key || '').split(':')[1]}"
-            query="{$props.query}" />
-        </VStack>
-        <VStack when="{$item.type === 'worklist-history'}">
-          <HistoryDetail when="{$item.extra}" group="{$item.extra}"
-            query="{$props.query}" />
-        </VStack>
+  <!-- The per-type detail in a modal (Transcript fullscreen-image precedent:
+       ModalDialog driven by a when + onClose reset, wide via
+       maxWidth-ModalDialog). The detail components are unchanged; their
+       find navigation steps term-to-term inside the modal's bounded
+       scroll region. -->
+  <Theme maxWidth-ModalDialog="95vw">
+    <ModalDialog
+      when="{!!selectedHit}"
+      onClose="selectedHit = null"
+      title="{selectedHit ? selectedHit.source : ''}">
+      <!-- height=70vh: the detail components' bounded scrollers default to a
+           400px height sized for the old inline expander; the modal has the
+           whole viewport to work with. -->
+      <VStack when="{selectedHit.type === 'session'}">
+        <SessionDetail sessionId="{selectedHit.id}" provider="{selectedHit.provider || 'claude'}"
+          query="{$props.query}" height="70vh" />
       </VStack>
-    </VStack>
-  </List>
+      <VStack when="{selectedHit.type === 'commit'}">
+        <CommitDetail sha="{(selectedHit.key || '').split(':')[1]}" url="{selectedHit.link}"
+          query="{$props.query}" height="70vh" />
+      </VStack>
+      <VStack when="{selectedHit.type === 'issue'}">
+        <IssueDetail number="{(selectedHit.key || '').split(':')[1]}"
+          query="{$props.query}" height="70vh" />
+      </VStack>
+      <VStack when="{selectedHit.type === 'worklist-history'}">
+        <HistoryDetail when="{selectedHit.extra}" group="{selectedHit.extra}"
+          query="{$props.query}" height="70vh" />
+      </VStack>
+    </ModalDialog>
+  </Theme>
 </Component>

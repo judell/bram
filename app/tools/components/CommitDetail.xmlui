@@ -50,7 +50,8 @@
             <Text color="red" value="-{$item.deletions}" />
           </HStack>
           <DiffView text="{$item.patch || '(no textual diff)'}"
-            needle="{$item.__needle}" activeIndex="{$item.__activeOcc}" />
+            needle="{$item.__needle}" activeIndex="{$item.__activeOcc}"
+            expectedMatchCount="{$item.__matchCount}" />
         </VStack>
       </property>
     </FindableList>

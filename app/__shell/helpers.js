@@ -6971,122 +6971,192 @@ window.__bramHistoryMarkedText = function (row) {
   return "";
 };
 // ---- Find-in-diff (search-index-commit-diffs iterate) ----
-// Shared walker for the two functions below: visits every term match in
-// document order across a DiffView row array (per segment; matches never
-// span segments) and calls visit(rowIdx, segIdx, start, len, occ). Returns
-// the total occurrence count.
+// Walk every term match in document order across rendered DiffView rows.
+// Annotation segments are presentation only: concatenate each row before
+// matching so a raw-patch occurrence split by word-diff segments is still one
+// visible occurrence. Calls visit(rowIdx, rowStart, len, occ). Returns total.
 window.__bramDiffWalkMatches = function (rows, terms, visit) {
   var lower = [];
   for (var t = 0; t < terms.length; t++) lower.push(String(terms[t]).toLowerCase());
   var occ = 0;
   for (var r = 0; r < (rows || []).length; r++) {
     var segs = rows[r].segments || [];
+    var rowText = "";
     for (var s = 0; s < segs.length; s++) {
-      var text = segs[s].text == null ? "" : String(segs[s].text);
-      var hay = text.toLowerCase();
-      var pos = 0;
-      while (pos < hay.length) {
-        var best = -1, bestLen = 0;
-        for (var q = 0; q < lower.length; q++) {
-          var idx = hay.indexOf(lower[q], pos);
-          if (idx !== -1 && (best === -1 || idx < best)) { best = idx; bestLen = lower[q].length; }
-        }
-        if (best === -1) break;
-        if (visit) visit(r, s, best, bestLen, occ);
-        occ++;
-        pos = best + bestLen;
+      rowText += segs[s].text == null ? "" : String(segs[s].text);
+    }
+    var hay = rowText.toLowerCase();
+    var pos = 0;
+    while (pos < hay.length) {
+      var best = -1, bestLen = 0;
+      for (var q = 0; q < lower.length; q++) {
+        var idx = hay.indexOf(lower[q], pos);
+        if (idx !== -1 && (best === -1 || idx < best)) { best = idx; bestLen = lower[q].length; }
       }
+      if (best === -1) break;
+      if (visit) visit(r, best, bestLen, occ);
+      occ++;
+      pos = best + bestLen;
     }
   }
   return occ;
 };
 
-// Decorate diffViewRows output with find marks: matched slices get a mark bg
-// (the block-local `activeIndex`-th gets the stronger active bg). No terms =>
-// rows pass through untouched, so DiffView callers without a find are free.
-window.__bramDiffFindRows = function (rows, needle, activeIndex) {
+// Canonical rendered-diff find plan. Counting, active-row selection, and
+// decoration all come from this one walk; callers never reconstruct the
+// target independently. expectedTotal is CommitDetail's raw-patch count and
+// rides the plan for trace verification of counted == rendered.
+window.__bramDiffFindPlan = function (rows, needle, activeIndex, expectedTotal) {
+  rows = rows || [];
   var terms = window.__bramSearchTerms(needle);
-  if (!terms.length || !rows || !rows.length) return rows || [];
   var act = activeIndex == null ? -1 : Number(activeIndex);
-  // Collect match spans per (row, seg) in one walk, then rebuild segments.
+  var expected = expectedTotal == null ? null : Number(expectedTotal);
+  // Standard 32-bit FNV-1a constants. This is a cheap, non-cryptographic
+  // fingerprint for ChangeListener invalidation: annotation content or segment
+  // boundaries must change the plan key even when the diff row count does not.
+  var FNV1A_OFFSET_BASIS_32 = 0x811c9dc5;
+  var FNV1A_PRIME_32 = 0x01000193;
+  var hash = FNV1A_OFFSET_BASIS_32;
+  var hashText = function (value) {
+    var text = String(value == null ? "" : value);
+    for (var hi = 0; hi < text.length; hi++) {
+      hash ^= text.charCodeAt(hi);
+      hash = Math.imul(hash, FNV1A_PRIME_32);
+    }
+  };
+  for (var hr = 0; hr < rows.length; hr++) {
+    hashText(rows[hr].kind || "");
+    var hsegs = rows[hr].segments || [];
+    hashText(hsegs.length);
+    for (var hs = 0; hs < hsegs.length; hs++) {
+      hashText("|");
+      hashText(hsegs[hs].text);
+    }
+    hashText("\n");
+  }
+  if (!terms.length || !rows.length) {
+    return {
+      rows: rows,
+      total: 0,
+      activeIndex: -1,
+      activeRow: -1,
+      expectedTotal: expected,
+      countMatches: expected == null || expected === 0,
+      key: "",
+    };
+  }
+
+  // Match spans use ROW offsets, not segment offsets. Decoration below maps
+  // each overlap back into the original segments, so a single mark may paint
+  // across multiple inline Texts without changing its occurrence identity.
   var spans = {};
-  window.__bramDiffWalkMatches(rows, terms, function (r, s, start, len, occ) {
-    var key = r + ":" + s;
-    (spans[key] = spans[key] || []).push({ start: start, len: len, occ: occ });
+  var activeRow = -1;
+  var total = window.__bramDiffWalkMatches(rows, terms, function (r, start, len, occ) {
+    (spans[r] = spans[r] || []).push({ start: start, len: len, occ: occ });
+    if (occ === act && activeRow === -1) activeRow = r;
   });
-  return rows.map(function (row, r) {
+  var decorated = rows.map(function (row, r) {
     var segs = [];
-    (row.segments || []).forEach(function (seg, s) {
+    var rowOffset = 0;
+    var rowSpans = spans[r] || [];
+    (row.segments || []).forEach(function (seg) {
       var text = seg.text == null ? "" : String(seg.text);
-      var list = spans[r + ":" + s];
-      if (!list || !list.length) { segs.push(seg); return; }
+      var segStart = rowOffset;
+      var segEnd = segStart + text.length;
+      rowOffset = segEnd;
+      var list = rowSpans.filter(function (m) {
+        return m.start < segEnd && (m.start + m.len) > segStart;
+      });
+      if (!list.length) { segs.push(seg); return; }
       var pos = 0;
       for (var i = 0; i < list.length; i++) {
         var m = list[i];
-        if (m.start > pos) segs.push({ text: text.slice(pos, m.start), bg: seg.bg || null, color: seg.color });
+        var localStart = Math.max(m.start, segStart) - segStart;
+        var localEnd = Math.min(m.start + m.len, segEnd) - segStart;
+        if (localStart > pos) segs.push({ text: text.slice(pos, localStart), bg: seg.bg || null, color: seg.color });
         segs.push({
-          text: text.slice(m.start, m.start + m.len),
+          text: text.slice(localStart, localEnd),
           bg: m.occ === act ? "rgba(249, 115, 22, 0.6)" : "rgba(250, 204, 21, 0.45)",
-          // Tag the active slice so the scroll helper can scrollIntoView it: a
-          // wrapped diff line is many visual rows inside ONE tall List row, so
-          // scrollToIndex(row) only reaches the row top, not a mark deep in it.
           active: m.occ === act,
           color: seg.color,
         });
-        pos = m.start + m.len;
+        pos = localEnd;
       }
       if (pos < text.length) segs.push({ text: text.slice(pos), bg: seg.bg || null, color: seg.color });
     });
     return { kind: row.kind, bg: row.bg, color: row.color, segments: segs };
   });
+  return {
+    rows: decorated,
+    total: total,
+    activeIndex: act,
+    activeRow: activeRow,
+    expectedTotal: expected,
+    countMatches: expected == null || expected === total,
+    key: activeRow >= 0
+      ? ((hash >>> 0) + "|" + String(needle || "") + "|" + act + "|" + activeRow)
+      : "",
+  };
 };
 
-// Row index of the block-local `activeIndex`-th mark (same walk as the
-// decorator), or -1. Drives DiffView's inner scrollToIndex.
+// Compatibility wrappers for compact/legacy callers. DiffView itself consumes
+// the canonical plan directly.
+window.__bramDiffFindRows = function (rows, needle, activeIndex) {
+  return window.__bramDiffFindPlan(rows, needle, activeIndex, null).rows;
+};
+
 window.__bramDiffActiveRow = function (rows, needle, activeIndex) {
-  var terms = window.__bramSearchTerms(needle);
-  var act = activeIndex == null ? -1 : Number(activeIndex);
-  if (!terms.length || act < 0 || !rows || !rows.length) return -1;
-  var found = -1;
-  window.__bramDiffWalkMatches(rows, terms, function (r, s, start, len, occ) {
-    if (occ === act && found === -1) found = r;
-  });
-  return found;
+  return window.__bramDiffFindPlan(rows, needle, activeIndex, null).activeRow;
 };
 
-// Scroll a DiffView's inner List to the active mark's row, if any. Traced
-// (subkind=diff-find-scroll) while the find-in-diff mechanics soak: a step
-// that doesn't land names itself — no line = listener never fired; a line
-// with row=-1 = the walker missed; hasRef=false = the List ref wasn't up.
-window.__bramDiffScrollToActive = function (listRef, rows, needle, activeIndex) {
-  var r = window.__bramDiffActiveRow(rows, needle, activeIndex);
+// Reveal one canonical plan. If its row is not mounted, scrollToIndex first;
+// DiffView's visibleRangeDidChange callback invokes this again after the List
+// reports the row mounted, at which point the active inline slice is revealed.
+// Returns true only when that second, mounted phase is complete.
+window.__bramDiffRevealPlan = function (listRef, plan, visibleRange) {
+  plan = plan || {};
+  var r = Number(plan.activeRow);
+  var range = visibleRange || (listRef && listRef.getVisibleRange ? listRef.getVisibleRange() : null);
+  var start = range && Number(range.startIndex);
+  var end = range && Number(range.endIndex);
+  var mounted = r >= 0 && start >= 0 && end >= start && r >= start && r <= end;
   try {
     window.logToHost && window.logToHost({
       kind: "iframe-trace",
       subkind: "diff-find-scroll",
-      rows: (rows || []).length,
-      active: activeIndex == null ? -1 : Number(activeIndex),
+      rows: (plan.rows || []).length,
+      active: plan.activeIndex == null ? -1 : Number(plan.activeIndex),
       row: r,
       hasRef: !!(listRef && listRef.scrollToIndex),
+      mounted: mounted,
+      visibleStart: start == null || isNaN(start) ? -1 : start,
+      visibleEnd: end == null || isNaN(end) ? -1 : end,
+      total: Number(plan.total) || 0,
+      expected: plan.expectedTotal == null ? -1 : Number(plan.expectedTotal),
+      countMatches: plan.countMatches !== false,
     });
   } catch (e) {}
-  if (r >= 0 && listRef && listRef.scrollToIndex) {
+  if (r < 0 || !listRef || !listRef.scrollToIndex) return false;
+  if (!mounted) {
     listRef.scrollToIndex(r);
+    return false;
+  }
+  if (typeof requestAnimationFrame === "function" && typeof document !== "undefined") {
     // scrollToIndex reaches the row top; a wrapped line wraps into many visual
     // rows inside that one tall List row, so a mark deep in it stays off-screen.
-    // After the row mounts (double-rAF = after layout), scrollIntoView the
-    // active slice (only one carries data-testid="diff-active-mark") to bring
-    // its wrapped sub-line into view. block:nearest minimizes vertical movement;
-    // inline:nearest is a no-op now that lines wrap (no horizontal overflow).
-    if (typeof requestAnimationFrame === "function" && typeof document !== "undefined") {
+    requestAnimationFrame(function () {
       requestAnimationFrame(function () {
-        requestAnimationFrame(function () {
-          var el = document.querySelector('[data-testid="diff-active-mark"]');
-          if (el && el.scrollIntoView) el.scrollIntoView({ block: "nearest", inline: "nearest" });
-        });
+        var el = document.querySelector('[data-testid="diff-active-mark"]');
+        if (el && el.scrollIntoView) el.scrollIntoView({ block: "nearest", inline: "nearest" });
       });
-    }
+    });
   }
+  return true;
+};
+
+window.__bramDiffScrollToActive = function (listRef, rows, needle, activeIndex) {
+  var plan = window.__bramDiffFindPlan(rows, needle, activeIndex, null);
+  return window.__bramDiffRevealPlan(listRef, plan, null);
 };
 
 // A List/Items row template is an isolated binding scope — it can read $item
@@ -7252,6 +7322,7 @@ window.__bramFindPlan = function (data, needle, cursor, markedTextName, keying, 
         __findKey: keying ? (idBase + keySep + "f:" + needleKey) : idBase,
         __markedText: Object.prototype.hasOwnProperty.call(surfacesBuilt, i) ? surfacesBuilt[i] : "",
         __needle: bi >= 0 ? needleKey : "",
+        __matchCount: bi >= 0 ? countsBuilt[bi] : 0,
         __activeOcc: -1,
         __blockIdx: bi,
       });

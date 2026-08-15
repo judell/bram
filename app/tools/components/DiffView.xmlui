@@ -1,4 +1,4 @@
-<Component name="DiffView">
+<Component name="DiffView" var.pendingRevealKey="{'initial'}">
   <APICall
     id="annotate"
     method="post"
@@ -7,6 +7,11 @@
   <ChangeListener
     listenTo="{$props.text}"
     onDidChange="annotate.execute()" />
+  <!-- One plan owns diff counting, decoration, and reveal. It matches across
+       annotation-segment boundaries, so CommitDetail's raw-patch count and the
+       painted occurrences agree. -->
+  <variable name="diffFindPlan"
+    value="{window.__bramDiffFindPlan(diffViewRows(annotate.lastResult, $props.text), $props.needle, $props.activeIndex, $props.expectedMatchCount)}" />
   <Theme
     backgroundColor-row-List--hover="transparent"
     backgroundColor-row-List="transparent">
@@ -23,7 +28,7 @@
            reserve 60vh or nest a scroller inside an outer scroller. -->
       <Items
         when="{$props.compact}"
-        data="{window.__bramDiffFindRows(diffViewRows(annotate.lastResult, $props.text), $props.needle, $props.activeIndex)}">
+        data="{diffFindPlan.rows}">
         <!-- A line WRAPS as continuous text: an outer Text (line box, width:100%,
              pre-wrap) hosts the per-segment inner Texts with inline="true"
              (xmlui-org/xmlui#3713 / the new inline display mode). True inline
@@ -53,21 +58,22 @@
       <!-- Default: virtualized bounded List for full / potentially large
            diffs (the modal, the TO COMMIT item diff, the Commits patch view).
            maxHeight defaults to 60vh so existing callers are unchanged. -->
-      <!-- Find marks (search-index-commit-diffs iterate): optional needle /
-           activeIndex props split matched slices into highlighted segments;
-           without a needle the decorator passes rows through untouched. The
-           ChangeListener scrolls the inner list to the active mark whenever
-           the cursor (or the annotate result) changes. -->
+      <!-- A plan change arms one reveal. The direct listener handles ordinary
+           cursor steps; visibleRangeDidChange retries only until the target row
+           is actually mounted, then clears the arm so manual scrolling is not
+           yanked back. List documents this event as the mounted-range signal:
+           https://docs.xmlui.org/components/List#visiblerangedidchange -->
       <ChangeListener
-        listenTo="{((annotate.lastResult || []).length) + '|' + ($props.needle || '') + '|' + ($props.activeIndex == null ? -1 : $props.activeIndex)}"
-        onDidChange="() => window.__bramDiffScrollToActive(diffRowsList, diffViewRows(annotate.lastResult, $props.text), $props.needle, $props.activeIndex)" />
+        listenTo="{diffFindPlan.key}"
+        onDidChange="() => pendingRevealKey = window.__bramDiffRevealPlan(diffRowsList, diffFindPlan, diffRowsList ? diffRowsList.getVisibleRange() : null) ? '' : diffFindPlan.key" />
       <!-- fixedItemSize dropped: wrapped lines have variable heights, so virtua
            must measure each row rather than assume the first row's height. -->
       <List
         id="diffRowsList"
         when="{!$props.compact}"
-        data="{window.__bramDiffFindRows(diffViewRows(annotate.lastResult, $props.text), $props.needle, $props.activeIndex)}"
-        height="{$props.maxHeight || '60vh'}">
+        data="{diffFindPlan.rows}"
+        height="{$props.maxHeight || '60vh'}"
+        onVisibleRangeDidChange="(range) => diffFindPlan.key &amp;&amp; (pendingRevealKey === 'initial' || pendingRevealKey === diffFindPlan.key) ? (pendingRevealKey = window.__bramDiffRevealPlan(diffRowsList, diffFindPlan, range) ? '' : diffFindPlan.key) : null">
         <!-- A line WRAPS as continuous text: outer Text (line box, width:100%,
              pre-wrap) hosting per-segment inner Texts with inline="true", so a
              highlighted match stays whole mid-word. See judell/bram#239. -->

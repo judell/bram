@@ -43,25 +43,85 @@
     ).sort((a, b) => a.rank - b.rank)
   }" />
 
-  <!-- Date-slider domain: [min, max] hit date across merged; widen by a day when
-       all hits share one date so the two thumbs aren't coincident. -->
-  <variable name="hitDates" value="{merged.map(h => Number(h.date)).filter(n => n > 0)}" />
+  <!-- Do not establish the date domain from partial bucket arrivals. A new
+       query may retain the prior DataSource values while inProgress, so both
+       loaded and quiescent are required. -->
+  <variable name="resultsSettled" value="{
+    ready
+      &amp;&amp; rSession.loaded &amp;&amp; rCommit.loaded &amp;&amp; rIssue.loaded &amp;&amp; rHistory.loaded
+      &amp;&amp; !rSession.inProgress &amp;&amp; !rCommit.inProgress &amp;&amp; !rIssue.inProgress &amp;&amp; !rHistory.inProgress
+  }" />
+
+  <!-- Date-slider domain: [min, max] across every query bucket, independent of
+       the selected facets; widen by a day when all hits share one date so the
+       two thumbs aren't coincident. It stays absent until all four result
+       buckets have settled, then remains stable until the query changes. -->
+  <variable name="hitDates" value="{
+    [].concat(
+      rSession.value || [],
+      rCommit.value || [],
+      rIssue.value || [],
+      rHistory.value || []
+    ).map(h => Number(h.date)).filter(n => n > 0)
+  }" />
   <variable name="dateLo" value="{hitDates.length ? hitDates.reduce((a, b) => a &lt; b ? a : b) : null}" />
   <variable name="dateHi" value="{hitDates.length ? hitDates.reduce((a, b) => a &gt; b ? a : b) : null}" />
   <variable name="dateRange"
-    value="{dateLo === null ? null : [dateLo, dateHi > dateLo ? dateHi : dateLo + 86400]}" />
+    value="{!resultsSettled || dateLo === null ? null : [dateLo, dateHi > dateLo ? dateHi : dateLo + 86400]}" />
 
-  <!-- New query => new domain; reset the filter and snap the handles to the full
-       span (a stale window from the prior query would mis-narrow). Moving the
-       slider doesn't touch dateRange, so this never loops. Two listeners because
-       ChangeListener.onDidChange is a sync callback: it must be a single arrow
-       expression, not a statement block. -->
+  <!-- Domain change => clear the applied filter. The thumbs need no companion
+       reset call: the Slider re-seeds itself whenever initialValue/minValue/
+       maxValue change together (SliderReact.tsx's initialValue effect depends
+       on [initialValue, min, max]), and all three read the same settled
+       dateRange, so they commit coherently in one render. A setValue-based
+       reset is worse than redundant: setValue clamps against the min/max
+       committed at call time (a debounced call can race the new domain props,
+       stranding thumbs on the old scale) and it fires didChange, which would
+       overwrite dateFilter with the full range instead of null.
+       https://docs.xmlui.org/components/Slider#setvalue -->
   <ChangeListener
-    listenTo="{dateRange ? (dateRange[0] + '-' + dateRange[1]) : ''}"
-    onDidChange="() => dateFilter = null" />
+    listenTo="{dateRange ? (query.trim() + '|' + dateRange[0] + '-' + dateRange[1]) : ''}"
+    onDidChange="() => { dateFilter = null; window.__bramIframeTrace('search-date', {op: 'filter-reset', settled: resultsSettled, lo: dateRange ? dateRange[0] : -1, hi: dateRange ? dateRange[1] : -1}) }" />
+
+  <!-- search-date-filter-forensics (observe-only): the 2026-08-14 iterate
+       reported the max thumb not constraining results, with auto-expand
+       suspected. Candidate mechanism: a bucket refetch flips the reset
+       signature through '' and the listener above clears dateFilter right
+       after a drag. These two listeners give the trace a denominator:
+       'buckets' marks every inProgress flap, 'displayed' marks every
+       recompute with the filter that produced it. A drag followed by
+       filter-reset + a bucket flap convicts the refetch path; a drag whose
+       'displayed' still shows filtered=false convicts the didChange path. -->
   <ChangeListener
-    listenTo="{dateRange ? (dateRange[0] + '-' + dateRange[1]) : ''}"
-    onDidChange="() => (dateSlider &amp;&amp; dateRange) ? dateSlider.setValue(dateRange) : null" />
+    listenTo="{'' + rSession.inProgress + rCommit.inProgress + rIssue.inProgress + rHistory.inProgress}"
+    onDidChange="() => window.__bramIframeTrace('search-date', {op: 'buckets', s: rSession.inProgress, c: rCommit.inProgress, i: rIssue.inProgress, h: rHistory.inProgress, settled: resultsSettled})" />
+  <ChangeListener
+    listenTo="{displayed.length + '|' + (dateFilter ? dateFilter[0] + '-' + dateFilter[1] : 'none')}"
+    onDidChange="() => window.__bramIframeTrace('search-date', {op: 'displayed', count: displayed.length, filtered: !!dateFilter, lo: dateFilter ? dateFilter[0] : -1, hi: dateFilter ? dateFilter[1] : -1})" />
+
+  <!-- search-pin-top-on-result-change: the date filter and the query change
+       the result set wholesale, the same way a bucket toggle does — and under
+       an outside-scroll virtualized List, shrink-then-grow re-anchoring
+       strands a residual scroll (2026-08-14 iterate: drag the min thumb right
+       then back, land mid-scroll). Pin the page to the top once the change
+       settles; the debounce coalesces per-tick drag events into one pin at
+       rest. Same rationale and mechanism as SearchResults' bucket-toggle pin
+       (window.scrollAllToTop — not List.scrollToTop, whose outside-scroll
+       startMargin goes stale). -->
+  <ChangeListener
+    listenTo="{(dateFilter ? dateFilter[0] + '-' + dateFilter[1] : 'none') + '|' + query.trim()}"
+    debounceWaitInMs="250"
+    onDidChange="() => { window.scrollAllToTop(); window.__bramIframeTrace('search-date', {op: 'pin-top', via: 'filter-or-query'}) }" />
+
+  <!-- Slider endpoint labels: show the applied filter when one is set, else
+       the full domain. Precomputed here so the Text bindings below are bare
+       var references (see the label comment at the Slider). -->
+  <variable name="dateLoLabel" value="{
+    dateRange ? formatDateTime(new Date((dateFilter ? dateFilter[0] : dateRange[0]) * 1000), 'yyyy-MM-dd') : ''
+  }" />
+  <variable name="dateHiLabel" value="{
+    dateRange ? formatDateTime(new Date((dateFilter ? dateFilter[1] : dateRange[1]) * 1000), 'yyyy-MM-dd') : ''
+  }" />
 
   <!-- search-rows-confinement: bake the per-row view-model here, once per
        result-set change — formatDateTime ran 576x per keystroke when it
@@ -76,68 +136,70 @@
       }))
   }" />
 
-  <!-- SearchResults owns expansion below this DataSource scope. This settled
-       query is only a readiness prop: its transient empty value must not write
-       parent state or retrigger the four facet signatures. -->
-  <variable name="settledQuery" value="{
-    ready
-      &amp;&amp; rSession.loaded &amp;&amp; rCommit.loaded &amp;&amp; rIssue.loaded &amp;&amp; rHistory.loaded
-      &amp;&amp; !rSession.inProgress &amp;&amp; !rCommit.inProgress &amp;&amp; !rIssue.inProgress &amp;&amp; !rHistory.inProgress
-      ? query.trim()
-      : ''
-  }" />
 
-  <!-- search-results-virtualize: the page no longer scrolls — the results
-       List inside SearchResults is the sole scroller (Transcript's star-fill
-       pattern); header, pills, hint, and slider stay fixed above it. -->
-  <VStack padding="$space-4" gap="$space-3" height="100%">
-    <HStack gap="$space-3" verticalAlignment="center">
-      <!-- Back affordance for Evidence-replay arrivals: shown only when the
-           page was entered via a deep link (q in the URL). Worklist expansion
-           state persists via the window-side UI-state store, so a plain
-           navigate restores the item the user replayed from. -->
-      <Link when="{!!$queryParams.q}" noIndicator tooltip="Back to the Worklist, restoring the open item"
-        onClick="navigate('/worklist')">
-        <Text value="← Worklist" />
-      </Link>
-      <Heading level="h2">Search</Heading>
-      <Theme paddingHorizontal-Button-xs="$space-0_5">
-        <Button
-          label="ⓘ"
-          variant="ghost"
-          size="xs"
-          tooltip="How search works"
-          onClick="searchHelpDialog.open()" />
-      </Theme>
-      <SearchBox
-        boxWidth="26rem"
-        placeholder="Quote for an exact phrase"
-        initialValue="{query}"
-        inProgress="{rSession.inProgress || rCommit.inProgress || rIssue.inProgress || rHistory.inProgress}"
-        onQueryChange="(q) => query = q"
-        onClear="query = ''" />
-      <!-- Active-mode indicator: shown only when a replay link arrived with a
-           non-default mode (raw/phrase/prefix). The generic Search UI keeps no
-           permanent mode dropdown by design (quote-for-phrase is the everyday
-           surface); this appears exactly when a mode is in play and offers a
-           one-click reset to the AND default. -->
-      <HStack when="{mode !== 'and'}" gap="$space-1" verticalAlignment="center">
-        <Badge value="{'mode: ' + mode}" />
-        <Link noIndicator onClick="mode = 'and'" tooltip="Reset to default (AND) search mode">
-          <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="reset" />
+  <!-- Search deliberately keeps Bram's whole-page App scroller. An unbounded
+       List delegates to that nearest scroll ancestor; StickySection pins the
+       compact controls below the AppHeader in the same proven arrangement as
+       Transcript.xmlui. Do not add a competing height/overflow boundary here.
+       https://docs.xmlui.org/howto/pin-sticky-content-below-the-appheader -->
+  <VStack padding="$space-4" gap="$space-3">
+    <StickySection stickTo="top" top="$height-AppHeader" backgroundColor="$backgroundColor">
+      <!-- A fit-content column lets the query row establish the width; the date
+           control beneath it follows that same width instead of stretching across
+           the remainder of the page. Stack sizing:
+           https://docs.xmlui.org/components/Stack -->
+      <VStack width="fit-content" maxWidth="100%" gap="$space-1">
+      <HStack gap="$space-3" verticalAlignment="center">
+        <!-- Back affordance for Evidence-replay arrivals: shown only when the
+             page was entered via a deep link (q in the URL). Worklist expansion
+             state persists via the window-side UI-state store, so a plain
+             navigate restores the item the user replayed from. -->
+        <Link when="{!!$queryParams.q}" noIndicator tooltip="Back to the Worklist, restoring the open item"
+          onClick="navigate('/worklist')">
+          <Text value="← Worklist" />
         </Link>
+        <Heading level="h2">Search</Heading>
+        <Theme paddingHorizontal-Button-xs="$space-0_5">
+          <Button
+            label="ⓘ"
+            variant="ghost"
+            size="xs"
+            tooltip="How search works"
+            onClick="searchHelpDialog.open()" />
+        </Theme>
+        <SearchBox
+          boxWidth="26rem"
+          placeholder="Quote for an exact phrase"
+          initialValue="{query}"
+          inProgress="{rSession.inProgress || rCommit.inProgress || rIssue.inProgress || rHistory.inProgress}"
+          onQueryChange="(q) => query = q"
+          onClear="query = ''" />
+        <!-- Active-mode indicator: shown only when a replay link arrived with a
+             non-default mode (raw/phrase/prefix). The generic Search UI keeps no
+             permanent mode dropdown by design (quote-for-phrase is the everyday
+             surface); this appears exactly when a mode is in play and offers a
+             one-click reset to the AND default. -->
+        <HStack when="{mode !== 'and'}" gap="$space-1" verticalAlignment="center">
+          <Badge value="{'mode: ' + mode}" />
+          <Link noIndicator onClick="mode = 'and'" tooltip="Reset to default (AND) search mode">
+            <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="reset" />
+          </Link>
+        </HStack>
       </HStack>
-      <!-- Two-handled date-range filter; fills the rest of the row. The dates
-           are shown as Text labels above the thumbs (top-level bindings) rather
-           than via the Slider's valueFormat, which is a sync render callback the
-           xs engine rejects for anything but a bare arrow expression. -->
-      <VStack when="{dateRange}" width="*" gap="$space-0">
+      <!-- Two-handled date-range filter. The endpoint labels bind to the
+           precomputed dateLoLabel/dateHiLabel vars, never to an inline
+           ternary: the 2026-08-14 search-date trace showed these labels
+           frozen at the first settled domain while the Slider bindings in
+           the same subtree tracked fine — the inline
+           `dateFilter ? … : dateRange[…]` inside `new Date(...)` defeated
+           dependency tracking (the known inline-expression failure mode).
+           The var graph is the proven reactive path (`displayed` tracks
+           dateFilter in the same trace). -->
+      <VStack when="{dateRange}" width="100%" gap="$space-0">
         <HStack>
-          <Text fontSize="$fontSize-xs" color="$textColor-secondary"
-            value="{formatDateTime(new Date((dateFilter ? dateFilter[0] : dateRange[0]) * 1000), 'yyyy-MM-dd')}" />
+          <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{dateLoLabel}" />
           <SpaceFiller />
-          <Text fontSize="$fontSize-xs" color="$textColor-secondary"
-            value="{formatDateTime(new Date((dateFilter ? dateFilter[1] : dateRange[1]) * 1000), 'yyyy-MM-dd')}" />
+          <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{dateHiLabel}" />
         </HStack>
         <Slider
           id="dateSlider"
@@ -146,51 +208,51 @@
           step="{86400}"
           initialValue="{dateRange}"
           showValues="false"
-          onDidChange="(v) => dateFilter = v" />
+          onDidChange="(v) => { dateFilter = v; window.__bramIframeTrace('search-date', {op: 'drag', lo: v[0], hi: v[1]}) }" />
       </VStack>
-    </HStack>
-
-    <HStack gap="$space-3" verticalAlignment="center">
-      <Link noIndicator tooltip="{selectedTypes.includes('session') ? 'Hide session matches' : 'Show session matches'}" onClick="selectedTypes = window.__bramToggleType(selectedTypes, 'session', !selectedTypes.includes('session'))">
-        <HStack gap="$space-1" verticalAlignment="center" opacity="{selectedTypes.includes('session') ? 1 : 0.4}">
-          <Badge value="Sessions" colorMap="{facetColors}" />
-          <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{(rSession.value || []).length}" />
-        </HStack>
-      </Link>
-      <Link noIndicator tooltip="{selectedTypes.includes('commit') ? 'Hide commit matches' : 'Show commit matches'}" onClick="selectedTypes = window.__bramToggleType(selectedTypes, 'commit', !selectedTypes.includes('commit'))">
-        <HStack gap="$space-1" verticalAlignment="center" opacity="{selectedTypes.includes('commit') ? 1 : 0.4}">
-          <Badge value="Commits" colorMap="{facetColors}" />
-          <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{(rCommit.value || []).length}" />
-        </HStack>
-      </Link>
-      <Link noIndicator tooltip="{selectedTypes.includes('issue') ? 'Hide issue matches' : 'Show issue matches'}" onClick="selectedTypes = window.__bramToggleType(selectedTypes, 'issue', !selectedTypes.includes('issue'))">
-        <HStack gap="$space-1" verticalAlignment="center" opacity="{selectedTypes.includes('issue') ? 1 : 0.4}">
-          <Badge value="Issues" colorMap="{facetColors}" />
-          <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{(rIssue.value || []).length}" />
-        </HStack>
-      </Link>
-      <Link noIndicator tooltip="{selectedTypes.includes('worklist-history') ? 'Hide history matches' : 'Show history matches'}" onClick="selectedTypes = window.__bramToggleType(selectedTypes, 'worklist-history', !selectedTypes.includes('worklist-history'))">
-        <HStack gap="$space-1" verticalAlignment="center" opacity="{selectedTypes.includes('worklist-history') ? 1 : 0.4}">
-          <Badge value="History" colorMap="{facetColors}" />
-          <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{(rHistory.value || []).length}" />
-        </HStack>
-      </Link>
-    </HStack>
+      <!-- Facet pills pin with the query block (2026-08-14 iterate: "the
+           buttons don't stick to the header") so bucket toggles stay reachable
+           while scrolled deep in results. paddingTop separates them from the
+           query/slider block (commit-gate feedback). -->
+      <HStack gap="$space-3" verticalAlignment="center" paddingTop="$space-2">
+        <Link noIndicator tooltip="{selectedTypes.includes('session') ? 'Hide session matches' : 'Show session matches'}" onClick="selectedTypes = window.__bramToggleType(selectedTypes, 'session', !selectedTypes.includes('session'))">
+          <HStack gap="$space-1" verticalAlignment="center" opacity="{selectedTypes.includes('session') ? 1 : 0.4}">
+            <Badge value="Sessions" colorMap="{facetColors}" />
+            <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{(rSession.value || []).length}" />
+          </HStack>
+        </Link>
+        <Link noIndicator tooltip="{selectedTypes.includes('commit') ? 'Hide commit matches' : 'Show commit matches'}" onClick="selectedTypes = window.__bramToggleType(selectedTypes, 'commit', !selectedTypes.includes('commit'))">
+          <HStack gap="$space-1" verticalAlignment="center" opacity="{selectedTypes.includes('commit') ? 1 : 0.4}">
+            <Badge value="Commits" colorMap="{facetColors}" />
+            <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{(rCommit.value || []).length}" />
+          </HStack>
+        </Link>
+        <Link noIndicator tooltip="{selectedTypes.includes('issue') ? 'Hide issue matches' : 'Show issue matches'}" onClick="selectedTypes = window.__bramToggleType(selectedTypes, 'issue', !selectedTypes.includes('issue'))">
+          <HStack gap="$space-1" verticalAlignment="center" opacity="{selectedTypes.includes('issue') ? 1 : 0.4}">
+            <Badge value="Issues" colorMap="{facetColors}" />
+            <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{(rIssue.value || []).length}" />
+          </HStack>
+        </Link>
+        <Link noIndicator tooltip="{selectedTypes.includes('worklist-history') ? 'Hide history matches' : 'Show history matches'}" onClick="selectedTypes = window.__bramToggleType(selectedTypes, 'worklist-history', !selectedTypes.includes('worklist-history'))">
+          <HStack gap="$space-1" verticalAlignment="center" opacity="{selectedTypes.includes('worklist-history') ? 1 : 0.4}">
+            <Badge value="History" colorMap="{facetColors}" />
+            <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{(rHistory.value || []).length}" />
+          </HStack>
+        </Link>
+      </HStack>
+      </VStack>
+    </StickySection>
 
     <Text when="{!ready}"
       color="$textColor-secondary"
       value="Type at least 2 characters to search the index." />
 
     <!-- search-rows-confinement + search-results-virtualize: rows render
-         behind the SearchResults boundary (probe receipts in its header),
-         virtualized, filling the remaining page height (reserved layout
-         props on the instance size its wrapper). Badge theming moved inside
-         the component so the star chain has no intervening wrapper. -->
+         behind the SearchResults boundary (probe receipts in its header) and
+         remain virtualized against the App's outside scroll container. -->
     <SearchResults
-      height="*"
       hits="{displayed}"
       query="{query.trim()}"
-      settledQuery="{settledQuery}"
       selectionKey="{selectedTypes.slice().sort().join(',')}" />
 
     <ModalDialog id="searchHelpDialog" title="Search help">

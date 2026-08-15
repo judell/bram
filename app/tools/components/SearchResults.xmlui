@@ -13,18 +13,13 @@
        invalidate Search's four parent DataSource signatures. -->
   <variable name="typeColors"
     value="{{ session: 'blue', commit: 'green', issue: '#c2410c', history: 'purple' }}" />
-  <!-- expansion = [last auto-open signature, currently open row key]. The
-       signature latches query + relevance winner, so a transient request phase
-       never reopens a manually collapsed row. A real query change clears the
-       latch; a changed winner (for example after a facet/date change) opens
-       once. Both values move in one assignment, keeping the transition
-       idempotent. Component scoping is the isolation guarantee:
-       https://docs.xmlui.org/howto/confine-a-hot-input-to-its-own-component -->
-  <variable name="autoExpandSignature" value="{
-    $props.settledQuery &amp;&amp; ($props.hits || []).length
-      ? $props.settledQuery + '|' + $props.hits[0].key
-      : ''
-  }" />
+  <!-- expansion = ['', currently open row key]. Expansion is manual-only:
+       the auto-open-top-hit latch was removed at the 2026-08-14 iterate
+       ("autoexpand still troublesome") — the search-date/search-expand soak
+       showed it firing on every settle transition during typing, popping
+       rows open unbidden. The first slot is retained so a click-time
+       assignment shape stays unchanged. A query change collapses whatever
+       is open. -->
   <variable name="displayed" value="{
     ($props.hits || []).map(h => Object.assign({}, h, {
       expanded: expansion[1] === h.key
@@ -32,21 +27,15 @@
   }" />
   <ChangeListener listenTo="{$props.query || ''}"
     onDidChange="() => expansion = ['', null]" />
-  <ChangeListener listenTo="{autoExpandSignature}"
-    debounceWaitInMs="1"
-    onDidChange="() => expansion = autoExpandSignature &amp;&amp; autoExpandSignature !== expansion[0] ? [autoExpandSignature, $props.hits[0].key] : expansion" />
   <!-- search-results-virtualize: List, not Items — ~10 rows in the DOM
        regardless of result count. The 2026-07-31 Timelines recording showed
        per-keystroke frames Layout-dominated: the auto-growing composer
        forces synchronous layout, and 100 materialized rows made each pass
-       250-1300ms. Virtualizing collapses the laid-out DOM for every
-       trigger. height=100% resolves through the Theme wrapper
-       (layout-transparent) to this component's star-sized instance
-       wrapper. -->
-  <!-- No Theme wrapper here: it sat inside the star-height chain and the
-       List's height=100% resolved against it instead of the sized instance
-       wrapper — results rendered zero-height (2026-07-31 "fast because
-       broken"). Badge size is a cosmetic follow-up. -->
+       250-1300ms. With no firm height, List intentionally uses its outside
+       scroll mode and virtualizes against Bram's whole-page App scroller;
+       Search's StickySection is a sibling above it. This is the whole-page
+       counterpart to the bounded-toolbar pattern:
+       https://docs.xmlui.org/howto/pin-a-toolbar-above-a-bounded-scroll-region -->
   <!-- idKey="key": hit ids are unreliable across buckets (issue hits carry
        id="" — every issue row would share one empty identity, and a pill
        toggle's recomposition then overlap-corrupts the virtualizer's row
@@ -56,11 +45,22 @@
        a visible row, so toggling a bucket pill off then on (hits shrinks then
        grows) leaves the user scrolled where the anchor landed instead of at the
        top. selectionKey (Search.xmlui) changes only on bucket-membership change,
-       so this ChangeListener pins the list back to the top on every toggle and
-       nothing else. https://docs.xmlui.org/components/List#scrolltotop -->
+       so this ChangeListener pins back to the top on every toggle and nothing
+       else. NOT List.scrollToTop: in outside-scroll mode it targets list-start
+       minus a startMargin that is only recalculated on container resize, so
+       content appearing above the list after mount (the date-slider block on
+       settle) leaves it stale and the pin lands short — the "slight unwanted
+       scroll" of the 2026-08-14 iterate (useStartMargin, ListReact.tsx;
+       upstream candidate). window.scrollAllToTop pins the App scroller itself. -->
+  <!-- Debounced like Search's filter/query pin: the 2026-08-15 03:02 trace
+       showed undebounced via=buckets pins firing 1-16ms after the displayed
+       recompute — inside the same frame as the data change, so virtua's
+       re-anchor correction landed after the pin and dragged the page back
+       down (the "overlap on toggle" report). 250ms fires past the re-anchor. -->
   <ChangeListener listenTo="{$props.selectionKey}"
-    onDidChange="() => resultsList ? resultsList.scrollToTop() : null" />
-  <List id="resultsList" height="100%" data="{displayed}" idKey="key">
+    debounceWaitInMs="250"
+    onDidChange="() => { window.scrollAllToTop(); window.__bramIframeTrace('search-date', {op: 'pin-top', via: 'buckets'}) }" />
+  <List id="resultsList" data="{displayed}" idKey="key">
     <!-- Suppress the List's default "No data available": Search renders its own
          intentional empty states ("Type at least 2 characters…" / "No matches."),
          so an empty results list should render nothing. -->
@@ -70,7 +70,10 @@
     <VStack gap="$space-1" paddingVertical="$space-2" borderBottom="1px solid $borderColor">
       <HStack gap="$space-3" verticalAlignment="start">
         <VStack gap="$space-0_5" width="7rem">
-          <Theme fontSize-Badge="$fontSize-xs" padding-Badge="$space-0_5 $space-1">
+          <!-- Compact row metadata; facet badges remain at the default size.
+               https://docs.xmlui.org/howto/theme-badge-colors-and-sizes -->
+          <Theme fontSize-Badge="0.7rem"
+            paddingHorizontal-Badge="$space-0_5" paddingVertical-Badge="0">
             <Badge value="{$item.typeLabel}" colorMap="{typeColors}" />
           </Theme>
           <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{$item.dateLabel}" />

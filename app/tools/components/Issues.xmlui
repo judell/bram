@@ -1,6 +1,5 @@
 <Component name="Issues"
   var.issuesExpanded="{false}"
-  var.expandedNumber="{null}"
   var.searchQuery="{getLastSearchQuery()}"
   var.searchNeedle="{searchQuery.trim().toLowerCase()}"
   var.showNewIssueHint="{false}"
@@ -34,7 +33,12 @@
           || (issuesSearchFts.value || []).some(hit => hit.key === 'issue:' + i.number))
       : sortedIssues
   }"
-  var.pageIssues="{filteredIssues.slice(0, searchNeedle ? 999 : (issuesExpanded ? 999 : 20))}">
+  var.pageIssues="{filteredIssues.slice(0, searchNeedle ? 999 : (issuesExpanded ? 999 : 20))}"
+  var.issueRows="{pageIssues.map(i => Object.assign({}, i, {
+    key: 'issue:' + i.number,
+    type: 'issue',
+    source: '#' + i.number + ' ' + (i.title || '')
+  }))}">
 
   <DataSource
     id="issuesSearchFts"
@@ -146,7 +150,7 @@
         initialValue="{searchQuery}"
         inProgress="{issuesFirstPage.inProgress || issuesFull.inProgress}"
         onQueryChange="(q) => searchQuery = q"
-        onClear="searchQuery = ''; expandedNumber = null" />
+        onClear="searchQuery = ''" />
       <Button
         when="{repoOrigin.value &amp;&amp; repoOrigin.value.issuesNewUrl}"
         label="+ New issue"
@@ -192,9 +196,17 @@
             value="{window.sortLabel('AGE', sortField, sortDir, 'updatedAt')}" />
         </Link>
       </HStack>
-      <Items data="{pageIssues}">
-        <VStack gap="0" borderBottom="1px solid $borderColor" var.rowIssue="{$item}">
-          <HStack gap="$space-3" paddingHorizontal="$space-3" paddingVertical="$space-2" verticalAlignment="center">
+      <!-- browse-tabs-adopt-searchresults: rows render through the shared
+           ResultList shell (hover Cards, whole-row click → detail modal,
+           virtualized). Row anatomy (state / title+meta / age) and the
+           comment/close controls stay Issues-owned via the two slots; the
+           inline expansion and its expandedNumber state retire. -->
+      <ResultList
+        data="{issueRows}"
+        query="{searchQuery.trim()}"
+        detailRefreshTick="{issueRefreshTick}">
+        <property name="rowTemplate">
+          <HStack gap="$space-3" verticalAlignment="center">
             <HStack width="64px" verticalAlignment="center">
               <Text
                 fontSize="$fontSize-sm"
@@ -202,67 +214,55 @@
                 color="{$item.state === 'OPEN' ? '$color-success-700' : '$textColor-secondary'}"
                 value="{$item.state === 'OPEN' ? 'open' : 'closed'}" />
             </HStack>
-            <HStack width="*" gap="$space-2" verticalAlignment="center">
-              <Link
-                onClick="expandedNumber = (expandedNumber === $item.number) ? null : $item.number"
-                noIndicator>
-                <VStack gap="0">
-                  <Text
-                    value="#{$item.number} {$item.title}"
-                    fontWeight="{expandedNumber === $item.number ? '$fontWeight-bold' : '$fontWeight-normal'}"
-                    maxLines="1" />
-                  <Text when="{$item.commentSummary}" fontSize="$fontSize-xs" color="$textColor-secondary" maxLines="1"
-                    value="{'comments: ' + $item.commentSummary}" />
-                  <Text fontSize="$fontSize-xs" color="$textColor-secondary" maxLines="1"
-                    value="{(($item.author &amp;&amp; ($item.author.login || $item.author.name)) || 'unknown') + ' opened ' + getDateUntilNow($item.createdAt) + ' ago'}" />
-                  <Text when="{$item.latestCommentAuthor &amp;&amp; $item.latestCommentAt}" fontSize="$fontSize-xs" color="$textColor-secondary" maxLines="1"
-                    value="{$item.latestCommentAuthor + ' commented ' + getDateUntilNow($item.latestCommentAt) + ' ago'}" />
-                </VStack>
-              </Link>
-            </HStack>
+            <VStack width="*" gap="0">
+              <Text value="#{$item.number} {$item.title}" maxLines="1" />
+              <Text when="{$item.commentSummary}" fontSize="$fontSize-xs" color="$textColor-secondary" maxLines="1"
+                value="{'comments: ' + $item.commentSummary}" />
+              <Text fontSize="$fontSize-xs" color="$textColor-secondary" maxLines="1"
+                value="{(($item.author &amp;&amp; ($item.author.login || $item.author.name)) || 'unknown') + ' opened ' + getDateUntilNow($item.createdAt) + ' ago'}" />
+              <Text when="{$item.latestCommentAuthor &amp;&amp; $item.latestCommentAt}" fontSize="$fontSize-xs" color="$textColor-secondary" maxLines="1"
+                value="{$item.latestCommentAuthor + ' commented ' + getDateUntilNow($item.latestCommentAt) + ' ago'}" />
+            </VStack>
             <HStack width="90px" verticalAlignment="center">
               <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{getDateUntilNow($item.activityAt || $item.updatedAt || $item.createdAt)}" />
             </HStack>
           </HStack>
-
-          <VStack when="{expandedNumber === $item.number}" paddingHorizontal="$space-3" paddingBottom="$space-3">
-            <IssueDetail number="{rowIssue.number}" refreshTick="{issueRefreshTick}"
-              query="{searchQuery.trim()}" />
-            <VStack gap="$space-2" paddingTop="$space-3" borderTop="1px solid $borderColor">
-              <TextArea
-                id="closeCommentBox"
-                placeholder="Optional comment"
-                autoComplete="off"
-                autoCorrect="{false}"
-                spellCheck="{false}"
-                autoCapitalize="off"
-                resize="vertical"
-                minRows="2"
-                maxRows="12"
-                width="*"
-                enabled="{!commentIssueCall.inProgress &amp;&amp; !closingIssue}" />
-              <HStack gap="$space-2">
-                <Button
-                  label="Comment"
-                  variant="outlined"
-                  size="sm"
-                  enabled="{!commentIssueCall.inProgress &amp;&amp; !closingIssue &amp;&amp; closeCommentBox.value &amp;&amp; closeCommentBox.value.trim().length > 0}"
-                  onClick="commentIssueCall.execute({ number: rowIssue.number, body: closeCommentBox.value }); closeCommentBox.setValue('')" />
-                <Button
-                  when="{rowIssue.state === 'OPEN'}"
-                  label="Close issue"
-                  variant="outlined"
-                  size="sm"
-                  enabled="{!commentIssueCall.inProgress &amp;&amp; !closingIssue}"
-                  onClick="closingIssue = true; window.__bramCloseIssue(rowIssue.number, closeCommentBox.value || '', () => { closingIssue = false; closeCommentBox.setValue(''); issueRefreshTick = issueRefreshTick + 1; issuesFirstPage.refetch(); issuesFull.refetch(); }, () => { closingIssue = false; })" />
-                <Theme size-Spinner="16px">
-                  <Spinner when="{commentIssueCall.inProgress || closingIssue}" />
-                </Theme>
-              </HStack>
-            </VStack>
+        </property>
+        <property name="detailFooterTemplate">
+          <VStack gap="$space-2" paddingTop="$space-3" borderTop="1px solid $borderColor">
+            <TextArea
+              id="closeCommentBox"
+              placeholder="Optional comment"
+              autoComplete="off"
+              autoCorrect="{false}"
+              spellCheck="{false}"
+              autoCapitalize="off"
+              resize="vertical"
+              minRows="2"
+              maxRows="12"
+              width="*"
+              enabled="{!commentIssueCall.inProgress &amp;&amp; !closingIssue}" />
+            <HStack gap="$space-2">
+              <Button
+                label="Comment"
+                variant="outlined"
+                size="sm"
+                enabled="{!commentIssueCall.inProgress &amp;&amp; !closingIssue &amp;&amp; closeCommentBox.value &amp;&amp; closeCommentBox.value.trim().length > 0}"
+                onClick="commentIssueCall.execute({ number: $item.number, body: closeCommentBox.value }); closeCommentBox.setValue('')" />
+              <Button
+                when="{$item.state === 'OPEN'}"
+                label="Close issue"
+                variant="outlined"
+                size="sm"
+                enabled="{!commentIssueCall.inProgress &amp;&amp; !closingIssue}"
+                onClick="closingIssue = true; window.__bramCloseIssue($item.number, closeCommentBox.value || '', () => { closingIssue = false; closeCommentBox.setValue(''); issueRefreshTick = issueRefreshTick + 1; issuesFirstPage.refetch(); issuesFull.refetch(); }, () => { closingIssue = false; })" />
+              <Theme size-Spinner="16px">
+                <Spinner when="{commentIssueCall.inProgress || closingIssue}" />
+              </Theme>
+            </HStack>
           </VStack>
-        </VStack>
-      </Items>
+        </property>
+      </ResultList>
       <HStack
         when="{!searchNeedle &amp;&amp; issuesSource &amp;&amp; issuesSource.length > 20}"
         padding="$space-2"

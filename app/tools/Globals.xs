@@ -106,6 +106,29 @@ function getLastSearchQuery() {
   return lastSearchQuery;
 }
 
+// browse-tabs-adopt-searchresults: browse-tab needle filters as xs functions
+// with the needle passed EXPLICITLY. Inline arrows inside <variable>
+// expressions captured the outer needle var as '' (compiled-bindings capture
+// failure, same engine family as the frozen date labels: the DEBUG probe
+// showed needle "subagent" at the top level while the arrow admitted all
+// 100 rows). Explicit arguments sidestep the capture entirely.
+function filterCommitList(list, needle) {
+  if (!needle) return list || [];
+  return (list || []).filter((c) => [
+    c.sha || '',
+    (c.commit && c.commit.message) || '',
+    (c.commit && c.commit.author && c.commit.author.login) || '',
+    (c.commit && c.commit.author && c.commit.author.name) || '',
+    (c.commit && c.commit.author && c.commit.author.email) || ''
+  ].join(' ').toLowerCase().includes(needle));
+}
+function filterHistoryList(list, needle) {
+  if (!needle) return list || [];
+  return (list || []).filter((h) =>
+    ((h.id || '') + ' ' + (h.title || '')).toLowerCase().includes(needle)
+    || JSON.stringify(h.extra || {}).toLowerCase().includes(needle));
+}
+
 function statusSectionSubhead(title) {
   const descriptions = {
     'Startup Run': 'first-minute load',

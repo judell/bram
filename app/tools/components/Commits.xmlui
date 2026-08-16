@@ -1,39 +1,39 @@
 <Component
   name="Commits"
-  var.selectedSha="{null}"
   var.commitsExpanded="{false}"
   var.searchQuery="{getLastSearchQuery()}"
   var.pullError="{null}"
-  var.pushError="{null}">
+  var.pushError="{null}"
+  var.searchNeedle="{searchQuery.trim().toLowerCase()}"
+  var.filteredCommits="{filterCommitList(commits.value, searchNeedle)}"
+  var.visibleCommits="{filteredCommits.slice(0, searchNeedle ? 999 : (commitsExpanded ? 999 : 20))}"
+  var.commitRows="{visibleCommits.map(c => Object.assign({}, c, {
+    key: 'commit:' + c.sha,
+    type: 'commit',
+    source: c.sha.slice(0, 7) + ' ' + ((c.commit &amp;&amp; c.commit.message) || '').split('\n')[0],
+    link: c.html_url || ''
+  }))}">
 
   <!-- Browse list with a local metadata filter and inline CommitDetail.
        Unified Search remains the cross-bucket/full-text path. -->
   <DataSource id="commits" url="/__commits" />
-  <!-- commits-issues-filter-use-fts: the filter box unions the local field
-       match (sha prefixes, authors, subjects) with full-message FTS hits
-       from the index, so body-only terms (e.g. "yank") match here the same
-       as on the Search tab. Sessions-precedent, hybridized. -->
-  <DataSource
-    id="commitsSearch"
-    url="/__search"
-    queryParams="{{ q: searchQuery, limit: 300, types: 'commit' }}"
-    when="{searchQuery.trim().length >= 2}" />
+  <!-- The filter is local-fields only: sha, author, and the FULL commit
+       message (subject + body). The former FTS union (commits-issues-
+       filter-use-fts) was retired at the browse-tabs-adopt-searchresults
+       iterate: since search-index-commit-diffs, commit FTS docs include
+       patch text, so common terms matched nearly every commit ("search":
+       260 of ~250 indexed) and the browse filter read as inert. Diff-text
+       matching is the Search tab's job — one click away, with the query
+       carried both directions. -->
+
   <DataSource id="gitStatus" url="/__git/status" />
-  <variable name="searchNeedle" value="{searchQuery.trim().toLowerCase()}" />
-  <variable name="filteredCommits" value="{
-    searchNeedle
-      ? (commits.value || []).filter(c => [
-          c.sha || '',
-          (c.commit &amp;&amp; c.commit.message) || '',
-          (c.commit &amp;&amp; c.commit.author &amp;&amp; c.commit.author.login) || '',
-          (c.commit &amp;&amp; c.commit.author &amp;&amp; c.commit.author.name) || '',
-          (c.commit &amp;&amp; c.commit.author &amp;&amp; c.commit.author.email) || ''
-        ].join(' ').toLowerCase().includes(searchNeedle)
-          || (commitsSearch.value || []).some(hit => hit.key === 'commit:' + c.sha))
-      : (commits.value || [])
-  }" />
-  <variable name="visibleCommits"
-    value="{filteredCommits.slice(0, searchNeedle ? 999 : (commitsExpanded ? 999 : 20))}" />
+  <!-- The needle/filter/rows chain lives in ROOT var. attributes (above),
+       not <variable> elements: element-declared variables in this component
+       went stale against the root searchQuery (DEBUG receipt 2026-08-16:
+       sibling Text bindings showed needle "subagent" while the element
+       variables computed with '' and admitted all rows). Issues uses the
+       root-attr shape and never exhibited the staleness. Filtering itself
+       is filterCommitList (Globals.xs) with the needle passed explicitly. -->
   <APICall
     id="pullRebase"
     method="post"
@@ -50,7 +50,7 @@
     onDidChange="window.__bramRefetchOnLiveEvent(gitStatusEvt.value, commits, gitStatus)" />
   <ChangeListener
     listenTo="{gitStatus.value &amp;&amp; gitStatus.value.branch}"
-    onDidChange="() => { selectedSha = null; commitsExpanded = false; }" />
+    onDidChange="() => { commitsExpanded = false; }" />
 
   <VStack padding="$space-4" gap="$space-4" overflowY="auto" height="100%">
     <HStack gap="$space-3" verticalAlignment="center">
@@ -61,7 +61,7 @@
         initialValue="{searchQuery}"
         inProgress="{commits.inProgress}"
         onQueryChange="(q) => searchQuery = q"
-        onClear="searchQuery = ''; selectedSha = null" />
+        onClear="searchQuery = ''" />
       <Text
         when="{gitStatus.value &amp;&amp; gitStatus.value.branch}"
         maxWidth="260px"
@@ -101,43 +101,39 @@
       value="{'Push will close ' + (commits.value || []).filter(c => !c.pushed &amp;&amp; c.pendingCloses &amp;&amp; c.pendingCloses.length > 0).map(c => c.pendingCloses.map(p => '#' + p.issue).join(', ')).join(', ')}" />
 
     <VStack gap="$space-1" when="{commits.value &amp;&amp; commits.value.length > 0}">
-      <Items data="{visibleCommits}">
-        <VStack gap="0" borderBottom="1px solid $borderColor">
-          <Link
-            onClick="selectedSha = (selectedSha === $item.sha) ? null : $item.sha"
-            noIndicator="true">
-            <HStack gap="$space-3" verticalAlignment="center" paddingVertical="$space-0_5">
-              <Text when="{$item.pushed}" value="✓" color="$color-success-600" fontSize="$fontSize-xs" width="12px" />
-              <Text when="{!$item.pushed}" value=" " width="12px" />
-              <Text value="{$item.sha.slice(0, 7)}" variant="code" fontSize="$fontSize-xs" color="$textColor-secondary" width="64px" />
-              <Text value="{formatDateTime($item.commit.author.date, 'MM-dd HH:mm')}" fontSize="$fontSize-xs" color="$textColor-secondary" overflowMode="none" width="74px" />
-              <HStack width="232px" gap="$space-1" verticalAlignment="center">
-                <Text value="{$item.commit.author.login || $item.commit.author.name}" fontSize="$fontSize-sm" color="$textColor-secondary" width="*" maxLines="1" />
-                <HStack gap="8px" verticalAlignment="center">
-                  <Text value="{'+' + ($item.additions || 0)}" textAlign="right" width="64px" fontFamily="$fontFamily-monospace" fontSize="$fontSize-xs" color="$color-success-700" />
-                  <Text value="{($item.deletions || 0) > 0 ? '-' + $item.deletions : ''}" textAlign="right" width="64px" fontFamily="$fontFamily-monospace" fontSize="$fontSize-xs" color="$color-danger-700" />
-                </HStack>
+      <!-- browse-tabs-adopt-searchresults: rows render through the shared
+           ResultList shell; the commit row anatomy (pushed check, sha, date,
+           author, +/- stats, pending-close annotation) stays Commits-owned
+           in the slot. Inline CommitDetail expansion and selectedSha retire
+           in favor of the shell's modal. -->
+      <ResultList data="{commitRows}" query="{searchQuery.trim()}">
+        <property name="rowTemplate">
+          <HStack gap="$space-3" verticalAlignment="center">
+            <Text when="{$item.pushed}" value="✓" color="$color-success-600" fontSize="$fontSize-xs" width="12px" />
+            <Text when="{!$item.pushed}" value=" " width="12px" />
+            <Text value="{$item.sha.slice(0, 7)}" variant="code" fontSize="$fontSize-xs" color="$textColor-secondary" width="64px" />
+            <Text value="{formatDateTime($item.commit.author.date, 'MM-dd HH:mm')}" fontSize="$fontSize-xs" color="$textColor-secondary" overflowMode="none" width="74px" />
+            <HStack width="232px" gap="$space-1" verticalAlignment="center">
+              <Text value="{$item.commit.author.login || $item.commit.author.name}" fontSize="$fontSize-sm" color="$textColor-secondary" width="*" maxLines="1" />
+              <HStack gap="8px" verticalAlignment="center">
+                <Text value="{'+' + ($item.additions || 0)}" textAlign="right" width="64px" fontFamily="$fontFamily-monospace" fontSize="$fontSize-xs" color="$color-success-700" />
+                <Text value="{($item.deletions || 0) > 0 ? '-' + $item.deletions : ''}" textAlign="right" width="64px" fontFamily="$fontFamily-monospace" fontSize="$fontSize-xs" color="$color-danger-700" />
               </HStack>
-              <Text
-                value="{$item.commit.message.split('\n')[0]}"
-                fontSize="$fontSize-sm"
-                fontWeight="{selectedSha === $item.sha ? '$fontWeight-bold' : '$fontWeight-normal'}"
-                width="*"
-                maxLines="1" />
-              <Text
-                when="{!$item.pushed &amp;&amp; $item.pendingCloses &amp;&amp; $item.pendingCloses.length > 0}"
-                value="{'closes ' + $item.pendingCloses.map(p => '#' + p.issue).join(' ') + ' on push'}"
-                fontSize="$fontSize-xs"
-                color="$color-primary-600"
-                overflowMode="none" />
             </HStack>
-          </Link>
-          <VStack when="{selectedSha === $item.sha}" paddingBottom="$space-2">
-            <CommitDetail sha="{$item.sha}" url="{$item.html_url || ''}"
-              query="{searchQuery.trim()}" />
-          </VStack>
-        </VStack>
-      </Items>
+            <Text
+              value="{$item.commit.message.split('\n')[0]}"
+              fontSize="$fontSize-sm"
+              width="*"
+              maxLines="1" />
+            <Text
+              when="{!$item.pushed &amp;&amp; $item.pendingCloses &amp;&amp; $item.pendingCloses.length > 0}"
+              value="{'closes ' + $item.pendingCloses.map(p => '#' + p.issue).join(' ') + ' on push'}"
+              fontSize="$fontSize-xs"
+              color="$color-primary-600"
+              overflowMode="none" />
+          </HStack>
+        </property>
+      </ResultList>
       <Link
         when="{!searchNeedle &amp;&amp; commits.value &amp;&amp; commits.value.length > 20}"
         onClick="commitsExpanded = !commitsExpanded"

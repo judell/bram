@@ -1,0 +1,105 @@
+<Component name="ResultList" var.selectedHit="{null}">
+  <!-- browse-tabs-adopt-searchresults: the shared result-surface shell,
+       extracted from SearchResults.xmlui where each mechanism earned its
+       receipts this release. Consumers (SearchResults, Issues, Commits,
+       History) supply:
+         data    — precomputed row view-model. Required per row: `key`
+                   ("<type>:<id>", unique — idKey), `type` ('session' |
+                   'commit' | 'issue' | 'worklist-history'), `source`
+                   (modal title). Per type the detail needs: session
+                   {id, provider}, commit {key sha suffix, link}, issue
+                   {key number suffix}, worklist-history {extra}.
+         query   — highlight / find-nav term for the modal detail.
+         pinKey  — signature string; a change pins the page to top.
+         pinVia  — trace label for the pin (defaults 'result-list').
+         rowTemplate — slotted row markup, evaluated in the CALLER's scope
+                   with the row exposed as $item.
+       https://docs.xmlui.org/howto/pass-a-template-slot-to-a-component -->
+
+  <!-- A query change invalidates the open detail; close the modal
+       (search-hit-hover-and-modal-expansion). -->
+  <ChangeListener listenTo="{$props.query || ''}"
+    onDidChange="() => selectedHit = null" />
+
+  <!-- search-list-render-forensics (d71ef50): data transition vs. first
+       mounted range distinguishes a nonempty prop from unmaterialized rows. -->
+  <ChangeListener
+    listenTo="{($props.data || []).length + '|' + ($props.query || '')}"
+    onDidChange="() => window.__bramTraceSearchList('data', $props.data || [], null, resultsList)" />
+
+  <!-- Pin-to-top on wholesale data change (search-pin-top-on-bucket-toggle
+       lineage): NOT List.scrollToTop — its outside-scroll startMargin goes
+       stale when content appears above the list after mount and the pin
+       lands short (useStartMargin, ListReact.tsx; upstream candidate).
+       window.__bramScrollMainToTop pins the App scroller itself. Debounced
+       past virtua's re-anchor (undebounced pins fired 1-16ms after the data
+       recompute and the re-anchor dragged the page back — 2026-08-15 trace). -->
+  <ChangeListener listenTo="{$props.pinKey || ''}"
+    debounceWaitInMs="250"
+    onDidChange="() => { window.__bramScrollMainToTop(); window.__bramIframeTrace('search-date', {op: 'pin-top', via: $props.pinVia || 'result-list'}) }" />
+
+  <!-- Virtualized List in outside-scroll mode against the whole-page App
+       scroller (~10 rows in the DOM regardless of result count;
+       2026-07-31 Timelines receipt). idKey must be unique across types —
+       raw ids are not (issue hits carried id="", 2026-08-01).
+       https://docs.xmlui.org/components/List#idkey
+       Each row is a hover-tinted Card, clickable anywhere; click opens the
+       per-type detail modal. Rows keep uniform heights, so the virtualizer
+       never reflows on open/close.
+       https://docs.xmlui.org/howto/style-card-appearance -->
+  <Theme backgroundColor-Card="$color-surface-50"
+    backgroundColor-Card--hover="$color-surface-100"
+    padding-Card="$space-2" boxShadow-Card="none">
+    <List id="resultsList" data="{$props.data || []}" idKey="key"
+      onVisibleRangeDidChange="(range) => window.__bramTraceSearchList('visible-range', $props.data || [], range, resultsList)">
+      <!-- Consumers render their own intentional empty states; an empty
+           list renders nothing here. -->
+      <property name="emptyListTemplate">
+        <Fragment />
+      </property>
+      <!-- The explicit itemTemplate wrapper is load-bearing: a bare Slot as
+           the List child resolves once, not per item (FindableList's
+           documented trap). The Slot re-exposes the row as $item to the
+           caller's rowTemplate, which evaluates in the caller's scope. -->
+      <property name="itemTemplate">
+        <Card onClick="selectedHit = $item">
+          <Slot name="rowTemplate" item="{$item}" />
+        </Card>
+      </property>
+    </List>
+  </Theme>
+
+  <!-- The per-type detail modal (Transcript fullscreen-image precedent).
+       height=70vh: the detail components' bounded scrollers default to a
+       400px height sized for the retired inline expander; the modal has the
+       whole viewport. Their find navigation steps term-to-term inside the
+       modal's bounded scroll region. -->
+  <Theme maxWidth-ModalDialog="95vw">
+    <ModalDialog
+      when="{!!selectedHit}"
+      onClose="selectedHit = null"
+      title="{selectedHit ? selectedHit.source : ''}">
+      <VStack when="{selectedHit.type === 'session'}">
+        <SessionDetail sessionId="{selectedHit.id}" provider="{selectedHit.provider || 'claude'}"
+          query="{$props.query}" height="70vh" />
+      </VStack>
+      <VStack when="{selectedHit.type === 'commit'}">
+        <CommitDetail sha="{(selectedHit.key || '').split(':')[1]}" url="{selectedHit.link}"
+          query="{$props.query}" height="70vh" />
+      </VStack>
+      <VStack when="{selectedHit.type === 'issue'}">
+        <IssueDetail number="{(selectedHit.key || '').split(':')[1]}"
+          refreshTick="{$props.detailRefreshTick}"
+          query="{$props.query}" height="70vh" />
+      </VStack>
+      <VStack when="{selectedHit.type === 'worklist-history'}">
+        <HistoryDetail when="{selectedHit.extra}" group="{selectedHit.extra}"
+          query="{$props.query}" height="70vh" />
+      </VStack>
+      <!-- Per-consumer action area under the detail (Issues: comment/close).
+           Evaluated in the caller's scope with the open row as $item;
+           default empty. -->
+      <Slot name="detailFooterTemplate" item="{selectedHit}" />
+    </ModalDialog>
+  </Theme>
+</Component>

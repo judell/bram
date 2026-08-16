@@ -1,8 +1,15 @@
 <Component
   name="History"
-  var.expandedId="{null}"
   var.historyExpanded="{false}"
-  var.searchQuery="{getLastSearchQuery()}">
+  var.searchQuery="{getLastSearchQuery()}"
+  var.searchNeedle="{searchQuery.trim().toLowerCase()}"
+  var.filteredHistory="{filterHistoryList(historyList.value, searchNeedle)}"
+  var.visibleHistory="{filteredHistory.slice(0, searchNeedle ? 9999 : (historyExpanded ? 9999 : 50))}"
+  var.historyRows="{visibleHistory.map(h => Object.assign({}, h, {
+    key: 'history:' + h.id,
+    type: 'worklist-history',
+    source: h.title || ''
+  }))}">
 
   <!-- issue-230: reverse-chron browse of worklist history as a simplified
        inline-expander table (matching Commits/Sessions), not the old cards.
@@ -21,27 +28,14 @@
   <ChangeListener
     listenTo="{historyIndexedEvt.value &amp;&amp; historyIndexedEvt.value.tick}"
     onDidChange="() => historyList.refetch()" />
-  <DataSource
-    id="historySearch"
-    url="/__search"
-    queryParams="{{ q: searchQuery, limit: 300, types: 'worklist-history' }}"
-    when="{searchQuery.trim().length >= 2}" />
-  <variable name="searchNeedle" value="{searchQuery.trim().toLowerCase()}" />
-  <variable name="filteredHistory" value="{
-    searchNeedle
-      ? (historyList.value || []).filter(h => [
-          h.id || '',
-          h.title || '',
-          h.extra ? window.__bramHistoryPhasePath(h.extra) : '',
-          h.extra ? window.__bramWorklistItemFiles(h.extra).join(' ') : '',
-          (h.extra &amp;&amp; h.extra.commitContextLabel) || '',
-          (h.extra &amp;&amp; h.extra.detailsRestoredLabel) || ''
-        ].join(' ').toLowerCase().includes(searchNeedle)
-          || (historySearch.value || []).some(hit => hit.key === 'history:' + h.id))
-      : (historyList.value || [])
-  }" />
-  <variable name="visibleHistory"
-    value="{filteredHistory.slice(0, searchNeedle ? 9999 : (historyExpanded ? 9999 : 50))}" />
+  <!-- The needle/filter/rows chain lives in ROOT var. attributes: element-
+       declared <variable>s went stale against the root searchQuery (the
+       Commits DEBUG receipt, 2026-08-16). Filtering is filterHistoryList
+       (Globals.xs), matching the row's OWN payload (title + the full group
+       in `extra`) so the match surface equals what HistoryDetail renders —
+       the former FTS union admitted rows whose match lived in indexed prose
+       the detail never displays ("subagent": 9 FTS hits vs 5 title
+       matches). -->
   <VStack padding="$space-4" gap="$space-4" overflowY="auto" height="100%">
     <HStack gap="$space-3" verticalAlignment="center">
       <Heading level="h2">History</Heading>
@@ -51,44 +45,40 @@
         initialValue="{searchQuery}"
         inProgress="{historyList.inProgress}"
         onQueryChange="(q) => searchQuery = q"
-        onClear="searchQuery = ''; expandedId = null" />
+        onClear="searchQuery = ''" />
     </HStack>
 
     <Spinner when="{historyList.inProgress &amp;&amp; !historyList.loaded}" />
 
     <VStack gap="$space-1" when="{historyList.value &amp;&amp; historyList.value.length > 0}">
-      <Items data="{visibleHistory}">
-        <VStack gap="0" borderBottom="1px solid $borderColor">
-          <Link
-            onClick="expandedId = (expandedId === $item.id) ? null : $item.id"
-            noIndicator="true">
-            <HStack gap="$space-3" verticalAlignment="center" paddingVertical="$space-0_5">
-              <Text
-                value="{formatDateTime(new Date(Number($item.date) * 1000), 'yyyy-MM-dd HH:mm')}"
-                fontSize="$fontSize-xs"
-                color="$textColor-secondary"
-                overflowMode="none"
-                width="120px" />
-              <Text
-                value="{$item.title}"
-                fontSize="$fontSize-sm"
-                fontWeight="{expandedId === $item.id ? '$fontWeight-bold' : '$fontWeight-normal'}"
-                width="*"
-                maxLines="1" />
-              <Text
-                when="{$item.extra}"
-                value="{window.__bramHistoryPhasePath($item.extra)}"
-                fontSize="$fontSize-xs"
-                color="$textColor-secondary"
-                overflowMode="none"
-                maxLines="1" />
-            </HStack>
-          </Link>
-          <VStack when="{expandedId === $item.id &amp;&amp; $item.extra}" paddingBottom="$space-2">
-            <HistoryDetail group="{$item.extra}" query="{searchQuery.trim()}" />
-          </VStack>
-        </VStack>
-      </Items>
+      <!-- browse-tabs-adopt-searchresults: rows render through the shared
+           ResultList shell; the history row anatomy (date / title / phase
+           path) stays History-owned in the slot. Inline HistoryDetail
+           expansion and expandedId retire in favor of the shell's modal. -->
+      <ResultList data="{historyRows}" query="{searchQuery.trim()}">
+        <property name="rowTemplate">
+          <HStack gap="$space-3" verticalAlignment="center">
+            <Text
+              value="{formatDateTime(new Date(Number($item.date) * 1000), 'yyyy-MM-dd HH:mm')}"
+              fontSize="$fontSize-xs"
+              color="$textColor-secondary"
+              overflowMode="none"
+              width="120px" />
+            <Text
+              value="{$item.title}"
+              fontSize="$fontSize-sm"
+              width="*"
+              maxLines="1" />
+            <Text
+              when="{$item.extra}"
+              value="{window.__bramHistoryPhasePath($item.extra)}"
+              fontSize="$fontSize-xs"
+              color="$textColor-secondary"
+              overflowMode="none"
+              maxLines="1" />
+          </HStack>
+        </property>
+      </ResultList>
       <Link
         when="{!searchNeedle &amp;&amp; historyList.value &amp;&amp; historyList.value.length > 50}"
         onClick="historyExpanded = !historyExpanded"

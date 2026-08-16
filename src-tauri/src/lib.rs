@@ -334,6 +334,8 @@ struct ProjectConfig {
     menus: Option<MenusConfig>,
     #[serde(default)]
     ai: Option<AiConfig>,
+    #[serde(default)]
+    search: Option<SearchConfig>,
 }
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
@@ -431,6 +433,55 @@ struct AiConfig {
     // Haiku alias validated in the feasibility test.
     #[serde(default)]
     model: Option<String>,
+}
+
+// Optional search block (issue #250 follow-up): per-project depth bounds for
+// the search index. `commitDepth` feeds the commit pass's `git log -n<depth>`
+// (how far back commit messages + diffs are indexed); `issueLimit` bounds the
+// forge issues list/probe. Both were hard-coded judgment calls (2000 / 500);
+// the right value is per-project. Values clamp at read time.
+#[derive(Default, Clone, serde::Deserialize)]
+struct SearchConfig {
+    #[serde(default, rename = "commitDepth")]
+    commit_depth: Option<u32>,
+    #[serde(default, rename = "issueLimit")]
+    issue_limit: Option<u32>,
+}
+
+const DEFAULT_SEARCH_COMMIT_DEPTH: u32 = 2000;
+const SEARCH_COMMIT_DEPTH_RANGE: (u32, u32) = (100, 20_000);
+const SEARCH_ISSUE_LIMIT_RANGE: (u32, u32) = (50, 2_000);
+
+fn search_commit_depth_from_config(config: Option<&ProjectConfig>) -> u32 {
+    config
+        .and_then(|c| c.search.as_ref())
+        .and_then(|s| s.commit_depth)
+        .unwrap_or(DEFAULT_SEARCH_COMMIT_DEPTH)
+        .clamp(SEARCH_COMMIT_DEPTH_RANGE.0, SEARCH_COMMIT_DEPTH_RANGE.1)
+}
+
+fn search_issue_limit_from_config(config: Option<&ProjectConfig>) -> usize {
+    config
+        .and_then(|c| c.search.as_ref())
+        .and_then(|s| s.issue_limit)
+        .unwrap_or(GH_ISSUE_LIST_LIMIT as u32)
+        .clamp(SEARCH_ISSUE_LIMIT_RANGE.0, SEARCH_ISSUE_LIMIT_RANGE.1) as usize
+}
+
+fn project_search_commit_depth<R: tauri::Runtime>(app: &AppHandle<R>) -> u32 {
+    let config = project_root(Some(app)).and_then(|root| load_project_config(&root));
+    search_commit_depth_from_config(config.as_ref())
+}
+
+fn project_search_issue_limit<R: tauri::Runtime>(app: &AppHandle<R>) -> usize {
+    let config = project_root(Some(app)).and_then(|root| load_project_config(&root));
+    search_issue_limit_from_config(config.as_ref())
+}
+
+// Root-based variant for ForgeAdapter methods, which receive only the
+// project root.
+fn search_issue_limit_for_root(root: &Path) -> usize {
+    search_issue_limit_from_config(load_project_config(root).as_ref())
 }
 
 fn default_server_path() -> String {
@@ -11319,7 +11370,7 @@ fn gh_issues_list<R: tauri::Runtime>(
     fresh: bool,
 ) -> Result<Vec<u8>, String> {
     if fresh {
-        match build_issues_list(app, GH_ISSUE_LIST_LIMIT) {
+        match build_issues_list(app, project_search_issue_limit(app)) {
             Ok(full) => {
                 if let Some(db) = search_index_db_path(app) {
                     if let Ok(conn) = search_index::open(&db.to_string_lossy()) {
@@ -11866,7 +11917,7 @@ impl ForgeAdapter for GitHubForge {
     }
 
     fn issues_list(&self, root: &Path, limit: usize) -> Result<Vec<serde_json::Value>, String> {
-        let limit = limit.clamp(1, GH_ISSUE_LIST_LIMIT).to_string();
+        let limit = limit.clamp(1, search_issue_limit_for_root(root)).to_string();
         let stdout = gh_json_out(
             root,
             &[
@@ -11888,7 +11939,7 @@ impl ForgeAdapter for GitHubForge {
         // number + updatedAt only — no body/comments, so this is far cheaper
         // than the full list. The indexer fetches full detail (issue_view) only
         // for issues whose updatedAt advanced.
-        let full_limit = GH_ISSUE_LIST_LIMIT.to_string();
+        let full_limit = search_issue_limit_for_root(root).to_string();
         let stdout = gh_json_out(
             root,
             &[
@@ -14595,6 +14646,8 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
     // external model. Only an explicit project setting enables the route.
     let describe_commands = project_config_describe_commands(config.clone());
     let one_click_approve_commit = project_config_one_click_approve_commit(config.clone());
+    let search_commit_depth = search_commit_depth_from_config(config.as_ref());
+    let search_issue_limit = search_issue_limit_from_config(config.as_ref());
     let (
         agent,
         args,
@@ -14686,6 +14739,10 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
         },
         "menus": { "parseAndDisplay": menus_parse },
         "ai": { "describeCommands": describe_commands },
+        "search": {
+            "commitDepth": search_commit_depth,
+            "issueLimit": search_issue_limit
+        },
     })
 }
 
@@ -18240,7 +18297,11 @@ fn run_commit_index_pass<R: tauri::Runtime>(
     // %at = author date as epoch seconds (avoids ISO parsing); %B last so
     // multi-line bodies reassemble; %x1f fields, %x1e records.
     let format = "--format=%H%x1f%at%x1f%an%x1f%B%x1e";
-    let log_out = git_run(app, &["log", "-n2000", format]).map_err(|e| e.to_string())?;
+    // Depth is a project setting (search.commitDepth, default 2000): how far
+    // back commit messages + diffs are indexed. Beyond it, git log -S /
+    // git grep remain the uncapped tools.
+    let depth_arg = format!("-n{}", project_search_commit_depth(app));
+    let log_out = git_run(app, &["log", &depth_arg, format]).map_err(|e| e.to_string())?;
     let (mut seen, mut indexed, mut skipped) = (0usize, 0usize, 0usize);
     // Gate first, collect what needs indexing: (sha, token, author, body).
     let mut pending: Vec<(String, i64, String, String)> = Vec::new();
@@ -18477,7 +18538,7 @@ fn run_issue_index_pass<R: tauri::Runtime>(
         // doc changes AND while the staleness marker is set, so one failed
         // rebuild self-heals on the next pass instead of waiting for the
         // next issue activity; failures are traced, not swallowed (#235).
-        match build_issues_list(app, GH_ISSUE_LIST_LIMIT) {
+        match build_issues_list(app, project_search_issue_limit(app)) {
             Ok(list_bytes) => {
                 if list_stale && indexed == 0 {
                     append_bram_trace_line(app, "search-index", "op=issues-list-rebuild-retry");
@@ -40396,14 +40457,15 @@ fn route_request<R: tauri::Runtime>(
     }
 
     if path == "__issues" {
-        let mut limit = GH_ISSUE_LIST_LIMIT;
+        let issue_limit = project_search_issue_limit(app);
+        let mut limit = issue_limit;
         let mut fresh = false;
         for pair in query.split('&') {
             if let Some(v) = pair.strip_prefix("limit=") {
                 let parsed = percent_decode(v)
                     .parse::<usize>()
-                    .unwrap_or(GH_ISSUE_LIST_LIMIT);
-                limit = parsed.clamp(1, GH_ISSUE_LIST_LIMIT);
+                    .unwrap_or(issue_limit);
+                limit = parsed.clamp(1, issue_limit);
             } else if pair == "fresh=1" {
                 fresh = true;
             }

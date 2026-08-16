@@ -1537,6 +1537,14 @@ window.settingsInfoBodies = {
     "Billing: a key Claude Code accepts bills it per-token instead of your " +
     "subscription. To keep it Bram-only, run `/config` → turn off \"Use " +
     "custom API key\". Persists in `.bram.json` under `ai.describeCommands`.",
+  search:
+    "## Commit depth\n\n" +
+    "How many of the newest commits the search index covers, messages and " +
+    "diffs (100–20,000, default 2,000); deeper indexing lengthens the next " +
+    "cold rebuild proportionally.\n\n" +
+    "## Issue limit\n\n" +
+    "How many forge issues the Issues tab and search index fetch " +
+    "(50–2,000, default 500).",
   traces:
     "## Tracing enabled\n\n" +
     "Master switch for writes to `bram-trace.log`. `BRAM_TRACE` in the " +
@@ -1569,6 +1577,13 @@ window.__bramSettingsFormData = function (settings, section) {
   if (section === "traces") {
     var traces = s.traces || {};
     return { archiveAfterDays: Number(traces.archiveAfterDays || 14) };
+  }
+  if (section === "search") {
+    var search = s.search || {};
+    return {
+      commitDepth: Number(search.commitDepth || 2000),
+      issueLimit: Number(search.issueLimit || 500),
+    };
   }
   return {};
 };

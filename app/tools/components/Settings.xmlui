@@ -362,6 +362,69 @@
           value="{'Last startup: ' + traceArchiveStatus.value.candidateFiles + ' candidate(s) older than ' + traceArchiveStatus.value.archiveAfterDays + ' days; ' + traceArchiveStatus.value.archivedFiles + ' archived, ' + traceArchiveStatus.value.failures + ' failed.'}" />
       </VStack>
 
+      <ContentSeparator />
+
+      <!-- search-depth-settings: per-project depth bounds for the search
+           index (issue #250 follow-up). Values persist in .bram.json under
+           `search`; the host clamps at read time and each indexing pass
+           reads them fresh, so a change applies on the next pass. -->
+      <VStack gap="$space-4">
+        <HStack
+          width="fit-content"
+          gap="$space-1"
+          verticalAlignment="center"
+          paddingHorizontal="$space-2"
+          paddingVertical="$space-1"
+          borderRadius="$borderRadius"
+          backgroundColor="$color-surface-100">
+          <Button
+            icon="info"
+            size="xs"
+            variant="ghost"
+            tooltip="About Search"
+            onClick="infoTitle = 'Search'; infoBody = window.settingsInfoBodies.search; settingInfoDialog.open()" />
+          <Heading level="h3">Search</Heading>
+        </HStack>
+        <Form
+          id="searchSettingsForm"
+          testId="settings-search-form"
+          width="12rem"
+          data="{window.__bramSettingsFormData(settingsValue, 'search')}"
+          submitUrl="/__settings"
+          submitMethod="post"
+          cancelLabel=""
+          saveLabel="Save search limits"
+          saveInProgressLabel="Saving…"
+          hideButtonRowUntilDirty="{true}"
+          marginRight-submitButton="auto"
+          onWillSubmit="(data) => window.__bramSettingsSectionUpdate('search', data)"
+          onSuccess="(response) => window.__bramAdoptSettingsForm(searchSettingsForm, response, 'search')">
+          <NumberBox
+            id="commitDepthBox"
+            bindTo="commitDepth"
+            label="Commit depth"
+            width="100%"
+            integersOnly="{true}"
+            minValue="{100}"
+            maxValue="{20000}" />
+          <NumberBox
+            id="issueLimitBox"
+            bindTo="issueLimit"
+            label="Issue limit"
+            width="100%"
+            integersOnly="{true}"
+            minValue="{50}"
+            maxValue="{2000}" />
+        </Form>
+        <ChangeListener
+          listenTo="{settingsValue}"
+          onDidChange="window.__bramSyncSettingsForm(settingsValue, searchSettingsForm, 'search')" />
+        <Text
+          fontSize="$fontSize-xs"
+          color="$textColor-secondary"
+          value="Changes apply on the next indexing pass. Deeper commit indexing lengthens the next cold rebuild." />
+      </VStack>
+
     </VStack>
 
     <Text

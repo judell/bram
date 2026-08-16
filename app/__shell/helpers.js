@@ -7267,52 +7267,6 @@ window.__bramMarkdownLiteral = function (text) {
     .replace(/([`*_{}\[\]()<>#+.!|~-])/g, "\\$1");
 };
 
-// sanitize-raw-transcript-markdown-braces: neutralize XMLUI Markdown's
-// at-brace binding syntax in DATA-fed content. The engine's
-// parseBindingExpression evaluates at-brace expressions in rendered markdown
-// (PowerShell hashtable literals collide exactly), skips ONLY triple-backtick
-// fences (inline code is NOT protected), and honors a backslash escape before
-// the at-sign (negative lookbehind). An unescaped occurrence in a transcript
-// turn, tool result, or worklist draft crashed the whole surface (2026-08-16:
-// Worklist tab, Transcript, and a session-detail modal, in one evening).
-// Fence-aware to mirror the engine's own splitByCodeFences: fenced segments
-// pass byte-exact (the parser leaves them verbatim; an injected backslash
-// would render). In prose, CommonMark strips the backslash before the
-// at-sign; inside inline code spans it stays visible — tolerable next to the
-// alternative. Apply at every Markdown content binding fed from data.
-window.__bramEscapeMarkdownBindings = function (text) {
-  if (text == null) return text;
-  var s = String(text);
-  if (s.indexOf("@{") === -1) return s;
-  var lines = s.split("\n");
-  var out = [];
-  var inFence = false;
-  var opener = "";
-  for (var i = 0; i < lines.length; i++) {
-    var line = lines[i];
-    var m = line.match(/^(`{3,})(.*)/);
-    if (!inFence) {
-      if (m) {
-        inFence = true;
-        opener = m[1];
-        out.push(line);
-        continue;
-      }
-      // Preserve already-escaped openers; escape the bare ones.
-      out.push(line.split("\\@{").map(function (seg) {
-        return seg.split("@{").join("\\@{");
-      }).join("\\@{"));
-    } else {
-      out.push(line);
-      if (m && m[1] === opener && m[2].trim() === "") {
-        inFence = false;
-        opener = "";
-      }
-    }
-  }
-  return out.join("\n");
-};
-
 // Bake find state into transcript rows (rows are isolated scopes — they
 // can't see the outer find vars). Returns NULL when the find is inactive so
 // the caller's `findPlan.rows || events` binding falls back to the live events

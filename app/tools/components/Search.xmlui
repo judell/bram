@@ -1,4 +1,7 @@
-<Component name="Search" var.query="{$queryParams.q || ''}">
+<!-- query seeds from a deep link when present, else from the pane-lifetime
+     carry-over (Globals.xs) — which Search itself publishes below, so
+     switching away and back retains the input (2026-08-16 iterate). -->
+<Component name="Search" var.query="{$queryParams.q || getLastSearchQuery()}">
   <!-- issue-230 unified search across the local FTS5 index (sessions,
        commits, issues, worklist-history). Each type is queried independently
        (its own top-100) so a length-penalized bucket isn't squeezed out of a
@@ -19,6 +22,10 @@
   <variable name="selectedTypes"
     value="{$queryParams.types ? $queryParams.types.split(',') : (window.__bramSearchBadgesInitialAllOn() ? ['session', 'commit', 'issue', 'worklist-history'] : [])}" />
   <variable name="mode" value="{$queryParams.mode || 'and'}" />
+  <!-- carry-search-query-to-tabs: publish the live query so Sessions /
+       Issues / History seed their filters from it at mount (Globals.xs). -->
+  <ChangeListener listenTo="{query}"
+    onDidChange="() => setLastSearchQuery(query)" />
   <variable name="ready" value="{!!query &amp;&amp; query.trim().length >= 2}" />
   <!-- Selected date window [lo, hi] (epoch seconds); null = no date filter. -->
   <variable name="dateFilter" value="{null}" />

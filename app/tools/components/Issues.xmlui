@@ -1,7 +1,7 @@
 <Component name="Issues"
   var.issuesExpanded="{false}"
   var.expandedNumber="{null}"
-  var.searchQuery=""
+  var.searchQuery="{getLastSearchQuery()}"
   var.searchNeedle="{searchQuery.trim().toLowerCase()}"
   var.showNewIssueHint="{false}"
   var.newIssueSubmitting="{false}"
@@ -143,6 +143,7 @@
       <SearchBox
         boxWidth="22rem"
         placeholder="Filter issues…"
+        initialValue="{searchQuery}"
         inProgress="{issuesFirstPage.inProgress || issuesFull.inProgress}"
         onQueryChange="(q) => searchQuery = q"
         onClear="searchQuery = ''; expandedNumber = null" />

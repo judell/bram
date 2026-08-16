@@ -2,7 +2,7 @@
   name="History"
   var.expandedId="{null}"
   var.historyExpanded="{false}"
-  var.searchQuery="">
+  var.searchQuery="{getLastSearchQuery()}">
 
   <!-- issue-230: reverse-chron browse of worklist history as a simplified
        inline-expander table (matching Commits/Sessions), not the old cards.
@@ -48,6 +48,7 @@
       <SearchBox
         boxWidth="22rem"
         placeholder="Filter history…"
+        initialValue="{searchQuery}"
         inProgress="{historyList.inProgress}"
         onQueryChange="(q) => searchQuery = q"
         onClear="searchQuery = ''; expandedId = null" />

@@ -2,7 +2,7 @@
   name="Commits"
   var.selectedSha="{null}"
   var.commitsExpanded="{false}"
-  var.searchQuery=""
+  var.searchQuery="{getLastSearchQuery()}"
   var.pullError="{null}"
   var.pushError="{null}">
 
@@ -58,6 +58,7 @@
       <SearchBox
         boxWidth="22rem"
         placeholder="Filter commits…"
+        initialValue="{searchQuery}"
         inProgress="{commits.inProgress}"
         onQueryChange="(q) => searchQuery = q"
         onClear="searchQuery = ''; selectedSha = null" />

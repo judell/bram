@@ -3,7 +3,7 @@
   var.currentProvider="{null}"
   var.expandedId="{null}"
   var.sessionsExpanded="{false}"
-  var.searchQuery=""
+  var.searchQuery="{getLastSearchQuery()}"
   var.renamingSession="{null}"
   var.renameDraft=""
   var.newSessionOpen="{false}"
@@ -161,6 +161,7 @@
       <SearchBox
         boxWidth="22rem"
         placeholder="Filter sessions…"
+        initialValue="{searchQuery}"
         inProgress="{searchReady &amp;&amp; (sessionsSearch.inProgress || sessionsFull.inProgress)}"
         onQueryChange="(q) => searchQuery = q"
         onClear="searchQuery = ''; expandedId = null" />

@@ -90,6 +90,22 @@ function sortSearchHits(hits, order) {
   });
 }
 
+// carry-search-query-to-tabs: the Search page's current query, published so
+// Sessions / Issues / History seed their filter from it at mount ("switch
+// tabs mid-investigation" carry-over). Deliberately in-memory xs module
+// state — it lives exactly as long as the pane, so tabs opened days later
+// are never pre-filtered by a stale query (localStorage was rejected for
+// that reason). Accessors because handler arrow bodies can't assign module
+// vars they don't own, and window-member assignment is the engine-rejected
+// shape; both functions hoist onto window for qualified handler calls.
+var lastSearchQuery = '';
+function setLastSearchQuery(q) {
+  lastSearchQuery = String(q || '');
+}
+function getLastSearchQuery() {
+  return lastSearchQuery;
+}
+
 function statusSectionSubhead(title) {
   const descriptions = {
     'Startup Run': 'first-minute load',

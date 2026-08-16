@@ -8589,6 +8589,29 @@ document.addEventListener("click", function (e) {
     return;
   }
 }, true);
+// search-pin freeze fix (P0 2026-08-16): pin the pane's main scroller only.
+// The search pins originally called scrollAllToTop below, whose
+// querySelectorAll("*") sweep + per-element scrollHeight reads (each a forced
+// layout) + smooth-scroll on every scrollable ran per debounced keystroke —
+// observed 1.8s long-tasks per settle on #/search, ending in WebKit recycling
+// the frozen page. This targets the App's one real scroll container directly
+// and sets scrollTop instantly: O(1) lookup, no layout sweep, no animation
+// queue. scrollAllToTop remains for its click-driven callers.
+window.__bramScrollMainToTop = function () {
+  try {
+    var main = document.querySelector('[class*="mainContentArea"]');
+    if (main) {
+      main.scrollTop = 0;
+      return true;
+    }
+    var root = document.scrollingElement || document.documentElement;
+    if (root) root.scrollTop = 0;
+    return false;
+  } catch (e) {
+    return false;
+  }
+};
+
 // Click-driven; scan the DOM per call.
 window.scrollAllToTop = function () {
   var root = document.scrollingElement || document.documentElement || document.body;

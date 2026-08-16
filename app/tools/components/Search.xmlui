@@ -120,7 +120,7 @@
   <ChangeListener
     listenTo="{(dateFilter ? dateFilter[0] + '-' + dateFilter[1] : 'none') + '|' + query.trim()}"
     debounceWaitInMs="250"
-    onDidChange="() => { window.scrollAllToTop(); window.__bramIframeTrace('search-date', {op: 'pin-top', via: 'filter-or-query'}) }" />
+    onDidChange="() => { window.__bramScrollMainToTop(); window.__bramIframeTrace('search-date', {op: 'pin-top', via: 'filter-or-query'}) }" />
 
   <!-- Slider endpoint labels: show the applied filter when one is set, else
        the full domain. Precomputed here so the Text bindings below are bare

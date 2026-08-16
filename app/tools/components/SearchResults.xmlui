@@ -41,7 +41,7 @@
        pin and dragged the page back down). -->
   <ChangeListener listenTo="{$props.selectionKey}"
     debounceWaitInMs="250"
-    onDidChange="() => { window.scrollAllToTop(); window.__bramIframeTrace('search-date', {op: 'pin-top', via: 'buckets'}) }" />
+    onDidChange="() => { window.__bramScrollMainToTop(); window.__bramIframeTrace('search-date', {op: 'pin-top', via: 'buckets'}) }" />
   <!-- search-results-virtualize: List, not Items — ~10 rows in the DOM
        regardless of result count (2026-07-31 Timelines recording: 100
        materialized rows made Layout-dominated frames of 250-1300ms). With no

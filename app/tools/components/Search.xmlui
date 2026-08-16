@@ -82,31 +82,35 @@
     ).sort((a, b) => a.rank - b.rank)
   }" />
 
-  <!-- Do not establish the date domain from partial bucket arrivals. A new
-       query may retain the prior DataSource values while inProgress, so both
-       loaded and quiescent are required. -->
+  <!-- FORENSICS-ONLY since search-slider-domain-from-latch: read by the
+       filter-reset and buckets trace lines, gates nothing. The derived
+       value goes stale after a backspace-to-empty → retype cycle
+       (op=buckets 2026-08-16T21:30:02Z logged every input favorable —
+       all loaded, none inProgress, ready — with settled:false), the
+       <variable>-staleness class. Kept until that gets an upstream
+       reproducer; do not gate UI on it. -->
   <variable name="resultsSettled" value="{
     ready
       &amp;&amp; rSession.loaded &amp;&amp; rCommit.loaded &amp;&amp; rIssue.loaded &amp;&amp; rHistory.loaded
       &amp;&amp; !rSession.inProgress &amp;&amp; !rCommit.inProgress &amp;&amp; !rIssue.inProgress &amp;&amp; !rHistory.inProgress
   }" />
 
-  <!-- Date-slider domain: [min, max] across every query bucket, independent of
-       the selected facets; widen by a day when all hits share one date so the
-       two thumbs aren't coincident. It stays absent until all four result
-       buckets have settled, then remains stable until the query changes. -->
+  <!-- Date-slider domain: [min, max] over the latched result set
+       (settledHits, 5d8cbb4) rather than the live buckets gated on
+       resultsSettled, whose staleness stranded the slider hidden after a
+       backspace-to-empty → retype cycle. The latch is settled content by
+       construction and ignores dateFilter, so moving the handles never
+       shifts the domain; it re-latches on facet toggles, so the domain
+       now tracks the visible types (previously facet-independent). Widen
+       by a day when all hits share one date so the two thumbs aren't
+       coincident. -->
   <variable name="hitDates" value="{
-    [].concat(
-      rSession.value || [],
-      rCommit.value || [],
-      rIssue.value || [],
-      rHistory.value || []
-    ).map(h => Number(h.date)).filter(n => n > 0)
+    settledHits.map(h => Number(h.date)).filter(n => n > 0)
   }" />
   <variable name="dateLo" value="{hitDates.length ? hitDates.reduce((a, b) => a &lt; b ? a : b) : null}" />
   <variable name="dateHi" value="{hitDates.length ? hitDates.reduce((a, b) => a &gt; b ? a : b) : null}" />
   <variable name="dateRange"
-    value="{!resultsSettled || dateLo === null ? null : [dateLo, dateHi > dateLo ? dateHi : dateLo + 86400]}" />
+    value="{dateLo === null ? null : [dateLo, dateHi > dateLo ? dateHi : dateLo + 86400]}" />
 
   <!-- Domain change => clear the applied filter. The thumbs need no companion
        reset call: the Slider re-seeds itself whenever initialValue/minValue/
@@ -182,10 +186,14 @@
        arrows captured stale in this component family. Facet counts keep
        their live per-bucket reads. -->
   <variable name="settledHits" value="{[]}" />
+  <!-- The query the latch last processed — the empty-state hint gates on
+       it so "No results" can't flash while a fresh query's buckets are
+       still in flight (the job resultsSettled used to do). -->
+  <variable name="latchedQuery" value="" />
   <ChangeListener
     listenTo="{ready + '|' + query.trim() + '|' + merged.length + '|' + (merged.length ? merged[0].key + '-' + merged[merged.length - 1].key : '') + '|' + selectedTypes.slice().sort().join(',')}"
     debounceWaitInMs="300"
-    onDidChange="() => { settledHits = ready ? merged : []; window.__bramIframeTrace('search-date', {op: 'latch', count: ready ? merged.length : 0, ready: ready}) }" />
+    onDidChange="() => { settledHits = ready ? merged : []; latchedQuery = ready ? query.trim() : ''; window.__bramIframeTrace('search-date', {op: 'latch', count: ready ? merged.length : 0, ready: ready}) }" />
 
   <!-- The 20-row initial-render cap (81ba145) was reverted once the
        xmlui-org/xmlui#3760 fix landed: outside-scroll Lists virtualize now,
@@ -336,7 +344,7 @@
          absence this is. Search is FTS keyword/phrase, not semantic — and
          self-inflicted filters (date window, disabled pills) are named so
          they can be fixed in place. -->
-    <VStack when="{ready &amp;&amp; resultsSettled &amp;&amp; displayed.length === 0}" gap="$space-0_5">
+    <VStack when="{ready &amp;&amp; displayed.length === 0 &amp;&amp; latchedQuery === query.trim()}" gap="$space-0_5">
       <Text color="$textColor-secondary" value="No matches." />
       <Text fontSize="$fontSize-xs" color="$textColor-secondary"
         value="Search matches exact keywords and phrases (quote for a phrase), not meanings — no match means no term matched, not that the item is missing from the index." />

@@ -39,14 +39,14 @@
             value="{($item.state === 'OPEN' ? 'open' : 'closed') + ' · #' + $item.number + ' ' + $item.title}" />
           <Text when="{$item.author}" fontSize="$fontSize-sm" color="$textColor-secondary"
             value="{(($item.author.login || $item.author.name) || 'unknown') + ' opened ' + getDateUntilNow($item.createdAt) + ' ago'}" />
-          <Markdown when="{$item.body}" content="{$item.body}"
+          <Markdown when="{$item.body}" interpolateBindings="false" allowHtml="false" content="{$item.body}"
             highlightText="{window.__bramSearchTerms($item.__needle)}"
             highlightActiveIndex="{$item.__activeOcc}" />
         </VStack>
         <VStack when="{$item.kind === 'comment'}" gap="$space-1" paddingTop="$space-2" borderTop="1px solid $borderColor">
           <Text fontSize="$fontSize-xs" color="$textColor-secondary"
             value="{(($item.author &amp;&amp; ($item.author.login || $item.author.name)) || 'unknown')}" />
-          <Markdown content="{$item.body}"
+          <Markdown interpolateBindings="false" allowHtml="false" content="{$item.body}"
             highlightText="{window.__bramSearchTerms($item.__needle)}"
             highlightActiveIndex="{$item.__activeOcc}" />
         </VStack>

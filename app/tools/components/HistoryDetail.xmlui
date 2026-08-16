@@ -33,14 +33,14 @@
 
         <VStack when="{$item.kind === 'before'}" gap="$space-2">
           <Text value="Before" fontWeight="$fontWeight-bold" />
-          <Markdown content="{$item.body}"
+          <Markdown interpolateBindings="false" allowHtml="false" content="{$item.body}"
             highlightText="{window.__bramSearchTerms($item.__needle)}"
             highlightActiveIndex="{$item.__activeOcc}" />
         </VStack>
 
         <VStack when="{$item.kind === 'after'}" gap="$space-2">
           <Text value="After" fontWeight="$fontWeight-bold" />
-          <Markdown content="{$item.body}"
+          <Markdown interpolateBindings="false" allowHtml="false" content="{$item.body}"
             highlightText="{window.__bramSearchTerms($item.__needle)}"
             highlightActiveIndex="{$item.__activeOcc}" />
         </VStack>
@@ -72,7 +72,7 @@
 
         <VStack when="{$item.kind === 'phase'}" gap="$space-1" paddingVertical="$space-1" borderTop="1px solid $borderColor">
           <Text value="{$item.label}" fontSize="$fontSize-sm" />
-          <Markdown when="{$item.isFeedback}" content="{$item.body}"
+          <Markdown when="{$item.isFeedback}" interpolateBindings="false" allowHtml="false" content="{$item.body}"
             highlightText="{window.__bramSearchTerms($item.__needle)}"
             highlightActiveIndex="{$item.__activeOcc}" />
           <Text when="{!$item.isFeedback}" value="{$item.summary}" color="$textColor-secondary" fontSize="$fontSize-xs" />

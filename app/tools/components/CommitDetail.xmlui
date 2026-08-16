@@ -37,7 +37,7 @@
             <Text fontWeight="$fontWeight-bold"
               value="{'Open commit on ' + (($props.url || '').includes('gitlab') ? 'GitLab' : 'GitHub') + ' ↗'}" />
           </Link>
-          <Markdown when="{$item.message}" content="{$item.message}"
+          <Markdown when="{$item.message}" interpolateBindings="false" allowHtml="false" content="{$item.message}"
             highlightText="{window.__bramSearchTerms($item.__needle)}"
             highlightActiveIndex="{$item.__activeOcc}" />
           <Text when="{$item.stats}" fontSize="$fontSize-sm" color="$textColor-secondary"

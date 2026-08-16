@@ -18445,6 +18445,10 @@ fn run_issue_index_pass<R: tauri::Runtime>(
         return Ok((0, 0, 0, search_index::row_count(&conn).unwrap_or(0)));
     };
     let (mut seen, mut indexed, mut skipped) = (0usize, 0usize, 0usize);
+    // issue-252: the probe is the source of truth for the newest issue that
+    // exists; the post-rebuild reconciliation below verifies the cached list
+    // reached it.
+    let probe_newest = probe.iter().map(|(n, _)| *n).max().unwrap_or(0);
     // Gate first (local SQLite, cheap) so the fetch loop knows its total and
     // can report affirmative progress during a cold backfill (issue #250) —
     // each issue_view is a network call, and a schema reset makes dozens of
@@ -18544,15 +18548,42 @@ fn run_issue_index_pass<R: tauri::Runtime>(
                     append_bram_trace_line(app, "search-index", "op=issues-list-rebuild-retry");
                     emit_replayable_signal(app, "issues-changed");
                 }
-                let status = cache_issues_list_row(
-                    &conn,
-                    &String::from_utf8(list_bytes).unwrap_or_default(),
-                );
+                let list_json = String::from_utf8(list_bytes).unwrap_or_default();
+                let status = cache_issues_list_row(&conn, &list_json);
                 if status == "empty-contradiction" {
                     append_bram_trace_line(
                         app,
                         "search-index",
                         "op=issues-list-empty-contradiction via=rebuild",
+                    );
+                }
+                // issue-252 reconciliation: a rebuild's gh snapshot can race a
+                // just-created issue (the probe and the list build are separate
+                // calls that can hit different replicas). If the cached list's
+                // newest number trails the probe's, mark the list stale so the
+                // existing #235 retry rebuilds on the next pass — a racy
+                // snapshot heals in about a minute instead of never (the
+                // change-token gate would otherwise never fire again for an
+                // unchanged issue).
+                let list_newest = serde_json::from_str::<serde_json::Value>(&list_json)
+                    .ok()
+                    .and_then(|v| {
+                        v.as_array().and_then(|a| {
+                            a.iter()
+                                .filter_map(|i| i.get("number").and_then(|n| n.as_u64()))
+                                .max()
+                        })
+                    })
+                    .unwrap_or(0);
+                if probe_newest > list_newest && list_newest > 0 {
+                    set_issues_list_stale(&conn, true);
+                    append_bram_trace_line(
+                        app,
+                        "search-index",
+                        &format!(
+                            "op=issues-list-reconcile-stale probe_newest={} list_newest={}",
+                            probe_newest, list_newest
+                        ),
                     );
                 }
             }

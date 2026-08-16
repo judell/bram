@@ -149,8 +149,8 @@
         placeholder="Filter issues…"
         initialValue="{searchQuery}"
         inProgress="{issuesFirstPage.inProgress || issuesFull.inProgress}"
-        onQueryChange="(q) => searchQuery = q"
-        onClear="searchQuery = ''" />
+        onQueryChange="(q) => { searchQuery = q; setLastSearchQuery(q) }"
+        onClear="searchQuery = ''; setLastSearchQuery('')" />
       <Button
         when="{repoOrigin.value &amp;&amp; repoOrigin.value.issuesNewUrl}"
         label="+ New issue"

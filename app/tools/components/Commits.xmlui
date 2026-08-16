@@ -60,8 +60,8 @@
         placeholder="Filter commits…"
         initialValue="{searchQuery}"
         inProgress="{commits.inProgress}"
-        onQueryChange="(q) => searchQuery = q"
-        onClear="searchQuery = ''" />
+        onQueryChange="(q) => { searchQuery = q; setLastSearchQuery(q) }"
+        onClear="searchQuery = ''; setLastSearchQuery('')" />
       <Text
         when="{gitStatus.value &amp;&amp; gitStatus.value.branch}"
         maxWidth="260px"

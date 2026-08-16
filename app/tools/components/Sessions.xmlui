@@ -163,8 +163,8 @@
         placeholder="Filter sessions…"
         initialValue="{searchQuery}"
         inProgress="{searchReady &amp;&amp; (sessionsSearch.inProgress || sessionsFull.inProgress)}"
-        onQueryChange="(q) => searchQuery = q"
-        onClear="searchQuery = ''; expandedId = null" />
+        onQueryChange="(q) => { searchQuery = q; setLastSearchQuery(q) }"
+        onClear="searchQuery = ''; setLastSearchQuery(''); expandedId = null" />
       <Button
         label="+ New session"
         variant="solid"

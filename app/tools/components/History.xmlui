@@ -44,8 +44,8 @@
         placeholder="Filter history…"
         initialValue="{searchQuery}"
         inProgress="{historyList.inProgress}"
-        onQueryChange="(q) => searchQuery = q"
-        onClear="searchQuery = ''" />
+        onQueryChange="(q) => { searchQuery = q; setLastSearchQuery(q) }"
+        onClear="searchQuery = ''; setLastSearchQuery('')" />
     </HStack>
 
     <Spinner when="{historyList.inProgress &amp;&amp; !historyList.loaded}" />

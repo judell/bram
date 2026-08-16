@@ -720,7 +720,7 @@
                         initiallyExpanded="{(expandedItemIds || []).includes($item.id + '::before')}"
                         onExpandedChange="(open) => { expandedItemIds = open ? (expandedItemIds || []).filter(k => k !== $item.id + '::before').concat([$item.id + '::before']) : (expandedItemIds || []).filter(k => k !== $item.id + '::before'); window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds, feedbackDraftsById: feedbackDraftsById || {}}) }"
                         fullWidthSummary="true">
-                        <Markdown content="{$item.before}" interpolateBindings="false" />
+                        <Markdown content="{$item.before}" interpolateBindings="false" allowHtml="false" />
                       </ExpandableItem>
                       <ExpandableItem
                         when="{$item.after}"
@@ -728,7 +728,7 @@
                         initiallyExpanded="{(expandedItemIds || []).includes($item.id + '::after')}"
                         onExpandedChange="(open) => { expandedItemIds = open ? (expandedItemIds || []).filter(k => k !== $item.id + '::after').concat([$item.id + '::after']) : (expandedItemIds || []).filter(k => k !== $item.id + '::after'); window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds, feedbackDraftsById: feedbackDraftsById || {}}) }"
                         fullWidthSummary="true">
-                        <Markdown content="{$item.after}" interpolateBindings="false" />
+                        <Markdown content="{$item.after}" interpolateBindings="false" allowHtml="false" />
                       </ExpandableItem>
                       <ExpandableItem
                         when="{$item.diff}"

@@ -22,6 +22,15 @@
   <variable name="ready" value="{!!query &amp;&amp; query.trim().length >= 2}" />
   <!-- Selected date window [lo, hi] (epoch seconds); null = no date filter. -->
   <variable name="dateFilter" value="{null}" />
+  <!-- search-results-date-sort: local ordering of the filtered result set.
+       'relevance' (default) keeps the bucket-merged rank order; 'newest' /
+       'oldest' sort chronologically (sortSearchHits, Globals.xs). Applied
+       after facet + date filtering, before the 100-row display cap; purely
+       client-side — no refetch. Persisted across sessions via XMLUI's
+       readLocalStorage/writeLocalStorage pair (dot-path key nests under the
+       'bram' localStorage entry, same as the splitter keys).
+       https://docs.xmlui.org/globals#readlocalstorage -->
+  <variable name="sortOrder" value="{readLocalStorage('bram.searchSortOrder', 'relevance')}" />
 
   <DataSource id="rSession" url="/__search"
     queryParams="{{ q: query, limit: 100, types: 'session', mode: mode }}" when="{ready}" />
@@ -127,8 +136,10 @@
        result-set change — formatDateTime ran 576x per keystroke when it
        lived in the row template (probe capture 2026-07-31). -->
   <variable name="displayed" value="{
-    merged
-      .filter(h => !dateFilter || (Number(h.date) >= dateFilter[0] &amp;&amp; Number(h.date) &lt;= dateFilter[1]))
+    sortSearchHits(
+      merged.filter(h => !dateFilter || (Number(h.date) >= dateFilter[0] &amp;&amp; Number(h.date) &lt;= dateFilter[1])),
+      sortOrder
+    )
       .slice(0, 100)
       .map(h => Object.assign({}, h, {
         typeLabel: h.type === 'worklist-history' ? 'history' : h.type,
@@ -150,7 +161,11 @@
            the remainder of the page. Stack sizing:
            https://docs.xmlui.org/components/Stack -->
       <VStack width="fit-content" maxWidth="100%" gap="$space-1">
-      <HStack gap="$space-3" verticalAlignment="center">
+      <!-- width 100% + a star-sized SearchBox: the query row stretches to the
+           fit-content column's width, which the pills+sort row establishes —
+           the box tracks that row's width exactly (2026-08-16 commit-gate
+           feedback: "expand the search box to match the extra width"). -->
+      <HStack gap="$space-3" verticalAlignment="center" width="100%">
         <!-- Back affordance for Evidence-replay arrivals: shown only when the
              page was entered via a deep link (q in the URL). Worklist expansion
              state persists via the window-side UI-state store, so a plain
@@ -169,7 +184,8 @@
             onClick="searchHelpDialog.open()" />
         </Theme>
         <SearchBox
-          boxWidth="26rem"
+          width="*"
+          boxWidth="100%"
           placeholder="Quote for an exact phrase"
           initialValue="{query}"
           inProgress="{rSession.inProgress || rCommit.inProgress || rIssue.inProgress || rHistory.inProgress}"
@@ -240,6 +256,17 @@
             <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{(rHistory.value || []).length}" />
           </HStack>
         </Link>
+        <!-- Sort control rides the pinned pills row: it reorders the same
+             result set the pills scope. https://docs.xmlui.org/components/Select -->
+        <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="sort by:" />
+        <Select
+          width="9rem"
+          initialValue="{sortOrder}"
+          onDidChange="(v) => { sortOrder = v; writeLocalStorage('bram.searchSortOrder', v) }">
+          <Option value="newest" label="Newest" />
+          <Option value="relevance" label="Relevance" />
+          <Option value="oldest" label="Oldest" />
+        </Select>
       </HStack>
       </VStack>
     </StickySection>

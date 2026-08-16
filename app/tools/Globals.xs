@@ -71,6 +71,25 @@ function snippetSegments(snippet, query) {
   return segs;
 }
 
+// Order filtered search hits for the Search tab's sort control
+// (search-results-date-sort). 'relevance' returns the input untouched — the
+// bucket-merged rank order. 'newest' / 'oldest' compare valid epoch
+// timestamps; undated or malformed-date hits sort last in either direction;
+// equal dates tie-break by relevance rank, then by the stable result key.
+function sortSearchHits(hits, order) {
+  if (order !== 'newest' && order !== 'oldest') return hits;
+  const dir = order === 'newest' ? -1 : 1;
+  return hits.slice().sort((a, b) => {
+    const ad = Number(a.date) > 0 ? Number(a.date) : null;
+    const bd = Number(b.date) > 0 ? Number(b.date) : null;
+    if (ad === null && bd !== null) return 1;
+    if (bd === null && ad !== null) return -1;
+    if (ad !== null && bd !== null && ad !== bd) return (ad - bd) * dir;
+    if ((a.rank || 0) !== (b.rank || 0)) return (a.rank || 0) - (b.rank || 0);
+    return String(a.key || '') < String(b.key || '') ? -1 : 1;
+  });
+}
+
 function statusSectionSubhead(title) {
   const descriptions = {
     'Startup Run': 'first-minute load',

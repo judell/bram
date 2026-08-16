@@ -8850,7 +8850,12 @@ window.__bramFooterIndexLabel = function (status) {
   var active = status.active_buckets || [];
   if (active.length) {
     var names = active.map(function (b) { return labels[b] || b; });
-    return 'Indexing ' + names.join(', ') + '…';
+    // Cold-backfill progress (issue #250): the host publishes per-batch
+    // {bucket, done, total} while a long rebuild runs — show it so a
+    // multi-minute pass reads as advancing, not just spinning.
+    var p = status.progress;
+    var suffix = p && p.total ? ' ' + p.done + '/' + p.total : '';
+    return 'Indexing ' + names.join(', ') + suffix + '…';
   }
   // Idle: just the indexed total. Per-bucket "+N <bucket>" additions were
   // dropped as noise (footer-drop-per-bucket-additions; history went first in

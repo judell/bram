@@ -358,6 +358,201 @@ pub fn get_extra(conn: &Connection, key: &str) -> Result<Option<String>> {
     .optional()
 }
 
+// --- Bounded commit-patch capture (issue #250) ---------------------------
+//
+// The commit indexer feeds `git show` output through these types so that a
+// commit's raw patch is sanitized WHILE it is read: retained bytes per commit
+// are bounded by PATCH_MAX_TOTAL (+ one line buffer) no matter how large the
+// raw patch is. The v0.3.14 cold rebuild accumulated every raw patch before
+// sanitizing and drove Bram to ~6 GB RSS on a heavily rewritten repo; one
+// commit's raw patch alone was 41.8 MB.
+
+/// Lines longer than this collapse to a marker (minified vendor bumps ride on
+/// one line).
+pub const PATCH_MAX_LINE: usize = 2000;
+/// Retained sanitized text per commit caps here.
+pub const PATCH_MAX_TOTAL: usize = 256 * 1024;
+
+/// Incremental, bounded sanitizer for one commit patch. Byte-feed; line
+/// buffering stops at PATCH_MAX_LINE + 1 (enough to know the line is long),
+/// so a multi-megabyte single line never materializes. Semantics match the
+/// historical batch sanitize: long lines become "[long line elided]\n",
+/// retention stops at PATCH_MAX_TOTAL with dropped bytes counted as
+/// stripped-line length + 1, and a final "[patch truncated]\n" marker lands
+/// when anything was dropped.
+pub struct PatchSanitizer {
+    out: String,
+    line: Vec<u8>,
+    line_len: usize, // full length of the current line (bytes), even when not buffered
+    last_byte_cr: bool,
+    elided: usize,
+    dropped: usize,
+}
+
+impl PatchSanitizer {
+    pub fn new() -> Self {
+        Self {
+            out: String::new(),
+            line: Vec::new(),
+            line_len: 0,
+            last_byte_cr: false,
+            elided: 0,
+            dropped: 0,
+        }
+    }
+
+    fn end_line(&mut self) {
+        // `str::lines()` parity: a trailing \r is part of the terminator.
+        let mut len = self.line_len;
+        if self.last_byte_cr {
+            len -= 1;
+            if self.line.len() == self.line_len {
+                self.line.pop();
+            }
+        }
+        if self.out.len() >= PATCH_MAX_TOTAL {
+            self.dropped += len + 1;
+        } else if len > PATCH_MAX_LINE {
+            self.elided += 1;
+            self.out.push_str("[long line elided]\n");
+        } else {
+            self.out
+                .push_str(&String::from_utf8_lossy(&self.line[..len.min(self.line.len())]));
+            self.out.push('\n');
+        }
+        self.line.clear();
+        self.line_len = 0;
+        self.last_byte_cr = false;
+    }
+
+    pub fn feed(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            if b == b'\n' {
+                self.end_line();
+                continue;
+            }
+            self.line_len += 1;
+            self.last_byte_cr = b == b'\r';
+            // Buffer one byte past the elision threshold so end_line can tell
+            // long from short; the rest of a long line is counted, not stored.
+            if self.line.len() <= PATCH_MAX_LINE {
+                self.line.push(b);
+            }
+        }
+    }
+
+    /// Retained bytes right now (sanitized text + line buffer) — the bound
+    /// the regression test asserts.
+    pub fn retained_bytes(&self) -> usize {
+        self.out.len() + self.line.len()
+    }
+
+    pub fn finish(mut self) -> (String, usize, usize) {
+        if self.line_len > 0 {
+            self.end_line();
+        }
+        if self.dropped > 0 {
+            self.out.push_str("[patch truncated]\n");
+        }
+        (self.out, self.elided, self.dropped)
+    }
+}
+
+/// Batch form, retained for parity testing: identical output to feeding the
+/// bytes through PatchSanitizer.
+#[cfg(test)]
+pub fn sanitize_commit_patch(patch: &str) -> (String, usize, usize) {
+    let mut s = PatchSanitizer::new();
+    s.feed(patch.as_bytes());
+    s.finish()
+}
+
+/// Streaming parser for `git show --format=%x1e%H%x1f --patch` output:
+/// splits records on \x1e, the sha header on \x1f, and runs each record's
+/// patch body through a PatchSanitizer as bytes arrive. Completed records
+/// are returned from feed()/finish() as (sha, (sanitized, elided, dropped)).
+pub struct PatchStream {
+    header: Vec<u8>,
+    in_body: bool,
+    sanitizer: PatchSanitizer,
+    max_retained: usize,
+}
+
+impl PatchStream {
+    pub fn new() -> Self {
+        Self {
+            header: Vec::new(),
+            in_body: false,
+            sanitizer: PatchSanitizer::new(),
+            max_retained: 0,
+        }
+    }
+
+    fn take_record(&mut self) -> Option<(String, (String, usize, usize))> {
+        let sha = String::from_utf8_lossy(&self.header).trim().to_string();
+        self.header.clear();
+        let sanitizer = std::mem::replace(&mut self.sanitizer, PatchSanitizer::new());
+        self.in_body = false;
+        if sha.is_empty() {
+            return None;
+        }
+        Some((sha, sanitizer.finish()))
+    }
+
+    pub fn feed(&mut self, chunk: &[u8]) -> Vec<(String, (String, usize, usize))> {
+        let mut done = Vec::new();
+        let mut rest = chunk;
+        while !rest.is_empty() {
+            if !self.in_body {
+                // Header: bytes up to \x1f are the sha; \x1e closes a record
+                // that had no body (or leading noise before the first record).
+                match rest.iter().position(|&b| b == 0x1f || b == 0x1e) {
+                    Some(pos) => {
+                        self.header.extend_from_slice(&rest[..pos]);
+                        let delim = rest[pos];
+                        rest = &rest[pos + 1..];
+                        if delim == 0x1f {
+                            self.in_body = true;
+                        } else if let Some(rec) = self.take_record() {
+                            done.push(rec);
+                        }
+                    }
+                    None => {
+                        self.header.extend_from_slice(rest);
+                        rest = &[];
+                    }
+                }
+            } else {
+                match rest.iter().position(|&b| b == 0x1e) {
+                    Some(pos) => {
+                        self.sanitizer.feed(&rest[..pos]);
+                        self.max_retained = self.max_retained.max(self.sanitizer.retained_bytes());
+                        rest = &rest[pos + 1..];
+                        if let Some(rec) = self.take_record() {
+                            done.push(rec);
+                        }
+                    }
+                    None => {
+                        self.sanitizer.feed(rest);
+                        self.max_retained = self.max_retained.max(self.sanitizer.retained_bytes());
+                        rest = &[];
+                    }
+                }
+            }
+        }
+        done
+    }
+
+    pub fn finish(mut self) -> (Vec<(String, (String, usize, usize))>, usize) {
+        let max = self.max_retained;
+        let mut done = Vec::new();
+        if let Some(rec) = self.take_record() {
+            done.push(rec);
+        }
+        (done, max)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,6 +679,52 @@ mod tests {
             session_paths_for_tools(&conn, &["tool-c".into()]).unwrap(),
             vec!["/s/1.jsonl"],
             "intent-only row replacement must preserve the routing map"
+        );
+    }
+
+    // issue-250 regression: multi-megabyte historical patches must index with
+    // truncation AND with bounded retained bytes during capture.
+    #[test]
+    fn patch_stream_bounds_retention_and_matches_batch_sanitize() {
+        // Three commits: a 5 MB many-line patch, a single 4 MB line, a small one.
+        let big_lines = format!("{}\n", "x".repeat(200));
+        let big = big_lines.repeat(25_000); // ~5 MB
+        let one_line = format!("diff --git a b\n{}\n", "y".repeat(4 * 1024 * 1024));
+        let small = "diff --git a b\n+hello\n".to_string();
+        let raw = format!(
+            "\u{1e}aaa\u{1f}{}\u{1e}bbb\u{1f}{}\u{1e}ccc\u{1f}{}",
+            big, one_line, small
+        );
+
+        let mut stream = PatchStream::new();
+        let mut records = Vec::new();
+        for chunk in raw.as_bytes().chunks(8 * 1024) {
+            records.extend(stream.feed(chunk));
+        }
+        let (tail, max_retained) = stream.finish();
+        records.extend(tail);
+
+        assert_eq!(
+            records.iter().map(|(sha, _)| sha.as_str()).collect::<Vec<_>>(),
+            vec!["aaa", "bbb", "ccc"]
+        );
+        // Streaming output is byte-identical to the historical batch sanitize.
+        for (sha, raw_patch) in [("aaa", &big), ("bbb", &one_line), ("ccc", &small)] {
+            let batch = sanitize_commit_patch(raw_patch);
+            let streamed = &records.iter().find(|(s, _)| s == sha).unwrap().1;
+            assert_eq!(streamed, &batch, "parity for {}", sha);
+        }
+        // Truncation happened where it should…
+        assert!(records[0].1 .0.ends_with("[patch truncated]\n"));
+        assert!(records[0].1 .2 > 4 * 1024 * 1024, "big patch dropped bytes");
+        assert!(records[1].1 .0.contains("[long line elided]"));
+        assert_eq!(records[1].1 .1, 1, "one elided line");
+        assert_eq!(records[2].1 .2, 0, "small patch intact");
+        // …and capture never retained more than the cap + one line buffer.
+        assert!(
+            max_retained <= PATCH_MAX_TOTAL + PATCH_MAX_LINE + 2,
+            "retained {} exceeds bound",
+            max_retained
         );
     }
 

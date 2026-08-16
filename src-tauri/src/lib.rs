@@ -18175,32 +18175,50 @@ fn parse_iso_to_epoch(s: &str) -> Option<i64> {
 /// mechanism for search-index-commit-diffs.
 const COMMIT_DIFF_SCHEMA: i64 = 1;
 
-/// Bound a commit patch for FTS indexing: lines longer than 2000 chars
-/// (minified vendor bumps ride on one line) collapse to a marker, and the
-/// retained text caps at 256 KB. Returns (text, elided_lines, dropped_bytes).
-fn sanitize_commit_patch(patch: &str) -> (String, usize, usize) {
-    const MAX_LINE: usize = 2000;
-    const MAX_TOTAL: usize = 256 * 1024;
-    let mut out = String::new();
-    let mut elided = 0usize;
-    let mut dropped = 0usize;
-    for line in patch.lines() {
-        if out.len() >= MAX_TOTAL {
-            dropped += line.len() + 1;
-            continue;
-        }
-        if line.len() > MAX_LINE {
-            elided += 1;
-            out.push_str("[long line elided]\n");
-        } else {
-            out.push_str(line);
-            out.push('\n');
+/// Fetch one batch of commit patches with bounded memory (issue #250):
+/// spawn `git show` and run its stdout through search_index::PatchStream,
+/// which sanitizes each record's patch WHILE reading (long lines elide,
+/// retention caps at PATCH_MAX_TOTAL during capture). Raw patch output is
+/// never accumulated — the v0.3.14 cold rebuild that materialized every raw
+/// patch (one was 41.8 MB) reached ~6 GB RSS; this path retains at most the
+/// sanitized cap + one line buffer per commit. Returns the batch's
+/// (sha, (sanitized, elided_lines, dropped_bytes)) records.
+fn git_show_patch_stream<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    shas: &[&str],
+) -> Result<Vec<(String, (String, usize, usize))>, String> {
+    use std::io::Read;
+    let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
+    let mut cmd = std::process::Command::new("git");
+    cmd.current_dir(&root)
+        .args(["show", "--format=%x1e%H%x1f", "--patch", "--no-color", "-M"])
+        .args(shas)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let mut stdout = child.stdout.take().ok_or("no stdout")?;
+    let mut stream = search_index::PatchStream::new();
+    let mut records = Vec::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        match stdout.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => records.extend(stream.feed(&buf[..n])),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e.to_string());
+            }
         }
     }
-    if dropped > 0 {
-        out.push_str("[patch truncated]\n");
+    let (tail, _max) = stream.finish();
+    records.extend(tail);
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err(format!("git show exited with {}", status));
     }
-    (out, elided, dropped)
+    Ok(records)
 }
 
 /// One pass over `git log` — index each commit (immutable, keyed by
@@ -18250,69 +18268,86 @@ fn run_commit_index_pass<R: tauri::Runtime>(
             parts[3].trim_end_matches('\n').to_string(),
         ));
     }
-    // Batched patch fetch for the pending shas only. A failed batch degrades
-    // to message-only content for its shas (never blocks the pass).
-    let mut patches: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
+    // Per-batch pipeline (issue #250): fetch one 100-commit batch with the
+    // bounded streaming reader, sanitize during capture, index the batch's
+    // rows, release it, then fetch the next. Working set = one batch of
+    // already-sanitized patches; rows land progressively, so an interrupted
+    // cold rebuild resumes via the change-token gate instead of restarting.
+    // A failed batch degrades to message-only content for its shas (never
+    // blocks the pass). Cold-rebuild shape (more than one batch) reports
+    // affirmative progress to the trace and the status snapshot, including
+    // startup runs that otherwise stay QuietUnlessAdded.
+    let total_pending = pending.len();
+    let report_progress = total_pending > 100;
+    let mut done = 0usize;
     for chunk in pending.chunks(100) {
-        let mut args: Vec<&str> = vec![
-            "show",
-            "--format=%x1e%H%x1f",
-            "--patch",
-            "--no-color",
-            "-M",
-        ];
-        args.extend(chunk.iter().map(|(sha, _, _, _)| sha.as_str()));
-        let Ok(show_out) = git_run(app, &args) else {
-            continue;
-        };
-        for record in show_out.split('\x1e') {
-            if record.is_empty() {
-                continue;
+        let batch_started = std::time::Instant::now();
+        let shas: Vec<&str> = chunk.iter().map(|(sha, _, _, _)| sha.as_str()).collect();
+        let patches: std::collections::HashMap<String, (String, usize, usize)> =
+            match git_show_patch_stream(app, &shas) {
+                Ok(records) => records.into_iter().collect(),
+                Err(_) => std::collections::HashMap::new(),
+            };
+        for (sha, token, author, body) in chunk {
+            let subject = body.lines().next().unwrap_or("").to_string();
+            let key = format!("commit:{}", sha);
+            let short: String = sha.chars().take(9).collect();
+            let (patch, elided, dropped) = patches
+                .get(sha.as_str())
+                .cloned()
+                .unwrap_or_default();
+            if elided > 0 || dropped > 0 {
+                append_bram_trace_line(
+                    app,
+                    "search-index",
+                    &format!(
+                        "op=diff-truncated sha={} kept={} elided_lines={} dropped_bytes={}",
+                        short,
+                        patch.len(),
+                        elided,
+                        dropped
+                    ),
+                );
             }
-            if let Some((sha, patch)) = record.split_once('\x1f') {
-                patches.insert(sha.trim().to_string(), patch.to_string());
+            let link = if html_base.is_empty() {
+                String::new()
+            } else {
+                format!("{}/commit/{}", html_base, sha)
+            };
+            let row = search_index::IndexRow {
+                kind: "commit".to_string(),
+                source: format!("{} {}", short, subject),
+                date: token.to_string(),
+                link,
+                content: format!("{}\n{}\n{}\n{}", subject, body, author, patch),
+                intent: String::new(),
+                file: key,
+                tool_ids: None,
+                extra: String::new(),
+            };
+            search_index::index_doc(&conn, &row, *token, COMMIT_DIFF_SCHEMA)
+                .map_err(|e| e.to_string())?;
+            indexed += 1;
+        }
+        done += chunk.len();
+        if report_progress {
+            search_index_set_progress(app, Some(("commit", done, total_pending)));
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "search-index",
+                    &format!(
+                        "op=scan-progress bucket=commits done={} total={} batch_ms={}",
+                        done,
+                        total_pending,
+                        batch_started.elapsed().as_millis()
+                    ),
+                );
             }
         }
     }
-    for (sha, token, author, body) in pending {
-        let subject = body.lines().next().unwrap_or("").to_string();
-        let key = format!("commit:{}", sha);
-        let short: String = sha.chars().take(9).collect();
-        let (patch, elided, dropped) =
-            sanitize_commit_patch(patches.get(&sha).map(String::as_str).unwrap_or(""));
-        if elided > 0 || dropped > 0 {
-            append_bram_trace_line(
-                app,
-                "search-index",
-                &format!(
-                    "op=diff-truncated sha={} kept={} elided_lines={} dropped_bytes={}",
-                    short,
-                    patch.len(),
-                    elided,
-                    dropped
-                ),
-            );
-        }
-        let link = if html_base.is_empty() {
-            String::new()
-        } else {
-            format!("{}/commit/{}", html_base, sha)
-        };
-        let row = search_index::IndexRow {
-            kind: "commit".to_string(),
-            source: format!("{} {}", short, subject),
-            date: token.to_string(),
-            link,
-            content: format!("{}\n{}\n{}\n{}", subject, body, author, patch),
-            intent: String::new(),
-            file: key,
-            tool_ids: None,
-            extra: String::new(),
-        };
-        search_index::index_doc(&conn, &row, token, COMMIT_DIFF_SCHEMA)
-            .map_err(|e| e.to_string())?;
-        indexed += 1;
+    if report_progress {
+        search_index_set_progress(app, None);
     }
     // `indexed > 0` means at least one new/changed commit landed, so rebuild +
     // cache the full commit list (with shortstat + gh-login resolution) for
@@ -18349,12 +18384,26 @@ fn run_issue_index_pass<R: tauri::Runtime>(
         return Ok((0, 0, 0, search_index::row_count(&conn).unwrap_or(0)));
     };
     let (mut seen, mut indexed, mut skipped) = (0usize, 0usize, 0usize);
+    // Gate first (local SQLite, cheap) so the fetch loop knows its total and
+    // can report affirmative progress during a cold backfill (issue #250) —
+    // each issue_view is a network call, and a schema reset makes dozens of
+    // them look like a stall otherwise.
+    let mut pending: Vec<(u64, i64)> = Vec::new();
     for (number, token) in probe {
         seen += 1;
         let key = format!("issue:{}", number);
         if !search_index::needs_index(&conn, &key, token, 0).unwrap_or(true) {
             skipped += 1;
             continue;
+        }
+        pending.push((number, token));
+    }
+    let total_pending = pending.len();
+    let report_progress = total_pending > 5;
+    for (fetched, (number, token)) in pending.into_iter().enumerate() {
+        let key = format!("issue:{}", number);
+        if report_progress {
+            search_index_set_progress(app, Some(("issue", fetched, total_pending)));
         }
         // Changed or new since last pass — fetch full detail for this one issue
         // (the only network cost beyond the cheap probe).
@@ -18398,6 +18447,20 @@ fn run_issue_index_pass<R: tauri::Runtime>(
         };
         search_index::index_doc(&conn, &row, token, 0).map_err(|e| e.to_string())?;
         indexed += 1;
+        if report_progress && bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "search-index",
+                &format!(
+                    "op=scan-progress bucket=issues done={} total={}",
+                    fetched + 1,
+                    total_pending
+                ),
+            );
+        }
+    }
+    if report_progress {
+        search_index_set_progress(app, None);
     }
     // `indexed > 0` means at least one issue's `updatedAt` moved (new issue, new
     // comment, or a close), so synthesize `issues-changed` and let the Issues
@@ -18554,6 +18617,11 @@ struct SearchIndexStatus {
     active_buckets: Vec<String>,
     total: i64,
     last_added: Vec<(String, usize)>,
+    // In-flight backfill progress: (bucket, done, total). Set per batch by the
+    // commit/issue passes during cold-rebuild-shaped work (issue #250) so long
+    // passes are visibly active even on QuietUnlessAdded startup runs; cleared
+    // at pass end and, as a safety net, by run_and_trace_index_pass.
+    progress: Option<(String, usize, usize)>,
 }
 
 fn search_index_status_cell() -> &'static Mutex<SearchIndexStatus> {
@@ -18573,6 +18641,18 @@ fn search_index_status_snapshot() -> SearchIndexStatus {
 fn search_index_set_active<R: tauri::Runtime>(app: &AppHandle<R>, buckets: Vec<String>) {
     if let Ok(mut s) = search_index_status_cell().lock() {
         s.active_buckets = buckets;
+    }
+    emit_replayable_signal(app, "search-index-changed");
+}
+
+// Publish (or clear) in-flight backfill progress and push the change so the
+// footer and Status tab can show a long pass working (issue #250).
+fn search_index_set_progress<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    progress: Option<(&str, usize, usize)>,
+) {
+    if let Ok(mut s) = search_index_status_cell().lock() {
+        s.progress = progress.map(|(b, d, t)| (b.to_string(), d, t));
     }
     emit_replayable_signal(app, "search-index-changed");
 }
@@ -18619,6 +18699,12 @@ where
 {
     let started = std::time::Instant::now();
     let result = pass(app);
+    // Safety net for the in-flight progress marker: a pass that errored out
+    // mid-backfill (e.g. a failed issue_view) must not leave the footer
+    // showing stale progress forever.
+    if search_index_status_snapshot().progress.is_some() {
+        search_index_set_progress(app, None);
+    }
     let indexed = match &result {
         Ok((_, indexed, _, _)) => *indexed,
         Err(_) => 0,
@@ -18953,12 +19039,16 @@ fn start_search_indexer<R: tauri::Runtime>(app: AppHandle<R>) {
         std::thread::sleep(std::time::Duration::from_secs(2));
         // Initial full index (replaces the cold-start branch). No-op per bucket
         // if already current, so a plain relaunch indexes nothing new.
+        // Cheap-first ordering (issue #250 iterate): worklist-history is
+        // sub-second and sessions are bounded by local transcripts, while a
+        // cold commit backfill can run minutes and issues adds network
+        // round-trips — a fast bucket must never sit unindexed behind them.
         run_index_buckets(
             &app,
             &[
+                IndexBucket::History,
                 IndexBucket::Sessions,
                 IndexBucket::Commits,
-                IndexBucket::History,
                 IndexBucket::Issues,
             ],
             IndexRunDisplay::QuietUnlessAdded,
@@ -34478,6 +34568,18 @@ fn search_index_status_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_
         }
     };
     let mut rows: Vec<serde_json::Value> = Vec::new();
+    // Affirmative cold-backfill progress (issue #250): while a long commit or
+    // issue backfill runs, name it with completed/total so the Status tab
+    // never shows a multi-minute rebuild as idle.
+    if let Some((bucket, d, t)) = search_index_status_snapshot().progress {
+        rows.push(serde_json::json!({
+            "signal": "Backfill in progress",
+            "level": "info",
+            "state": format!("{} {}/{}", bucket, d, t),
+            "detail": "Cold rebuild indexing in bounded batches; rows land progressively",
+            "seen": "",
+        }));
+    }
     for (kind, n) in search_index::counts_by_type(&conn).unwrap_or_default() {
         rows.push(serde_json::json!({
             "signal": kind,
@@ -39652,9 +39754,21 @@ fn route_request<R: tauri::Runtime>(
     // footer-indexing-status: compact indexer state for the footer indicator.
     if path == "__search-index-status" {
         let snap = search_index_status_snapshot();
+        // Backfill progress makes its bucket "active" even when the run's
+        // display mode kept active_buckets empty (QuietUnlessAdded startup):
+        // a multi-minute cold rebuild must read as working, not idle (#250).
+        let mut active = snap.active_buckets.clone();
+        if let Some((bucket, _, _)) = &snap.progress {
+            if !active.contains(bucket) {
+                active.push(bucket.clone());
+            }
+        }
         let body = serde_json::json!({
-            "active_buckets": snap.active_buckets,
+            "active_buckets": active,
             "total": search_index_current_total(app),
+            "progress": snap.progress.as_ref().map(|(b, d, t)| serde_json::json!({
+                "bucket": b, "done": d, "total": t
+            })),
             "last_added": snap
                 .last_added
                 .iter()

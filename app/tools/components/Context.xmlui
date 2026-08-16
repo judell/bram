@@ -140,7 +140,8 @@
         </VStack>
         <Markdown
           when="{!selectedLine &amp;&amp; selectedDisplay &amp;&amp; selectedDisplay.endsWith('.md')}"
-          content="{ctxFile.value &amp;&amp; ctxFile.value.content}" />
+          content="{ctxFile.value &amp;&amp; ctxFile.value.content}"
+          interpolateBindings="false" allowHtml="false" />
         <Text
           when="{!selectedLine &amp;&amp; selectedDisplay &amp;&amp; !selectedDisplay.endsWith('.md')}"
           fontFamily="$fontFamily-monospace"

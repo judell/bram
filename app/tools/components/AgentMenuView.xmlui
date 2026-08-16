@@ -96,7 +96,7 @@
       borderRadius="$borderRadius"
       backgroundColor="$color-surface-100"
       var.contentLines="{($props.menu.toolCallContent || '').split('\n')}">
-      <Markdown content="{contentLines.slice(0, 24).join('\n')}" />
+      <Markdown content="{contentLines.slice(0, 24).join('\n')}" interpolateBindings="false" allowHtml="false" />
       <Button
         when="{contentLines.length > 24}"
         label="View full ({contentLines.length} lines)"
@@ -190,7 +190,8 @@
           text="{$props.menu.toolCallDiff || ''}" />
         <Markdown
           when="{!$props.menu.toolCallDiff &amp;&amp; $props.menu.toolCallContent}"
-          content="{$props.menu.toolCallContent}" />
+          content="{$props.menu.toolCallContent}"
+          interpolateBindings="false" allowHtml="false" />
         <!-- signature/text spill target (the two capped blocks above) -->
         <Text
           when="{!$props.menu.toolCallDiff &amp;&amp; !$props.menu.toolCallContent &amp;&amp; ($props.menu.toolCallSignature || $props.menu.text)}"

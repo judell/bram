@@ -30,7 +30,8 @@
         <Markdown
           when="{localLinkPreviewEvt.value &amp;&amp; localLinkPreviewEvt.value.renderMode !== 'loading'}"
           overflowMode="scroll"
-          content="{window.__bramFormatLocalLinkPreview(localLinkPreviewEvt.value)}" />
+          content="{window.__bramFormatLocalLinkPreview(localLinkPreviewEvt.value)}"
+          interpolateBindings="false" allowHtml="false" />
         <HStack gap="$space-2">
           <SpaceFiller />
           <Button

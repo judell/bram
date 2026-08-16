@@ -38,7 +38,8 @@
           value="{$item.text}" />
         <Markdown
           when="{$item.kind === 'text'}"
-          content="{$item.text}" />
+          content="{$item.text}"
+          interpolateBindings="false" allowHtml="false" />
         <Text
           when="{$item.kind === 'tool'}"
           fontSize="$fontSize-xs"

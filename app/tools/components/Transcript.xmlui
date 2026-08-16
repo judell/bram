@@ -235,6 +235,7 @@
           fontSize="$fontSize-sm"
           color="$textColor-secondary"
           content="{window.__bramMarkdownLiteral($item.__findPreview)}"
+          interpolateBindings="false" allowHtml="false"
           highlightText="{window.__bramSearchTerms($item.__needle)}"
           highlightActiveIndex="{$item.__activeOcc}" />
         <!-- image strip -->
@@ -265,6 +266,7 @@
             fontSize="$fontSize-sm"
             color="$textColor-secondary"
             content="{window.__bramMarkdownLiteral($item.__findPreview)}"
+            interpolateBindings="false" allowHtml="false"
             highlightText="{window.__bramSearchTerms($item.__needle)}"
             highlightActiveIndex="{$item.__activeOcc}" />
           <VStack
@@ -327,6 +329,7 @@
             fontSize="$fontSize-sm"
             color="$textColor-secondary"
             content="{window.__bramMarkdownLiteral($item.__findPreview)}"
+            interpolateBindings="false" allowHtml="false"
             highlightText="{window.__bramSearchTerms($item.__needle)}"
             highlightActiveIndex="{$item.__activeOcc}" />
           <!-- transcript-render-menu-answers: the user's menu answer (host

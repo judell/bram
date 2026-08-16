@@ -1200,7 +1200,7 @@ Drop is the clean rejection path; Iterate is what you want if the item just need
           color="$textColor-secondary"
           value="You: last message" />
         <VStack maxHeight="12em" overflowY="auto" width="100%">
-          <Markdown when="{youText}" content="{youText}" />
+          <Markdown when="{youText}" content="{youText}" interpolateBindings="false" allowHtml="false" />
           <VStack when="{youImages.length > 0}" gap="$space-2" paddingVertical="$space-1">
             <Items data="{youImages}">
               <Link onClick="fullscreenImage = $item" noIndicator="true">
@@ -1227,7 +1227,7 @@ Drop is the clean rejection path; Iterate is what you want if the item just need
           color="$textColor-secondary"
           value="Agent: last response" />
         <VStack maxHeight="20em" overflowY="auto" width="100%">
-          <Markdown content="{window.__bramStripImagePaths(lastResp)}" />
+          <Markdown content="{window.__bramStripImagePaths(lastResp)}" interpolateBindings="false" allowHtml="false" />
         </VStack>
       </VStack>
     </VStack>

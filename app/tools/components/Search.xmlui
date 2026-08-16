@@ -29,6 +29,12 @@
   <variable name="ready" value="{!!query &amp;&amp; query.trim().length >= 2}" />
   <!-- Selected date window [lo, hi] (epoch seconds); null = no date filter. -->
   <variable name="dateFilter" value="{null}" />
+  <!-- search-mount-cost: cap the INITIAL render at 20 rows (the browse tabs'
+       size), More reveals the rest. Caps rendering work, not results: facet
+       counts, slider domain, sort, and filter read the full buckets. The
+       Timeline receipt: Search mounting 100 Card rows carried ~5x the
+       binding-compile / RO-measure / row-mapping cost of a 20-row tab. -->
+  <variable name="searchExpanded" value="{false}" />
   <!-- search-results-date-sort: local ordering of the filtered result set.
        'relevance' (default) keeps the bucket-merged rank order; 'newest' /
        'oldest' sort chronologically (sortSearchHits, Globals.xs). Applied
@@ -165,12 +171,15 @@
   <!-- search-rows-confinement: bake the per-row view-model here, once per
        result-set change — formatDateTime ran 576x per keystroke when it
        lived in the row template (probe capture 2026-07-31). -->
-  <variable name="displayed" value="{
+  <variable name="matchedHits" value="{
     sortSearchHits(
       merged.filter(h => !dateFilter || (Number(h.date) >= dateFilter[0] &amp;&amp; Number(h.date) &lt;= dateFilter[1])),
       sortOrder
     )
-      .slice(0, 100)
+  }" />
+  <variable name="displayed" value="{
+    matchedHits
+      .slice(0, searchExpanded ? 100 : 20)
       .map(h => Object.assign({}, h, {
         typeLabel: h.type === 'worklist-history' ? 'history' : h.type,
         dateLabel: h.date ? formatDateTime(new Date(Number(h.date) * 1000), 'yyyy-MM-dd HH:mm') : '',
@@ -328,6 +337,12 @@
       hits="{displayed}"
       query="{query.trim()}"
       selectionKey="{selectedTypes.slice().sort().join(',')}" />
+    <HStack when="{ready &amp;&amp; matchedHits.length > 20}" padding="$space-2">
+      <Link onClick="searchExpanded = !searchExpanded" noIndicator>
+        <Text fontSize="$fontSize-sm" color="$textColor-secondary"
+          value="{searchExpanded ? 'Show fewer' : 'More (' + (matchedHits.length - 20) + ' more)'}" />
+      </Link>
+    </HStack>
 
     <ModalDialog id="searchHelpDialog" title="Search help">
       <VStack gap="$space-3" padding="$space-2">

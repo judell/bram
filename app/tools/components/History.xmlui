@@ -3,7 +3,8 @@
   var.historyExpanded="{false}"
   var.searchQuery="{getLastSearchQuery()}"
   var.searchNeedle="{searchQuery.trim().toLowerCase()}"
-  var.filteredHistory="{filterHistoryList(historyList.value, searchNeedle)}"
+  var.historyBlobbed="{blobHistoryRows(historyList.value)}"
+  var.filteredHistory="{filterHistoryList(historyBlobbed, searchNeedle)}"
   var.visibleHistory="{filteredHistory.slice(0, searchNeedle ? 9999 : (historyExpanded ? 9999 : 50))}"
   var.historyRows="{visibleHistory.map(h => Object.assign({}, h, {
     key: 'history:' + h.id,

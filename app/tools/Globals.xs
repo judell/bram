@@ -122,11 +122,18 @@ function filterCommitList(list, needle) {
     (c.commit && c.commit.author && c.commit.author.email) || ''
   ].join(' ').toLowerCase().includes(needle));
 }
+// search-mount-cost: rows arrive pre-blobbed (blobHistoryRows below) so the
+// per-recompute path is a substring test — JSON.stringify over full group
+// payloads was 2.8s of Timeline self-time when it ran inside the filter.
 function filterHistoryList(list, needle) {
   if (!needle) return list || [];
-  return (list || []).filter((h) =>
-    ((h.id || '') + ' ' + (h.title || '')).toLowerCase().includes(needle)
-    || JSON.stringify(h.extra || {}).toLowerCase().includes(needle));
+  return (list || []).filter((h) => (h.__blob || '').includes(needle));
+}
+function blobHistoryRows(list) {
+  return (list || []).map((h) => Object.assign({}, h, {
+    __blob: ((h.id || '') + ' ' + (h.title || '') + ' '
+      + JSON.stringify(h.extra || {})).toLowerCase()
+  }));
 }
 
 function statusSectionSubhead(title) {

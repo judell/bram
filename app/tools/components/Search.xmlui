@@ -132,8 +132,8 @@
        filter-reset + a bucket flap convicts the refetch path; a drag whose
        'displayed' still shows filtered=false convicts the didChange path. -->
   <ChangeListener
-    listenTo="{'' + rSession.inProgress + rCommit.inProgress + rIssue.inProgress + rHistory.inProgress}"
-    onDidChange="() => window.__bramIframeTrace('search-date', {op: 'buckets', s: rSession.inProgress, c: rCommit.inProgress, i: rIssue.inProgress, h: rHistory.inProgress, settled: resultsSettled})" />
+    listenTo="{'' + rSession.inProgress + rCommit.inProgress + rIssue.inProgress + rHistory.inProgress + rSession.loaded + rCommit.loaded + rIssue.loaded + rHistory.loaded}"
+    onDidChange="() => window.__bramIframeTrace('search-date', {op: 'buckets', s: rSession.inProgress, c: rCommit.inProgress, i: rIssue.inProgress, h: rHistory.inProgress, ls: rSession.loaded, lc: rCommit.loaded, li: rIssue.loaded, lh: rHistory.loaded, ready: ready, settled: resultsSettled})" />
   <ChangeListener
     listenTo="{displayed.length + '|' + (dateFilter ? dateFilter[0] + '-' + dateFilter[1] : 'none')}"
     onDidChange="() => window.__bramIframeTrace('search-date', {op: 'displayed', count: displayed.length, filtered: !!dateFilter, lo: dateFilter ? dateFilter[0] : -1, hi: dateFilter ? dateFilter[1] : -1})" />
@@ -165,12 +165,34 @@
   <!-- search-rows-confinement: bake the per-row view-model here, once per
        result-set change — formatDateTime ran 576x per keystroke when it
        lived in the row template (probe capture 2026-07-31). -->
+  <!-- search-settle-gate: the four buckets settle staggered, and deriving
+       rows straight from `merged` rebuilt the full row array (mapping +
+       snippet segmentation + List swap + virtualizer re-anchor) once per
+       bucket arrival — the 2026-08-16 trace attributed all three remaining
+       multi-second main-thread blocks to exactly that shape. `settledHits`
+       LATCHES merged, debounced on a content fingerprint (query, length,
+       end keys, facets): arrivals inside the window collapse to ONE
+       rebuild, and previous rows hold during a refetch. Deliberately NOT
+       gated on resultsSettled — the first cut was, and a backspace-below-
+       ready + retype-same-query cycle stranded the loaded/inProgress
+       flags false (LOADER_LOADED with undefined data clears `loaded`,
+       and a cache-equal refetch can skip the re-dispatch), blanking the
+       page for good. The latch is a ChangeListener assignment, not a
+       conditional binding — conditional variables froze and expression-
+       arrows captured stale in this component family. Facet counts keep
+       their live per-bucket reads. -->
+  <variable name="settledHits" value="{[]}" />
+  <ChangeListener
+    listenTo="{ready + '|' + query.trim() + '|' + merged.length + '|' + (merged.length ? merged[0].key + '-' + merged[merged.length - 1].key : '') + '|' + selectedTypes.slice().sort().join(',')}"
+    debounceWaitInMs="300"
+    onDidChange="() => { settledHits = ready ? merged : []; window.__bramIframeTrace('search-date', {op: 'latch', count: ready ? merged.length : 0, ready: ready}) }" />
+
   <!-- The 20-row initial-render cap (81ba145) was reverted once the
        xmlui-org/xmlui#3760 fix landed: outside-scroll Lists virtualize now,
        so mount cost tracks the viewport, not this array's length. -->
   <variable name="displayed" value="{
     sortSearchHits(
-      merged.filter(h => !dateFilter || (Number(h.date) >= dateFilter[0] &amp;&amp; Number(h.date) &lt;= dateFilter[1])),
+      settledHits.filter(h => !dateFilter || (Number(h.date) >= dateFilter[0] &amp;&amp; Number(h.date) &lt;= dateFilter[1])),
       sortOrder
     )
       .slice(0, 100)

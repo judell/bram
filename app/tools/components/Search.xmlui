@@ -32,6 +32,29 @@
        https://docs.xmlui.org/globals#readlocalstorage -->
   <variable name="sortOrder" value="{readLocalStorage('bram.searchSortOrder', 'relevance')}" />
 
+  <!-- issue-251 coverage line: indexer freshness so an absent result is
+       legible as un-indexed vs. not-a-keyword-match. Pushed via
+       search-index-changed (no polling), the footer's pattern. -->
+  <DataSource id="searchIndexStatus" url="/__search-index-status" />
+  <PushSource
+    id="searchIndexChangedEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('search-index-changed')}" />
+  <ChangeListener
+    listenTo="{searchIndexChangedEvt.value &amp;&amp; searchIndexChangedEvt.value.tick}"
+    onDidChange="() => searchIndexStatus.refetch()" />
+  <!-- Precomputed (top-level var, the reactive path — inline ternaries in
+       Text bindings froze once already, see the dateLoLabel comment). -->
+  <variable name="coverageLine" value="{
+    searchIndexStatus.value
+      ? Number(searchIndexStatus.value.total || 0).toLocaleString() + ' docs indexed · issues through #'
+        + (searchIndexStatus.value.issuesThrough || 0)
+        + (searchIndexStatus.value.lastCycleMs
+            ? ' · refreshed ' + formatDateTime(new Date(searchIndexStatus.value.lastCycleMs), 'HH:mm:ss')
+            : '')
+      : ''
+  }" />
+
   <DataSource id="rSession" url="/__search"
     queryParams="{{ q: query, limit: 100, types: 'session', mode: mode }}" when="{ready}" />
   <DataSource id="rCommit" url="/__search"
@@ -268,12 +291,28 @@
           <Option value="oldest" label="Oldest" />
         </Select>
       </HStack>
+      <Text when="{coverageLine}" fontSize="$fontSize-xs" color="$textColor-secondary"
+        value="{coverageLine}" />
       </VStack>
     </StickySection>
 
     <Text when="{!ready}"
       color="$textColor-secondary"
       value="Type at least 2 characters to search the index." />
+
+    <!-- issue-251 absence signals: an empty result set says what kind of
+         absence this is. Search is FTS keyword/phrase, not semantic — and
+         self-inflicted filters (date window, disabled pills) are named so
+         they can be fixed in place. -->
+    <VStack when="{ready &amp;&amp; resultsSettled &amp;&amp; displayed.length === 0}" gap="$space-0_5">
+      <Text color="$textColor-secondary" value="No matches." />
+      <Text fontSize="$fontSize-xs" color="$textColor-secondary"
+        value="Search matches exact keywords and phrases (quote for a phrase), not meanings — no match means no term matched, not that the item is missing from the index." />
+      <Text when="{!!dateFilter}" fontSize="$fontSize-xs" color="$textColor-secondary"
+        value="A date filter is active — widen or reset the slider above." />
+      <Text when="{selectedTypes.length &lt; 4}" fontSize="$fontSize-xs" color="$textColor-secondary"
+        value="{(4 - selectedTypes.length) + ' result type(s) are hidden — enable more pills above.'}" />
+    </VStack>
 
     <!-- search-rows-confinement + search-results-virtualize: rows render
          behind the SearchResults boundary (probe receipts in its header) and

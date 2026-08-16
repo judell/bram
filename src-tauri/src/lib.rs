@@ -18709,6 +18709,10 @@ struct SearchIndexStatus {
     active_buckets: Vec<String>,
     total: i64,
     last_added: Vec<(String, usize)>,
+    // Unix ms of the last completed index cycle — the Search page's coverage
+    // line renders it so "not indexed yet" is distinguishable from "no
+    // keyword match" (issue #251).
+    last_cycle_ms: i64,
     // In-flight backfill progress: (bucket, done, total). Set per batch by the
     // commit/issue passes during cold-rebuild-shaped work (issue #250) so long
     // passes are visibly active even on QuietUnlessAdded startup runs; cleared
@@ -18760,6 +18764,7 @@ fn search_index_record_cycle<R: tauri::Runtime>(
     if let Ok(mut s) = search_index_status_cell().lock() {
         s.active_buckets = Vec::new();
         s.total = total;
+        s.last_cycle_ms = unix_now_ms() as i64;
         if !added.is_empty() {
             s.last_added = added;
         }
@@ -39855,9 +39860,19 @@ fn route_request<R: tauri::Runtime>(
                 active.push(bucket.clone());
             }
         }
+        // issue-251 coverage fields: newest indexed issue number + last
+        // completed cycle, so the Search page can say "issues through #N ·
+        // refreshed HH:MM" and an absent result is legible as un-indexed vs.
+        // not-a-keyword-match.
+        let issues_through = search_index_db_path(app)
+            .and_then(|db| search_index::open(&db.to_string_lossy()).ok())
+            .and_then(|conn| search_index::newest_issue_number(&conn).ok())
+            .unwrap_or(0);
         let body = serde_json::json!({
             "active_buckets": active,
             "total": search_index_current_total(app),
+            "issuesThrough": issues_through,
+            "lastCycleMs": snap.last_cycle_ms,
             "progress": snap.progress.as_ref().map(|(b, d, t)| serde_json::json!({
                 "bucket": b, "done": d, "total": t
             })),

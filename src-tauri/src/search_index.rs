@@ -250,6 +250,19 @@ pub fn prune_missing_files(conn: &Connection) -> Result<usize> {
 }
 
 /// Total indexed rows — for the scan trace.
+/// Newest issue number present in the issues bucket (0 when none) — the
+/// Search page's coverage line (issue #251): "issues through #N" tells a user
+/// whether an absent result could be un-indexed vs. simply not a keyword
+/// match. Keys are `issue:<number>`, so numeric max over the suffix.
+pub fn newest_issue_number(conn: &Connection) -> Result<i64> {
+    conn.query_row(
+        "SELECT COALESCE(MAX(CAST(SUBSTR(file, 7) AS INTEGER)), 0) FROM search_index \
+         WHERE file LIKE 'issue:%'",
+        [],
+        |r| r.get(0),
+    )
+}
+
 pub fn row_count(conn: &Connection) -> Result<i64> {
     conn.query_row("SELECT count(*) FROM search_index", [], |r| r.get(0))
 }

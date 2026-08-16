@@ -211,14 +211,14 @@
                highlightText/highlightActiveIndex ride the find decoration
                (__needle/__activeOcc/__blockIdx baked by the find plan; inert
                otherwise). -->
-          <Markdown content="{$item.text}"
+          <Markdown content="{window.__bramEscapeMarkdownBindings($item.text)}"
             highlightText="{window.__bramSearchTerms($item.__needle)}"
             highlightActiveIndex="{$item.__activeOcc}" />
         </VStack>
         <!-- assistant text -->
         <Markdown
           when="{$item.kind === 'text'}"
-          content="{$item.text}"
+          content="{window.__bramEscapeMarkdownBindings($item.text)}"
           highlightText="{window.__bramSearchTerms($item.__needle)}"
           highlightActiveIndex="{$item.__activeOcc}" />
         <!-- task notification: quiet system-note row (host-reclassified
@@ -273,7 +273,7 @@
             borderRadius="$borderRadius">
             <!-- Expanded body: unmarked while finding (the preview above
                  is the counted, active-highlighted surface). -->
-            <Markdown content="{$item.text}"
+            <Markdown content="{window.__bramEscapeMarkdownBindings($item.text)}"
               highlightText="{$item.__findPreview ? [] : window.__bramSearchTerms($item.__needle)}" />
           </VStack>
         </VStack>
@@ -359,12 +359,12 @@
             <Markdown
               when="{window.__bramShowToolCommand ? window.__bramShowToolCommand($item) : (($item.commandDisplay || $item.summary) &amp;&amp; ($item.name !== 'apply_patch' || !$item.commandDisplay))}"
               overflowMode="scroll"
-              content="{window.__bramFormatToolCommand($item.commandDisplay || $item.summary, $item.aiDescription || $item.description)}"
+              content="{window.__bramEscapeMarkdownBindings(window.__bramFormatToolCommand($item.commandDisplay || $item.summary, $item.aiDescription || $item.description))}"
               highlightText="{$item.__findPreview ? [] : window.__bramSearchTerms($item.__needle)}" />
             <Markdown
               when="{$item.commandMarkdown}"
               overflowMode="flow"
-              content="{$item.commandMarkdown}" />
+              content="{window.__bramEscapeMarkdownBindings($item.commandMarkdown)}" />
             <DiffView
               when="{$item.diff}"
               compact="true"
@@ -379,7 +379,7 @@
               when="{$item.result &amp;&amp; !$item.isError &amp;&amp; window.__bramFormatToolResult}"
               overflowMode="{window.__bramFreeformResultMode ? window.__bramFreeformResultMode($item) : 'scroll'}"
               breakMode="word"
-              content="{window.__bramFormatToolResult($item.result, $item.name, $item.summary)}" />
+              content="{window.__bramEscapeMarkdownBindings(window.__bramFormatToolResult($item.result, $item.name, $item.summary))}" />
             <Text
               when="{$item.result &amp;&amp; ($item.isError || !window.__bramFormatToolResult)}"
               fontFamily="$fontFamily-monospace"

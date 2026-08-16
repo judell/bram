@@ -18,6 +18,12 @@
        A query change invalidates the open detail; close the modal. -->
   <ChangeListener listenTo="{$props.query || ''}"
     onDidChange="() => selectedHit = null" />
+  <!-- search-list-render-forensics: capture the data transition before the
+       virtualizer reports its first mounted range. This distinguishes a
+       nonempty prop from a List that has not materialized rows yet. -->
+  <ChangeListener
+    listenTo="{($props.hits || []).length + '|' + ($props.query || '')}"
+    onDidChange="() => window.__bramTraceSearchList('data', $props.hits || [], null, resultsList)" />
   <!-- search-pin-top-on-bucket-toggle: a virtualized List anchors its scroll to
        a visible row, so toggling a bucket pill off then on (hits shrinks then
        grows) leaves the user scrolled where the anchor landed instead of at the
@@ -56,7 +62,8 @@
   <Theme backgroundColor-Card="$color-surface-50"
     backgroundColor-Card--hover="$color-surface-100"
     padding-Card="$space-2" boxShadow-Card="none">
-    <List id="resultsList" data="{$props.hits || []}" idKey="key">
+    <List id="resultsList" data="{$props.hits || []}" idKey="key"
+      onVisibleRangeDidChange="(range) => window.__bramTraceSearchList('visible-range', $props.hits || [], range, resultsList)">
       <!-- Suppress the List's default "No data available": Search renders its own
            intentional empty states ("Type at least 2 characters…" / "No matches."),
            so an empty results list should render nothing. -->

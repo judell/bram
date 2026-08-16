@@ -4825,6 +4825,31 @@ window.__bramMeasureTurnsRender = function (count) {
     });
   });
 };
+// search-list-render-forensics: the Search result List runs in outside-scroll
+// mode, so a nonempty data prop can coexist with a stale/empty virtualized
+// range. Keep this probe deliberately cheap and only call it from Search.
+// `range` is the List's first-class visible-range event; the optional ref is
+// useful for the data-change receipt before that event fires. The DOM count
+// is a fallback signal for whether any virtualized rows actually materialized.
+window.__bramTraceSearchList = function (op, hits, range, listRef) {
+  try {
+    var r = range || (listRef && listRef.getVisibleRange ? listRef.getVisibleRange() : null);
+    var rows = 0;
+    if (typeof document !== "undefined") {
+      rows = document.querySelectorAll("[data-index]").length;
+    }
+    var root = document && (document.scrollingElement || document.documentElement);
+    window.__bramIframeTrace("search-render", {
+      op: op || "unknown",
+      hits: Array.isArray(hits) ? hits.length : -1,
+      visibleStart: r && typeof r.startIndex === "number" ? r.startIndex : -1,
+      visibleEnd: r && typeof r.endIndex === "number" ? r.endIndex : -1,
+      domRows: rows,
+      scrollTop: root ? Math.round(root.scrollTop || 0) : -1,
+      viewportHeight: root ? root.clientHeight : -1,
+    });
+  } catch (e) { /* diagnostics must never affect rendering */ }
+};
 window.__bramOpenLocalLinkPreview = function (request) {
   if (!request || !request.path) return;
   var qs = "path=" + encodeURIComponent(request.path);

@@ -10976,15 +10976,24 @@ fn git_log_recent<R: tauri::Runtime>(app: &AppHandle<R>, count: usize) -> Result
     // emit no shortstat line, so we finalize on the next sentinel.
     // %ae = full author email (matched against local git user.email);
     // %al = email local-part used as a fallback / for non-local authors.
-    let format = "--format=__C__%H%x09%an%x09%aI%x09%ae%x09%al%x09%s";
+    // commits-list-full-messages: the message field carries the FULL commit
+    // message (subject + body), not just %s — the Commits tab's local filter
+    // matches against it, and subject-only silently dropped body-term matches
+    // (the retired FTS union's original reason to exist). Body lines follow
+    // the header line and are terminated by the __B__ sentinel so they can
+    // never be misparsed as shortstat lines (which follow __B__).
+    let format = "--format=__C__%H%x09%an%x09%aI%x09%ae%x09%al%x09%s%n%b__B__";
     let log_out = git_run(app, &["log", &count_arg, "--shortstat", format])?;
 
     let mut commits: Vec<serde_json::Value> = Vec::new();
     let mut header_parts: Option<(String, String, String, String, String)> = None;
+    let mut body_acc: Vec<String> = Vec::new();
+    let mut in_body = false;
     let mut additions: u64 = 0;
     let mut deletions: u64 = 0;
 
     let finalize = |hdr: &Option<(String, String, String, String, String)>,
+                    body: &[String],
                     adds: u64,
                     dels: u64,
                     out: &mut Vec<serde_json::Value>| {
@@ -10995,6 +11004,12 @@ fn git_log_recent<R: tauri::Runtime>(app: &AppHandle<R>, count: usize) -> Result
             } else {
                 format!("{}/commit/{}", html_base, sha)
             };
+            let body_text = body.join("\n");
+            let message = if body_text.trim().is_empty() {
+                subject.clone()
+            } else {
+                format!("{}\n\n{}", subject, body_text.trim_end())
+            };
             out.push(serde_json::json!({
                 "sha": sha,
                 "html_url": html_url,
@@ -11003,7 +11018,7 @@ fn git_log_recent<R: tauri::Runtime>(app: &AppHandle<R>, count: usize) -> Result
                 "deletions": dels,
                 "commit": {
                     "author": { "name": author, "date": date, "login": login },
-                    "message": subject,
+                    "message": message,
                 },
             }));
         }
@@ -11011,9 +11026,11 @@ fn git_log_recent<R: tauri::Runtime>(app: &AppHandle<R>, count: usize) -> Result
 
     for line in log_out.lines() {
         if let Some(rest) = line.strip_prefix("__C__") {
-            finalize(&header_parts, additions, deletions, &mut commits);
+            finalize(&header_parts, &body_acc, additions, deletions, &mut commits);
             additions = 0;
             deletions = 0;
+            body_acc.clear();
+            in_body = true;
             let parts: Vec<&str> = rest.splitn(6, '\t').collect();
             if parts.len() == 6 {
                 let author_email = parts[3];
@@ -11046,6 +11063,18 @@ fn git_log_recent<R: tauri::Runtime>(app: &AppHandle<R>, count: usize) -> Result
                 ));
             } else {
                 header_parts = None;
+                in_body = false;
+            }
+        } else if in_body {
+            // Body lines run until the __B__ sentinel (possibly suffixed to
+            // the last body line when the body lacks a trailing newline).
+            if let Some(stripped) = line.strip_suffix("__B__") {
+                if !stripped.is_empty() {
+                    body_acc.push(stripped.to_string());
+                }
+                in_body = false;
+            } else {
+                body_acc.push(line.to_string());
             }
         } else if header_parts.is_some() {
             // Shortstat line, e.g.: " 3 files changed, 18 insertions(+), 2 deletions(-)"
@@ -11062,7 +11091,7 @@ fn git_log_recent<R: tauri::Runtime>(app: &AppHandle<R>, count: usize) -> Result
             }
         }
     }
-    finalize(&header_parts, additions, deletions, &mut commits);
+    finalize(&header_parts, &body_acc, additions, deletions, &mut commits);
 
     serde_json::to_vec(&commits).map_err(|e| e.to_string())
 }

@@ -228,6 +228,31 @@ explain the finding in chat, recommend Drop on the resulting TO
 COMMIT row. The user's Drop click works equally well on `proposed`
 and `applied` items. No special undo path needed.
 
+### Placeholder items (droppable reminders)
+
+One shape of item carries no diff yet and is still legitimate: a
+**placeholder** for an action that is already decided but gated on an
+external condition — an upstream merge, a release being cut, another
+agent's verdict — that will resolve after this session ends. Chat
+context dies with the session; the placeholder is what carries the
+reminder across. Live precedents:
+`file-upstream-null-expr-crash-after-3763` and
+`revendor-after-xmlui-release` (bram), `watch-for-3764-merge` (xmlui).
+
+- **Shape.** `Before` states the awaited condition plus enough
+  self-contained context that no conversation history is needed to act
+  on it. `After` states the action Approve green-lights, and says
+  explicitly what condition would make Drop the right verdict. `files`
+  lists what the eventual action will touch (empty for issue-only
+  actions).
+- **Lifecycle.** Approve = the condition is met; do the action, and the
+  item behaves like any other approved item from there. Drop = the
+  condition was mooted or the action superseded — an expected, honorable
+  ending for this kind, not a failure.
+- **Boundary.** This does not reopen the door to investigation items. A
+  placeholder records a *decided future action*; an open question is
+  still chat's job.
+
 ### Schema and draft layout
 
 Proposals split metadata from review prose across two files:

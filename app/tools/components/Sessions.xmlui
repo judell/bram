@@ -74,7 +74,7 @@
     queryParams="{{ id: $param.id, provider: $param.provider }}"
     confirmTitle="Delete session?"
     confirmMessage="This cannot be undone."
-    completedNotificationMessage="Session deleted. Reload Bram to refresh the session list; you do not need to restart the agent."
+    completedNotificationMessage="Session deleted."
     onSuccess="pendingDeletes = pendingDeletes.concat([lastDeleteId]); savePendingSessionDeletes(pendingDeletes); if (expandedId === lastDeleteId) { expandedId = null; } sessionsFirstPage.refetch(); if (sessionsExpanded || searchNeedle) sessionsFull.refetch();" />
 
   <APICall

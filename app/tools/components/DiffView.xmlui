@@ -1,17 +1,21 @@
 <Component name="DiffView" var.pendingRevealKey="{'initial'}">
-  <APICall
+  <!-- issue-258: was an APICall driven by onInit + a ChangeListener. Neither
+       trigger fired here: ChangeListener does not fire on initial mount
+       (documented), and execute() at mount never issued a request, so
+       lastResult stayed empty and every diff fell back to plain line-splitting
+       with no word-diff segments. DataSource is the documented HTTP-read
+       abstraction: it fetches on mount and refetches when its body changes,
+       which is exactly the two triggers this needed, declaratively. -->
+  <DataSource
     id="annotate"
     method="post"
     url="/__diff/annotate"
     body="{ { diff: $props.text } }" />
-  <ChangeListener
-    listenTo="{$props.text}"
-    onDidChange="annotate.execute()" />
   <!-- One plan owns diff counting, decoration, and reveal. It matches across
        annotation-segment boundaries, so CommitDetail's raw-patch count and the
        painted occurrences agree. -->
   <variable name="diffFindPlan"
-    value="{window.__bramDiffFindPlan(diffViewRows(annotate.lastResult, $props.text), $props.needle, $props.activeIndex, $props.expectedMatchCount)}" />
+    value="{window.__bramDiffFindPlan(diffViewRows(annotate.value, $props.text), $props.needle, $props.activeIndex, $props.expectedMatchCount)}" />
   <Theme
     backgroundColor-row-List--hover="transparent"
     backgroundColor-row-List="transparent">
@@ -20,8 +24,7 @@
       padding="$space-2"
       backgroundColor="$color-surface-50"
       borderRadius="$borderRadius"
-      overflowX="auto"
-      onInit="annotate.execute()">
+      overflowX="auto">
       <!-- Compact: plain rows that hug their content — no virtualized
            fixed-height List and no inner scroller. For small inline previews
            (e.g. the AgentMenuView menu preview) so a short diff does not

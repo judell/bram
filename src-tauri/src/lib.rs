@@ -13708,9 +13708,6 @@ fn inject_turn_payload<R: tauri::Runtime>(
 
 const AGENT_INTERRUPT_GAP_MS: u64 = 150;
 const AGENT_RELAUNCH_SETTLE_MS: u64 = 1200;
-// sessions-new-named-session: wait for the freshly-launched agent's TUI to be
-// ready for input before seeding it with the session title as the first message.
-const NEW_SESSION_SEED_DELAY_MS: u64 = 2500;
 const AGENT_SESSION_REFRESH_MS: u64 = 3000;
 // Delay, measured from writing the launch command, before typing the
 // configured first command into the freshly-started agent's TUI. Gives the
@@ -14181,13 +14178,12 @@ fn create_new_session(
         "claude" | "claud" => "claude",
         other => return Err(format!("unknown agent provider: {}", other)),
     };
-    let command = agent_launch_command(provider_key).ok_or("unknown agent provider")?;
     let trimmed = title.trim().to_string();
     if trimmed.is_empty() {
         return Err("session name is required".to_string());
     }
-    // Queue the title so the new session (which may materialize a moment after
-    // its first message) is renamed to the exact name via rename_session.
+    // Queue the title so the new session is renamed to the exact name when its
+    // session file surfaces. The title is metadata, never a user turn.
     write_pending_session_title(&app, provider_key, &trimmed);
     if bram_trace_enabled() {
         append_bram_trace_line(&app, "session-new", &format!("op=create provider={}", provider_key));
@@ -14200,22 +14196,9 @@ fn create_new_session(
     std::thread::sleep(std::time::Duration::from_millis(AGENT_INTERRUPT_GAP_MS));
     pty_write_internal(&app, &state, "\x03", "agent-new-interrupt-2")?;
     std::thread::sleep(std::time::Duration::from_millis(AGENT_RELAUNCH_SETTLE_MS));
-    pty_write_internal(&app, &state, &format!("{}\r", command), "agent-new-launch")?;
+    let launch = new_session_launch_command(provider_key, &trimmed);
+    pty_write_internal(&app, &state, &format!("{}\r", launch), "agent-new-launch")?;
     schedule_agent_switch_refresh(app.clone(), provider_key, "new-session");
-    // Seed the fresh agent with the title as its first message once its TUI is
-    // ready — Claude is lazy about writing a session JSONL until first input, so
-    // this creates the session immediately (no switch gap) and starts it on the
-    // named topic. Off-thread so the command returns promptly.
-    let app_seed = app.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(NEW_SESSION_SEED_DELAY_MS));
-        let state = app_seed.state::<AppState>();
-        // Submit via the same bracketed-paste + CR path as toTurn so it lands as
-        // a sent turn on BOTH providers. A plain "{text}\r" submits in Claude's
-        // Ink input but only strands the text in Codex's readline composer
-        // (needs a manual Enter) — that's the codex-seed-strand.
-        let _ = inject_turn_payload(&app_seed, &state, &trimmed);
-    });
     Ok(())
 }
 
@@ -14327,6 +14310,18 @@ fn agent_launch_command(provider: &str) -> Option<&'static str> {
     }
 }
 
+// A named fresh session must not be initialized by sending the requested name
+// as a user prompt. Claude has a native display-name flag; Codex creates its
+// session lazily and receives the same name through the pending metadata path
+// above when its first real turn creates the rollout file.
+fn new_session_launch_command(provider: &str, title: &str) -> String {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "claude" | "claud" => format!("claude --name {}", shell_single_quote(title)),
+        "codex" => "codex".to_string(),
+        _ => "".to_string(),
+    }
+}
+
 // Resume a specific past session for `provider`, using each CLI's own
 // resume syntax. An empty id falls back to the provider's "continue most
 // recent" form. Session ids are uuid/hex-shaped, so no shell quoting.
@@ -14435,9 +14430,9 @@ fn resolve_agent_startup_launch(
 #[cfg(test)]
 mod agent_startup_policy_tests {
     use super::{
-        merge_settings_into_config, resolve_agent_startup_launch, settings_view_from_config,
-        startup_policy_from_shell, AgentStartupPolicy, ProjectConfig, SessionProvider,
-        ShellConfig,
+        merge_settings_into_config, new_session_launch_command, resolve_agent_startup_launch,
+        settings_view_from_config, startup_policy_from_shell, AgentStartupPolicy, ProjectConfig,
+        SessionProvider, ShellConfig,
     };
 
     fn shell(json: &str) -> ShellConfig {
@@ -14505,6 +14500,23 @@ mod agent_startup_policy_tests {
         assert_eq!(launch.provider, SessionProvider::Codex);
         assert!(!launch.resume);
         assert_eq!(launch.session_id, None);
+    }
+
+    #[test]
+    fn named_new_session_uses_provider_metadata_not_a_seed_prompt() {
+        assert_eq!(
+            new_session_launch_command("claude", "Design review"),
+            "claude --name 'Design review'"
+        );
+        assert_eq!(new_session_launch_command("codex", "Design review"), "codex");
+    }
+
+    #[test]
+    fn named_new_session_shell_quotes_apostrophes() {
+        assert_eq!(
+            new_session_launch_command("claude", "R&D's plan"),
+            "claude --name 'R&D'\\''s plan'"
+        );
     }
 
     #[test]

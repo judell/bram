@@ -132,7 +132,7 @@
       <Text
         color="$textColor-secondary"
         fontSize="$fontSize-sm"
-        value="Stops the running agent and starts a fresh one, then sends this name as the first message so the new session is created and becomes current right away. The prior session stays in the list, resumable." />
+        value="Stops the running agent and starts a fresh session with this exact name. The name is session metadata, not a message to the agent; your next message will be the first conversation turn. The prior session stays in the list, resumable." />
       <HStack horizontalAlignment="end" gap="$space-2">
         <Button label="Cancel" variant="outlined" onClick="newSessionOpen = false; newSessionDraft = ''" />
         <Button

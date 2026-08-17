@@ -305,14 +305,28 @@
           <SpaceFiller />
           <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="{dateHiLabel}" />
         </HStack>
-        <Slider
-          id="dateSlider"
-          minValue="{dateRange[0]}"
-          maxValue="{dateRange[1]}"
-          step="{86400}"
-          initialValue="{dateRange}"
-          showValues="false"
-          onDidChange="(v) => { dateDraft = v; window.__bramIframeTrace('search-date', {op: 'drag', lo: v[0], hi: v[1]}) }" />
+        <!-- showValues is the enable flag for Slider's per-thumb hover
+             tooltip, not a permanent label: SliderReact.tsx gates it as
+             `open={showValues &amp;&amp; showTooltip}`, with showTooltip driven
+             by mouseover / pointerdown / focus. Off, the thumbs were silent
+             and picking an intermediate date was guesswork. valueFormat
+             turns the raw epoch second into the same yyyy-MM-dd the endpoint
+             labels use.
+             https://docs.xmlui.org/components/Slider#valueformat -->
+        <!-- fontSize-Tooltip defaults to 1em (Tooltip.tsx:96), which reads
+             large next to the $fontSize-xs endpoint labels; scoped here so
+             only the thumb readouts shrink. -->
+        <Theme fontSize-Tooltip="$fontSize-sm">
+          <Slider
+            id="dateSlider"
+            minValue="{dateRange[0]}"
+            maxValue="{dateRange[1]}"
+            step="{86400}"
+            initialValue="{dateRange}"
+            showValues="true"
+            valueFormat="{(v) => formatDateTime(new Date(v * 1000), 'yyyy-MM-dd')}"
+            onDidChange="(v) => { dateDraft = v; window.__bramIframeTrace('search-date', {op: 'drag', lo: v[0], hi: v[1]}) }" />
+        </Theme>
       </VStack>
       <!-- Facet pills pin with the query block (2026-08-14 iterate: "the
            buttons don't stick to the header") so bucket toggles stay reachable

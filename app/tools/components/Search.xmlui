@@ -130,21 +130,11 @@
     listenTo="{dateRange ? (query.trim() + '|' + dateRange[0] + '-' + dateRange[1]) : ''}"
     onDidChange="() => { dateFilter = null; dateDraft = null; window.__bramIframeTrace('search-date', {op: 'filter-reset', settled: resultsSettled, lo: dateRange ? dateRange[0] : -1, hi: dateRange ? dateRange[1] : -1}) }" />
 
-  <!-- search-slider-drag-debounce: the Slider writes every step it crosses
-       into dateDraft (cheap: only the endpoint labels and the thumb
-       tooltips read it), and this listener commits it to dateFilter once
-       the drag settles. dateFilter is what `displayed` consumes, and that
-       binding filters + sorts + rebuilds 100 row objects, each running
-       formatDateTime and snippetSegments — per step, before this.
-       120ms is short enough to feel immediate on release and long enough
-       to swallow a sweep.
-       The real fix is apply-on-release, which the component cannot express:
-       Radix supplies onValueCommit but XMLUI's Slider does not surface it.
-       Filed as xmlui-org/xmlui#3768; retire this debounce when it ships. -->
-  <ChangeListener
-    listenTo="{dateDraft ? dateDraft[0] + '-' + dateDraft[1] : 'none'}"
-    debounceWaitInMs="120"
-    onDidChange="() => { dateFilter = dateDraft; window.__bramIframeTrace('search-date', {op: 'commit', lo: dateDraft ? dateDraft[0] : -1, hi: dateDraft ? dateDraft[1] : -1}) }" />
+  <!-- The debounced commit this replaced (a ChangeListener on dateDraft at
+       120ms) is gone: the Slider now commits on release through didCommit
+       (xmlui-org/xmlui#3768). dateDraft stays — didChange still fires per
+       step, and the endpoint labels and thumb tooltips read it so they
+       track the thumbs while dateFilter waits for the release. -->
 
   <!-- search-date-filter-forensics (observe-only): the 2026-08-14 iterate
        reported the max thumb not constraining results, with auto-expand
@@ -325,7 +315,8 @@
             initialValue="{dateRange}"
             showValues="true"
             valueFormat="{(v) => formatDateTime(new Date(v * 1000), 'yyyy-MM-dd')}"
-            onDidChange="(v) => { dateDraft = v; window.__bramIframeTrace('search-date', {op: 'drag', lo: v[0], hi: v[1]}) }" />
+            onDidChange="(v) => { dateDraft = v; window.__bramIframeTrace('search-date', {op: 'drag', lo: v[0], hi: v[1]}) }"
+            onDidCommit="(v) => { dateFilter = v; window.__bramIframeTrace('search-date', {op: 'commit', via: 'didCommit', lo: v[0], hi: v[1]}) }" />
         </Theme>
       </VStack>
       <!-- Facet pills pin with the query block (2026-08-14 iterate: "the

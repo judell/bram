@@ -3346,6 +3346,19 @@ fn pty_tail_snippet(max_chars: usize) -> String {
     }
 }
 
+// The change signal and pending-title handoff both need the provider's real
+// session id. Claude stores it in the filename; Codex stores it in the
+// rollout's session_meta record (the filename includes a timestamp prefix and
+// is not accepted by rename_session).
+fn session_change_snapshot(provider: SessionProvider, path: Option<&Path>) -> (String, u64) {
+    path.map(|path| {
+        let sid = session_id_for_path(provider, path).unwrap_or_default();
+        let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        (sid, len)
+    })
+    .unwrap_or((String::new(), 0))
+}
+
 fn emit_talk_session_changed_for_provider<R: tauri::Runtime>(
     app: &AppHandle<R>,
     provider: Option<SessionProvider>,
@@ -3365,18 +3378,21 @@ fn emit_talk_session_changed_for_provider<R: tauri::Runtime>(
         // zero-delta ticks: watchers fire 2-3 events per write, and on a
         // multi-MB session each redundant refetch costs real main-thread
         // time (2026-07-07 codex esc wedge).
-        let latest_path = latest_session_path_for_provider(app, provider).unwrap_or(None);
-        let (sid, len) = latest_path
-            .as_ref()
-            .map(|p| {
-                let sid = p
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let len = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-                (sid, len)
-            })
-            .unwrap_or((String::new(), 0));
+        let ordinary_latest = latest_session_path_for_provider(app, provider).unwrap_or(None);
+        // A Bram-created Codex session initially contains only bootstrap
+        // context, so ordinary discovery intentionally keeps following the
+        // previous real conversation. The pending-title record is the narrow
+        // proof that this newest bootstrap rollout was explicitly requested;
+        // let it drive the one-time handoff without weakening the global
+        // bootstrap filter used for incidental Codex stubs.
+        let pending_latest = if matches!(provider, SessionProvider::Codex) {
+            pending_codex_session_path(app)
+        } else {
+            None
+        };
+        let pending_handoff = pending_latest.is_some();
+        let latest_path = pending_latest.or(ordinary_latest);
+        let (sid, len) = session_change_snapshot(provider, latest_path.as_deref());
         // Bram-level last-active state advances only with the foreground
         // provider. Watchers also emit for inactive-provider files, so writing
         // every observed session here would redefine "last active" as merely
@@ -3411,13 +3427,21 @@ fn emit_talk_session_changed_for_provider<R: tauri::Runtime>(
             let prev = last.get(&provider_label).cloned().unwrap_or_default();
             let changed = !prev.is_empty() && !sid.is_empty() && prev != sid;
             last.insert(provider_label.clone(), sid.clone());
-            if changed { Some(prev) } else { None }
+            if changed {
+                Some(prev)
+            } else {
+                None
+            }
         };
-        if let Some(prev) = rotated_from {
+        if let Some(prev) = rotated_from.as_deref() {
             // session-rotation-self-diagnose: name the rotation's cause.
             if bram_trace_enabled() {
                 let last_out = LAST_PTY_OUTPUT_MS.load(std::sync::atomic::Ordering::Relaxed);
-                let silence_ms = if last_out > 0 { at_host_ms - last_out } else { -1 };
+                let silence_ms = if last_out > 0 {
+                    at_host_ms - last_out
+                } else {
+                    -1
+                };
                 append_bram_trace_line(
                     app,
                     "session-rotation",
@@ -3431,11 +3455,28 @@ fn emit_talk_session_changed_for_provider<R: tauri::Runtime>(
                     ),
                 );
             }
-            // sessions-new-named-session: apply a queued title to the new session.
-            apply_pending_session_title(app, provider, &sid);
+        } else if pending_handoff && bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "session-new",
+                &format!(
+                    "op=bootstrap-detected provider={} sid={}",
+                    provider_label, sid
+                ),
+            );
+        }
+        if rotated_from.is_some() || pending_handoff {
+            // sessions-new-named-session: bind a queued title to the new
+            // session. A deliberate Codex bootstrap reaches this path before
+            // its first real user turn; later writes retry any failed rename.
+            apply_pending_session_title(app, provider, &sid, true);
             // prompt-lifecycle: a rotation orphans any open prompt — the
             // session that asked it is gone.
             prompt_resolved(app, "session-ended", &provider_label);
+        } else {
+            // A Codex rollout may become discoverable only after its first
+            // real user turn. Retry a title that was already bound above.
+            apply_pending_session_title(app, provider, &sid, false);
         }
         // menu-stack-pty-inflight-prose probe: on each Claude session-JSONL
         // write, correlate the latest assistant-record timestamp against the
@@ -13804,11 +13845,32 @@ fn switch_agent(
     Ok(())
 }
 
+// Resolve a Codex rollout by the UUID in its session_meta record without the
+// visible-session filter. This is required for an explicitly created empty
+// session: it is a valid project rollout before it has any real user activity.
+fn codex_session_path_for_id<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+) -> Option<std::path::PathBuf> {
+    let project = project_root(Some(app))?;
+    let project_cwd = canonical_path_string(&project);
+    let sessions_root = home_dir()?.join(".codex").join("sessions");
+    let mut paths = Vec::new();
+    collect_codex_session_paths(&sessions_root, &mut paths).ok()?;
+    paths.into_iter().find(|path| {
+        codex_session_meta(path)
+            .ok()
+            .flatten()
+            .is_some_and(|(session_id, cwd)| {
+                session_id == id && canonical_path_string(Path::new(&cwd)) == project_cwd
+            })
+    })
+}
+
 // Resolve a session's on-disk path by id WITHOUT the full, title-parsing
 // session discovery (which can take many seconds on large histories and was
 // blocking reload_agent_session past its UI timeout). Claude files are named
-// `<id>.jsonl`, so construct the path directly; Codex rollout files are not,
-// so fall back to discovery there (callers run this off the command thread).
+// `<id>.jsonl`; Codex ids live in each rollout's session_meta record.
 fn session_path_for_id<R: tauri::Runtime>(
     app: &AppHandle<R>,
     provider: SessionProvider,
@@ -13819,9 +13881,7 @@ fn session_path_for_id<R: tauri::Runtime>(
             let path = claude_sessions_dir(app).ok()?.join(format!("{}.jsonl", id));
             path.exists().then_some(path)
         }
-        SessionProvider::Codex => sessions_for_provider(app, Some(provider), None)
-            .ok()
-            .and_then(|(_, sessions)| sessions.into_iter().find(|s| s.id == id).map(|s| s.path)),
+        SessionProvider::Codex => codex_session_path_for_id(app, id),
     }
 }
 
@@ -14103,6 +14163,10 @@ struct PendingSessionTitle {
     provider: String,
     title: String,
     created_at_ms: i64,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    previous_session_id: Option<String>,
 }
 
 fn pending_session_title_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
@@ -14117,19 +14181,81 @@ fn write_pending_session_title<R: tauri::Runtime>(app: &AppHandle<R>, provider: 
         provider: provider.to_string(),
         title: title.to_string(),
         created_at_ms: unix_now_ms(),
+        session_id: None,
+        previous_session_id: SessionProvider::from_str(provider)
+            .and_then(|session_provider| live_session_id(app, session_provider)),
     };
     if let Ok(bytes) = serde_json::to_vec(&rec) {
         let _ = std::fs::write(&path, bytes);
     }
 }
 
-// Apply a queued title to a just-surfaced session. Called at a live-session-id
-// change. Same-provider + fresh (<30s) → rename and clear; stale → drop;
-// wrong provider → leave queued for its own provider's next session.
+fn read_pending_session_title<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    provider: SessionProvider,
+) -> Option<PendingSessionTitle> {
+    let path = pending_session_title_file(app)?;
+    let bytes = std::fs::read(path).ok()?;
+    let rec = serde_json::from_slice::<PendingSessionTitle>(&bytes).ok()?;
+    if rec.provider != session_provider_label(provider)
+        || unix_now_ms().saturating_sub(rec.created_at_ms) > 600_000
+    {
+        return None;
+    }
+    Some(rec)
+}
+
+// Return the newest same-project Codex rollout created after Bram queued a
+// title, but only while that title is still unclaimed. The ordinary live-path
+// detector ignores bootstrap-only rollouts on purpose. Excluding the UUID that
+// was current when Create was clicked prevents the outgoing session's final
+// write from claiming its own pending title; unlike path exclusion, this also
+// works when the new bootstrap is the only Codex rollout in the project.
+fn pending_codex_session_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    let rec = read_pending_session_title(app, SessionProvider::Codex)?;
+    if rec.session_id.is_some() {
+        return None;
+    }
+    let project = project_root(Some(app))?;
+    let project_cwd = canonical_path_string(&project);
+    let sessions_root = home_dir()?.join(".codex").join("sessions");
+    let mut paths = Vec::new();
+    collect_codex_session_paths(&sessions_root, &mut paths).ok()?;
+    paths
+        .into_iter()
+        .filter_map(|candidate| {
+            let (session_id, cwd) = codex_session_meta(&candidate).ok().flatten()?;
+            if rec.previous_session_id.as_deref() == Some(session_id.as_str()) {
+                return None;
+            }
+            if canonical_path_string(Path::new(&cwd)) != project_cwd {
+                return None;
+            }
+            let modified = std::fs::metadata(&candidate).ok()?.modified().ok()?;
+            let modified_ms = system_time_ms(modified)?;
+            // Filesystems with coarse timestamp precision can round the new
+            // rollout's mtime just below the pending record's millisecond
+            // timestamp. A two-second allowance remains safely inside the
+            // ten-minute handoff window and the previous-UUID exclusion above.
+            if modified_ms + 2_000 < rec.created_at_ms {
+                return None;
+            }
+            Some((modified, candidate))
+        })
+        .max_by_key(|(modified, _)| *modified)
+        .map(|(_, candidate)| candidate)
+}
+
+// Apply a queued title to a just-surfaced session. On rotation, claim the
+// session id; subsequent writes retry a failed rename (Codex's bootstrap-only
+// rollout is not discoverable until its first real user turn). Same-provider
+// + fresh (<10m) → rename and clear; stale → drop; wrong provider → leave
+// queued for its own provider's next session.
 fn apply_pending_session_title<R: tauri::Runtime>(
     app: &AppHandle<R>,
     provider: SessionProvider,
     new_sid: &str,
+    allow_claim: bool,
 ) {
     let Some(path) = pending_session_title_file(app) else {
         return;
@@ -14137,7 +14263,7 @@ fn apply_pending_session_title<R: tauri::Runtime>(
     let Ok(bytes) = std::fs::read(&path) else {
         return;
     };
-    let Ok(rec) = serde_json::from_slice::<PendingSessionTitle>(&bytes) else {
+    let Ok(mut rec) = serde_json::from_slice::<PendingSessionTitle>(&bytes) else {
         let _ = std::fs::remove_file(&path);
         return;
     };
@@ -14148,18 +14274,126 @@ fn apply_pending_session_title<R: tauri::Runtime>(
     // is only to stop it attaching to an unrelated much-later rotation.
     let stale = unix_now_ms() - rec.created_at_ms > 600_000;
     if rec.provider == want && !stale {
-        let _ = rename_session(app, new_sid, Some(provider), &rec.title);
-        let _ = std::fs::remove_file(&path);
-        emit_replayable_signal(app, "sessions-list-changed");
-        if bram_trace_enabled() {
-            append_bram_trace_line(
-                app,
-                "session-new",
-                &format!("op=named provider={} sid={} title={}", want, new_sid, rec.title),
-            );
+        if let Some(target) = rec.session_id.as_deref() {
+            if target != new_sid {
+                return;
+            }
+        } else if allow_claim {
+            rec.session_id = Some(new_sid.to_string());
+            if let Ok(bytes) = serde_json::to_vec(&rec) {
+                let _ = std::fs::write(&path, bytes);
+            }
+        } else {
+            return;
+        }
+        let rename_result = match provider {
+            SessionProvider::Codex => pin_codex_reload_target(app, new_sid)
+                .and_then(|_| append_codex_session_title(new_sid, &rec.title)),
+            SessionProvider::Claude => {
+                rename_session(app, new_sid, Some(provider), &rec.title).map(|_| ())
+            }
+        };
+        match rename_result {
+            Ok(_) => {
+                let _ = std::fs::remove_file(&path);
+                emit_replayable_signal(app, "sessions-list-changed");
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        app,
+                        "session-new",
+                        &format!(
+                            "op=named provider={} sid={} title={}",
+                            want, new_sid, rec.title
+                        ),
+                    );
+                }
+            }
+            Err(error) => {
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        app,
+                        "session-new",
+                        &format!(
+                            "op=name-pending provider={} sid={} error={}",
+                            want,
+                            new_sid,
+                            error.replace('"', "'")
+                        ),
+                    );
+                }
+            }
         }
     } else if stale {
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod pending_session_title_tests {
+    use super::{
+        codex_session_is_visible, merge_pending_session_entry, session_change_snapshot,
+        SessionEntry, SessionProvider,
+    };
+
+    #[test]
+    fn codex_handoff_uses_session_meta_id_not_rollout_filename() {
+        let path = std::env::temp_dir().join(format!(
+            "rollout-2026-08-16T20-00-00-codex-title-test-{}.jsonl",
+            std::process::id()
+        ));
+        let content = serde_json::json!({
+            "type": "session_meta",
+            "payload": {
+                "id": "0198b75d-471b-7db3-bb26-a26b8478754e",
+                "cwd": "/tmp/bram-title-test"
+            }
+        })
+        .to_string();
+        std::fs::write(&path, format!("{}\n", content)).expect("write Codex rollout fixture");
+
+        let (sid, len) = session_change_snapshot(SessionProvider::Codex, Some(&path));
+
+        assert_eq!(sid, "0198b75d-471b-7db3-bb26-a26b8478754e");
+        assert_eq!(len, content.len() as u64 + 1);
+        assert_ne!(sid, path.file_stem().unwrap().to_string_lossy());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn explicitly_titled_codex_bootstrap_is_visible_before_first_turn() {
+        assert!(!codex_session_is_visible(false, false));
+        assert!(codex_session_is_visible(false, true));
+        assert!(codex_session_is_visible(true, false));
+    }
+
+    #[test]
+    fn pending_codex_row_replaces_the_old_current_marker() {
+        let mut entries = vec![SessionEntry {
+            id: "old-session".to_string(),
+            mtime: 1,
+            size: 10,
+            title: Some("Old session".to_string()),
+            provider: SessionProvider::Codex,
+            current: true,
+            pending: false,
+        }];
+        let pending = SessionEntry {
+            id: "pending-2".to_string(),
+            mtime: 2,
+            size: 0,
+            title: Some("New session".to_string()),
+            provider: SessionProvider::Codex,
+            current: true,
+            pending: true,
+        };
+
+        merge_pending_session_entry(&mut entries, pending, Some(20));
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].id, "pending-2");
+        assert!(entries[0].current);
+        assert!(entries[0].pending);
+        assert!(!entries[1].current);
     }
 }
 
@@ -14186,7 +14420,11 @@ fn create_new_session(
     // session file surfaces. The title is metadata, never a user turn.
     write_pending_session_title(&app, provider_key, &trimmed);
     if bram_trace_enabled() {
-        append_bram_trace_line(&app, "session-new", &format!("op=create provider={}", provider_key));
+        append_bram_trace_line(
+            &app,
+            "session-new",
+            &format!("op=create provider={}", provider_key),
+        );
     }
     // Same kill sequence as reload_agent_session, then a FRESH launch.
     clear_stale_terminal_input_for_switch(&app, &state, "agent-new-session");
@@ -14198,6 +14436,10 @@ fn create_new_session(
     std::thread::sleep(std::time::Duration::from_millis(AGENT_RELAUNCH_SETTLE_MS));
     let launch = new_session_launch_command(provider_key, &trimmed);
     pty_write_internal(&app, &state, &format!("{}\r", launch), "agent-new-launch")?;
+    // Codex does not create a rollout file until the first real user turn.
+    // Refresh now so /__sessions/list can expose the queued title as the
+    // provisional current row instead of leaving the previous session shown.
+    emit_replayable_signal(&app, "sessions-list-changed");
     schedule_agent_switch_refresh(app.clone(), provider_key, "new-session");
     Ok(())
 }
@@ -14508,7 +14750,10 @@ mod agent_startup_policy_tests {
             new_session_launch_command("claude", "Design review"),
             "claude --name 'Design review'"
         );
-        assert_eq!(new_session_launch_command("codex", "Design review"), "codex");
+        assert_eq!(
+            new_session_launch_command("codex", "Design review"),
+            "codex"
+        );
     }
 
     #[test]
@@ -16285,6 +16530,7 @@ struct SessionEntry {
     title: Option<String>,
     provider: SessionProvider,
     current: bool,
+    pending: bool,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
@@ -17186,6 +17432,10 @@ fn claude_discovery_notes(lookup: &SessionsDirLookup) -> Vec<String> {
     notes
 }
 
+fn codex_session_is_visible(has_real_user_activity: bool, has_explicit_title: bool) -> bool {
+    has_real_user_activity || has_explicit_title
+}
+
 fn discover_codex_sessions<R: tauri::Runtime>(
     app: &AppHandle<R>,
     limit: Option<usize>,
@@ -17227,14 +17477,15 @@ fn discover_codex_sessions<R: tauri::Runtime>(
                 break;
             }
         }
-        if !codex_session_has_real_user_activity(&path).unwrap_or(false) {
+        let explicit_title = titles.get(&id).cloned();
+        if !codex_session_is_visible(
+            codex_session_has_real_user_activity(&path).unwrap_or(false),
+            explicit_title.is_some(),
+        ) {
             hidden_bootstrap += 1;
             continue;
         }
-        let title = titles
-            .get(&id)
-            .cloned()
-            .or_else(|| codex_session_title(&path).ok().flatten());
+        let title = explicit_title.or_else(|| codex_session_title(&path).ok().flatten());
         sessions.push(SessionRecord {
             provider: SessionProvider::Codex,
             id: id.clone(),
@@ -17318,22 +17569,14 @@ fn count_claude_sessions<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<usize,
 }
 
 fn count_codex_sessions<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<usize, String> {
-    let project = project_root(Some(app)).ok_or("could not resolve project root")?;
-    let project_cwd = canonical_path_string(&project);
-    let home = home_dir().ok_or("no HOME or USERPROFILE")?;
-    let sessions_root = home.join(".codex").join("sessions");
-    let mut paths = Vec::new();
-    collect_codex_session_paths(&sessions_root, &mut paths)?;
-
-    let mut count = 0usize;
-    for path in paths {
-        let Some((_, cwd)) = codex_session_meta(&path).map_err(|e| e.to_string())? else {
-            continue;
-        };
-        if canonical_path_string(Path::new(&cwd)) != project_cwd {
-            continue;
-        }
-        if codex_session_has_real_user_activity(&path).unwrap_or(false) {
+    let sessions = discover_codex_sessions(app, None)?;
+    let mut count = sessions.len();
+    if let Some(rec) = read_pending_session_title(app, SessionProvider::Codex) {
+        let already_listed = rec
+            .session_id
+            .as_deref()
+            .is_some_and(|id| sessions.iter().any(|session| session.id == id));
+        if !already_listed {
             count += 1;
         }
     }
@@ -19339,20 +19582,7 @@ fn list_sessions<R: tauri::Runtime>(
 ) -> Result<Vec<SessionEntry>, String> {
     let (provider, sessions) = sessions_for_provider(app, preferred, limit)?;
     let live_id = live_session_id(app, provider);
-    append_bram_trace_line(
-        app,
-        "sessions",
-        &format!(
-            "op=list provider={} visible={} current_id={} limit={}",
-            session_provider_label(provider),
-            sessions.len(),
-            live_id.as_deref().unwrap_or(""),
-            limit
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "all".to_string())
-        ),
-    );
-    Ok(sessions
+    let mut entries: Vec<SessionEntry> = sessions
         .into_iter()
         .map(|session| {
             let current = match &live_id {
@@ -19366,9 +19596,67 @@ fn list_sessions<R: tauri::Runtime>(
                 title: session.title,
                 provider: session.provider,
                 current,
+                pending: false,
             }
         })
-        .collect())
+        .collect();
+    if provider == SessionProvider::Codex {
+        if let Some(pending) = pending_codex_session_entry(app) {
+            merge_pending_session_entry(&mut entries, pending, limit);
+        }
+    }
+    append_bram_trace_line(
+        app,
+        "sessions",
+        &format!(
+            "op=list provider={} visible={} current_id={} limit={}",
+            session_provider_label(provider),
+            entries.len(),
+            live_id.as_deref().unwrap_or(""),
+            limit
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "all".to_string())
+        ),
+    );
+    Ok(entries)
+}
+
+fn pending_codex_session_entry<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<SessionEntry> {
+    let rec = read_pending_session_title(app, SessionProvider::Codex)?;
+    Some(SessionEntry {
+        id: rec
+            .session_id
+            .unwrap_or_else(|| format!("pending-{}", rec.created_at_ms.max(0))),
+        mtime: rec.created_at_ms.max(0) as u64 / 1_000,
+        size: 0,
+        title: Some(rec.title),
+        provider: SessionProvider::Codex,
+        current: true,
+        pending: true,
+    })
+}
+
+fn merge_pending_session_entry(
+    entries: &mut Vec<SessionEntry>,
+    pending: SessionEntry,
+    limit: Option<usize>,
+) {
+    for entry in entries.iter_mut() {
+        entry.current = false;
+    }
+    let pending = if let Some(index) = entries.iter().position(|entry| entry.id == pending.id) {
+        let mut existing = entries.remove(index);
+        existing.title = pending.title;
+        existing.current = true;
+        existing.pending = true;
+        existing
+    } else {
+        pending
+    };
+    entries.insert(0, pending);
+    if let Some(limit) = limit {
+        entries.truncate(limit);
+    }
 }
 
 fn live_session_id<R: tauri::Runtime>(
@@ -19461,12 +19749,43 @@ fn rfc3339_now() -> String {
     )
 }
 
+// Write a Codex title by UUID. The caller is responsible for establishing that
+// the id belongs to this project; keeping the append separate from visible
+// session discovery lets Bram name an explicitly created bootstrap rollout.
+fn append_codex_session_title(id: &str, title: &str) -> Result<(), String> {
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err("invalid session id".to_string());
+    }
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return Err("empty title".to_string());
+    }
+    let home = home_dir().ok_or("no HOME or USERPROFILE")?;
+    let index_path = home.join(".codex").join("session_index.jsonl");
+    if let Some(parent) = index_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let record = serde_json::json!({
+        "id": id,
+        "thread_name": trimmed,
+        "updated_at": rfc3339_now(),
+    });
+    let mut line = serde_json::to_string(&record).map_err(|e| e.to_string())?;
+    line.push('\n');
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&index_path)
+        .map_err(|e| e.to_string())?;
+    f.write_all(line.as_bytes()).map_err(|e| e.to_string())
+}
+
 // Rename a session. For Claude: append `{type: "custom-title", customTitle: ...}`
-// to the session JSONL so claude_session_title at lib.rs:1893 picks it up on
-// next read. For codex: append `{id, thread_name, updated_at}` to
-// ~/.codex/session_index.jsonl (append-only, last entry wins) so both
-// codex_session_index in Bram and codex's own session listing see the
-// new title. Codex contract verified against codex-rs/rollout/src/session_index.rs.
+// to the session JSONL so claude_session_title picks it up on next read. For
+// Codex: append `{id, thread_name, updated_at}` to session_index.jsonl
+// (append-only, last entry wins). Codex contract verified against
+// codex-rs/rollout/src/session_index.rs.
 fn rename_session<R: tauri::Runtime>(
     app: &AppHandle<R>,
     id: &str,
@@ -19498,24 +19817,7 @@ fn rename_session<R: tauri::Runtime>(
             f.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
         }
         SessionProvider::Codex => {
-            let home = home_dir().ok_or("no HOME or USERPROFILE")?;
-            let index_path = home.join(".codex").join("session_index.jsonl");
-            if let Some(parent) = index_path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-            }
-            let record = serde_json::json!({
-                "id": session.id,
-                "thread_name": trimmed,
-                "updated_at": rfc3339_now(),
-            });
-            let mut line = serde_json::to_string(&record).map_err(|e| e.to_string())?;
-            line.push('\n');
-            let mut f = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&index_path)
-                .map_err(|e| e.to_string())?;
-            f.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
+            append_codex_session_title(&session.id, trimmed)?;
         }
     }
     Ok(b"{\"ok\":true}".to_vec())

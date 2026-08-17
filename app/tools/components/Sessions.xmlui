@@ -211,24 +211,25 @@
               label="⟳"
               variant="ghost"
               size="xs"
-              enabled="{!(pendingDeletes.includes($item.id) || pendingRenames.includes($item.id))}"
-              tooltip="{pendingDeletes.includes($item.id) ? 'delete pending' : (pendingRenames.includes($item.id) ? 'rename pending' : 'Reload: kill the running agent and resume this session')}"
+              enabled="{!$item.pending &amp;&amp; !(pendingDeletes.includes($item.id) || pendingRenames.includes($item.id))}"
+              tooltip="{$item.pending ? 'Available after the first message creates the Codex session' : (pendingDeletes.includes($item.id) ? 'delete pending' : (pendingRenames.includes($item.id) ? 'rename pending' : 'Reload: kill the running agent and resume this session'))}"
               onClick="window.__bramReloadAgentSessionClick($item.provider, $item.id, toast)" />
             <Button
               label="✕"
               variant="ghost"
               size="xs"
-              enabled="{!(pendingDeletes.includes($item.id) || pendingRenames.includes($item.id))}"
-              tooltip="{pendingDeletes.includes($item.id) ? 'delete pending' : (pendingRenames.includes($item.id) ? 'rename pending' : 'Delete session')}"
+              enabled="{!$item.pending &amp;&amp; !(pendingDeletes.includes($item.id) || pendingRenames.includes($item.id))}"
+              tooltip="{$item.pending ? 'Available after the first message creates the Codex session' : (pendingDeletes.includes($item.id) ? 'delete pending' : (pendingRenames.includes($item.id) ? 'rename pending' : 'Delete session'))}"
               onClick="lastDeleteId = $item.id; deleteSession.execute({ id: $item.id, provider: $item.provider })" />
             <Button
               label="✎"
               variant="ghost"
               size="xs"
-              enabled="{!(pendingDeletes.includes($item.id) || pendingRenames.includes($item.id))}"
-              tooltip="{pendingDeletes.includes($item.id) ? 'delete pending' : (pendingRenames.includes($item.id) ? 'rename pending' : 'Rename session')}"
+              enabled="{!$item.pending &amp;&amp; !(pendingDeletes.includes($item.id) || pendingRenames.includes($item.id))}"
+              tooltip="{$item.pending ? 'Available after the first message creates the Codex session' : (pendingDeletes.includes($item.id) ? 'delete pending' : (pendingRenames.includes($item.id) ? 'rename pending' : 'Rename session'))}"
               onClick="renamingSession = { id: $item.id, provider: $item.provider, title: ($item.title || '') }; renameDraft = ($item.title || '')" />
             <Link
+              when="{!$item.pending}"
               width="*"
               onClick="expandedId = (expandedId === $item.id) ? null : $item.id"
               noIndicator>
@@ -237,8 +238,13 @@
                 fontWeight="{expandedId === $item.id ? '$fontWeight-bold' : '$fontWeight-normal'}"
                 value="{($item.current ? '[current] ' : '') + ($item.title || '(untitled)')}" />
             </Link>
+            <Text
+              when="{$item.pending}"
+              width="*"
+              color="$textColor-secondary"
+              value="{($item.current ? '[current] ' : '') + ($item.title || '(untitled)') + ' — starting…'}" />
             <Text width="140px" fontSize="$fontSize-sm" value="{formatDateTime(new Date($item.mtime * 1000), 'yyyy-MM-dd HH:mm')}" />
-            <Text width="70px" fontSize="$fontSize-sm" value="{Math.round($item.size / 1024) + ' KB'}" />
+            <Text width="70px" fontSize="$fontSize-sm" value="{$item.pending ? 'Pending' : (Math.round($item.size / 1024) + ' KB')}" />
           </HStack>
           <VStack when="{expandedId === $item.id}" paddingBottom="$space-2">
             <SessionDetail sessionId="{$item.id}" provider="{$item.provider}"

@@ -33085,32 +33085,92 @@ fn claude_jsonl_is_genuine_user_message(entry: &serde_json::Value) -> bool {
 // the turn is over and any latched menu should clear — but the completion
 // detector currently ignores user records and reports non-final-assistant,
 // pinning the menu. Instrument first; graduate to ending the turn after a soak.
-fn claude_jsonl_user_after_nonfinal_assistant(content: &str) -> bool {
+// issue-259: what the detector saw when it fired, so a fire self-classifies
+// in the trace instead of being reconstructed by correlating against proxies
+// that cannot see interrupts touching no worklist state. An audit of the
+// 420-fire post-reset corpus matched only 30% to an interrupt signal within
+// 5s; correlation cannot settle the graduation criterion, so the detector
+// states its own evidence. Classification only — never user text.
+#[derive(Default)]
+struct WouldEndEvidence {
+    fires: bool,
+    stop_reason: String,
+    user_shape: &'static str,
+    user_records: usize,
+    gap_lines: usize,
+}
+
+// Bram injects user turns itself: every approved:/drop:/iterate:/
+// skip-worklist: payload and every message-agent send lands as a genuine
+// user record trailing a non-final assistant one, indistinguishable from an
+// interrupt under this predicate. Labelling the shape makes that countable.
+fn claude_jsonl_user_shape(entry: &serde_json::Value) -> &'static str {
+    let text = match entry.get("message").and_then(|m| m.get("content")) {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(blocks)) => blocks
+            .iter()
+            .find(|b| b.get("type").and_then(|v| v.as_str()) == Some("text"))
+            .and_then(|b| b.get("text").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .to_string(),
+        _ => String::new(),
+    };
+    let head = text.trim_start();
+    const INJECTED: [&str; 6] = [
+        "approved:",
+        "drop:",
+        "iterate:",
+        "skip-worklist:",
+        "talk:",
+        "voice:",
+    ];
+    if INJECTED.iter().any(|p| head.starts_with(p)) {
+        "injected"
+    } else if head.is_empty() {
+        "unknown"
+    } else {
+        "typed"
+    }
+}
+
+fn claude_jsonl_user_after_nonfinal_assistant(content: &str) -> WouldEndEvidence {
+    let mut ev = WouldEndEvidence {
+        user_shape: "unknown",
+        ..Default::default()
+    };
     let mut saw_user_message = false;
     for line in content.lines().rev() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
+        ev.gap_lines += 1;
         let Ok(entry) = serde_json::from_str::<serde_json::Value>(trimmed) else {
             continue;
         };
         match entry.get("type").and_then(|v| v.as_str()) {
             Some("assistant") => {
-                let final_turn = entry
+                let stop = entry
                     .get("message")
                     .and_then(|m| m.get("stop_reason"))
-                    .and_then(|v| v.as_str())
-                    == Some("end_turn");
-                return saw_user_message && !final_turn;
+                    .and_then(|v| v.as_str());
+                ev.stop_reason = stop.unwrap_or("none").to_string();
+                ev.fires = saw_user_message && stop != Some("end_turn");
+                return ev;
             }
             Some("user") if claude_jsonl_is_genuine_user_message(&entry) => {
+                if !saw_user_message {
+                    // the record adjacent to the assistant one is the
+                    // interesting shape; earlier ones are just counted
+                    ev.user_shape = claude_jsonl_user_shape(&entry);
+                }
                 saw_user_message = true;
+                ev.user_records += 1;
             }
             _ => {}
         }
     }
-    false
+    ev
 }
 
 // Timestamp (ms) of the most recent `type=assistant` record in a Claude
@@ -33493,15 +33553,23 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
             // (agent-*.jsonl) are excluded: no human types into them, so the
             // takeover signature is meaningless there (3 of the 2026-07-20
             // audit's 33 fires were this class).
-            if bram_trace_enabled()
-                && !basename.starts_with("agent-")
-                && claude_jsonl_user_after_nonfinal_assistant(&content)
-            {
-                append_bram_trace_line(
-                    app,
-                    "jsonl-turn-end",
-                    &format!("op=would-end reason=user-after-assistant path={}", basename),
-                );
+            if bram_trace_enabled() && !basename.starts_with("agent-") {
+                let ev = claude_jsonl_user_after_nonfinal_assistant(&content);
+                if ev.fires {
+                    append_bram_trace_line(
+                        app,
+                        "jsonl-turn-end",
+                        &format!(
+                            "op=would-end reason=user-after-assistant path={} \
+                             stop_reason={} user_shape={} user_records={} gap_lines={}",
+                            basename,
+                            ev.stop_reason,
+                            ev.user_shape,
+                            ev.user_records,
+                            ev.gap_lines
+                        ),
+                    );
+                }
             }
         }
         if provider == JsonlCompletionProvider::Codex && should_set_codex_jsonl_working(&decision) {
@@ -36628,7 +36696,7 @@ mod turn_completion_tests {
             r#"{"type":"user","message":{"content":"did not mean tab"}}"#,
             "\n",
         );
-        assert!(claude_jsonl_user_after_nonfinal_assistant(content));
+        assert!(claude_jsonl_user_after_nonfinal_assistant(content).fires);
     }
 
     #[test]
@@ -36642,7 +36710,7 @@ mod turn_completion_tests {
             r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#,
             "\n",
         );
-        assert!(!claude_jsonl_user_after_nonfinal_assistant(content));
+        assert!(!claude_jsonl_user_after_nonfinal_assistant(content).fires);
     }
 
     #[test]
@@ -36659,7 +36727,7 @@ mod turn_completion_tests {
             r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#,
             "\n",
         );
-        assert!(!claude_jsonl_user_after_nonfinal_assistant(content));
+        assert!(!claude_jsonl_user_after_nonfinal_assistant(content).fires);
     }
 
     #[test]

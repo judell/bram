@@ -40,11 +40,15 @@ function paragraphsContaining(text, query) {
 // preserved.
 function snippetSegments(snippet, query) {
   const text = snippet || '';
-  const terms = (query || '')
-    .replace(/"/g, ' ')
-    .split(/\s+/)
-    .filter((t) => t.length >= 2)
-    .map((t) => t.toLowerCase());
+  // Terms come from helpers.js (real JS), the same derivation the modal's
+  // Markdown/Text highlightText path uses via __bramSearchTerms. The xs
+  // chain that used to live here (replace/split(/\s+/)/filter/map) marked
+  // correctly for a single term and silently produced NO hits for two or
+  // more, so multi-term queries rendered raw [term] brackets — identical
+  // code returned the expected hits under Node, which is what identified
+  // the engine as the difference. Sharing one derivation also gives the
+  // results list the modal's quoted-phrase and punctuated-query handling.
+  const terms = (window.__bramSearchTerms(query) || []).map((t) => t.toLowerCase());
   const segs = [];
   let plain = '';
   let i = 0;

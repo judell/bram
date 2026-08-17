@@ -771,6 +771,128 @@ left in the target project (issue, doc, commit message) self-contained —
 carry the evidence inline rather than pointing at the wrong project's
 transcript.
 
+That subsection is about pivoting *this* session's attention. When two
+sessions both stay put on opposite sides of a boundary and coordinate,
+see *Working across project boundaries* below.
+
+
+## Working across project boundaries
+
+Some of the best work happens between two sessions that each hold
+evidence the other cannot reach, coordinating through issue threads.
+Three shapes recur, and the practices are the same in all three — only
+the asymmetry differs:
+
+- **Downstream ↔ upstream.** Your project consumes a library; a bug or
+  gap here is a change there.
+- **Machine ↔ machine.** The same repo running on two platforms, where
+  a failure reproduces on only one of them.
+- **Agent ↔ agent.** The same repo, two agents, each able to reach
+  things the other can't.
+
+### Name the boundary and sign your side
+
+Open every artifact that crosses a boundary — issue, comment, PR
+description, commit message another session will read — by saying who
+is speaking and from where ("filed from the *<project>* side", "posted
+from the macOS session"). The reader is often another agent with a
+different vantage point, and the signature is what tells them which
+side the evidence comes from.
+
+### Scope claims to what your side can observe
+
+Say "from this side" and mean it. State what you verified and how; name
+what you *cannot* check from here rather than letting silence imply
+it's fine. *Local absence is not disproof* (in *Log-first development*)
+is the special case of this rule for machine-specific artifacts; this
+is the general one.
+
+### The thread is the design document
+
+Chat dies with the session; the thread is what the other side reads,
+and months later it's the only record of why. So file at mechanism
+depth — symptom, the mechanism cited at the *other* side's
+`file:line`, blast radius, and the trace or measurement receipts — not
+"this seems broken."
+
+One issue, one mechanism. When a second mechanism surfaces mid-thread,
+split it into its own issue and say in both places what moved and what
+remains.
+
+### Make the ask specific, and report gates by name
+
+Ask for something answerable: a litmus test to run, a build to
+validate, a specific gate to clear. When work is gated, enumerate the
+gates and report their status per side ("gate 2 is green; from this
+side, remaining: ..."), so neither session has to guess what the other
+is waiting on.
+
+### Green-light before irreversible or expensive steps
+
+Vendoring a candidate build, merging, restarting something shared —
+request the go-ahead across the boundary explicitly, and grant it
+explicitly. An assumed green light is how two sessions end up half-way
+through incompatible states.
+
+### Reproduce before fixing; correct the record in public
+
+On the other side of a boundary the currency is a reproduction — a
+failing test pins the decision so prose doesn't have to. Build it
+before proposing a fix, because it frequently contradicts the filing.
+
+When it does, post a **correction comment** carrying the measurements.
+Do not quietly edit the original body: the other side may have already
+acted on it, and the correction is the most useful thing in the thread.
+
+### Recompute rather than defer
+
+Being upstream, or being the side where the bug reproduces, is not
+authority over arithmetic. When the other session's claim conflicts
+with yours, re-run the numbers and read the source before conceding —
+then concede once, to the evidence, and move on. Deference and
+digging in are the same failure.
+
+### Verify the artifact you run, not the source diff
+
+A merged fix, a green CI run, and a source diff are not the build in
+your hands. Verify the artifact you actually execute (checksum,
+marker string, behavioral probe), and when you report results, label
+which of your instruments are authoritative and which are only
+corroborating.
+
+### Close every hard stretch with two questions
+
+This is the engine that turns local pain into shared improvement.
+When a struggle ends, ask:
+
+- *What documentation would have short-circuited this?* → name the
+  question you couldn't answer and where you looked.
+- *What feature would have obviated this workaround?* → carry the
+  workaround itself as the evidence.
+
+Then file each one on the other side. If that boundary doesn't take
+issues from you, write the ask up locally anyway, fully formed and
+evidence-backed, so it exists the day a channel opens.
+
+Any workaround you land carries the issue number it's waiting on, and
+its retirement is its own worklist item. A workaround with no filed
+issue is a decision to keep the pain.
+
+Where the other side publishes a searchable doc corpus, the
+documentation half has a stricter form — validate the gap against the
+current corpus before filing, since the fastest way to lose standing
+is to report a gap that closed last week. See *Coordinating MCP demand
+with search*.
+
+### Carry gated follow-ups, and don't edit across the boundary
+
+Actions gated on the other side (a merge, a release, a verdict) become
+**placeholder items** — see *Placeholder items (droppable reminders)*.
+
+Act only in the repo whose session you're in. The thread is the
+transport, not a shortcut for reaching across and editing the other
+project directly.
+
 
 ## Host-managed inflight sentinel
 

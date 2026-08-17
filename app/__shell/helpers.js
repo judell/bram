@@ -1810,6 +1810,64 @@ window.__bramInflightBannerLabel = function (claim) {
   return action + " " + ids + status;
 };
 
+// project-identity-chip: deterministic hue for the project chip and the
+// AppHeader's bottom border, so two Brams running side by side are told
+// apart without reading anything. FNV-1a over the absolute project root
+// (stable across restarts and machines with the same checkout path),
+// then spread around the wheel by the golden angle so neighbouring hash
+// values don't land on neighbouring colors.
+window.__bramProjectHue = function (key) {
+  var s = String(key || "");
+  if (!s) return 210;
+  var h = 2166136261;
+  for (var i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return Math.round(((h >>> 0) * 137.508) % 360);
+};
+
+// Chip background / border color at a fixed saturation+lightness, so the
+// tint reads the same weight in either theme and never fights the
+// surface colors. `alpha` lets the same hue serve the chip fill and the
+// 2px header rule at different strengths.
+window.__bramProjectTint = function (key, alpha) {
+  var a = typeof alpha === "number" ? alpha : 1;
+  return "hsla(" + window.__bramProjectHue(key) + ", 62%, 45%, " + a + ")";
+};
+
+// Chip label: the home-shortened project path, with the repo slug in the
+// tooltip rather than the label so the chip stays short. Falls back to
+// the path when the host published no repo (no origin remote).
+window.__bramProjectTooltip = function (info) {
+  if (!info) return "";
+  return info.repo ? info.project + " · " + info.repo : info.project || "";
+};
+
+// Badge takes a dynamic background only through colorMap (value -> color),
+// so the chip's one-entry map is built here rather than as an inline
+// object literal in the markup.
+// https://docs.xmlui.org/components/Badge
+window.__bramProjectColorMap = function (info) {
+  var map = {};
+  if (!info || !info.project) return map;
+  map[info.project] = {
+    background: window.__bramProjectTint(info.projectKey, 1),
+    label: "#ffffff",
+  };
+  return map;
+};
+
+// Header band wash behind the whole AppHeader row. Low alpha so it reads
+// as a tint in either theme without touching text contrast. Returned as a
+// single helper call (not an inline ternary in the binding) — inline
+// ternaries in attribute expressions have defeated XMLUI's dependency
+// tracking before; see the search-date endpoint-label bug.
+window.__bramProjectBandTint = function (info) {
+  if (!info || !info.projectKey) return "transparent";
+  return window.__bramProjectTint(info.projectKey, 0.12);
+};
+
 window.__bramStripImageMarkerPrefix = function (text) {
   return (text || "").replace(/^(\s*Read this screenshot: @\S+\s*)+/, "").trim();
 };

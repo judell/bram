@@ -395,9 +395,29 @@
       onClick="updateBannerDismissedVersion = appInfo.value.latest; writeLocalStorage('bram.updateBannerDismissedVersion', appInfo.value.latest)" />
   </HStack>
 
-  <AppHeader>
+  <!-- project-identity-chip: two Brams side by side are otherwise
+       pixel-identical inside the pane, and the OS title bar (the only
+       place the project appears) is absent from screenshots. The band
+       wash is the preattentive half — you identify the window without
+       reading it; the pill carries the actual path, repo in tooltip.
+       The wash goes on AppHeader itself, not the inner HStack: that
+       HStack sits inside paddingHorizontal-AppHeader and begins after
+       the header's logo region, so its background stopped short of
+       both edges. -->
+  <AppHeader backgroundColor="{window.__bramProjectBandTint(appInfo.value)}">
     <Theme fontSize-Button="$fontSize-md">
       <HStack gap="$space-0_5" verticalAlignment="center" width="100%">
+        <!-- Badge takes a dynamic background only via colorMap:
+             https://docs.xmlui.org/components/Badge -->
+        <Theme textTransform-Badge="none">
+          <Badge
+            when="{appInfo.value &amp;&amp; appInfo.value.project}"
+            variant="pill"
+            marginRight="$space-8"
+            value="{appInfo.value.project}"
+            colorMap="{window.__bramProjectColorMap(appInfo.value)}"
+            tooltip="{window.__bramProjectTooltip(appInfo.value)}" />
+        </Theme>
         <RadioGroup
           id="agentSwitcherSelect"
           when="{(mainAgentStatus.value &amp;&amp; mainAgentStatus.value.provider) || (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider)}"

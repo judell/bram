@@ -40601,6 +40601,32 @@ fn route_request<R: tauri::Runtime>(
                 "forge".to_string(),
                 serde_json::Value::String(forge_adapter(app).label().to_string()),
             );
+            // project-identity-chip: publish the same identity the OS window
+            // title carries (shell_window_title_parts) so the pane can render
+            // it. Two Brams side by side are otherwise pixel-identical inside,
+            // and the title bar is exactly what a screenshot drops.
+            if let Some(root) = project_root(Some(app)) {
+                obj.insert(
+                    "project".to_string(),
+                    serde_json::Value::String(title_path_with_home(
+                        &root,
+                        home_dir().as_deref(),
+                    )),
+                );
+                // Hue is hashed from the absolute root, not the display form:
+                // two projects can share a basename, and "~/x" vs "/Users/j/x"
+                // must not drift to different colors.
+                obj.insert(
+                    "projectKey".to_string(),
+                    serde_json::Value::String(root.display().to_string()),
+                );
+            }
+            if let Some(slug) = repo_owner_name(app) {
+                let slug = slug.trim().to_string();
+                if !slug.is_empty() {
+                    obj.insert("repo".to_string(), serde_json::Value::String(slug));
+                }
+            }
         }
         let body = serde_json::to_vec(&v).unwrap_or_default();
         return (200, "application/json; charset=utf-8", body);

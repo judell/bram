@@ -1,6 +1,6 @@
 [package]
 name = "bram"
-version = "0.3.16"
+version = "0.3.17"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"

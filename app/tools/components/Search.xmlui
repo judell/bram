@@ -29,6 +29,10 @@
   <variable name="ready" value="{!!query &amp;&amp; query.trim().length >= 2}" />
   <!-- Selected date window [lo, hi] (epoch seconds); null = no date filter. -->
   <variable name="dateFilter" value="{null}" />
+  <!-- Live thumb position during a drag; dateFilter is its debounced
+       commit (search-slider-drag-debounce). Labels read this, `displayed`
+       reads dateFilter. -->
+  <variable name="dateDraft" value="{null}" />
   <!-- search-results-date-sort: local ordering of the filtered result set.
        'relevance' (default) keeps the bucket-merged rank order; 'newest' /
        'oldest' sort chronologically (sortSearchHits, Globals.xs). Applied
@@ -124,7 +128,23 @@
        https://docs.xmlui.org/components/Slider#setvalue -->
   <ChangeListener
     listenTo="{dateRange ? (query.trim() + '|' + dateRange[0] + '-' + dateRange[1]) : ''}"
-    onDidChange="() => { dateFilter = null; window.__bramIframeTrace('search-date', {op: 'filter-reset', settled: resultsSettled, lo: dateRange ? dateRange[0] : -1, hi: dateRange ? dateRange[1] : -1}) }" />
+    onDidChange="() => { dateFilter = null; dateDraft = null; window.__bramIframeTrace('search-date', {op: 'filter-reset', settled: resultsSettled, lo: dateRange ? dateRange[0] : -1, hi: dateRange ? dateRange[1] : -1}) }" />
+
+  <!-- search-slider-drag-debounce: the Slider writes every step it crosses
+       into dateDraft (cheap: only the endpoint labels and the thumb
+       tooltips read it), and this listener commits it to dateFilter once
+       the drag settles. dateFilter is what `displayed` consumes, and that
+       binding filters + sorts + rebuilds 100 row objects, each running
+       formatDateTime and snippetSegments — per step, before this.
+       120ms is short enough to feel immediate on release and long enough
+       to swallow a sweep.
+       The real fix is apply-on-release, which the component cannot express:
+       Radix supplies onValueCommit but XMLUI's Slider does not surface it.
+       Filed as xmlui-org/xmlui#3768; retire this debounce when it ships. -->
+  <ChangeListener
+    listenTo="{dateDraft ? dateDraft[0] + '-' + dateDraft[1] : 'none'}"
+    debounceWaitInMs="120"
+    onDidChange="() => { dateFilter = dateDraft; window.__bramIframeTrace('search-date', {op: 'commit', lo: dateDraft ? dateDraft[0] : -1, hi: dateDraft ? dateDraft[1] : -1}) }" />
 
   <!-- search-date-filter-forensics (observe-only): the 2026-08-14 iterate
        reported the max thumb not constraining results, with auto-expand
@@ -156,14 +176,18 @@
     debounceWaitInMs="250"
     onDidChange="() => { window.__bramScrollMainToTop(); window.__bramIframeTrace('search-date', {op: 'pin-top', via: 'filter-or-query'}) }" />
 
-  <!-- Slider endpoint labels: show the applied filter when one is set, else
-       the full domain. Precomputed here so the Text bindings below are bare
-       var references (see the label comment at the Slider). -->
+  <!-- Slider endpoint labels: show the live drag position when there is one,
+       else the applied filter, else the full domain. Precomputed here so the
+       Text bindings below are bare var references (see the label comment at
+       the Slider). Reading dateDraft ahead of dateFilter is what keeps the
+       labels tracking the thumbs at drag speed now that the filter itself
+       commits on a 120ms debounce (search-slider-drag-debounce). -->
+  <variable name="dateLabelPair" value="{dateDraft || dateFilter || dateRange}" />
   <variable name="dateLoLabel" value="{
-    dateRange ? formatDateTime(new Date((dateFilter ? dateFilter[0] : dateRange[0]) * 1000), 'yyyy-MM-dd') : ''
+    dateRange ? formatDateTime(new Date(dateLabelPair[0] * 1000), 'yyyy-MM-dd') : ''
   }" />
   <variable name="dateHiLabel" value="{
-    dateRange ? formatDateTime(new Date((dateFilter ? dateFilter[1] : dateRange[1]) * 1000), 'yyyy-MM-dd') : ''
+    dateRange ? formatDateTime(new Date(dateLabelPair[1] * 1000), 'yyyy-MM-dd') : ''
   }" />
 
   <!-- search-rows-confinement: bake the per-row view-model here, once per
@@ -288,7 +312,7 @@
           step="{86400}"
           initialValue="{dateRange}"
           showValues="false"
-          onDidChange="(v) => { dateFilter = v; window.__bramIframeTrace('search-date', {op: 'drag', lo: v[0], hi: v[1]}) }" />
+          onDidChange="(v) => { dateDraft = v; window.__bramIframeTrace('search-date', {op: 'drag', lo: v[0], hi: v[1]}) }" />
       </VStack>
       <!-- Facet pills pin with the query block (2026-08-14 iterate: "the
            buttons don't stick to the header") so bucket toggles stay reachable

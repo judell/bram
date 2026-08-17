@@ -37922,7 +37922,7 @@ fn worklist_active_authorization_summary<R: tauri::Runtime>(
         return None;
     }
     let now = unix_now_ms();
-    if worklist_auth_freshness_ok(&auth, now).is_err() {
+    if worklist_auth_freshness_ok(&auth, now, WorklistAuthUse::Publish).is_err() {
         return None;
     }
     let kind = auth.get("kind").and_then(|v| v.as_str())?;
@@ -42149,11 +42149,29 @@ fn worklist_json_ids(value: &serde_json::Value, key: &str) -> Vec<String> {
 // replayed on a later turn. Consumption is intentionally NOT checked here:
 // a drop's resolve consumes the record on read but the same-turn prune must
 // still succeed (see handle_worklist_mutate). Pure over now_ms for testing.
-fn worklist_auth_freshness_ok(auth: &serde_json::Value, now_ms: i64) -> Result<(), String> {
-    if auth
-        .get("interruptedAtMs")
-        .and_then(|v| v.as_i64())
-        .is_some()
+// issue-255: what a record is being asked to authorize. An interrupt (Esc,
+// menu reject, provider cancel) revokes the right to PUBLISH work — commit
+// files, record issue closes — because replaying an abandoned turn's approval
+// there is the security-h4 hazard. It does not revoke RECONCILE: advance and
+// prune touch no files, they only make the worklist agree with what is already
+// on disk. Refusing those was what stranded applied work at TO APPLY while its
+// commits were pushed, i.e. the pane asserting the opposite of the repository.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum WorklistAuthUse {
+    Reconcile,
+    Publish,
+}
+
+fn worklist_auth_freshness_ok(
+    auth: &serde_json::Value,
+    now_ms: i64,
+    auth_use: WorklistAuthUse,
+) -> Result<(), String> {
+    if auth_use == WorklistAuthUse::Publish
+        && auth
+            .get("interruptedAtMs")
+            .and_then(|v| v.as_i64())
+            .is_some()
     {
         return Err("authorization was interrupted; re-approve to proceed".to_string());
     }
@@ -42193,7 +42211,7 @@ fn validate_worklist_mutate_authorization(
         }
     }
 
-    worklist_auth_freshness_ok(auth, now_ms)?;
+    worklist_auth_freshness_ok(auth, now_ms, WorklistAuthUse::Reconcile)?;
 
     Ok(auth_kind.to_string())
 }
@@ -42268,8 +42286,9 @@ fn ensure_worklist_commit_authorized(
             return Err(format!("id not in auth: {}", id));
         }
     }
-    // security-h4: same interrupted/TTL gate as mutate.
-    worklist_auth_freshness_ok(auth, now_ms)?;
+    // security-h4: publication stays fail-closed on an interrupted record
+    // (issue-255 narrowed only the reconcile path, not this one).
+    worklist_auth_freshness_ok(auth, now_ms, WorklistAuthUse::Publish)?;
     Ok(())
 }
 
@@ -42604,8 +42623,43 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
         .unwrap_or_else(|| serde_json::json!({}));
     let commit_too = auth.get("commitToo").and_then(|v| v.as_bool()).unwrap_or(false);
     let auth_kind = match validate_worklist_mutate_authorization(op, &ids, &auth, unix_now_ms()) {
-        Ok(kind) => kind,
+        Ok(kind) => {
+            // issue-255: this reconciliation was allowed on a record an
+            // interrupt had marked. Logged so a soak can show how often the
+            // narrowed rule is exercised and on which ids — a surprising id
+            // here is the signal to revisit the split.
+            if auth
+                .get("interruptedAtMs")
+                .and_then(|v| v.as_i64())
+                .is_some()
+                && bram_trace_enabled()
+            {
+                append_bram_trace_line(
+                    app,
+                    "auth-record",
+                    &format!(
+                        "op=reconcile-after-interrupt route=mutate mutate_op={} kind={} ids={}",
+                        op,
+                        kind,
+                        serde_json::to_string(&ids).unwrap_or_else(|_| "[]".to_string())
+                    ),
+                );
+            }
+            kind
+        }
         Err(e) => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "auth-record",
+                    &format!(
+                        "op=refuse route=mutate mutate_op={} detail={} ids={}",
+                        op,
+                        e,
+                        serde_json::to_string(&ids).unwrap_or_else(|_| "[]".to_string())
+                    ),
+                );
+            }
             return (
                 400,
                 "application/json; charset=utf-8",
@@ -42833,6 +42887,22 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         }
     }
     if let Err(e) = ensure_worklist_commit_authorized(&ids, &auth, unix_now_ms()) {
+        // issue-255: a refusal used to leave nothing behind but a generic
+        // `[route] status=400`, so an incident read as an op=invalidate line
+        // and, minutes later, an unexplained non-200 correlated only by
+        // timing. Naming the reason and the ids here makes
+        // invalidate -> refuse one grep in any project.
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "auth-record",
+                &format!(
+                    "op=refuse route=commit detail={} ids={}",
+                    e,
+                    serde_json::to_string(&ids).unwrap_or_else(|_| "[]".to_string())
+                ),
+            );
+        }
         return worklist_json_error(400, e);
     }
 
@@ -43246,28 +43316,42 @@ mod worklist_authorization_tests {
         assert_eq!(err, "id not in auth: b");
     }
 
-    // security-h4: interrupted / stale authorizations fail closed, while the
-    // same-turn drop flow (resolve-consumed, un-interrupted, fresh) stays valid.
+    // security-h4 as narrowed by issue-255: an interrupted authorization can no
+    // longer PUBLISH (commit), but it can still RECONCILE (advance / prune).
+    // Refusing reconciliation was what left applied work stranded at TO APPLY
+    // with its commits already pushed — the worklist contradicting the repo.
     #[test]
-    fn h4_interrupted_authorization_is_rejected() {
+    fn h4_interrupted_authorization_cannot_publish_but_can_reconcile() {
         let now = 1_000_000;
         let interrupted = json!({
             "kind": "approved", "ids": ["a"], "issuedAtMs": now, "interruptedAtMs": now
         });
-        let adv = validate_worklist_mutate_authorization("advance", &ids(&["a"]), &interrupted, now)
-            .expect_err("interrupted approval must not advance");
-        assert!(adv.contains("interrupted"), "got: {adv}");
+
+        // publication stays fail-closed
         let com = ensure_worklist_commit_authorized(&ids(&["a"]), &interrupted, now)
             .expect_err("interrupted approval must not commit");
         assert!(com.contains("interrupted"), "got: {com}");
-        // prune (drop kind) also rejected when interrupted
+
+        // reconciliation proceeds: these touch no files
+        validate_worklist_mutate_authorization("advance", &ids(&["a"]), &interrupted, now)
+            .expect("interrupted approval must still advance (issue-255)");
         let interrupted_drop = json!({
             "kind": "drop", "ids": ["a"], "issuedAtMs": now, "interruptedAtMs": now
         });
-        assert!(
-            validate_worklist_mutate_authorization("prune", &ids(&["a"]), &interrupted_drop, now)
-                .is_err()
-        );
+        validate_worklist_mutate_authorization("prune", &ids(&["a"]), &interrupted_drop, now)
+            .expect("interrupted drop must still prune (issue-255)");
+    }
+
+    // The TTL gate is unchanged by issue-255 and still applies to BOTH uses:
+    // an interrupt is a steering signal, an expired record is simply stale.
+    #[test]
+    fn issue255_ttl_still_gates_reconciliation() {
+        let issued = 1_000_000;
+        let stale_now = issued + WORKLIST_AUTH_TTL_MS + 1;
+        let auth = json!({ "kind": "approved", "ids": ["a"], "issuedAtMs": issued });
+        let err = validate_worklist_mutate_authorization("advance", &ids(&["a"]), &auth, stale_now)
+            .expect_err("expired approval must not advance");
+        assert!(err.contains("expired"), "got: {err}");
     }
 
     #[test]

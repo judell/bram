@@ -49,7 +49,10 @@
             <Text color="green" value="+{$item.additions}" />
             <Text color="red" value="-{$item.deletions}" />
           </HStack>
-          <DiffView text="{$item.patch || '(no textual diff)'}"
+          <!-- diffview-uniform-patch-cap: this caller had NO cap, so a
+               vendored-bundle commit (tens of MB) posted its whole patch to
+               /__diff/annotate and rendered the result. -->
+          <DiffView text="{cappedDiffText($item.patch || '(no textual diff)')}"
             needle="{$item.__needle}" activeIndex="{$item.__activeOcc}"
             expectedMatchCount="{$item.__matchCount}" />
         </VStack>

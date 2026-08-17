@@ -737,12 +737,12 @@
                         onExpandedChange="(open) => { expandedItemIds = open ? (expandedItemIds || []).filter(k => k !== $item.id + '::diff').concat([$item.id + '::diff']) : (expandedItemIds || []).filter(k => k !== $item.id + '::diff'); window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds, feedbackDraftsById: feedbackDraftsById || {}}) }"
                         fullWidthSummary="true">
                         <VStack gap="$space-1">
-                          <DiffView text="{($item.diff || '').slice(0, 20000)}" />
-                          <Text
-                            when="{($item.diff || '').length > 20000}"
-                            fontSize="$fontSize-xs"
-                            color="$textColor-secondary"
-                            value="{'Diff preview truncated at 20 KB for responsiveness.'}" />
+                          <!-- diffview-uniform-patch-cap: shared 256 KB cap;
+                               the previous 20 KB slice cut ~1 commit in 10
+                               (p90 is 23.5 KB). The truncation notice moved
+                               into the diff itself as a marker line, so it
+                               cannot drift from the actual cap. -->
+                          <DiffView text="{cappedDiffText($item.diff || '')}" />
                         </VStack>
                       </ExpandableItem>
                       <!-- issue-232 Evidence: read-only citations merged from

@@ -300,6 +300,41 @@ function settingsDescribeCommands(s) {
   return s.ai.describeCommands !== false;
 }
 
+
+// diffview-uniform-patch-cap: one cap for every DiffView reader surface.
+// 256 KB matches search_index.rs PATCH_MAX_TOTAL, the per-commit patch cap
+// the indexer already uses, so there is one number and one rationale.
+//
+// Measured over this repo's last 120 commits, the distribution is bimodal
+// with a wide empty gap: the human-readable band tops out at 58 KB (p50
+// 5.8 KB, p90 23.5 KB, p99 53 KB), while vendored-bundle commits are all
+// >= 1 MB, up to 46 MB. Nothing lives between. 256 KB clears the largest
+// real diff 4.4x over and excludes the bundles without a path heuristic.
+//
+// The old per-caller caps were 20000 chars (Workspace) and none at all
+// (CommitDetail) — so one commit in ten was truncated in the worklist while
+// a 6.5 MB bundle diff went through whole. The cut is line-aligned and
+// announces itself; slicing mid-line left the last row garbled with nothing
+// saying why.
+//
+// The cap is a LOCAL, deliberately. A top-level `const DIFF_TEXT_CAP` was
+// not visible inside this function under the xs engine, so the comparison
+// read `s.length <= undefined` (false, always truncate) and the cut ran
+// `lastIndexOf('\n', undefined)` — fromIndex NaN, treated as +Infinity,
+// i.e. the LAST newline. Every diff came back "showing N-1 of N lines".
+// The only other module-level state in this file is a `var`; module-scope
+// `const` is not a shape to rely on here.
+function cappedDiffText(text) {
+  const cap = 262144;
+  const s = text || '';
+  if (s.length <= cap) return s;
+  const cut = s.lastIndexOf('\n', cap);
+  const head = s.slice(0, cut > 0 ? cut : cap);
+  const shown = head.split('\n').length;
+  const total = s.split('\n').length;
+  return head + '\n[diff truncated at 256 KB \u2014 showing ' + shown + ' of ' + total + ' lines]';
+}
+
 // Diff rendering — used by the DiffView component, which all three
 // diff sites (Transcript, Workspace, Commits) share. Per-line
 // classification + theme-variable backgrounds; no syntax highlighter

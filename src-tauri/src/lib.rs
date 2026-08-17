@@ -11936,6 +11936,13 @@ trait ForgeAdapter: Sync {
     fn commit_url(&self, html_base: &str, full_sha: &str) -> String {
         format!("{}/commit/{}", html_base, full_sha)
     }
+    // issue-257: the forge's own answer for the default branch, used only
+    // when the local refs cannot supply it. None by default so an adapter
+    // without the capability falls back to the git-based steps rather than
+    // forcing a parallel implementation.
+    fn default_branch(&self, _root: &Path) -> Option<String> {
+        None
+    }
     fn commit_visible(&self, root: &Path, repo_slug: &str, full_sha: &str) -> Result<bool, String> {
         // Default: git-level. After a push, the local remote-tracking
         // refs contain the commit — forge-independent, no network.
@@ -11984,6 +11991,28 @@ impl ForgeAdapter for GitHubForge {
 
     fn cli(&self) -> &'static str {
         "gh"
+    }
+
+    // issue-257: authoritative default-branch name, used only when
+    // origin/HEAD is missing and `git remote set-head` could not repair it.
+    fn default_branch(&self, root: &Path) -> Option<String> {
+        let out = std::process::Command::new("gh")
+            .current_dir(root)
+            .args([
+                "repo",
+                "view",
+                "--json",
+                "defaultBranchRef",
+                "--jq",
+                ".defaultBranchRef.name",
+            ])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!name.is_empty()).then_some(name)
     }
 
     fn issues_list(&self, root: &Path, limit: usize) -> Result<Vec<serde_json::Value>, String> {
@@ -12122,6 +12151,26 @@ impl ForgeAdapter for GitLabForge {
 
     fn cli(&self) -> &'static str {
         "glab"
+    }
+
+    // issue-257: GitLab's answer for the same question. Verified against a
+    // live project (gitlab.com/judell/glab-demo): the call returns the
+    // project JSON with `default_branch`. Safe even if a future API shape
+    // breaks it — a wrong or empty answer produces a ref name that
+    // `rev-parse --verify` rejects, which yields None and defers the close
+    // rather than firing it.
+    fn default_branch(&self, root: &Path) -> Option<String> {
+        let out = std::process::Command::new("glab")
+            .current_dir(root)
+            .args(["api", "projects/:id", "--method", "GET"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+        let name = v.get("default_branch")?.as_str()?.trim().to_string();
+        (!name.is_empty()).then_some(name)
     }
 
     fn issues_list(&self, root: &Path, _limit: usize) -> Result<Vec<serde_json::Value>, String> {
@@ -39271,8 +39320,22 @@ fn enqueue_issue_closes_from_auth<R: tauri::Runtime>(
                 patch_id: patch_id.clone(),
                 created_at_ms: unix_now_ms(),
             };
+            let branch = git_current_branch(app).unwrap_or_default();
             if let Err(e) = enqueue_pending_issue_close_path(&path, record) {
                 eprintln!("[issue-close-queue] enqueue #{} failed: {}", issue, e);
+            } else {
+                // issue-257: the ledger carried only authorization and commit
+                // records, so "did Bram close this, when, against what?" was
+                // unanswerable once the opt-in trace rotated away.
+                append_audit_record(
+                    app,
+                    serde_json::json!({
+                        "kind": "issue-close-enqueued",
+                        "issue": issue,
+                        "commit": commit_sha,
+                        "branch": branch,
+                    }),
+                );
             }
         }
     }
@@ -39284,28 +39347,65 @@ fn enqueue_issue_closes_from_auth<R: tauri::Runtime>(
 // origin/master). None = no default ref resolvable locally; the caller
 // falls back to the forge-visibility check so repos without origin/HEAD
 // keep the old behavior.
-fn commit_on_origin_default<R: tauri::Runtime>(app: &AppHandle<R>, sha: &str) -> Option<bool> {
-    let root = project_root(Some(app))?;
-    for r in [
-        "refs/remotes/origin/HEAD",
-        "refs/remotes/origin/main",
-        "refs/remotes/origin/master",
-    ] {
-        let resolved = std::process::Command::new("git")
-            .current_dir(&root)
-            .args(["rev-parse", "--verify", "--quiet", r])
+// issue-257: resolve the DEFAULT branch rather than guessing at it. The
+// previous version walked origin/HEAD, then origin/main, then
+// origin/master — and the last two are a guess that can be confidently
+// WRONG, not merely unknown: in a repo whose default is `develop` with a
+// stale origin/main present, a commit on main tested as an ancestor of
+// main answers "yes, on default" and closes an issue whose fix never
+// reached the default branch. Cheapest-first ladder, no guessing:
+//
+//   1. refs/remotes/origin/HEAD  (correct local answer when set)
+//   2. `git remote set-head origin --auto`, then retry (the standard
+//      repair for exactly this condition; makes later checks local)
+//   3. the forge's own answer (gh repo view --json defaultBranchRef)
+//
+// None means genuinely unresolvable, and the caller defers rather than
+// falling back to any-ref visibility.
+fn origin_default_ref<R: tauri::Runtime>(app: &AppHandle<R>, root: &Path) -> Option<String> {
+    let symbolic = |root: &Path| -> Option<String> {
+        let out = std::process::Command::new("git")
+            .current_dir(root)
+            .args(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])
             .output()
             .ok()?;
-        if resolved.status.success() {
-            let anc = std::process::Command::new("git")
-                .current_dir(&root)
-                .args(["merge-base", "--is-ancestor", sha, r])
-                .status()
-                .ok()?;
-            return Some(anc.success());
+        if !out.status.success() {
+            return None;
         }
+        let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!name.is_empty()).then_some(name)
+    };
+    if let Some(r) = symbolic(root) {
+        return Some(r);
     }
-    None
+    // repair the missing local ref once, then retry
+    let _ = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["remote", "set-head", "origin", "--auto"])
+        .output();
+    if let Some(r) = symbolic(root) {
+        return Some(r);
+    }
+    // last resort: ask the forge
+    let name = forge_adapter(app).default_branch(root)?;
+    let candidate = format!("refs/remotes/origin/{}", name);
+    let ok = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["rev-parse", "--verify", "--quiet", &candidate])
+        .output()
+        .ok()?;
+    ok.status.success().then_some(candidate)
+}
+
+fn commit_on_origin_default<R: tauri::Runtime>(app: &AppHandle<R>, sha: &str) -> Option<bool> {
+    let root = project_root(Some(app))?;
+    let default_ref = origin_default_ref(app, &root)?;
+    let anc = std::process::Command::new("git")
+        .current_dir(&root)
+        .args(["merge-base", "--is-ancestor", sha, &default_ref])
+        .status()
+        .ok()?;
+    Some(anc.success())
 }
 
 // On the user's explicit Push, close each queued issue whose commit is now
@@ -39336,16 +39436,44 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>) {
         // a rebase-rewritten twin. Re-anchor by patch-id over recent origin
         // history and adopt the new SHA; if nothing matches, defer as before
         // but say so — the silent-forever case is what hid the #227 miss.
+        // issue-257: an unresolvable default branch DEFERS. It used to fall
+        // back to any-ref visibility, which is the premature-close hazard
+        // #237 §3 named — a branch push would close the issue with the fix
+        // on no default branch, and an issue closed as COMPLETED is
+        // indistinguishable from work that shipped.
         let default_check = commit_on_origin_default(app, &record.commit_sha);
-        let mut visible = match default_check {
-            Some(v) => v,
-            None => matches!(gh_commit_visible(app, &repo_slug, &record.commit_sha), Ok(true)),
-        };
+        let unknown_default = default_check.is_none();
+        let mut visible = default_check.unwrap_or(false);
         // On origin but not merged to the default branch (review-branch
         // push): defer without re-anchoring noise; close fires once merged.
         let deferred_unmerged = !visible
             && default_check == Some(false)
             && matches!(gh_commit_visible(app, &repo_slug, &record.commit_sha), Ok(true));
+        if unknown_default {
+            eprintln!(
+                "[issue-close-queue] op=deferred-unknown-default issue={} sha={}",
+                record.issue, record.commit_sha
+            );
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "issue-close-queue",
+                    &format!(
+                        "op=deferred-unknown-default issue={} sha={}",
+                        record.issue, record.commit_sha
+                    ),
+                );
+            }
+            append_audit_record(
+                app,
+                serde_json::json!({
+                    "kind": "issue-close-deferred",
+                    "issue": record.issue,
+                    "commit": record.commit_sha,
+                    "reason": "unknown-default-branch",
+                }),
+            );
+        }
         if deferred_unmerged {
             eprintln!(
                 "[issue-close-queue] op=deferred-not-on-default issue={} sha={}",
@@ -39436,6 +39564,15 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>) {
                             &format!("op=closed issue={} sha={}", record.issue, full_sha),
                         );
                     }
+                    append_audit_record(
+                        app,
+                        serde_json::json!({
+                            "kind": "issue-close-fired",
+                            "issue": record.issue,
+                            "commit": full_sha,
+                            "branch": git_current_branch(app).unwrap_or_default(),
+                        }),
+                    );
                 }
             }
         } else {

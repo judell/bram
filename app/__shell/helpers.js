@@ -6127,18 +6127,83 @@ window.__bramFollowTransition = function (to, cause, agentId) {
   } catch (e) { /* ignore */ }
   return to;
 };
-window.__bramFollowVerify = function (cause, agentId) {
+// The List's virtua scroller, found by walking up from a rendered row rather
+// than by class name (the generated class hashes change between builds).
+function __bramTranscriptScroller() {
+  try {
+    var el = document.querySelector("[data-index]");
+    el = el && el.parentElement;
+    while (el) {
+      if (el.scrollHeight > el.clientHeight + 1) {
+        var ov = "";
+        try { ov = window.getComputedStyle(el).overflowY || ""; } catch (e2) { ov = ""; }
+        if (ov === "auto" || ov === "scroll") return el;
+      }
+      el = el.parentElement;
+    }
+  } catch (e) { /* ignore */ }
+  return null;
+}
+
+// Did a bottom-promise actually land?
+//
+// This check was inert from the day it was written: it read
+// `window.__bramVisibleRange.atBottom`, and NOTHING populates that field while
+// the transcript is mounted. `atBottom` does not exist anywhere in xmlui — the
+// List's visibleRangeDidChange payload carries startIndex/endIndex only, and
+// Transcript's onCleanup is the one writer, at unmount, for the restore path.
+// `undefined !== false` is true, so `landed` was unconditionally true and
+// `op=violation` was unreachable. Six fixes to the follow contract were
+// evaluated against it, including a soak reported as "1,056 bottom-promises,
+// zero violations" (2026-08-18: that soak measured nothing).
+//
+// Measure two granularities, because they fail differently and the divergence
+// is itself diagnostic:
+//   index — the last row is inside the visible range;
+//   pixel — the scroller is actually at its end.
+// A tall final row satisfies index while its body sits below the fold, the
+// same class as DiffView's scrollToIndex-reaches-the-row-top note. Pixel is
+// authoritative when a scroller can be found, because it is what the user
+// sees; index is recorded either way so the two can be compared in the soak.
+//
+// Deliberately NOT reading the last onScroll `ev.atEnd`: a pin that does not
+// move the scroller emits no scroll event, so that value can be stale exactly
+// when the promise failed.
+window.__bramFollowVerify = function (cause, agentId, total) {
   try {
     requestAnimationFrame(function () {
       requestAnimationFrame(function () {
         try {
           var r = window.__bramVisibleRange;
-          var landed = !!(r && r.atBottom !== false);
+          var endIndex = (r && typeof r.endIndex === "number") ? r.endIndex : -1;
+          var n = (typeof total === "number" && total >= 0)
+            ? total
+            : ((window.__bramLastTranscriptEvents || []).length || 0);
+          var indexAtEnd = n > 0 && endIndex >= n - 1;
+
+          var sc = __bramTranscriptScroller();
+          var pixelAtEnd = null;
+          var pixelGap = -1;
+          if (sc) {
+            pixelGap = Math.max(0, sc.scrollHeight - (sc.scrollTop + sc.clientHeight));
+            pixelAtEnd = pixelGap <= 4;
+          }
+
+          var landed = (pixelAtEnd === null) ? indexAtEnd : pixelAtEnd;
+          var route = "";
+          try { route = String(location.hash || ""); } catch (e4) { /* ignore */ }
+
           window.__bramIframeTrace("follow-state", {
             op: landed ? "verify" : "violation",
             cause: cause || "",
             landed: landed,
-            endIndex: (r && typeof r.endIndex === "number") ? r.endIndex : -1,
+            indexAtEnd: indexAtEnd,
+            pixelAtEnd: pixelAtEnd,
+            pixelGap: pixelGap,
+            divergent: (pixelAtEnd !== null && pixelAtEnd !== indexAtEnd),
+            endIndex: endIndex,
+            total: n,
+            route: route,
             agentId: agentId || "main",
           });
         } catch (e3) { /* ignore */ }

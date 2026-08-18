@@ -127,7 +127,7 @@
     height="100%"
     padding="$space-4"
     gap="$space-2"
-    onInit="window.__bramRegisterTranscriptScroll(() => { atBottom = window.__bramFollowTransition(false, 'footer-arrow-up', $props.agentId); transcriptList.scrollToTop(); }, () => { window.__bramClearTranscriptFind('footer-arrow-down'); atBottom = window.__bramFollowTransition(true, 'footer-arrow-down', $props.agentId); transcriptList.scrollToBottom(); window.__bramFollowVerify('footer-arrow-down', $props.agentId); }); window.__bramTranscriptMount()"
+    onInit="window.__bramRegisterTranscriptScroll(() => { atBottom = window.__bramFollowTransition(false, 'footer-arrow-up', $props.agentId); transcriptList.scrollToTop(); }, () => { window.__bramClearTranscriptFind('footer-arrow-down'); atBottom = window.__bramFollowTransition(true, 'footer-arrow-down', $props.agentId); transcriptList.scrollToBottom(); window.__bramFollowVerify('footer-arrow-down', $props.agentId, events.length); }); window.__bramTranscriptMount()"
     onCleanup="window.__bramSetTranscriptMounted(false); window.__bramSetVisibleRange(Object.assign({}, window.__bramVisibleRange || {}, { atBottom: atBottom, total: events.length }))"
     var.events="{window.__bramTranscriptEventsFromTurns($props.agentId ? subagentTurns.value : turnsEvt.value, null)}"
     var.eventsVersion="{($props.agentId ? (subagentTurns.value &amp;&amp; subagentTurns.value.total) : (turnsEvt.value &amp;&amp; turnsEvt.value.revision)) || events.length}"
@@ -453,7 +453,7 @@
       onDidChange="() => (findPlan &amp;&amp; findPlan.total) ? (atBottom = window.__bramFollowTransition(false, 'find-step', $props.agentId)) : null" />
     <ChangeListener
       listenTo="{events.length + ':' + eventsVersion}"
-      onDidChange="() => { if (window.__bramFollowRepinOk(atBottom, $props.agentId)) { transcriptList.scrollToBottom(); settleArmed = true; window.__bramFollowVerify('content-append-repin', $props.agentId); window.__bramIframeTrace('transcript-repin', {events: events.length, agentId: $props.agentId || 'main'}); } }" />
+      onDidChange="() => { if (window.__bramFollowRepinOk(atBottom, $props.agentId)) { transcriptList.scrollToBottom(); settleArmed = true; window.__bramFollowVerify('content-append-repin', $props.agentId, events.length); window.__bramIframeTrace('transcript-repin', {events: events.length, agentId: $props.agentId || 'main'}); } }" />
     <!-- Settle re-assert: content keeps growing for a beat after the repin
          (async Markdown layout, eager tool descriptions splicing in), so one
          delayed re-scroll pins the true bottom once measurements settle.
@@ -464,7 +464,7 @@
     <Timer
       interval="200"
       enabled="{settleArmed}"
-      onTick="() => { settleArmed = false; if (window.__bramFollowRepinOk(atBottom, $props.agentId)) { transcriptList.scrollToBottom(); window.__bramFollowVerify('settle-repin', $props.agentId); window.__bramIframeTrace('transcript-settle-repin', {events: events.length, agentId: $props.agentId || 'main'}); } }" />
+      onTick="() => { settleArmed = false; if (window.__bramFollowRepinOk(atBottom, $props.agentId)) { transcriptList.scrollToBottom(); window.__bramFollowVerify('settle-repin', $props.agentId, events.length); window.__bramIframeTrace('transcript-settle-repin', {events: events.length, agentId: $props.agentId || 'main'}); } }" />
     <!-- Viewport switch (chip click: Main ↔ subagent) always lands at the
          bottom: re-arm follow mode so the async refetch's events swap
          re-pins via the listener above, and pin immediately for the
@@ -493,13 +493,13 @@
     <Timer
       interval="250"
       enabled="{mountPinArmed}"
-      onTick="() => { mountPinTicks = mountPinTicks + 1; if (!mountFollow) { mountPinArmed = false; atBottom = window.__bramFollowTransition(false, 'mount-restore-reading', $props.agentId); if (mountReturnState &amp;&amp; mountReturnState.startIndex > 0) { transcriptList.scrollToIndex(mountReturnState.startIndex); } window.__bramIframeTrace('transcript-mount-restore', {index: (mountReturnState &amp;&amp; mountReturnState.startIndex) || 0, events: events.length}); } else if ((window.__bramVisibleRange &amp;&amp; window.__bramVisibleRange.endIndex >= events.length - 1) || mountPinTicks > 8) { mountPinArmed = false; window.__bramFollowVerify('mount-pin', $props.agentId); window.__bramIframeTrace('transcript-mount-pin', {landed: (window.__bramVisibleRange &amp;&amp; window.__bramVisibleRange.endIndex >= events.length - 1) || false, ticks: mountPinTicks, events: events.length}); } else { transcriptList.scrollToBottom(); } }" />
+      onTick="() => { mountPinTicks = mountPinTicks + 1; if (!mountFollow) { mountPinArmed = false; atBottom = window.__bramFollowTransition(false, 'mount-restore-reading', $props.agentId); if (mountReturnState &amp;&amp; mountReturnState.startIndex > 0) { transcriptList.scrollToIndex(mountReturnState.startIndex); } window.__bramIframeTrace('transcript-mount-restore', {index: (mountReturnState &amp;&amp; mountReturnState.startIndex) || 0, events: events.length}); } else if (window.__bramVisibleRange &amp;&amp; window.__bramVisibleRange.endIndex >= events.length - 1) { mountPinArmed = false; window.__bramFollowVerify('mount-pin', $props.agentId, events.length); window.__bramIframeTrace('transcript-mount-pin', {ticks: mountPinTicks, events: events.length}); } else if (mountPinTicks > 8) { mountPinArmed = false; window.__bramIframeTrace('follow-state', {op: 'pin-abandoned', cause: 'mount-pin', ticks: mountPinTicks, total: events.length, endIndex: (window.__bramVisibleRange &amp;&amp; window.__bramVisibleRange.endIndex) || -1, agentId: $props.agentId || 'main'}); window.__bramFollowVerify('mount-pin-abandoned', $props.agentId, events.length); } else { transcriptList.scrollToBottom(); } }" />
     <ChangeListener
       listenTo="{$props.agentId}"
       onDidChange="() => { atBottom = window.__bramFollowTransition(true, 'agent-chip-switch', $props.agentId); repinArmed = true; window.__bramIframeTrace('subagent-switch', {agentId: $props.agentId || 'main', events: events.length}); transcriptList.scrollToBottom(); }" />
     <Timer
       interval="400"
       enabled="{repinArmed}"
-      onTick="() => { repinArmed = false; transcriptList.scrollToBottom(); window.__bramFollowVerify('subagent-switch-repin', $props.agentId); window.__bramIframeTrace('subagent-switch-repin', {agentId: $props.agentId || 'main', events: events.length}); }" />
+      onTick="() => { repinArmed = false; transcriptList.scrollToBottom(); window.__bramFollowVerify('subagent-switch-repin', $props.agentId, events.length); window.__bramIframeTrace('subagent-switch-repin', {agentId: $props.agentId || 'main', events: events.length}); }" />
   </VStack>
 </Component>

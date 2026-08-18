@@ -24,6 +24,14 @@ Project-awareness: if the cwd does not contain
 resources/.worklist-authorization.json, this is not a Bram-managed
 repo and the guard exits 0 (allow everything). Bram's setup writes that file
 the first time it's run in a project.
+
+Second responsibility on the `Bash` surface, independent of the worklist:
+deny a forge write (`gh`/`glab` issue/pr/mr create|comment|note|edit|update|
+review) that targets a repo other than this project's origin and whose body
+does not open with the cross-boundary signature required by conventions.md
+("Name the boundary and sign your side"). Same-project issue work is never
+inspected, and any command shape the parser cannot read fails OPEN. See
+crossboundary_signature_verdict.
 """
 
 import json
@@ -366,6 +374,136 @@ def is_gh_body_at_antipattern(command):
     if not isinstance(command, str):
         return False
     return bool(_GH_BODY_AT_RX.search(command))
+
+
+# Cross-boundary signature check. conventions.md ("Name the boundary and
+# sign your side") requires every artifact crossing a project boundary to
+# open with `<owner>'s <Agent> speaking from the <Project> project:`.
+# Measured drift on both sides is what motivates enforcing it here rather
+# than trusting prose alone.
+#
+# A parallel implementation lives in the Claude guard; the two scripts
+# install to different roots as standalone files, so this logic is
+# deliberately duplicated rather than shared (same reasoning as
+# _BASH_WRITE_PATTERNS). Keep them in step.
+#
+# Three gates, all of which must pass before denying. Any shape we cannot
+# read with confidence FAILS OPEN — a guard that blocks real work over a
+# formatting rule is worse than the drift it prevents.
+_FORGE_WRITE_RX = re.compile(
+    r"(?:^|[\s;&|`(])(?:gh|glab)\s+(?:issue|pr|mr)\s+"
+    r"(?:create|comment|note|edit|update|review)\b"
+)
+# `gh --repo owner/name`, `-R owner/name`, `glab --repo owner/name`.
+_REPO_FLAG_RX = re.compile(r"(?:--repo|-R)(?:=|\s+)(\S+)")
+# Body sources. The alternation deliberately requires `=` or whitespace
+# after the flag so `--body-file` is not swallowed by the `--body` arm.
+_BODY_FILE_RX = re.compile(r"(?:--body-file|-F)(?:=|\s+)(\S+)")
+_BODY_LITERAL_RX = re.compile(
+    r"(?:--body|-b|--message|-m|--description)(?:=|\s+)"
+    r"(\"(?:[^\"\\]|\\.)*\"|'[^']*'|\S+)"
+)
+# `<owner>'s <Agent> speaking from the <Project> project:` — the shape, not
+# the instance. The script ships to every managed project, so no owner or
+# project name is hardcoded; conventions.md supplies the instances.
+_SIGNATURE_RX = re.compile(
+    r"speaking\s+from\s+the\s+.{1,60}?\bproject\b",
+    re.IGNORECASE,
+)
+
+
+def _repo_slug_from_url(url):
+    """owner/name from an https or ssh remote URL, lowercased."""
+    if not isinstance(url, str):
+        return None
+    s = re.sub(r"\.git\s*$", "", url.strip())
+    m = re.search(r"[:/]([^/:\s]+/[^/\s]+)$", s)
+    return m.group(1).lower() if m else None
+
+
+def origin_repo_slug(cwd):
+    """Read origin's slug from .git/config. Parsed rather than shelled out
+    so the hook stays fast and cannot hang on a git invocation."""
+    try:
+        path = os.path.join(cwd, ".git", "config")
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except Exception:
+        return None
+    m = re.search(
+        r'\[remote\s+"origin"\][^\[]*?url\s*=\s*(\S+)',
+        text,
+        re.DOTALL,
+    )
+    return _repo_slug_from_url(m.group(1)) if m else None
+
+
+def _unquote_shell(value):
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        inner = value[1:-1]
+        return inner.replace('\\"', '"').replace("\\n", NL)
+    return value
+
+
+def crossboundary_body(command, cwd):
+    """Return (body_text, reason). body_text is None when the body cannot be
+    read, with reason naming why so the fail-open is greppable."""
+    m = _BODY_FILE_RX.search(command)
+    if m:
+        path = m.group(1)
+        if path == "-":
+            return None, "body-file-stdin"
+        try:
+            candidate = path if os.path.isabs(path) else os.path.join(cwd, path)
+            with open(candidate, encoding="utf-8", errors="replace") as f:
+                return f.read(), "body-file"
+        except Exception:
+            return None, "body-file-unreadable"
+    m = _BODY_LITERAL_RX.search(command)
+    if m:
+        return _unquote_shell(m.group(1)), "body-literal"
+    return None, "no-body-flag"
+
+
+def body_is_signed(body):
+    """True iff the first non-empty line carries the canonical shape."""
+    if not isinstance(body, str):
+        return False
+    for line in body.splitlines():
+        stripped = line.strip().lstrip("_*>#- ").strip()
+        if not stripped:
+            continue
+        return bool(_SIGNATURE_RX.search(stripped))
+    return False
+
+
+def crossboundary_signature_verdict(command, cwd):
+    """('skip'|'signed'|'unparsed'|'unsigned', detail).
+
+    'skip' means the command is not a cross-boundary forge write at all —
+    the overwhelmingly common case, including all same-project issue work.
+    """
+    if not isinstance(command, str) or not command:
+        return "skip", "no-command"
+    if not _FORGE_WRITE_RX.search(command):
+        return "skip", "not-forge-write"
+    target = _REPO_FLAG_RX.search(command)
+    if not target:
+        # No repo flag: the command targets the current project, which is
+        # not a boundary crossing. Never inspected.
+        return "skip", "no-repo-flag"
+    target_slug = _repo_slug_from_url(target.group(1)) or target.group(1).lower()
+    origin_slug = origin_repo_slug(cwd)
+    if origin_slug is None:
+        return "unparsed", "no-origin"
+    if target_slug == origin_slug:
+        return "skip", "same-repo"
+    body, reason = crossboundary_body(command, cwd)
+    if body is None:
+        return "unparsed", reason
+    if body_is_signed(body):
+        return "signed", reason
+    return "unsigned", reason
 
 
 # MCP tool naming convention is `mcp__<server>__<tool>` (verified in
@@ -772,6 +910,69 @@ def self_test():
         assert isinstance(wrote["issued_at_ms"], int)
         assert wrote["issued_at_ms"] > 0
 
+    # Cross-boundary signature gates.
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / ".git").mkdir()
+        (root / ".git" / "config").write_text(
+            '[remote "origin"]\n'
+            "\turl = https://github.com/judell/bram.git\n"
+        )
+        cwd = str(root)
+        assert origin_repo_slug(cwd) == "judell/bram"
+        assert _repo_slug_from_url("git@github.com:judell/bram.git") == "judell/bram"
+
+        signed = "Jon's Claude speaking from the Bram project:\n\nBody."
+        unsigned = "Vendored the build; the tooltip renders."
+
+        def verdict(cmd):
+            return crossboundary_signature_verdict(cmd, cwd)[0]
+
+        # Gate 1: not a forge write.
+        assert verdict("gh issue view 12 --repo xmlui-org/xmlui") == "skip"
+        assert verdict("ls -la") == "skip"
+        # Gate 2: same project, or no repo flag at all — never inspected.
+        assert verdict(f'gh issue comment 5 --body "{unsigned}"') == "skip"
+        assert verdict(
+            f'gh issue comment 5 --repo judell/bram --body "{unsigned}"'
+        ) == "skip"
+        # Gate 3: cross-repo, signature present or absent.
+        assert verdict(
+            f'gh issue comment 5 --repo xmlui-org/xmlui --body "{signed}"'
+        ) == "signed"
+        assert verdict(
+            f'gh issue comment 5 --repo xmlui-org/xmlui --body "{unsigned}"'
+        ) == "unsigned"
+        # Surfaces _BASH_WRITE_PATTERNS does not match.
+        assert verdict(
+            f'gh pr comment 9 --repo xmlui-org/xmlui --body "{unsigned}"'
+        ) == "unsigned"
+        assert verdict(
+            f'glab issue note 3 --repo group/proj -m "{unsigned}"'
+        ) == "unsigned"
+        # Fail-open shapes.
+        assert verdict(
+            "gh issue comment 5 --repo xmlui-org/xmlui --body-file -"
+        ) == "unparsed"
+        assert verdict(
+            "gh issue comment 5 --repo xmlui-org/xmlui --body-file /nope/missing.md"
+        ) == "unparsed"
+        assert verdict("gh issue comment 5 --repo xmlui-org/xmlui") == "unparsed"
+
+        # --body-file must not be swallowed by the --body arm.
+        body_path = root / "comment.md"
+        body_path.write_text(signed)
+        assert crossboundary_signature_verdict(
+            f"gh issue comment 5 --repo xmlui-org/xmlui --body-file {body_path}",
+            cwd,
+        ) == ("signed", "body-file")
+
+        # Leading Markdown emphasis on the signature line still counts.
+        assert body_is_signed("_Jon's Codex speaking from the XMLUI project:_")
+        assert body_is_signed("> **Jon's Claude speaking from the Bram project:**")
+        assert not body_is_signed("Bram side — a correction to my green light.")
+        assert not body_is_signed("")
+
 
 def _worklist_new_content_from_tool_input(cwd, tool_input):
     old_content = current_worklist_text(cwd)
@@ -1109,6 +1310,38 @@ def main():
                 "gh --body takes a literal string, not stdin or a file reference.\n"
                 "Use --body-file - (stdin) or --body-file <path> instead.\n"
                 f"Detected: {matched}"
+            )
+        # Cross-boundary signature. Runs before bash_writes for the same
+        # reason the #176 check does: _BASH_WRITE_PATTERNS covers
+        # `gh issue ...` but not `gh pr ...` or glab at all, so a later
+        # position would miss those surfaces entirely. Non-terminal on
+        # pass — the command still faces the worklist gate below.
+        _cb_verdict, _cb_detail = crossboundary_signature_verdict(cmd or "", cwd)
+        if _cb_verdict == "unsigned":
+            _trace_hook(
+                "PreToolUse",
+                "Bash",
+                (cmd or "")[:200],
+                "deny",
+                "crossboundary-unsigned",
+                cwd,
+            )
+            deny(
+                "This posts to a repo other than this project's origin, and the "
+                "body does not open with the cross-boundary signature.\n"
+                "Open the first line with:\n"
+                "    <owner>'s <Agent> speaking from the <Project> project:\n"
+                "See conventions.md, 'Name the boundary and sign your side' — "
+                "every artifact, every comment, not just the first in a thread."
+            )
+        elif _cb_verdict in ("signed", "unparsed"):
+            _trace_hook(
+                "PreToolUse",
+                "Bash",
+                (cmd or "")[:200],
+                "allow",
+                "crossboundary-" + _cb_verdict + ":" + _cb_detail,
+                cwd,
             )
         if not bash_writes(cmd):
             allow()

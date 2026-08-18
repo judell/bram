@@ -480,6 +480,58 @@
     <NavLink label="Settings" to="/settings" />
   </NavPanel>
 
+  <!-- Mis-launch notices. Bram manages whatever directory it is launched from,
+       and every downstream symptom of a wrong one (cold index, no sessions, no
+       history) names a consequence rather than the cause. The AppHeader band
+       tint already varies by project path, but it answers "which project is
+       this?" for someone who believes they are in the right one — on
+       2026-08-18 the tint changed for a launch in ~/community-calendar/xmlui
+       instead of ~/community-calendar and was read past. Hence words, at
+       startup, naming the ABSOLUTE path: the two differ only in the last
+       component, so a basename would have read as correct. -->
+  <VStack
+    when="{enhanceStatus.value && enhanceStatus.value.firstRun && enhanceStatus.value.nestedUnder}"
+    padding="$space-4"
+    gap="$space-2"
+    backgroundColor="$color-warn-50"
+    borderBottom="1px solid $color-warn-200">
+    <Heading level="h3">Already inside a Bram project — did you mean the parent?</Heading>
+    <Text fontSize="$fontSize-sm">
+      <Text inline="true" fontWeight="$fontWeight-bold" value="{enhanceStatus.value.nestedUnder}" />
+      is already a Bram project. Launching in
+      <Text inline="true" fontWeight="$fontWeight-bold" value="{enhanceStatus.value.projectRoot}" />
+      manages the subdirectory separately, with its own index, worklist and hooks.
+    </Text>
+    <Text fontSize="$fontSize-sm" color="$textColor-secondary">
+      Nested managed projects are almost never intended. If this was a mistake, quit and
+      relaunch from the parent — nothing here is seeded until Setup runs.
+    </Text>
+  </VStack>
+
+  <VStack
+    when="{enhanceStatus.value && enhanceStatus.value.firstRun && !enhanceStatus.value.nestedUnder}"
+    padding="$space-4"
+    gap="$space-2"
+    backgroundColor="$color-info-50"
+    borderBottom="1px solid $color-info-200">
+    <Heading level="h3">Bram is starting for the first time in this repo</Heading>
+    <Text fontSize="$fontSize-sm">
+      It will manage
+      <Text inline="true" fontWeight="$fontWeight-bold" value="{enhanceStatus.value.projectRoot}" />.
+      Setup writes <Text inline="true" fontFamily="$fontFamily-monospace" value=".bram.json" />,
+      <Text inline="true" fontFamily="$fontFamily-monospace" value="AGENTS.md" />,
+      <Text inline="true" fontFamily="$fontFamily-monospace" value="resources/" /> (worklist, port
+      sidecar, traces) and <Text inline="true" fontFamily="$fontFamily-monospace" value=".claude/" />
+      (conventions, hooks, skills, settings).
+    </Text>
+    <Text
+      when="{enhanceStatus.value.gitToplevel}"
+      fontSize="$fontSize-sm" color="$textColor-secondary">
+      Note: this is a subdirectory of the git repo
+      <Text inline="true" fontWeight="$fontWeight-bold" value="{enhanceStatus.value.gitToplevel}" />.
+    </Text>
+  </VStack>
+
   <VStack
     when="{enhanceStatus.value && enhanceStatus.value.activeProvider && enhanceStatus.value.providerNeedsSetup && !setupCompleteProvider}"
     padding="$space-4"

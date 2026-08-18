@@ -19681,6 +19681,16 @@ fn run_index_buckets<R: tauri::Runtime>(
 /// Issues has no local signal (remote GitHub state), so it stays a poll: the
 /// thread's `recv_timeout` fires it every 60s. Passes are change-token gated,
 /// so a redundant enqueue is a cheap no-op.
+// True when `dir` is an acknowledged Bram project. Both names, matching the
+// existing detection at the .bram.json / .xmlui-desktop.json call site: a repo
+// managed under the legacy name is still managed, and claiming otherwise would
+// both fire the first-run notice on it and hold its indexing.
+fn has_project_settings(dir: &Path) -> bool {
+    [".bram.json", ".xmlui-desktop.json"]
+        .iter()
+        .any(|n| dir.join(n).exists())
+}
+
 fn start_search_indexer<R: tauri::Runtime>(app: AppHandle<R>) {
     let (tx, rx) = std::sync::mpsc::channel::<IndexBucket>();
     if let Ok(mut guard) = search_index_tx_cell().lock() {
@@ -19694,6 +19704,36 @@ fn start_search_indexer<R: tauri::Runtime>(app: AppHandle<R>) {
     }
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(2));
+        // Hold the initial pass until this project is acknowledged as managed.
+        // Bram indexes whatever directory it was launched from, so a mis-launch
+        // used to pay for a full cold index against the wrong project key
+        // BEFORE the first-run notice could be read — announcing a decision it
+        // had already made on the user's behalf (2026-08-18: a launch one path
+        // component deep, in ~/community-calendar/xmlui). The release condition
+        // is deliberately the same artifact that clears the notice — Setup
+        // writing .bram.json — so one condition carries one meaning rather than
+        // a banner and an indexer disagreeing about whether this repo is ours.
+        if let Some(root) = project_root(Some(&app)) {
+            if !has_project_settings(&root) {
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        &app,
+                        "search-index",
+                        "op=hold reason=unmanaged-project",
+                    );
+                }
+                while !has_project_settings(&root) {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        &app,
+                        "search-index",
+                        "op=hold-release reason=project-acknowledged",
+                    );
+                }
+            }
+        }
         // Initial full index (replaces the cold-start branch). No-op per bucket
         // if already current, so a plain relaunch indexes nothing new.
         // Cheap-first ordering (issue #250 iterate): worklist-history is
@@ -31822,7 +31862,42 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         Some(SessionProvider::Codex) => json!("codex"),
         None => serde_json::Value::Null,
     };
+    // Mis-launch signals. Bram manages whatever directory it is started from,
+    // and every downstream symptom of a wrong directory (cold index, no
+    // sessions, no history) describes a consequence rather than the cause. The
+    // AppHeader band tint already varies by project path, but it answers
+    // "which project is this?" for someone who believes they are in the right
+    // one — it has no vocabulary for "you did not mean to be here" (observed
+    // 2026-08-18: the tint changed and was read past).
+    let root = project_root(Some(app));
+    let first_run = root.as_ref().map(|p| !has_project_settings(p)).unwrap_or(false);
+    // A parent carrying .bram.json means this launch is nested inside an
+    // already-managed project, which is near-certainly a mistake: nested
+    // managed projects are not a configuration anyone wants.
+    let nested_under = root.as_ref().and_then(|p| {
+        p.ancestors()
+            .skip(1)
+            .find(|a| has_project_settings(a))
+            .map(|a| a.to_string_lossy().to_string())
+    });
+    // Weaker corroborating hint, deliberately not its own warning: subproject
+    // layouts make "cwd is not the git toplevel" legitimately common, and a
+    // warning that fires on normal setups trains the dismiss reflex.
+    let git_toplevel = root.as_ref().and_then(|p| {
+        std::process::Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(p)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|t| !t.is_empty() && Path::new(t) != p.as_path())
+    });
     let body = serde_json::json!({
+        "projectRoot": root.as_ref().map(|p| p.to_string_lossy().to_string()),
+        "firstRun": first_run,
+        "nestedUnder": nested_under,
+        "gitToplevel": git_toplevel,
         "enhanced": core_installed && claude_installed && codex_installed,
         "activeProvider": active_provider_json,
         "coreInstalled": core_installed,

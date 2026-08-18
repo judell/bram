@@ -29931,26 +29931,23 @@ mod hook_python_resolver_tests {
         let expected = super::claude_hook_commands(Some("C:\\Python313\\python.exe"))
             .unwrap()
             .0;
-        let settings = json!({
-            "hooks": {
-                "PreToolUse": [
-                    {
-                        "matcher": "Write",
-                        "hooks": [{
-                            "type": "command",
-                            "command": expected
-                        }]
-                    },
-                    {
-                        "matcher": "Edit",
-                        "hooks": [{
-                            "type": "command",
-                            "command": expected
-                        }]
-                    }
-                ]
-            }
-        });
+        // Derive the entries from CLAUDE_GUARD_MATCHERS rather than pinning a
+        // literal pair: this test is about settings LOCALITY, not about which
+        // surfaces are registered, and a hardcoded fixture fails for the wrong
+        // reason the next time coverage changes (it did, at #261).
+        let entries: Vec<serde_json::Value> = super::CLAUDE_GUARD_MATCHERS
+            .iter()
+            .map(|matcher| {
+                json!({
+                    "matcher": matcher,
+                    "hooks": [{
+                        "type": "command",
+                        "command": &expected
+                    }]
+                })
+            })
+            .collect();
+        let settings = json!({ "hooks": { "PreToolUse": entries } });
         fs::write(&tracked, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
 
         assert!(settings_has_worklist_guard_hook(&tracked, Some(&expected)));
@@ -30123,7 +30120,22 @@ fn settings_event_hook_current(
 // and regex). The documented list form "Write|Edit" works on 2.1.220/darwin but
 // silently matches nothing on 2.1.232/win32, leaving the guard registered but
 // never invoked — unauthorized writes were not blocked (judell/bram#249).
-const CLAUDE_GUARD_MATCHERS: [&str; 2] = ["Write", "Edit"];
+//
+// `Bash` and the MCP surface were missing until judell/bram#261: the guard
+// carried live branches for both, but with no matcher registered they were
+// dead code that still read as coverage — `Bash` fired 2026-07-20..23 and
+// never again, silently taking #176's `gh --body @` check down with it, and
+// MCP was never registered at all. A branch is only as real as its matcher.
+//
+// The MCP entry cannot follow the literal-name rule: MCP tool names vary with
+// whatever servers a user has configured, so there is no finite set to
+// enumerate. `mcp__.*` is the Codex guard's form and is preferred over a bare
+// `.*`, which would invoke the guard on every tool call for no added coverage.
+// Verified by probe on 2.1.x/darwin rather than assumed; if a build is found
+// where it does not fire, `.*` is the measured fallback (the user-global
+// catalog hook registered under `.*` holds 70,511 records including MCP tool
+// calls, so a non-literal matcher demonstrably fires there).
+const CLAUDE_GUARD_MATCHERS: [&str; 4] = ["Write", "Edit", "Bash", "mcp__.*"];
 
 // True iff the guard is registered under every matcher in
 // CLAUDE_GUARD_MATCHERS with `expected_command`, and no guard command sits

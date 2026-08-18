@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-"""PreToolUse hook: enforce the worklist flow for Write/Edit on this project.
+"""PreToolUse hook: enforce the worklist flow on this project.
+
+Three write surfaces, registered via CLAUDE_GUARD_MATCHERS in
+src-tauri/src/lib.rs — the registration is what makes each branch below
+reachable, and a branch whose matcher is missing is dead code that still
+reads as coverage (judell/bram#261):
+
+- `Write` / `Edit` — the canonical Claude edit tools.
+- `Bash` — the agent can `sed -i` / `tee` / `python -c` / heredoc around
+  the Write/Edit gate, so mutating commands need coverage too. Also
+  where the #176 `gh --body @` check and the cross-boundary signature
+  check live.
+- `mcp__*` — a configured filesystem MCP server exposes write_file /
+  edit_file / move_file, which would otherwise bypass Write/Edit
+  entirely.
 
 Two responsibilities:
 
@@ -136,6 +150,53 @@ def bash_writes(command):
         if rx.search(command):
             return True
     return False
+
+
+# MCP is the third write surface, at parity with the Codex guard: a user
+# with a filesystem MCP server configured can route writes through
+# mcp__filesystem__write_file / edit_file / move_file, bypassing the
+# Write/Edit gate entirely. This project has a project-scoped filesystem
+# server whose allowed roots include the repo (judell/bram#261).
+#
+# Mutation candidates are recognized by a token in the tool-name suffix, so
+# read-only MCP tools (search, docs, list) pass untouched and non-filesystem
+# servers are not broken. Mirrors _MCP_WRITE_TOKENS in the Codex guard.
+_MCP_WRITE_TOKENS = (
+    "write", "edit", "create", "delete", "remove", "rename",
+    "move", "copy", "patch", "append", "truncate", "mkdir", "rmdir",
+    "modify", "replace", "save", "set_",
+)
+
+# Path-shaped keys in MCP tool_input payloads. The standard
+# @modelcontextprotocol/server-filesystem uses path/source/destination;
+# other servers vary. Mirrors _MCP_PATH_KEYS in the Codex guard.
+_MCP_PATH_KEYS = (
+    "path", "file_path", "filepath", "filename",
+    "source", "src", "destination", "dest", "dst",
+    "target", "target_path", "to", "from",
+)
+
+
+def mcp_is_mutation(tool_name):
+    """True iff an mcp__-prefixed tool name signals filesystem mutation."""
+    name = (tool_name or "").lower()
+    return any(tok in name for tok in _MCP_WRITE_TOKENS)
+
+
+def mcp_paths(tool_input):
+    """Extract path-shaped values from an MCP tool_input dict."""
+    if not isinstance(tool_input, dict):
+        return []
+    out = []
+    for key in _MCP_PATH_KEYS:
+        v = tool_input.get(key)
+        if isinstance(v, str) and v:
+            out.append(v)
+        elif isinstance(v, list):
+            for item in v:
+                if isinstance(item, str) and item:
+                    out.append(item)
+    return out
 
 
 def _post_hook_trace(script, event, tool, target, decision, reason, cwd):
@@ -599,6 +660,31 @@ def self_test():
     for command in read_commands:
         assert not bash_writes(command), command
 
+    # MCP surface (judell/bram#261). Mutation recognition is by tool-name
+    # token, so read-only servers pass untouched.
+    mcp_mutations = [
+        "mcp__filesystem__write_file",
+        "mcp__filesystem__edit_file",
+        "mcp__filesystem__move_file",
+        "mcp__filesystem__create_directory",
+    ]
+    mcp_reads = [
+        "mcp__filesystem__read_text_file",
+        "mcp__filesystem__list_directory",
+        "mcp__xmlui__xmlui_search_howto",
+        "mcp__xmlui__xmlui_component_docs",
+    ]
+    for name in mcp_mutations:
+        assert mcp_is_mutation(name), name
+    for name in mcp_reads:
+        assert not mcp_is_mutation(name), name
+
+    assert mcp_paths({"path": "app/x.xmlui"}) == ["app/x.xmlui"]
+    assert mcp_paths({"source": "a", "destination": "b"}) == ["a", "b"]
+    assert mcp_paths({"paths": ["a", "b"]}) == []  # unrecognized key -> deny path
+    assert mcp_paths({"edits": [{"oldText": "x"}]}) == []
+    assert mcp_paths("not-a-dict") == []
+
 
 def main():
     payload = json.load(sys.stdin)
@@ -642,6 +728,68 @@ def main():
             _trace_hook("PreToolUse", "Bash", preview, "allow", "covered-by-worklist-item", cwd)
             sys.exit(0)
         deny_bash_coverage(command, cwd)
+
+    if tool_name.startswith("mcp__"):
+        os.environ["__BRAM_TRACE_TOOL"] = tool_name
+        ti = payload.get("tool_input", {})
+        cwd = payload.get("cwd") or os.getcwd()
+        if not mcp_is_mutation(tool_name):
+            _trace_hook("PreToolUse", tool_name, "", "allow", "mcp-read-only", cwd)
+            sys.exit(0)
+        project_root = find_project_root(cwd)
+        if project_root is None:
+            _trace_hook("PreToolUse", tool_name, "", "allow", "unmanaged-repo", cwd)
+            sys.exit(0)
+        candidates = mcp_paths(ti)
+        if not candidates:
+            # Mutation-shaped with no path we recognize. Don't guess: deny and
+            # name the surface so the guard can be extended deliberately.
+            _trace_hook(
+                "PreToolUse", tool_name, "", "deny", "mcp-unrecognized-input", cwd
+            )
+            print(
+                f"{tool_name} blocked: this looks like a mutation, but the guard "
+                f"could not extract any file path from tool_input.\n"
+                f"Propose the change in resources/worklist.json first, or extend "
+                f"claude-worklist-guard.py to recognize this tool's input shape.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        covered = worklist_covered_files(project_root)
+        violations = []
+        for target in candidates:
+            rel = normalize_target(project_root, target)
+            if rel is None:
+                continue  # outside the project tree
+            if rel == WORKLIST_REL:
+                # worklist.json mutations must go through a shape the guard can
+                # validate (Write/Edit) or through /__worklist/mutate. An MCP
+                # write would skip the prune/version/inline-prose checks.
+                _trace_hook(
+                    "PreToolUse", tool_name, rel, "deny", "mcp-worklist-write", cwd
+                )
+                print(
+                    f"{tool_name} blocked: edits to {WORKLIST_REL} must use "
+                    f"Write/Edit (so the guard can validate prunes, the version "
+                    f"bump, and inline prose) or /__worklist/mutate for "
+                    f"mechanical transitions.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            if is_lifecycle_path(rel):
+                continue
+            if rel in covered:
+                continue
+            if fresh_bypass(project_root, rel):
+                continue
+            violations.append(rel)
+        if violations:
+            deny_coverage(violations[0], opt_out_attempted=False)
+        _trace_hook(
+            "PreToolUse", tool_name, ",".join(candidates)[:120], "allow",
+            "covered-by-worklist-item", cwd,
+        )
+        sys.exit(0)
 
     if tool_name not in ("Write", "Edit"):
         sys.exit(0)

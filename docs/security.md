@@ -55,9 +55,47 @@ roots. All now fixed.
    `6d49edf`). Approve/drop authorization is host-owned; a forged `approved:`
    in relayed PTY input no longer writes an auth record.
 4. ~~**The Claude PreToolUse guard does not gate the `Bash` write surface.**~~
-   **FIXED** (H3). The Claude guard now carries `_BASH_WRITE_PATTERNS`
-   (`claude-worklist-guard.py:113`) covering `>`, `tee`, `sed -i`, etc., at
-   parity with the Codex guard.
+   **FIXED** (H3), **regressed 2026-07-23, re-fixed** (#261). The guard carries
+   `_BASH_WRITE_PATTERNS` covering `>`, `tee`, `sed -i`, etc., at parity with
+   the Codex guard — but for three and a half weeks the `Bash` matcher was
+   absent from the registration, so the branch never ran. The lesson is the
+   general one from *Working across project boundaries*: **verify the artifact
+   you run, not the source diff.** A guard branch is only as real as its
+   matcher, which is why the coverage matrix below quotes the registration
+   rather than the code that would run if it were reached.
+
+## Guard coverage
+
+What each agent's PreToolUse guard actually gates. Registration is the
+load-bearing column: a branch whose matcher is missing is dead code that
+still reads as coverage.
+
+| | Claude | Codex |
+|---|---|---|
+| canonical edit tool | `Write`, `Edit` | `apply_patch` |
+| registration | `CLAUDE_GUARD_MATCHERS` (`lib.rs`) → project `settings.local.json` | `~/.codex/config.toml`, matcher `^(apply_patch\|Bash\|Write\|Edit\|mcp__.*)$` |
+| matchers | `Write`, `Edit`, `Bash`, `mcp__.*` | as above |
+| shell surface | `bash_writes()` → coverage | `bash_writes()` → coverage |
+| MCP surface | `mcp_is_mutation()` + `mcp_paths()` → coverage | same |
+| cross-boundary signature | `Bash`, forge writes to a non-origin repo | same |
+| on guard crash | **fail closed** (exit 2) | fail closed |
+| gate granularity | see below | see below |
+
+**Gate granularity, stated plainly because it is easy to over-read.** The
+`Write`/`Edit` and MCP paths intersect the *specific* target path with the
+worklist's covered files. The `Bash` path does **not**: it passes when the
+worklist has any covered files at all (`if covered or fresh_bypass(...)`),
+because mapping arbitrary shell commands to paths is too fragile to be worth
+the false denials. So the shell gate bites only against an effectively empty
+worklist — measured over 2026-07-20..23, it logged 332 read-only allows, 104
+`covered-by-worklist-item`, and zero denials. This resolves the Claude half of
+M5's open question as documentation; whether to make it per-file is a design
+change, tracked there.
+
+Matcher shape is its own hazard. Single literal tool names are the only shape
+that behaves identically under every semantics Claude Code has implemented
+(#249); `mcp__.*` is a deliberate exception, since MCP tool names vary with the
+user's configured servers and cannot be enumerated. It is verified by probe.
 
 ## Ranked action plan
 
@@ -78,7 +116,7 @@ day, **M** = half to two days, **L** = more than two days.
 |---|---------|--------|
 | H1 | Bracketed-paste `\x1b[201~` smuggling / auto-submit. | **DONE** — paste-end neutralized in outbound payloads (`6a13cde`). |
 | H2 | Worklist authorization forged from PTY input. | **DONE** — host-owned approve/drop auth (`6d49edf`). Root cause #3. |
-| H3 | Claude guard exits 0 for all `Bash`; write ops bypass the worklist. | **DONE** — `_BASH_WRITE_PATTERNS` in the Claude guard (`claude-worklist-guard.py:113`). Root cause #4. |
+| H3 | Claude guard exits 0 for all `Bash`; write ops bypass the worklist. | **DONE (regressed 2026-07-23, re-fixed)** — `_BASH_WRITE_PATTERNS` landed in the guard, but the `Bash` matcher was dropped from the registration by unrelated collateral (`a8d2acb`), leaving the branch unreachable for three and a half weeks. The original DONE verified the script, not the artifact that runs. Re-fixed by registering the surface in `CLAUDE_GUARD_MATCHERS` and verifying by probe (#261). Root cause #4. |
 | H4 | Auth did not fail closed on interrupt. | **DONE** — `invalidate_worklist_authorization` at every interrupt site; `validate_*`/`ensure_*` reject an interrupted or past-TTL record (`d044b34`, `e75fea2`). |
 | H5 | Issue-close / push side effects ungated. | **DONE** — agent `/__issue/close` route removed; closing is a host consequence of the user's explicit Push (`8c64ef7`). |
 | H6 | Loopback wildcard CORS let any cross-origin browser page that learned the port read responses. | **DONE — browser vector** (`issue-113-h6-loopback-cors-and-token`). The blanket `Access-Control-Allow-Origin: *` is gone; ACAO is echoed only for the shell (agent-pane) origin and omitted for every other Origin and for no-Origin callers (`cors_allowed_origin`). Confirmed by soak that real pane traffic sends no Origin, so the change is transparent to it; a cross-origin browser page — and the target pane's `bramapp://` origin — can no longer read loopback responses. **Residual (accepted):** a same-user *local process* is not browser-CORS-bound; a per-session token was designed and deliberately dropped as low-value, since such a process could equally read the token (env via `ps eww`, or a port-adjacent file). |

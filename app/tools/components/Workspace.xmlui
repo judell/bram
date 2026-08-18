@@ -472,7 +472,7 @@
         <Items data="{worklist.value.items}">
           <VStack
             gap="$space-1"
-            var.issueNumber="{String($item.id || '').startsWith('issue-') ? Number(String($item.id || '').split('-')[1]) : null}">
+            var.issueNumbers="{worklistIssueNumbers($item)}">
             <HStack gap="$space-3" verticalAlignment="start">
               <HStack width="1.75em" horizontalAlignment="center" verticalAlignment="center">
                 <Theme size-Spinner="14px">
@@ -680,17 +680,24 @@
                        mount, closed is the default. -->
                   <!-- Keep the external issue action outside the disclosure
                        summary: a nested link would bubble into ExpandableItem's
-                       summary click target and also toggle Details. Issue-derived
-                       ids follow the canonical issue-N-slug convention. -->
-                  <Link
-                    when="{issueNumber &amp;&amp; repoOrigin.value &amp;&amp; repoOrigin.value.htmlBase}"
-                    noIndicator
-                    onClick="openExternal(repoOrigin.value.htmlBase + '/issues/' + issueNumber)">
-                    <Text
-                      fontSize="$fontSize-sm"
-                      color="$color-primary-600"
-                      value="{'Issue #' + issueNumber + ' ↗'}" />
-                  </Link>
+                       summary click target and also toggle Details.
+                       worklist-issue-link-from-closesissues: one link per
+                       closesIssues entry (an item closing two issues shows
+                       two), falling back to a numeric issue-N-slug id. The
+                       previous inline derivation trusted the `issue-` prefix
+                       without checking the segment and rendered "Issue #NaN"
+                       for a descriptive slug like issue-index-immediate-refresh. -->
+                  <Items data="{issueNumbers}">
+                    <Link
+                      when="{repoOrigin.value &amp;&amp; repoOrigin.value.htmlBase}"
+                      noIndicator
+                      onClick="openExternal(repoOrigin.value.htmlBase + '/issues/' + $item)">
+                      <Text
+                        fontSize="$fontSize-sm"
+                        color="$color-primary-600"
+                        value="{'Issue #' + $item + ' ↗'}" />
+                    </Link>
+                  </Items>
                   <Theme paddingLeft-summary-ExpandableItem="0">
                     <ExpandableItem
                       when="{$item.before || $item.after || $item.diff || window.__bramWorklistItemFiles($item).length > 0}"

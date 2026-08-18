@@ -301,6 +301,28 @@ function settingsDescribeCommands(s) {
 }
 
 
+// worklist-issue-link-from-closesissues: which issues does a worklist row
+// link to? closesIssues is authoritative — it drives the close-on-commit
+// dialog and the close-on-push queue — so it wins. The `issue-<N>-slug` id
+// convention is a human-scanning aid and only a fallback.
+//
+// The previous inline derivation tested the `issue-` prefix but never that
+// the next segment was numeric, so `issue-index-immediate-refresh` rendered
+// "Issue #NaN". Reading closesIssues first also fixes the inverse case: an
+// item named issue-42-… whose closesIssues is deliberately empty (partial or
+// investigative work) no longer claims to close #42.
+function worklistIssueNumbers(item) {
+  const closes = (item && item.closesIssues) || [];
+  const fromField = closes
+    .map((c) => Number(c && c.number))
+    .filter((n) => Number.isFinite(n) && n > 0);
+  if (fromField.length) return fromField;
+  const id = String((item && item.id) || '');
+  if (!id.startsWith('issue-')) return [];
+  const n = Number(id.split('-')[1]);
+  return Number.isFinite(n) && n > 0 ? [n] : [];
+}
+
 // issues-age-cell-overflow: compact relative age for the Issues tab's 90px
 // AGE gutter. The row's other timestamps keep XMLUI's getDateUntilNow, whose
 // long phrasing ("about 9 hours", "less than a minute") is right in prose —

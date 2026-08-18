@@ -43,6 +43,13 @@
        2026-07-31 Timelines receipt). idKey must be unique across types —
        raw ids are not (issue hits carried id="", 2026-08-01).
        https://docs.xmlui.org/components/List#idkey
+       Upstream now detects this, but not for us: xmlui-org/xmlui#3762
+       shipped as #3775, a dev-time warning on duplicate or empty idKey.
+       That warning is compiled out of the production bundle Bram vendors
+       (verified 2026-08-18 — no idKey validation in
+       app/vendor/xmlui-standalone.umd.js, only prop documentation), so
+       the hazard stays silent here and this key stays load-bearing
+       rather than merely tidy.
        Each row is a hover-tinted Card, clickable anywhere; click opens the
        per-type detail modal. Rows keep uniform heights, so the virtualizer
        never reflows on open/close.

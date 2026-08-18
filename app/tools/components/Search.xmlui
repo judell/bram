@@ -22,6 +22,14 @@
   <variable name="selectedTypes"
     value="{$queryParams.types ? $queryParams.types.split(',') : (window.__bramSearchBadgesInitialAllOn() ? ['session', 'commit', 'issue', 'worklist-history'] : [])}" />
   <variable name="mode" value="{$queryParams.mode || 'and'}" />
+  <!-- `mode` stays the URL/user-controlled state (the reset link assigns to
+       it). effectiveMode is what actually ships: a trailing `*` on the typed
+       query dispatches FTS5 prefix mode, which the box could not reach before
+       — `run*` ran as the bare token `run` and returned strictly narrower
+       results than the user asked for. An explicit ?mode= always wins, so
+       replay deep links keep phrase/raw. -->
+  <variable name="effectiveMode" value="{window.__bramSearchMode(query, mode)}" />
+  <variable name="effectiveQuery" value="{window.__bramSearchQuery(query, mode)}" />
   <!-- carry-search-query-to-tabs: publish the live query so Sessions /
        Issues / History seed their filters from it at mount (Globals.xs). -->
   <ChangeListener listenTo="{query}"
@@ -67,13 +75,13 @@
   }" />
 
   <DataSource id="rSession" url="/__search"
-    queryParams="{{ q: query, limit: 100, types: 'session', mode: mode }}" when="{ready}" />
+    queryParams="{{ q: effectiveQuery, limit: 100, types: 'session', mode: effectiveMode }}" when="{ready}" />
   <DataSource id="rCommit" url="/__search"
-    queryParams="{{ q: query, limit: 100, types: 'commit', mode: mode }}" when="{ready}" />
+    queryParams="{{ q: effectiveQuery, limit: 100, types: 'commit', mode: effectiveMode }}" when="{ready}" />
   <DataSource id="rIssue" url="/__search"
-    queryParams="{{ q: query, limit: 100, types: 'issue', mode: mode }}" when="{ready}" />
+    queryParams="{{ q: effectiveQuery, limit: 100, types: 'issue', mode: effectiveMode }}" when="{ready}" />
   <DataSource id="rHistory" url="/__search"
-    queryParams="{{ q: query, limit: 100, types: 'worklist-history', mode: mode }}" when="{ready}" />
+    queryParams="{{ q: effectiveQuery, limit: 100, types: 'worklist-history', mode: effectiveMode }}" when="{ready}" />
 
   <!-- Full relevance-ordered set of the selected buckets (no date filter) — the
        stable domain the slider measures, so moving the handles never shifts it. -->
@@ -273,9 +281,13 @@
              permanent mode dropdown by design (quote-for-phrase is the everyday
              surface); this appears exactly when a mode is in play and offers a
              one-click reset to the AND default. -->
-        <HStack when="{mode !== 'and'}" gap="$space-1" verticalAlignment="center">
-          <Badge value="{'mode: ' + mode}" />
-          <Link noIndicator onClick="mode = 'and'" tooltip="Reset to default (AND) search mode">
+        <HStack when="{effectiveMode !== 'and'}" gap="$space-1" verticalAlignment="center">
+          <Badge value="{'mode: ' + effectiveMode}" />
+          <!-- Reset clears a URL-imposed mode only. A prefix mode derived from
+               a trailing `*` is cleared by editing the query, and the `*` in
+               the box is its own indicator — a reset link that did nothing
+               visible would read as broken. -->
+          <Link when="{mode !== 'and'}" noIndicator onClick="mode = 'and'" tooltip="Reset to default (AND) search mode">
             <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="reset" />
           </Link>
         </HStack>

@@ -6899,6 +6899,38 @@ window.__bramProjectedSessionTurns = function (payload) {
 // matched on. It does NOT reproduce FTS5's matching; it only keeps the in-view
 // find from being stricter than the search that surfaced the row (details in
 // the function body).
+// Trailing `*` dispatches FTS5 prefix mode. Typing `run*` used to be silently
+// NARROWER than intended: the box only ever sent the URL-seeded mode (`and`),
+// and __bramSearchTerms splits on non-alphanumerics, so the `*` was discarded
+// and the query ran as the bare token `run`. Measured on the wire: `q=run`
+// in `and` mode brackets only `run`; in `prefix` mode it brackets `run`,
+// `runs` and `runtime` — WHOLE tokens, not just the typed prefix.
+//
+// An explicit ?mode= always wins, so replay deep links keep `phrase` / `raw`.
+// The stem must be >= 2 chars: `__bramSearchTerms` ignores shorter queries, so
+// `a*` would highlight nothing and is left as an ordinary AND query.
+function __bramSearchPrefixStem(query) {
+  var s = (query == null ? "" : String(query)).trim();
+  if (s.length < 3 || s.charAt(s.length - 1) !== "*") return null;
+  var stem = s.slice(0, -1);
+  return stem.length >= 2 ? stem : null;
+}
+
+window.__bramSearchMode = function (query, mode) {
+  if (mode && mode !== "and") return mode;
+  return __bramSearchPrefixStem(query) ? "prefix" : (mode || "and");
+};
+
+window.__bramSearchQuery = function (query, mode) {
+  var s = (query == null ? "" : String(query)).trim();
+  // Only consume the `*` when WE chose prefix mode from it. Under an explicit
+  // ?mode=, the query is the user's verbatim — and in `raw` mode a trailing
+  // `*` is meaningful FTS5 syntax, so stripping it would rewrite their query.
+  if (mode && mode !== "and") return s;
+  var stem = __bramSearchPrefixStem(s);
+  return stem ? stem : s;
+};
+
 window.__bramSearchTerms = function (query) {
   var s = (query == null ? "" : String(query)).trim();
   if (s.length < 2) return [];

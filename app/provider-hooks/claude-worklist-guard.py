@@ -616,6 +616,36 @@ def deny_coverage(target_rel, opt_out_attempted):
     sys.exit(2)
 
 
+def opt_out_clears(project_root, payload, tool_name, target_rel):
+    """Last-chance authorization shared by EVERY write surface: the documented
+    "just do it" phrase in the user's last message.
+
+    Every branch that is about to deny for lack of coverage must call this
+    first. It lives in one place deliberately (judell/bram#263): the policy
+    used to be inline in the Write/Edit branch only, so the Bash branch
+    (#217) and then the MCP branch (#261) were each written without it, and
+    `conventions.md`'s promise that the phrase is matched "on every
+    PreToolUse" was false on two of the three surfaces for a month.
+
+    Posting the audit breadcrumb is part of this function, not of its
+    callers, for the same reason: it is the only record that a prose opt-out
+    authorized a change, and a surface that honored the phrase without
+    recording it would authorize unaudited writes — worse than
+    over-denying.
+    """
+    last_msg = last_user_text(payload.get("transcript_path", ""))
+    if not has_opt_out(last_msg):
+        return False
+    _post_direct_edit_audit_breadcrumb(project_root, last_msg)
+    # Pass project_root as cwd: it is the project the decision applies to, and
+    # it is where _post_hook_trace finds resources/.bram-port. Defaulting to
+    # os.getcwd() named the wrong project on the Bash/MCP paths, where the
+    # target can live outside the session's directory.
+    _trace_hook("PreToolUse", tool_name, target_rel, "allow", "opt-out-phrase",
+                project_root)
+    return True
+
+
 def deny_bash_coverage(command, cwd=None):
     preview = (command or "")[:200]
     _trace_hook(
@@ -629,8 +659,11 @@ def deny_bash_coverage(command, cwd=None):
     print(
         "Bash blocked: this command writes to the filesystem or performs a "
         "sensitive side effect, and resources/worklist.json has no proposed "
-        "or applied items covering active work. Propose the work in the "
-        "worklist first, or have the user issue a direct-edit authorization.",
+        "or applied items covering active work.\n"
+        "  - Propose the work in the worklist first, wait for the user's "
+        "approved: payload, then retry.\n"
+        "  - The user can authorize a direct edit by ending their message "
+        "with \"just do it\", or by clicking the Skip worklist button.",
         file=sys.stderr,
     )
     sys.exit(2)
@@ -808,8 +841,44 @@ def self_test():
     for name in mcp_reads:
         assert not mcp_is_mutation(name), name
 
-    # Cross-boundary signature gates. Mirrors the Codex guard's cases.
+    # judell/bram#263: the opt-out must be reachable from every write surface,
+    # so it is tested as one function rather than per-branch.
     import tempfile as _tempfile
+
+    with _tempfile.TemporaryDirectory() as td:
+        def _transcript(text):
+            p = os.path.join(td, "t-%d.jsonl" % abs(hash(text)))
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "type": "user",
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }) + NL)
+                # A trailing tool_result-only record must not clobber the
+                # real user message (the reason last_user_text skips blanks).
+                f.write(json.dumps({
+                    "type": "user",
+                    "message": {"content": [{"type": "tool_result", "text": ""}]},
+                }) + NL)
+            return p
+
+        assert last_user_text(_transcript("patch it, just do it")) == "patch it, just do it"
+        assert has_opt_out(last_user_text(_transcript("patch it, just do it")))
+        assert not has_opt_out(last_user_text(_transcript("skip the worklist")))
+        assert not has_opt_out(last_user_text(""))
+
+        # The helper is what every branch calls; project_root is only used for
+        # the breadcrumb POST, which is best-effort and silent with no port.
+        assert opt_out_clears(
+            td, {"transcript_path": _transcript("do the build, just do it")},
+            "Bash", "git pull",
+        )
+        assert not opt_out_clears(
+            td, {"transcript_path": _transcript("please do the build")},
+            "Bash", "git pull",
+        )
+        assert not opt_out_clears(td, {}, "mcp__filesystem__write_file", "a.txt")
+
+    # Cross-boundary signature gates. Mirrors the Codex guard's cases.
 
     with _tempfile.TemporaryDirectory() as td:
         os.makedirs(os.path.join(td, ".git"))
@@ -949,6 +1018,8 @@ def main():
         if covered or fresh_bypass(project_root, "*"):
             _trace_hook("PreToolUse", "Bash", preview, "allow", "covered-by-worklist-item", cwd)
             sys.exit(0)
+        if opt_out_clears(project_root, payload, "Bash", preview):
+            sys.exit(0)
         deny_bash_coverage(command, cwd)
 
     if tool_name.startswith("mcp__"):
@@ -1006,6 +1077,8 @@ def main():
                 continue
             violations.append(rel)
         if violations:
+            if opt_out_clears(project_root, payload, tool_name, violations[0]):
+                sys.exit(0)
             deny_coverage(violations[0], opt_out_attempted=False)
         _trace_hook(
             "PreToolUse", tool_name, ",".join(candidates)[:120], "allow",
@@ -1093,11 +1166,9 @@ def main():
     if fresh_bypass(project_root, rel):
         _trace_hook("PreToolUse", tool_name, rel, "allow", "fresh-bypass")
         sys.exit(0)
-    last_msg = last_user_text(payload.get("transcript_path", ""))
-    if has_opt_out(last_msg):
-        _post_direct_edit_audit_breadcrumb(project_root, last_msg)
-        _trace_hook("PreToolUse", tool_name, rel, "allow", "opt-out-phrase")
+    if opt_out_clears(project_root, payload, tool_name, rel):
         sys.exit(0)
+    last_msg = last_user_text(payload.get("transcript_path", ""))
     deny_coverage(rel, opt_out_attempted=("worklist" in (last_msg or "").lower()
                                           and "no" in (last_msg or "").lower()))
 

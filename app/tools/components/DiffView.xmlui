@@ -16,9 +16,24 @@
        painted occurrences agree. -->
   <variable name="diffFindPlan"
     value="{window.__bramDiffFindPlan(diffViewRows(annotate.value, $props.text), $props.needle, $props.activeIndex, $props.expectedMatchCount)}" />
+  <!-- backgroundColor-mark-diff{Add,Del}-Text below are the word-diff emphasis
+       colours. KNOWN GAP: they do not resolve today. Text builds the variant
+       style as var(--xmlui-backgroundColor-mark-VARIANT-Text) with no
+       fallback, and Theme rewrites $token values only for variables it
+       recognises — an app-defined variant name passes through raw, so
+       "$color-success-200" lands as invalid CSS and the span renders
+       unstyled. Shown three ways in one screenshot: registered var + $token
+       resolved, app variant + literal resolved, app variant + $token flat
+       (xmlui-org/xmlui#3782, comment 5333034241). Deliberately NOT hardcoded
+       to hsl() literals — that would freeze diff emphasis across light/dark
+       and any palette change, a worse defect than the gap. Left as the
+       correct expression of intent; restore-diff-emphasis-after-3782-theming
+       carries the retirement. -->
   <Theme
     backgroundColor-row-List--hover="transparent"
-    backgroundColor-row-List="transparent">
+    backgroundColor-row-List="transparent"
+    backgroundColor-mark-diffAdd-Text="$color-success-200"
+    backgroundColor-mark-diffDel-Text="$color-danger-200">
     <VStack
       gap="0"
       padding="$space-2"
@@ -32,31 +47,21 @@
       <Items
         when="{$props.compact}"
         data="{diffFindPlan.rows}">
-        <!-- A line WRAPS as continuous text: an outer Text (line box, width:100%,
-             pre-wrap) hosts the per-segment inner Texts with inline="true"
-             (xmlui-org/xmlui#3713 / the new inline display mode). True inline
-             runs share one line-breaking context, so a highlighted match stays
-             whole mid-word — inline-block/flex segments split it (hooks ->
-             "hook" / "s in..."). See judell/bram#239. -->
+        <!-- One Text per line, rendering pre-computed spans. Was an outer
+             line-box Text hosting per-segment inline Texts, so a highlighted
+             match stayed whole mid-word (judell/bram#239, xmlui-org/xmlui#3713);
+             Text.segments does that natively and additionally carries the
+             word-diff emphasis as a named variant, which the two-level shape
+             could only express as a baked colour (xmlui-org/xmlui#3782). -->
         <Text
           width="100%"
           whiteSpace="pre-wrap"
           fontFamily="$fontFamily-monospace"
           fontSize="$fontSize-sm"
           backgroundColor="{$item.bg}"
-          paddingHorizontal="$space-2">
-          <Items data="{$item.segments}">
-            <Text
-              inline="true"
-              whiteSpace="pre-wrap"
-              fontFamily="$fontFamily-monospace"
-              fontSize="$fontSize-sm"
-              backgroundColor="{$item.bg || 'transparent'}"
-              color="{$item.color}"
-              testId="{$item.active ? 'diff-active-mark' : ''}"
-              value="{$item.text}" />
-          </Items>
-        </Text>
+          color="{$item.color}"
+          paddingHorizontal="$space-2"
+          segments="{$item.segments}" />
       </Items>
       <!-- Default: virtualized bounded List for full / potentially large
            diffs (the modal, the TO COMMIT item diff, the Commits patch view).
@@ -77,28 +82,17 @@
         data="{diffFindPlan.rows}"
         height="{$props.maxHeight || '60vh'}"
         onVisibleRangeDidChange="(range) => diffFindPlan.key &amp;&amp; (pendingRevealKey === 'initial' || pendingRevealKey === diffFindPlan.key) ? (pendingRevealKey = window.__bramDiffRevealPlan(diffRowsList, diffFindPlan, range) ? '' : diffFindPlan.key) : null">
-        <!-- A line WRAPS as continuous text: outer Text (line box, width:100%,
-             pre-wrap) hosting per-segment inner Texts with inline="true", so a
-             highlighted match stays whole mid-word. See judell/bram#239. -->
+        <!-- Same shape as the compact branch above: one Text per line,
+             rendering pre-computed spans. See judell/bram#239. -->
         <Text
           width="100%"
           whiteSpace="pre-wrap"
           fontFamily="$fontFamily-monospace"
           fontSize="$fontSize-sm"
           backgroundColor="{$item.bg}"
-          paddingHorizontal="$space-2">
-          <Items data="{$item.segments}">
-            <Text
-              inline="true"
-              whiteSpace="pre-wrap"
-              fontFamily="$fontFamily-monospace"
-              fontSize="$fontSize-sm"
-              backgroundColor="{$item.bg || 'transparent'}"
-              color="{$item.color}"
-              testId="{$item.active ? 'diff-active-mark' : ''}"
-              value="{$item.text}" />
-          </Items>
-        </Text>
+          color="{$item.color}"
+          paddingHorizontal="$space-2"
+          segments="{$item.segments}" />
       </List>
     </VStack>
   </Theme>

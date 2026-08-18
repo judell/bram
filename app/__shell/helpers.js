@@ -7171,16 +7171,22 @@ window.__bramDiffFindPlan = function (rows, needle, activeIndex, expectedTotal) 
         var m = list[i];
         var localStart = Math.max(m.start, segStart) - segStart;
         var localEnd = Math.min(m.start + m.len, segEnd) - segStart;
-        if (localStart > pos) segs.push({ text: text.slice(pos, localStart), bg: seg.bg || null, color: seg.color });
+        // Overlap semantics, unchanged in behaviour but now expressed in
+        // Text.segments' vocabulary (xmlui-org/xmlui#3782): the find wins on
+        // the matched run, and the word-diff emphasis survives on the
+        // fragments either side. The search is live intent; the emphasis is
+        // ambient context still visible around it. Colour is no longer baked
+        // here — hits resolve backgroundColor-mark(-Active)-Text and variants
+        // resolve backgroundColor-mark-<variant>-Text, from the theme.
+        if (localStart > pos) segs.push({ text: text.slice(pos, localStart), variant: seg.variant || null });
         segs.push({
           text: text.slice(localStart, localEnd),
-          bg: m.occ === act ? "rgba(249, 115, 22, 0.6)" : "rgba(250, 204, 21, 0.45)",
+          hit: true,
           active: m.occ === act,
-          color: seg.color,
         });
         pos = localEnd;
       }
-      if (pos < text.length) segs.push({ text: text.slice(pos), bg: seg.bg || null, color: seg.color });
+      if (pos < text.length) segs.push({ text: text.slice(pos), variant: seg.variant || null });
     });
     return { kind: row.kind, bg: row.bg, color: row.color, segments: segs };
   });
@@ -7244,7 +7250,13 @@ window.__bramDiffRevealPlan = function (listRef, plan, visibleRange) {
     // rows inside that one tall List row, so a mark deep in it stays off-screen.
     requestAnimationFrame(function () {
       requestAnimationFrame(function () {
-        var el = document.querySelector('[data-testid="diff-active-mark"]');
+        // Text renders the active hit as <mark data-active="true"> since
+        // 0.14.16, so the anchor is the element itself rather than a testId
+        // we attached to a hand-built segment Text. Kept (rather than left
+        // to Text's own reveal, which also fires) because ours is
+        // block:"nearest" — it scrolls the minimum needed inside a tall
+        // wrapped row, where block:"center" would jump the row.
+        var el = document.querySelector('mark[data-active="true"]');
         if (el && el.scrollIntoView) el.scrollIntoView({ block: "nearest", inline: "nearest" });
       });
     });

@@ -423,8 +423,19 @@ function diffViewRows(apiResult, fallbackText) {
       kind: row.kind,
       bg: diffLineBg(row.kind),
       color: lineColor,
+      // Word-diff emphasis is a NAMED VARIANT now, not a baked colour:
+      // Text resolves backgroundColor-mark-<variant>-Text from the theme
+      // (xmlui-org/xmlui#3782), declared in DiffView's Theme wrapper.
+      // Two names rather than one — the backend emits $color-danger-200
+      // for deletions and $color-success-200 for additions, so a single
+      // "emphasis" variant would flatten the red/green distinction.
+      // Per-segment colour is gone: the line's colour is row-level and
+      // rides the outer Text.
       segments: segs.map(function (s) {
-        return { text: s.text, bg: s.bg || null, color: lineColor };
+        return {
+          text: s.text,
+          variant: s.bg ? (row.kind === 'add' ? 'diffAdd' : 'diffDel') : null,
+        };
       }),
     };
   });

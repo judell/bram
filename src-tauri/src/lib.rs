@@ -11358,6 +11358,189 @@ fn build_issues_list<R: tauri::Runtime>(app: &AppHandle<R>, limit: usize) -> Res
     serde_json::to_vec(&issues).map_err(|e| e.to_string())
 }
 
+// issue-index-immediate-refresh (#254, #260): splice one issue into the
+// cached issues:list JSON. PURE so the risky part is testable without a
+// forge, an index, or an app handle — this feeds cache_issues_list_row,
+// whose comments record a 2026-08-08 incident where a bad write made an
+// empty list sticky, so the splice is kept small and covered.
+//
+// Byte-identity with a live build is the cache's stated invariant, and it
+// survives here because `issues_list` and `issue_view` request the SAME
+// fields (number,title,state,author,createdAt,updatedAt,labels,url,comments)
+// — the view adds `body`, which is dropped. Ordering is left alone: an
+// existing row is replaced in place, a new one goes to the front, and the
+// next full rebuild restores the forge's own order.
+//
+// Returns None when the cache is absent or is not a JSON array, so callers
+// skip the write rather than inventing a list — the empty-list contradiction
+// guard downstream exists because a confident wrong write is the failure
+// mode that hurts here.
+fn issues_list_upsert_row(list_json: &str, issue: &serde_json::Value) -> Option<String> {
+    let number = issue.get("number").and_then(|v| v.as_u64())?;
+    let mut row = issue.clone();
+    if let Some(obj) = row.as_object_mut() {
+        obj.remove("body");
+    }
+    let mut list: Vec<serde_json::Value> = serde_json::from_str(list_json).ok()?;
+    match list
+        .iter()
+        .position(|r| r.get("number").and_then(|v| v.as_u64()) == Some(number))
+    {
+        Some(i) => list[i] = row,
+        None => list.insert(0, row),
+    }
+    serde_json::to_string(&list).ok()
+}
+
+// Fetch, index and surface ONE issue immediately, instead of waiting for the
+// next issues pass (~45s, and only every ~6th indexer pass). Used for events
+// Bram itself caused — today a close — where the number is already in hand.
+// Mirrors the per-issue block of the issues pass so the indexed row is
+// identical to what that pass would have written.
+fn refresh_issue_now<R: tauri::Runtime>(app: &AppHandle<R>, number: u64) -> Result<(), String> {
+    let db = search_index_db_path(app).ok_or("no index db path")?;
+    let conn = search_index::open(&db.to_string_lossy()).map_err(|e| e.to_string())?;
+    let root = project_root(Some(app)).ok_or("no project root")?;
+    let issue = forge_adapter(app).issue_view(&root, number)?;
+
+    let title = issue.get("title").and_then(|v| v.as_str()).unwrap_or("");
+    let body = issue.get("body").and_then(|v| v.as_str()).unwrap_or("");
+    let url = issue
+        .get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let author = issue
+        .get("author")
+        .and_then(|v| v.get("login"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let mut content = format!("{}\n{}\n{}", title, body, author);
+    if let Some(comments) = issue.get("comments").and_then(|v| v.as_array()) {
+        for c in comments {
+            if let Some(cb) = c.get("body").and_then(|v| v.as_str()) {
+                content.push('\n');
+                content.push_str(cb);
+            }
+        }
+    }
+    let token = issue
+        .get("updatedAt")
+        .and_then(|v| v.as_str())
+        .and_then(parse_iso_to_epoch)
+        .unwrap_or_else(unix_now_ms);
+    let extra = String::from_utf8(build_enriched_issue(app, number).unwrap_or_default())
+        .unwrap_or_default();
+    let row = search_index::IndexRow {
+        kind: "issue".to_string(),
+        source: format!("#{} {}", number, title),
+        date: token.to_string(),
+        link: url,
+        content,
+        intent: String::new(),
+        file: format!("issue:{}", number),
+        tool_ids: None,
+        extra,
+    };
+    search_index::index_doc(&conn, &row, token, 0).map_err(|e| e.to_string())?;
+
+    // Splice into the cached list so the tab reflects it without a full
+    // rebuild (which would re-fetch the whole list from the forge — the very
+    // call this exists to avoid waiting on).
+    let mut list_row = issue.clone();
+    let repo_slug = repo_owner_name(app);
+    enrich_issue_activity(app, &mut list_row, repo_slug.as_deref());
+    if let Some(cached) = search_index::get_extra(&conn, "issues:list").ok().flatten() {
+        if let Some(updated) = issues_list_upsert_row(&cached, &list_row) {
+            cache_issues_list_row(&conn, &updated);
+        }
+    }
+    emit_replayable_signal(app, "issues-changed");
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "search-index",
+            &format!("op=issue-refresh-now issue={}", number),
+        );
+    }
+    Ok(())
+}
+
+// Numbers already refreshed this run, so a transcript re-read (which happens
+// on every mtime change) does not re-fetch what it already fetched.
+fn sighted_issue_cell() -> &'static Mutex<std::collections::HashSet<u64>> {
+    static CELL: OnceLock<Mutex<std::collections::HashSet<u64>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+// Extract issue numbers appearing as `<html base>/issues/<n>` in a bounded
+// tail. Pure over its inputs so the parsing is testable without a transcript.
+fn issue_numbers_in_tail(tail: &str, html_base: &str) -> Vec<u64> {
+    if html_base.is_empty() {
+        return Vec::new();
+    }
+    let needle = format!("{}/issues/", html_base.trim_end_matches('/'));
+    let mut out = Vec::new();
+    for (idx, _) in tail.match_indices(&needle) {
+        let rest = &tail[idx + needle.len()..];
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(n) = digits.parse::<u64>() {
+            if !out.contains(&n) {
+                out.push(n);
+            }
+        }
+    }
+    out
+}
+
+fn scan_jsonl_tail_for_new_issues<R: tauri::Runtime>(app: &AppHandle<R>, content: &str) {
+    const TAIL_BYTES: usize = 64 * 1024;
+    let Some(html_base) = forge_html_base(app) else {
+        return;
+    };
+    let mut start = content.len().saturating_sub(TAIL_BYTES);
+    while start < content.len() && !content.is_char_boundary(start) {
+        start += 1;
+    }
+    let numbers = issue_numbers_in_tail(&content[start..], &html_base);
+    if numbers.is_empty() {
+        return;
+    }
+    for n in numbers {
+        {
+            let Ok(mut seen) = sighted_issue_cell().lock() else {
+                return;
+            };
+            if !seen.insert(n) {
+                continue;
+            }
+        }
+        // Already indexed means the poll (or an earlier sighting) has it;
+        // only a genuinely new number is worth a fetch.
+        let known = search_index_db_path(app)
+            .and_then(|db| search_index::open(&db.to_string_lossy()).ok())
+            .map(|conn| {
+                search_index::get_extra(&conn, &format!("issue:{}", n))
+                    .ok()
+                    .flatten()
+                    .is_some()
+            })
+            .unwrap_or(false);
+        if known {
+            continue;
+        }
+        if let Err(e) = refresh_issue_now(app, n) {
+            // Leave it OUT of the seen set so a transient failure (gh 503s
+            // were observed during a forge degradation) retries on the next
+            // transcript read, rather than being dropped silently.
+            if let Ok(mut seen) = sighted_issue_cell().lock() {
+                seen.remove(&n);
+            }
+            eprintln!("[search-index] sighted issue #{} refresh failed: {}", n, e);
+        }
+    }
+}
+
 // Writes the issues:list cache row and clears the staleness marker, so
 // /__issues serves cache-first, byte-identical to a live build (#235).
 fn cache_issues_list_row(conn: &rusqlite::Connection, list_json: &str) -> &'static str {
@@ -26735,16 +26918,24 @@ fn audit_direct_edit_last_turn_key_cell() -> &'static Mutex<Option<String>> {
 // per-field, and serialize compact. Per-field rather than whole-line
 // because the redactor's token patterns match any 40-char hex string —
 // which is exactly a git SHA: the ledger's first live commit record
-// masked its own sha (audit-ledger-preserve-sha). The `sha` field is
-// host-authored from `git rev-parse`, structurally not a secret, and is
-// the ledger's primary lookup key, so it is exempt; every other string
-// (and string-array element) still redacts.
+// masked its own sha (audit-ledger-preserve-sha).
+//
+// That trap has now sprung twice. The first fix exempted one key spelled
+// literally "sha"; issue-257's close records named the same kind of value
+// `commit`, and their first live run wrote
+// {"kind":"issue-close-fired","issue":258,"commit":"[REDACTED]"} — masking
+// the one field that made the record auditable. A single-key exemption
+// only protects the name that happened to be chosen first, so this is an
+// allowlist: host-authored identifiers that structurally cannot carry a
+// secret. Everything else (and every string-array element) still redacts.
 // Returns a single line with no trailing newline.
+const AUDIT_PLAIN_KEYS: [&str; 5] = ["sha", "commit", "issue", "branch", "kind"];
+
 fn audit_record_line(record: &serde_json::Value, at_ms: i64) -> String {
     let mut stamped = record.clone();
     if let Some(obj) = stamped.as_object_mut() {
         for (key, value) in obj.iter_mut() {
-            if key != "sha" {
+            if !AUDIT_PLAIN_KEYS.contains(&key.as_str()) {
                 audit_redact_value(value);
             }
         }
@@ -33534,6 +33725,21 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
         );
         return;
     };
+    // issue-index-immediate-refresh (#254, #260): an issue created by the
+    // agent reaches the host only as text — `gh issue create` prints its URL.
+    // Sight it here, in the transcript the completion detector already holds
+    // in memory, rather than in the PTY tail: the JSONL is structured and
+    // exact, while the rendered tail carries ANSI, wrapping and chunk
+    // boundaries. Verified against the real case — the tool result for
+    // creating judell/bram#260 carries the URL verbatim.
+    //
+    // Scans a bounded tail, not the whole transcript: this content is a full
+    // read of a file that reaches tens of MB, so the search is capped near
+    // where a just-printed URL lives. Full-text search was considered and is
+    // the wrong instrument — it answers "does this known string appear", while
+    // this discovers numbers not yet known, and it would add a dependency on
+    // the session indexer having already run.
+    scan_jsonl_tail_for_new_issues(app, &content);
     let decision = jsonl_completion_decision(provider, &content);
     // Shared stale-end predicate (fix-mid-turn-false-finished-banner): a Claude
     // end_turn detected during a new turn's think/stream phase walks back to the
@@ -39573,6 +39779,17 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>) {
                             "branch": git_current_branch(app).unwrap_or_default(),
                         }),
                     );
+                    // issue-index-immediate-refresh: we just changed this
+                    // issue's state, so surface it now rather than waiting
+                    // for the next issues pass to rediscover our own work.
+                    // Best-effort: a failure here leaves the poll to catch
+                    // up, exactly as before.
+                    if let Err(e) = refresh_issue_now(app, record.issue) {
+                        eprintln!(
+                            "[issue-close-queue] refresh #{} after close failed: {}",
+                            record.issue, e
+                        );
+                    }
                 }
             }
         } else {
@@ -44036,6 +44253,108 @@ mod audit_ledger_tests {
         assert_eq!(parsed["decision"], "approved");
         assert_eq!(parsed["itemIds"], serde_json::json!(["a", "b"]));
         assert_eq!(parsed["applyAndCommit"], true);
+    }
+
+    // audit-ledger-keep-commit-sha-readable: the redactor masks any 40-char
+    // hex string, so a record's identifier survives only if its key is on the
+    // allowlist. This trap sprang twice — once on `sha`, then on issue-257's
+    // `commit` — so the test pins the whole allowlist, not just today's field.
+    // issue-index-immediate-refresh: the splice feeds cache_issues_list_row,
+    // whose history includes a write that made an empty list sticky, so these
+    // pin the shape rather than trusting it.
+    // issue-index-immediate-refresh: URL sighting, over the real shape a
+    // `gh issue create` tool result carries in the transcript.
+    #[test]
+    fn issue_numbers_in_tail_finds_created_issue_urls() {
+        let tail = r#"{"type":"user","message":{"content":[{"type":"tool_result",
+            "content":"https://github.com/judell/bram/issues/260\n"}]}}"#;
+        let got = super::issue_numbers_in_tail(tail, "https://github.com/judell/bram");
+        assert_eq!(got, vec![260]);
+    }
+
+    #[test]
+    fn issue_numbers_in_tail_dedupes_and_ignores_other_repos() {
+        let tail = "https://github.com/judell/bram/issues/7 ... again \
+                    https://github.com/judell/bram/issues/7 and \
+                    https://github.com/other/repo/issues/99 and \
+                    https://github.com/judell/bram/issues/12x";
+        let got = super::issue_numbers_in_tail(tail, "https://github.com/judell/bram");
+        assert_eq!(got, vec![7, 12], "dedupe; foreign repo ignored; digits stop at non-digit");
+    }
+
+    #[test]
+    fn issue_numbers_in_tail_is_inert_without_a_base() {
+        assert!(super::issue_numbers_in_tail("issues/1", "").is_empty());
+    }
+
+    #[test]
+    fn issues_list_upsert_replaces_in_place_and_drops_body() {
+        let list = r#"[{"number":9,"title":"nine","state":"OPEN"},{"number":7,"title":"seven","state":"OPEN"}]"#;
+        let fresh = serde_json::json!({
+            "number": 7, "title": "seven", "state": "CLOSED", "body": "long text"
+        });
+        let out = super::issues_list_upsert_row(list, &fresh).expect("spliced");
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&out).unwrap();
+        assert_eq!(rows.len(), 2, "replace, never append a duplicate");
+        assert_eq!(rows[0]["number"], 9, "ordering is left alone");
+        assert_eq!(rows[1]["state"], "CLOSED", "the row is refreshed in place");
+        assert!(rows[1].get("body").is_none(), "body must not enter the list shape");
+    }
+
+    #[test]
+    fn issues_list_upsert_inserts_unknown_issue_at_front() {
+        let list = r#"[{"number":9,"title":"nine"}]"#;
+        let fresh = serde_json::json!({"number": 10, "title": "ten"});
+        let out = super::issues_list_upsert_row(list, &fresh).expect("spliced");
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&out).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["number"], 10);
+    }
+
+    // A confident wrong write is the failure mode this cache has already
+    // suffered, so an unreadable cache yields None and the caller skips.
+    #[test]
+    fn issues_list_upsert_refuses_non_array_cache() {
+        let fresh = serde_json::json!({"number": 1});
+        assert!(super::issues_list_upsert_row("", &fresh).is_none());
+        assert!(super::issues_list_upsert_row("{\"oops\":true}", &fresh).is_none());
+        assert!(super::issues_list_upsert_row("[]", &serde_json::json!({"no":"number"})).is_none());
+    }
+
+    #[test]
+    fn audit_record_line_keeps_host_authored_identifiers_readable() {
+        let sha = "badfe03f6b9dd240e828e9a518083ff664a0a966";
+        let rec = serde_json::json!({
+            "kind": "issue-close-fired",
+            "issue": 258,
+            "commit": sha,
+            "sha": sha,
+            "branch": "main",
+        });
+        let parsed: serde_json::Value =
+            serde_json::from_str(&audit_record_line(&rec, 1)).expect("valid JSON");
+        assert_eq!(parsed["commit"], sha, "commit SHA must stay readable");
+        assert_eq!(parsed["sha"], sha);
+        assert_eq!(parsed["branch"], "main");
+        assert_eq!(parsed["issue"], 258);
+        assert_eq!(parsed["kind"], "issue-close-fired");
+    }
+
+    // ...and the allowlist must not become a hole: a secret-shaped value in
+    // any other field still redacts.
+    #[test]
+    fn audit_record_line_still_redacts_unlisted_fields() {
+        let rec = serde_json::json!({
+            "kind": "issue-close-fired",
+            "note": "token ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        });
+        let parsed: serde_json::Value =
+            serde_json::from_str(&audit_record_line(&rec, 1)).expect("valid JSON");
+        let note = parsed["note"].as_str().unwrap_or_default();
+        assert!(
+            !note.contains("ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            "unlisted field must still redact, got: {note}"
+        );
     }
 
     #[test]

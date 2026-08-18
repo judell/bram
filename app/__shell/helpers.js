@@ -1784,11 +1784,26 @@ window.__bramWithStagedImageMarkers = function (text, target, voiceTarget) {
 
 // Pure predicate — voice-target whitelist for text-input destinations.
 // xs delegator in Globals.xs preserves the bare-name callability.
+// Delivery allowlist for dictated text. A target NOT listed here falls through
+// to `toTurn('voice: ' + t)` — the transcript is sent to the terminal as a user
+// turn instead of landing in the box the user dictated into.
+//
+// This is a registration list, not a validation: IsolatedDraftEditor accepts any
+// `voiceTarget` string and will happily set it, record with it, and trace it
+// end to end, so a target missing from here fails ONLY at the last step and
+// looks like a routing bug in the component. Observed 2026-08-18: the issue
+// comment box was wired with `issue-comment:<n>`, the trace showed
+// target=issue-comment:253 through `processing-start`, and the transcript still
+// landed in the transcript pane via `stage=fallback-terminal`.
+//
+// Adding a voiceTarget prefix to any editor means adding it here too, in a
+// different file on the rebuild path.
 window.__bramIsWorklistTextVoiceTarget = function (target) {
   var t = target || "";
   return ["message-agent", "feedback", "new-item", "new-issue"].indexOf(t) !== -1
     || t.indexOf("feedback:") === 0
-    || t.indexOf("queue-item:") === 0;
+    || t.indexOf("queue-item:") === 0
+    || t.indexOf("issue-comment:") === 0;
 };
 
 // Inflight + submitted-message helpers (audit step 6). All pure data

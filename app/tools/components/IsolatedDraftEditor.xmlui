@@ -36,6 +36,25 @@
 
   <VStack width="100%" gap="$space-1">
     <HStack width="100%" gap="$space-2" verticalAlignment="{$props.verticalAlignment || 'center'}">
+      <!-- Mic before the TextArea: the message-agent composer puts it on
+           the left, and this component is the only surface that had it on
+           the right. Same order everywhere is worth more than the two
+           characters of markup it costs. -->
+      <Button
+        when="{!!$props.voiceTarget}"
+        label="{voiceRecording ? (worklistVoiceRecordingActive ? '⏹' : '⏳') : '🎤'}"
+        variant="{$props.voiceVariant || 'outlined'}"
+        size="{$props.voiceSize || 'sm'}"
+        tooltip="{$props.voiceTooltip || 'Dictate'}"
+        enabled="{$props.enabled !== false &amp;&amp; !isWorklistVoiceProcessingTarget($props.voiceTarget) &amp;&amp; (!worklistVoiceRecordingActive || worklistVoiceTarget === $props.voiceTarget) &amp;&amp; (!voiceRecording || worklistVoiceRecordingActive)}">
+        <event name="click">
+          setWorklistVoiceTarget($props.voiceTarget);
+          voiceRecording = toggleVoiceForCurrentTarget(voiceRecording);
+        </event>
+      </Button>
+      <Theme when="{!!$props.voiceTarget}" size-Spinner="14px">
+        <Spinner when="{isWorklistVoiceProcessingTarget($props.voiceTarget)}" />
+      </Theme>
       <TextArea
         id="editorBox"
         initialValue="{$props.initialValue || ''}"
@@ -62,21 +81,6 @@
           }
         </event>
       </TextArea>
-      <Button
-        when="{!!$props.voiceTarget}"
-        label="{voiceRecording ? (worklistVoiceRecordingActive ? '⏹' : '⏳') : '🎤'}"
-        variant="{$props.voiceVariant || 'outlined'}"
-        size="{$props.voiceSize || 'sm'}"
-        tooltip="{$props.voiceTooltip || 'Dictate'}"
-        enabled="{$props.enabled !== false &amp;&amp; !isWorklistVoiceProcessingTarget($props.voiceTarget) &amp;&amp; (!worklistVoiceRecordingActive || worklistVoiceTarget === $props.voiceTarget) &amp;&amp; (!voiceRecording || worklistVoiceRecordingActive)}">
-        <event name="click">
-          setWorklistVoiceTarget($props.voiceTarget);
-          voiceRecording = toggleVoiceForCurrentTarget(voiceRecording);
-        </event>
-      </Button>
-      <Theme when="{!!$props.voiceTarget}" size-Spinner="14px">
-        <Spinner when="{isWorklistVoiceProcessingTarget($props.voiceTarget)}" />
-      </Theme>
     </HStack>
     <PastedImageStrip
       when="{!!$props.pasteTarget}"

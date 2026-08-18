@@ -235,32 +235,36 @@
         </property>
         <property name="detailFooterTemplate">
           <VStack gap="$space-2" paddingTop="$space-3" borderTop="1px solid $borderColor">
-            <TextArea
+            <!-- IsolatedDraftEditor for dictation. Deliberately NO pasteTarget:
+                 a screenshot cannot be attached to a forge comment (neither gh
+                 nor glab has an attachment flag, and the web UI's upload is
+                 session-authenticated), so inviting a paste here would stage an
+                 image that never reaches the comment. The placeholder is the
+                 lead sentence only; draft-editor-derived-affordance-placeholder
+                 appends affordance text from what is actually wired. -->
+            <IsolatedDraftEditor
               id="closeCommentBox"
               placeholder="Optional comment"
-              autoComplete="off"
-              autoCorrect="{false}"
-              spellCheck="{false}"
-              autoCapitalize="off"
               resize="vertical"
               minRows="2"
               maxRows="12"
-              width="*"
+              voiceTarget="{'issue-comment:' + $item.number}"
+              voiceTooltip="Dictate comment"
               enabled="{!commentIssueCall.inProgress &amp;&amp; !closingIssue}" />
             <HStack gap="$space-2">
               <Button
                 label="Comment"
                 variant="outlined"
                 size="sm"
-                enabled="{!commentIssueCall.inProgress &amp;&amp; !closingIssue &amp;&amp; closeCommentBox.value &amp;&amp; closeCommentBox.value.trim().length > 0}"
-                onClick="commentIssueCall.execute({ number: $item.number, body: closeCommentBox.value }); closeCommentBox.setValue('')" />
+                enabled="{!commentIssueCall.inProgress &amp;&amp; !closingIssue}"
+                onClick="const text = (closeCommentBox.getValue() || '').trim(); if (text) { commentIssueCall.execute({ number: $item.number, body: text }); closeCommentBox.clear(); }" />
               <Button
                 when="{$item.state === 'OPEN'}"
                 label="Close issue"
                 variant="outlined"
                 size="sm"
                 enabled="{!commentIssueCall.inProgress &amp;&amp; !closingIssue}"
-                onClick="closingIssue = true; window.__bramCloseIssue($item.number, closeCommentBox.value || '', () => { closingIssue = false; closeCommentBox.setValue(''); issueRefreshTick = issueRefreshTick + 1; issuesFirstPage.refetch(); issuesFull.refetch(); }, () => { closingIssue = false; })" />
+                onClick="closingIssue = true; window.__bramCloseIssue($item.number, closeCommentBox.getValue() || '', () => { closingIssue = false; closeCommentBox.clear(); issueRefreshTick = issueRefreshTick + 1; issuesFirstPage.refetch(); issuesFull.refetch(); }, () => { closingIssue = false; })" />
               <Theme size-Spinner="16px">
                 <Spinner when="{commentIssueCall.inProgress || closingIssue}" />
               </Theme>

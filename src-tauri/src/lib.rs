@@ -11468,26 +11468,60 @@ fn refresh_issue_now<R: tauri::Runtime>(app: &AppHandle<R>, number: u64) -> Resu
 
 // Numbers already refreshed this run, so a transcript re-read (which happens
 // on every mtime change) does not re-fetch what it already fetched.
-fn sighted_issue_cell() -> &'static Mutex<std::collections::HashSet<u64>> {
-    static CELL: OnceLock<Mutex<std::collections::HashSet<u64>>> = OnceLock::new();
+// Keyed by the SIGHTING, not the issue number: "264" for a creation,
+// "262#5333389524" for a comment. Keying on the bare number admitted each
+// issue once per process, so a comment on an already-sighted issue was
+// dropped before it could be considered.
+fn sighted_issue_cell() -> &'static Mutex<std::collections::HashSet<String>> {
+    static CELL: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
     CELL.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
 }
 
-// Extract issue numbers appearing as `<html base>/issues/<n>` in a bounded
-// tail. Pure over its inputs so the parsing is testable without a transcript.
-fn issue_numbers_in_tail(tail: &str, html_base: &str) -> Vec<u64> {
+// One `<html base>/issues/<n>` occurrence in the transcript tail. `comment_id`
+// is Some when the URL carried a `#issuecomment-<id>` fragment, which is what
+// `gh issue comment` prints — the signal that an already-indexed issue has new
+// content and is worth re-fetching.
+#[derive(Debug, PartialEq, Eq, Clone)]
+struct IssueSighting {
+    number: u64,
+    comment_id: Option<u64>,
+}
+
+impl IssueSighting {
+    // Dedupe/seen key. Two different comments on one issue are two keys; the
+    // same comment seen twice (a re-read of the same tail) is one.
+    fn key(&self) -> String {
+        match self.comment_id {
+            Some(c) => format!("{}#{}", self.number, c),
+            None => self.number.to_string(),
+        }
+    }
+}
+
+// Extract issue sightings appearing as `<html base>/issues/<n>` (optionally
+// followed by `#issuecomment-<id>`) in a bounded tail. Pure over its inputs so
+// the parsing is testable without a transcript.
+fn issue_numbers_in_tail(tail: &str, html_base: &str) -> Vec<IssueSighting> {
     if html_base.is_empty() {
         return Vec::new();
     }
     let needle = format!("{}/issues/", html_base.trim_end_matches('/'));
-    let mut out = Vec::new();
+    let frag = "#issuecomment-";
+    let mut out: Vec<IssueSighting> = Vec::new();
     for (idx, _) in tail.match_indices(&needle) {
         let rest = &tail[idx + needle.len()..];
         let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if let Ok(n) = digits.parse::<u64>() {
-            if !out.contains(&n) {
-                out.push(n);
-            }
+        let Ok(number) = digits.parse::<u64>() else {
+            continue;
+        };
+        let after = &rest[digits.len()..];
+        let comment_id = after.strip_prefix(frag).and_then(|r| {
+            let d: String = r.chars().take_while(|c| c.is_ascii_digit()).collect();
+            d.parse::<u64>().ok()
+        });
+        let sighting = IssueSighting { number, comment_id };
+        if !out.contains(&sighting) {
+            out.push(sighting);
         }
     }
     out
@@ -11502,39 +11536,49 @@ fn scan_jsonl_tail_for_new_issues<R: tauri::Runtime>(app: &AppHandle<R>, content
     while start < content.len() && !content.is_char_boundary(start) {
         start += 1;
     }
-    let numbers = issue_numbers_in_tail(&content[start..], &html_base);
-    if numbers.is_empty() {
+    let sightings = issue_numbers_in_tail(&content[start..], &html_base);
+    if sightings.is_empty() {
         return;
     }
-    for n in numbers {
+    for s in sightings {
+        let key = s.key();
+        let n = s.number;
         {
             let Ok(mut seen) = sighted_issue_cell().lock() else {
                 return;
             };
-            if !seen.insert(n) {
+            if !seen.insert(key.clone()) {
                 continue;
             }
         }
-        // Already indexed means the poll (or an earlier sighting) has it;
-        // only a genuinely new number is worth a fetch.
-        let known = search_index_db_path(app)
-            .and_then(|db| search_index::open(&db.to_string_lossy()).ok())
-            .map(|conn| {
-                search_index::get_extra(&conn, &format!("issue:{}", n))
-                    .ok()
-                    .flatten()
-                    .is_some()
-            })
-            .unwrap_or(false);
-        if known {
-            continue;
+        // For a CREATION sighting, already-indexed means the poll (or an
+        // earlier sighting) has it and only a genuinely new number is worth a
+        // fetch. A COMMENT sighting is the opposite case by construction: the
+        // issue is necessarily already indexed, and the new comment body is
+        // exactly what the indexed doc is missing (issue content is title +
+        // body + author + every comment). Applying the short-circuit there
+        // would inverse its intent, which is why comments used to wait for
+        // the 60s issues poll while creations refreshed immediately.
+        if s.comment_id.is_none() {
+            let known = search_index_db_path(app)
+                .and_then(|db| search_index::open(&db.to_string_lossy()).ok())
+                .map(|conn| {
+                    search_index::get_extra(&conn, &format!("issue:{}", n))
+                        .ok()
+                        .flatten()
+                        .is_some()
+                })
+                .unwrap_or(false);
+            if known {
+                continue;
+            }
         }
         if let Err(e) = refresh_issue_now(app, n) {
             // Leave it OUT of the seen set so a transient failure (gh 503s
             // were observed during a forge degradation) retries on the next
             // transcript read, rather than being dropped silently.
             if let Ok(mut seen) = sighted_issue_cell().lock() {
-                seen.remove(&n);
+                seen.remove(&key);
             }
             eprintln!("[search-index] sighted issue #{} refresh failed: {}", n, e);
         }
@@ -44281,7 +44325,10 @@ mod audit_ledger_tests {
         let tail = r#"{"type":"user","message":{"content":[{"type":"tool_result",
             "content":"https://github.com/judell/bram/issues/260\n"}]}}"#;
         let got = super::issue_numbers_in_tail(tail, "https://github.com/judell/bram");
-        assert_eq!(got, vec![260]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].number, 260);
+        assert_eq!(got[0].comment_id, None, "a bare create URL is not a comment sighting");
+        assert_eq!(got[0].key(), "260");
     }
 
     #[test]
@@ -44291,7 +44338,40 @@ mod audit_ledger_tests {
                     https://github.com/other/repo/issues/99 and \
                     https://github.com/judell/bram/issues/12x";
         let got = super::issue_numbers_in_tail(tail, "https://github.com/judell/bram");
-        assert_eq!(got, vec![7, 12], "dedupe; foreign repo ignored; digits stop at non-digit");
+        let nums: Vec<u64> = got.iter().map(|s| s.number).collect();
+        assert_eq!(nums, vec![7, 12], "dedupe; foreign repo ignored; digits stop at non-digit");
+    }
+
+    // index-issue-comments-on-sighting: `gh issue comment` prints the issue URL
+    // with a #issuecomment-<id> fragment. That fragment is what distinguishes
+    // "this issue has new content" from "this issue is new", and it is what the
+    // seen-set must key on so two comments on one issue are two sightings.
+    #[test]
+    fn issue_numbers_in_tail_distinguishes_comments_from_creations() {
+        let base = "https://github.com/judell/bram";
+        let tail = "created https://github.com/judell/bram/issues/264 then \
+                    https://github.com/judell/bram/issues/262#issuecomment-5333389524 and \
+                    https://github.com/judell/bram/issues/262#issuecomment-5333999999 and \
+                    https://github.com/judell/bram/issues/262#issuecomment-5333389524";
+        let got = super::issue_numbers_in_tail(tail, base);
+        let keys: Vec<String> = got.iter().map(|s| s.key()).collect();
+        assert_eq!(
+            keys,
+            vec!["264", "262#5333389524", "262#5333999999"],
+            "creation keys on the number; each distinct comment is its own key; \
+             the same comment seen twice collapses"
+        );
+        assert_eq!(got[0].comment_id, None);
+        assert_eq!(got[1].comment_id, Some(5333389524));
+    }
+
+    #[test]
+    fn issue_sighting_key_separates_comment_from_bare_number() {
+        // A creation sighting and a comment sighting on the same issue must not
+        // collide, or the first would suppress the second for the process.
+        let bare = super::IssueSighting { number: 262, comment_id: None };
+        let commented = super::IssueSighting { number: 262, comment_id: Some(1) };
+        assert_ne!(bare.key(), commented.key());
     }
 
     #[test]

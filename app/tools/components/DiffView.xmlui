@@ -16,19 +16,17 @@
        painted occurrences agree. -->
   <variable name="diffFindPlan"
     value="{window.__bramDiffFindPlan(diffViewRows(annotate.value, $props.text), $props.needle, $props.activeIndex, $props.expectedMatchCount)}" />
-  <!-- backgroundColor-mark-diff{Add,Del}-Text below are the word-diff emphasis
-       colours. KNOWN GAP: they do not resolve today. Text builds the variant
-       style as var(--xmlui-backgroundColor-mark-VARIANT-Text) with no
-       fallback, and Theme rewrites $token values only for variables it
-       recognises — an app-defined variant name passes through raw, so
-       "$color-success-200" lands as invalid CSS and the span renders
-       unstyled. Shown three ways in one screenshot: registered var + $token
-       resolved, app variant + literal resolved, app variant + $token flat
-       (xmlui-org/xmlui#3782, comment 5333034241). Deliberately NOT hardcoded
-       to hsl() literals — that would freeze diff emphasis across light/dark
-       and any palette change, a worse defect than the gap. Left as the
-       correct expression of intent; restore-diff-emphasis-after-3782-theming
-       carries the retirement. -->
+  <!-- backgroundColor-mark-diff{Add,Del}-Text below are the word-diff
+       emphasis colours, resolved by Text from the segment's `variant`
+       (xmlui-org/xmlui#3782). Two names rather than one because the
+       backend emits $color-danger-200 for deletions and
+       $color-success-200 for additions — a single "emphasis" variant
+       would flatten red into green.
+       Until xmlui-org/xmlui#3797, inline <Theme> declarations with
+       $token values were dropped rather than resolved, so these
+       rendered unstyled; keep them as token references rather than
+       literals, which would freeze the colours against light/dark and
+       any palette change. -->
   <Theme
     backgroundColor-row-List--hover="transparent"
     backgroundColor-row-List="transparent"

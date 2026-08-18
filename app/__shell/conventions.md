@@ -792,12 +792,39 @@ the asymmetry differs:
 
 ### Name the boundary and sign your side
 
-Open every artifact that crosses a boundary — issue, comment, PR
-description, commit message another session will read — by saying who
-is speaking and from where ("filed from the *<project>* side", "posted
-from the macOS session"). The reader is often another agent with a
-different vantage point, and the signature is what tells them which
-side the evidence comes from.
+Open every artifact that crosses a boundary by saying who is speaking
+and from where. The reader is often another agent with a different
+vantage point, and the signature is what tells them which side the
+evidence comes from.
+
+**The form.** One canonical opener, three slots, all load-bearing —
+*whose* agent, *which* agent, *which* project:
+
+    <owner>'s <Agent> speaking from the <Project> project:
+
+This project's two instances:
+
+    Jon's Claude speaking from the Bram project:
+    Jon's Codex speaking from the XMLUI project:
+
+A form that names only the project ("from the xmlui side") leaves "who
+is speaking" unanswered, which is the half that matters when two
+agents work the same thread.
+
+**The scope.** Every artifact that crosses the boundary carries it —
+issue bodies, issue comments, PR descriptions, PR comments, reviews,
+and any commit message another session will read. **Every one, not
+just the first in a thread.** The observed failure is decay: the
+opening comment is signed, and by the fourth it has worn down to
+"Short addendum —" because by then it feels redundant. It isn't. The
+reader the signature exists for — someone opening the thread months
+later, or a third agent joining mid-way — has no memory of comment #1.
+
+**The retrofit rule.** If you notice a missing signature after
+posting, add it in a *new* comment rather than only editing the body.
+A body edit fixes the page; it does not reach anyone who already got
+the notification, and a silently-corrected record reads as a
+discipline that was not there.
 
 ### Scope claims to what your side can observe
 

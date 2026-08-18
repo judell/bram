@@ -33,23 +33,19 @@
         </VStack>
         <VStack width="*" gap="$space-0_5">
           <Text maxLines="1" fontWeight="$fontWeight-bold" value="{$item.source}" />
-          <!-- Snippet with matched terms highlighted: segments precomputed
-               by snippetSegments (Globals.xs) from the server's FTS5
-               [ / ] markers, term-verified against the query so literal
-               brackets in content stay literal. Outer Text (line box,
-               pre-wrap) hosting inline segment Texts so a highlighted
-               match stays whole mid-word — the DiffView pattern
-               (judell/bram#239). Passive-match yellow matches the
-               find-in-diff marks (rgba(250, 204, 21, 0.45)). -->
+          <!-- Snippet with matched terms highlighted. Spans are still
+               precomputed by snippetSegments (Globals.xs) from the server's
+               FTS5 [ / ] markers, term-verified against the query so literal
+               brackets in content stay literal — `segments` consumes
+               pre-computed spans, it does not parse them (xmlui-org/xmlui#3777).
+               Was an outer pre-wrap Text hosting inline segment Texts, to keep
+               a highlighted match whole mid-word (judell/bram#239); Text.segments
+               (0.14.16, xmlui-org/xmlui#3780) does that natively, and mark colour
+               now resolves through backgroundColor-mark-Text instead of a
+               hand-tuned rgba kept in sync with Markdown's marks by eye. -->
           <Text width="100%" whiteSpace="pre-wrap"
-            fontSize="$fontSize-sm" color="$textColor-secondary">
-            <Items data="{$item.snippetSegs}">
-              <Text inline="true" whiteSpace="pre-wrap"
-                fontSize="$fontSize-sm" color="$textColor-secondary"
-                backgroundColor="{$item.hit ? 'rgba(250, 204, 21, 0.45)' : 'transparent'}"
-                value="{$item.text}" />
-            </Items>
-          </Text>
+            fontSize="$fontSize-sm" color="$textColor-secondary"
+            segments="{$item.snippetSegs}" />
         </VStack>
       </HStack>
     </property>

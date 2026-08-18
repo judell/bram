@@ -7317,13 +7317,11 @@ window.__bramTranscriptFindPreview = function (event, needle) {
   return (start ? "…" : "") + text.slice(start, end) + (end < text.length ? "…" : "");
 };
 
-// Feed a plain-text find excerpt through Markdown without treating tool names,
-// shell syntax, or file paths as formatting.
-window.__bramMarkdownLiteral = function (text) {
-  return String(text || "")
-    .replace(/\\/g, "\\\\")
-    .replace(/([`*_{}\[\]()<>#+.!|~-])/g, "\\$1");
-};
+// __bramMarkdownLiteral lived here: it escaped a plain-text find excerpt into
+// Markdown so the excerpt could borrow Markdown's <mark> engine, since Text had
+// no highlightText. xmlui 0.14.16 (xmlui-org/xmlui#3779) gives Text the same
+// highlightText / highlightActiveIndex props, so the six find-preview rows now
+// render as Text directly and the escape hop is gone.
 
 // Bake find state into transcript rows (rows are isolated scopes — they
 // can't see the outer find vars). Returns NULL when the find is inactive so

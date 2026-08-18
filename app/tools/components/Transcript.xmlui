@@ -230,12 +230,11 @@
           fontStyle="italic"
           color="$textColor-secondary"
           value="{'🔔 ' + $item.text}" />
-        <Markdown
+        <Text
           when="{$item.kind === 'notification' &amp;&amp; $item.__findPreview}"
           fontSize="$fontSize-sm"
           color="$textColor-secondary"
-          content="{window.__bramMarkdownLiteral($item.__findPreview)}"
-          interpolateBindings="false" allowHtml="false"
+          value="{$item.__findPreview}"
           highlightText="{window.__bramSearchTerms($item.__needle)}"
           highlightActiveIndex="{$item.__activeOcc}" />
         <!-- image strip -->
@@ -261,12 +260,11 @@
               color="$textColor-secondary"
               value="{((expanded || []).includes($item.id) ? '▾' : '▸') + '  💭 thinking'}" />
           </Link>
-          <Markdown
+          <Text
             when="{$item.__findPreview}"
             fontSize="$fontSize-sm"
             color="$textColor-secondary"
-            content="{window.__bramMarkdownLiteral($item.__findPreview)}"
-            interpolateBindings="false" allowHtml="false"
+            value="{$item.__findPreview}"
             highlightText="{window.__bramSearchTerms($item.__needle)}"
             highlightActiveIndex="{$item.__activeOcc}" />
           <VStack
@@ -324,12 +322,11 @@
                Surface a compact excerpt while finding so every counted match
                has an actual <mark>, including a match that exists only in the
                folded command body. -->
-          <Markdown
+          <Text
             when="{$item.__findPreview}"
             fontSize="$fontSize-sm"
             color="$textColor-secondary"
-            content="{window.__bramMarkdownLiteral($item.__findPreview)}"
-            interpolateBindings="false" allowHtml="false"
+            value="{$item.__findPreview}"
             highlightText="{window.__bramSearchTerms($item.__needle)}"
             highlightActiveIndex="{$item.__activeOcc}" />
           <!-- transcript-render-menu-answers: the user's menu answer (host

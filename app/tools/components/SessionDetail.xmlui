@@ -106,12 +106,11 @@
             fontStyle="italic"
             color="$textColor-secondary"
             value="{'🔔 ' + $item.text}" />
-          <Markdown
+          <Text
             when="{$item.kind === 'notification' &amp;&amp; $item.__findPreview}"
             fontSize="$fontSize-sm"
             color="$textColor-secondary"
-            content="{window.__bramMarkdownLiteral($item.__findPreview)}"
-            interpolateBindings="false" allowHtml="false"
+            value="{$item.__findPreview}"
             highlightText="{window.__bramSearchTerms($item.__needle)}"
             highlightActiveIndex="{$item.__activeOcc}" />
           <!-- image strip -->
@@ -132,12 +131,11 @@
                 color="$textColor-secondary"
                 value="{((expanded || []).includes($item.id) ? '▾' : '▸') + '  💭 thinking'}" />
             </Link>
-            <Markdown
+            <Text
               when="{$item.__findPreview}"
               fontSize="$fontSize-sm"
               color="$textColor-secondary"
-              content="{window.__bramMarkdownLiteral($item.__findPreview)}"
-              interpolateBindings="false" allowHtml="false"
+              value="{$item.__findPreview}"
               highlightText="{window.__bramSearchTerms($item.__needle)}"
               highlightActiveIndex="{$item.__activeOcc}" />
             <VStack
@@ -176,12 +174,11 @@
             <!-- Compact find preview: always rendered while finding so every
                  counted match has a visible <mark>, even if it's only in the
                  folded body. -->
-            <Markdown
+            <Text
               when="{$item.__findPreview}"
               fontSize="$fontSize-sm"
               color="$textColor-secondary"
-              content="{window.__bramMarkdownLiteral($item.__findPreview)}"
-              interpolateBindings="false" allowHtml="false"
+              value="{$item.__findPreview}"
               highlightText="{window.__bramSearchTerms($item.__needle)}"
               highlightActiveIndex="{$item.__activeOcc}" />
             <VStack

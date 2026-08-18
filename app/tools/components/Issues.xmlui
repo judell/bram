@@ -223,8 +223,13 @@
               <Text when="{$item.latestCommentAuthor &amp;&amp; $item.latestCommentAt}" fontSize="$fontSize-xs" color="$textColor-secondary" maxLines="1"
                 value="{$item.latestCommentAuthor + ' commented ' + getDateUntilNow($item.latestCommentAt) + ' ago'}" />
             </VStack>
+            <!-- issues-age-cell-overflow: compact form for the 90px gutter,
+                 plus the maxLines backstop every sibling Text already had.
+                 getDateUntilNow's prose ("less than a minute") escaped the
+                 card; it stays in use above, where prose is what's wanted. -->
             <HStack width="90px" verticalAlignment="center">
-              <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{getDateUntilNow($item.activityAt || $item.updatedAt || $item.createdAt)}" />
+              <Text fontSize="$fontSize-sm" color="$textColor-secondary" maxLines="1"
+                value="{compactAge($item.activityAt || $item.updatedAt || $item.createdAt)}" />
             </HStack>
           </HStack>
         </property>

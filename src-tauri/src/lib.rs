@@ -33019,6 +33019,26 @@ fn write_inflight_claim_sentinel<R: tauri::Runtime>(
     let Some(path) = inflight_claim_file(app) else {
         return;
     };
+    // subagent-worklist-collision-observability: capture the prior claim
+    // (if any) BEFORE it is overwritten, so a write that displaces a still-
+    // live claim can be traced. Only read when tracing is enabled — this
+    // must not add I/O on the default path.
+    let prior_claim = if bram_trace_enabled() {
+        inflight_claim_ids_and_claimed_at(app).and_then(|(prior_ids, claimed_at)| {
+            if prior_ids.is_empty() {
+                None
+            } else {
+                let prior_kind = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+                    .and_then(|v| v.get("kind").and_then(|k| k.as_str().map(String::from)))
+                    .unwrap_or_default();
+                Some((prior_ids, prior_kind, claimed_at))
+            }
+        })
+    } else {
+        None
+    };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -33037,13 +33057,23 @@ fn write_inflight_claim_sentinel<R: tauri::Runtime>(
     }
     let _ = std::fs::rename(&tmp, &path);
     if bram_trace_enabled() {
+        let extra = match &prior_claim {
+            Some((prior_ids, prior_kind, claimed_at)) => format!(
+                " prior_ids={} prior_kind={} prior_age_ms={}",
+                serde_json::to_string(prior_ids).unwrap_or_else(|_| "[]".to_string()),
+                prior_kind,
+                unix_now_ms() - claimed_at
+            ),
+            None => String::new(),
+        };
         append_bram_trace_line(
             app,
             "inflight-sentinel",
             &format!(
-                "op=write kind={} ids={}",
+                "op=write kind={} ids={}{}",
                 kind,
-                serde_json::to_string(ids).unwrap_or_else(|_| "[]".to_string())
+                serde_json::to_string(ids).unwrap_or_else(|_| "[]".to_string()),
+                extra
             ),
         );
     }
@@ -33113,6 +33143,23 @@ fn clear_inflight_claim_sentinel<R: tauri::Runtime>(
         })
         .unwrap_or_default();
     if !inflight_claim_fully_covered(&claimed_ids, mutated_ids) {
+        if bram_trace_enabled() {
+            let remaining: Vec<String> = claimed_ids
+                .iter()
+                .filter(|cid| !mutated_ids.iter().any(|mid| mid == *cid))
+                .cloned()
+                .collect();
+            append_bram_trace_line(
+                app,
+                "inflight-sentinel",
+                &format!(
+                    "op=clear-partial claimed={} requested={} remaining={}",
+                    serde_json::to_string(&claimed_ids).unwrap_or_else(|_| "[]".to_string()),
+                    serde_json::to_string(mutated_ids).unwrap_or_else(|_| "[]".to_string()),
+                    serde_json::to_string(&remaining).unwrap_or_else(|_| "[]".to_string())
+                ),
+            );
+        }
         return false;
     }
     let _ = std::fs::remove_file(&path);
@@ -38481,6 +38528,18 @@ fn consume_worklist_authorization<R: tauri::Runtime>(app: &AppHandle<R>) {
         Err(_) => return,
     };
     if record.consumed_at_ms.is_some() {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "auth-record",
+                &format!(
+                    "op=consume-already-consumed kind={} consumed_at_ms={} ids={}",
+                    record.kind,
+                    record.consumed_at_ms.unwrap_or(0),
+                    serde_json::to_string(&record.ids).unwrap_or_else(|_| "[]".to_string())
+                ),
+            );
+        }
         return;
     }
     if bram_trace_enabled() {

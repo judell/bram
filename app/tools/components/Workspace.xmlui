@@ -14,7 +14,6 @@
   var.newItemStartSig="{''}"
   var.newItemTurnEnded="{false}"
   var.newItemIssue="{null}"
-  var.inflightTick="{0}"
   var.actionProgressTick="{0}"
   var.actionProgressKind="{''}"
   var.actionProgressScope="{''}"
@@ -128,7 +127,7 @@
        / drop) and on the toTurn write path (approved / iterate).
        Sentinels clear at host turn-end detection, with /__worklist/end
        available as an explicit endpoint. Each write/clear emits
-       inflightTick below and forces this DataSource to refetch. When
+       a refetch() below on the shared cache entry. When
        the sentinel no longer claims the targeted item, the onLoaded
        handler clears localStorage and resets per-cycle state.
        Replaces the prior heuristic clear paths (agent-turn-end
@@ -136,7 +135,7 @@
        60 s stale-timeout). -->
   <DataSource
     id="inflightClaim"
-    url="/__inflight?t={inflightTick}"
+    url="/__inflight"
     onLoaded="(data) => {
       const u = window.__bramInflightSentinelDecide(data, submitting, submittedItemId);
       if (u.kind === 'submit') {
@@ -476,10 +475,13 @@
             <HStack gap="$space-3" verticalAlignment="start">
               <HStack width="1.75em" horizontalAlignment="center" verticalAlignment="center">
                 <Theme size-Spinner="14px">
-                  <Spinner when="{submitting &amp;&amp; actionProgressScope !== 'batch' &amp;&amp; submittedItemId === $item.id}" />
+                  <!-- issue-265: host-driven. This span used to key purely on local
+                       submitting/submittedItemId, so it could spin against a clean
+                       sentinel whenever the completion callback failed to fire. -->
+                  <Spinner when="{window.__bramItemStatusIsInflight(inflightClaim.value, $item, actionProgressScope === 'batch' ? '' : submittedItemId, actionProgressKind, actionProgressTick)}" />
                 </Theme>
                 <Button
-                  when="{!(submitting &amp;&amp; actionProgressScope !== 'batch' &amp;&amp; submittedItemId === $item.id)}"
+                  when="{!window.__bramItemStatusIsInflight(inflightClaim.value, $item, actionProgressScope === 'batch' ? '' : submittedItemId, actionProgressKind, actionProgressTick)}"
                   label="{(expandedItemIds || []).includes($item.id) ? '▼' : '▶'}"
                   variant="ghost"
                   size="xs"
@@ -504,14 +506,28 @@
                         size="xs"
                         tooltip="{($item.status || 'proposed') === 'applied' || ($item.status || 'proposed') === 'proposed' ? 'What does this badge mean?' : 'Why is this status invalid?'}"
                         onClick="($item.status || 'proposed') === 'applied' ? statusAppliedHelpDialog.open() : (($item.status || 'proposed') === 'proposed' ? statusProposedHelpDialog.open() : statusInvalidHelpDialog.open())" />
-                      <!-- issue-223: a live, unconsumed authorization is otherwise invisible -->
+                      <!-- issue-223: a live, unconsumed authorization is otherwise invisible.
+                           issue-265: this is now the row's ONE status indicator. In-flight
+                           transition state takes precedence; the authorization badge shows
+                           only when nothing is in flight for this item. Previously the
+                           in-flight fact was rendered twice more (a local-only spinner and
+                           an "Approving..." line with a local fallback) and the three could
+                           contradict each other. Two Texts here only because they differ in
+                           color; their `when` clauses are mutually exclusive by construction. -->
                       <Text
-                        when="{!!$item.activeAuthorization}"
-                        value="{($item.activeAuthorization === 'drop' ? 'DROP' : 'APPROVED') + ' · awaiting agent'}"
+                        when="{window.__bramItemStatusIsInflight(inflightClaim.value, $item, actionProgressScope === 'batch' ? '' : submittedItemId, actionProgressKind, actionProgressTick)}"
+                        value="{window.__bramItemStatusText(inflightClaim.value, $item, actionProgressScope === 'batch' ? '' : submittedItemId, actionProgressKind, actionProgressTick)}"
+                        fontSize="$fontSize-xs"
+                        fontWeight="$fontWeight-bold"
+                        color="$color-primary-600"
+                        tooltip="{window.__bramItemStatusTooltip(inflightClaim.value, $item, actionProgressScope === 'batch' ? '' : submittedItemId, actionProgressKind, actionProgressTick)}" />
+                      <Text
+                        when="{!!$item.activeAuthorization &amp;&amp; !window.__bramItemStatusIsInflight(inflightClaim.value, $item, actionProgressScope === 'batch' ? '' : submittedItemId, actionProgressKind, actionProgressTick)}"
+                        value="{window.__bramItemStatusText(inflightClaim.value, $item, actionProgressScope === 'batch' ? '' : submittedItemId, actionProgressKind, actionProgressTick)}"
                         fontSize="$fontSize-xs"
                         fontWeight="$fontWeight-bold"
                         color="$color-warn-700"
-                        tooltip="{'An unconsumed ' + $item.activeAuthorization + ' authorization from ' + Math.round(($item.authorizationAgeMs || 0) / 60000) + ' min ago covers this item. The agent has not advanced it yet; re-clicking the button refreshes the authorization.'}" />
+                        tooltip="{window.__bramItemStatusTooltip(inflightClaim.value, $item, actionProgressScope === 'batch' ? '' : submittedItemId, actionProgressKind, actionProgressTick)}" />
                     </HStack>
                   </Theme>
                   <Text value="{$item.id}" fontWeight="$fontWeight-bold" />
@@ -660,12 +676,6 @@
                     variant="ghost"
                     onClick="submitting = false; submittedItemId = null; submittedKind = null; window.__bramSetWorklistSubmittedKind(null); actionProgressScope = ''; actionProgressKind = ''; actionProgressTick = 0" />
                 </HStack>
-                <Text
-                  when="{submitting &amp;&amp; actionProgressScope !== 'batch' &amp;&amp; submittedItemId === $item.id &amp;&amp; actionProgressKind}"
-                  fontSize="$fontSize-sm"
-                  fontStyle="italic"
-                  color="$textColor-secondary"
-                  value="{window.__bramInflightActionLabel(((inflightClaim.value &amp;&amp; (inflightClaim.value.ids || []).includes($item.id)) ? inflightClaim.value.kind : '') || actionProgressKind) + '.'.repeat(1 + (actionProgressTick % 3))}" />
                 <Fragment when="{(expandedItemIds || []).includes($item.id)}">
                   <PastedImageStrip target="{'feedback:' + $item.id}" />
                 </Fragment>
@@ -1186,7 +1196,7 @@ Drop is the clean rejection path; Iterate is what you want if the item just need
       listenTo="{inflightClaimChangedEvt.value &amp;&amp; inflightClaimChangedEvt.value.tick}"
       onDidChange="() => {
         window.__bramIframeTrace('listener-fired', {context: 'inflight-claim-changed'});
-        inflightTick = inflightTick + 1;
+        inflightClaim.refetch();
       }" />
     <!-- Agent dock: the last exchange from the same projected-turns
          source Transcript uses, so provider switches update both

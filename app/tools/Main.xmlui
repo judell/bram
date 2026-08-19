@@ -1,4 +1,4 @@
-<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{window.__bramRestoreUpdateBannerDismissed ? window.__bramRestoreUpdateBannerDismissed() : ''}" var.toolDescBannerDismissedVersion="{window.__bramRestoreToolDescBannerDismissed ? window.__bramRestoreToolDescBannerDismissed() : ''}" var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.headerInflightTick="{0}" var.agentSwitching="{false}" var.transcriptAgentId="{''}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}" var.dismissedAgentIds="{window.__bramRestoreDismissedAgents()}"
+<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{window.__bramRestoreUpdateBannerDismissed ? window.__bramRestoreUpdateBannerDismissed() : ''}" var.toolDescBannerDismissedVersion="{window.__bramRestoreToolDescBannerDismissed ? window.__bramRestoreToolDescBannerDismissed() : ''}" var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.agentSwitching="{false}" var.transcriptAgentId="{''}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}" var.dismissedAgentIds="{window.__bramRestoreDismissedAgents()}"
   onInit="startBramLatestJsonlPush(() => (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || '')">
   <PushSource
     id="mainAgentStatus"
@@ -50,22 +50,31 @@
        Refetched on open and when enhance-status-changed fires. -->
   <DataSource id="skillsList" url="/__context/skills" />
   <!-- App-scope read of the inflight worklist claim, so the header can show
-       "Approving/Iterating/Dropping <item>" even when you've left the Worklist tab. -->
-  <DataSource id="headerInflightClaim" url="/__inflight?t={headerInflightTick}" />
+       "Approving/Iterating/Dropping <item>" even when you've left the Worklist tab.
+       issue-265: the url carries NO cache-busting tick. DataSource shares one
+       cache entry across every instance with the same url/queryParams/body
+       (https://www.xmlui.org/docs/reference/components/DataSource — "mounting
+       two DataSource instances with the same url ... calls the handler once and
+       shares the result across consumers"), so this and Workspace's
+       inflightClaim are one source of truth. A per-component tick in the url
+       silently split them into two cache entries that drifted apart, which was
+       the whole of #265. Refresh via refetch(), which invalidates the shared
+       entry for all consumers. -->
+  <DataSource id="headerInflightClaim" url="/__inflight" />
   <PushSource
     id="headerInflightEvt"
     initial="{null}"
     subscribe="{window.bramSubscribeTauriEvent('inflight-claim-changed')}" />
   <ChangeListener
     listenTo="{headerInflightEvt.value}"
-    onDidChange="() => { headerInflightTick = headerInflightTick + 1; window.__bramIframeTrace('refetch-called', {context: 'header-inflight-claim-changed', tick: headerInflightTick}); }" />
+    onDidChange="() => { headerInflightClaim.refetch(); window.__bramIframeTrace('refetch-called', {context: 'header-inflight-claim-changed'}); }" />
   <!-- Backup driver: the dedicated inflight-claim-changed subscription dedups
        against Workspace's, so also refetch whenever the agent status changes
        (App-scope push that's already proven). An in-flight action always makes
        the agent work, so this reliably picks the claim up and drops it. -->
   <ChangeListener
     listenTo="{mainAgentStatus.value &amp;&amp; mainAgentStatus.value.state}"
-    onDidChange="() => { headerInflightTick = headerInflightTick + 1; window.__bramIframeTrace('header-inflight-refetch', {tick: headerInflightTick, state: (mainAgentStatus.value &amp;&amp; mainAgentStatus.value.state) || ''}); }" />
+    onDidChange="() => { headerInflightClaim.refetch(); window.__bramIframeTrace('header-inflight-refetch', {state: (mainAgentStatus.value &amp;&amp; mainAgentStatus.value.state) || ''}); }" />
   <DataSource id="appInfo" url="/__app-info" />
   <!-- issue-231 footer tips: settings snapshot feeds the relevance gates
        (Tool Descriptions / batch actions); tick bumps re-pick on dismiss

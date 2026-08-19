@@ -1848,6 +1848,73 @@ window.__bramInflightBannerLabel = function (claim) {
   return action + " " + ids + status;
 };
 
+// issue-265: the per-item indicator's kind, resolved from ONE source with a
+// bounded local echo. Host state wins whenever the claim covers the item;
+// the echo only fills the gap between the click and the host's sentinel
+// write, and Workspace expires it so a completion callback that never fires
+// cannot leave an indicator running against a clean sentinel. Returns ''
+// when nothing is in flight for this item.
+// The echo is bounded by the caller's tick rather than by a separate timer or
+// piece of state: Workspace's existing 2 s Timer advances actionProgressTick
+// while a submission is outstanding, so ECHO_MAX_TICKS is simply how long we
+// will believe a click the host never confirmed. Expiry is therefore derived,
+// not stored — there is no way for it to get stuck out of sync.
+var BRAM_ECHO_MAX_TICKS = 15; // ~30 s at the 2 s tick
+
+window.__bramItemInflightKind = function (claim, itemId, echoItemId, echoKind, echoTick) {
+  if (!itemId) return "";
+  var ids = (claim && claim.ids) || [];
+  if (ids.indexOf(itemId) !== -1) return claim.kind || "";
+  if (!echoItemId || echoItemId !== itemId || !echoKind) return "";
+  if ((echoTick || 0) >= BRAM_ECHO_MAX_TICKS) {
+    // Host never claimed this item. Stop asserting it is in flight; the row
+    // falls back to its authorization state (or to nothing).
+    return "";
+  }
+  return echoKind;
+};
+
+// issue-265: per-item indicator text. Animated dots come from a tick the
+// caller advances; the verb comes from __bramItemInflightKind so the row and
+// the header banner cannot disagree about what is happening.
+window.__bramItemInflightText = function (claim, itemId, echoItemId, echoKind, tick) {
+  var kind = window.__bramItemInflightKind(claim, itemId, echoItemId, echoKind, tick);
+  if (!kind) return "";
+  var label = window.__bramInflightActionLabel(kind);
+  if (!label) return "";
+  return label + ".".repeat(1 + (((tick || 0) % 3) + 3) % 3);
+};
+
+// issue-265: the ONE per-item indicator. Previously three surfaces reported
+// overlapping facts and could contradict each other — a local-only spinner, an
+// "Approving..." line with a local fallback, and the authorization badge.
+// Precedence: an in-flight transition wins; otherwise an unconsumed
+// authorization shows. Empty string means the row has nothing to say.
+window.__bramItemStatusText = function (claim, item, echoItemId, echoKind, tick) {
+  var id = item && item.id;
+  var inflight = window.__bramItemInflightText(claim, id, echoItemId, echoKind, tick);
+  if (inflight) return inflight;
+  var auth = item && item.activeAuthorization;
+  if (auth) return (auth === "drop" ? "DROP" : "APPROVED") + " · awaiting agent";
+  return "";
+};
+
+window.__bramItemStatusIsInflight = function (claim, item, echoItemId, echoKind, tick) {
+  return window.__bramItemInflightKind(claim, item && item.id, echoItemId, echoKind, tick) !== "";
+};
+
+window.__bramItemStatusTooltip = function (claim, item, echoItemId, echoKind, tick) {
+  if (window.__bramItemStatusIsInflight(claim, item, echoItemId, echoKind, tick)) {
+    return "A worklist lifecycle transition is in flight for this item.";
+  }
+  var auth = item && item.activeAuthorization;
+  if (!auth) return "";
+  var mins = Math.round(((item && item.authorizationAgeMs) || 0) / 60000);
+  return "An unconsumed " + auth + " authorization from " + mins +
+    " min ago covers this item. The agent has not advanced it yet; " +
+    "re-clicking the button refreshes the authorization.";
+};
+
 // project-identity-chip: deterministic hue for the project chip and the
 // AppHeader's bottom border, so two Brams running side by side are told
 // apart without reading anything. FNV-1a over the absolute project root

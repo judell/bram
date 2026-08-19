@@ -1334,6 +1334,28 @@ render?") are answered by evidence, not inspection. The norms:
   ("every would-X corresponds to a corroborated moment; zero fire
   during Y"). Precedents: the send-ledger's observe-only phase, the
   reveal-floor observer. The design review is a grep.
+- **Distinguish soak observers from tripwires — they graduate
+  differently, and applying the wrong shape retires a working
+  instrument.** A *soak observer* fires during normal operation, so a
+  soak accumulates positive instances and the criteria above apply as
+  written. A *tripwire* fires only when a rule is violated, and the
+  rule usually exists precisely to prevent the condition — so correct
+  operation reads zero indefinitely, and zero is **success, not absent
+  evidence**. Its graduation question is not "did it fire" but "is the
+  condition reachable, and would a fire be actionable?", settled by
+  reasoning about the mechanism rather than by waiting.
+  `inflight-collision` is the type case.
+
+  The trap: **a tripwire's zero and a dead instrument's zero are
+  identical in a grep.** So a tripwire needs a *provenance* check in
+  place of a soak — a deliberate violation in a test, or a review
+  confirming the emit is wired and the path reachable. Receipt: the
+  `inflight-collision` draft borrowed the soak shape and asserted that
+  a two-subagent run producing no lines would falsify it. The first
+  two-track exercise (2026-08-19, xmlui-org/xmlui-mcp#33) ran two full
+  gate cycles with zero fires — the convention worked — and by its own
+  criterion that argued for dropping the tripwire that had just
+  demonstrated the convention holding.
 - **Baselines are commits.** Perf work starts with an instrumentation
   commit that records the before (see `a99c7d9`, "sets up the
   before/after": ~1.7 footer re-renders/sec while typing, 49 ms avg

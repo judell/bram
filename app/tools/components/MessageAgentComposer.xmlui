@@ -89,24 +89,57 @@
           </event>
         </Button>
       </VStack>
-      <VStack
-        when="{$pathname === '/transcript'}"
-        width="2rem"
-        gap="$space-1"
-        horizontalAlignment="center">
-        <Button
-          label="▲"
-          variant="ghost"
-          size="xs"
-          tooltip="Scroll transcript to top"
-          onClick="window.__bramTranscriptScroll('top')" />
-        <Button
-          label="▼"
-          variant="ghost"
-          size="xs"
-          tooltip="Scroll transcript to bottom"
-          onClick="window.__bramTranscriptScroll('bottom')" />
-      </VStack>
+      <!-- ▲ and ▼ ride opposite ends of the footer column so position
+           carries the meaning, instead of leaving it entirely to the two
+           glyphs. SpaceFiller is the sanctioned idiom for this
+           (https://docs.xmlui.org/howto/align-items-to-row-ends-with-spacefiller),
+           and it needs a container with a REAL height to grow into
+           (https://docs.xmlui.org/howto/push-a-footer-to-the-bottom).
+
+           height="100%" does not supply one here. The footer row is
+           <HStack verticalAlignment="center">, and Stack alignment takes
+           only start | center | end — there is no `stretch`, so no row
+           child ever matches the row height, and a percentage resolves
+           against a parent that never had one. The column collapsed to
+           its two buttons and SpaceFiller had nothing to absorb, which
+           read as "the change did not land" twice over.
+
+           So the height is explicit. The cost: it does not track the
+           composer, which grows from minRows=2 to maxRows=4, so past
+           that the arrows stay 6rem apart rather than spanning. Visible
+           stable separation beats a silent collapse.
+
+           The glyph size does NOT come from the `size` prop. Button's
+           `size` selects padding only — the docs define
+           paddingVertical-Button-{xs,sm,md,lg} but a single
+           fontSize-Button ($fontSize-sm) shared by every size, so
+           xs → sm → md moved the box and left the arrow identical.
+           Making the arrows bigger means fontSize-Button; making them
+           hug the ends means zero padding. Both go through this Theme
+           wrapper, which is why size stays xs.
+           https://docs.xmlui.org/components/Button -->
+      <Theme fontSize-Button="$fontSize-xl"
+             paddingVertical-Button-xs="0" paddingHorizontal-Button-xs="0">
+        <VStack
+          when="{$pathname === '/transcript'}"
+          width="2rem"
+          height="6rem"
+          horizontalAlignment="center">
+          <Button
+            label="▲"
+            variant="ghost"
+            size="xs"
+            tooltip="Scroll transcript to top"
+            onClick="window.__bramTranscriptScroll('top')" />
+          <SpaceFiller />
+          <Button
+            label="▼"
+            variant="ghost"
+            size="xs"
+            tooltip="Scroll transcript to bottom"
+            onClick="window.__bramTranscriptScroll('bottom')" />
+        </VStack>
+      </Theme>
     </HStack>
   </Form>
   <PastedImageStrip target="message-agent" />

@@ -1095,7 +1095,7 @@ Before you `Approve` a `TO-APPLY` item you can `Iterate` to refine the proposal.
             voiceTarget="new-item"
             pasteTarget="new-item"
             voiceTooltip="Dictate worklist item"
-            verticalAlignment="start" />
+            />
           <HStack gap="$space-2">
             <Button
               label="Send"

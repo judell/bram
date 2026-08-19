@@ -105,10 +105,7 @@
             width="100%"
             voiceTarget="{'queue-item:' + $item.id}"
             pasteTarget="{'queue-item:' + $item.id}"
-            voiceVariant="ghost"
-            voiceSize="xs"
             voiceTooltip="Voice note"
-            verticalAlignment="start"
             onCommit="(v) => entries = window.__bramQueueUpdate(entries, $itemIndex, v)" />
           <HStack gap="$space-2" verticalAlignment="center">
             <Text

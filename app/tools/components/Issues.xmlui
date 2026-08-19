@@ -108,7 +108,7 @@
           width="100%"
           voiceTarget="new-issue"
           voiceTooltip="Dictate issue request"
-          verticalAlignment="start" />
+          />
         <HStack gap="$space-2">
           <Button
             label="Send"

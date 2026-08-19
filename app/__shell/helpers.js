@@ -1798,6 +1798,29 @@ window.__bramWithStagedImageMarkers = function (text, target, voiceTarget) {
 //
 // Adding a voiceTarget prefix to any editor means adding it here too, in a
 // different file on the rebuild path.
+// Compose an IsolatedDraftEditor placeholder from what is actually wired.
+//
+// Callers pass only the lead ("Type a note"); the affordance clauses are
+// derived from the props, so a placeholder cannot advertise a capability the
+// editor does not have. Before this, each call site hand-wrote the whole
+// string and they had drifted in both directions: the queue invited a
+// screenshot paste with no pasteTarget (so no PastedImageStrip rendered and
+// pasted images staged invisibly under the voice key), while the one editor
+// that HAD paste wired never mentioned it.
+//
+// Wording is the queue's, which read well and is the reason this is a
+// narrowing rather than a redesign.
+window.__bramEditorPlaceholder = function (lead, hasPaste, hasVoice) {
+  var base = String(lead == null ? "" : lead).trim();
+  if (!base) return "";
+  var clauses = [];
+  if (hasPaste) clauses.push("paste a screenshot (Ctrl-V/Cmd-V)");
+  if (hasVoice) clauses.push("dictate with the mic");
+  if (!clauses.length) return base;
+  if (clauses.length === 1) return base + ", or " + clauses[0] + ".";
+  return base + ", " + clauses[0] + ", or " + clauses[1] + ".";
+};
+
 window.__bramIsWorklistTextVoiceTarget = function (target) {
   var t = target || "";
   return ["message-agent", "feedback", "new-item", "new-issue"].indexOf(t) !== -1
@@ -6081,6 +6104,57 @@ window.__bramFollowRepinOk = function (varAtBottom, agentId) {
   }
   return truth;
 };
+// A machine scroll that yanks the view off the bottom after a jump already
+// landed is the failure the echo guard was never asked to fix.
+//
+// The guard's job is to stop a programmatic scroll from FLIPPING follow state,
+// and it does that correctly. But suppressing the classification does nothing
+// about the scroll, so the view moves and nothing re-checks. Across three weeks
+// of trace archive this signature -- an uncorroborated suppression 84-1968ms
+// after an explicit jump that verified landed=true -- appears 24 times, always
+// after footer-arrow-down, about 10% of explicit jumps. That is the "sometimes
+// it works" the operator has been reporting.
+//
+// The repair never acts on the classification alone. It measures: if the final
+// row is rendered and its bottom now sits below the fold, the promise made at
+// jump time is visibly broken, so re-issue it. If the row is still at the fold,
+// the suppressed scroll was jitter and nothing happens -- so a fire in the
+// trace is always a real, measured departure, and zero fires means the class
+// stopped occurring rather than the instrument going quiet.
+//
+// Bounded at 3 per rolling 3s: the repair scrolls, which produces more scroll
+// events, which re-enter here.
+window.__bramFollowRepinBudget = [];
+window.__bramFollowEchoRepin = function (agentId) {
+  try {
+    var listRef = window.__bramJumpListRef;
+    if (!listRef || !listRef.scrollToBottom) return false;
+    var total = window.__bramFollowLastTotal || 0;
+    var probe = __bramLastRowProbe(total);
+    if (!probe.lastRowRendered || probe.lastRowGap <= 4) return false;
+    var now = performance.now();
+    var budget = (window.__bramFollowRepinBudget || []).filter(function (t) {
+      return (now - t) < 3000;
+    });
+    if (budget.length >= 3) {
+      window.__bramFollowRepinBudget = budget;
+      window.__bramIframeTrace("follow-state", {
+        op: "echo-repin-capped", gap: probe.lastRowGap,
+        total: total, agentId: agentId || "main",
+      });
+      return false;
+    }
+    budget.push(now);
+    window.__bramFollowRepinBudget = budget;
+    window.__bramIframeTrace("follow-state", {
+      op: "echo-repin", gap: probe.lastRowGap, attempt: budget.length,
+      maxRenderedIndex: probe.maxRenderedIndex, total: total,
+      agentId: agentId || "main",
+    });
+    window.__bramBottomJumpRetry(listRef, "echo-repin", agentId, total);
+    return true;
+  } catch (e) { return false; }
+};
 window.__bramFollowClassify = function (cur, atEnd, agentId) {
   try {
     var suppress = "";
@@ -6092,12 +6166,18 @@ window.__bramFollowClassify = function (cur, atEnd, agentId) {
     }
     if (suppress) {
       if (cur !== atEnd) {
+        var sp = __bramLastRowProbe(window.__bramFollowLastTotal || 0);
         window.__bramIframeTrace("follow-state", {
           op: "echo-suppressed", to: !!atEnd, cause: suppress,
           inputAgeMs: window.__bramLastUserInputMs
             ? (Date.now() - window.__bramLastUserInputMs) : -1,
+          lastRowRendered: sp.lastRowRendered, lastRowGap: sp.lastRowGap,
           agentId: agentId || "main",
         });
+        // Following, and something not-the-user moved us off the bottom.
+        if (cur === true && atEnd === false) {
+          window.__bramFollowEchoRepin(agentId);
+        }
       }
       window.__bramFollowAtBottom = cur !== false;
       return cur;
@@ -6127,23 +6207,203 @@ window.__bramFollowTransition = function (to, cause, agentId) {
   } catch (e) { /* ignore */ }
   return to;
 };
-// The List's virtua scroller, found by walking up from a rendered row rather
-// than by class name (the generated class hashes change between builds).
-function __bramTranscriptScroller() {
+function __bramIsScrollable(el) {
   try {
-    var el = document.querySelector("[data-index]");
-    el = el && el.parentElement;
-    while (el) {
-      if (el.scrollHeight > el.clientHeight + 1) {
-        var ov = "";
-        try { ov = window.getComputedStyle(el).overflowY || ""; } catch (e2) { ov = ""; }
-        if (ov === "auto" || ov === "scroll") return el;
-      }
-      el = el.parentElement;
-    }
-  } catch (e) { /* ignore */ }
-  return null;
+    if (!el || el.scrollHeight <= el.clientHeight + 1) return false;
+    var ov = window.getComputedStyle(el).overflowY || "";
+    return ov === "auto" || ov === "scroll";
+  } catch (e) { return false; }
 }
+
+// The transcript List's virtua scroller.
+//
+// SCOPED to [data-testid="transcript-list"], and that scoping is the whole
+// point. The first version walked up from `document.querySelector("[data-index]")`
+// — the first virtualized row ANYWHERE in the document. Search results, the
+// message queue and the transcript all render Lists with [data-index] rows, so
+// when a previously-visited tab was still mounted the check measured THAT
+// list's scroller: legitimately at its end, while the transcript sat far from
+// its bottom. Observed 2026-08-19: two jump failures reported by the operator,
+// both immediately after arriving from another tab, both traced gap=0.
+//
+// A measurement that names the wrong element is worse than no measurement,
+// because it is confident. `how` is traced so a scoping miss is visible rather
+// than silently falling back to the old document-wide behaviour.
+function __bramTranscriptScrollerInfo() {
+  var root = null;
+  try { root = document.querySelector('[data-testid="transcript-list"]'); } catch (e) { root = null; }
+  if (root) {
+    if (__bramIsScrollable(root)) return { el: root, how: "scoped-self" };
+    try {
+      var inner = root.querySelectorAll("*");
+      for (var i = 0; i < inner.length && i < 40; i++) {
+        if (__bramIsScrollable(inner[i])) return { el: inner[i], how: "scoped-inner" };
+      }
+    } catch (e2) { /* ignore */ }
+    var up = root.parentElement;
+    while (up) {
+      if (__bramIsScrollable(up)) return { el: up, how: "scoped-ancestor" };
+      up = up.parentElement;
+    }
+    return { el: null, how: "scoped-miss" };
+  }
+  // No tagged list in the DOM: the transcript is not mounted, so there is
+  // nothing to measure. Deliberately NOT falling back to a document-wide
+  // search, which is the bug this function was rewritten to fix.
+  return { el: null, how: "unmounted" };
+}
+
+function __bramTranscriptScroller() {
+  return __bramTranscriptScrollerInfo().el;
+}
+
+// Ground truth for "did I land at the bottom", independent of any scroller.
+//
+// Three times tonight a scroller-gap reading said landed while the operator was
+// looking at a screen that said otherwise. The last of those exposed why: every
+// reading resolved `scoped-ancestor`, meaning the transcript List is not itself
+// scrollable and the measurement walks up to the page/main scroller. That
+// scroller can legitimately be at its end while the virtualized List has not
+// extended to its final row — two different questions, and only one of them is
+// the user's.
+//
+// So measure the thing the user actually cares about: is the final event's row
+// rendered, and is its bottom edge above the fold? `lastRowBottom` is relative
+// to the viewport; `lastRowGap` is how far below the fold it sits (0 when
+// visible). `lastRowRendered:false` means virtua has not built that row at all,
+// which is a different failure from "rendered but scrolled past".
+function __bramLastRowProbe(total) {
+  var out = { lastRowRendered: false, lastRowGap: -1, lastRowIndex: -1, maxRenderedIndex: -1 };
+  try {
+    var root = document.querySelector('[data-testid="transcript-list"]');
+    var nodes = (root || document).querySelectorAll("[data-index]");
+    if (!nodes || !nodes.length) return out;
+    var want = (typeof total === "number" && total > 0) ? total - 1 : -1;
+    var maxIdx = -1;
+    var node = null;
+    for (var i = 0; i < nodes.length; i++) {
+      var raw = nodes[i].getAttribute("data-index");
+      var idx = raw == null ? -1 : parseInt(raw, 10);
+      if (isNaN(idx)) continue;
+      if (idx > maxIdx) { maxIdx = idx; }
+      if (want >= 0 && idx === want) node = nodes[i];
+    }
+    out.maxRenderedIndex = maxIdx;
+    out.lastRowIndex = want;
+    if (!node) return out;
+    out.lastRowRendered = true;
+    var r = node.getBoundingClientRect();
+    var vh = window.innerHeight || document.documentElement.clientHeight || 0;
+    out.lastRowGap = Math.max(0, Math.round(r.bottom - vh));
+  } catch (e) { /* ignore */ }
+  return out;
+}
+
+// Explicit jump-to-bottom, with the bounded retry the mount path has always
+// had and the jump paths never did.
+//
+// Measured 2026-08-18 with the corrected verifier: footer-arrow-down landed 0
+// of 2 (short by 43px, then 522px) while mount-pin landed 5 of 5. The only
+// bottom-promise that re-checks is the only one that lands. A jump issues
+// scrollToBottom(), verifies two frames later, and if the content is still
+// settling it simply stays wrong — in the observed episode, 43px short for
+// five seconds until unrelated agent output triggered a repin.
+//
+// Retry on PIXELS, never on index: five append-time divergences in the same
+// soak reported endIndex 0 against totals above 2100, because the visible
+// range is stale at exactly those moments. An index-driven retry would spin
+// against a lie.
+//
+// No fixed offset correction: the two misses differed by an order of
+// magnitude, which points at content settling after the scroll rather than a
+// constant error, so a fudge factor would fix one and miss the other.
+window.__bramBottomJumpRetry = function (listRef, cause, agentId, total) {
+  window.__bramJumpListRef = listRef;
+  var MAX_ATTEMPTS = 40; // ~2s at 50ms; a jump from the top of a long
+                         // virtualized list needs virtua to render and measure
+                         // its way down, which the old 600ms budget cut short.
+  var attempts = 0;
+  var settled = 0;
+  function jump() {
+    try { if (listRef && listRef.scrollToBottom) listRef.scrollToBottom(); } catch (e) { /* ignore */ }
+  }
+  function step() {
+    // The user scrolling up mid-retry takes precedence: __bramFollowTransition
+    // sets this false on a corroborated user scroll, and a retry that fought
+    // that would be worse than the miss it fixes.
+    if (window.__bramFollowAtBottom === false) {
+      window.__bramIframeTrace("follow-state", {
+        op: "jump-yielded", cause: cause || "", attempts: attempts,
+        agentId: agentId || "main",
+      });
+      return;
+    }
+    var info = __bramTranscriptScrollerInfo();
+    var sc = info.el;
+    var gap = sc ? Math.max(0, sc.scrollHeight - (sc.scrollTop + sc.clientHeight)) : 0;
+    // Require pixel AND index, and require them twice running.
+    //
+    // Pixel alone is not enough when jumping from far away: virtua renders and
+    // measures rows incrementally, so scrollHeight is still GROWING during the
+    // jump and `scrollTop + clientHeight >= scrollHeight - 4` is satisfied
+    // against a partial height. Observed 2026-08-19: a chip jump from the top
+    // of a 2,224-event transcript reported gap<=4, stopped, and was 3,158px
+    // short two frames later — with no pin-abandoned, because the loop thought
+    // it had won.
+    //
+    // Index alone is not enough either: during content appends the visible
+    // range lags and reports endIndex 0 against totals above 2,100. The two
+    // measures fail in opposite conditions, so the conjunction is the honest
+    // test, and the consecutive-tick requirement is what a still-growing
+    // scrollHeight cannot fake.
+    var r = window.__bramVisibleRange;
+    var endIndex = (r && typeof r.endIndex === "number") ? r.endIndex : -1;
+    var n = (typeof total === "number" && total >= 0)
+      ? total
+      : ((window.__bramLastTranscriptEvents || []).length || 0);
+    var indexAtEnd = n > 0 && endIndex >= n - 1;
+    // Converge on what the user can see. When the final row is rendered, its
+    // position relative to the fold IS the answer, and it settles the case a
+    // scroller gap cannot: the page scroller at its end while the virtualized
+    // List has not extended to its last row. Only when that row does not exist
+    // yet do we fall back to the scroller/index conjunction.
+    var probe = __bramLastRowProbe(n);
+    var atEnd = probe.lastRowRendered
+      ? (probe.lastRowGap <= 4)
+      : (!!sc && gap <= 4 && indexAtEnd);
+    if (!sc) {
+      window.__bramFollowVerify(cause, agentId, total);
+      return;
+    }
+    if (atEnd) {
+      settled += 1;
+      if (settled >= 2) {
+        window.__bramFollowVerify(cause, agentId, total);
+        return;
+      }
+    } else {
+      settled = 0;
+    }
+    if (attempts >= MAX_ATTEMPTS) {
+      window.__bramIframeTrace("follow-state", {
+        op: "pin-abandoned", cause: cause || "", attempts: attempts,
+        pixelGap: gap, indexAtEnd: indexAtEnd, endIndex: endIndex,
+        lastRowRendered: probe.lastRowRendered, lastRowGap: probe.lastRowGap,
+        maxRenderedIndex: probe.maxRenderedIndex,
+        scroller: info.how, total: n, agentId: agentId || "main",
+      });
+      window.__bramFollowVerify(cause, agentId, total);
+      return;
+    }
+    attempts += 1;
+    // Re-issue only while genuinely short; a settling tick should not fight
+    // the scroller it is waiting on.
+    if (!atEnd) jump();
+    setTimeout(step, 50);
+  }
+  jump();
+  setTimeout(step, 50);
+};
 
 // Did a bottom-promise actually land?
 //
@@ -6170,6 +6430,9 @@ function __bramTranscriptScroller() {
 // move the scroller emits no scroll event, so that value can be stale exactly
 // when the promise failed.
 window.__bramFollowVerify = function (cause, agentId, total) {
+  // Every verify carries the live turn count, so the repair path has a fresh
+  // "which row is last" without threading it through the scroll listener.
+  if (typeof total === "number" && total > 0) window.__bramFollowLastTotal = total;
   try {
     requestAnimationFrame(function () {
       requestAnimationFrame(function () {
@@ -6181,14 +6444,27 @@ window.__bramFollowVerify = function (cause, agentId, total) {
             : ((window.__bramLastTranscriptEvents || []).length || 0);
           var indexAtEnd = n > 0 && endIndex >= n - 1;
 
-          var sc = __bramTranscriptScroller();
+          var info = __bramTranscriptScrollerInfo();
+          var sc = info.el;
           var pixelAtEnd = null;
           var pixelGap = -1;
+          var elDesc = "";
           if (sc) {
             pixelGap = Math.max(0, sc.scrollHeight - (sc.scrollTop + sc.clientHeight));
             pixelAtEnd = pixelGap <= 4;
+            try {
+              elDesc = (sc.tagName || "?").toLowerCase()
+                + "." + String(sc.className || "").split(/\s+/)[0].slice(0, 24)
+                + " " + Math.round(sc.scrollTop) + "/" + Math.round(sc.scrollHeight)
+                + " h" + Math.round(sc.clientHeight);
+            } catch (e5) { elDesc = "?"; }
           }
+          var probe = __bramLastRowProbe(n);
 
+          // With no scroller of OUR OWN to measure, fall back to index rather
+          // than to another list's scroller. `scroller` names which happened,
+          // so a run of `scoped-miss` / `unmounted` is legible as "this reading
+          // is index-only" instead of passing for a pixel verdict.
           var landed = (pixelAtEnd === null) ? indexAtEnd : pixelAtEnd;
           var route = "";
           try { route = String(location.hash || ""); } catch (e4) { /* ignore */ }
@@ -6201,6 +6477,11 @@ window.__bramFollowVerify = function (cause, agentId, total) {
             pixelAtEnd: pixelAtEnd,
             pixelGap: pixelGap,
             divergent: (pixelAtEnd !== null && pixelAtEnd !== indexAtEnd),
+            scroller: info.how,
+            el: elDesc,
+            lastRowRendered: probe.lastRowRendered,
+            lastRowGap: probe.lastRowGap,
+            maxRenderedIndex: probe.maxRenderedIndex,
             endIndex: endIndex,
             total: n,
             route: route,

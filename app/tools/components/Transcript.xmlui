@@ -127,7 +127,7 @@
     height="100%"
     padding="$space-4"
     gap="$space-2"
-    onInit="window.__bramRegisterTranscriptScroll(() => { atBottom = window.__bramFollowTransition(false, 'footer-arrow-up', $props.agentId); transcriptList.scrollToTop(); }, () => { window.__bramClearTranscriptFind('footer-arrow-down'); atBottom = window.__bramFollowTransition(true, 'footer-arrow-down', $props.agentId); transcriptList.scrollToBottom(); window.__bramFollowVerify('footer-arrow-down', $props.agentId, events.length); }); window.__bramTranscriptMount()"
+    onInit="window.__bramRegisterTranscriptScroll(() => { atBottom = window.__bramFollowTransition(false, 'footer-arrow-up', $props.agentId); transcriptList.scrollToTop(); }, () => { window.__bramClearTranscriptFind('footer-arrow-down'); atBottom = window.__bramFollowTransition(true, 'footer-arrow-down', $props.agentId); window.__bramBottomJumpRetry(transcriptList, 'footer-arrow-down', $props.agentId, events.length); }); window.__bramTranscriptMount()"
     onCleanup="window.__bramSetTranscriptMounted(false); window.__bramSetVisibleRange(Object.assign({}, window.__bramVisibleRange || {}, { atBottom: atBottom, total: events.length }))"
     var.events="{window.__bramTranscriptEventsFromTurns($props.agentId ? subagentTurns.value : turnsEvt.value, null)}"
     var.eventsVersion="{($props.agentId ? (subagentTurns.value &amp;&amp; subagentTurns.value.total) : (turnsEvt.value &amp;&amp; turnsEvt.value.revision)) || events.length}"
@@ -191,6 +191,7 @@
       value="No transcript yet." />
     <List
       id="transcriptList"
+      testId="transcript-list"
       height="*"
       data="{(findPlan &amp;&amp; findPlan.rows) || events}"
       idKey="{findPlan ? '__findKey' : 'id'}"
@@ -496,7 +497,7 @@
       onTick="() => { mountPinTicks = mountPinTicks + 1; if (!mountFollow) { mountPinArmed = false; atBottom = window.__bramFollowTransition(false, 'mount-restore-reading', $props.agentId); if (mountReturnState &amp;&amp; mountReturnState.startIndex > 0) { transcriptList.scrollToIndex(mountReturnState.startIndex); } window.__bramIframeTrace('transcript-mount-restore', {index: (mountReturnState &amp;&amp; mountReturnState.startIndex) || 0, events: events.length}); } else if (window.__bramVisibleRange &amp;&amp; window.__bramVisibleRange.endIndex >= events.length - 1) { mountPinArmed = false; window.__bramFollowVerify('mount-pin', $props.agentId, events.length); window.__bramIframeTrace('transcript-mount-pin', {ticks: mountPinTicks, events: events.length}); } else if (mountPinTicks > 8) { mountPinArmed = false; window.__bramIframeTrace('follow-state', {op: 'pin-abandoned', cause: 'mount-pin', ticks: mountPinTicks, total: events.length, endIndex: (window.__bramVisibleRange &amp;&amp; window.__bramVisibleRange.endIndex) || -1, agentId: $props.agentId || 'main'}); window.__bramFollowVerify('mount-pin-abandoned', $props.agentId, events.length); } else { transcriptList.scrollToBottom(); } }" />
     <ChangeListener
       listenTo="{$props.agentId}"
-      onDidChange="() => { atBottom = window.__bramFollowTransition(true, 'agent-chip-switch', $props.agentId); repinArmed = true; window.__bramIframeTrace('subagent-switch', {agentId: $props.agentId || 'main', events: events.length}); transcriptList.scrollToBottom(); }" />
+      onDidChange="() => { atBottom = window.__bramFollowTransition(true, 'agent-chip-switch', $props.agentId); repinArmed = true; window.__bramIframeTrace('subagent-switch', {agentId: $props.agentId || 'main', events: events.length}); window.__bramBottomJumpRetry(transcriptList, 'agent-chip-switch', $props.agentId, events.length); }" />
     <Timer
       interval="400"
       enabled="{repinArmed}"

@@ -48,6 +48,17 @@ permission-menu hook follows the same split:
 `app/provider-hooks/claude-permission-menu-hook.py` canonical,
 `.claude/hooks/claude-permission-menu-hook.py` installed.
 
+In **this source repo** the installed copies are tracked, and `build.rs`
+regenerates them on every build — so a worklist item that edits a
+canonical hook must list its installed twin in `files` as well
+(`app/provider-hooks/claude-worklist-guard.py` →
+`.claude/hooks/claude-worklist-guard.py`). Omit it and the commit lands
+canonical-only; the next build then regenerates the installed copy into
+a dirty working tree that belongs to no item, and a checkout of that
+commit carries a guard whose installed and canonical forms disagree.
+The `.gitignore` entries near `.claude/hooks/` cover only the retired
+generic names, not the provider-prefixed installed copies.
+
 The Codex guard has the same source/installed split:
 `app/provider-hooks/codex-worklist-guard.py` is canonical, while
 `~/.bram/codex-worklist-guard.py` is the installed runtime copy (the

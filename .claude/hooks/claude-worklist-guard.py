@@ -130,12 +130,16 @@ _GH_ISSUE_WRITE_RX = re.compile(
     r"(^|[\s;&|`(])gh\s+issue\s+(close|reopen|edit|comment|create|delete|transfer|pin|unpin|lock|unlock)\b"
 )
 
+# The redirect entry needs extra logic (see _pattern_is_write /
+# bash-write-nonrepo-target below), so it's named rather than inlined below.
+_REDIRECT_WRITE_RX = re.compile(r"(^|[\s;&|`(])>+\s*[^\s>&]")  # > file or >> file
+
 # Bash commands we deny without worklist coverage. This intentionally matches
 # the Codex guard's H3-level classifier: broad enough to stop common write and
 # external side-effect bypasses, but narrow enough to keep read-only shell
 # investigation usable.
 _BASH_WRITE_PATTERNS = [
-    re.compile(r"(^|[\s;&|`(])>+\s*[^\s>&]"),         # > file or >> file
+    _REDIRECT_WRITE_RX,
     re.compile(r"(^|[\s;&|`(])tee\b"),                # tee
     re.compile(r"(^|[\s;&|`(])sed\s+[^|;&]*-i\b"),    # sed -i
     re.compile(r"(^|[\s;&|`(])perl\s+[^|;&]*-i\b"),   # perl -i
@@ -149,14 +153,58 @@ _BASH_WRITE_PATTERNS = [
     re.compile(r"(^|[\s;&|`(])sh\s+-c\b"),
 ]
 
+# Redirect targets that are not a repository mutation: no-op sinks and temp
+# scratch space, not the repo (guard-write-detection-false-positives). Other
+# /dev/* targets (stdout, fd/*) are genuine writes and stay covered -- only
+# these two exact sinks and the two temp prefixes are excluded.
+_REDIRECT_TARGET_RX = re.compile(r"(^|[\s;&|`(])>+\s*([^\s>&]+)")
+_NONREPO_REDIRECT_EXACT = {"/dev/null", "/dev/zero", "/tmp", "/private/tmp"}
+_NONREPO_REDIRECT_PREFIXES = ("/tmp/", "/private/tmp/")
+
+
+def _redirect_targets(command):
+    """Every `> x` / `>> x` redirect target in command, quotes stripped."""
+    if not isinstance(command, str):
+        return []
+    out = []
+    for m in _REDIRECT_TARGET_RX.finditer(command):
+        target = m.group(2)
+        if len(target) >= 2 and target[0] == target[-1] and target[0] in ("'", '"'):
+            target = target[1:-1]
+        out.append(target)
+    return out
+
+
+def _is_nonrepo_redirect_target(target):
+    return (
+        target in _NONREPO_REDIRECT_EXACT
+        or target.startswith(_NONREPO_REDIRECT_PREFIXES)
+    )
+
+
+def redirect_is_write(command):
+    """True iff command has a redirect targeting somewhere other than a
+    no-op sink or temp scratch space. A command whose only redirect targets
+    are excluded (`cmd >/dev/null 2>&1`, `cat > /tmp/body.md`) is not a
+    write via this pattern -- other _BASH_WRITE_PATTERNS entries still
+    apply, so a compound command with a real write is still caught."""
+    targets = _redirect_targets(command)
+    return any(not _is_nonrepo_redirect_target(t) for t in targets)
+
+
+def _pattern_is_write(rx, command):
+    """Evaluate one _BASH_WRITE_PATTERNS entry against command. Every entry
+    is a plain regex search except the redirect entry, which additionally
+    requires at least one non-excluded target."""
+    if rx is _REDIRECT_WRITE_RX:
+        return redirect_is_write(command)
+    return bool(rx.search(command))
+
 
 def bash_writes(command):
     if not isinstance(command, str):
         return False
-    for rx in _BASH_WRITE_PATTERNS:
-        if rx.search(command):
-            return True
-    return False
+    return any(_pattern_is_write(rx, command) for rx in _BASH_WRITE_PATTERNS)
 
 
 # conventions.md, "Issue-only forge work with no repo diff": create, edit,
@@ -177,10 +225,23 @@ def forge_issue_only_write(command):
     gate."""
     if not isinstance(command, str) or not _FORGE_ISSUE_ONLY_RX.search(command):
         return False
+    # Any redirect in the same command disqualifies the exemption, regardless
+    # of target. Before the non-repo-target narrowing this fell out of
+    # _BASH_WRITE_PATTERNS by accident: a heredoc body write counted as a
+    # write, so `cat > /tmp/b.md <<EOF ... && gh issue comment --body-file`
+    # was refused and the agent had to split the two commands. That accident
+    # was load-bearing -- splitting them is what lets PreToolUse read the body
+    # and actually verify the signature (conventions.md, "Write the body file
+    # in its own step"); combined, the check fails open against the very
+    # artifact it exists to verify. Narrowing the redirect pattern would have
+    # silently restored the combined form, so the refusal is now deliberate
+    # rather than incidental.
+    if _REDIRECT_WRITE_RX.search(command):
+        return False
     for rx in _BASH_WRITE_PATTERNS:
         if rx is _GH_ISSUE_WRITE_RX:
             continue
-        if rx.search(command):
+        if _pattern_is_write(rx, command):
             return False
     return True
 
@@ -849,6 +910,14 @@ def self_test():
         "truncate -s 0 file.txt",
         "bash -c 'echo x > out.txt'",
         "sh -c 'echo x > out.txt'",
+        # guard-write-detection-false-positives: other /dev/* targets and
+        # real repo paths are still writes even though /dev/null and /tmp
+        # are excluded below.
+        "echo hi > /dev/stdout",
+        "cat > src-tauri/src/lib.rs",
+        # A no-op-sink redirect compounded with a genuine write is still
+        # caught -- by the git pattern, not the redirect one.
+        "cat > /tmp/b.md && git commit -m x",
     ]
     read_commands = [
         "ls -la",
@@ -857,6 +926,13 @@ def self_test():
         "gh issue view 119 --repo judell/bram",
         "python --version",
         "curl -I https://example.com",
+        # guard-write-detection-false-positives: no-op sinks and temp
+        # scratch space are not repository mutations.
+        "git ls-files x >/dev/null 2>&1",
+        "echo hi > /dev/null",
+        "echo hi >> /dev/zero",
+        "cat > /tmp/body.md",
+        "cat > /private/tmp/x/body.md",
     ]
     for command in write_commands:
         assert bash_writes(command), command
@@ -1138,7 +1214,15 @@ def main():
             _trace_hook("PreToolUse", "Bash", preview, "allow", "forge-issue-only", cwd)
             sys.exit(0)
         if not bash_writes(command):
-            _trace_hook("PreToolUse", "Bash", preview, "allow", "bash-read-only", cwd)
+            # Distinguish "no write pattern matched at all" from "the only
+            # redirect target was a no-op sink / temp path" so the new
+            # allowance (guard-write-detection-false-positives) is
+            # greppable rather than blending into bash-read-only.
+            if _REDIRECT_WRITE_RX.search(command) and not redirect_is_write(command):
+                reason = "bash-write-nonrepo-target"
+            else:
+                reason = "bash-read-only"
+            _trace_hook("PreToolUse", "Bash", preview, "allow", reason, cwd)
             sys.exit(0)
         project_root = find_project_root(cwd)
         if project_root is None:

@@ -834,8 +834,8 @@
         <Markdown content="- **Open** the item you want to act on by clicking its chevron (`▶` becomes `▼` when open). Multiple items can stay open at once.
 - Click **Approve** to authorize the edits — the agent applies and the item transitions to TO COMMIT.
 - Click **Approve &amp; commit** to apply the edits and commit them in one step.
-- Click **Drop** to discard the item — it's removed without any file changes.
-- Ask the agent in chat to tweak an item's scope, before/after prose, or split it up — useful when the proposal is *almost* right." />
+- Enter non-empty per-item feedback and click **Iterate** to refine the proposal's scope, files, or before/after prose — the item stays TO APPLY and no file edits happen.
+- Click **Drop** to discard the item — it's removed without any file changes." />
         <HStack>
           <Button label="Got it" onClick="statusProposedHelpDialog.close()" />
         </HStack>

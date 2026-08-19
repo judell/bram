@@ -1081,6 +1081,30 @@ time. The check is mechanical: intersect the candidate item's
 in `resources/worklist.json`; non-empty intersection triggers the
 warning.
 
+### Delegating worklist items to subagents
+
+Parallelize the *work*; serialize the *gates*.
+
+- Subagents receive file paths and instructions only. They do **not**
+  call `/__worklist/resolve`, `/__worklist/mutate`, or
+  `worklist-commit`. Every lifecycle call stays in the orchestrator's
+  own turn, after the subagents return.
+- The reason is structural: the inflight sentinel holds one claim
+  (writing a second overwrites the first), and an authorization
+  record carries one whole-record consumed flag (the first `mutate`
+  consumes it, and the next subagent is told
+  `no_active_authorization` for work that was in fact approved).
+  Neither surface can represent two concurrent claimants.
+- Before delegating in parallel, intersect the `files` lists of the
+  candidate items. **Non-empty intersection → do not parallelize
+  those two**; run them in sequence.
+- Attribution: `worklist.json` has no agent field, so a TO COMMIT
+  diff produced by several subagents carries no record of which one
+  made which edit. If that matters for a batch, commit the items
+  separately.
+- This is hook-enforced, not merely advised — a lifecycle call from a
+  subagent transcript is denied. See below.
+
 ### Suggest a branch when isolation helps
 
 Bram should guide users toward good git practice, not force ceremony.

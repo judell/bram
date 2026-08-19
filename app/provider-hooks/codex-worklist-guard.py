@@ -58,6 +58,13 @@ AUTH_REL = "resources/.worklist-authorization.json"
 WORKLIST_INTENT_REL = "resources/.worklist-intent.json"
 WORKLIST_RESULT_REL = "resources/.worklist-result.json"
 BYPASS_TTL_SECONDS = 60 * 60  # an authorization record is fresh for 1h
+# Much shorter than BYPASS_TTL_SECONDS: an undrained worklist intent is a
+# lost request, not a standing authorization, so a stale one should stop
+# blocking new writes quickly rather than wedge Codex behind a file the
+# host will never drain (subagent-delegation-serialize-the-gates). Staleness
+# is measured from the intent file's own mtime (os.path.getmtime), since the
+# on-disk schema ({nonce, route, body}) carries no writer-supplied timestamp.
+INTENT_STALE_SECONDS = 120
 
 
 # Issue #49 [hook] trace + issue #95 phantom-write diagnostic.
@@ -218,6 +225,54 @@ def is_coordination_file(rel):
     """Codex lifecycle channel files (#130) — always allowed, like a curl to
     the loopback lifecycle routes was. Not a tracked repo mutation."""
     return rel in (WORKLIST_INTENT_REL, WORKLIST_RESULT_REL)
+
+
+def intent_write_verdict(cwd):
+    """('allow'|'deny', detail) for a write to resources/.worklist-intent.json.
+
+    The intent file is a single-slot coordination channel (#130): the host
+    drains and deletes it, but if a prior request was never drained (host
+    restart, watcher lag, an errored request), an unconditional allow here
+    lets the next write silently clobber it, losing the first request with
+    no signal (subagent-delegation-serialize-the-gates).
+
+    The on-disk schema is `{nonce, route, body}` (verified against
+    conventions.md's "Codex: filesystem intent/result files" section and the
+    host's drain code) -- there is no `turn_id` and no `written_at_ms` field.
+    An earlier version of this check gated on those two fields and so never
+    fired in production (every real file read back "unreadable" -> allow).
+    Staleness is measured from the file's own mtime instead, which needs no
+    schema change and is exactly what the host's drain-and-delete lifecycle
+    already implies: a file that has sat un-drained past INTENT_STALE_SECONDS
+    is abandoned, not merely slow.
+
+    The file carries no writer identity, so there is no way to distinguish
+    one's own undrained intent from another writer's (no 'own-turn' verdict
+    any more). Denying either is the safe reading: the host drains and
+    deletes within watcher latency, so a recent undrained intent means the
+    prior request is still in flight or stranded, and overwriting it loses
+    it either way.
+
+    'allow' details: 'no-pending' (nothing on disk -- the normal case, since
+    the host deletes the file after draining), or 'stale-overwrite' (the
+    pending intent's mtime is older than INTENT_STALE_SECONDS -- treated as
+    recovery, not collision). 'deny' detail is (pending_nonce, pending_route,
+    age_seconds) for the message; an unparsable-but-fresh file still denies,
+    with nonce/route reported as None -- a recent undrained intent is a
+    collision whether or not we can parse it.
+    """
+    path = os.path.join(cwd, WORKLIST_INTENT_REL)
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return "allow", "no-pending"
+    age_seconds = time.time() - mtime
+    if age_seconds > INTENT_STALE_SECONDS:
+        return "allow", "stale-overwrite"
+    existing = load_json(path)
+    pending_nonce = existing.get("nonce") if isinstance(existing, dict) else None
+    pending_route = existing.get("route") if isinstance(existing, dict) else None
+    return "deny", (pending_nonce, pending_route, int(age_seconds))
 
 
 def covered_files(items):
@@ -938,6 +993,46 @@ def self_test():
         assert not body_is_signed("Bram side — a correction to my green light.")
         assert not body_is_signed("")
 
+    # Pending-intent gate on resources/.worklist-intent.json
+    # (subagent-delegation-serialize-the-gates). Staleness is measured from
+    # the file's own mtime -- the real on-disk schema is {nonce, route,
+    # body}, with no turn_id / written_at_ms field to gate on.
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cwd = str(root)
+        (root / "resources").mkdir()
+        intent_path = root / WORKLIST_INTENT_REL
+
+        # No intent file on disk -> allow.
+        assert intent_write_verdict(cwd) == ("allow", "no-pending")
+
+        # A fresh pending intent -> deny.
+        intent_path.write_text(json.dumps({
+            "nonce": "n1",
+            "route": "worklist-mutate",
+            "body": {},
+        }))
+        verdict, detail = intent_write_verdict(cwd)
+        assert verdict == "deny"
+        pending_nonce, pending_route, age_seconds = detail
+        assert pending_nonce == "n1"
+        assert pending_route == "worklist-mutate"
+        assert age_seconds < INTENT_STALE_SECONDS
+
+        # A pending intent whose mtime is older than INTENT_STALE_SECONDS ->
+        # allow (traced as an overwrite, not a collision).
+        old_ts = time.time() - (INTENT_STALE_SECONDS + 5)
+        os.utime(intent_path, (old_ts, old_ts))
+        assert intent_write_verdict(cwd) == ("allow", "stale-overwrite")
+
+        # Unparsable but FRESH -> deny, not allow: a recent undrained intent
+        # is a collision whether or not we can parse it. nonce/route report
+        # as None when the file can't be read as the expected shape.
+        intent_path.write_text("not json")
+        verdict, detail = intent_write_verdict(cwd)
+        assert verdict == "deny"
+        assert detail[0] is None and detail[1] is None
+
 
 def _worklist_new_content_from_tool_input(cwd, tool_input):
     old_content = current_worklist_text(cwd)
@@ -1237,7 +1332,28 @@ def main():
                 continue  # draft prose files are proposal-authoring inputs
             if is_worklist_citation(rel):
                 continue  # citation objects (issue-232) are proposal inputs
-            if is_coordination_file(rel):
+            if rel == WORKLIST_RESULT_REL:
+                continue  # host-written result file, exempt for symmetry
+            if rel == WORKLIST_INTENT_REL:
+                iv_verdict, iv_detail = intent_write_verdict(cwd)
+                if iv_verdict == "deny":
+                    pending_nonce, pending_route, age_seconds = iv_detail
+                    deny(
+                        "apply_patch blocked: resources/.worklist-intent.json "
+                        f"already holds a pending request (route={pending_route}, "
+                        f"nonce={pending_nonce}, age={age_seconds}s) that has not "
+                        "drained yet. Wait for resources/.worklist-result.json to "
+                        "appear, or retry once the prior request clears."
+                    )
+                if iv_detail == "stale-overwrite":
+                    _trace_hook(
+                        "PreToolUse",
+                        "apply_patch",
+                        rel,
+                        "allow",
+                        "intent-" + iv_detail,
+                        cwd,
+                    )
                 continue  # Codex lifecycle channel (#130)
             if rel in covered:
                 continue
@@ -1313,6 +1429,18 @@ def main():
         if "resources/worklist-drafts/" in (cmd or ""):
             allow()
         if ".worklist-intent.json" in (cmd or ""):
+            iv_verdict, iv_detail = intent_write_verdict(cwd)
+            if iv_verdict == "deny":
+                pending_nonce, pending_route, age_seconds = iv_detail
+                deny(
+                    "Bash blocked: resources/.worklist-intent.json already "
+                    f"holds a pending request (route={pending_route}, "
+                    f"nonce={pending_nonce}, age={age_seconds}s) that has not "
+                    "drained yet. Wait for resources/.worklist-result.json to "
+                    "appear, or retry once the prior request clears."
+                )
+            if iv_detail == "stale-overwrite":
+                allow("intent-" + iv_detail)
             allow()  # Codex lifecycle channel (#130)
         # Mutating shell command — require any worklist coverage OR a "*"
         # bypass. We don't try to map shell commands to specific paths

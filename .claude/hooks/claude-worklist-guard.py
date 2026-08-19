@@ -123,6 +123,13 @@ def is_gh_body_at_antipattern(command):
     return bool(_GH_BODY_AT_RX.search(command))
 
 
+# Named separately from _BASH_WRITE_PATTERNS so forge_issue_only_write() can
+# skip this one entry by identity when checking whether an issue-only forge
+# command ALSO matches some other write pattern (e.g. a chained `git commit`).
+_GH_ISSUE_WRITE_RX = re.compile(
+    r"(^|[\s;&|`(])gh\s+issue\s+(close|reopen|edit|comment|create|delete|transfer|pin|unpin|lock|unlock)\b"
+)
+
 # Bash commands we deny without worklist coverage. This intentionally matches
 # the Codex guard's H3-level classifier: broad enough to stop common write and
 # external side-effect bypasses, but narrow enough to keep read-only shell
@@ -134,7 +141,7 @@ _BASH_WRITE_PATTERNS = [
     re.compile(r"(^|[\s;&|`(])perl\s+[^|;&]*-i\b"),   # perl -i
     re.compile(r"(^|[\s;&|`(])(rm|mv|cp|truncate|install)\b"),
     re.compile(r"(^|[\s;&|`(])git\s+(add|commit|push|rm|mv|reset|checkout|restore|stash|am|apply|cherry-pick|rebase|revert|tag|branch)\b"),
-    re.compile(r"(^|[\s;&|`(])gh\s+issue\s+(close|reopen|edit|comment|create|delete|transfer|pin|unpin|lock|unlock)\b"),
+    _GH_ISSUE_WRITE_RX,
     re.compile(r"open\s*\(\s*['\"][^'\"]+['\"]\s*,\s*['\"][wax]"),
     re.compile(r"(^|[\s;&|`(])python[0-9.]*\s+-c\b"),  # python -c can write
     re.compile(r"(^|[\s;&|`(])node\s+-e\b"),
@@ -150,6 +157,32 @@ def bash_writes(command):
         if rx.search(command):
             return True
     return False
+
+
+# conventions.md, "Issue-only forge work with no repo diff": create, edit,
+# comment on, close, or reopen a forge issue with no tracked-file change and
+# no commit is exempt from worklist coverage entirely. `delete` / `transfer`
+# / `pin` / `unpin` / `lock` / `unlock` are deliberately NOT exempt -- they
+# are not the verbs conventions.md names, so they keep requiring coverage.
+_FORGE_ISSUE_ONLY_RX = re.compile(
+    r"(^|[\s;&|`(])gh\s+issue\s+(comment|create|edit|close|reopen)\b"
+)
+
+
+def forge_issue_only_write(command):
+    """True iff the command is issue-only forge work that conventions.md
+    exempts from worklist coverage ("Issue-only forge work with no repo
+    diff"). A compound command that ALSO matches any other write pattern is
+    not exempt, so `gh issue comment ... && git commit ...` still faces the
+    gate."""
+    if not isinstance(command, str) or not _FORGE_ISSUE_ONLY_RX.search(command):
+        return False
+    for rx in _BASH_WRITE_PATTERNS:
+        if rx is _GH_ISSUE_WRITE_RX:
+            continue
+        if rx.search(command):
+            return False
+    return True
 
 
 # Cross-boundary signature check. conventions.md ("Name the boundary and
@@ -253,6 +286,41 @@ def crossboundary_signature_verdict(command, cwd):
     if body_is_signed(body):
         return "signed", reason
     return "unsigned", reason
+
+
+# Worklist lifecycle routes are single-claimant: one inflight sentinel, one
+# whole-record auth consume. A subagent calling one directly races the
+# orchestrator's own claim/authorization state (subagent-delegation-
+# serialize-the-gates). See "Delegating worklist items to subagents" in
+# conventions.md.
+_WORKLIST_LIFECYCLE_ROUTES = (
+    "/__worklist/resolve", "/__worklist/mutate", "/__worklist/commit",
+)
+
+
+def subagent_lifecycle_verdict(command, transcript_path):
+    """('skip'|'deny'|'allow', detail) for a Bash command that may be a
+    worklist lifecycle call made from a subagent transcript.
+
+    'skip' means the command doesn't target a lifecycle route at all, so
+    the caller should fall through to the other Bash checks. 'deny' means
+    the command targets a lifecycle route AND the transcript is a subagent
+    transcript (`/subagents/` in its path). 'allow' covers every other
+    case, including the fail-open ones: transcript_path missing or empty
+    (detail 'unknown-transcript'), or present but not a subagent transcript
+    (detail None).
+    """
+    if not isinstance(command, str) or not any(
+        route in command for route in _WORKLIST_LIFECYCLE_ROUTES
+    ):
+        return "skip", None
+    transcript_path = transcript_path or ""
+    if "/subagents/" in transcript_path:
+        return "deny", None
+    if not transcript_path:
+        return "allow", "unknown-transcript"
+    return "allow", None
+
 
 # MCP is the third write surface, at parity with the Codex guard: a user
 # with a filesystem MCP server configured can route writes through
@@ -795,6 +863,29 @@ def self_test():
     for command in read_commands:
         assert not bash_writes(command), command
 
+    # Issue-only forge work with no repo diff (conventions.md) is exempt from
+    # worklist coverage entirely.
+    assert forge_issue_only_write('gh issue comment 5 --body-file f')
+    assert forge_issue_only_write('gh issue close 5')
+    assert forge_issue_only_write('gh issue reopen 5')
+    assert forge_issue_only_write('gh issue edit 5 --title "new title"')
+    assert forge_issue_only_write('gh issue create --title x --body y')
+    # A compound command that also matches another write pattern is NOT
+    # exempt -- the repo-changing half still faces the gate.
+    assert not forge_issue_only_write(
+        'gh issue comment 5 --body-file f && git commit -m x'
+    )
+    # delete/transfer/pin/unpin/lock/unlock keep requiring coverage --
+    # conventions.md names only comment/create/edit/close/reopen.
+    assert not forge_issue_only_write('gh issue delete 5')
+    assert not forge_issue_only_write('gh issue transfer 5 other/repo')
+    assert not forge_issue_only_write('gh issue pin 5')
+    assert not forge_issue_only_write('gh issue lock 5')
+    # Non-issue / read-only commands are not exempt (they simply aren't
+    # writes in the first place, so bash_writes already lets them through).
+    assert not forge_issue_only_write('gh issue view 5')
+    assert not forge_issue_only_write('git commit -m x')
+
     # MCP surface (judell/bram#261). Mutation recognition is by tool-name
     # token, so read-only servers pass untouched.
     mcp_mutations = [
@@ -910,6 +1001,46 @@ def self_test():
     assert mcp_paths({"edits": [{"oldText": "x"}]}) == []
     assert mcp_paths("not-a-dict") == []
 
+    # Subagent lifecycle-call gate (subagent-delegation-serialize-the-gates).
+    with _tempfile.TemporaryDirectory() as td:
+        lifecycle_cmd = (
+            'curl -4 -sS -X POST -H "Content-Type: application/json" '
+            "--data @/tmp/body.json http://127.0.0.1:61455/__worklist/mutate"
+        )
+        subagent_transcript = os.path.join(td, "subagents", "agent-1.jsonl")
+        os.makedirs(os.path.dirname(subagent_transcript), exist_ok=True)
+        with open(subagent_transcript, "w", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "type": "user",
+                "message": {"content": [{"type": "text", "text": "resolve it"}]},
+            }) + NL)
+        main_transcript = os.path.join(td, "sess-1.jsonl")
+        with open(main_transcript, "w", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "type": "user",
+                "message": {"content": [{"type": "text", "text": "resolve it"}]},
+            }) + NL)
+
+        # Lifecycle curl + subagent transcript -> deny.
+        assert subagent_lifecycle_verdict(lifecycle_cmd, subagent_transcript) == (
+            "deny", None
+        )
+        # Same curl + main-session transcript -> allow.
+        assert subagent_lifecycle_verdict(lifecycle_cmd, main_transcript) == (
+            "allow", None
+        )
+        # Same curl + missing transcript_path -> allow (fail-open), traced.
+        assert subagent_lifecycle_verdict(lifecycle_cmd, "") == (
+            "allow", "unknown-transcript"
+        )
+        assert subagent_lifecycle_verdict(lifecycle_cmd, None) == (
+            "allow", "unknown-transcript"
+        )
+        # Non-lifecycle command -> skip regardless of transcript.
+        assert subagent_lifecycle_verdict("git status", subagent_transcript) == (
+            "skip", None
+        )
+
 
 def main():
     payload = json.load(sys.stdin)
@@ -972,6 +1103,40 @@ def main():
                 "crossboundary-" + cb_verdict + ":" + cb_detail,
                 cwd,
             )
+        sl_verdict, sl_detail = subagent_lifecycle_verdict(
+            command, payload.get("transcript_path", "")
+        )
+        if sl_verdict == "deny":
+            _trace_hook(
+                "PreToolUse",
+                "Bash",
+                preview,
+                "deny",
+                "subagent-lifecycle-call",
+                cwd,
+            )
+            print(
+                "Worklist lifecycle calls (/__worklist/resolve, "
+                "/__worklist/mutate, worklist-commit) stay in the "
+                "orchestrator's own turn, after delegated subagents "
+                "return. A subagent transcript cannot make them "
+                "directly. See 'Delegating worklist items to "
+                "subagents' in conventions.md.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        elif sl_detail == "unknown-transcript":
+            _trace_hook(
+                "PreToolUse",
+                "Bash",
+                preview,
+                "allow",
+                "subagent-gate-unknown-transcript",
+                cwd,
+            )
+        if forge_issue_only_write(command):
+            _trace_hook("PreToolUse", "Bash", preview, "allow", "forge-issue-only", cwd)
+            sys.exit(0)
         if not bash_writes(command):
             _trace_hook("PreToolUse", "Bash", preview, "allow", "bash-read-only", cwd)
             sys.exit(0)

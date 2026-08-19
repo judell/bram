@@ -834,6 +834,26 @@ body the parser cannot read (`--body-file -`, an unreadable path, no
 body flag) is allowed through, so the check never blocks work it cannot
 judge.
 
+**Write the body file in its own step.** Build the body in one call,
+post it in the next — never both in a single command. `PreToolUse` runs
+*before* the command executes, so a body written by that same command
+does not exist yet when the guard looks for it, and the check fails open
+against the very artifact it exists to verify. The `--body-file`
+indirection itself is still right (it keeps apostrophes and quotes out of
+the allowlisted command line); only the ordering matters.
+
+Two things follow from getting it right: the signature is genuinely
+verified rather than nominally required, and an issue-only post is
+allowed on its own merits rather than depending on whatever worklist
+items happen to be in flight — a heredoc redirect in the same command is
+another write pattern, which correctly disqualifies the issue-only
+exemption. The trace names which happened:
+
+- `crossboundary-unparsed:body-file-unreadable` — the body was not
+  readable; the check passed without verifying anything.
+- `crossboundary-signed:body-file` — the body was read and the signature
+  confirmed.
+
 
 ## Working across project boundaries
 

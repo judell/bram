@@ -170,8 +170,6 @@ _FORGE_WRITE_RX = re.compile(
     r"(?:^|[\s;&|`(])(?:gh|glab)\s+(?:issue|pr|mr)\s+"
     r"(?:create|comment|note|edit|update|review)\b"
 )
-# `gh --repo owner/name`, `-R owner/name`, `glab --repo owner/name`.
-_REPO_FLAG_RX = re.compile(r"(?:--repo|-R)(?:=|\s+)(\S+)")
 # Body sources. The alternation deliberately requires `=` or whitespace
 # after the flag so `--body-file` is not swallowed by the `--body` arm.
 _BODY_FILE_RX = re.compile(r"(?:--body-file|-F)(?:=|\s+)(\S+)")
@@ -186,32 +184,6 @@ _SIGNATURE_RX = re.compile(
     r"speaking\s+from\s+the\s+.{1,60}?\bproject\b",
     re.IGNORECASE,
 )
-
-
-def _repo_slug_from_url(url):
-    """owner/name from an https or ssh remote URL, lowercased."""
-    if not isinstance(url, str):
-        return None
-    s = re.sub(r"\.git\s*$", "", url.strip())
-    m = re.search(r"[:/]([^/:\s]+/[^/\s]+)$", s)
-    return m.group(1).lower() if m else None
-
-
-def origin_repo_slug(cwd):
-    """Read origin's slug from .git/config. Parsed rather than shelled out
-    so the hook stays fast and cannot hang on a git invocation."""
-    try:
-        path = os.path.join(cwd, ".git", "config")
-        with open(path, encoding="utf-8", errors="replace") as f:
-            text = f.read()
-    except Exception:
-        return None
-    m = re.search(
-        r'\[remote\s+"origin"\][^\[]*?url\s*=\s*(\S+)',
-        text,
-        re.DOTALL,
-    )
-    return _repo_slug_from_url(m.group(1)) if m else None
 
 
 def _unquote_shell(value):
@@ -256,24 +228,25 @@ def body_is_signed(body):
 def crossboundary_signature_verdict(command, cwd):
     """('skip'|'signed'|'unparsed'|'unsigned', detail).
 
-    'skip' means the command is not a cross-boundary forge write at all —
-    the overwhelmingly common case, including all same-project issue work.
+    'skip' means the command is not a forge write with a body at all.
+
+    The signature is required on EVERY agent-authored forge artifact, not
+    only ones that cross a project boundary. The risk it exists to prevent
+    is not "which project is this from" but "who is speaking": on a shared
+    account an agent comment is indistinguishable from a human one, and
+    that is true in every repo. The cross-boundary case was a subset of the
+    problem mistaken for the whole of it (judell/bram#253, where unsigned
+    agent comments sat beside Jon's own replies while a cross-boundary
+    issue in the same period was correctly signed).
+
+    So there is no origin comparison here any more, and the hook no longer
+    parses .git/config. That the correction REMOVES a gate is the tell that
+    the scoping was the accidental part.
     """
     if not isinstance(command, str) or not command:
         return "skip", "no-command"
     if not _FORGE_WRITE_RX.search(command):
         return "skip", "not-forge-write"
-    target = _REPO_FLAG_RX.search(command)
-    if not target:
-        # No repo flag: the command targets the current project, which is
-        # not a boundary crossing. Never inspected.
-        return "skip", "no-repo-flag"
-    target_slug = _repo_slug_from_url(target.group(1)) or target.group(1).lower()
-    origin_slug = origin_repo_slug(cwd)
-    if origin_slug is None:
-        return "unparsed", "no-origin"
-    if target_slug == origin_slug:
-        return "skip", "same-repo"
     body, reason = crossboundary_body(command, cwd)
     if body is None:
         return "unparsed", reason
@@ -878,15 +851,9 @@ def self_test():
         )
         assert not opt_out_clears(td, {}, "mcp__filesystem__write_file", "a.txt")
 
-    # Cross-boundary signature gates. Mirrors the Codex guard's cases.
+    # Signature gates. Mirrors the Codex guard's cases.
 
     with _tempfile.TemporaryDirectory() as td:
-        os.makedirs(os.path.join(td, ".git"))
-        with open(os.path.join(td, ".git", "config"), "w") as f:
-            f.write('[remote "origin"]' + NL + "\turl = https://github.com/judell/bram.git" + NL)
-        assert origin_repo_slug(td) == "judell/bram"
-        assert _repo_slug_from_url("git@github.com:judell/bram.git") == "judell/bram"
-
         signed = "Jon's Claude speaking from the Bram project:" + NL + NL + "Body."
         unsigned = "Vendored the build; the tooltip renders."
 
@@ -896,12 +863,17 @@ def self_test():
         # Gate 1: not a forge write.
         assert verdict("gh issue view 12 --repo xmlui-org/xmlui") == "skip"
         assert verdict("ls -la") == "skip"
-        # Gate 2: same project, or no repo flag at all — never inspected.
-        assert verdict('gh issue comment 5 --body "%s"' % unsigned) == "skip"
+        # Same repo is now inspected exactly like any other — the regression
+        # test for the scoping this item removed.
+        assert verdict('gh issue comment 5 --body "%s"' % unsigned) == "unsigned"
+        assert verdict('gh issue comment 5 --body "%s"' % signed) == "signed"
         assert verdict(
             'gh issue comment 5 --repo judell/bram --body "%s"' % unsigned
-        ) == "skip"
-        # Gate 3: cross-repo, signature present or absent.
+        ) == "unsigned"
+        # No .git/config anywhere in this tempdir: the verdict must not
+        # depend on one being readable.
+        assert not os.path.exists(os.path.join(td, ".git", "config"))
+        # Gate 3: cross-repo behaviour unchanged in both directions.
         assert verdict(
             'gh issue comment 5 --repo xmlui-org/xmlui --body "%s"' % signed
         ) == "signed"
@@ -909,25 +881,21 @@ def self_test():
             'gh issue comment 5 --repo xmlui-org/xmlui --body "%s"' % unsigned
         ) == "unsigned"
         # Surfaces _BASH_WRITE_PATTERNS does not match.
-        assert verdict(
-            'gh pr comment 9 --repo xmlui-org/xmlui --body "%s"' % unsigned
-        ) == "unsigned"
-        assert verdict(
-            'glab issue note 3 --repo group/proj -m "%s"' % unsigned
-        ) == "unsigned"
+        assert verdict('gh pr comment 9 --body "%s"' % unsigned) == "unsigned"
+        assert verdict('glab issue note 3 -m "%s"' % unsigned) == "unsigned"
         # Fail-open shapes.
-        assert verdict("gh issue comment 5 --repo xmlui-org/xmlui --body-file -") == "unparsed"
-        assert verdict(
-            "gh issue comment 5 --repo xmlui-org/xmlui --body-file /nope/missing.md"
-        ) == "unparsed"
-        assert verdict("gh issue comment 5 --repo xmlui-org/xmlui") == "unparsed"
+        assert verdict("gh issue comment 5 --body-file -") == "unparsed"
+        assert verdict("gh issue comment 5 --body-file /nope/missing.md") == "unparsed"
+        # No body to inspect at all (e.g. `gh issue close 5`) still fails open.
+        assert verdict("gh issue comment 5") == "unparsed"
+        assert verdict("gh issue close 5") == "skip"
 
         # --body-file must not be swallowed by the --body arm.
         body_path = os.path.join(td, "comment.md")
         with open(body_path, "w") as f:
             f.write(signed)
         assert crossboundary_signature_verdict(
-            "gh issue comment 5 --repo xmlui-org/xmlui --body-file %s" % body_path, td
+            "gh issue comment 5 --body-file %s" % body_path, td
         ) == ("signed", "body-file")
 
     # Leading Markdown emphasis on the signature line still counts.

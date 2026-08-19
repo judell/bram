@@ -776,6 +776,65 @@ sessions both stay put on opposite sides of a boundary and coordinate,
 see *Working across project boundaries* below.
 
 
+## Signing agent-authored forge artifacts
+
+**Every agent-authored forge artifact opens with a signature** — issue
+bodies, issue comments, PR descriptions, PR comments, reviews. Every
+repo, boundary or not.
+
+The reason is not "which project is this from" but **who is speaking**.
+Agents post through the human's account, so an unsigned agent comment is
+indistinguishable from one the human wrote, and that is equally true in
+the project you are sitting in. An earlier version of this convention
+scoped the requirement to artifacts that cross a project boundary; the
+result was judell/bram#253, where unsigned agent comments sat beside
+Jon's own replies while a cross-boundary issue filed in the same period
+was correctly signed. The record was inconsistent along an axis no
+reader cares about. The cross-boundary case is a subset of the problem,
+and it was mistaken for the whole of it.
+
+**The form.** One canonical opener, three slots, all load-bearing —
+*whose* agent, *which* agent, *which* project:
+
+    <owner>'s <Agent> speaking from the <Project> project:
+
+This project's two instances:
+
+    Jon's Claude speaking from the Bram project:
+    Jon's Codex speaking from the XMLUI project:
+
+A form that names only the project ("from the xmlui side") leaves "who
+is speaking" unanswered, which is the half that matters when two agents
+work the same thread. Across a boundary the third slot also answers
+*which side the evidence comes from*.
+
+**The scope.** **Every artifact, not just the first in a thread.** The
+observed failure is decay: the opening comment is signed, and by the
+fourth it has worn down to "Short addendum —" because by then it feels
+redundant. It isn't. The reader the signature exists for — someone
+opening the thread months later, or a third agent joining mid-way — has
+no memory of comment #1.
+
+Commit messages are deliberately excluded. Conventions ask for a
+signature on any commit message another session will read, and that
+stays as-is: commit subjects are short, `git log` is dense, and commits
+already carry an author field that the comment box does not.
+
+**The retrofit rule.** If you notice a missing signature after posting,
+add it in a *new* comment rather than only editing the body. A body edit
+fixes the page; it does not reach anyone who already got the
+notification, and a silently-corrected record reads as a discipline that
+was not there.
+
+**Enforcement.** Both provider guards check this on `PreToolUse` and
+**deny** an unsigned forge write rather than warning. You should never
+meet that check: sign by default and it never fires. A denial means you
+forgot, and costs one turn to fix. The guards fail open by design — a
+body the parser cannot read (`--body-file -`, an unreadable path, no
+body flag) is allowed through, so the check never blocks work it cannot
+judge.
+
+
 ## Working across project boundaries
 
 Some of the best work happens between two sessions that each hold
@@ -790,41 +849,12 @@ the asymmetry differs:
 - **Agent ↔ agent.** The same repo, two agents, each able to reach
   things the other can't.
 
-### Name the boundary and sign your side
+### Name the boundary
 
-Open every artifact that crosses a boundary by saying who is speaking
-and from where. The reader is often another agent with a different
-vantage point, and the signature is what tells them which side the
-evidence comes from.
-
-**The form.** One canonical opener, three slots, all load-bearing —
-*whose* agent, *which* agent, *which* project:
-
-    <owner>'s <Agent> speaking from the <Project> project:
-
-This project's two instances:
-
-    Jon's Claude speaking from the Bram project:
-    Jon's Codex speaking from the XMLUI project:
-
-A form that names only the project ("from the xmlui side") leaves "who
-is speaking" unanswered, which is the half that matters when two
-agents work the same thread.
-
-**The scope.** Every artifact that crosses the boundary carries it —
-issue bodies, issue comments, PR descriptions, PR comments, reviews,
-and any commit message another session will read. **Every one, not
-just the first in a thread.** The observed failure is decay: the
-opening comment is signed, and by the fourth it has worn down to
-"Short addendum —" because by then it feels redundant. It isn't. The
-reader the signature exists for — someone opening the thread months
-later, or a third agent joining mid-way — has no memory of comment #1.
-
-**The retrofit rule.** If you notice a missing signature after
-posting, add it in a *new* comment rather than only editing the body.
-A body edit fixes the page; it does not reach anyone who already got
-the notification, and a silently-corrected record reads as a
-discipline that was not there.
+Say which side of the boundary you are on, and scope every claim to it.
+The *signature* that carries this is not boundary-scoped — it is required
+on every agent-authored forge artifact, in every repo. See *Signing
+agent-authored forge artifacts* above for the form and the rule.
 
 ### Scope claims to what your side can observe
 
@@ -1515,7 +1545,7 @@ grep for:
 | `describe-patch` | `__bramFlushDescribePatches` in `helpers.js` | `stage` (`begin` \| `end` \| `settle` \| `subagent-refetch`), `patches` (applied), `queued`, `provider`, `turns`, `ms`; on `settle` also `settleMs`; `stage=subagent-refetch` (`patches` = matched subagent ids) marks a flush whose completions belong to the chip-selected subagent view — delivery is a `subagentTurns` refetch through the host overlay, so no main-projection begin/end bracket fires (broadcast to second-next-paint, the fan-out render cost the sync `ms:0` flush conceals) and `sinceBeginMs` | Brackets the full-projection rebroadcast that splices Haiku "Tool Descriptions" results (`ai.describeCommands`) into the transcript. Since describe-rebroadcast-coalesce (2026-07-22 perf audit: 524 per-result rebroadcasts degraded heartbeat drift to 4.1s max and a tab-switch subscribe refetch to 3.1s), completions ENQUEUE and one flush per ~400ms window broadcasts them all — the bracket measures the flush, its `patches` field the batch size. Emitted synchronously before/after `__bramBroadcastProjectedTurns` (via `logToHost` → `invoke`, whose IPC dispatch survives an iframe main-thread freeze), so a hard freeze in the re-render is self-diagnosing: a `stage:begin` with **no matching `stage:end`** names the broadcast as the freeze and quantifies it (`turns`, `resultChars`). Added for the 2026-07-11 describe-freeze recurrence on a large Codex session (82 turns / 1 MB); unlike `long-task`, which logs at recovery and goes silent on a terminal freeze. |
 | `describe-load` | describe issuance counters in `helpers.js` (`__bramRequestCommandDescription`) | `issued_1s`, `inflight`, `requested_total`, `held` (requests queued by the typing hold), `window_ms` (active flush coalesce window) | describe-backfill-observability: one coalesced line per second while Tool-Description requests are issued or in flight — the backfill pressure curve with a denominator. Boot of a large session fires a burst (2026-07-30: ~375 calls in 4 min, peak ~150/min, saturating the main thread during typing); this subkind makes that storm and its drain directly visible instead of reconstructible-by-correlation. Host-side twin: `[ai-describe] op=call` carries `concurrent=` (active requests at call entry). Pacing (describe-backfill-pacing, graduated from the 22.7%-settle-churn storm): new requests hold while the user typed within 2s (`held`), and the patch-flush window widens 400ms→2s while backfill is active (`window_ms`). |
 | `projection-broadcast` | `__bramBroadcastProjectedTurns` in `helpers.js` | `reason` (`describe-flush` \| `refetch:<trigger>` \| `unknown`), `route` (active hash), `subscribers`, `turns`, `ms` (sync fan-out), `tail_emits`/`tail_skips` (cumulative decisions of the tail-scoped last-exchange source — workspace-tail-subscription; skips are broadcasts whose exchange content was unchanged, i.e. storm broadcasts the Worklist page no longer pays for); a second `stage:settle` line carries `settleMs` (double-rAF render settle) | projection-broadcast-attribution (round 2 of the 2026-07-30 boot-latency work): every projection broadcast names its trigger, the active tab, and both halves of its cost. Motivating finding: ~195ms settles on `#/worklist` — a page rendering no transcript rows — because Workspace subscribes to the projection (`Workspace.xmlui` PushSource). The graduation grep: which routes/reasons account for the non-describe 389–562ms long-tasks. |
-| `follow-state` | `__bramFollowTransition` / `__bramFollowVerify` in `helpers.js`; call sites across `Transcript.xmlui` | `op=transition` (`to` bool, `cause`: `user-scroll-bottom` \| `user-scroll-up` \| `find-step` \| `tool-expand` \| `footer-arrow-up`/`-down` \| `mount-restore-reading` \| `agent-chip-switch` \| `unseen-jump` (chip-recruited arrival from another tab), `route`, `agentId`); `op=verify` \| `op=violation` (`cause`: `footer-arrow-down` \| `content-append-repin` \| `settle-repin` \| `mount-pin` \| `subagent-switch-repin`, `landed`, `endIndex`); `op=echo-suppressed` (`to`, `cause` = the echo-window opener (a transition cause or `mount`) or `uncorroborated`, `inputAgeMs`, `agentId`); `op=unseen-clear` (`count` of unseen turns cleared, `cause` = the FOLLOWING-entering transition, `route` — transcript-new-below-badge: the footer status-line chip's recruitment log); `op=repin-blocked` (`varAtBottom`, `sinceReadingMs`, `agentId` — follow-state-source-of-truth: a repin the stale xs var would have misfired, blocked by the synchronous window truth; the 2026-08-01 240ms-into-READING yank class made countable) | transcript-follow-contract layer 1: the Transcript's follow/reading contract (authoritative text in Transcript.xmlui's header) made self-reporting. Every state flip logs its cause; every bottom-promise is measured against the List's own visibleRange after a double-rAF, and a miss logs a violation — the six-fix whack-a-mole lineage (9daa693/f846258/6a892f6/652d9b3/410d069/c4c14ed) becomes a named, greppable inventory. Violations are leads, not convictions: an append landing inside the verify window can log a violation the next repin heals — corroborate with surrounding lines. Layer 2 (transcript-follow-echo-guard) graduated from this log's soak (1,056 bottom-promises, zero violations; phantom user-scroll flips within 200-400ms of every tool-expand): deliberate transitions and mount open a one-shot echo window (`__bramFollowEchoOpen`, 700ms / 1500ms mount), and `__bramFollowClassify` attributes a scroll event to the user only when no window is open AND user input corroborates it (wheel / keydown / held-or-recent pointer within 400ms; passive capture listeners). Input corroboration was added after the first live soak caught an expand echo re-arming FOLLOWING 2.7s post-click — machine scrolls have no input beside them at any latency, so no fixed window suffices. Suppressions log `op=echo-suppressed` with `inputAgeMs`, no state flip. A suppression of a genuine user scroll would surface as a missing expected transition next to an `echo-suppressed` line. Replaces the old `transcript-follow` onScroll trace. |
+| `follow-state` | `__bramFollowTransition` / `__bramFollowVerify` in `helpers.js`; call sites across `Transcript.xmlui` | `op=transition` (`to` bool, `cause`: `user-scroll-bottom` \| `user-scroll-up` \| `find-step` \| `tool-expand` \| `footer-arrow-up`/`-down` \| `mount-restore-reading` \| `agent-chip-switch` \| `unseen-jump` (chip-recruited arrival from another tab), `route`, `agentId`); `op=verify` \| `op=violation` (`cause`: `footer-arrow-down` \| `content-append-repin` \| `settle-repin` \| `mount-pin` \| `subagent-switch-repin`, `landed`, `endIndex`); `op=echo-suppressed` (`to`, `cause` = the echo-window opener (a transition cause or `mount`) or `uncorroborated`, `inputAgeMs`, `agentId`); `op=unseen-clear` (`count` of unseen turns cleared, `cause` = the FOLLOWING-entering transition, `route` — transcript-new-below-badge: the footer status-line chip's recruitment log); `op=repin-blocked` (`varAtBottom`, `sinceReadingMs`, `agentId` — follow-state-source-of-truth: a repin the stale xs var would have misfired, blocked by the synchronous window truth; the 2026-08-01 240ms-into-READING yank class made countable); `op=echo-repin` (`gap`, `attempt`, `maxRenderedIndex`, `total`) / `op=echo-repin-capped` — transcript-follow-echo-repair: a suppressed machine scroll took the view off the bottom AFTER an explicit jump verified `landed=true`, and the final row's bottom is now measurably below the fold, so the jump is re-issued (bounded 3 per rolling 3s). Fires on the MEASUREMENT, never on the suppression alone, so zero lines means the class stopped rather than the instrument going quiet. `op=echo-suppressed` carries `lastRowRendered`/`lastRowGap` for the same reason — it separates the ~10% of suppressions that are this failure from the jitter that is not | transcript-follow-contract layer 1: the Transcript's follow/reading contract (authoritative text in Transcript.xmlui's header) made self-reporting. Every state flip logs its cause; every bottom-promise is measured against the List's own visibleRange after a double-rAF, and a miss logs a violation — the six-fix whack-a-mole lineage (9daa693/f846258/6a892f6/652d9b3/410d069/c4c14ed) becomes a named, greppable inventory. Violations are leads, not convictions: an append landing inside the verify window can log a violation the next repin heals — corroborate with surrounding lines. Layer 2 (transcript-follow-echo-guard) graduated from this log's soak (1,056 bottom-promises, zero violations; phantom user-scroll flips within 200-400ms of every tool-expand): deliberate transitions and mount open a one-shot echo window (`__bramFollowEchoOpen`, 700ms / 1500ms mount), and `__bramFollowClassify` attributes a scroll event to the user only when no window is open AND user input corroborates it (wheel / keydown / held-or-recent pointer within 400ms; passive capture listeners). Input corroboration was added after the first live soak caught an expand echo re-arming FOLLOWING 2.7s post-click — machine scrolls have no input beside them at any latency, so no fixed window suffices. Suppressions log `op=echo-suppressed` with `inputAgeMs`, no state flip. A suppression of a genuine user scroll would surface as a missing expected transition next to an `echo-suppressed` line. Replaces the old `transcript-follow` onScroll trace. |
 | `describe-scan` | `__bramEagerDescribe` / `__bramEagerDescribeSubagent` / `__bramPumpDescribeQueue` in `helpers.js` | `op=scan` (`ms`, `turns`, `entries` scanned, `queued`, `route`); `op=scan-subagent` (`agentId`, `ms`, `turns`, `entries`, `queued` — subagent-transcript-describe: the chip view's eager scan over the subagent stream); `op=pump` (`ms`, `via` `range` \| `dom-scrape`, `visible`, `queue`, `subQueue`, `route`; emitted only when either queue had work) | Round 3 of the boot-latency work (eager-describe-scan-instrumentation): the eager-describe queue rebuild walks all turns × entries inside every broadcast, and the pump's visibility re-partition falls back to a `[data-index]` DOM scrape on non-Transcript pages (also riding the 1.5s drain interval). Suspected for the 17.5s zero-subscriber settle (2026-07-30 22:49 worklist boot). Graduation candidates pre-agreed: incremental queue maintenance from deltas; gate the visibility scrape on `__bramTranscriptMounted`. |
 | `projection-subscriber` | `notify()` in `bramSubscribeProjectedTurns`, `helpers.js` | `idx`, `ms`, `total` | Companion to `projection-broadcast`: times each PushSource emit's sync slice, logging any ≥50ms — a consumer named directly. React may defer the real render to the settle half; a silent subscriber log with a fat `settleMs` means the cost lives in the deferred render, not the emit. |
 | `input-latency` | input responsiveness probe in `helpers.js` (keydown/pointerdown, rAF-measured, ≥100ms — floor dropped from 200ms for the describe-backfill-pacing soak; the felt band lives at 50-200ms) | `event`, `latencyMs`, `hadFocus`, `target`, `route` (active tab hash — the per-tab felt map); `describeInflight`, `lastLongTaskMs`, `lastLongTaskName`, `lastLongTaskAgoMs` (blockedBy attribution, describe-backfill-observability) | One line per slow input event: rAF delta ≥200ms from dispatch. The blockedBy fields are written at emit time — how many describe fetches were in flight and the most recent `long-task` within 1.5s — so a slow keystroke names its suspect directly (the 2026-07-30 storm needed three-subkind timestamp correlation to convict). |

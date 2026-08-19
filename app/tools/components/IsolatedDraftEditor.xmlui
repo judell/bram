@@ -58,7 +58,7 @@
       <TextArea
         id="editorBox"
         initialValue="{$props.initialValue || ''}"
-        placeholder="{$props.placeholder || ''}"
+        placeholder="{window.__bramEditorPlaceholder($props.placeholder, !!$props.pasteTarget, !!$props.voiceTarget)}"
         autoFocus="{!!$props.autoFocus}"
         autoComplete="off"
         autoCorrect="{false}"

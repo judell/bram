@@ -97,7 +97,7 @@
         <VStack width="*" gap="$space-0_5">
           <IsolatedDraftEditor
             id="queueEditor"
-            placeholder="Type a note, paste a screenshot (Ctrl-V/Cmd-V), or dictate with the mic."
+            placeholder="Type a note"
             initialValue="{$item.text}"
             resize="vertical"
             minRows="2"

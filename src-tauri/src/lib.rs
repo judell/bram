@@ -16115,7 +16115,7 @@ fn finish_git_push<R: tauri::Runtime>(app: &AppHandle<R>) {
     flush_pending_worklist_push_mirrors(app);
     // close-on-push-automatic: after the user's explicit push, close any queued
     // issue whose commit is now on origin. Runs regardless of the mirror setting.
-    flush_pending_issue_closes(app);
+    flush_pending_issue_closes(app, "button");
 }
 
 fn git_current_branch<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<String, String> {
@@ -16152,6 +16152,23 @@ fn git_dir_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
     })
 }
 
+// issue-253: the remote whose tracking refs a push lands in. The upstream's
+// remote is the authority (`origin/main` -> `origin`); fall back to the first
+// configured remote, then to the conventional name.
+fn git_push_remote_name<R: tauri::Runtime>(app: &AppHandle<R>) -> String {
+    if let Some(remote) = git_upstream_branch(app)
+        .and_then(|up| up.split_once('/').map(|(r, _)| r.to_string()))
+        .filter(|r| !r.is_empty())
+    {
+        return remote;
+    }
+    git_run(app, &["remote"])
+        .ok()
+        .and_then(|out| out.lines().next().map(|l| l.trim().to_string()))
+        .filter(|r| !r.is_empty())
+        .unwrap_or_else(|| "origin".to_string())
+}
+
 fn start_git_head_watch<R: tauri::Runtime>(app_handle: AppHandle<R>) {
     let Some(git_dir) = git_dir_path(&app_handle) else {
         eprintln!("[git-head-watch] no git dir");
@@ -16162,6 +16179,15 @@ fn start_git_head_watch<R: tauri::Runtime>(app_handle: AppHandle<R>) {
         eprintln!("[git-head-watch] no HEAD at {}", head_path.display());
         return;
     }
+    // issue-253: a push lands in the remote-tracking refs, never in HEAD, so
+    // the same thread also watches the two places it can land. Either may
+    // legitimately be absent (no remote yet, nothing packed) — log and keep
+    // watching whatever exists rather than losing branch-switch detection too.
+    let remote_refs_dir = git_dir
+        .join("refs")
+        .join("remotes")
+        .join(git_push_remote_name(&app_handle));
+    let packed_refs_path = git_dir.join("packed-refs");
     std::thread::spawn(move || {
         use notify::{recommended_watcher, Event, EventKind, RecursiveMode, Watcher};
         use std::sync::mpsc::channel;
@@ -16186,13 +16212,52 @@ fn start_git_head_watch<R: tauri::Runtime>(app_handle: AppHandle<R>) {
             return;
         }
         eprintln!("[git-head-watch] watching {}", head_path.display());
+        if remote_refs_dir.exists() {
+            match watcher.watch(&remote_refs_dir, RecursiveMode::Recursive) {
+                Ok(()) => eprintln!("[git-refs-watch] watching {}", remote_refs_dir.display()),
+                Err(e) => eprintln!(
+                    "[git-refs-watch] watch {} failed: {}",
+                    remote_refs_dir.display(),
+                    e
+                ),
+            }
+        } else {
+            eprintln!(
+                "[git-refs-watch] no remote refs dir at {}",
+                remote_refs_dir.display()
+            );
+        }
+        if packed_refs_path.exists() {
+            match watcher.watch(&packed_refs_path, RecursiveMode::NonRecursive) {
+                Ok(()) => eprintln!("[git-refs-watch] watching {}", packed_refs_path.display()),
+                Err(e) => eprintln!(
+                    "[git-refs-watch] watch {} failed: {}",
+                    packed_refs_path.display(),
+                    e
+                ),
+            }
+        } else {
+            eprintln!(
+                "[git-refs-watch] no packed-refs at {}",
+                packed_refs_path.display()
+            );
+        }
         let debounce = Duration::from_millis(100);
         let mut pending_since: Option<Instant> = None;
+        let mut refs_pending_since: Option<Instant> = None;
         loop {
             match rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(Ok(event)) => {
                     if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
-                        pending_since = Some(Instant::now());
+                        let now = Instant::now();
+                        // A pathless event keeps the original HEAD behavior:
+                        // treat it as a branch-switch candidate.
+                        if event.paths.is_empty() || event.paths.iter().any(|p| p == &head_path) {
+                            pending_since = Some(now);
+                        }
+                        if event.paths.iter().any(|p| p != &head_path) {
+                            refs_pending_since = Some(now);
+                        }
                     }
                 }
                 Ok(Err(e)) => {
@@ -16201,6 +16266,14 @@ fn start_git_head_watch<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+            if let Some(since) = refs_pending_since {
+                if since.elapsed() >= debounce {
+                    refs_pending_since = None;
+                    // The queue-empty guard lives in the flush itself, so an
+                    // ordinary fetch costs one file read.
+                    flush_pending_issue_closes(&app_handle, "refs-watch");
+                }
             }
             let Some(since) = pending_since else {
                 continue;
@@ -39804,11 +39877,14 @@ fn commit_on_origin_default<R: tauri::Runtime>(app: &AppHandle<R>, sha: &str) ->
     Some(anc.success())
 }
 
-// On the user's explicit Push, close each queued issue whose commit is now
+// On an observed push, close each queued issue whose commit is now
 // visible on origin, with the commit-link comment (plus any user comment).
 // Records whose commit isn't visible yet stay queued. NOT gated on the
 // lifecycle-mirror setting — closing is a core action, not the optional mirror.
-fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>) {
+// issue-253: `trigger` names what asked (button / refs-watch / startup) so the
+// non-button triggers are greppable; the attempt itself is traced, not just the
+// successes, because "the flush ran and decided not to" was invisible before.
+fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>, trigger: &str) {
     let Some(path) = issue_close_queue_file(app) else {
         return;
     };
@@ -39816,12 +39892,38 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>) {
     if records.is_empty() {
         return;
     }
+    let pending = records.len();
+    eprintln!(
+        "[issue-close-queue] op=flush-attempt trigger={} pending={}",
+        trigger, pending
+    );
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "issue-close-queue",
+            &format!("op=flush-attempt trigger={} pending={}", trigger, pending),
+        );
+    }
     // issue-222-forge-adapter: forge-neutral gate. repo_owner_name is
     // GitHub-only (it strips the github.com prefix), which silently
     // disabled close-on-push for any other origin; the html base works
     // for both forges and the visibility check dispatches internally.
     let adapter = forge_adapter(app);
     let Some(html_base) = forge_html_base(app) else {
+        eprintln!(
+            "[issue-close-queue] op=flush-none trigger={} pending={} closed=0 reason=no-forge-base",
+            trigger, pending
+        );
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "issue-close-queue",
+                &format!(
+                    "op=flush-none trigger={} pending={} closed=0 reason=no-forge-base",
+                    trigger, pending
+                ),
+            );
+        }
         return;
     };
     let repo_slug = repo_owner_name(app).unwrap_or_default();
@@ -39988,6 +40090,36 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>) {
     }
     if let Err(e) = write_pending_issue_closes(&path, &remaining) {
         eprintln!("[issue-close-queue] write remaining failed: {}", e);
+    }
+    // issue-253: record the outcome of the attempt. `flush-none` is the
+    // deferred-forever case — a non-empty queue that closed nothing — which
+    // only the per-record deferral lines hinted at before.
+    let op = if closed.is_empty() {
+        "flush-none"
+    } else {
+        "flush-done"
+    };
+    eprintln!(
+        "[issue-close-queue] op={} trigger={} pending={} closed={} remaining={}",
+        op,
+        trigger,
+        pending,
+        closed.len(),
+        remaining.len()
+    );
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "issue-close-queue",
+            &format!(
+                "op={} trigger={} pending={} closed={} remaining={}",
+                op,
+                trigger,
+                pending,
+                closed.len(),
+                remaining.len()
+            ),
+        );
     }
     // toast-issue-closed-on-push: announce the auto-close in the agent pane.
     // Only fires when a close actually happened, so no-op pushes stay silent.
@@ -46586,6 +46718,16 @@ pub fn run() {
             start_codex_session_poll_fallback(app_handle.clone());
             start_claude_turn_stats_poll(app_handle.clone());
             start_git_head_watch(app_handle.clone());
+            // issue-253: the refs watcher only helps if Bram was running when
+            // the push happened, and the reported case is a release script with
+            // the app closed. One attempt at startup covers it; the flush's own
+            // empty-queue guard makes the ordinary launch a single file read.
+            // Off the setup thread so a queue with work can't stall startup on
+            // forge calls.
+            let close_flush_handle = app_handle.clone();
+            std::thread::spawn(move || {
+                flush_pending_issue_closes(&close_flush_handle, "startup");
+            });
             std::thread::spawn(move || {
                 use notify::{recommended_watcher, Event, EventKind, RecursiveMode, Watcher};
                 use std::sync::mpsc::channel;

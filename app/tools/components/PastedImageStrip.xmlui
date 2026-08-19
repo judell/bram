@@ -1,12 +1,12 @@
 <Component name="PastedImageStrip">
   <VStack
-    gap="0"
+    gap="$space-1"
     var.fullscreenImage="{null}">
     <PushSource
       id="pasteState"
       initial="{{count: 0, paths: [], staging: 0}}"
       subscribe="{window.bramSubscribePasteState($props.target)}" />
-    <Theme maxWidth-ModalDialog="95vw">
+    <Theme when="{!$props.inlinePreview}" maxWidth-ModalDialog="95vw">
       <ModalDialog
         when="{!!fullscreenImage}"
         onClose="fullscreenImage = null">
@@ -17,13 +17,39 @@
           height="80vh" />
       </ModalDialog>
     </Theme>
+    <VStack
+      when="{!!fullscreenImage &amp;&amp; !!$props.inlinePreview}"
+      gap="$space-2"
+      padding="$space-2"
+      border="1px solid $borderColor"
+      borderRadius="$borderRadius">
+      <HStack verticalAlignment="center">
+        <Text fontWeight="$fontWeight-bold" value="Image preview" />
+        <SpaceFiller />
+        <Button
+          label="Close preview"
+          variant="ghost"
+          size="xs"
+          onClick="fullscreenImage = null" />
+      </HStack>
+      <Image
+        src="{window.imageSrcForPath(fullscreenImage)}"
+        fit="contain"
+        width="100%"
+        height="55vh" />
+    </VStack>
     <HStack
       gap="$space-2"
       verticalAlignment="center"
       when="{pasteState.value.count > 0 || pasteState.value.staging > 0}">
       <Items data="{pasteState.value.paths}">
         <HStack gap="$space-1" verticalAlignment="center">
-          <Link onClick="fullscreenImage = $item" noIndicator="true">
+          <Link noIndicator="true">
+            <event name="click">
+              window.__bramIframeTrace('paste-image', {stage: 'preview-click', path: $item || '', target: $props.target || ''});
+              fullscreenImage = $item;
+              window.__bramIframeTrace('paste-image', {stage: $props.inlinePreview ? 'preview-inline-selected' : 'preview-modal-selected', path: $item || '', target: $props.target || ''});
+            </event>
             <Badge variant="pill" value="image {$itemIndex + 1}" />
           </Link>
           <Button

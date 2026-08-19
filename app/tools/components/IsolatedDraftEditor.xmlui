@@ -94,7 +94,8 @@
     </HStack>
     <PastedImageStrip
       when="{!!$props.pasteTarget}"
-      target="{$props.pasteTarget}" />
+      target="{$props.pasteTarget}"
+      inlinePreview="{!!$props.inlineImagePreview}" />
   </VStack>
 
   <method name="getValue">

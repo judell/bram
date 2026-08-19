@@ -94,6 +94,16 @@
     ).sort((a, b) => a.rank - b.rank)
   }" />
 
+  <!-- Pre-filter denominator: every bucket's full hit list, irrespective of
+       `selectedTypes` and `dateFilter`. This is what the pills count, and it
+       is what separates "the index returned nothing" from "everything it
+       returned is filtered out" — two different facts with different fixes
+       that the empty state used to render identically. -->
+  <variable name="totalHits" value="{
+    (rSession.value || []).length + (rCommit.value || []).length
+      + (rIssue.value || []).length + (rHistory.value || []).length
+  }" />
+
   <!-- FORENSICS-ONLY since search-slider-domain-from-latch: read by the
        filter-reset and buckets trace lines, gates nothing. The derived
        value goes stale after a backspace-to-empty → retype cycle
@@ -382,17 +392,30 @@
       value="Type at least 2 characters to search the index." />
 
     <!-- issue-251 absence signals: an empty result set says what kind of
-         absence this is. Search is FTS keyword/phrase, not semantic — and
-         self-inflicted filters (date window, disabled pills) are named so
-         they can be fixed in place. -->
-    <VStack when="{ready &amp;&amp; displayed.length === 0 &amp;&amp; latchedQuery === query.trim()}" gap="$space-0_5">
+         absence this is. Two cases, and conflating them printed a falsehood:
+         gated on post-filter `displayed` alone, a query matching 129 docs
+         with every pill off rendered "No matches." directly beneath the
+         pills counting those 129, over a keyword-not-semantic note asserting
+         no term had matched. Branch on `totalHits` instead. The note is
+         load-bearing on a real zero (FTS5 keyword/phrase — a miss is not
+         proof of absence) and firing it falsely teaches the reader to
+         distrust it in the case it exists for. -->
+    <VStack when="{ready &amp;&amp; displayed.length === 0 &amp;&amp; latchedQuery === query.trim() &amp;&amp; totalHits === 0}" gap="$space-0_5">
       <Text color="$textColor-secondary" value="No matches." />
       <Text fontSize="$fontSize-xs" color="$textColor-secondary"
-        value="Search matches exact keywords and phrases (quote for a phrase), not meanings — no match means no term matched, not that the item is missing from the index." />
-      <Text when="{!!dateFilter}" fontSize="$fontSize-xs" color="$textColor-secondary"
-        value="A date filter is active — widen or reset the slider above." />
-      <Text when="{selectedTypes.length &lt; 4}" fontSize="$fontSize-xs" color="$textColor-secondary"
-        value="{(4 - selectedTypes.length) + ' result type(s) are hidden — enable more pills above.'}" />
+        value="Search matches exact keywords and phrases (quote for a phrase), not meanings — no match means no term matched, not that the item is missing from the index. A trailing * widens the last word to a prefix." />
+    </VStack>
+
+    <!-- Hits exist; the filters are hiding them. Name the cause in the
+         headline and make it fixable with one control rather than an
+         instruction to go operate another one. -->
+    <VStack when="{ready &amp;&amp; displayed.length === 0 &amp;&amp; latchedQuery === query.trim() &amp;&amp; totalHits > 0}" gap="$space-1">
+      <Text color="$textColor-secondary"
+        value="{'All ' + totalHits + ' match' + (totalHits === 1 ? ' is' : 'es are') + ' hidden by your filters.'}" />
+      <Text fontSize="$fontSize-xs" color="$textColor-secondary"
+        value="{(selectedTypes.length &lt; 4 ? ((4 - selectedTypes.length) + ' of 4 result types are turned off. ') : '') + (dateFilter ? 'A date window is narrowing the results. ' : '')}" />
+      <Button label="Show all" themeColor="primary" size="xs"
+        onClick="() => { selectedTypes = ['session', 'commit', 'issue', 'worklist-history']; dateFilter = null; dateDraft = null }" />
     </VStack>
 
     <!-- search-rows-confinement + search-results-virtualize: rows render
@@ -403,25 +426,197 @@
       query="{query.trim()}"
       selectionKey="{selectedTypes.slice().sort().join(',')}" />
 
+    <!-- search-empty-state-and-help-show-dont-tell: the dialog used to be
+         a seven-bullet spec of the query language, which a reader had to
+         translate into a query themselves. Each row now RUNS instead --
+         the button navigates the deep link -- and carries two more
+         columns: what the answer looks like, and what the query actually
+         becomes.
+
+         The sample is a REAL top hit for that query in this instance,
+         trimmed by hand to the few words that carry the point, rendered
+         through snippetSegments with the SAME Text props SearchResults
+         uses -- so the mark colour and size here are the ones on the
+         results page, not an approximation. Static on purpose: a live
+         query would make the lesson depend on what happens to be indexed,
+         and an AND row whose top hit had its two terms adjacent would
+         teach the opposite of the point. Trimmed on purpose too -- two
+         marks with a word between them is the lesson, and forty words of
+         real snippet buries it.
+
+         The syntax column is the literal FTS5 MATCH expression the host
+         builds: fts5_and_query (lib.rs:19871) quotes each term and joins
+         with AND, appending * per term in prefix mode; raw passes through
+         verbatim (dispatch at lib.rs:40826). It is here because only a
+         fraction of that language is reachable from the box today -- the
+         column is the map for opening more of it up.
+
+         The two dead-wildcard rows carry no sample. They match as literal
+         text, so whatever lone document contains that string is noise
+         rather than an illustration. -->
+    <Theme maxWidth-ModalDialog="64rem">
     <ModalDialog id="searchHelpDialog" title="Search help">
       <VStack gap="$space-3" padding="$space-2">
         <Markdown content="Searches Bram's local full-text index of this project's history:
 
 - **Sessions** — Claude and Codex transcripts
-- **Commits** — the git log
+- **Commits** — the git log, message and patch
 - **Issues** — the project forge
-- **History** — worklist history (proposals, approvals, commits)
+- **History** — worklist history (proposals, approvals, commits)" />
 
-How queries work:
+        <!-- Two things the layout does not say for itself: that the first
+             column is live, and that the middle column is a sample from THIS
+             repo rather than a promise about the reader's. Without the second
+             half, a reader who clicks and gets different hits reasonably
+             concludes the help is wrong. -->
+        <Text fontSize="$fontSize-xs" color="$textColor-secondary"
+          value="Queries in the first column are clickable — each one runs. What comes back depends on what is indexed in your repo, so your results will differ from the samples shown here." />
+        <HStack gap="$space-3" verticalAlignment="center">
+          <Text width="13rem" fontWeight="bold" value="Try these" />
+          <Text width="*" fontWeight="bold" value="What you get" />
+          <Text width="15rem" fontWeight="bold" value="Sent to the index as" />
+        </HStack>
+        <HStack gap="$space-3" verticalAlignment="start">
+          <Button size="xs" variant="ghost" width="13rem" label="worklist version"
+            onClick="() => { searchHelpDialog.close(); navigate('/search', { queryParams: { q: 'worklist version' } }) }" />
+          <VStack width="*" gap="$space-0_5">
+            <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="Two words, ANDed: both must appear, in any order, with anything between them." />
+            <Text width="100%" whiteSpace="pre-wrap"
+              fontSize="$fontSize-sm" color="$textColor-secondary"
+              segments="{snippetSegments('[version] field to [worklist].json', 'worklist version')}" />
+          </VStack>
+          <VStack width="15rem">
+            <Markdown content="`&quot;worklist&quot; AND &quot;version&quot;`" />
+          </VStack>
+        </HStack>
+        <HStack gap="$space-3" verticalAlignment="start">
+          <Button size="xs" variant="ghost" width="13rem" label="&quot;inflight sentinel&quot;"
+            onClick="() => { searchHelpDialog.close(); navigate('/search', { queryParams: { q: '&quot;inflight sentinel&quot;' } }) }" />
+          <VStack width="*" gap="$space-0_5">
+            <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="In quotes: the same two words, but adjacent and in that order." />
+            <Text width="100%" whiteSpace="pre-wrap"
+              fontSize="$fontSize-sm" color="$textColor-secondary"
+              segments="{snippetSegments('the Worklist [inflight sentinel] when approved', '&quot;inflight sentinel&quot;')}" />
+          </VStack>
+          <VStack width="15rem">
+            <Markdown content="`&quot;inflight sentinel&quot;`" />
+          </VStack>
+        </HStack>
+        <HStack gap="$space-3" verticalAlignment="start">
+          <Button size="xs" variant="ghost" width="13rem" label="&quot;inflight sentinel&quot; clear"
+            onClick="() => { searchHelpDialog.close(); navigate('/search', { queryParams: { q: '&quot;inflight sentinel&quot; clear' } }) }" />
+          <VStack width="*" gap="$space-0_5">
+            <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="Mix them: a quoted phrase and a loose word, both required." />
+            <Text width="100%" whiteSpace="pre-wrap"
+              fontSize="$fontSize-sm" color="$textColor-secondary"
+              segments="{snippetSegments('no [inflight sentinel] write/[clear]', '&quot;inflight sentinel&quot; clear')}" />
+          </VStack>
+          <VStack width="15rem">
+            <Markdown content="`&quot;inflight sentinel&quot; AND &quot;clear&quot;`" />
+          </VStack>
+        </HStack>
+        <HStack gap="$space-3" verticalAlignment="start">
+          <Button size="xs" variant="ghost" width="13rem" label="feedback-history"
+            onClick="() => { searchHelpDialog.close(); navigate('/search', { queryParams: { q: 'feedback-history' } }) }" />
+          <VStack width="*" gap="$space-0_5">
+            <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="Punctuation splits into adjacent words, so this also finds it written with a space." />
+            <Text width="100%" whiteSpace="pre-wrap"
+              fontSize="$fontSize-sm" color="$textColor-secondary"
+              segments="{snippetSegments('resources/[feedback-history]/ archive', 'feedback-history')}" />
+          </VStack>
+          <VStack width="15rem">
+            <Markdown content="`&quot;feedback-history&quot;`" />
+          </VStack>
+        </HStack>
+        <HStack gap="$space-3" verticalAlignment="start">
+          <Button size="xs" variant="ghost" width="13rem" label="ledg*"
+            onClick="() => { searchHelpDialog.close(); navigate('/search', { queryParams: { q: 'ledg*' } }) }" />
+          <VStack width="*" gap="$space-0_5">
+            <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="Trailing *: what you typed is a prefix, so the match runs longer than the query." />
+            <Text width="100%" whiteSpace="pre-wrap"
+              fontSize="$fontSize-sm" color="$textColor-secondary"
+              segments="{snippetSegments('add outbound-send [ledger]', 'ledg*')}" />
+          </VStack>
+          <VStack width="15rem">
+            <Markdown content="`&quot;ledg&quot;*`" />
+          </VStack>
+        </HStack>
+        <HStack gap="$space-3" verticalAlignment="start">
+          <Button size="xs" variant="ghost" width="13rem" label="work vers*"
+            onClick="() => { searchHelpDialog.close(); navigate('/search', { queryParams: { q: 'work vers*' } }) }" />
+          <VStack width="*" gap="$space-0_5">
+            <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="One trailing * widens EVERY word in the query, not just the last one." />
+            <Text width="100%" whiteSpace="pre-wrap"
+              fontSize="$fontSize-sm" color="$textColor-secondary"
+              segments="{snippetSegments('bump [version] files from release [workflow]', 'work vers*')}" />
+          </VStack>
+          <VStack width="15rem">
+            <Markdown content="`&quot;work&quot;* AND &quot;vers&quot;*`" />
+          </VStack>
+        </HStack>
+        <HStack gap="$space-3" verticalAlignment="start">
+          <Button size="xs" variant="ghost" width="13rem" label="*edger"
+            onClick="() => { searchHelpDialog.close(); navigate('/search', { queryParams: { q: '*edger' } }) }" />
+          <VStack width="*" gap="$space-0_5">
+            <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="A * anywhere but the very end is not a wildcard: it is searched as literal text." />
+          </VStack>
+          <VStack width="15rem">
+            <Markdown content="`&quot;*edger&quot;`" />
+          </VStack>
+        </HStack>
+        <HStack gap="$space-3" verticalAlignment="start">
+          <Button size="xs" variant="ghost" width="13rem" label="ledg*r"
+            onClick="() => { searchHelpDialog.close(); navigate('/search', { queryParams: { q: 'ledg*r' } }) }" />
+          <VStack width="*" gap="$space-0_5">
+            <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="Same in the middle. Only the end of a word can float; there is no infix match." />
+          </VStack>
+          <VStack width="15rem">
+            <Markdown content="`&quot;ledg*r&quot;`" />
+          </VStack>
+        </HStack>
+        <HStack gap="$space-3" verticalAlignment="start">
+          <Button size="xs" variant="ghost" width="13rem" label="ledger OR sentinel"
+            onClick="() => { searchHelpDialog.close(); navigate('/search', { queryParams: { q: 'ledger OR sentinel', mode: 'raw' } }) }" />
+          <VStack width="*" gap="$space-0_5">
+            <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="Raw mode: OR widens, so either word alone is a hit." />
+            <Text width="100%" whiteSpace="pre-wrap"
+              fontSize="$fontSize-sm" color="$textColor-secondary"
+              segments="{snippetSegments('send-[ledger] transitions and guards', 'ledger OR sentinel')}" />
+          </VStack>
+          <VStack width="15rem">
+            <Markdown content="`ledger OR sentinel`" />
+          </VStack>
+        </HStack>
+        <HStack gap="$space-3" verticalAlignment="start">
+          <Button size="xs" variant="ghost" width="13rem" label="sentinel NOT ledger"
+            onClick="() => { searchHelpDialog.close(); navigate('/search', { queryParams: { q: 'sentinel NOT ledger', mode: 'raw' } }) }" />
+          <VStack width="*" gap="$space-0_5">
+            <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="Raw mode: NOT subtracts, keeping hits that lack the second word." />
+            <Text width="100%" whiteSpace="pre-wrap"
+              fontSize="$fontSize-sm" color="$textColor-secondary"
+              segments="{snippetSegments('the inflight [sentinel] cleared at turn-end', 'sentinel NOT ledger')}" />
+          </VStack>
+          <VStack width="15rem">
+            <Markdown content="`sentinel NOT ledger`" />
+          </VStack>
+        </HStack>
+        <HStack gap="$space-3" verticalAlignment="start">
+          <Button size="xs" variant="ghost" width="13rem" label="echo NEAR repin"
+            onClick="() => { searchHelpDialog.close(); navigate('/search', { queryParams: { q: 'echo NEAR repin', mode: 'raw' } }) }" />
+          <VStack width="*" gap="$space-0_5">
+            <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="Raw mode: NEAR wants the words close together, not just present." />
+            <Text width="100%" whiteSpace="pre-wrap"
+              fontSize="$fontSize-sm" color="$textColor-secondary"
+              segments="{snippetSegments('[echo]-suppressed, then [repin]', 'echo NEAR repin')}" />
+          </VStack>
+          <VStack width="15rem">
+            <Markdown content="`echo NEAR repin`" />
+          </VStack>
+        </HStack>
 
-- Type at least 2 characters.
-- Multiple words are ANDed — every term must appear somewhere in the document.
-- Wrap the whole query in double quotes for an exact phrase.
-- Click the colored pills to include or exclude a bucket; each shows its own hit count.
-- When results span dates, drag the two-handled slider to narrow the time window.
-- Click any result title to expand its full detail inline; click again to collapse.
-- Matching is keyword-based, not semantic: zero hits means those exact words were not found in the index — not proof the thing never happened. Try fewer or different terms." />
+        <Markdown content="**Then narrow what you got.** Click the colored pills to show or hide a bucket — each carries its own hit count. When results span dates, drag the two-handled slider to a time window. Click any result title to expand its full detail inline, and again to collapse." />
       </VStack>
     </ModalDialog>
+    </Theme>
   </VStack>
 </Component>

@@ -37,7 +37,7 @@
     onDidChange="() => window.__bramToastWhisperNotice(whisperNotice.value, toast)" />
   <ChangeListener
     listenTo="{voiceBusyNotice.value &amp;&amp; voiceBusyNotice.value.at}"
-    onDidChange="(c) => { if (c.newValue) { toast('A voice recording is already in progress. Return to that recording to stop it.'); } }" />
+    onDidChange="(c) => { if (c.newValue) { toast('A voice recording is already in progress. Return to that recording to stop it. If you can\'t find it, reload Bram to clear it.'); } }" />
   <ChangeListener
     listenTo="{enhanceStatusEvt.value}"
     onDidChange="() => { window.__bramIframeTrace('refetch-called', {context: 'enhance-status-changed'}); enhanceStatus.refetch(); startBramLatestJsonlPush(() => (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || ''); }" />

@@ -57,6 +57,16 @@
                set of collapsed items without expanding any. -->
           <property name="summary">
             <HStack gap="$space-2" verticalAlignment="center">
+              <!-- rethink-activity-indicators: row-prepended spinner while
+                   the HOST's claim covers this item — a decision being
+                   carried out, host state, never inferred agent activity.
+                   A plural (batch) claim lights all its rows. Persists
+                   across assistant turns now that soft detectors leave
+                   approved claims alone (lib.rs guards). -->
+              <Theme size-Spinner="14px">
+                <Spinner when="{window.__bramItemInflightKind(inflightClaim.value, $item.id, '', '', 0)}" />
+              </Theme>
+              <!-- Badge follows -->
               <!-- Badge's text prop is `value` (not `label` — the
                    ExpandableItem doc's summary example is wrong, filed
                    upstream); empty value renders a bare nbsp frame.

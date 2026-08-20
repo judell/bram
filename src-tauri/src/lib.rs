@@ -33172,6 +33172,21 @@ fn inflight_claim_ids_and_claimed_at<R: tauri::Runtime>(
     Some((ids, claimed_at))
 }
 
+// rethink-activity-indicators: the current claim's kind, consulted by the
+// SOFT clear paths (jsonl-turn-end, pty-silence). An approved claim spans
+// a multi-turn apply — receipt from the rung-8 cycle (2026-08-20): claim
+// written 20:16:22, soft-cleared at 20:17:13 on an intermediate assistant
+// turn end, while the apply ran until the 20:19 commit — so soft detectors
+// must not clear it. Hard paths (mutate advance/prune, worklist-commit,
+// iterate-end, explicit PTY interrupts, startup stale-claim cleanup)
+// clear regardless of kind.
+fn inflight_claim_kind<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<String> {
+    let path = inflight_claim_file(app)?;
+    let content = std::fs::read_to_string(&path).ok()?;
+    let claim: serde_json::Value = serde_json::from_str(&content).ok()?;
+    claim.get("kind").and_then(|v| v.as_str()).map(String::from)
+}
+
 // Clear the inflight sentinel (#84). Conditions: a sentinel exists,
 // AND every id currently claimed is in `mutated_ids`. Partial coverage
 // leaves the sentinel alone — partial completion is a diagnostic
@@ -33338,6 +33353,18 @@ fn emit_or_defer_tools_pane_reload<R: tauri::Runtime>(app: &AppHandle<R>, force:
 // sentinel is absent or has no ids. Refs #91 follow-up.
 fn clear_active_sentinel<R: tauri::Runtime>(app: &AppHandle<R>) {
     if let Some((ids, _claimed_at)) = inflight_claim_ids_and_claimed_at(app) {
+        // Soft path (pty-silence rides this fn): approved claims outlive
+        // turns — see inflight_claim_kind.
+        if inflight_claim_kind(app).as_deref() == Some("approved") {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "inflight-sentinel",
+                    "op=skip-clear source=pty-silence reason=approved-claim-live",
+                );
+            }
+            return;
+        }
         clear_inflight_claim_sentinel(app, &ids);
     }
 }
@@ -34333,6 +34360,18 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
                     file_mtime_ms,
                     serde_json::to_string(&claimed_ids).unwrap_or_else(|_| "[]".to_string())
                 ),
+            );
+        }
+        return;
+    }
+    // Soft path: approved claims outlive turns — see inflight_claim_kind
+    // (the rung-8 receipt: cleared 51s into a multi-turn apply).
+    if inflight_claim_kind(app).as_deref() == Some("approved") {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "inflight-sentinel",
+                "op=skip-clear source=jsonl-turn-end reason=approved-claim-live",
             );
         }
         return;

@@ -1926,11 +1926,14 @@ window.__bramWorklist2Strip = function (item, claim) {
   };
   var kind = window.__bramItemInflightKind(claim, item.id, "", "", 0);
   if (kind) {
-    // header-inflight-verbs: the strip shares the banner's verb — an
-    // approved claim on a row with changes is Committing…, not Approving….
-    var csv = item.changeSummary;
-    var gate = kind === "approved" && csv && csv.changed > 0 ? "TO COMMIT" : "";
-    return withCloses(window.__bramClaimVerb(kind, gate) + "…");
+    // header-inflight-verbs, corrected (2026-08-20 sighting: the strip
+    // flipped Approving… → Committing… mid-apply as the first edits
+    // landed): the verb reads the claim's statusLabel — the gate FIXED at
+    // approval time, same host fact the banner reads — never inferred
+    // from the moving changed-count.
+    return withCloses(
+      window.__bramClaimVerb(kind, (claim && claim.statusLabel) || "") + "…",
+    );
   }
   // worklist2-plan-vs-activity: activity counts render only for items
   // that have BEGUN (applied, or covered by a live claim — host facts,
@@ -2475,6 +2478,45 @@ window.__bramWorklist2IteratePrep = function (items, itemId, feedback) {
   });
   window.__bramSetWorklistActionState({ worklistActionResult: r });
   return r;
+};
+
+// worklist2-batch-selection (as clarified): one gate row serves one or
+// several — the selection is part of the sentence. The message box's text
+// fans out to every selected item's payload entry; Iterate-N composes a
+// plural iterate: turn (no authorization payload — iterate claims no
+// slot; the host's toTurn path raises the sentinel from the prefix).
+window.__bramWorklist2CaptureSent = function (map, ids, text, atMs) {
+  if (!text || !String(text).trim()) return map || {};
+  var next = Object.assign({}, map || {});
+  (ids || []).forEach(function (id) {
+    next[id] = [{ text: text, atMs: atMs }].concat(next[id] || []);
+  });
+  return next;
+};
+window.__bramFanFeedback = function (ids, text) {
+  var map = {};
+  (ids || []).forEach(function (id) {
+    map[id] = text || "";
+  });
+  return map;
+};
+window.__bramWorklist2BatchIterate = function (ids, text) {
+  var items = (ids || []).map(function (id) {
+    return { id: id, feedback: text || "" };
+  });
+  var r = {
+    turnText: "iterate: " + JSON.stringify({ items: items }),
+    authorizationPayload: null,
+    submitting: true,
+    submittedItemId: items.length ? items[0].id : null,
+    submittedKind: window.__bramSetWorklistSubmittedKind("action"),
+    actionProgressScope: "batch",
+    actionProgressKind: "iterate",
+    actionProgressTick: 0,
+    expandedItemIds: [],
+    feedbackDraftsById: {},
+  };
+  return window.__bramWorklistActApply(r);
 };
 
 // Selection state helpers for the row tickboxes and the plural action bar.

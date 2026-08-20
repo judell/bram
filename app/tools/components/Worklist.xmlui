@@ -4,9 +4,13 @@
   var.worklist2Feedback="{{}}"
   var.worklist2Close="{{}}"
   var.worklist2NewItemOpen="{false}"
-  var.worklist2NewItemText="{''}"
+  var.worklist2NewItemIssue="{null}"
   var.worklist2VoiceRecording="{false}"
-  var.worklist2VoiceItemId="{''}">
+  var.worklist2VoiceItemId="{''}"
+  var.worklist2Sent="{{}}"
+  var.worklist2Selected="{[]}"
+  var.worklist2BatchText="{''}"
+  var.w2BatchVoiceRecording="{false}">
   <!-- Worklist2: the redesigned, evidence-first gate (tutorial gist v3).
        Binds the same /__worklist payload Workspace uses, so the two tabs
        cannot disagree about state. Two-level compression: a row-level
@@ -80,27 +84,60 @@
         size="xs"
         onClick="worklist2NewItemOpen = !worklist2NewItemOpen" />
     </HStack>
+    <!-- worklist2-new-item-parity: thin composition of existing pieces.
+         IsolatedDraftEditor brings the placeholder protocol, voice, paste
+         and drag-resize as a unit (voice/paste target new-item, shared
+         with the old dialog's machinery); the issue Select restores the
+         issue-driven path (issue-<N>- ids + closesIssues key off the
+         composed phrasing). The instructional prose is gone by design. -->
+    <DataSource
+      id="w2OpenIssues"
+      url="/__issues"
+      when="{worklist2NewItemOpen}" />
     <VStack
       when="{worklist2NewItemOpen}"
       gap="$space-2"
       padding="$space-3"
       border="1px solid $color-surface-200"
       borderRadius="$borderRadius">
-      <Text
-        fontSize="$fontSize-sm"
-        color="$textColor-secondary"
-        value="You don't add items directly — describe the change and the agent proposes it as a row here." />
-      <HStack gap="$space-2" verticalAlignment="center">
-        <TextBox
-          width="32rem"
-          placeholder="Describe what the item should change"
-          initialValue="{worklist2NewItemText}"
-          onDidChange="(v) => worklist2NewItemText = v" />
+      <Select
+        when="{!!w2OpenIssues.value}"
+        placeholder="Optional: cite an open issue"
+        data="{((w2OpenIssues.value) || []).filter(i => i.state === 'OPEN').map(i => ({value: i.number, label: '#' + i.number + ' ' + i.title}))}"
+        initialValue="{worklist2NewItemIssue}"
+        onDidChange="(v) => worklist2NewItemIssue = v" />
+      <IsolatedDraftEditor
+        id="w2NewItemEditor"
+        placeholder="Describe what the item should change"
+        minRows="2"
+        maxRows="16"
+        width="100%"
+        voiceTarget="new-item"
+        pasteTarget="new-item"
+        inlineImagePreview="true"
+        voiceTooltip="Dictate worklist item" />
+      <HStack gap="$space-2">
         <Button
-          label="Ask agent"
+          label="Propose item"
           size="sm"
-          enabled="{(worklist2NewItemText || '').trim().length > 0}"
-          onClick="window.__bramIframeTrace('click', {target: 'worklist2-new-item'}); window.toTurn('Propose a worklist item: ' + worklist2NewItemText); worklist2NewItemText = ''; worklist2NewItemOpen = false" />
+          onClick="(() => {
+            const issuesArr = (w2OpenIssues.value) || [];
+            const issueObj = worklist2NewItemIssue ? issuesArr.find(i => String(i.number) === String(worklist2NewItemIssue)) : null;
+            const text = (w2NewItemEditor.getValue() || '').trim();
+            if (!issueObj &amp;&amp; !text) return;
+            let msg;
+            if (issueObj &amp;&amp; text) { msg = 'Propose a worklist item to address #' + issueObj.number + ' (' + issueObj.title + '): ' + text; }
+            else if (issueObj) { msg = 'Propose a worklist item to address #' + issueObj.number + ' (' + issueObj.title + ').'; }
+            else { msg = 'Propose a worklist item: ' + text; }
+            window.__bramIframeTrace('click', {target: 'worklist2-new-item', issue: issueObj ? issueObj.number : 0});
+            toTurn(window.__bramWithStagedImageMarkers(msg, 'new-item'));
+            worklist2NewItemOpen = false; worklist2NewItemIssue = null; setWorklistVoiceTarget('message-agent'); w2NewItemEditor.clear();
+          })()" />
+        <Button
+          label="Cancel"
+          variant="ghost"
+          size="sm"
+          onClick="worklist2NewItemOpen = false; worklist2NewItemIssue = null; setWorklistVoiceTarget('message-agent'); w2NewItemEditor.clear()" />
       </HStack>
     </VStack>
     <!-- Component is named Worklist (the eventual real name); only the nav
@@ -110,7 +147,7 @@
     <Text
       fontSize="$fontSize-sm"
       color="$textColor-secondary"
-      value="The redesigned gate — Approve, Commit, Iterate, and Drop all work here. (Batch selection still lives in the Worklist tab.)" />
+      value="The redesigned gate — Approve, Commit, Iterate, Drop, and batch selection all work here." />
     <Text
       when="{worklist.value &amp;&amp; (!worklist.value.items || worklist.value.items.length === 0)}"
       color="$textColor-secondary">
@@ -122,11 +159,17 @@
       <VStack gap="$space-1" paddingBottom="$space-4">
         <!-- worklist2-remove-expander-chrome: no indicator glyphs (History's
              chrome-free section headers are the precedent); the header line
-             itself is the toggle. -->
-        <HStack
-          gap="$space-2"
-          verticalAlignment="center"
-          onClick="expandedKeys = window.__bramFlipExpansionKey(expandedKeys, $item.id)">
+             itself is the toggle. The selection Checkbox sits OUTSIDE the
+             toggling region so ticking never flips expansion. -->
+        <HStack gap="$space-2" verticalAlignment="center">
+          <Checkbox
+            initialValue="{(worklist2Selected || []).includes($item.id)}"
+            onDidChange="(v) => worklist2Selected = window.__bramToggleRowSelection(worklist2Selected || [], $item.id, v)" />
+          <HStack
+            gap="$space-2"
+            verticalAlignment="center"
+            width="*"
+            onClick="expandedKeys = window.__bramFlipExpansionKey(expandedKeys, $item.id)">
           <!-- rethink-activity-indicators: row-prepended spinner while
                the HOST's claim covers this item — a decision being
                carried out, host state, never inferred agent activity.
@@ -146,6 +189,7 @@
             fontSize="$fontSize-sm"
             color="$textColor-secondary"
             value="{window.__bramWorklist2Strip($item, inflightClaim.value)}" />
+          </HStack>
         </HStack>
         <VStack
           when="{(expandedKeys || []).includes($item.id)}"
@@ -243,6 +287,32 @@
                with tickbox override on begun rows (default ticked; untick
                to keep an issue open) — the old tab's inline pattern, at
                its final home. Plan rows keep the plain declaration. -->
+          <!-- worklist2-dim-sent-feedback (as clarified): a Feedback
+               SECTION under Diff - multiple entries, reverse
+               chronological, rendered exactly as worklist-history does.
+               Entries accumulate per verb-send for the item's life on
+               the board. -->
+          <HStack
+            when="{(((worklist2Sent || {})[$item.id] || []).concat($item.feedbackHistory || [])).length > 0}"
+            gap="$space-1"
+            verticalAlignment="center"
+            onClick="expandedKeys = window.__bramFlipExpansionKey(expandedKeys, $item.id + '::feedback')">
+            <Text value="Feedback" />
+          </HStack>
+          <VStack
+            when="{(expandedKeys || []).includes($item.id + '::feedback') &amp;&amp; (((worklist2Sent || {})[$item.id] || []).concat($item.feedbackHistory || [])).length > 0}"
+            gap="$space-2"
+            paddingLeft="$space-6">
+            <Items data="{(((worklist2Sent || {})[$item.id] || []).concat($item.feedbackHistory || []))}">
+              <VStack gap="$space-1">
+                <Text
+                  fontSize="$fontSize-xs"
+                  color="$textColor-secondary"
+                  value="{'Feedback · ' + new Date($item.atMs).toLocaleTimeString()}" />
+                <Markdown content="{$item.text}" interpolateBindings="false" allowHtml="false" />
+              </VStack>
+            </Items>
+          </VStack>
           <HStack
             when="{$item.closesIssues &amp;&amp; $item.closesIssues.length > 0}"
             gap="$space-2"
@@ -259,74 +329,67 @@
               </HStack>
             </Items>
           </HStack>
-          <!-- The gate row: one message box, the disk-named primary
-               (Approve on plan rows and the stale no-work shape; Commit on
-               begun rows with changes), then Iterate (needs feedback -
-               no-direction iterate is meaningless) and Drop (fine print
-               names the on-disk consequence). All four verbs ride the
-               shared prep/store machinery - same wire, same claims, same
-               serialization as the old tab. -->
-          <HStack gap="$space-2" verticalAlignment="center">
-            <!-- worklist2-feedback-input-parity: the old tab's mic, verbatim
-                 semantics - voice targets feedback:<itemId>; the shared xs
-                 voice machinery (Globals.xs module scope) is bare-callable
-                 here exactly as in Workspace. -->
-            <Button
-              label="{worklist2VoiceRecording &amp;&amp; worklist2VoiceItemId === $item.id ? (worklistVoiceRecordingActive ? '⏹' : '⏳') : '🎤'}"
-              size="sm"
-              variant="ghost"
-              enabled="{!isWorklistVoiceProcessingTarget('feedback:' + $item.id) &amp;&amp; (!worklist2VoiceRecording || (worklist2VoiceItemId === $item.id &amp;&amp; worklistVoiceRecordingActive))}"
-              onClick="setWorklistVoiceTarget('feedback:' + $item.id); if (!worklist2VoiceRecording) worklist2VoiceItemId = $item.id; worklist2VoiceRecording = toggleVoiceForCurrentTarget(worklist2VoiceRecording)" />
-            <Theme size-Spinner="14px">
-              <Spinner when="{isWorklistVoiceProcessingTarget('feedback:' + $item.id)}" />
-            </Theme>
-            <ChangeListener
-              listenTo="{w2VoiceArrival.value &amp;&amp; w2VoiceArrival.value.at}"
-              onDidChange="() => { const ev = w2VoiceArrival.value || null; const tr = (ev &amp;&amp; ev.transcript) || ''; const target = (ev &amp;&amp; ev.meta &amp;&amp; ev.meta.target) || ''; if (target === ('feedback:' + $item.id)) { if (tr) { const nv = window.__bramAppendVoiceToBox(w2FeedbackBox, tr); if (nv !== false) worklist2Feedback = window.__bramMapSet(worklist2Feedback, $item.id, nv); } worklist2VoiceRecording = false; worklist2VoiceItemId = ''; worklistVoiceRecordingActive = false; }}" />
-            <!-- TextArea, drag-expandable (review: long feedback was
-                 unreadable in a one-line box). Focus sets the FULL
-                 feedback:<itemId> target: the paste resolver's placeholder
-                 sniff proved unreliable here (trace receipt 22:54:01 -
-                 image staged under bare "feedback", consume matched 0), so
-                 the voice-target fallback must resolve correctly on its
-                 own. -->
-            <TextArea
-              id="w2FeedbackBox"
-              width="24rem"
-              resize="vertical"
-              placeholder="Message to agent"
-              initialValue="{(worklist2Feedback || {})[$item.id] || ''}"
-              onGotFocus="setWorklistVoiceTarget('feedback:' + $item.id); setFocusedFeedbackItemId($item.id); window.__bramIframeTrace('paste-image-target', {stage: 'w2-feedback-focus', target: 'feedback:' + $item.id, item: $item.id})"
-              onDidChange="(v) => worklist2Feedback = window.__bramMapSet(worklist2Feedback, $item.id, v)" />
-            <Button
-              when="{!(window.__bramWorklist2Begun($item, inflightClaim.value) &amp;&amp; $item.changeSummary &amp;&amp; $item.changeSummary.changed > 0)}"
-              label="Approve"
-              size="sm"
-              enabled="{!window.__bramInflightBlocker(inflightClaim.value)}"
-              onClick="window.__bramIframeTrace('click', {target: 'worklist2-approve', item: $item.id}); window.__bramWorklist2Approve(worklist.value.items, $item.id, (worklist2Feedback || {})[$item.id] || ''); worklist2Feedback = window.__bramMapSet(worklist2Feedback, $item.id, '')" />
-            <Button
-              when="{window.__bramWorklist2Begun($item, inflightClaim.value) &amp;&amp; $item.changeSummary &amp;&amp; $item.changeSummary.changed > 0}"
-              label="Commit"
-              size="sm"
-              enabled="{!window.__bramInflightBlocker(inflightClaim.value)}"
-              onClick="window.__bramIframeTrace('click', {target: 'worklist2-commit', item: $item.id}); window.__bramWorklist2Commit(worklist.value.items, $item, (worklist2Feedback || {})[$item.id] || '', worklist2Close); worklist2Feedback = window.__bramMapSet(worklist2Feedback, $item.id, '')" />
-            <Button
-              label="Iterate"
-              size="sm"
-              enabled="{!window.__bramInflightBlocker(inflightClaim.value) &amp;&amp; (((worklist2Feedback || {})[$item.id] || '').trim().length > 0 || (window.__bramPasteStateSnapshot ? window.__bramPasteStateSnapshot('feedback:' + $item.id).count : 0) > 0)}"
-              tooltip="Send the message as redirection; the item stays where it is"
-              onClick="window.__bramIframeTrace('click', {target: 'worklist2-iterate', item: $item.id}); const r = window.__bramWorklist2IteratePrep(worklist.value.items, $item.id, (worklist2Feedback || {})[$item.id] || ''); sendIterateWithFeedbackDraft(worklist.value.items, $item.id, r.feedback); worklist2Feedback = window.__bramMapSet(worklist2Feedback, $item.id, '')" />
-            <Button
-              label="Drop"
-              size="sm"
-              enabled="{!window.__bramInflightBlocker(inflightClaim.value)}"
-              tooltip="{$item.changeSummary &amp;&amp; $item.changeSummary.changed > 0 ? 'Drops this item. ' + $item.changeSummary.changed + ' changed file' + ($item.changeSummary.changed === 1 ? '' : 's') + ' stay on disk.' : 'Drops this item.'}"
-              onClick="window.__bramIframeTrace('click', {target: 'worklist2-drop', item: $item.id}); window.__bramWorklist2Drop(worklist.value.items, $item.id, (worklist2Feedback || {})[$item.id] || ''); worklist2Feedback = window.__bramMapSet(worklist2Feedback, $item.id, '')" />
-          </HStack>
-          <PastedImageStrip target="{'feedback:' + $item.id}" />
         </VStack>
       </VStack>
     </Items>
+    <!-- worklist2-batch-selection (as clarified): ONE control row serves
+         one or several — the Iterate-N principle applied to every verb.
+         Appears when anything is ticked; the message is about the set and
+         fans out to each selected item's payload entry. -->
+    <VStack
+      when="{(worklist2Selected || []).length > 0}"
+      gap="$space-1"
+      padding="$space-2"
+      borderRadius="$borderRadius"
+      backgroundColor="$color-surface-50">
+    <HStack gap="$space-2" verticalAlignment="center">
+      <Text
+        fontSize="$fontSize-sm"
+        color="$textColor-secondary"
+        value="{(worklist2Selected || []).length + ' selected'}" />
+      <Button
+        label="{w2BatchVoiceRecording ? (worklistVoiceRecordingActive ? '⏹' : '⏳') : '🎤'}"
+        size="sm"
+        variant="ghost"
+        enabled="{!isWorklistVoiceProcessingTarget('feedback') &amp;&amp; (!w2BatchVoiceRecording || worklistVoiceRecordingActive)}"
+        onClick="setWorklistVoiceTarget('feedback'); w2BatchVoiceRecording = toggleVoiceForCurrentTarget(w2BatchVoiceRecording)" />
+      <ChangeListener
+        listenTo="{w2VoiceArrival.value &amp;&amp; w2VoiceArrival.value.at}"
+        onDidChange="() => { const ev = w2VoiceArrival.value || null; const tr = (ev &amp;&amp; ev.transcript) || ''; const target = (ev &amp;&amp; ev.meta &amp;&amp; ev.meta.target) || ''; if (target === 'feedback') { if (tr) { const nv = window.__bramAppendVoiceToBox(w2BatchBox, tr); if (nv !== false) worklist2BatchText = nv; } w2BatchVoiceRecording = false; worklistVoiceRecordingActive = false; }}" />
+      <TextArea
+        id="w2BatchBox"
+        width="24rem"
+        resize="vertical"
+        placeholder="{window.__bramEditorPlaceholder('Message about the selection', true, true)}"
+        initialValue="{worklist2BatchText}"
+        onGotFocus="setWorklistVoiceTarget('feedback')"
+        onDidChange="(v) => worklist2BatchText = v" />
+      <Button
+        when="{window.__bramSelectionIds(worklist.value.items, worklist2Selected, 'proposed').length > 0}"
+        label="{'Approve ' + window.__bramSelectionIds(worklist.value.items, worklist2Selected, 'proposed').length}"
+        size="sm"
+        enabled="{!window.__bramInflightBlocker(inflightClaim.value)}"
+        onClick="window.__bramIframeTrace('click', {target: 'worklist2-batch-approve', count: (worklist2Selected || []).length}); const ids = window.__bramSelectionIds(worklist.value.items, worklist2Selected, 'proposed'); worklist2Sent = window.__bramWorklist2CaptureSent(worklist2Sent, ids, worklist2BatchText, Date.now()); const r = window.__bramPrepareBatchWorklistActionSubmission({kind: 'approved', items: worklist.value.items, selectedIds: ids, feedbackDraftsById: window.__bramFanFeedback(ids, window.__bramWithStagedImageMarkers(worklist2BatchText, 'feedback'))}); worklist2Selected = []; worklist2BatchText = ''; window.__bramWorklistActApply(r)" />
+      <Button
+        when="{window.__bramSelectionIds(worklist.value.items, worklist2Selected, 'applied').length > 0}"
+        label="{'Commit ' + window.__bramSelectionIds(worklist.value.items, worklist2Selected, 'applied').length}"
+        size="sm"
+        enabled="{!window.__bramInflightBlocker(inflightClaim.value)}"
+        onClick="window.__bramIframeTrace('click', {target: 'worklist2-batch-commit', count: (worklist2Selected || []).length}); const ids = window.__bramSelectionIds(worklist.value.items, worklist2Selected, 'applied'); worklist2Sent = window.__bramWorklist2CaptureSent(worklist2Sent, ids, worklist2BatchText, Date.now()); const r = window.__bramPrepareBatchWorklistActionSubmission({kind: 'approved', items: worklist.value.items, selectedIds: ids, feedbackDraftsById: window.__bramFanFeedback(ids, window.__bramWithStagedImageMarkers(worklist2BatchText, 'feedback'))}); worklist2Selected = []; worklist2BatchText = ''; window.__bramWorklistActApply(r)" />
+      <Button
+        label="{'Iterate ' + (worklist2Selected || []).length}"
+        size="sm"
+        enabled="{!window.__bramInflightBlocker(inflightClaim.value) &amp;&amp; (worklist2BatchText || '').trim().length > 0}"
+        tooltip="One message about the selected set"
+        onClick="window.__bramIframeTrace('click', {target: 'worklist2-batch-iterate', count: (worklist2Selected || []).length}); const iids = window.__bramSelectionIds(worklist.value.items, worklist2Selected, ''); worklist2Sent = window.__bramWorklist2CaptureSent(worklist2Sent, iids, worklist2BatchText, Date.now()); window.__bramWorklist2BatchIterate(iids, window.__bramWithStagedImageMarkers(worklist2BatchText, 'feedback')); worklist2Selected = []; worklist2BatchText = ''" />
+      <Button
+        label="{'Drop ' + (worklist2Selected || []).length}"
+        size="sm"
+        enabled="{!window.__bramInflightBlocker(inflightClaim.value)}"
+        onClick="window.__bramIframeTrace('click', {target: 'worklist2-batch-drop', count: (worklist2Selected || []).length}); const ids = window.__bramSelectionIds(worklist.value.items, worklist2Selected, ''); worklist2Sent = window.__bramWorklist2CaptureSent(worklist2Sent, ids, worklist2BatchText, Date.now()); const r = window.__bramPrepareBatchWorklistActionSubmission({kind: 'drop', items: worklist.value.items, selectedIds: ids, feedbackDraftsById: window.__bramFanFeedback(ids, window.__bramWithStagedImageMarkers(worklist2BatchText, 'feedback'))}); worklist2Selected = []; worklist2BatchText = ''; window.__bramWorklistActApply(r)" />
+    </HStack>
+    <PastedImageStrip target="feedback" />
+    </VStack>
     <!-- Parity: You/Agent last-exchange dock (old tab's shape, simplified:
          no fullscreen image viewer; dim while a newer user message awaits
          its answer). -->

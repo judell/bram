@@ -42217,6 +42217,38 @@ fn route_request<R: tauri::Runtime>(
                 }
             }
         }
+        // worklist2-dim-sent-feedback: per-item feedback history from the
+        // lossless iterate refs in resources/feedback-drafts/ (filenames
+        // <ms>-<itemId>.md), so the pane's Feedback section survives
+        // reloads — the durable mid-flight record, promoted to
+        // feedback-history/ on completion where worklist-history takes
+        // over. One directory read per request; newest first.
+        let mut feedback_by_item: std::collections::HashMap<String, Vec<(i64, String)>> =
+            std::collections::HashMap::new();
+        if let Some(dir) = project_resource_path(app, "feedback-drafts") {
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let Some(stem) = name.strip_suffix(".md") else {
+                        continue;
+                    };
+                    let Some(dash) = stem.find('-') else { continue };
+                    let (ms_str, rest) = stem.split_at(dash);
+                    let Ok(ms) = ms_str.parse::<i64>() else {
+                        continue;
+                    };
+                    let item_id = rest.trim_start_matches('-').to_string();
+                    if item_id.is_empty() {
+                        continue;
+                    }
+                    let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+                    if text.trim().is_empty() {
+                        continue;
+                    }
+                    feedback_by_item.entry(item_id).or_default().push((ms, text));
+                }
+            }
+        }
         if let Some(items) = doc.get_mut("items").and_then(|v| v.as_array_mut()) {
             for item in items {
                 // Item scope: prefer `files: [...]` array, fall back to the
@@ -42238,6 +42270,23 @@ fn route_request<R: tauri::Runtime>(
                     };
                 if file_paths.is_empty() {
                     continue;
+                }
+                if let Some(id) = item.get("id").and_then(|v| v.as_str()).map(String::from) {
+                    if let Some(list) = feedback_by_item.get_mut(&id) {
+                        list.sort_by(|a, b| b.0.cmp(&a.0));
+                        let arr: Vec<serde_json::Value> = list
+                            .iter()
+                            .map(|(ms, text)| {
+                                serde_json::json!({"atMs": ms, "text": text})
+                            })
+                            .collect();
+                        if let Some(obj) = item.as_object_mut() {
+                            obj.insert(
+                                "feedbackHistory".to_string(),
+                                serde_json::Value::Array(arr),
+                            );
+                        }
+                    }
                 }
                 // count-changed-files-rung1: change activity on EVERY item,
                 // whatever its status — the evidence-first rows render disk

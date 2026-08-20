@@ -107,10 +107,11 @@
             gap="$space-1"
             verticalAlignment="center"
             onClick="expandedKeys = window.__bramFlipExpansionKey(expandedKeys, $item.id + '::files')">
-            <!-- worklist2-plan-vs-activity: plan rows say Will touch (names
-                 only); begun rows (applied or claim-covered) say Files
-                 touched with the activity table. -->
-            <Text value="{window.__bramWorklist2Begun($item, inflightClaim.value) ? 'Files touched' : 'Will touch'}" />
+            <!-- Constant section name (review 2026-08-20: the Will-touch
+                 label flip read as regression). Plan-vs-activity survives
+                 in the CONTENT: plain name list for plans, activity table
+                 for begun rows. -->
+            <Text value="Files touched" />
           </HStack>
           <VStack
             when="{(expandedKeys || []).includes($item.id + '::files') &amp;&amp; ($item.changedFiles || window.__bramWorklistItemFiles($item)).length > 0}"

@@ -106,7 +106,10 @@
             gap="$space-1"
             verticalAlignment="center"
             onClick="expandedKeys = window.__bramFlipExpansionKey(expandedKeys, $item.id + '::files')">
-            <Text value="Files touched" />
+            <!-- worklist2-plan-vs-activity: plan rows say Will touch (names
+                 only); begun rows (applied or claim-covered) say Files
+                 touched with the activity table. -->
+            <Text value="{window.__bramWorklist2Begun($item, inflightClaim.value) ? 'Files touched' : 'Will touch'}" />
           </HStack>
           <VStack
             when="{(expandedKeys || []).includes($item.id + '::files') &amp;&amp; ($item.changedFiles || window.__bramWorklistItemFiles($item)).length > 0}"
@@ -116,7 +119,9 @@
                  shared-files flags live here beside the file they concern,
                  not on the status line. Plain-path fallback covers payloads
                  without the rung-1 enrichment. -->
-            <Table when="{$item.changedFiles}" data="{$item.changedFiles}">
+            <Table
+              when="{window.__bramWorklist2Begun($item, inflightClaim.value) &amp;&amp; $item.changedFiles}"
+              data="{$item.changedFiles}">
               <Column header="file">
                 <Text value="{$item.path}" variant="code" fontSize="$fontSize-sm" />
               </Column>
@@ -133,7 +138,9 @@
                   value="{$item.sharedWith &amp;&amp; $item.sharedWith.length ? '⚠ ' + $item.sharedWith.join(', ') : ''}" />
               </Column>
             </Table>
-            <Items when="{!$item.changedFiles}" data="{window.__bramWorklistItemFiles($item)}">
+            <Items
+              when="{!window.__bramWorklist2Begun($item, inflightClaim.value) || !$item.changedFiles}"
+              data="{window.__bramWorklistItemFiles($item)}">
               <Text value="{$item}" variant="code" fontSize="$fontSize-sm" />
             </Items>
           </VStack>

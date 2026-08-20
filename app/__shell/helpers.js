@@ -1917,15 +1917,27 @@ window.__bramWorklist2Strip = function (item, claim) {
   if (kind === "iterate") return withCloses("Iterating…");
   if (kind === "drop") return withCloses("Dropping…");
   if (kind) return withCloses(kind + "…");
+  // worklist2-plan-vs-activity: activity counts render only for items
+  // that have BEGUN (applied, or covered by a live claim — host facts,
+  // never agent-state inference). A proposed, unclaimed item is a PLAN:
+  // sibling work on shared paths is not this item's activity, so its
+  // strip stays at "no changes yet" and its files render as a plain
+  // Will-touch list.
+  var begun = window.__bramWorklist2Begun(item, claim);
   var cs = item.changeSummary;
-  if (cs && cs.changed > 0) {
+  if (begun && cs && cs.changed > 0) {
     var t = cs.lastChangeMs ? new Date(cs.lastChangeMs).toLocaleTimeString() : "";
     return withCloses(
       cs.diskLabel + " · " + cs.activityLabel + (t ? " · last: " + t : ""),
     );
   }
-  if ((item.status || "proposed") === "proposed") return withCloses("no changes yet");
+  if (!begun) return withCloses("no changes yet");
   return "";
+};
+window.__bramWorklist2Begun = function (item, claim) {
+  if (!item) return false;
+  if ((item.status || "proposed") === "applied") return true;
+  return !!window.__bramItemInflightKind(claim, item.id, "", "", 0);
 };
 
 // issue-266-close-declaration-inline: state helpers for the inline close

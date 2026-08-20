@@ -118,6 +118,16 @@
   <DataSource
     id="gitStatus"
     url="/__git/status" />
+  <!-- count-changed-files-rung1: the worklist payload's change activity
+       derives from git status, so refetch it on the host's
+       git-status-changed event (push over polling; Commits.xmlui idiom). -->
+  <PushSource
+    id="gitStatusChangedEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('git-status-changed', false)}" />
+  <ChangeListener
+    listenTo="{gitStatusChangedEvt.value &amp;&amp; gitStatusChangedEvt.value.tick}"
+    onDidChange="window.__bramRefetchOnLiveEvent(gitStatusChangedEvt.value, worklist)" />
   <DataSource
     id="commits"
     url="/__commits"
@@ -499,6 +509,15 @@
                         fontSize="$fontSize-xs"
                         fontWeight="$fontWeight-bold"
                         color="{($item.status || 'proposed') === 'applied' ? '$color-success-600' : (($item.status || 'proposed') === 'proposed' ? '$color-info-600' : '$color-danger-700')}" />
+                      <!-- count-changed-files-rung1: disk-truth marker on
+                           proposed items — work already on disk for a row
+                           whose badge says TO APPLY is the confusion this
+                           names (absent when nothing is on disk). -->
+                      <Text
+                        when="{($item.status || 'proposed') === 'proposed' &amp;&amp; $item.changeSummary &amp;&amp; $item.changeSummary.changed > 0}"
+                        value="{$item.changeSummary.diskLabel}"
+                        fontSize="$fontSize-xs"
+                        color="$textColor-secondary" />
                       <Button
                         when="{$itemIndex === worklist.value.items.findIndex(i => (i.status || 'proposed') === ($item.status || 'proposed'))}"
                         label="ⓘ"

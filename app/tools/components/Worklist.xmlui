@@ -10,6 +10,16 @@
        Workspace's persistence machinery. No actions: gating still happens
        in the Worklist tab. -->
   <DataSource id="worklist" url="/__worklist" />
+  <!-- count-changed-files-rung1: the payload's change activity derives
+       from git status, so refetch on the host's git-status-changed event
+       (push over polling; same idiom as Commits.xmlui). -->
+  <PushSource
+    id="gitStatusEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('git-status-changed', false)}" />
+  <ChangeListener
+    listenTo="{gitStatusEvt.value &amp;&amp; gitStatusEvt.value.tick}"
+    onDidChange="window.__bramRefetchOnLiveEvent(gitStatusEvt.value, worklist)" />
   <VStack padding="$space-4" gap="$space-3">
     <H2>Worklist2</H2>
     <!-- Component is named Worklist (the eventual real name); only the nav
@@ -27,16 +37,40 @@
     </Text>
     <Items data="{worklist.value &amp;&amp; worklist.value.items ? worklist.value.items : []}">
       <Theme paddingLeft-summary-ExpandableItem="0">
-        <ExpandableItem
-          summary="{$item.id}"
-          fullWidthSummary="true">
+        <ExpandableItem fullWidthSummary="true">
+          <!-- Rich summary (component-definition form of the summary prop):
+               Badge for the id (color/background emphasis per iterate
+               feedback), then the full activity strip — scannable across a
+               set of collapsed items without expanding any. -->
+          <property name="summary">
+            <HStack gap="$space-2" verticalAlignment="center">
+              <!-- Badge's text prop is `value` (not `label` — the
+                   ExpandableItem doc's summary example is wrong, filed
+                   upstream); empty value renders a bare nbsp frame.
+                   Contrast matched to Search's facet chips via theme vars:
+                   https://www.xmlui.org/docs/howto/theme-badge-colors-and-sizes -->
+              <Theme backgroundColor-Badge="$color-primary-600" textColor-Badge="white">
+                <Badge value="{$item.id}" />
+              </Theme>
+              <Text
+                fontSize="$fontSize-sm"
+                color="$textColor-secondary"
+                value="{$item.changeSummary ? ($item.changeSummary.diskLabel + ($item.changeSummary.changed > 0 ? ' · ' + $item.changeSummary.activityLabel + ' · last: ' + new Date($item.changeSummary.lastChangeMs).toLocaleTimeString() : '')) : ''}" />
+            </HStack>
+          </property>
           <VStack gap="$space-2" paddingLeft="$space-4">
             <ExpandableItem
-              when="{window.__bramWorklistItemFiles($item).length > 0}"
+              when="{($item.changedFiles || window.__bramWorklistItemFiles($item)).length > 0}"
               summary="Will touch"
               fullWidthSummary="true">
               <VStack gap="$space-1">
-                <Items data="{window.__bramWorklistItemFiles($item)}">
+                <!-- changedFiles carries one record per listed file with a
+                     host-computed label (path, or path +A −R (new/deleted));
+                     plain-path fallback covers payloads without rung 1. -->
+                <Items when="{$item.changedFiles}" data="{$item.changedFiles}">
+                  <Text value="{$item.label}" variant="code" fontSize="$fontSize-sm" />
+                </Items>
+                <Items when="{!$item.changedFiles}" data="{window.__bramWorklistItemFiles($item)}">
                   <Text value="{$item}" variant="code" fontSize="$fontSize-sm" />
                 </Items>
               </VStack>

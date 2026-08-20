@@ -42144,9 +42144,6 @@ fn route_request<R: tauri::Runtime>(
                     .and_then(|v| v.as_str())
                     .unwrap_or("proposed")
                     .to_string();
-                if status != "applied" {
-                    continue;
-                }
                 // Item scope: prefer `files: [...]` array, fall back to the
                 // legacy single `file: <string>` for backward compat.
                 let file_paths: Vec<String> =
@@ -42165,6 +42162,20 @@ fn route_request<R: tauri::Runtime>(
                         Vec::new()
                     };
                 if file_paths.is_empty() {
+                    continue;
+                }
+                // count-changed-files-rung1: change activity on EVERY item,
+                // whatever its status — the evidence-first rows render disk
+                // truth, not bookkeeping state.
+                if let Some((changed_files, summary)) =
+                    worklist_change_activity(app, &file_paths)
+                {
+                    if let Some(obj) = item.as_object_mut() {
+                        obj.insert("changedFiles".to_string(), changed_files);
+                        obj.insert("changeSummary".to_string(), summary);
+                    }
+                }
+                if status != "applied" {
                     continue;
                 }
                 let mut combined = String::new();
@@ -43229,11 +43240,144 @@ fn ensure_no_unrelated_staged_files(
     }
 }
 
+// count-changed-files-rung1: per-item change activity derived from disk.
+// Returns (changedFiles, changeSummary) for the /__worklist payload — one
+// record per listed file plus roll-up totals, with display labels computed
+// host-side so the pane renders dumb bindings. Porcelain semantics (not
+// `diff --name-only`): untracked files and deletions count as changed —
+// a diff-based derivation reads a false incomplete when an item's new
+// test file is complete. Quantifies ACTIVITY, never progress or
+// completion: the `files` list is the agent's prediction, and a partial
+// count can be done (a listed file that needed no change).
+fn worklist_change_activity<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    file_paths: &[String],
+) -> Option<(serde_json::Value, serde_json::Value)> {
+    if file_paths.is_empty() {
+        return None;
+    }
+    let root = project_root(Some(app))?;
+    let mut status_args: Vec<&str> = vec!["status", "--porcelain", "--no-renames", "--"];
+    for f in file_paths {
+        status_args.push(f.as_str());
+    }
+    let porcelain = git_run(app, &status_args).unwrap_or_default();
+    let mut status_by_path: std::collections::HashMap<String, &'static str> =
+        std::collections::HashMap::new();
+    for line in porcelain.lines() {
+        if line.len() < 4 {
+            continue;
+        }
+        let (xy, rest) = line.split_at(2);
+        let path = rest.trim_start().trim_matches('"').to_string();
+        let status = if xy.contains('?') || xy.contains('A') {
+            "new"
+        } else if xy.contains('D') {
+            "deleted"
+        } else {
+            "modified"
+        };
+        status_by_path.insert(path, status);
+    }
+    let mut num_args: Vec<&str> = vec!["diff", "HEAD", "--numstat", "--no-renames", "--"];
+    for f in file_paths {
+        num_args.push(f.as_str());
+    }
+    let numstat = git_run(app, &num_args).unwrap_or_default();
+    let mut counts: std::collections::HashMap<String, (i64, i64)> =
+        std::collections::HashMap::new();
+    for line in numstat.lines() {
+        let mut parts = line.splitn(3, '\t');
+        let a = parts.next().unwrap_or("0").parse::<i64>().unwrap_or(0);
+        let r = parts.next().unwrap_or("0").parse::<i64>().unwrap_or(0);
+        if let Some(path) = parts.next() {
+            counts.insert(path.trim_matches('"').to_string(), (a, r));
+        }
+    }
+    let mut hunk_args: Vec<&str> = vec!["diff", "HEAD", "--no-renames", "--"];
+    for f in file_paths {
+        hunk_args.push(f.as_str());
+    }
+    let mut hunks: i64 = git_run(app, &hunk_args)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.starts_with("@@"))
+        .count() as i64;
+    let mut changed_files: Vec<serde_json::Value> = Vec::new();
+    let (mut add_sum, mut rem_sum, mut changed_n) = (0i64, 0i64, 0usize);
+    let mut last_ms: i64 = 0;
+    for p in file_paths {
+        let status = status_by_path.get(p.as_str()).copied().unwrap_or("unchanged");
+        let (mut a, r) = counts.get(p.as_str()).copied().unwrap_or((0, 0));
+        if status == "new" && a == 0 {
+            // Untracked: numstat cannot see it — the whole file counts as
+            // added (read and count; never `git add -N`, which mutates the
+            // index), and it is one edit site.
+            if let Ok(text) = std::fs::read_to_string(root.join(p)) {
+                a = text.lines().count() as i64;
+            }
+            hunks += 1;
+        }
+        if status != "unchanged" {
+            changed_n += 1;
+            add_sum += a;
+            rem_sum += r;
+            if let Ok(md) = std::fs::metadata(root.join(p)) {
+                if let Ok(m) = md.modified() {
+                    if let Ok(d) = m.duration_since(std::time::UNIX_EPOCH) {
+                        last_ms = last_ms.max(d.as_millis() as i64);
+                    }
+                }
+            }
+        }
+        let label = if status == "unchanged" {
+            p.clone()
+        } else {
+            let marker = match status {
+                "new" => " (new)",
+                "deleted" => " (deleted)",
+                _ => "",
+            };
+            format!("{}  +{} \u{2212}{}{}", p, a, r, marker)
+        };
+        changed_files.push(serde_json::json!({
+            "path": p, "status": status, "added": a, "removed": r, "label": label,
+        }));
+    }
+    let total = file_paths.len();
+    // Labeled-field format per iterate feedback: the strip lives on the
+    // collapsed summary line, scannable across a set of items.
+    let disk_label = if changed_n == 0 {
+        "no changes yet".to_string()
+    } else {
+        format!("files changed: {} of {}", changed_n, total)
+    };
+    let activity_label = if changed_n == 0 {
+        String::new()
+    } else {
+        format!(
+            "lines +{} \u{00b7} lines \u{2212}{} \u{00b7} edit sites: {}",
+            add_sum, rem_sum, hunks
+        )
+    };
+    let summary = serde_json::json!({
+        "changed": changed_n, "total": total, "added": add_sum, "removed": rem_sum,
+        "hunks": hunks, "lastChangeMs": last_ms,
+        "diskLabel": disk_label, "activityLabel": activity_label,
+    });
+    Some((serde_json::Value::Array(changed_files), summary))
+}
+
 fn git_staged_files<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<String>, String> {
     let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
+    // --no-renames: with rename detection on, a staged rename lists only
+    // the NEW path, so the commit gate's staged-intersection pathspec
+    // drops the old path and the deletion half of the rename strands in
+    // the index (Worklist2 -> Worklist rename, 2026-08-20: 7b0b79b added
+    // the new file, e331fc4 had to hand-commit the stranded deletion).
     let out = std::process::Command::new("git")
         .current_dir(&root)
-        .args(["diff", "--cached", "--name-only", "-z", "--"])
+        .args(["diff", "--cached", "--name-only", "--no-renames", "-z", "--"])
         .output()
         .map_err(|e| e.to_string())?;
     if !out.status.success() {

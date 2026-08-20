@@ -2230,6 +2230,91 @@ window.__bramBuildBatchDropItems = function (items, feedback, selectedIds) {
   });
 };
 
+// worklist-action-state-store: submission state (the eight fields the
+// worklist action handlers used to juggle as Workspace component vars)
+// moves into this helpers-owned store. Workspace subscribes and mirrors
+// the fields into its legacy vars via one ChangeListener, so the ~150
+// reader bindings stay untouched; every WRITER routes through here.
+// __bramWorklistActApply absorbs the shared handler tail (publish the
+// prepared submission, submit the turn, reset on completion), leaving
+// handlers a prep call plus their UI-state bookkeeping.
+window.__bramWorklistActionState = {
+  submitting: false,
+  actionProgressScope: "",
+  actionProgressKind: "",
+  actionProgressTick: 0,
+  submittedItemId: null,
+  submittedKind: "",
+  awaitingResponse: false,
+  worklistActionResult: null,
+  rev: 0,
+};
+window.__bramWorklistActionSubscribers = new Set();
+window.__bramNotifyWorklistActionState = function () {
+  window.__bramWorklistActionState.rev++;
+  var snap = Object.assign({}, window.__bramWorklistActionState);
+  window.__bramWorklistActionSubscribers.forEach(function (fn) {
+    try {
+      fn(snap);
+    } catch (e) {
+      console.error("[worklist-action-store] subscriber threw:", e);
+    }
+  });
+};
+window.bramSubscribeWorklistActionState = (function () {
+  var factory;
+  return function () {
+    if (factory) return factory;
+    factory = function (emit) {
+      var fire = function (s) {
+        emit(s || Object.assign({}, window.__bramWorklistActionState));
+      };
+      window.__bramWorklistActionSubscribers.add(fire);
+      fire();
+      return function () {
+        window.__bramWorklistActionSubscribers.delete(fire);
+      };
+    };
+    return factory;
+  };
+})();
+window.__bramSetWorklistActionState = function (partial) {
+  Object.assign(window.__bramWorklistActionState, partial || {});
+  window.__bramNotifyWorklistActionState();
+};
+window.__bramWorklistActionTickBump = function () {
+  window.__bramSetWorklistActionState({
+    actionProgressTick: window.__bramWorklistActionState.actionProgressTick + 1,
+  });
+};
+window.__bramWorklistActReset = function () {
+  window.__bramSetWorklistActionState({
+    submitting: false,
+    actionProgressScope: "",
+    actionProgressKind: "",
+    actionProgressTick: 0,
+    submittedItemId: null,
+    submittedKind: "",
+    awaitingResponse: false,
+    worklistActionResult: null,
+  });
+};
+window.__bramWorklistActApply = function (r) {
+  window.__bramSetWorklistActionState({
+    submitting: true,
+    actionProgressScope: r.actionProgressScope || "",
+    actionProgressKind: r.actionProgressKind || "",
+    actionProgressTick: 0,
+    submittedItemId: r.submittedItemId || null,
+    submittedKind: r.submittedKind || "",
+    worklistActionResult: r,
+  });
+  window.submitAuthorizedWorklistTurn(r, function () {
+    window.__bramWorklistActReset();
+  });
+  return r;
+};
+
 // Selection state helpers for the row tickboxes and the plural action bar.
 window.__bramToggleRowSelection = function (sel, id, on) {
   var next = (sel || []).filter(function (x) {

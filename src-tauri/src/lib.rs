@@ -42159,6 +42159,23 @@ fn route_request<R: tauri::Runtime>(
         return (200, "application/json; charset=utf-8", body);
     }
 
+    // rung9-publish-surface: the close queue as a readable fact. The
+    // pre-push half of the publish story already lives on the Commits tab
+    // ("Push will close #N", per-row markers); this route serves the
+    // post-push half — a close queued for a commit already on origin was
+    // previously visible only in the trace, leaving "why hasn't it
+    // closed?" a guessing game (live demo, 2026-08-20).
+    if path == "__issue-close-queue" {
+        let pending: Vec<serde_json::Value> = issue_close_queue_file(app)
+            .map(|p| read_pending_issue_closes(&p))
+            .unwrap_or_default()
+            .iter()
+            .map(|r| serde_json::json!({"issue": r.issue, "commitSha": r.commit_sha}))
+            .collect();
+        let body = serde_json::json!({ "pending": pending }).to_string().into_bytes();
+        return (200, "application/json; charset=utf-8", body);
+    }
+
     // /__worklist — same shape as /resources/worklist.json but enriched
     // per item with change activity (changedFiles / changeSummary, rung 1)
     // and a `diff` field whenever the item's files carry uncommitted

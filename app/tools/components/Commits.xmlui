@@ -41,13 +41,18 @@
     onSuccess="pullError = null; commits.refetch(); gitStatus.refetch()"
     onError="(e) => pullError = (e &amp;&amp; e.message) ? e.message : String(e)" />
 
+  <!-- rung9-publish-surface: the close queue's post-push state. The
+       pre-push half ("Push will close #N") reads pendingCloses on unpushed
+       commit rows; this covers the other half — a close queued for a
+       commit already on origin, previously trace-only. -->
+  <DataSource id="closeQueue" url="/__issue-close-queue" />
   <PushSource
     id="gitStatusEvt"
     initial="{null}"
     subscribe="{window.bramSubscribeTauriEvent('git-status-changed', false)}" />
   <ChangeListener
     listenTo="{gitStatusEvt.value &amp;&amp; gitStatusEvt.value.tick}"
-    onDidChange="window.__bramRefetchOnLiveEvent(gitStatusEvt.value, commits, gitStatus)" />
+    onDidChange="window.__bramRefetchOnLiveEvent(gitStatusEvt.value, commits, gitStatus, closeQueue)" />
   <ChangeListener
     listenTo="{gitStatus.value &amp;&amp; gitStatus.value.branch}"
     onDidChange="() => { commitsExpanded = false; }" />
@@ -99,6 +104,11 @@
       fontSize="$fontSize-sm"
       color="$textColor-secondary"
       value="{'Push will close ' + (commits.value || []).filter(c => !c.pushed &amp;&amp; c.pendingCloses &amp;&amp; c.pendingCloses.length > 0).map(c => c.pendingCloses.map(p => '#' + p.issue).join(', ')).join(', ')}" />
+    <Text
+      when="{((closeQueue.value &amp;&amp; closeQueue.value.pending) || []).filter(p => !(commits.value || []).some(c => !c.pushed &amp;&amp; c.sha === p.commitSha)).length > 0}"
+      fontSize="$fontSize-sm"
+      color="$textColor-secondary"
+      value="{'close queued for ' + ((closeQueue.value &amp;&amp; closeQueue.value.pending) || []).filter(p => !(commits.value || []).some(c => !c.pushed &amp;&amp; c.sha === p.commitSha)).map(p => '#' + p.issue).join(', ') + ' — completes when the commit is visible on origin'}" />
 
     <VStack gap="$space-1" when="{commits.value &amp;&amp; commits.value.length > 0}">
       <!-- browse-tabs-adopt-searchresults: rows render through the shared

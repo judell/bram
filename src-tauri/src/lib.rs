@@ -39885,6 +39885,18 @@ fn commit_on_origin_default<R: tauri::Runtime>(app: &AppHandle<R>, sha: &str) ->
 // non-button triggers are greppable; the attempt itself is traced, not just the
 // successes, because "the flush ran and decided not to" was invisible before.
 fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>, trigger: &str) {
+    // issue-close-flush-race: serialize the whole read-close-rewrite cycle
+    // across triggers. First live refs-watch proof (2026-08-20, #266):
+    // refs-watch and the button both read pending=1 before either consumed
+    // the entry, both closed, and the issue got two identical "Closed by"
+    // comments one second apart. Under the lock the second trigger re-reads
+    // and finds pending=0 — its flush honestly reports nothing to do, which
+    // is this fix's regression signature.
+    static FLUSH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = FLUSH_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let Some(path) = issue_close_queue_file(app) else {
         return;
     };

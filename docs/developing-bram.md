@@ -205,7 +205,7 @@ attribution.
 
 | path | rule |
 |---|---|
-| `app/tools/**` | Hot-reloadable tools XMLUI app code: `Main.xmlui`, `components/**`, `Globals.xs`, `config.json`, `themes/**`, `resources/**`. (Reload is automatic only when the project's `ui.toolsPaneHotReload` setting is on; otherwise the user reloads the pane manually.) |
+| `app/tools/**` | Hot-reloadable tools XMLUI app code: `Main.xmlui`, `components/**`, `Globals.xs`, `config.json`, `themes/**`, `resources/**`. (Reload is automatic only when the project's `ui.toolsPaneHotReload` setting is on; otherwise the user reloads the pane manually.) Hot reload covers **edits to existing files only** — a **new** file (e.g. a new `components/*.xmlui`) is absent from the running binary's embedded `app/` tree and fails to load until rebuild + relaunch. |
 | `app/__shell/**` | Rebuild from `src-tauri/`, then relaunch `./bram`. This includes `helpers.js`. |
 | `app/main.js`, `app/index.html`, `app/styles.css` | Rebuild + relaunch. Parent-shell code is not hot-reloaded. |
 | `app/vendor/**` | Rebuild + relaunch. |

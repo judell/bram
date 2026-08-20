@@ -210,6 +210,12 @@
           label="Show target app"
           initialValue="{settingsShowTargetApp(settingsValue)}"
           onDidChange="(v) => saveSettings.execute({ ui: { showTargetApp: v } })" />
+        <!-- worklist2 cutover: the legacy tab, opt-in, shown above the new
+             Worklist as OldWorklist while the retirement clock runs. -->
+        <Switch
+          label="Show legacy Worklist"
+          initialValue="{!!(settingsValue &amp;&amp; settingsValue.ui &amp;&amp; settingsValue.ui.showLegacyWorklist)}"
+          onDidChange="(v) => saveSettings.execute({ ui: { showLegacyWorklist: v } })" />
         <Switch
           id="hotReloadSwitch"
           label="Agent-pane hot-reload"

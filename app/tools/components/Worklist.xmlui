@@ -270,14 +270,12 @@
             <Button
               label="Iterate"
               size="sm"
-              variant="ghost"
               enabled="{!window.__bramInflightBlocker(inflightClaim.value) &amp;&amp; ((worklist2Feedback || {})[$item.id] || '').trim().length > 0}"
               tooltip="Send the message as redirection; the item stays where it is"
               onClick="window.__bramIframeTrace('click', {target: 'worklist2-iterate', item: $item.id}); const r = window.__bramWorklist2IteratePrep(worklist.value.items, $item.id, (worklist2Feedback || {})[$item.id] || ''); sendIterateWithFeedbackDraft(worklist.value.items, $item.id, r.feedback); worklist2Feedback = window.__bramMapSet(worklist2Feedback, $item.id, '')" />
             <Button
               label="Drop"
               size="sm"
-              variant="outlined"
               enabled="{!window.__bramInflightBlocker(inflightClaim.value)}"
               tooltip="{$item.changeSummary &amp;&amp; $item.changeSummary.changed > 0 ? 'Drops this item. ' + $item.changeSummary.changed + ' changed file' + ($item.changeSummary.changed === 1 ? '' : 's') + ' stay on disk.' : 'Drops this item.'}"
               onClick="window.__bramIframeTrace('click', {target: 'worklist2-drop', item: $item.id}); window.__bramWorklist2Drop(worklist.value.items, $item.id, (worklist2Feedback || {})[$item.id] || ''); worklist2Feedback = window.__bramMapSet(worklist2Feedback, $item.id, '')" />

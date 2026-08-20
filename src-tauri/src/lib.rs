@@ -28024,6 +28024,7 @@ fn format_worklist_payload_text<R: tauri::Runtime>(
         };
         let mut labels: Vec<String> = Vec::new();
         let mut fb_images: Vec<String> = Vec::new();
+        let mut display_verb: Option<&str> = None;
         if let Ok(payload) = serde_json::from_str::<serde_json::Value>(rest.trim()) {
             let empty: Vec<serde_json::Value> = Vec::new();
             let items = payload
@@ -28036,12 +28037,21 @@ fn format_worklist_payload_text<R: tauri::Runtime>(
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                // approval-turn-specify-gate: the payload carries the item's
-                // gate (to apply / to commit) baked in at action time; surface
-                // it so "approved: <id> (to commit)" is unambiguous.
+                // header-inflight-verbs: the gate parenthetical retires from
+                // the displayed turn — the payload's gate (baked in at action
+                // time, approval-turn-specify-gate) now picks the display
+                // VERB instead of trailing the id, matching the header
+                // banner's vocabulary.
                 let gate = it.get("gate").and_then(|v| v.as_str()).unwrap_or("");
-                if !gate.is_empty() && !label.is_empty() {
-                    label = format!("{} ({})", label, gate);
+                if display_verb.is_none() {
+                    display_verb = Some(match (verb, gate) {
+                        ("approved", "to commit") => "Committing",
+                        ("approved", "apply-and-commit") => "Committing",
+                        ("approved", _) => "Approving",
+                        ("drop", _) => "Dropping",
+                        ("iterate", _) => "Iterating",
+                        _ => verb,
+                    });
                 }
                 let mut fb = it
                     .get("feedback")
@@ -28064,10 +28074,11 @@ fn format_worklist_payload_text<R: tauri::Runtime>(
                 }
             }
         }
+        let shown = display_verb.unwrap_or(verb);
         if labels.is_empty() {
-            return Some((format!("{}:", verb), fb_images));
+            return Some((format!("{}:", shown), fb_images));
         }
-        return Some((format!("{}: {}", verb, labels.join(", ")), fb_images));
+        return Some((format!("{} {}", shown, labels.join(", ")), fb_images));
     }
     None
 }

@@ -1840,12 +1840,24 @@ window.__bramInflightActionLabel = function (kind) {
 
 // Full header inflight-banner label: "<Action> <ids> (TO APPLY|TO COMMIT)".
 // statusLabel is supplied by the /__inflight route from worklist.json.
+// header-inflight-verbs: one verb, derived from host facts (claim kind +
+// the claimed item's gate), replacing the kind-label + "(TO APPLY)"
+// parenthetical — approving an applied item's commit is Committing, in
+// the user's vocabulary, and the status badge language retires from the
+// banner.
+window.__bramClaimVerb = function (kind, statusLabel) {
+  if (kind === "drop") return "Dropping";
+  if (kind === "iterate") return "Iterating";
+  if (kind === "approved") {
+    return statusLabel === "TO COMMIT" ? "Committing" : "Approving";
+  }
+  return kind ? kind.charAt(0).toUpperCase() + kind.slice(1) : "";
+};
+
 window.__bramInflightBannerLabel = function (claim) {
   if (!claim || !claim.ids || !claim.ids.length) return "";
-  var action = window.__bramInflightActionLabel(claim.kind);
   var ids = (claim.ids || []).join(", ");
-  var status = claim.statusLabel ? " (" + claim.statusLabel + ")" : "";
-  return action + " " + ids + status;
+  return window.__bramClaimVerb(claim.kind, claim.statusLabel) + " " + ids;
 };
 
 // issue-265: the per-item indicator's kind, resolved from ONE source with a
@@ -1913,10 +1925,13 @@ window.__bramWorklist2Strip = function (item, claim) {
     return closes ? base + " · " + closes : base;
   };
   var kind = window.__bramItemInflightKind(claim, item.id, "", "", 0);
-  if (kind === "approved") return withCloses("Approving…");
-  if (kind === "iterate") return withCloses("Iterating…");
-  if (kind === "drop") return withCloses("Dropping…");
-  if (kind) return withCloses(kind + "…");
+  if (kind) {
+    // header-inflight-verbs: the strip shares the banner's verb — an
+    // approved claim on a row with changes is Committing…, not Approving….
+    var csv = item.changeSummary;
+    var gate = kind === "approved" && csv && csv.changed > 0 ? "TO COMMIT" : "";
+    return withCloses(window.__bramClaimVerb(kind, gate) + "…");
+  }
   // worklist2-plan-vs-activity: activity counts render only for items
   // that have BEGUN (applied, or covered by a live claim — host facts,
   // never agent-state inference). A proposed, unclaimed item is a PLAN:

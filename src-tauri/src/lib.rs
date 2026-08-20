@@ -43463,7 +43463,11 @@ fn worklist_change_activity<R: tauri::Runtime>(
     let disk_label = if changed_n == 0 {
         "no changes yet".to_string()
     } else {
-        format!("files: {} of {}", changed_n, total)
+        // plan-vs-work-count-semantics: attribute the denominator to the
+        // PLAN — "2 of 3 planned" reads plan-vs-actual, not unfinished
+        // (the files list is the agent's prediction; a partial count can
+        // be completion when a listed file proved unneeded).
+        format!("files: {} of {} planned", changed_n, total)
     };
     let activity_label = if changed_n == 0 {
         String::new()

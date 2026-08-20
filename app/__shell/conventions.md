@@ -601,6 +601,21 @@ id is for human scanning (Worklist tab, `git log`, chat),
 both apply. Existing items keep their names — renaming breaks
 back-references for marginal benefit.
 
+#### Keep the `files` list current as understanding evolves
+
+An item's `files` is the agent's *prediction* of what the change will
+touch, and the pane's change-activity count uses it as the denominator
+(`files: 2 of 3 planned`). When a listed file proves unneeded mid-work,
+**update the item's `files` to match** — an ordinary `worklist.json`
+edit (version-bumped, guard-allowed) — so the count converges to
+`N of N planned` before the commit gate. The draft prose keeps the
+original prediction as the audit trail. The clean expression of "the
+plan was wrong, not the work" is a corrected plan, not a caveat on the
+count; a committed item whose count still reads `2 of 3` invites the
+misreading that work went missing (live case: 2026-08-20,
+`rethink-activity-indicators`, where an unneeded `helpers.js` guess
+made a complete commit read as a partial one).
+
 #### Refer to items by id, not by ordinal
 
 Name worklist items in chat by their `id` verbatim

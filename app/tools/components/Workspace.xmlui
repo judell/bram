@@ -10,6 +10,7 @@
   var.closeIssuesState="{null}"
   var.closeIssuesOneShot="{false}"
   var.inlineCloseStateById="{{}}"
+  var.selectedRowIds="{[]}"
   var.newItemHelp="{!!$queryParams.addItem}"
   var.newItemSubmitting="{false}"
   var.newItemStartSig="{''}"
@@ -440,8 +441,15 @@
           color="$textColor-secondary">
           (none)
         </Text>
+        <!-- rung8-batch-as-selection: the plural action bar. Appears when
+             ≥2 rows are ticked; replaces the batchCommitActions-gated
+             "Approve all / Drop all" strip (that setting no longer gates
+             anything — batching is selection, not a mode). One plural
+             button per kind present in the selection, each composing one
+             multi-item payload: one selection = one decision = one
+             authorization claim. -->
         <HStack
-          when="{worklistConfig.value && worklistConfig.value.batchCommitActions && worklist.value.items && window.__bramCountByStatus(worklist.value.items, 'applied') >= 2}"
+          when="{(selectedRowIds || []).length >= 2}"
           gap="$space-2"
           verticalAlignment="center"
           padding="$space-2"
@@ -450,18 +458,25 @@
           <Text
             fontSize="$fontSize-sm"
             color="$textColor-secondary"
-            value="{window.__bramCountByStatus(worklist.value.items, 'applied') + ' items ready to commit'}" />
+            value="{(selectedRowIds || []).length + ' selected'}" />
           <Button
-            label="{'Approve all (' + window.__bramCountByStatus(worklist.value.items, 'applied') + ')'}"
+            when="{window.__bramSelectionIds(worklist.value.items, selectedRowIds, 'proposed').length > 0}"
+            label="{'Approve ' + window.__bramSelectionIds(worklist.value.items, selectedRowIds, 'proposed').length + ' to apply'}"
             size="xs"
             enabled="{!submitting &amp;&amp; !window.__bramInflightBlocker(inflightClaim.value)}"
-            onClick="const r = window.__bramPrepareBatchWorklistActionSubmission({kind: 'approved', items: worklist.value.items}); expandedItemIds = r.expandedItemIds; feedbackDraftsById = r.feedbackDraftsById; submitting = r.submitting; actionProgressScope = r.actionProgressScope; actionProgressKind = r.actionProgressKind; actionProgressTick = r.actionProgressTick; submittedItemId = r.submittedItemId; submittedKind = r.submittedKind; window.submitAuthorizedWorklistTurn(r, () => { submitting = false; actionProgressScope = ''; actionProgressKind = ''; actionProgressTick = 0; submittedItemId = null; submittedKind = ''; awaitingResponse = false; worklistActionResult = null; })" />
+            onClick="const r = window.__bramPrepareBatchWorklistActionSubmission({kind: 'approved', items: worklist.value.items, selectedIds: window.__bramSelectionIds(worklist.value.items, selectedRowIds, 'proposed'), feedbackDraftsById: feedbackDraftsById || {}}); selectedRowIds = []; expandedItemIds = r.expandedItemIds; feedbackDraftsById = r.feedbackDraftsById; submitting = r.submitting; actionProgressScope = r.actionProgressScope; actionProgressKind = r.actionProgressKind; actionProgressTick = r.actionProgressTick; submittedItemId = r.submittedItemId; submittedKind = r.submittedKind; window.submitAuthorizedWorklistTurn(r, () => { submitting = false; actionProgressScope = ''; actionProgressKind = ''; actionProgressTick = 0; submittedItemId = null; submittedKind = ''; awaitingResponse = false; worklistActionResult = null; })" />
           <Button
-            label="{'Drop all (' + window.__bramCountByStatus(worklist.value.items, 'applied') + ')'}"
+            when="{window.__bramSelectionIds(worklist.value.items, selectedRowIds, 'applied').length > 0}"
+            label="{'Approve ' + window.__bramSelectionIds(worklist.value.items, selectedRowIds, 'applied').length + ' to commit'}"
+            size="xs"
+            enabled="{!submitting &amp;&amp; !window.__bramInflightBlocker(inflightClaim.value)}"
+            onClick="const r = window.__bramPrepareBatchWorklistActionSubmission({kind: 'approved', items: worklist.value.items, selectedIds: window.__bramSelectionIds(worklist.value.items, selectedRowIds, 'applied'), feedbackDraftsById: feedbackDraftsById || {}}); selectedRowIds = []; expandedItemIds = r.expandedItemIds; feedbackDraftsById = r.feedbackDraftsById; submitting = r.submitting; actionProgressScope = r.actionProgressScope; actionProgressKind = r.actionProgressKind; actionProgressTick = r.actionProgressTick; submittedItemId = r.submittedItemId; submittedKind = r.submittedKind; window.submitAuthorizedWorklistTurn(r, () => { submitting = false; actionProgressScope = ''; actionProgressKind = ''; actionProgressTick = 0; submittedItemId = null; submittedKind = ''; awaitingResponse = false; worklistActionResult = null; })" />
+          <Button
+            label="{'Drop ' + (selectedRowIds || []).length}"
             size="xs"
             variant="outlined"
             enabled="{!submitting &amp;&amp; !window.__bramInflightBlocker(inflightClaim.value)}"
-            onClick="const r = window.__bramPrepareBatchWorklistActionSubmission({kind: 'drop', items: worklist.value.items}); expandedItemIds = r.expandedItemIds; feedbackDraftsById = r.feedbackDraftsById; submitting = r.submitting; actionProgressScope = r.actionProgressScope; actionProgressKind = r.actionProgressKind; actionProgressTick = r.actionProgressTick; submittedItemId = r.submittedItemId; submittedKind = r.submittedKind; window.submitAuthorizedWorklistTurn(r, () => { submitting = false; actionProgressScope = ''; actionProgressKind = ''; actionProgressTick = 0; submittedItemId = null; submittedKind = ''; awaitingResponse = false; worklistActionResult = null; })" />
+            onClick="const r = window.__bramPrepareBatchWorklistActionSubmission({kind: 'drop', items: worklist.value.items, selectedIds: window.__bramSelectionIds(worklist.value.items, selectedRowIds, ''), feedbackDraftsById: feedbackDraftsById || {}}); selectedRowIds = []; expandedItemIds = r.expandedItemIds; feedbackDraftsById = r.feedbackDraftsById; submitting = r.submitting; actionProgressScope = r.actionProgressScope; actionProgressKind = r.actionProgressKind; actionProgressTick = r.actionProgressTick; submittedItemId = r.submittedItemId; submittedKind = r.submittedKind; window.submitAuthorizedWorklistTurn(r, () => { submitting = false; actionProgressScope = ''; actionProgressKind = ''; actionProgressTick = 0; submittedItemId = null; submittedKind = ''; awaitingResponse = false; worklistActionResult = null; })" />
         </HStack>
         <HStack
           when="{submitting &amp;&amp; actionProgressScope === 'batch' &amp;&amp; actionProgressKind}"
@@ -484,6 +499,12 @@
             gap="$space-1"
             var.issueNumbers="{worklistIssueNumbers($item)}">
             <HStack gap="$space-3" verticalAlignment="start">
+              <!-- rung8-batch-as-selection: row tickbox. A selection of N
+                   is ONE decision — one plural payload, one authorization
+                   claim — so it composes with one-decision-at-a-time. -->
+              <Checkbox
+                initialValue="{(selectedRowIds || []).includes($item.id)}"
+                onDidChange="(v) => selectedRowIds = window.__bramToggleRowSelection(selectedRowIds || [], $item.id, v)" />
               <HStack width="1.75em" horizontalAlignment="center" verticalAlignment="center">
                 <Theme size-Spinner="14px">
                   <!-- issue-265: host-driven. This span used to key purely on local

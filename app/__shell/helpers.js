@@ -2179,51 +2179,101 @@ window.__bramCountByStatus = function (items, status) {
   return (items || []).filter(function (i) { return (i.status || "proposed") === status; }).length;
 };
 
-window.__bramBuildBatchApprovePayload = function (items, feedback) {
+// rung8-batch-as-selection: batching is selection, not a mode. Targets
+// come from an explicit selectedIds list when given (the tickboxes);
+// the no-selection fallback keeps the legacy all-applied behavior.
+// Feedback may be a string (same for all) or the feedbackDraftsById map
+// (per-item feedback boxes keep working in a batch).
+function __bramBatchTargets(items, selectedIds) {
+  var list = items || [];
+  if (selectedIds && selectedIds.length) {
+    return list.filter(function (i) {
+      return selectedIds.indexOf(i.id) !== -1;
+    });
+  }
+  return list.filter(function (i) {
+    return (i.status || "proposed") === "applied";
+  });
+}
+function __bramBatchFeedbackFor(feedback, id) {
+  if (feedback && typeof feedback === "object") return feedback[id] || "";
+  return feedback || "";
+}
+
+window.__bramBuildBatchApprovePayload = function (items, feedback, selectedIds) {
   __bramAppMark("build-batch-approve-payload");
   return JSON.stringify({
-    items: (items || []).filter(function (i) { return (i.status || "proposed") === "applied"; })
-      .map(function (i) { return { id: i.id, feedback: feedback || "", gate: window.__bramItemGate(i) }; }),
+    items: __bramBatchTargets(items, selectedIds).map(function (i) {
+      return { id: i.id, feedback: __bramBatchFeedbackFor(feedback, i.id), gate: window.__bramItemGate(i) };
+    }),
   });
 };
 
-window.__bramBuildBatchApproveItems = function (items, feedback) {
-  return (items || []).filter(function (i) { return (i.status || "proposed") === "applied"; })
-    .map(function (i) { return { id: i.id, feedback: feedback || "" }; });
+window.__bramBuildBatchApproveItems = function (items, feedback, selectedIds) {
+  return __bramBatchTargets(items, selectedIds).map(function (i) {
+    return { id: i.id, feedback: __bramBatchFeedbackFor(feedback, i.id) };
+  });
 };
 
-window.__bramBuildBatchDropPayload = function (items, feedback) {
+window.__bramBuildBatchDropPayload = function (items, feedback, selectedIds) {
   __bramAppMark("build-batch-drop-payload");
   return JSON.stringify({
-    items: (items || []).filter(function (i) { return (i.status || "proposed") === "applied"; })
-      .map(function (i) { return { id: i.id, feedback: feedback || "", gate: window.__bramItemGate(i) }; }),
+    items: __bramBatchTargets(items, selectedIds).map(function (i) {
+      return { id: i.id, feedback: __bramBatchFeedbackFor(feedback, i.id), gate: window.__bramItemGate(i) };
+    }),
   });
 };
 
-window.__bramBuildBatchDropItems = function (items, feedback) {
-  return (items || []).filter(function (i) { return (i.status || "proposed") === "applied"; })
-    .map(function (i) { return { id: i.id, feedback: feedback || "" }; });
+window.__bramBuildBatchDropItems = function (items, feedback, selectedIds) {
+  return __bramBatchTargets(items, selectedIds).map(function (i) {
+    return { id: i.id, feedback: __bramBatchFeedbackFor(feedback, i.id) };
+  });
+};
+
+// Selection state helpers for the row tickboxes and the plural action bar.
+window.__bramToggleRowSelection = function (sel, id, on) {
+  var next = (sel || []).filter(function (x) {
+    return x !== id;
+  });
+  if (on) next.push(id);
+  return next;
+};
+window.__bramSelectionIds = function (items, sel, status) {
+  var chosen = sel || [];
+  return (items || [])
+    .filter(function (i) {
+      return (
+        chosen.indexOf(i.id) !== -1 &&
+        (!status || (i.status || "proposed") === status)
+      );
+    })
+    .map(function (i) {
+      return i.id;
+    });
 };
 
 window.__bramPrepareBatchWorklistActionSubmission = function (opts) {
   opts = opts || {};
   var items = opts.items || [];
   var kind = opts.kind === "drop" ? "drop" : "approved";
-  var target = kind === "drop" ? "drop-all" : "approve-all";
-  var ids = items.filter(function (i) { return (i.status || "proposed") === "applied"; });
-  window.__bramIframeTrace("click", { target: target, count: ids.length });
+  var sel = opts.selectedIds && opts.selectedIds.length ? opts.selectedIds : null;
+  var feedback = opts.feedbackDraftsById || "";
+  var target =
+    (kind === "drop" ? "drop" : "approve") + (sel ? "-selection" : "-all");
+  var targets = __bramBatchTargets(items, sel);
+  window.__bramIframeTrace("click", { target: target, count: targets.length });
   window.__bramClearWorklistUiState();
-  var submittedItemId = ids.length > 0 ? ids[0].id : null;
+  var submittedItemId = targets.length > 0 ? targets[0].id : null;
   var submittedKind = window.__bramSetWorklistSubmittedKind("action");
   window.__bramIframeTrace("inflight-set", { item: submittedItemId, via: "click", target: target });
   var authItems = kind === "drop"
-    ? window.__bramBuildBatchDropItems(items, "")
-    : window.__bramBuildBatchApproveItems(items, "");
+    ? window.__bramBuildBatchDropItems(items, feedback, sel)
+    : window.__bramBuildBatchApproveItems(items, feedback, sel);
   return {
     turnText: (kind === "drop" ? "drop: " : "approved: ") + (
       kind === "drop"
-        ? window.__bramBuildBatchDropPayload(items, "")
-        : window.__bramBuildBatchApprovePayload(items, "")
+        ? window.__bramBuildBatchDropPayload(items, feedback, sel)
+        : window.__bramBuildBatchApprovePayload(items, feedback, sel)
     ),
     authorizationPayload: { kind: kind, items: authItems },
     submitting: true,

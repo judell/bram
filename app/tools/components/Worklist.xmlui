@@ -63,7 +63,7 @@
     <Text
       fontSize="$fontSize-sm"
       color="$textColor-secondary"
-      value="Preview of the redesigned gate. Approve and Commit work here; for Iterate or Drop, use the Worklist tab." />
+      value="The redesigned gate — Approve, Commit, Iterate, and Drop all work here. (Batch selection still lives in the Worklist tab.)" />
     <Text
       when="{worklist.value &amp;&amp; (!worklist.value.items || worklist.value.items.length === 0)}"
       color="$textColor-secondary">
@@ -202,44 +202,45 @@
               </HStack>
             </Items>
           </HStack>
-          <!-- worklist2-first-action: the first gate. Plan rows (nothing
-               on disk) render the disk-named primary; the click composes
-               the standard approved: payload through the shared prep and
-               state store. Serialization guard applies from day one. -->
-          <HStack
-            when="{!(window.__bramWorklist2Begun($item, inflightClaim.value) &amp;&amp; $item.changeSummary &amp;&amp; $item.changeSummary.changed > 0)}"
-            gap="$space-2"
-            verticalAlignment="center">
+          <!-- The gate row: one message box, the disk-named primary
+               (Approve on plan rows and the stale no-work shape; Commit on
+               begun rows with changes), then Iterate (needs feedback -
+               no-direction iterate is meaningless) and Drop (fine print
+               names the on-disk consequence). All four verbs ride the
+               shared prep/store machinery - same wire, same claims, same
+               serialization as the old tab. -->
+          <HStack gap="$space-2" verticalAlignment="center">
             <TextBox
               width="24rem"
               placeholder="Message to agent (optional)"
               initialValue="{(worklist2Feedback || {})[$item.id] || ''}"
               onDidChange="(v) => worklist2Feedback = window.__bramMapSet(worklist2Feedback, $item.id, v)" />
             <Button
+              when="{!(window.__bramWorklist2Begun($item, inflightClaim.value) &amp;&amp; $item.changeSummary &amp;&amp; $item.changeSummary.changed > 0)}"
               label="Approve"
               size="sm"
               enabled="{!window.__bramInflightBlocker(inflightClaim.value)}"
               onClick="window.__bramIframeTrace('click', {target: 'worklist2-approve', item: $item.id}); window.__bramWorklist2Approve(worklist.value.items, $item.id, (worklist2Feedback || {})[$item.id] || ''); worklist2Feedback = window.__bramMapSet(worklist2Feedback, $item.id, '')" />
-          </HStack>
-          <!-- worklist2-commit-action: the disk-named primary for begun
-               rows with changes. Composes the standard commit-gate
-               approved: payload (with close-issue: lines from the inline
-               tickboxes when declared) through the shared prep and state
-               store. -->
-          <HStack
-            when="{window.__bramWorklist2Begun($item, inflightClaim.value) &amp;&amp; $item.changeSummary &amp;&amp; $item.changeSummary.changed > 0}"
-            gap="$space-2"
-            verticalAlignment="center">
-            <TextBox
-              width="24rem"
-              placeholder="Message to agent (optional)"
-              initialValue="{(worklist2Feedback || {})[$item.id] || ''}"
-              onDidChange="(v) => worklist2Feedback = window.__bramMapSet(worklist2Feedback, $item.id, v)" />
             <Button
+              when="{window.__bramWorklist2Begun($item, inflightClaim.value) &amp;&amp; $item.changeSummary &amp;&amp; $item.changeSummary.changed > 0}"
               label="Commit"
               size="sm"
               enabled="{!window.__bramInflightBlocker(inflightClaim.value)}"
               onClick="window.__bramIframeTrace('click', {target: 'worklist2-commit', item: $item.id}); window.__bramWorklist2Commit(worklist.value.items, $item, (worklist2Feedback || {})[$item.id] || '', worklist2Close); worklist2Feedback = window.__bramMapSet(worklist2Feedback, $item.id, '')" />
+            <Button
+              label="Iterate"
+              size="sm"
+              variant="ghost"
+              enabled="{!window.__bramInflightBlocker(inflightClaim.value) &amp;&amp; ((worklist2Feedback || {})[$item.id] || '').trim().length > 0}"
+              tooltip="Send the message as redirection; the item stays where it is"
+              onClick="window.__bramIframeTrace('click', {target: 'worklist2-iterate', item: $item.id}); const r = window.__bramWorklist2IteratePrep(worklist.value.items, $item.id, (worklist2Feedback || {})[$item.id] || ''); sendIterateWithFeedbackDraft(worklist.value.items, $item.id, r.feedback); worklist2Feedback = window.__bramMapSet(worklist2Feedback, $item.id, '')" />
+            <Button
+              label="Drop"
+              size="sm"
+              variant="outlined"
+              enabled="{!window.__bramInflightBlocker(inflightClaim.value)}"
+              tooltip="{$item.changeSummary &amp;&amp; $item.changeSummary.changed > 0 ? 'Drops this item. ' + $item.changeSummary.changed + ' changed file' + ($item.changeSummary.changed === 1 ? '' : 's') + ' stay on disk.' : 'Drops this item.'}"
+              onClick="window.__bramIframeTrace('click', {target: 'worklist2-drop', item: $item.id}); window.__bramWorklist2Drop(worklist.value.items, $item.id, (worklist2Feedback || {})[$item.id] || ''); worklist2Feedback = window.__bramMapSet(worklist2Feedback, $item.id, '')" />
           </HStack>
         </VStack>
       </VStack>

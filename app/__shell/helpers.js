@@ -2428,6 +2428,40 @@ window.__bramWorklist2Commit = function (items, item, feedback, closeMap) {
   return window.__bramWorklistActApply(r);
 };
 
+// worklist2-iterate-and-drop: the last two verbs. Drop composes the
+// standard drop: payload through the shared prep/store. Iterate's prep
+// publishes the result into the action store; the send itself rides the
+// old tab's sendIterateWithFeedbackDraft (a Globals.xs function, called
+// BARE from the XMLUI handler — xs names are reachable in attribute
+// positions, though not as window.* from real JS; today's lesson).
+window.__bramWorklist2Drop = function (items, itemId, feedback) {
+  var r = window.__bramPrepareWorklistActionSubmission({
+    kind: "drop",
+    items: items || [],
+    selectedId: itemId,
+    rawFeedback: feedback || "",
+    feedbackDraftsById: {},
+    expandedItemIds: [],
+    voiceTarget: "message-agent",
+    inflightTarget: "drop",
+  });
+  return window.__bramWorklistActApply(r);
+};
+window.__bramWorklist2IteratePrep = function (items, itemId, feedback) {
+  var r = window.__bramPrepareWorklistActionSubmission({
+    kind: "iterate",
+    items: items || [],
+    selectedId: itemId,
+    rawFeedback: feedback || "",
+    feedbackDraftsById: {},
+    expandedItemIds: [],
+    voiceTarget: "message-agent",
+    inflightTarget: "iterate",
+  });
+  window.__bramSetWorklistActionState({ worklistActionResult: r });
+  return r;
+};
+
 // Selection state helpers for the row tickboxes and the plural action bar.
 window.__bramToggleRowSelection = function (sel, id, on) {
   var next = (sel || []).filter(function (x) {

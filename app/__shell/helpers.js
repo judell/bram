@@ -1884,6 +1884,31 @@ window.__bramInflightBlocker = function (claim) {
   return ids.length ? ids[0] : "";
 };
 
+// strip-label-tense-for-applied-items: the Worklist2 summary strip's
+// four-state priority, as one pure function so the binding stays a single
+// call. (1) A live claim covering the item reports the claim verb — the
+// HOST's record of a decision being carried out, never an inference about
+// agent activity. (2) Changes on disk report the activity strip. (3) A
+// quiet proposed item reads "no changes yet". (4) A quiet applied item
+// says NOTHING — badge alone (the just-committed drain window and the
+// stale applied-with-no-work shape alike): badge and message appear
+// together or neither appears.
+window.__bramWorklist2Strip = function (item, claim) {
+  if (!item) return "";
+  var kind = window.__bramItemInflightKind(claim, item.id, "", "", 0);
+  if (kind === "approved") return "Approving…";
+  if (kind === "iterate") return "Iterating…";
+  if (kind === "drop") return "Dropping…";
+  if (kind) return kind + "…";
+  var cs = item.changeSummary;
+  if (cs && cs.changed > 0) {
+    var t = cs.lastChangeMs ? new Date(cs.lastChangeMs).toLocaleTimeString() : "";
+    return cs.diskLabel + " · " + cs.activityLabel + (t ? " · last: " + t : "");
+  }
+  if ((item.status || "proposed") === "proposed") return "no changes yet";
+  return "";
+};
+
 // issue-265: per-item indicator text. Animated dots come from a tick the
 // caller advances; the verb comes from __bramItemInflightKind so the row and
 // the header banner cannot disagree about what is happening.

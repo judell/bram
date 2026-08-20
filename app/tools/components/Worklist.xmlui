@@ -10,6 +10,19 @@
        Workspace's persistence machinery. No actions: gating still happens
        in the Worklist tab. -->
   <DataSource id="worklist" url="/__worklist" />
+  <!-- strip-label-tense-for-applied-items: the summary strip's first
+       priority is the host's claim record (Approving…/Iterating…/…), so
+       read /__inflight and refetch on its push event — the same payload
+       and idiom as the old tab's #265 indicators, so the two tabs cannot
+       tell different stories about what is in flight. -->
+  <DataSource id="inflightClaim" url="/__inflight" />
+  <PushSource
+    id="inflightClaimEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('inflight-claim-changed')}" />
+  <ChangeListener
+    listenTo="{inflightClaimEvt.value &amp;&amp; inflightClaimEvt.value.tick}"
+    onDidChange="window.__bramRefetchOnLiveEvent(inflightClaimEvt.value, inflightClaim, worklist)" />
   <!-- count-changed-files-rung1: the payload's change activity derives
        from git status, so refetch on the host's git-status-changed event
        (push over polling; same idiom as Commits.xmlui). -->
@@ -55,7 +68,7 @@
               <Text
                 fontSize="$fontSize-sm"
                 color="$textColor-secondary"
-                value="{$item.changeSummary ? ($item.changeSummary.diskLabel + ($item.changeSummary.changed > 0 ? ' · ' + $item.changeSummary.activityLabel + ' · last: ' + new Date($item.changeSummary.lastChangeMs).toLocaleTimeString() : '')) : ''}" />
+                value="{window.__bramWorklist2Strip($item, inflightClaim.value)}" />
             </HStack>
           </property>
           <VStack gap="$space-2" paddingLeft="$space-4">

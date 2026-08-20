@@ -1,0 +1,64 @@
+<Component name="Worklist">
+  <!-- worklist2-nav-scaffold / worklist-component-rename: read-only first
+       cut of the redesigned,
+       evidence-first gate (tutorial gist v3, implementation ladder rung 5).
+       Binds the same /__worklist payload Workspace uses, so the two tabs
+       cannot disagree about state. Renders each item as one row whose
+       evidence area shows what is true: the diff when the payload carries
+       one, the Before/After plan prose otherwise. No actions, no count yet
+       (the count is rung 1, host-side): gating still happens in the
+       Worklist tab. Every later rung lands as an edit to this file. -->
+  <DataSource id="worklist" url="/__worklist" />
+  <VStack padding="$space-4" gap="$space-3">
+    <H2>Worklist2</H2>
+    <!-- Component is named Worklist (the eventual real name); only the nav
+         label and route say Worklist2 while the old tab (Workspace.xmlui)
+         still owns /worklist. Renaming the label later solves the legacy
+         naming in one move. -->
+    <Text
+      fontSize="$fontSize-sm"
+      color="$textColor-secondary"
+      value="Read-only preview of the redesigned gate. To approve, iterate, or drop, use the Worklist tab." />
+    <Text
+      when="{worklist.value &amp;&amp; (!worklist.value.items || worklist.value.items.length === 0)}"
+      color="$textColor-secondary">
+      (no items)
+    </Text>
+    <Items data="{worklist.value &amp;&amp; worklist.value.items ? worklist.value.items : []}">
+      <Card>
+        <VStack gap="$space-2">
+          <Text value="{$item.id}" fontWeight="$fontWeight-bold" />
+          <VStack when="{$item.diff}" gap="$space-1">
+            <DiffView text="{cappedDiffText($item.diff || '')}" />
+          </VStack>
+          <VStack when="{!$item.diff &amp;&amp; $item.before}" gap="$space-1">
+            <Text value="Before" fontSize="$fontSize-sm" fontWeight="$fontWeight-bold" color="$textColor-secondary" />
+            <Markdown content="{$item.before}" interpolateBindings="false" allowHtml="false" />
+          </VStack>
+          <VStack when="{!$item.diff &amp;&amp; $item.after}" gap="$space-1">
+            <Text value="After" fontSize="$fontSize-sm" fontWeight="$fontWeight-bold" color="$textColor-secondary" />
+            <Markdown content="{$item.after}" interpolateBindings="false" allowHtml="false" />
+          </VStack>
+          <HStack
+            when="{window.__bramWorklistItemFiles($item).length > 0}"
+            gap="$space-2"
+            verticalAlignment="center">
+            <Text value="will touch" fontSize="$fontSize-sm" color="$textColor-secondary" />
+            <Items data="{window.__bramWorklistItemFiles($item)}">
+              <Text value="{$item}" variant="code" fontSize="$fontSize-sm" />
+            </Items>
+          </HStack>
+          <HStack
+            when="{$item.closesIssues &amp;&amp; $item.closesIssues.length > 0}"
+            gap="$space-2"
+            verticalAlignment="center">
+            <Text value="closes" fontSize="$fontSize-sm" color="$textColor-secondary" />
+            <Items data="{$item.closesIssues}">
+              <Text value="{'#' + $item.number}" fontSize="$fontSize-sm" />
+            </Items>
+          </HStack>
+        </VStack>
+      </Card>
+    </Items>
+  </VStack>
+</Component>

@@ -2394,6 +2394,40 @@ window.__bramWorklist2Approve = function (items, itemId, feedback) {
   return window.__bramWorklistActApply(r);
 };
 
+// worklist2-commit-action: Worklist2's second gate. Same shape as
+// __bramWorklist2Approve; when the item declares closesIssues the
+// payload runs through the close-issue composer with Worklist2's own
+// inline tickbox state, so close-issue: lines ride exactly as at the
+// old tab's commit gate.
+window.__bramWorklist2Commit = function (items, item, feedback, closeMap) {
+  var r;
+  if (item && item.closesIssues && item.closesIssues.length > 0) {
+    var drafts = {};
+    drafts[item.id] = feedback || "";
+    r = window.__bramPrepareCloseIssueWorklistActionSubmission({
+      item: item,
+      closeIssuesState: window.__bramInlineCloseState(closeMap, item),
+      closeIssues: true,
+      feedbackDraftsById: drafts,
+      expandedItemIds: [],
+      voiceTarget: "message-agent",
+      oneShot: false,
+    });
+  } else {
+    r = window.__bramPrepareWorklistActionSubmission({
+      kind: "approved",
+      items: items || [item],
+      selectedId: item.id,
+      rawFeedback: feedback || "",
+      feedbackDraftsById: {},
+      expandedItemIds: [],
+      voiceTarget: "message-agent",
+      inflightTarget: "approve",
+    });
+  }
+  return window.__bramWorklistActApply(r);
+};
+
 // Selection state helpers for the row tickboxes and the plural action bar.
 window.__bramToggleRowSelection = function (sel, id, on) {
   var next = (sel || []).filter(function (x) {

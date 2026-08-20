@@ -42108,10 +42108,11 @@ fn route_request<R: tauri::Runtime>(
         return (200, "application/json; charset=utf-8", body);
     }
 
-    // /__worklist — same shape as /resources/worklist.json but with a
-    // `diff` field injected on each `applied` item (the `git diff <file>`
-    // output). The Workspace pane polls this so the TO COMMIT rows can
-    // surface their pending diff inline.
+    // /__worklist — same shape as /resources/worklist.json but enriched
+    // per item with change activity (changedFiles / changeSummary, rung 1)
+    // and a `diff` field whenever the item's files carry uncommitted
+    // changes (rung 2: evidence follows disk state, not status — TO APPLY
+    // rows with work on disk show their diff too).
     if path == "__worklist" {
         let mut doc = worklist_doc(app);
         // issue-223-surface-unconsumed-approval: annotate items covered by
@@ -42139,11 +42140,6 @@ fn route_request<R: tauri::Runtime>(
         }
         if let Some(items) = doc.get_mut("items").and_then(|v| v.as_array_mut()) {
             for item in items {
-                let status = item
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("proposed")
-                    .to_string();
                 // Item scope: prefer `files: [...]` array, fall back to the
                 // legacy single `file: <string>` for backward compat.
                 let file_paths: Vec<String> =
@@ -42167,15 +42163,26 @@ fn route_request<R: tauri::Runtime>(
                 // count-changed-files-rung1: change activity on EVERY item,
                 // whatever its status — the evidence-first rows render disk
                 // truth, not bookkeeping state.
+                let mut has_changes = false;
                 if let Some((changed_files, summary)) =
                     worklist_change_activity(app, &file_paths)
                 {
+                    has_changes = summary
+                        .get("changed")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0)
+                        > 0;
                     if let Some(obj) = item.as_object_mut() {
                         obj.insert("changedFiles".to_string(), changed_files);
                         obj.insert("changeSummary".to_string(), summary);
                     }
                 }
-                if status != "applied" {
+                // rung2-diff-by-disk-state: evidence follows disk, not
+                // status. Any item whose files carry uncommitted changes
+                // gets its diff — a proposed item with work on disk (the
+                // verbal-launch and mid-iterate cases) shows what the work
+                // IS, not just that it exists.
+                if !has_changes {
                     continue;
                 }
                 let mut combined = String::new();

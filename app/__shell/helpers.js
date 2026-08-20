@@ -2315,6 +2315,38 @@ window.__bramWorklistActApply = function (r) {
   return r;
 };
 
+// worklist2-remember-expansion: Worklist2 expander state in localStorage
+// (its own key, so the two tabs' states never interfere). Keys are
+// <itemId> for rows, <itemId>::<section> for sections. Prune runs on each
+// worklist load against current item ids so dead keys don't accumulate.
+window.__bramPersistWorklist2Expansion = function (keys) {
+  try {
+    localStorage.setItem("bram.worklist2.expanded", JSON.stringify(keys || []));
+  } catch (e) {}
+  return keys || [];
+};
+window.__bramRestoreWorklist2Expansion = function () {
+  try {
+    return JSON.parse(localStorage.getItem("bram.worklist2.expanded") || "[]") || [];
+  } catch (e) {
+    return [];
+  }
+};
+window.__bramToggleExpansionKey = function (keys, key, open) {
+  var next = (keys || []).filter(function (k) {
+    return k !== key;
+  });
+  if (open) next.push(key);
+  return window.__bramPersistWorklist2Expansion(next);
+};
+window.__bramPruneWorklist2Expansion = function (validIds) {
+  var ids = validIds || [];
+  var kept = window.__bramRestoreWorklist2Expansion().filter(function (k) {
+    return ids.indexOf(String(k).split("::")[0]) !== -1;
+  });
+  return window.__bramPersistWorklist2Expansion(kept);
+};
+
 // Selection state helpers for the row tickboxes and the plural action bar.
 window.__bramToggleRowSelection = function (sel, id, on) {
   var next = (sel || []).filter(function (x) {

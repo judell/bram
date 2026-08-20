@@ -1,4 +1,4 @@
-<Component name="Worklist">
+<Component name="Worklist" var.expandedKeys="{window.__bramRestoreWorklist2Expansion()}">
   <!-- worklist2-nav-scaffold / worklist-component-rename /
        worklist2-row-expanders: read-only preview of the redesigned,
        evidence-first gate (tutorial gist v3). Binds the same /__worklist
@@ -9,7 +9,10 @@
        collapsed by default. Local expansion state only - none of
        Workspace's persistence machinery. No actions: gating still happens
        in the Worklist tab. -->
-  <DataSource id="worklist" url="/__worklist" />
+  <DataSource
+    id="worklist"
+    url="/__worklist"
+    onLoaded="(d) => expandedKeys = window.__bramPruneWorklist2Expansion(d && d.items ? d.items.map(i => i.id) : [])" />
   <!-- strip-label-tense-for-applied-items: the summary strip's first
        priority is the host's claim record (Approving…/Iterating…/…), so
        read /__inflight and refetch on its push event — the same payload
@@ -50,7 +53,10 @@
     </Text>
     <Items data="{worklist.value &amp;&amp; worklist.value.items ? worklist.value.items : []}">
       <Theme paddingLeft-summary-ExpandableItem="0">
-        <ExpandableItem fullWidthSummary="true">
+        <ExpandableItem
+          fullWidthSummary="true"
+          initiallyExpanded="{(expandedKeys || []).includes($item.id)}"
+          onExpandedChange="(open) => expandedKeys = window.__bramToggleExpansionKey(expandedKeys, $item.id, open)">
           <!-- Rich summary (component-definition form of the summary prop):
                Badge for the id (color/background emphasis per iterate
                feedback), then the full activity strip — scannable across a
@@ -85,7 +91,9 @@
             <ExpandableItem
               when="{($item.changedFiles || window.__bramWorklistItemFiles($item)).length > 0}"
               summary="Files touched"
-              fullWidthSummary="true">
+              fullWidthSummary="true"
+              initiallyExpanded="{(expandedKeys || []).includes($item.id + '::files')}"
+              onExpandedChange="(open) => expandedKeys = window.__bramToggleExpansionKey(expandedKeys, $item.id + '::files', open)">
               <VStack gap="$space-1">
                 <!-- issue-266 third iterate: Files touched as a Table
                      (Status.xmlui idiom). Per-file shared-files flags live
@@ -117,19 +125,25 @@
             <ExpandableItem
               when="{$item.before}"
               summary="Before"
-              fullWidthSummary="true">
+              fullWidthSummary="true"
+              initiallyExpanded="{(expandedKeys || []).includes($item.id + '::before')}"
+              onExpandedChange="(open) => expandedKeys = window.__bramToggleExpansionKey(expandedKeys, $item.id + '::before', open)">
               <Markdown content="{$item.before}" interpolateBindings="false" allowHtml="false" />
             </ExpandableItem>
             <ExpandableItem
               when="{$item.after}"
               summary="After"
-              fullWidthSummary="true">
+              fullWidthSummary="true"
+              initiallyExpanded="{(expandedKeys || []).includes($item.id + '::after')}"
+              onExpandedChange="(open) => expandedKeys = window.__bramToggleExpansionKey(expandedKeys, $item.id + '::after', open)">
               <Markdown content="{$item.after}" interpolateBindings="false" allowHtml="false" />
             </ExpandableItem>
             <ExpandableItem
               when="{$item.diff}"
               summary="Diff"
-              fullWidthSummary="true">
+              fullWidthSummary="true"
+              initiallyExpanded="{(expandedKeys || []).includes($item.id + '::diff')}"
+              onExpandedChange="(open) => expandedKeys = window.__bramToggleExpansionKey(expandedKeys, $item.id + '::diff', open)">
               <VStack gap="$space-1">
                 <DiffView text="{cappedDiffText($item.diff || '')}" />
               </VStack>

@@ -165,6 +165,7 @@
         submitting = u.submitting;
         submittedItemId = u.submittedItemId;
         actionProgressKind = u.actionProgressKind || actionProgressKind || '';
+        window.__bramSetWorklistActionState({submitting: u.submitting, submittedItemId: u.submittedItemId, actionProgressKind: u.actionProgressKind || actionProgressKind || ''});
       } else if (u.kind === 'clear') {
         window.__bramIframeTrace('inflight-clear', u.trace);
         const completedId = submittedItemId;
@@ -182,6 +183,7 @@
         actionProgressScope = '';
         actionProgressTick = 0;
         setWorklistVoiceTarget('message-agent');
+        window.__bramWorklistActReset();
       }
     }" />
   <!-- Reactive voice-target reset: when no item is expanded, reset

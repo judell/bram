@@ -393,6 +393,11 @@ struct UiConfig {
     show_target_app: Option<bool>,
     #[serde(default, rename = "toolsPaneHotReload")]
     tools_pane_hot_reload: Option<bool>,
+    // worklist2 cutover: opt-in visibility for the legacy Worklist tab
+    // (shown above the new one as OldWorklist) while the retirement
+    // clock runs. Default false: the new gate is the Worklist.
+    #[serde(default, rename = "showLegacyWorklist")]
+    show_legacy_worklist: Option<bool>,
 }
 
 #[derive(Default, Clone, serde::Deserialize)]
@@ -15203,6 +15208,11 @@ fn project_config_trace_archive_after_days(config: Option<&ProjectConfig>) -> u3
 // so the consumer never sees nulls; out-of-scope blocks like `server`
 // stay invisible — they're project infrastructure, not Settings knobs.
 fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value {
+    let show_legacy_worklist = config
+        .as_ref()
+        .and_then(|c| c.ui.as_ref())
+        .and_then(|u| u.show_legacy_worklist)
+        .unwrap_or(false);
     // Default OFF: an API key in Bram's environment is not consent to send
     // commands, diffs, written content, context, or result excerpts to an
     // external model. Only an explicit project setting enables the route.
@@ -15293,7 +15303,7 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
             "continueLast": startup_policy != AgentStartupPolicy::NewSession.as_str()
         },
         "worklist": { "batchCommitActions": batch, "oneClickApproveCommit": one_click_approve_commit },
-        "ui": { "showTargetApp": show_target_app, "toolsPaneHotReload": tools_pane_hot_reload },
+        "ui": { "showTargetApp": show_target_app, "toolsPaneHotReload": tools_pane_hot_reload, "showLegacyWorklist": show_legacy_worklist },
         "traces": {
             "enabled": tracing_enabled,
             "inspectorTap": inspector_tap,

@@ -76,7 +76,7 @@
     subscribe="{window.bramSubscribeProjectedLastExchange()}" />
   <VStack padding="$space-4" gap="$space-3">
     <HStack gap="$space-3" verticalAlignment="center">
-      <H2>Worklist2</H2>
+      <H2>Worklist</H2>
       <!-- Parity: + New item. Inline ask (the old tab's dialog distilled):
            items are proposed by the agent; this composes that ask. -->
       <Button
@@ -140,10 +140,10 @@
           onClick="worklist2NewItemOpen = false; worklist2NewItemIssue = null; setWorklistVoiceTarget('message-agent'); w2NewItemEditor.clear()" />
       </HStack>
     </VStack>
-    <!-- Component is named Worklist (the eventual real name); only the nav
-         label and route say Worklist2 while the old tab (Workspace.xmlui)
-         still owns /worklist. Renaming the label later solves the legacy
-         naming in one move. -->
+    <!-- Cutover complete: this IS the Worklist (nav label, heading,
+         component name). Only the /worklist2 route remembers the preview
+         era; the legacy tab survives behind Settings -> Show legacy
+         Worklist as OldWorklist on the /worklist route. -->
     <Text
       fontSize="$fontSize-sm"
       color="$textColor-secondary"

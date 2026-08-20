@@ -475,8 +475,14 @@
     <property name="footerTemplate">
       <Fragment/>
     </property>
-    <NavLink label="Worklist" to="/worklist" />
-    <NavLink label="Worklist2" to="/worklist2" />
+    <!-- worklist2 cutover: the new gate IS the Worklist. The legacy tab
+         survives behind Settings -> Show legacy Worklist, shown above as
+         OldWorklist while the retirement clock runs. -->
+    <NavLink
+      when="{footerTipSettings.value &amp;&amp; footerTipSettings.value.ui &amp;&amp; footerTipSettings.value.ui.showLegacyWorklist}"
+      label="OldWorklist"
+      to="/worklist" />
+    <NavLink label="Worklist" to="/worklist2" />
     <NavLink label="Transcript" to="/transcript" />
     <NavLink label="Search" to="/search" />
     <NavLink label="Issues" to="/issues" />
@@ -630,7 +636,7 @@
   <Theme paddingVertical-Pages="0" paddingVertical-content-App="0"
     backgroundColor-mark-markdown="$color-warn-200"
     backgroundColor-markActive-markdown="$color-warn-400">
-    <Pages fallbackPath="/worklist">
+    <Pages fallbackPath="/worklist2">
       <Page url="/"><Workspace activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}" /></Page>
       <Page url="/worklist"><Workspace activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}" /></Page>
       <Page url="/worklist2"><Worklist /></Page>

@@ -1,4 +1,7 @@
-<Component name="Worklist" var.expandedKeys="{window.__bramRestoreWorklist2Expansion()}">
+<Component
+  name="Worklist"
+  var.expandedKeys="{window.__bramRestoreWorklist2Expansion()}"
+  var.worklist2Feedback="{{}}">
   <!-- worklist2-nav-scaffold / worklist-component-rename /
        worklist2-row-expanders: read-only preview of the redesigned,
        evidence-first gate (tutorial gist v3). Binds the same /__worklist
@@ -36,6 +39,17 @@
   <ChangeListener
     listenTo="{gitStatusEvt.value &amp;&amp; gitStatusEvt.value.tick}"
     onDidChange="window.__bramRefetchOnLiveEvent(gitStatusEvt.value, worklist)" />
+  <!-- worklist2-first-action sync fix: worklist-changed is the event
+       every worklist.json write emits and the old tab's primary refetch
+       trigger; without it the board desyncs exactly when items are added
+       or pruned (observed live 2026-08-20: one row shown, two on disk). -->
+  <PushSource
+    id="worklistChangedEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('worklist-changed')}" />
+  <ChangeListener
+    listenTo="{worklistChangedEvt.value &amp;&amp; worklistChangedEvt.value.tick}"
+    onDidChange="window.__bramRefetchOnLiveEvent(worklistChangedEvt.value, worklist)" />
   <VStack padding="$space-4" gap="$space-3">
     <H2>Worklist2</H2>
     <!-- Component is named Worklist (the eventual real name); only the nav
@@ -45,7 +59,7 @@
     <Text
       fontSize="$fontSize-sm"
       color="$textColor-secondary"
-      value="Read-only preview of the redesigned gate. To approve, iterate, or drop, use the Worklist tab." />
+      value="Preview of the redesigned gate. Approve works here on plan rows; for Commit, Iterate, or Drop, use the Worklist tab." />
     <Text
       when="{worklist.value &amp;&amp; (!worklist.value.items || worklist.value.items.length === 0)}"
       color="$textColor-secondary">
@@ -156,6 +170,25 @@
               <Items data="{$item.closesIssues}">
                 <Text value="{'#' + $item.number}" fontSize="$fontSize-sm" />
               </Items>
+            </HStack>
+            <!-- worklist2-first-action: the first gate. Plan rows (nothing
+                 on disk) render the disk-named primary; the click composes
+                 the standard approved: payload through the shared prep and
+                 state store. Serialization guard applies from day one. -->
+            <HStack
+              when="{($item.status || 'proposed') === 'proposed' &amp;&amp; !($item.changeSummary &amp;&amp; $item.changeSummary.changed > 0)}"
+              gap="$space-2"
+              verticalAlignment="center">
+              <TextBox
+                width="24rem"
+                placeholder="Message to agent (optional)"
+                initialValue="{(worklist2Feedback || {})[$item.id] || ''}"
+                onDidChange="(v) => worklist2Feedback = window.__bramMapSet(worklist2Feedback, $item.id, v)" />
+              <Button
+                label="Approve"
+                size="sm"
+                enabled="{!window.__bramInflightBlocker(inflightClaim.value)}"
+                onClick="window.__bramIframeTrace('click', {target: 'worklist2-approve', item: $item.id}); window.__bramWorklist2Approve(worklist.value.items, $item.id, (worklist2Feedback || {})[$item.id] || ''); worklist2Feedback = window.__bramMapSet(worklist2Feedback, $item.id, '')" />
             </HStack>
           </VStack>
         </ExpandableItem>

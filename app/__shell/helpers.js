@@ -2347,6 +2347,29 @@ window.__bramPruneWorklist2Expansion = function (validIds) {
   return window.__bramPersistWorklist2Expansion(kept);
 };
 
+// worklist2-first-action: Worklist2's first gate. Thin adapter so the
+// row's onClick stays near-single-call: compose the standard single-item
+// approved payload through the shared prep and submit through the state
+// store — same wire, same authorization, same claim as the old tab.
+window.__bramMapSet = function (map, key, value) {
+  var next = Object.assign({}, map || {});
+  next[key] = value;
+  return next;
+};
+window.__bramWorklist2Approve = function (items, itemId, feedback) {
+  var r = window.__bramPrepareWorklistActionSubmission({
+    kind: "approved",
+    items: items || [],
+    selectedId: itemId,
+    rawFeedback: feedback || "",
+    feedbackDraftsById: {},
+    expandedItemIds: [],
+    voiceTarget: "message-agent",
+    inflightTarget: "approve",
+  });
+  return window.__bramWorklistActApply(r);
+};
+
 // Selection state helpers for the row tickboxes and the plural action bar.
 window.__bramToggleRowSelection = function (sel, id, on) {
   var next = (sel || []).filter(function (x) {

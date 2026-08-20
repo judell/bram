@@ -179,11 +179,13 @@
                   value="{$item.sharedWith &amp;&amp; $item.sharedWith.length ? '⚠ ' + $item.sharedWith.join(', ') : ''}" />
               </Column>
             </Table>
-            <Items
+            <!-- Plan-mode list per the tutorial's S1: one inline line,
+                 names dot-separated — not the old per-file boxes. -->
+            <Text
               when="{!window.__bramWorklist2Begun($item, inflightClaim.value) || !$item.changedFiles}"
-              data="{window.__bramWorklistItemFiles($item)}">
-              <Text value="{$item}" variant="code" fontSize="$fontSize-sm" />
-            </Items>
+              variant="code"
+              fontSize="$fontSize-sm"
+              value="{window.__bramWorklistItemFiles($item).join(' · ')}" />
           </VStack>
           <HStack
             when="{$item.before}"

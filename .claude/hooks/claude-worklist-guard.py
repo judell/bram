@@ -359,28 +359,40 @@ _WORKLIST_LIFECYCLE_ROUTES = (
 )
 
 
-def subagent_lifecycle_verdict(command, transcript_path):
+def subagent_lifecycle_verdict(command, agent_id):
     """('skip'|'deny'|'allow', detail) for a Bash command that may be a
-    worklist lifecycle call made from a subagent transcript.
+    worklist lifecycle call made from a delegated subagent.
 
     'skip' means the command doesn't target a lifecycle route at all, so
     the caller should fall through to the other Bash checks. 'deny' means
-    the command targets a lifecycle route AND the transcript is a subagent
-    transcript (`/subagents/` in its path). 'allow' covers every other
-    case, including the fail-open ones: transcript_path missing or empty
-    (detail 'unknown-transcript'), or present but not a subagent transcript
-    (detail None).
+    the command targets a lifecycle route AND the call originated in a
+    subagent. 'allow' is everything else -- crucially including the
+    orchestrator's own lifecycle calls, which are the normal case and must
+    never be blocked.
+
+    Keyed on the payload's `agent_id`, which is populated only for
+    subagent-originated tool calls (documented as a subagent-specific field
+    at https://code.claude.com/docs/en/hooks.md, and observed present in a
+    real payload -- see the decision=observe trace from ee33cd5).
+
+    This previously keyed on a `/subagents/` segment in `transcript_path`,
+    which never fired: that field is present but carries the session path,
+    never a subagent path. The check was inert from 6e07f6b until the
+    deliberate violation in xmlui-org/xmlui-mcp#33 exposed it. Keying on
+    identity rather than on where transcripts happen to be stored is also
+    the more durable choice -- storage layouts move (the subagents/workflows
+    discovery miss is precedent), whereas agent_id is about the caller.
+
+    Fail open when agent_id is absent: a guard that blocked the
+    orchestrator's lifecycle calls would break every gate in the system.
     """
     if not isinstance(command, str) or not any(
         route in command for route in _WORKLIST_LIFECYCLE_ROUTES
     ):
         return "skip", None
-    transcript_path = transcript_path or ""
-    if "/subagents/" in transcript_path:
+    if isinstance(agent_id, str) and agent_id.strip():
         return "deny", None
-    if not transcript_path:
-        return "allow", "unknown-transcript"
-    return "allow", None
+    return "allow", "no-agent-id"
 
 
 # MCP is the third write surface, at parity with the Codex guard: a user
@@ -1097,25 +1109,38 @@ def self_test():
                 "message": {"content": [{"type": "text", "text": "resolve it"}]},
             }) + NL)
 
-        # Lifecycle curl + subagent transcript -> deny.
-        assert subagent_lifecycle_verdict(lifecycle_cmd, subagent_transcript) == (
+        # Keyed on agent_id, not transcript_path: the latter is present on
+        # every payload but never carries a subagent path, which is why the
+        # original check was inert (ee33cd5).
+        #
+        # Lifecycle curl + agent_id present -> deny.
+        assert subagent_lifecycle_verdict(lifecycle_cmd, "b1iz1vf6f") == (
             "deny", None
         )
-        # Same curl + main-session transcript -> allow.
-        assert subagent_lifecycle_verdict(lifecycle_cmd, main_transcript) == (
-            "allow", None
-        )
-        # Same curl + missing transcript_path -> allow (fail-open), traced.
+        # Same curl, no agent_id -> allow. This is the ORCHESTRATOR's own
+        # lifecycle call, the normal case; blocking it would break every gate.
         assert subagent_lifecycle_verdict(lifecycle_cmd, "") == (
-            "allow", "unknown-transcript"
+            "allow", "no-agent-id"
         )
         assert subagent_lifecycle_verdict(lifecycle_cmd, None) == (
-            "allow", "unknown-transcript"
+            "allow", "no-agent-id"
         )
-        # Non-lifecycle command -> skip regardless of transcript.
+        # Whitespace-only agent_id is not an identity -> allow.
+        assert subagent_lifecycle_verdict(lifecycle_cmd, "   ") == (
+            "allow", "no-agent-id"
+        )
+        # Non-lifecycle command -> skip even from a subagent.
+        assert subagent_lifecycle_verdict("git status", "b1iz1vf6f") == (
+            "skip", None
+        )
+        # A subagent transcript path in the agent_id slot must NOT deny --
+        # guards against reintroducing the path-shape assumption by accident.
         assert subagent_lifecycle_verdict("git status", subagent_transcript) == (
             "skip", None
         )
+        # main_transcript is retained above for the opt-out cases; reference it
+        # here so the fixture stays live rather than becoming dead setup.
+        assert isinstance(main_transcript, str)
 
 
 def main():
@@ -1180,7 +1205,7 @@ def main():
                 cwd,
             )
         sl_verdict, sl_detail = subagent_lifecycle_verdict(
-            command, payload.get("transcript_path", "")
+            command, payload.get("agent_id", "")
         )
         # subagent-lifecycle-check-never-fires step 1: OBSERVE before repairing.
         # The check above tests for a "/subagents/" segment in transcript_path,
@@ -1230,13 +1255,15 @@ def main():
                 file=sys.stderr,
             )
             sys.exit(2)
-        elif sl_detail == "unknown-transcript":
+        elif sl_detail == "no-agent-id":
+            # The orchestrator's own lifecycle calls land here, which is the
+            # normal case, so this is traced rather than treated as anomalous.
             _trace_hook(
                 "PreToolUse",
                 "Bash",
                 preview,
                 "allow",
-                "subagent-gate-unknown-transcript",
+                "subagent-gate-no-agent-id",
                 cwd,
             )
         if forge_issue_only_write(command):

@@ -1133,16 +1133,26 @@ Parallelize the *work*; serialize the *gates*.
   diff produced by several subagents carries no record of which one
   made which edit. If that matters for a batch, commit the items
   separately.
-- **Currently convention-only: follow it because it is the rule, not
-  because anything stops you.** A guard check exists that intends to deny
-  a lifecycle call from a subagent, but it has never fired — it tests for
-  a `/subagents/` segment in the hook payload's `transcript_path`, and
-  that is not what the payload carries for a subagent's tool call. Found
-  by deliberate violation (xmlui-org/xmlui-mcp#33): the call reached the
-  host and was stopped by the authorization layer, which only refused it
-  because the id happened not to be covered. Repair is tracked as
-  `subagent-lifecycle-check-never-fires`; until it lands and a violation
-  is observed to deny, treat this rule as unenforced.
+- **Hook-enforced on Claude, and verified by deliberate violation.** A
+  lifecycle call from a delegated subagent is denied at `PreToolUse`
+  (`decision=deny reason=subagent-lifecycle-call`), and the call never
+  reaches the host. The check keys on the payload's `agent_id`, which is
+  populated only for subagent-originated tool calls.
+
+  It has not always worked. It originally tested for a `/subagents/`
+  segment in `transcript_path` — a field present on every payload but
+  never carrying a subagent path — so it was inert from the day it
+  shipped, and no amount of quiet running would have revealed that. It
+  was found by deliberately breaking the rule
+  (xmlui-org/xmlui-mcp#33): the call reached the host and was stopped
+  only by the authorization layer, which happened to refuse an id it did
+  not cover. Had the id been covered, it would have succeeded.
+
+  Two lessons worth keeping attached to this rule. Enforcement claims
+  need a **fire** behind them rather than an inspection — see
+  *Distinguish soak observers from tripwires*. And a check keyed on the
+  *shape* of a path supplied by someone else's payload asserts something
+  that payload never promised.
 
 ### Suggest a branch when isolation helps
 

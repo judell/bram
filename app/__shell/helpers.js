@@ -2339,6 +2339,18 @@ window.__bramToggleExpansionKey = function (keys, key, open) {
   if (open) next.push(key);
   return window.__bramPersistWorklist2Expansion(next);
 };
+// worklist2-keyed-expansion: controlled-expander helpers. Expansion lives
+// ONLY in expandedKeys (persisted, id-keyed) — never in component
+// internals — so positional row reuse in the Items loop cannot carry
+// state across items (the pruned-item state-transfer bug, 2026-08-20;
+// see https://www.xmlui.org/docs/howto/keep-per-item-state-in-a-loop).
+window.__bramChevron = function (keys, key) {
+  return (keys || []).indexOf(key) !== -1 ? "▼" : "▶";
+};
+window.__bramFlipExpansionKey = function (keys, key) {
+  var open = (keys || []).indexOf(key) === -1;
+  return window.__bramToggleExpansionKey(keys, key, open);
+};
 window.__bramPruneWorklist2Expansion = function (validIds) {
   var ids = validIds || [];
   var kept = window.__bramRestoreWorklist2Expansion().filter(function (k) {

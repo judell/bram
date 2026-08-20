@@ -2,16 +2,19 @@
   name="Worklist"
   var.expandedKeys="{window.__bramRestoreWorklist2Expansion()}"
   var.worklist2Feedback="{{}}">
-  <!-- worklist2-nav-scaffold / worklist-component-rename /
-       worklist2-row-expanders: read-only preview of the redesigned,
-       evidence-first gate (tutorial gist v3). Binds the same /__worklist
-       payload Workspace uses, so the two tabs cannot disagree about state.
-       Two-level compression per the old tab's proven shape: a row-level
-       expander (title; disk state joins the summary when rung 1 lands),
-       with Will touch / Before / After / Diff as nested expanders,
-       collapsed by default. Local expansion state only - none of
-       Workspace's persistence machinery. No actions: gating still happens
-       in the Worklist tab. -->
+  <!-- Worklist2: the redesigned, evidence-first gate (tutorial gist v3).
+       Binds the same /__worklist payload Workspace uses, so the two tabs
+       cannot disagree about state. Two-level compression: a row-level
+       expander with Files touched / Before / After / Diff sections.
+
+       worklist2-keyed-expansion: expansion is CONTROLLED — it lives only
+       in expandedKeys (persisted, id-keyed), never in component
+       internals. ExpandableItem is uncontrolled (initiallyExpanded reads
+       once at mount), so positional row reuse in the Items loop carried
+       expansion state across items when the list changed (pruned-item
+       state transfer, 2026-08-20). Chevron Button + when-bound body per
+       https://www.xmlui.org/docs/howto/keep-per-item-state-in-a-loop —
+       the old tab's proven shape. -->
   <DataSource
     id="worklist"
     url="/__worklist"
@@ -66,133 +69,141 @@
       (no items)
     </Text>
     <Items data="{worklist.value &amp;&amp; worklist.value.items ? worklist.value.items : []}">
-      <Theme paddingLeft-summary-ExpandableItem="0">
-        <ExpandableItem
-          fullWidthSummary="true"
-          initiallyExpanded="{(expandedKeys || []).includes($item.id)}"
-          onExpandedChange="(open) => expandedKeys = window.__bramToggleExpansionKey(expandedKeys, $item.id, open)">
-          <!-- Rich summary (component-definition form of the summary prop):
-               Badge for the id (color/background emphasis per iterate
-               feedback), then the full activity strip — scannable across a
-               set of collapsed items without expanding any. -->
-          <property name="summary">
-            <HStack gap="$space-2" verticalAlignment="center">
-              <!-- rethink-activity-indicators: row-prepended spinner while
-                   the HOST's claim covers this item — a decision being
-                   carried out, host state, never inferred agent activity.
-                   A plural (batch) claim lights all its rows. Persists
-                   across assistant turns now that soft detectors leave
-                   approved claims alone (lib.rs guards). -->
-              <Theme size-Spinner="14px">
-                <Spinner when="{window.__bramItemInflightKind(inflightClaim.value, $item.id, '', '', 0)}" />
-              </Theme>
-              <!-- Badge follows -->
-              <!-- Badge's text prop is `value` (not `label` — the
-                   ExpandableItem doc's summary example is wrong, filed
-                   upstream); empty value renders a bare nbsp frame.
-                   Contrast matched to Search's facet chips via theme vars:
-                   https://www.xmlui.org/docs/howto/theme-badge-colors-and-sizes -->
-              <Theme backgroundColor-Badge="$color-primary-600" textColor-Badge="white">
-                <Badge value="{$item.id}" />
-              </Theme>
-              <Text
-                fontSize="$fontSize-sm"
-                color="$textColor-secondary"
-                value="{window.__bramWorklist2Strip($item, inflightClaim.value)}" />
-            </HStack>
-          </property>
-          <VStack gap="$space-2" paddingLeft="$space-4">
-            <ExpandableItem
-              when="{($item.changedFiles || window.__bramWorklistItemFiles($item)).length > 0}"
-              summary="Files touched"
-              fullWidthSummary="true"
-              initiallyExpanded="{(expandedKeys || []).includes($item.id + '::files')}"
-              onExpandedChange="(open) => expandedKeys = window.__bramToggleExpansionKey(expandedKeys, $item.id + '::files', open)">
-              <VStack gap="$space-1">
-                <!-- issue-266 third iterate: Files touched as a Table
-                     (Status.xmlui idiom). Per-file shared-files flags live
-                     here beside the file they concern, not on the status
-                     line. Plain-path fallback covers payloads without the
-                     rung-1 enrichment. -->
-                <Table when="{$item.changedFiles}" data="{$item.changedFiles}">
-                  <Column header="file">
-                    <Text value="{$item.path}" variant="code" fontSize="$fontSize-sm" />
-                  </Column>
-                  <Column header="changes" width="140px">
-                    <Text
-                      variant="code"
-                      fontSize="$fontSize-sm"
-                      value="{$item.status === 'unchanged' ? '' : '+' + $item.added + ' −' + $item.removed + ($item.status === 'new' ? ' (new)' : ($item.status === 'deleted' ? ' (deleted)' : ''))}" />
-                  </Column>
-                  <Column header="shared with">
-                    <Text
-                      fontSize="$fontSize-sm"
-                      color="$textColor-secondary"
-                      value="{$item.sharedWith &amp;&amp; $item.sharedWith.length ? '⚠ ' + $item.sharedWith.join(', ') : ''}" />
-                  </Column>
-                </Table>
-                <Items when="{!$item.changedFiles}" data="{window.__bramWorklistItemFiles($item)}">
-                  <Text value="{$item}" variant="code" fontSize="$fontSize-sm" />
-                </Items>
-              </VStack>
-            </ExpandableItem>
-            <ExpandableItem
-              when="{$item.before}"
-              summary="Before"
-              fullWidthSummary="true"
-              initiallyExpanded="{(expandedKeys || []).includes($item.id + '::before')}"
-              onExpandedChange="(open) => expandedKeys = window.__bramToggleExpansionKey(expandedKeys, $item.id + '::before', open)">
-              <Markdown content="{$item.before}" interpolateBindings="false" allowHtml="false" />
-            </ExpandableItem>
-            <ExpandableItem
-              when="{$item.after}"
-              summary="After"
-              fullWidthSummary="true"
-              initiallyExpanded="{(expandedKeys || []).includes($item.id + '::after')}"
-              onExpandedChange="(open) => expandedKeys = window.__bramToggleExpansionKey(expandedKeys, $item.id + '::after', open)">
-              <Markdown content="{$item.after}" interpolateBindings="false" allowHtml="false" />
-            </ExpandableItem>
-            <ExpandableItem
-              when="{$item.diff}"
-              summary="Diff"
-              fullWidthSummary="true"
-              initiallyExpanded="{(expandedKeys || []).includes($item.id + '::diff')}"
-              onExpandedChange="(open) => expandedKeys = window.__bramToggleExpansionKey(expandedKeys, $item.id + '::diff', open)">
-              <VStack gap="$space-1">
-                <DiffView text="{cappedDiffText($item.diff || '')}" />
-              </VStack>
-            </ExpandableItem>
-            <HStack
-              when="{$item.closesIssues &amp;&amp; $item.closesIssues.length > 0}"
-              gap="$space-2"
-              verticalAlignment="center">
-              <Text value="closes" fontSize="$fontSize-sm" color="$textColor-secondary" />
-              <Items data="{$item.closesIssues}">
-                <Text value="{'#' + $item.number}" fontSize="$fontSize-sm" />
-              </Items>
-            </HStack>
-            <!-- worklist2-first-action: the first gate. Plan rows (nothing
-                 on disk) render the disk-named primary; the click composes
-                 the standard approved: payload through the shared prep and
-                 state store. Serialization guard applies from day one. -->
-            <HStack
-              when="{($item.status || 'proposed') === 'proposed' &amp;&amp; !($item.changeSummary &amp;&amp; $item.changeSummary.changed > 0)}"
-              gap="$space-2"
-              verticalAlignment="center">
-              <TextBox
-                width="24rem"
-                placeholder="Message to agent (optional)"
-                initialValue="{(worklist2Feedback || {})[$item.id] || ''}"
-                onDidChange="(v) => worklist2Feedback = window.__bramMapSet(worklist2Feedback, $item.id, v)" />
-              <Button
-                label="Approve"
-                size="sm"
-                enabled="{!window.__bramInflightBlocker(inflightClaim.value)}"
-                onClick="window.__bramIframeTrace('click', {target: 'worklist2-approve', item: $item.id}); window.__bramWorklist2Approve(worklist.value.items, $item.id, (worklist2Feedback || {})[$item.id] || ''); worklist2Feedback = window.__bramMapSet(worklist2Feedback, $item.id, '')" />
-            </HStack>
+      <VStack gap="$space-1">
+        <!-- worklist2-remove-expander-chrome: no indicator glyphs (History's
+             chrome-free section headers are the precedent); the header line
+             itself is the toggle. -->
+        <HStack
+          gap="$space-2"
+          verticalAlignment="center"
+          onClick="expandedKeys = window.__bramFlipExpansionKey(expandedKeys, $item.id)">
+          <!-- rethink-activity-indicators: row-prepended spinner while
+               the HOST's claim covers this item — a decision being
+               carried out, host state, never inferred agent activity.
+               A plural (batch) claim lights all its rows. -->
+          <Theme size-Spinner="14px">
+            <Spinner when="{window.__bramItemInflightKind(inflightClaim.value, $item.id, '', '', 0)}" />
+          </Theme>
+          <!-- Badge's text prop is `value` (not `label` — the
+               ExpandableItem doc's summary example is wrong, filed
+               upstream as xmlui-org/xmlui#3814). Contrast matched to
+               Search's facet chips via theme vars:
+               https://www.xmlui.org/docs/howto/theme-badge-colors-and-sizes -->
+          <Theme backgroundColor-Badge="$color-primary-600" textColor-Badge="white">
+            <Badge value="{$item.id}" />
+          </Theme>
+          <Text
+            fontSize="$fontSize-sm"
+            color="$textColor-secondary"
+            value="{window.__bramWorklist2Strip($item, inflightClaim.value)}" />
+        </HStack>
+        <VStack
+          when="{(expandedKeys || []).includes($item.id)}"
+          gap="$space-2"
+          paddingLeft="$space-6">
+          <HStack
+            when="{($item.changedFiles || window.__bramWorklistItemFiles($item)).length > 0}"
+            gap="$space-1"
+            verticalAlignment="center"
+            onClick="expandedKeys = window.__bramFlipExpansionKey(expandedKeys, $item.id + '::files')">
+            <Text value="Files touched" />
+          </HStack>
+          <VStack
+            when="{(expandedKeys || []).includes($item.id + '::files') &amp;&amp; ($item.changedFiles || window.__bramWorklistItemFiles($item)).length > 0}"
+            gap="$space-1"
+            paddingLeft="$space-6">
+            <!-- Files touched as a Table (Status.xmlui idiom). Per-file
+                 shared-files flags live here beside the file they concern,
+                 not on the status line. Plain-path fallback covers payloads
+                 without the rung-1 enrichment. -->
+            <Table when="{$item.changedFiles}" data="{$item.changedFiles}">
+              <Column header="file">
+                <Text value="{$item.path}" variant="code" fontSize="$fontSize-sm" />
+              </Column>
+              <Column header="changes" width="140px">
+                <Text
+                  variant="code"
+                  fontSize="$fontSize-sm"
+                  value="{$item.status === 'unchanged' ? '' : '+' + $item.added + ' −' + $item.removed + ($item.status === 'new' ? ' (new)' : ($item.status === 'deleted' ? ' (deleted)' : ''))}" />
+              </Column>
+              <Column header="shared with">
+                <Text
+                  fontSize="$fontSize-sm"
+                  color="$textColor-secondary"
+                  value="{$item.sharedWith &amp;&amp; $item.sharedWith.length ? '⚠ ' + $item.sharedWith.join(', ') : ''}" />
+              </Column>
+            </Table>
+            <Items when="{!$item.changedFiles}" data="{window.__bramWorklistItemFiles($item)}">
+              <Text value="{$item}" variant="code" fontSize="$fontSize-sm" />
+            </Items>
           </VStack>
-        </ExpandableItem>
-      </Theme>
+          <HStack
+            when="{$item.before}"
+            gap="$space-1"
+            verticalAlignment="center"
+            onClick="expandedKeys = window.__bramFlipExpansionKey(expandedKeys, $item.id + '::before')">
+            <Text value="Before" />
+          </HStack>
+          <VStack
+            when="{(expandedKeys || []).includes($item.id + '::before') &amp;&amp; $item.before}"
+            paddingLeft="$space-6">
+            <Markdown content="{$item.before}" interpolateBindings="false" allowHtml="false" />
+          </VStack>
+          <HStack
+            when="{$item.after}"
+            gap="$space-1"
+            verticalAlignment="center"
+            onClick="expandedKeys = window.__bramFlipExpansionKey(expandedKeys, $item.id + '::after')">
+            <Text value="After" />
+          </HStack>
+          <VStack
+            when="{(expandedKeys || []).includes($item.id + '::after') &amp;&amp; $item.after}"
+            paddingLeft="$space-6">
+            <Markdown content="{$item.after}" interpolateBindings="false" allowHtml="false" />
+          </VStack>
+          <HStack
+            when="{$item.diff}"
+            gap="$space-1"
+            verticalAlignment="center"
+            onClick="expandedKeys = window.__bramFlipExpansionKey(expandedKeys, $item.id + '::diff')">
+            <Text value="Diff" />
+          </HStack>
+          <VStack
+            when="{(expandedKeys || []).includes($item.id + '::diff') &amp;&amp; $item.diff}"
+            gap="$space-1"
+            paddingLeft="$space-6">
+            <DiffView text="{cappedDiffText($item.diff || '')}" />
+          </VStack>
+          <HStack
+            when="{$item.closesIssues &amp;&amp; $item.closesIssues.length > 0}"
+            gap="$space-2"
+            verticalAlignment="center">
+            <Text value="closes" fontSize="$fontSize-sm" color="$textColor-secondary" />
+            <Items data="{$item.closesIssues}">
+              <Text value="{'#' + $item.number}" fontSize="$fontSize-sm" />
+            </Items>
+          </HStack>
+          <!-- worklist2-first-action: the first gate. Plan rows (nothing
+               on disk) render the disk-named primary; the click composes
+               the standard approved: payload through the shared prep and
+               state store. Serialization guard applies from day one. -->
+          <HStack
+            when="{($item.status || 'proposed') === 'proposed' &amp;&amp; !($item.changeSummary &amp;&amp; $item.changeSummary.changed > 0)}"
+            gap="$space-2"
+            verticalAlignment="center">
+            <TextBox
+              width="24rem"
+              placeholder="Message to agent (optional)"
+              initialValue="{(worklist2Feedback || {})[$item.id] || ''}"
+              onDidChange="(v) => worklist2Feedback = window.__bramMapSet(worklist2Feedback, $item.id, v)" />
+            <Button
+              label="Approve"
+              size="sm"
+              enabled="{!window.__bramInflightBlocker(inflightClaim.value)}"
+              onClick="window.__bramIframeTrace('click', {target: 'worklist2-approve', item: $item.id}); window.__bramWorklist2Approve(worklist.value.items, $item.id, (worklist2Feedback || {})[$item.id] || ''); worklist2Feedback = window.__bramMapSet(worklist2Feedback, $item.id, '')" />
+          </HStack>
+        </VStack>
+      </VStack>
     </Items>
   </VStack>
 </Component>

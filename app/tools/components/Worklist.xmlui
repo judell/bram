@@ -155,13 +155,20 @@
           <VStack
             when="{(expandedKeys || []).includes($item.id + '::files') &amp;&amp; ($item.changedFiles || window.__bramWorklistItemFiles($item)).length > 0}"
             gap="$space-1"
-            paddingLeft="$space-6">
+            paddingLeft="$space-6"
+            var.rowBegun="{window.__bramWorklist2Begun($item, inflightClaim.value)}">
             <!-- Files touched as a Table (Status.xmlui idiom). Per-file
                  shared-files flags live here beside the file they concern,
                  not on the status line. Plain-path fallback covers payloads
                  without the rung-1 enrichment. -->
+            <!-- The table renders for plan rows too (review 2026-08-20:
+                 "the table display with the file overlap is important for
+                 understanding what to do next and possible entanglement").
+                 Only the activity numbers are begun-gated - a plan row
+                 shows path + shared-with, never sibling bleed as its own
+                 changes. -->
             <Table
-              when="{window.__bramWorklist2Begun($item, inflightClaim.value) &amp;&amp; $item.changedFiles}"
+              when="{$item.changedFiles}"
               data="{$item.changedFiles}">
               <Column header="file">
                 <Text value="{$item.path}" variant="code" fontSize="$fontSize-sm" />
@@ -170,7 +177,7 @@
                 <Text
                   variant="code"
                   fontSize="$fontSize-sm"
-                  value="{$item.status === 'unchanged' ? '' : '+' + $item.added + ' −' + $item.removed + ($item.status === 'new' ? ' (new)' : ($item.status === 'deleted' ? ' (deleted)' : ''))}" />
+                  value="{!rowBegun || $item.status === 'unchanged' ? '' : '+' + $item.added + ' −' + $item.removed + ($item.status === 'new' ? ' (new)' : ($item.status === 'deleted' ? ' (deleted)' : ''))}" />
               </Column>
               <Column header="shared with">
                 <Text
@@ -179,10 +186,8 @@
                   value="{$item.sharedWith &amp;&amp; $item.sharedWith.length ? '⚠ ' + $item.sharedWith.join(', ') : ''}" />
               </Column>
             </Table>
-            <!-- Plan-mode list per the tutorial's S1: one inline line,
-                 names dot-separated — not the old per-file boxes. -->
             <Text
-              when="{!window.__bramWorklist2Begun($item, inflightClaim.value) || !$item.changedFiles}"
+              when="{!$item.changedFiles}"
               variant="code"
               fontSize="$fontSize-sm"
               value="{window.__bramWorklistItemFiles($item).join(' · ')}" />

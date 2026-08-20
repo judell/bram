@@ -476,6 +476,7 @@
       <Fragment/>
     </property>
     <NavLink label="Worklist" to="/worklist" />
+    <NavLink label="Worklist2" to="/worklist2" />
     <NavLink label="Transcript" to="/transcript" />
     <NavLink label="Search" to="/search" />
     <NavLink label="Issues" to="/issues" />
@@ -632,6 +633,7 @@
     <Pages fallbackPath="/worklist">
       <Page url="/"><Workspace activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}" /></Page>
       <Page url="/worklist"><Workspace activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}" /></Page>
+      <Page url="/worklist2"><Worklist2 /></Page>
       <Page url="/transcript"><Transcript agentId="{transcriptAgentId}" /></Page>
       <Page url="/search"><Search /></Page>
       <Page url="/queue"><AgentMessageQueue /></Page>

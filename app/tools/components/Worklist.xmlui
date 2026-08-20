@@ -74,15 +74,31 @@
           <VStack gap="$space-2" paddingLeft="$space-4">
             <ExpandableItem
               when="{($item.changedFiles || window.__bramWorklistItemFiles($item)).length > 0}"
-              summary="Will touch"
+              summary="Files touched"
               fullWidthSummary="true">
               <VStack gap="$space-1">
-                <!-- changedFiles carries one record per listed file with a
-                     host-computed label (path, or path +A −R (new/deleted));
-                     plain-path fallback covers payloads without rung 1. -->
-                <Items when="{$item.changedFiles}" data="{$item.changedFiles}">
-                  <Text value="{$item.label}" variant="code" fontSize="$fontSize-sm" />
-                </Items>
+                <!-- issue-266 third iterate: Files touched as a Table
+                     (Status.xmlui idiom). Per-file shared-files flags live
+                     here beside the file they concern, not on the status
+                     line. Plain-path fallback covers payloads without the
+                     rung-1 enrichment. -->
+                <Table when="{$item.changedFiles}" data="{$item.changedFiles}">
+                  <Column header="file">
+                    <Text value="{$item.path}" variant="code" fontSize="$fontSize-sm" />
+                  </Column>
+                  <Column header="changes" width="140px">
+                    <Text
+                      variant="code"
+                      fontSize="$fontSize-sm"
+                      value="{$item.status === 'unchanged' ? '' : '+' + $item.added + ' −' + $item.removed + ($item.status === 'new' ? ' (new)' : ($item.status === 'deleted' ? ' (deleted)' : ''))}" />
+                  </Column>
+                  <Column header="shared with">
+                    <Text
+                      fontSize="$fontSize-sm"
+                      color="$textColor-secondary"
+                      value="{$item.sharedWith &amp;&amp; $item.sharedWith.length ? '⚠ ' + $item.sharedWith.join(', ') : ''}" />
+                  </Column>
+                </Table>
                 <Items when="{!$item.changedFiles}" data="{window.__bramWorklistItemFiles($item)}">
                   <Text value="{$item}" variant="code" fontSize="$fontSize-sm" />
                 </Items>

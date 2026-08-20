@@ -42215,6 +42215,59 @@ fn route_request<R: tauri::Runtime>(
                 }
             }
         }
+        // issue-266 iterate (shared-files mixup, 2026-08-20): when two
+        // items list overlapping files, one item's real work renders as
+        // identical activity on its sibling — the count is disk truth
+        // without authorship. The host cannot attribute, so it WARNS,
+        // per FILE where the overlap actually lives (second iterate: the
+        // status line was the wrong home; the Will touch row is ideal):
+        // each changedFiles record gains sharedWith = sibling item ids
+        // that also list that path.
+        if let Some(items) = doc.get_mut("items").and_then(|v| v.as_array_mut()) {
+            let listings: Vec<(String, std::collections::HashSet<String>)> = items
+                .iter()
+                .map(|item| {
+                    let id = item
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let set: std::collections::HashSet<String> =
+                        worklist_item_files(item).into_iter().collect();
+                    (id, set)
+                })
+                .collect();
+            for (idx, item) in items.iter_mut().enumerate() {
+                let Some(records) = item
+                    .get_mut("changedFiles")
+                    .and_then(|v| v.as_array_mut())
+                else {
+                    continue;
+                };
+                for rec in records {
+                    let Some(path) = rec.get("path").and_then(|v| v.as_str()).map(String::from)
+                    else {
+                        continue;
+                    };
+                    let shared: Vec<serde_json::Value> = listings
+                        .iter()
+                        .enumerate()
+                        .filter(|(j, (oid, oset))| {
+                            *j != idx && !oid.is_empty() && oset.contains(&path)
+                        })
+                        .map(|(_, (oid, _))| serde_json::Value::String(oid.clone()))
+                        .collect();
+                    if !shared.is_empty() {
+                        if let Some(obj) = rec.as_object_mut() {
+                            obj.insert(
+                                "sharedWith".to_string(),
+                                serde_json::Value::Array(shared),
+                            );
+                        }
+                    }
+                }
+            }
+        }
         let body = serde_json::to_vec(&doc).unwrap_or_default();
         return (200, "application/json; charset=utf-8", body);
     }

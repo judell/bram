@@ -1895,18 +1895,68 @@ window.__bramInflightBlocker = function (claim) {
 // together or neither appears.
 window.__bramWorklist2Strip = function (item, claim) {
   if (!item) return "";
+  // issue-266: the close declaration belongs on the status line for
+  // scannability, never buried in the expanded body.
+  var closes = "";
+  var ci = item.closesIssues;
+  if (ci && ci.length) {
+    closes =
+      "closes " +
+      ci
+        .map(function (c) {
+          return "#" + (c && c.number != null ? c.number : c);
+        })
+        .join(", ");
+  }
+  var withCloses = function (base) {
+    if (!base) return base;
+    return closes ? base + " · " + closes : base;
+  };
   var kind = window.__bramItemInflightKind(claim, item.id, "", "", 0);
-  if (kind === "approved") return "Approving…";
-  if (kind === "iterate") return "Iterating…";
-  if (kind === "drop") return "Dropping…";
-  if (kind) return kind + "…";
+  if (kind === "approved") return withCloses("Approving…");
+  if (kind === "iterate") return withCloses("Iterating…");
+  if (kind === "drop") return withCloses("Dropping…");
+  if (kind) return withCloses(kind + "…");
   var cs = item.changeSummary;
   if (cs && cs.changed > 0) {
     var t = cs.lastChangeMs ? new Date(cs.lastChangeMs).toLocaleTimeString() : "";
-    return cs.diskLabel + " · " + cs.activityLabel + (t ? " · last: " + t : "");
+    return withCloses(
+      cs.diskLabel + " · " + cs.activityLabel + (t ? " · last: " + t : ""),
+    );
   }
-  if ((item.status || "proposed") === "proposed") return "no changes yet";
+  if ((item.status || "proposed") === "proposed") return withCloses("no changes yet");
   return "";
+};
+
+// issue-266-close-declaration-inline: state helpers for the inline close
+// declaration at the commit gate. The map holds per-item close state only
+// once the user touches a tickbox; untouched items derive default state
+// (everything ticked) from closesIssues. Self-contained replicas of
+// Globals.xs initCloseIssueState/setCloseIssueClose — the xs functions
+// proved NOT reachable as window.* from a click handler
+// ("window.initCloseIssueState is not a function", live Approve failure
+// 2026-08-20), so helpers.js must not lean on xs hoisting. State shape
+// must match __bramBuildCloseIssueLines: { <issueNumber>: {close, comment} }.
+function __bramDefaultCloseState(closesIssues) {
+  var state = {};
+  (closesIssues || []).forEach(function (entry) {
+    var n = entry && typeof entry === "object" ? entry.number : entry;
+    state[n] = { close: true, comment: "" };
+  });
+  return state;
+}
+window.__bramInlineCloseState = function (map, item) {
+  if (map && item && map[item.id]) return map[item.id];
+  return __bramDefaultCloseState((item && item.closesIssues) || []);
+};
+window.__bramInlineCloseToggle = function (map, itemId, issueNumber, checked, closesIssues) {
+  var next = Object.assign({}, map || {});
+  var st = next[itemId] || __bramDefaultCloseState(closesIssues || []);
+  var prev = st[issueNumber] || { close: true, comment: "" };
+  var updated = Object.assign({}, st);
+  updated[issueNumber] = Object.assign({}, prev, { close: !!checked });
+  next[itemId] = updated;
+  return next;
 };
 
 // issue-265: per-item indicator text. Animated dots come from a tick the

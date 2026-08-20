@@ -9,6 +9,7 @@
   var.closeIssuesItemRef="{null}"
   var.closeIssuesState="{null}"
   var.closeIssuesOneShot="{false}"
+  var.inlineCloseStateById="{{}}"
   var.newItemHelp="{!!$queryParams.addItem}"
   var.newItemSubmitting="{false}"
   var.newItemStartSig="{''}"
@@ -518,6 +519,30 @@
                         value="{$item.changeSummary.diskLabel}"
                         fontSize="$fontSize-xs"
                         color="$textColor-secondary" />
+                      <!-- issue-266-close-declaration-inline: the close
+                           declaration as stated fact on the status line —
+                           tickbox per issue, default ticked; unticking is
+                           the whole override, unticking all commits
+                           without closing. Replaces the commit-gate
+                           dialog; wire (close-issue: lines) unchanged. -->
+                      <HStack
+                        when="{($item.status || 'proposed') === 'applied' &amp;&amp; $item.closesIssues &amp;&amp; $item.closesIssues.length > 0}"
+                        gap="$space-1"
+                        verticalAlignment="center"
+                        var.witem="{$item}">
+                        <Text value="closes" fontSize="$fontSize-xs" color="$textColor-secondary" />
+                        <Items data="{$item.closesIssues}">
+                          <HStack gap="$space-0_5" verticalAlignment="center" var.issue="{normalizeCloseIssue($item)}">
+                            <Checkbox
+                              initialValue="{true}"
+                              onDidChange="(v) => inlineCloseStateById = window.__bramInlineCloseToggle(inlineCloseStateById, witem.id, issue.number, v, witem.closesIssues)" />
+                            <Text
+                              value="{'#' + issue.number}"
+                              fontSize="$fontSize-xs"
+                              tooltip="{issue.title || ''}" />
+                          </HStack>
+                        </Items>
+                      </HStack>
                       <Button
                         when="{$itemIndex === worklist.value.items.findIndex(i => (i.status || 'proposed') === ($item.status || 'proposed'))}"
                         label="ⓘ"
@@ -629,7 +654,7 @@
                       label="Approve"
                       size="xs"
                       enabled="{!submitting && !window.__bramInflightBlocker(inflightClaim.value) && (($item.status || 'proposed') === 'applied' || ($item.status || 'proposed') === 'proposed')}"
-                      onClick="(() => { window.__bramIframeTrace('click', {target: 'approve', item: $item.id}); if ($item.status === 'applied' &amp;&amp; $item.closesIssues &amp;&amp; $item.closesIssues.length > 0) { closeIssuesOneShot = false; closeIssuesItemRef = $item; closeIssuesState = initCloseIssueState($item.closesIssues); closeIssuesDialog = $item.id; return; } const sentText = (feedbackBox &amp;&amp; feedbackBox.value) || (feedbackDraftsById || {})[$item.id] || ''; const r = window.__bramPrepareWorklistActionSubmission({kind: 'approved', items: worklist.value.items, selectedId: $item.id, rawFeedback: sentText, feedbackDraftsById: feedbackDraftsById || {}, expandedItemIds: expandedItemIds || [], voiceTarget: worklistVoiceTarget || 'message-agent', inflightTarget: 'approve'}); const next = Object.assign({}, r.feedbackDraftsById || {}); feedbackDraftsById = next; if (feedbackBox) feedbackBox.setValue(''); window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds || [], feedbackDraftsById: feedbackDraftsById}); worklistActionResult = r; window.submitAuthorizedWorklistTurn(r, () => { submitting = false; actionProgressScope = ''; actionProgressKind = ''; actionProgressTick = 0; submittedItemId = null; submittedKind = ''; awaitingResponse = false; worklistActionResult = null; }); })()" />
+                      onClick="(() => { window.__bramIframeTrace('click', {target: 'approve', item: $item.id}); if ($item.status === 'applied' &amp;&amp; $item.closesIssues &amp;&amp; $item.closesIssues.length > 0) { const rc = window.__bramPrepareCloseIssueWorklistActionSubmission({item: $item, closeIssuesState: window.__bramInlineCloseState(inlineCloseStateById, $item), closeIssues: true, feedbackDraftsById: feedbackDraftsById || {}, expandedItemIds: expandedItemIds || [], voiceTarget: worklistVoiceTarget || 'message-agent', oneShot: false}); const nextc = Object.assign({}, rc.feedbackDraftsById || {}); feedbackDraftsById = nextc; window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds || [], feedbackDraftsById: feedbackDraftsById}); worklistActionResult = rc; window.submitAuthorizedWorklistTurn(rc, () => { submitting = false; actionProgressScope = ''; actionProgressKind = ''; actionProgressTick = 0; submittedItemId = null; submittedKind = ''; awaitingResponse = false; worklistActionResult = null; }); return; } const sentText = (feedbackBox &amp;&amp; feedbackBox.value) || (feedbackDraftsById || {})[$item.id] || ''; const r = window.__bramPrepareWorklistActionSubmission({kind: 'approved', items: worklist.value.items, selectedId: $item.id, rawFeedback: sentText, feedbackDraftsById: feedbackDraftsById || {}, expandedItemIds: expandedItemIds || [], voiceTarget: worklistVoiceTarget || 'message-agent', inflightTarget: 'approve'}); const next = Object.assign({}, r.feedbackDraftsById || {}); feedbackDraftsById = next; if (feedbackBox) feedbackBox.setValue(''); window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds || [], feedbackDraftsById: feedbackDraftsById}); worklistActionResult = r; window.submitAuthorizedWorklistTurn(r, () => { submitting = false; actionProgressScope = ''; actionProgressKind = ''; actionProgressTick = 0; submittedItemId = null; submittedKind = ''; awaitingResponse = false; worklistActionResult = null; }); })()" />
                     <Theme paddingHorizontal-Button-xs="$space-0_5">
                       <Button
                         label="ⓘ"

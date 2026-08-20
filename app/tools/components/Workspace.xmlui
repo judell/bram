@@ -453,13 +453,13 @@
           <Button
             label="{'Approve all (' + window.__bramCountByStatus(worklist.value.items, 'applied') + ')'}"
             size="xs"
-            enabled="{!submitting}"
+            enabled="{!submitting &amp;&amp; !window.__bramInflightBlocker(inflightClaim.value)}"
             onClick="const r = window.__bramPrepareBatchWorklistActionSubmission({kind: 'approved', items: worklist.value.items}); expandedItemIds = r.expandedItemIds; feedbackDraftsById = r.feedbackDraftsById; submitting = r.submitting; actionProgressScope = r.actionProgressScope; actionProgressKind = r.actionProgressKind; actionProgressTick = r.actionProgressTick; submittedItemId = r.submittedItemId; submittedKind = r.submittedKind; window.submitAuthorizedWorklistTurn(r, () => { submitting = false; actionProgressScope = ''; actionProgressKind = ''; actionProgressTick = 0; submittedItemId = null; submittedKind = ''; awaitingResponse = false; worklistActionResult = null; })" />
           <Button
             label="{'Drop all (' + window.__bramCountByStatus(worklist.value.items, 'applied') + ')'}"
             size="xs"
             variant="outlined"
-            enabled="{!submitting}"
+            enabled="{!submitting &amp;&amp; !window.__bramInflightBlocker(inflightClaim.value)}"
             onClick="const r = window.__bramPrepareBatchWorklistActionSubmission({kind: 'drop', items: worklist.value.items}); expandedItemIds = r.expandedItemIds; feedbackDraftsById = r.feedbackDraftsById; submitting = r.submitting; actionProgressScope = r.actionProgressScope; actionProgressKind = r.actionProgressKind; actionProgressTick = r.actionProgressTick; submittedItemId = r.submittedItemId; submittedKind = r.submittedKind; window.submitAuthorizedWorklistTurn(r, () => { submitting = false; actionProgressScope = ''; actionProgressKind = ''; actionProgressTick = 0; submittedItemId = null; submittedKind = ''; awaitingResponse = false; worklistActionResult = null; })" />
         </HStack>
         <HStack
@@ -628,7 +628,7 @@
                     <Button
                       label="Approve"
                       size="xs"
-                      enabled="{!submitting && (($item.status || 'proposed') === 'applied' || ($item.status || 'proposed') === 'proposed')}"
+                      enabled="{!submitting && !window.__bramInflightBlocker(inflightClaim.value) && (($item.status || 'proposed') === 'applied' || ($item.status || 'proposed') === 'proposed')}"
                       onClick="(() => { window.__bramIframeTrace('click', {target: 'approve', item: $item.id}); if ($item.status === 'applied' &amp;&amp; $item.closesIssues &amp;&amp; $item.closesIssues.length > 0) { closeIssuesOneShot = false; closeIssuesItemRef = $item; closeIssuesState = initCloseIssueState($item.closesIssues); closeIssuesDialog = $item.id; return; } const sentText = (feedbackBox &amp;&amp; feedbackBox.value) || (feedbackDraftsById || {})[$item.id] || ''; const r = window.__bramPrepareWorklistActionSubmission({kind: 'approved', items: worklist.value.items, selectedId: $item.id, rawFeedback: sentText, feedbackDraftsById: feedbackDraftsById || {}, expandedItemIds: expandedItemIds || [], voiceTarget: worklistVoiceTarget || 'message-agent', inflightTarget: 'approve'}); const next = Object.assign({}, r.feedbackDraftsById || {}); feedbackDraftsById = next; if (feedbackBox) feedbackBox.setValue(''); window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds || [], feedbackDraftsById: feedbackDraftsById}); worklistActionResult = r; window.submitAuthorizedWorklistTurn(r, () => { submitting = false; actionProgressScope = ''; actionProgressKind = ''; actionProgressTick = 0; submittedItemId = null; submittedKind = ''; awaitingResponse = false; worklistActionResult = null; }); })()" />
                     <Theme paddingHorizontal-Button-xs="$space-0_5">
                       <Button
@@ -647,7 +647,7 @@
                       label="Approve &amp; commit"
                       size="xs"
                       variant="outlined"
-                      enabled="{!submitting}"
+                      enabled="{!submitting && !window.__bramInflightBlocker(inflightClaim.value)}"
                       tooltip="Apply and commit in one step"
                       onClick="(() => { window.__bramIframeTrace('click', {target: 'approve-commit', item: $item.id}); if ($item.closesIssues &amp;&amp; $item.closesIssues.length > 0) { closeIssuesOneShot = true; closeIssuesItemRef = $item; closeIssuesState = initCloseIssueState($item.closesIssues); closeIssuesDialog = $item.id; return; } const sentText = (feedbackBox &amp;&amp; feedbackBox.value) || (feedbackDraftsById || {})[$item.id] || ''; const r = window.__bramPrepareWorklistActionSubmission({kind: 'approved', items: worklist.value.items, selectedId: $item.id, rawFeedback: sentText, feedbackDraftsById: feedbackDraftsById || {}, expandedItemIds: expandedItemIds || [], voiceTarget: worklistVoiceTarget || 'message-agent', inflightTarget: 'approve', oneShot: true}); const next = Object.assign({}, r.feedbackDraftsById || {}); feedbackDraftsById = next; if (feedbackBox) feedbackBox.setValue(''); window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds || [], feedbackDraftsById: feedbackDraftsById}); worklistActionResult = r; window.submitAuthorizedWorklistTurn(r, () => { submitting = false; actionProgressScope = ''; actionProgressKind = ''; actionProgressTick = 0; submittedItemId = null; submittedKind = ''; awaitingResponse = false; worklistActionResult = null; }); })()" />
                     <Theme paddingHorizontal-Button-xs="$space-0_5">
@@ -678,7 +678,7 @@
                     <Button
                       label="Drop"
                       size="xs"
-                      enabled="{!submitting}"
+                      enabled="{!submitting && !window.__bramInflightBlocker(inflightClaim.value)}"
                       onClick="window.__bramIframeTrace('click', {target: 'drop', item: $item.id}); const sentText = (feedbackBox &amp;&amp; feedbackBox.value) || (feedbackDraftsById || {})[$item.id] || ''; const r = window.__bramPrepareWorklistActionSubmission({kind: 'drop', items: worklist.value.items, selectedId: $item.id, rawFeedback: sentText, feedbackDraftsById: feedbackDraftsById || {}, expandedItemIds: expandedItemIds || [], voiceTarget: worklistVoiceTarget || 'message-agent', inflightTarget: 'drop'}); const next = Object.assign({}, r.feedbackDraftsById || {}); feedbackDraftsById = next; if (feedbackBox) feedbackBox.setValue(''); window.__bramPersistWorklistUiState({expandedItemIds: expandedItemIds || [], feedbackDraftsById: feedbackDraftsById}); worklistActionResult = r; window.submitAuthorizedWorklistTurn(r, () => { submitting = false; actionProgressScope = ''; actionProgressKind = ''; actionProgressTick = 0; submittedItemId = null; submittedKind = ''; awaitingResponse = false; worklistActionResult = null; })" />
                     <Theme paddingHorizontal-Button-xs="$space-0_5">
                       <Button
@@ -689,6 +689,16 @@
                         onClick="dropHelpDialog.open()" />
                     </Theme>
                   </HStack>
+                  <!-- serialize-decisions-while-inflight: the stated reason
+                       for the one disable semantic — teaches "decisions
+                       serialize" without exposing auth machinery. Shown on
+                       rows other than the claimed one (that row already
+                       carries the inflight indicator). -->
+                  <Text
+                    when="{window.__bramInflightBlocker(inflightClaim.value) &amp;&amp; !window.__bramItemInflightKind(inflightClaim.value, $item.id, '', '', 0)}"
+                    value="{'one decision at a time — waiting for ' + window.__bramInflightBlocker(inflightClaim.value)}"
+                    fontSize="$fontSize-xs"
+                    color="$textColor-secondary" />
                   <Button
                     when="{submitting && actionProgressScope !== 'batch' && submittedItemId === $item.id}"
                     label="Cancel"

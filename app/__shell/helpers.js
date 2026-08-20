@@ -1874,6 +1874,16 @@ window.__bramItemInflightKind = function (claim, itemId, echoItemId, echoKind, e
   return echoKind;
 };
 
+// serialize-decisions-while-inflight: the single reason buttons ever
+// disable — an unconsumed authorization being carried out. Returns the
+// first claimed id while a claim is live, else ''. Keyed on the claim's
+// ids, not a boolean: when parallel agent work later brings multi-claim
+// host state, the evolution happens here and call sites stay put.
+window.__bramInflightBlocker = function (claim) {
+  var ids = (claim && claim.ids) || [];
+  return ids.length ? ids[0] : "";
+};
+
 // issue-265: per-item indicator text. Animated dots come from a tick the
 // caller advances; the verb comes from __bramItemInflightKind so the row and
 // the header banner cannot disagree about what is happening.

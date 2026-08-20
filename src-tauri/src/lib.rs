@@ -43354,16 +43354,18 @@ fn worklist_change_activity<R: tauri::Runtime>(
     let total = file_paths.len();
     // Labeled-field format per iterate feedback: the strip lives on the
     // collapsed summary line, scannable across a set of items.
+    // Max-compression format (2026-08-20 iterate): the strip lives on a
+    // one-line summary that must not wrap.
     let disk_label = if changed_n == 0 {
         "no changes yet".to_string()
     } else {
-        format!("files changed: {} of {}", changed_n, total)
+        format!("files: {} of {}", changed_n, total)
     };
     let activity_label = if changed_n == 0 {
         String::new()
     } else {
         format!(
-            "lines +{} \u{00b7} lines \u{2212}{} \u{00b7} edit sites: {}",
+            "lines: +{}, \u{2212}{} \u{00b7} edits: {}",
             add_sum, rem_sum, hunks
         )
     };
@@ -43811,7 +43813,44 @@ fn handle_worklist_commit<R: tauri::Runtime>(
     let Some(items) = wl.get("items").and_then(|v| v.as_array()) else {
         return worklist_json_error(500, "worklist missing items[]");
     };
-    let mut files = match worklist_commit_files_for_ids(items, &ids, commit_too) {
+    // rung6-commit-gate-accepts-proposed-with-work: a proposed item is
+    // committable under ANY commit-gate authorization — not just the
+    // one-click commitToo path — provided its files carry uncommitted
+    // changes (rung 1's disk-derived activity). The advance step stays
+    // valid but stops being mandatory where disk already answers what
+    // status was tracking. A proposed item with NO work on disk is still
+    // refused, which also keeps the #88 stale shape uncommittable.
+    if !commit_too {
+        for id in &ids {
+            let Some(item) = items
+                .iter()
+                .find(|it| it.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
+            else {
+                continue; // files_for_ids below reports the missing id
+            };
+            let status = item
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("proposed");
+            if status != "proposed" {
+                continue;
+            }
+            let fps = worklist_item_files(item);
+            let changed = worklist_change_activity(app, &fps)
+                .and_then(|(_, s)| s.get("changed").and_then(|v| v.as_u64()))
+                .unwrap_or(0);
+            if changed == 0 {
+                return worklist_json_error(
+                    400,
+                    format!(
+                        "{} is proposed with no changes on disk; nothing to commit",
+                        id
+                    ),
+                );
+            }
+        }
+    }
+    let mut files = match worklist_commit_files_for_ids(items, &ids, true) {
         Ok(files) => files,
         Err(e) => return worklist_json_error(400, e),
     };

@@ -109,7 +109,9 @@
       (no items)
     </Text>
     <Items data="{worklist.value &amp;&amp; worklist.value.items ? worklist.value.items : []}">
-      <VStack gap="$space-1">
+      <!-- Row separation (review 2026-08-20): breathing room between
+           items, which matters most when rows are expanded. -->
+      <VStack gap="$space-1" paddingBottom="$space-4">
         <!-- worklist2-remove-expander-chrome: no indicator glyphs (History's
              chrome-free section headers are the precedent); the header line
              itself is the toggle. -->

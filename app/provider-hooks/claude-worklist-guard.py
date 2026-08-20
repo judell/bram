@@ -1182,6 +1182,35 @@ def main():
         sl_verdict, sl_detail = subagent_lifecycle_verdict(
             command, payload.get("transcript_path", "")
         )
+        # subagent-lifecycle-check-never-fires step 1: OBSERVE before repairing.
+        # The check above tests for a "/subagents/" segment in transcript_path,
+        # on an assumption about the payload that was never verified -- and the
+        # check has been inert since it shipped (xmlui-org/xmlui-mcp#33, pass 2:
+        # a subagent's lifecycle curl reached the host and was stopped by the
+        # authorization layer, not here). Log what the payload actually carries
+        # whenever the command targets a lifecycle route, so one real call names
+        # the discriminator instead of us guessing a second time.
+        #
+        # KEY NAMES ONLY, never values: the payload carries tool input and a
+        # token. `agent_id` / `agent_type` are documented as subagent-specific
+        # fields (https://code.claude.com/docs/en/hooks.md) and are the leading
+        # candidate, so their presence is reported as a boolean.
+        if sl_verdict != "skip":
+            _trace_hook(
+                "PreToolUse",
+                "Bash",
+                preview,
+                "observe",
+                "payload-keys="
+                + "|".join(sorted(str(k) for k in payload.keys()))
+                + " agent_id="
+                + ("yes" if payload.get("agent_id") else "no")
+                + " agent_type="
+                + ("yes" if payload.get("agent_type") else "no")
+                + " tp_has_subagents="
+                + ("yes" if "/subagents/" in (payload.get("transcript_path") or "") else "no"),
+                cwd,
+            )
         if sl_verdict == "deny":
             _trace_hook(
                 "PreToolUse",

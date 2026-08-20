@@ -1133,8 +1133,16 @@ Parallelize the *work*; serialize the *gates*.
   diff produced by several subagents carries no record of which one
   made which edit. If that matters for a batch, commit the items
   separately.
-- This is hook-enforced, not merely advised — a lifecycle call from a
-  subagent transcript is denied. See below.
+- **Currently convention-only: follow it because it is the rule, not
+  because anything stops you.** A guard check exists that intends to deny
+  a lifecycle call from a subagent, but it has never fired — it tests for
+  a `/subagents/` segment in the hook payload's `transcript_path`, and
+  that is not what the payload carries for a subagent's tool call. Found
+  by deliberate violation (xmlui-org/xmlui-mcp#33): the call reached the
+  host and was stopped by the authorization layer, which only refused it
+  because the id happened not to be covered. Repair is tracked as
+  `subagent-lifecycle-check-never-fires`; until it lands and a violation
+  is observed to deny, treat this rule as unenforced.
 
 ### Suggest a branch when isolation helps
 

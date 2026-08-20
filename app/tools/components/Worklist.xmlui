@@ -2,7 +2,9 @@
   name="Worklist"
   var.expandedKeys="{window.__bramRestoreWorklist2Expansion()}"
   var.worklist2Feedback="{{}}"
-  var.worklist2Close="{{}}">
+  var.worklist2Close="{{}}"
+  var.worklist2NewItemOpen="{false}"
+  var.worklist2NewItemText="{''}">
   <!-- Worklist2: the redesigned, evidence-first gate (tutorial gist v3).
        Binds the same /__worklist payload Workspace uses, so the two tabs
        cannot disagree about state. Two-level compression: a row-level
@@ -54,8 +56,45 @@
   <ChangeListener
     listenTo="{worklistChangedEvt.value &amp;&amp; worklistChangedEvt.value.tick}"
     onDidChange="window.__bramRefetchOnLiveEvent(worklistChangedEvt.value, worklist)" />
+  <!-- Parity: the old tab's last-exchange dock rides the projection
+       subscription (workspace-tail-subscription). -->
+  <PushSource
+    id="projectedTurnsDS"
+    initial="{window.__bramProjectedLastExchange(null)}"
+    subscribe="{window.bramSubscribeProjectedLastExchange()}" />
   <VStack padding="$space-4" gap="$space-3">
-    <H2>Worklist2</H2>
+    <HStack gap="$space-3" verticalAlignment="center">
+      <H2>Worklist2</H2>
+      <!-- Parity: + New item. Inline ask (the old tab's dialog distilled):
+           items are proposed by the agent; this composes that ask. -->
+      <Button
+        label="+ New item"
+        size="xs"
+        onClick="worklist2NewItemOpen = !worklist2NewItemOpen" />
+    </HStack>
+    <VStack
+      when="{worklist2NewItemOpen}"
+      gap="$space-2"
+      padding="$space-3"
+      border="1px solid $color-surface-200"
+      borderRadius="$borderRadius">
+      <Text
+        fontSize="$fontSize-sm"
+        color="$textColor-secondary"
+        value="You don't add items directly — describe the change and the agent proposes it as a row here." />
+      <HStack gap="$space-2" verticalAlignment="center">
+        <TextBox
+          width="32rem"
+          placeholder="Describe what the item should change"
+          initialValue="{worklist2NewItemText}"
+          onDidChange="(v) => worklist2NewItemText = v" />
+        <Button
+          label="Ask agent"
+          size="sm"
+          enabled="{(worklist2NewItemText || '').trim().length > 0}"
+          onClick="window.__bramIframeTrace('click', {target: 'worklist2-new-item'}); window.toTurn('Propose a worklist item: ' + worklist2NewItemText); worklist2NewItemText = ''; worklist2NewItemOpen = false" />
+      </HStack>
+    </VStack>
     <!-- Component is named Worklist (the eventual real name); only the nav
          label and route say Worklist2 while the old tab (Workspace.xmlui)
          still owns /worklist. Renaming the label later solves the legacy
@@ -246,5 +285,35 @@
         </VStack>
       </VStack>
     </Items>
+    <!-- Parity: You/Agent last-exchange dock (old tab's shape, simplified:
+         no fullscreen image viewer; dim while a newer user message awaits
+         its answer). -->
+    <VStack var.dockExchange="{projectedTurnsDS.value || window.__bramProjectedLastExchange(null)}">
+      <VStack
+        when="{(dockExchange.lastExchange &amp;&amp; dockExchange.lastExchange.userText) || (dockExchange.lastAssistantText &amp;&amp; dockExchange.lastAssistantText.text)}"
+        gap="$space-2"
+        width="100%"
+        paddingTop="$space-4">
+        <VStack
+          when="{dockExchange.lastExchange &amp;&amp; dockExchange.lastExchange.userText}"
+          gap="$space-1"
+          width="100%">
+          <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="You: last message" />
+          <VStack maxHeight="12em" overflowY="auto" width="100%">
+            <Markdown content="{dockExchange.lastExchange.userText}" interpolateBindings="false" allowHtml="false" />
+          </VStack>
+        </VStack>
+        <VStack
+          when="{dockExchange.lastAssistantText &amp;&amp; dockExchange.lastAssistantText.text}"
+          gap="$space-1"
+          width="100%"
+          opacity="{(dockExchange.lastExchange &amp;&amp; dockExchange.lastExchange.userText &amp;&amp; !dockExchange.lastExchange.assistantText) ? 0.45 : 1}">
+          <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="Agent: last response" />
+          <VStack maxHeight="20em" overflowY="auto" width="100%">
+            <Markdown content="{window.__bramStripImagePaths(dockExchange.lastAssistantText.text)}" interpolateBindings="false" allowHtml="false" />
+          </VStack>
+        </VStack>
+      </VStack>
+    </VStack>
   </VStack>
 </Component>

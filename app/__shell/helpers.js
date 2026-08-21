@@ -2250,20 +2250,33 @@ function __bramBatchFeedbackFor(feedback, id) {
   return feedback || "";
 }
 
-window.__bramBuildBatchApprovePayload = function (items, feedback, selectedIds, oneShot) {
+// worklist2-batch-close-lines: the single-gate cutover orphaned the
+// per-row close-composer path, so batch commits queued no closes. For
+// commit-bound batch payloads (Commit N, Approve & commit N) each
+// item's feedback gains close-issue: lines from the inline tickbox
+// state (default all ticked) when the item declares closesIssues.
+function __bramBatchFeedbackWithCloses(feedback, item, closeMap) {
+  var base = __bramBatchFeedbackFor(feedback, item.id);
+  if (!closeMap || !item.closesIssues || !item.closesIssues.length) return base;
+  var lines = __bramBuildCloseIssueLines(window.__bramInlineCloseState(closeMap, item));
+  if (!lines.length) return base;
+  return (base ? base + "\n" : "") + lines.join("\n");
+}
+
+window.__bramBuildBatchApprovePayload = function (items, feedback, selectedIds, oneShot, closeMap) {
   __bramAppMark("build-batch-approve-payload");
   return JSON.stringify({
     items: __bramBatchTargets(items, selectedIds).map(function (i) {
-      return { id: i.id, feedback: __bramBatchFeedbackFor(feedback, i.id), gate: oneShot ? "apply-and-commit" : window.__bramItemGate(i) };
+      return { id: i.id, feedback: __bramBatchFeedbackWithCloses(feedback, i, closeMap), gate: oneShot ? "apply-and-commit" : window.__bramItemGate(i) };
     }),
   });
 };
 
-window.__bramBuildBatchApproveItems = function (items, feedback, selectedIds, oneShot) {
+window.__bramBuildBatchApproveItems = function (items, feedback, selectedIds, oneShot, closeMap) {
   return __bramBatchTargets(items, selectedIds).map(function (i) {
     return oneShot
-      ? { id: i.id, feedback: __bramBatchFeedbackFor(feedback, i.id), gate: "apply-and-commit" }
-      : { id: i.id, feedback: __bramBatchFeedbackFor(feedback, i.id) };
+      ? { id: i.id, feedback: __bramBatchFeedbackWithCloses(feedback, i, closeMap), gate: "apply-and-commit" }
+      : { id: i.id, feedback: __bramBatchFeedbackWithCloses(feedback, i, closeMap) };
   });
 };
 
@@ -2434,39 +2447,11 @@ window.__bramWorklist2Approve = function (items, itemId, feedback) {
   return window.__bramWorklistActApply(r);
 };
 
-// worklist2-commit-action: Worklist2's second gate. Same shape as
-// __bramWorklist2Approve; when the item declares closesIssues the
-// payload runs through the close-issue composer with Worklist2's own
-// inline tickbox state, so close-issue: lines ride exactly as at the
-// old tab's commit gate.
-window.__bramWorklist2Commit = function (items, item, feedback, closeMap) {
-  var r;
-  if (item && item.closesIssues && item.closesIssues.length > 0) {
-    var drafts = {};
-    drafts[item.id] = feedback || "";
-    r = window.__bramPrepareCloseIssueWorklistActionSubmission({
-      item: item,
-      closeIssuesState: window.__bramInlineCloseState(closeMap, item),
-      closeIssues: true,
-      feedbackDraftsById: drafts,
-      expandedItemIds: [],
-      voiceTarget: "message-agent",
-      oneShot: false,
-    });
-  } else {
-    r = window.__bramPrepareWorklistActionSubmission({
-      kind: "approved",
-      items: items || [item],
-      selectedId: item.id,
-      rawFeedback: feedback || "",
-      feedbackDraftsById: {},
-      expandedItemIds: [],
-      voiceTarget: "message-agent",
-      inflightTarget: "approve",
-    });
-  }
-  return window.__bramWorklistActApply(r);
-};
+// (worklist2-batch-close-lines: the per-row __bramWorklist2Commit that
+// once ran the close composer was orphaned by the single-gate cutover
+// and is deleted; the batch builders now compose close-issue: lines
+// via __bramBatchFeedbackWithCloses. The legacy tab still uses
+// __bramPrepareCloseIssueWorklistActionSubmission directly.)
 
 // worklist2-iterate-and-drop: the last two verbs. Drop composes the
 // standard drop: payload through the shared prep/store. Iterate's prep
@@ -2599,12 +2584,12 @@ window.__bramPrepareBatchWorklistActionSubmission = function (opts) {
   window.__bramIframeTrace("inflight-set", { item: submittedItemId, via: "click", target: target });
   var authItems = kind === "drop"
     ? window.__bramBuildBatchDropItems(items, feedback, sel)
-    : window.__bramBuildBatchApproveItems(items, feedback, sel, opts.oneShot);
+    : window.__bramBuildBatchApproveItems(items, feedback, sel, opts.oneShot, opts.closeMap);
   return {
     turnText: (kind === "drop" ? "drop: " : "approved: ") + (
       kind === "drop"
         ? window.__bramBuildBatchDropPayload(items, feedback, sel)
-        : window.__bramBuildBatchApprovePayload(items, feedback, sel, opts.oneShot)
+        : window.__bramBuildBatchApprovePayload(items, feedback, sel, opts.oneShot, opts.closeMap)
     ),
     authorizationPayload: { kind: kind, items: authItems },
     submitting: true,

@@ -1509,9 +1509,9 @@ window.settingsInfoBodies = {
     "Launch arguments are extra CLI flags. First command is sent to the agent's TUI after startup. Both apply whichever startup choice is used.",
   batchCommitActions:
     "## One-click Approve & commit (legacy Worklist only)\n\n" +
-    "Adds a per-item Approve & commit button on the legacy tab. The Worklist gate always offers Approve & commit when every selected row is a plan (no changes on disk yet) — no setting needed.\n\n" +
-    "## Mirror worklist lifecycle to GitHub issues\n\n" +
-    "Post worklist lifecycle comments to linked GitHub issues.",
+    "Adds a per-item Approve & commit button on the legacy tab. The Worklist always offers Approve & commit when every selected row is a plan (no changes on disk yet). No setting needed.\n\n" +
+    "## Mirror Worklist lifecycle to GitHub issues\n\n" +
+    "Post Worklist lifecycle comments to linked GitHub issues.",
   ui:
     "## Show target app\n\n" +
     "Show the embedded target-app preview pane. Usually off.\n\n" +
@@ -2020,7 +2020,7 @@ window.__bramItemStatusIsInflight = function (claim, item, echoItemId, echoKind,
 
 window.__bramItemStatusTooltip = function (claim, item, echoItemId, echoKind, tick) {
   if (window.__bramItemStatusIsInflight(claim, item, echoItemId, echoKind, tick)) {
-    return "A worklist lifecycle transition is in flight for this item.";
+    return "A Worklist lifecycle transition is in flight for this item.";
   }
   var auth = item && item.activeAuthorization;
   if (!auth) return "";
@@ -9928,16 +9928,24 @@ window.__bramTipsRegistry = [
   { id: 'terminal-toggle', priority: 15,
     text: 'Tip: Use the terminal button in the top toolbar to show or hide the terminal.' },
   { id: 'batch-actions', priority: 20, route: '/worklist2',
-    text: 'Tip: Tick several Worklist rows to act on them together — the gate buttons carry the count (Approve 3, Drop 2, one shared message).' },
+    text: 'Tip: Tick several Worklist rows to act on them together.' },
+  { id: 'gate-one-click', priority: 22, route: '/worklist2',
+    text: "Tip: Use 'Approve & commit' to bypass the option to iterate." },
+  { id: 'gate-shared-message', priority: 24, route: '/worklist2',
+    text: "Tip: The Worklist message box applies to whatever button you press. One note fans out to every selected item's feedback." },
   { id: 'queue', priority: 30, route: '/queue?from=tip',
-    text: 'Tip: The Queue tab lines up notes for the agent while it works — reorder them, dictate by voice, paste images — then send as one message or an iterate.' },
+    text: 'Tip: Use the Queue tab to record ideas while an agent works, then send when the agent is ready.' },
   { id: 'session-rename', priority: 40, route: '/sessions?from=tip',
-    text: 'Tip: Sessions can be renamed — give the current one a name that matches the project, in the Sessions tab.' },
+    text: 'Tip: Sessions can be renamed in the Sessions tab. Give the current one a name that matches the project.' },
   { id: 'issue-to-item', priority: 50, route: '/worklist2',
-    text: 'Tip: Turn an open issue into a worklist item — click + New item in the Worklist and pick the issue from the selector.' },
+    text: 'Tip: To convert an open issue into a Worklist item, click + New item in the Worklist and pick the issue from the selector.' },
+  { id: 'feedback-history', priority: 55, route: '/worklist2',
+    text: "Tip: Expand an item's Feedback section (under Diff) to see your past iterate messages for that item, newest first." },
   { id: 'issue-comments-collab', priority: 60,
     url: 'https://blog.jonudell.net/2026/06/17/vibe-coding-as-a-team-sport/',
     text: 'Tip: Use issue comments to communicate with other team members — humans and agents alike.' },
+  { id: 'inline-close', priority: 65, route: '/worklist2',
+    text: 'Tip: When an in-progress item resolves issues, tickboxes on its row choose which ones close automatically with your next Push.' },
   { id: 'log-first', priority: 70,
     url: 'https://blog.jonudell.net/2026/07/08/dont-infer-behavior-from-code-observe-it-in-logs/',
     text: 'Tip: Tell your agent to record evidence in logs.' },
@@ -9947,11 +9955,11 @@ window.__bramTipsRegistry = [
   { id: 'agent-switch', priority: 90,
     text: "Tip: Switch agents to have Claude Code review Codex's work, or vice versa." },
   { id: 'worklist-scope-issue', priority: 100,
-    text: "Tip: If a worklist item's scope gets out of hand, tell the agent to file an issue, then drop the item — you can resurrect it later from the issue and worklist history." },
+    text: "Tip: If a Worklist item's scope gets out of hand, tell the agent to file an issue, then drop the item. You can resurrect it later from the issue and Worklist history." },
   { id: 'paste-screenshot', priority: 110,
-    text: 'Tip: Paste a screenshot to show a UI glitch to the agent — it renders in the Worklist and Transcript so you can both see it.' },
+    text: 'Tip: Paste a screenshot to show a UI glitch to the agent. It renders in the Worklist and Transcript so you can both see it.' },
   { id: 'iterate-before-approve', priority: 120,
-    text: 'Tip: Use Iterate to refine a proposed or applied item before you click Approve.' },
+    text: 'Tip: Use Iterate to refine an in-progress item.' },
   { id: 'tips-dismiss-interval', priority: 130, route: '/settings?from=tip&highlight=tipsDismissInterval',
     text: "Tip: Use Settings → 'Dismissed tips return after' to control how long a dismissed tip stays hidden." },
 ];

@@ -2230,18 +2230,20 @@ function __bramBatchFeedbackFor(feedback, id) {
   return feedback || "";
 }
 
-window.__bramBuildBatchApprovePayload = function (items, feedback, selectedIds) {
+window.__bramBuildBatchApprovePayload = function (items, feedback, selectedIds, oneShot) {
   __bramAppMark("build-batch-approve-payload");
   return JSON.stringify({
     items: __bramBatchTargets(items, selectedIds).map(function (i) {
-      return { id: i.id, feedback: __bramBatchFeedbackFor(feedback, i.id), gate: window.__bramItemGate(i) };
+      return { id: i.id, feedback: __bramBatchFeedbackFor(feedback, i.id), gate: oneShot ? "apply-and-commit" : window.__bramItemGate(i) };
     }),
   });
 };
 
-window.__bramBuildBatchApproveItems = function (items, feedback, selectedIds) {
+window.__bramBuildBatchApproveItems = function (items, feedback, selectedIds, oneShot) {
   return __bramBatchTargets(items, selectedIds).map(function (i) {
-    return { id: i.id, feedback: __bramBatchFeedbackFor(feedback, i.id) };
+    return oneShot
+      ? { id: i.id, feedback: __bramBatchFeedbackFor(feedback, i.id), gate: "apply-and-commit" }
+      : { id: i.id, feedback: __bramBatchFeedbackFor(feedback, i.id) };
   });
 };
 
@@ -2527,6 +2529,26 @@ window.__bramToggleRowSelection = function (sel, id, on) {
   if (on) next.push(id);
   return next;
 };
+// worklist2-approve-and-commit: the one-click gate button shows only when
+// every selected row is a PLAN — proposed, with zero changed files in the
+// host-computed changeSummary. Begun or mixed selections never see it:
+// one-click commits sight-unseen, so it is reserved for rows where there
+// is no disk evidence to review yet.
+window.__bramSelectionAllPlans = function (items, sel) {
+  var chosen = sel || [];
+  if (chosen.length === 0) return false;
+  var picked = (items || []).filter(function (i) {
+    return chosen.indexOf(i.id) !== -1;
+  });
+  if (picked.length === 0) return false;
+  return picked.every(function (i) {
+    var cs = i.changeSummary;
+    return (
+      (i.status || "proposed") === "proposed" &&
+      !(cs && cs.changed > 0)
+    );
+  });
+};
 window.__bramSelectionIds = function (items, sel, status) {
   var chosen = sel || [];
   return (items || [])
@@ -2557,12 +2579,12 @@ window.__bramPrepareBatchWorklistActionSubmission = function (opts) {
   window.__bramIframeTrace("inflight-set", { item: submittedItemId, via: "click", target: target });
   var authItems = kind === "drop"
     ? window.__bramBuildBatchDropItems(items, feedback, sel)
-    : window.__bramBuildBatchApproveItems(items, feedback, sel);
+    : window.__bramBuildBatchApproveItems(items, feedback, sel, opts.oneShot);
   return {
     turnText: (kind === "drop" ? "drop: " : "approved: ") + (
       kind === "drop"
         ? window.__bramBuildBatchDropPayload(items, feedback, sel)
-        : window.__bramBuildBatchApprovePayload(items, feedback, sel)
+        : window.__bramBuildBatchApprovePayload(items, feedback, sel, opts.oneShot)
     ),
     authorizationPayload: { kind: kind, items: authItems },
     submitting: true,

@@ -1508,15 +1508,15 @@ window.settingsInfoBodies = {
     "## Advanced\n\n" +
     "Launch arguments are extra CLI flags. First command is sent to the agent's TUI after startup. Both apply whichever startup choice is used.",
   batchCommitActions:
-    "## Batch commit actions\n\n" +
-    "Adds Approve all / Drop all when two or more items are TO COMMIT.\n\n" +
-    "## One-click Approve & commit\n\n" +
-    "Adds a per-item Approve & commit button that applies and commits a proposed item in one step — for small, low-risk changes.\n\n" +
+    "## One-click Approve & commit (legacy Worklist only)\n\n" +
+    "Adds a per-item Approve & commit button on the legacy tab. The Worklist gate always offers Approve & commit when every selected row is a plan (no changes on disk yet) — no setting needed.\n\n" +
     "## Mirror worklist lifecycle to GitHub issues\n\n" +
     "Post worklist lifecycle comments to linked GitHub issues.",
   ui:
     "## Show target app\n\n" +
     "Show the embedded target-app preview pane. Usually off.\n\n" +
+    "## Show legacy Worklist\n\n" +
+    "Show the pre-redesign Worklist tab as OldWorklist above the Worklist. A transitional escape hatch while the new gate settles in; off by default.\n\n" +
     "## Agent-pane hot-reload\n\n" +
     "Auto-reload the agent pane as you edit Bram's own source. For developing Bram.\n\n" +
     "## Show tips in the footer\n\n" +
@@ -9927,16 +9927,14 @@ window.__bramTipsRegistry = [
     text: 'Tip: Turn on Tool Descriptions (Settings) to make agentic work more legible.' },
   { id: 'terminal-toggle', priority: 15,
     text: 'Tip: Use the terminal button in the top toolbar to show or hide the terminal.' },
-  { id: 'batch-actions', priority: 20, route: '/settings?from=tip&highlight=batchCommitActions',
-    text: 'Tip: Batch actions let you approve or drop several worklist items in one click — enable them in Settings → Worklist.' },
-  { id: 'oneclick-approve-commit', priority: 25, route: '/settings?from=tip&highlight=oneClickApproveCommit',
-    text: 'Tip: Enable one-click Approve & commit (Settings → Worklist) to apply and commit a small change in a single click.' },
+  { id: 'batch-actions', priority: 20, route: '/worklist2',
+    text: 'Tip: Tick several Worklist rows to act on them together — the gate buttons carry the count (Approve 3, Drop 2, one shared message).' },
   { id: 'queue', priority: 30, route: '/queue?from=tip',
     text: 'Tip: The Queue tab lines up notes for the agent while it works — reorder them, dictate by voice, paste images — then send as one message or an iterate.' },
   { id: 'session-rename', priority: 40, route: '/sessions?from=tip',
     text: 'Tip: Sessions can be renamed — give the current one a name that matches the project, in the Sessions tab.' },
-  { id: 'issue-to-item', priority: 50, route: '/worklist?addItem=1',
-    text: 'Tip: Turn an open issue into a worklist item — this opens the Add-item dialog, where you can cite the issue.' },
+  { id: 'issue-to-item', priority: 50, route: '/worklist2',
+    text: 'Tip: Turn an open issue into a worklist item — click + New item in the Worklist and pick the issue from the selector.' },
   { id: 'issue-comments-collab', priority: 60,
     url: 'https://blog.jonudell.net/2026/06/17/vibe-coding-as-a-team-sport/',
     text: 'Tip: Use issue comments to communicate with other team members — humans and agents alike.' },
@@ -10088,8 +10086,6 @@ window.__bramBeepOnMenu = function (menu) {
 function __bramTipEligible(tip, settings) {
   var s = settings || {};
   if (tip.id === 'tool-descriptions') return !(s.ai && s.ai.describeCommands);
-  if (tip.id === 'batch-actions') return !(s.worklist && s.worklist.batchCommitActions);
-  if (tip.id === 'oneclick-approve-commit') return !(s.worklist && s.worklist.oneClickApproveCommit);
   return true;
 }
 

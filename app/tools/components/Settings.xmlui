@@ -157,17 +157,10 @@
             onClick="infoTitle = 'Worklist'; infoBody = window.settingsInfoBodies.batchCommitActions; settingInfoDialog.open()" />
           <Heading level="h3">Worklist</Heading>
         </HStack>
-        <VStack
-          testId="setting-batchCommitActions"
-          padding="$space-1"
-          borderRadius="$borderRadius"
-          backgroundColor="{highlightKey === 'batchCommitActions' ? '$color-primary-100' : 'transparent'}">
-          <Switch
-            id="batchActionsSwitch"
-            label="Batch commit actions"
-            initialValue="{settingsBatch(settingsValue)}"
-            onDidChange="(v) => saveSettings.execute({ worklist: { batchCommitActions: v } })" />
-        </VStack>
+        <!-- Post-cutover (#267 A2): "Batch commit actions" switch removed —
+             batch is selection in the Worklist gate, no setting gates it.
+             The worklist.batchCommitActions config key still deserializes
+             for compat; only the UI row is gone. -->
         <VStack
           testId="setting-oneClickApproveCommit"
           padding="$space-1"
@@ -175,7 +168,7 @@
           backgroundColor="{highlightKey === 'oneClickApproveCommit' ? '$color-primary-100' : 'transparent'}">
           <Switch
             id="oneClickSwitch"
-            label="One-click Approve &amp; commit"
+            label="One-click Approve &amp; commit (legacy Worklist only)"
             initialValue="{settingsOneClickApproveCommit(settingsValue)}"
             onDidChange="(v) => saveSettings.execute({ worklist: { oneClickApproveCommit: v } })" />
         </VStack>

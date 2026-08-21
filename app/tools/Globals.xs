@@ -268,9 +268,6 @@ function buildCloseIssueLines(state) {
 // window-global script needed. App.mark pushes a `kind: "app:mark"`
 // record with `ts` (Unix ms) and `perfTs` to the inspector buffer,
 // directly mergeable with bram-trace.log on the same Unix-ms clock.
-function settingsBatch(s) {
-  return !!(s && s.worklist && s.worklist.batchCommitActions);
-}
 function settingsOneClickApproveCommit(s) {
   return !!(s && s.worklist && s.worklist.oneClickApproveCommit);
 }

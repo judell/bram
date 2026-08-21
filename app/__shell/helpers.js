@@ -1949,7 +1949,7 @@ window.__bramWorklist2Strip = function (item, claim) {
       cs.diskLabel + " · " + cs.activityLabel + (t ? " · last: " + t : ""),
     );
   }
-  if (!begun) return withCloses("no changes yet");
+  if (!begun) return withCloses("No changes yet");
   return "";
 };
 window.__bramWorklist2Begun = function (item, claim) {

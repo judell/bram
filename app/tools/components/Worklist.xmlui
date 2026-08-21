@@ -358,8 +358,8 @@
         onGotFocus="setWorklistVoiceTarget('feedback')"
         onDidChange="(v) => worklist2BatchText = v" />
       <Button
-        when="{window.__bramSelectionIds(worklist.value.items, worklist2Selected, 'proposed').length > 0}"
-        label="{'Approve ' + window.__bramSelectionIds(worklist.value.items, worklist2Selected, 'proposed').length}"
+        when="{window.__bramSelectionAllStatus(worklist.value.items, worklist2Selected, 'proposed')}"
+        label="{'Approve ' + (worklist2Selected || []).length}"
         size="sm"
         enabled="{!window.__bramInflightBlocker(inflightClaim.value)}"
         onClick="window.__bramIframeTrace('click', {target: 'worklist2-batch-approve', count: (worklist2Selected || []).length}); const ids = window.__bramSelectionIds(worklist.value.items, worklist2Selected, 'proposed'); worklist2Sent = window.__bramWorklist2CaptureSent(worklist2Sent, ids, worklist2BatchText, Date.now()); const r = window.__bramPrepareBatchWorklistActionSubmission({kind: 'approved', items: worklist.value.items, selectedIds: ids, feedbackDraftsById: window.__bramFanFeedback(ids, window.__bramWithStagedImageMarkers(worklist2BatchText, 'feedback'))}); worklist2Selected = []; worklist2BatchText = ''; window.__bramWorklistActApply(r)" />
@@ -371,8 +371,8 @@
         tooltip="One click: apply, then commit when done"
         onClick="window.__bramIframeTrace('click', {target: 'worklist2-batch-approve-commit', count: (worklist2Selected || []).length}); const ids = window.__bramSelectionIds(worklist.value.items, worklist2Selected, 'proposed'); worklist2Sent = window.__bramWorklist2CaptureSent(worklist2Sent, ids, worklist2BatchText, Date.now()); const r = window.__bramPrepareBatchWorklistActionSubmission({kind: 'approved', oneShot: true, closeMap: worklist2Close, items: worklist.value.items, selectedIds: ids, feedbackDraftsById: window.__bramFanFeedback(ids, window.__bramWithStagedImageMarkers(worklist2BatchText, 'feedback'))}); worklist2Selected = []; worklist2BatchText = ''; window.__bramWorklistActApply(r)" />
       <Button
-        when="{window.__bramSelectionIds(worklist.value.items, worklist2Selected, 'applied').length > 0}"
-        label="{'Commit ' + window.__bramSelectionIds(worklist.value.items, worklist2Selected, 'applied').length}"
+        when="{window.__bramSelectionAllStatus(worklist.value.items, worklist2Selected, 'applied')}"
+        label="{'Commit ' + (worklist2Selected || []).length}"
         size="sm"
         enabled="{!window.__bramInflightBlocker(inflightClaim.value)}"
         onClick="window.__bramIframeTrace('click', {target: 'worklist2-batch-commit', count: (worklist2Selected || []).length}); const ids = window.__bramSelectionIds(worklist.value.items, worklist2Selected, 'applied'); worklist2Sent = window.__bramWorklist2CaptureSent(worklist2Sent, ids, worklist2BatchText, Date.now()); const r = window.__bramPrepareBatchWorklistActionSubmission({kind: 'approved', closeMap: worklist2Close, items: worklist.value.items, selectedIds: ids, feedbackDraftsById: window.__bramFanFeedback(ids, window.__bramWithStagedImageMarkers(worklist2BatchText, 'feedback'))}); worklist2Selected = []; worklist2BatchText = ''; window.__bramWorklistActApply(r)" />

@@ -13800,7 +13800,20 @@ fn drain_pty_intents<R: tauri::Runtime>(
                 pty_write_internal(app, state, &wrapped, "pty-intent-toShell")
             }
             "toTurn" => write_pty_turn_intent(app, state, data),
-            "sendKeys" => pty_write_internal(app, state, data, "pty-intent-sendKeys"),
+            "sendKeys" => {
+                if data == "\x1b" && !pane_escape_has_job() {
+                    if bram_trace_enabled() {
+                        append_bram_trace_line(
+                            app,
+                            "send-gate",
+                            "op=esc-suppressed reason=idle source=pty-intent-sendKeys",
+                        );
+                    }
+                    Ok(())
+                } else {
+                    pty_write_internal(app, state, data, "pty-intent-sendKeys")
+                }
+            }
             "menuAnswer" => {
                 let current_prompt_id = prompt_open_cell()
                     .lock()
@@ -27323,6 +27336,25 @@ static SEND_GATE_STALE_WARNED_MS: std::sync::atomic::AtomicI64 =
 // input while a question is displayed and typing over it is a
 // legitimate answer path (2026-07-19 22:04:50 landed in <1s with the
 // question open); permission menus and pickers swallow pasted input.
+// guard-double-escape-agent-exit: a pane-origin bare Esc is forwarded
+// only when it has a job — an open turn to interrupt (lenient PTY-chrome
+// phase check, so a genuine interrupt is never held; see the #210 scar in
+// Globals.xs escToolbarClick) or a displayed menu to dismiss. With the
+// agent idle at its prompt, a stray Esc falls through to the TUI as a
+// gesture (double-Esc opens rewind / can bounce the user out of the CLI),
+// so it is dropped and traced instead. Esc typed in the terminal never
+// passes through this path.
+fn pane_escape_has_job() -> bool {
+    let turn = turn_state_cell()
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_else(|_| TurnState::idle());
+    let phase_open = turn.phase == "working" || turn.phase == "waiting-for-permission";
+    phase_open
+        || turn.pending_menu.is_some()
+        || PANE_MENU_DISPLAYED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn send_gate_blocking_menu_tool() -> Option<String> {
     turn_state_cell().lock().ok().and_then(|t| {
         t.pending_menu.as_ref().and_then(|m| {

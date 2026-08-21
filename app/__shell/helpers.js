@@ -2592,6 +2592,16 @@ window.__bramSelectionAllPlans = function (items, sel) {
     );
   });
 };
+// worklist2-mixed-selection-verbs: status-scoped verbs render only when
+// the WHOLE selection matches — a verb acts on exactly the selection or
+// it doesn't appear, so no click ever discards part of a selection or
+// its fanned message. Mixed selections keep Iterate/Drop, which cover
+// the whole set.
+window.__bramSelectionAllStatus = function (items, sel, status) {
+  var chosen = sel || [];
+  if (chosen.length === 0) return false;
+  return window.__bramSelectionIds(items, sel, status).length === chosen.length;
+};
 window.__bramSelectionIds = function (items, sel, status) {
   var chosen = sel || [];
   return (items || [])

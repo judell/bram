@@ -5705,17 +5705,33 @@ fn parse_codex_compaction_line(line: &str) -> Option<CodexCompactionRecord> {
     })
 }
 
-// Incremental tail reader over the active Codex rollout. Deliberately dumb: it
-// yields unseen structured records and owns no lifecycle policy -- correlation,
-// the turn hold, and re-arming all belong to CompactionTracker.
+// One record extracted from a session JSONL: a stable identity for
+// de-duplication, an optional monotonic ordinal for offset-invalidation, and
+// the provider-specific payload.
+#[derive(Clone, Debug, PartialEq)]
+struct ObservedRecord<T> {
+    id: String,
+    ordinal: Option<u64>,
+    value: T,
+}
+
+// Incremental tail reader over an append-only session JSONL. Deliberately
+// dumb: it yields unseen structured records and owns no lifecycle policy --
+// correlation and lifecycle mutation belong to the caller's state machine.
+//
+// Shared by the compaction observer (issue #268) and the interrupt observer
+// (structured-interrupt-edge-both-providers), which differ only in their
+// record extractor. Both providers are supported: Codex records carry a
+// top-level `ordinal`, Claude records do not, so ordinal-regression detection
+// is skipped when the extractor supplies none.
 //
 // No inode tracking (issue #268 open question 2). De-duplication is
-// content-keyed on `(session_id, window_id)`, which makes a full re-read
+// content-keyed on the extractor's identity, which makes a full re-read
 // idempotent, and once replay is harmless file identity has no job left. What
 // does break under in-place replacement is the byte offset, so the offset is
 // invalidated on a shrink, a session-id change, or an ordinal regression.
 #[derive(Debug, Default)]
-struct CodexCompactionObserver {
+struct JsonlTailObserver {
     session_id: Option<String>,
     offset: u64,
     last_ordinal: Option<u64>,
@@ -5730,7 +5746,7 @@ enum CompactionReadReset {
     OrdinalRegressed,
 }
 
-impl CodexCompactionObserver {
+impl JsonlTailObserver {
     fn new() -> Self {
         Self::default()
     }
@@ -5747,7 +5763,15 @@ impl CodexCompactionObserver {
         self.seen.clear();
     }
 
-    fn poll(&mut self, path: &std::path::Path, session_id: &str) -> (Vec<CodexCompactionRecord>, CompactionReadReset) {
+    fn poll<T, F>(
+        &mut self,
+        path: &std::path::Path,
+        session_id: &str,
+        extract: F,
+    ) -> (Vec<T>, CompactionReadReset)
+    where
+        F: Fn(&str) -> Option<ObservedRecord<T>>,
+    {
         use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
         let Ok(meta) = std::fs::metadata(path) else {
@@ -5799,23 +5823,227 @@ impl CodexCompactionObserver {
                 break;
             }
             consumed += read as u64;
-            let Some(record) = parse_codex_compaction_line(&line) else {
+            let Some(record) = extract(&line) else {
                 continue;
             };
-            if let Some(last) = self.last_ordinal {
+            if let (Some(ordinal), Some(last)) = (record.ordinal, self.last_ordinal) {
                 // First cause wins: a shrink already explains the re-read, and
                 // reporting its downstream effects would obscure the trigger.
-                if record.ordinal < last && reset == CompactionReadReset::None {
+                if ordinal < last && reset == CompactionReadReset::None {
                     reset = CompactionReadReset::OrdinalRegressed;
                 }
             }
-            self.last_ordinal = Some(record.ordinal);
-            if self.seen.insert(record.window_id.clone()) {
-                out.push(record);
+            if let Some(ordinal) = record.ordinal {
+                self.last_ordinal = Some(ordinal);
+            }
+            if self.seen.insert(record.id) {
+                out.push(record.value);
             }
         }
         self.offset = consumed;
         (out, reset)
+    }
+}
+
+fn observe_codex_compaction(line: &str) -> Option<ObservedRecord<CodexCompactionRecord>> {
+    let record = parse_codex_compaction_line(line)?;
+    Some(ObservedRecord {
+        id: record.window_id.clone(),
+        ordinal: Some(record.ordinal),
+        value: record,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Structured interrupt edge (structured-interrupt-edge-both-providers)
+// ---------------------------------------------------------------------------
+//
+// The last lifecycle edge Bram inferred from repaintable terminal text.
+// `pty_output_clears_inflight` substring-matches "Conversation interrupted" /
+// "You canceled the request" in PTY bytes; Codex repaints historical rows, so
+// c962ccc had to guard it with a 5 s post-Esc window -- an elapsed-time proxy
+// for episode identity, the instrument #268 concluded is the wrong one.
+//
+// Both providers write a declarative record instead:
+//
+//   * Codex -- `event_msg` with `payload.type == "turn_aborted"`, carrying
+//     `turn_id`, `reason`, `started_at`, `completed_at`, `duration_ms`. An
+//     aborted turn emits this INSTEAD of `task_complete` (verified in the live
+//     rollout: 18 `task_started` = 15 `task_complete` + 3 `turn_aborted`, each
+//     pair sharing a `turn_id`), which is exactly why the structured turn-end
+//     detector saw no completion record for a cancelled Codex turn and the PTY
+//     path had to exist.
+//
+//   * Claude -- a `type:"user"` record whose text block starts with
+//     "[Request interrupted" (228 across 16 project sessions, in three
+//     variants: "by user", "by user for tool use", and an ellipsis form, all
+//     covered by the prefix). The discriminator already exists as the
+//     synthetic-message filter inside `send_ledger_line_delivers`; here the
+//     same predicate is used positively. Reading the text through
+//     `send_ledger_record_text` is load-bearing, not incidental: it keeps only
+//     `type == "text"` blocks, so a `tool_result` whose OUTPUT quotes the
+//     sentinel is not mistaken for one, and the `type` gate keeps assistant
+//     prose discussing interrupts from ever reaching the check. All three
+//     shapes occur in one real transcript.
+//
+// Unlike the compaction latch, the PTY path is NOT deleted. There, the
+// task_started/task_complete/turn_aborted accounting proved the record covers
+// every episode; here presence data cannot prove these records cover every
+// cancellation (logs prove presence, never absence). So the PTY marker stays
+// as a fallback, and precedence is what changes: when a record exists it
+// decides, and the 5 s Esc window stops being load-bearing.
+const CLAUDE_INTERRUPT_PREFIX: &str = "[Request interrupted";
+
+// How long a PTY cancel marker waits to see whether a declarative record
+// supersedes it. Not a tuned value: it only has to exceed the provider's
+// JSONL flush plus one ticker period. `record_lag_ms` on `op=interrupt` is
+// what pins it, and the cost of erring long is that the sentinel clears a
+// beat later on the fallback path only.
+const CANCEL_DEFER_MS: i64 = 1_200;
+
+#[derive(Clone, Debug, PartialEq)]
+struct InterruptRecord {
+    id: String,
+    reason: &'static str,
+    ts_ms: i64,
+}
+
+fn observe_codex_interrupt(line: &str) -> Option<ObservedRecord<InterruptRecord>> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    if value.get("type").and_then(|v| v.as_str()) != Some("event_msg") {
+        return None;
+    }
+    let payload = value.get("payload")?;
+    if payload.get("type").and_then(|v| v.as_str()) != Some("turn_aborted") {
+        return None;
+    }
+    let ordinal = value.get("ordinal").and_then(|v| v.as_u64());
+    let ts_ms = value
+        .get("timestamp")
+        .and_then(|v| v.as_str())
+        .and_then(parse_iso_to_epoch_ms)
+        .unwrap_or(0);
+    // Feature-detected like `compacted`: a record without `turn_id` still gets
+    // an identity from its ordinal rather than being dropped.
+    let id = payload
+        .get("turn_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("ordinal:{}", ordinal.unwrap_or(0)));
+    Some(ObservedRecord {
+        ordinal,
+        value: InterruptRecord {
+            id: id.clone(),
+            reason: "jsonl-turn-aborted",
+            ts_ms,
+        },
+        id,
+    })
+}
+
+// Shared by the observer and by `claude_jsonl_completion_decision`, so the
+// interrupt edge and the turn-completion veto can never disagree about what
+// counts as an interrupt.
+fn claude_record_is_interrupt(entry: &serde_json::Value) -> bool {
+    if entry.get("type").and_then(|v| v.as_str()) != Some("user") {
+        return false;
+    }
+    send_ledger_record_text(entry)
+        .trim_start()
+        .starts_with(CLAUDE_INTERRUPT_PREFIX)
+}
+
+fn observe_claude_interrupt(line: &str) -> Option<ObservedRecord<InterruptRecord>> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    if !claude_record_is_interrupt(&value) {
+        return None;
+    }
+    let ts_ms = value
+        .get("timestamp")
+        .and_then(|v| v.as_str())
+        .and_then(parse_iso_to_epoch_ms)
+        .unwrap_or(0);
+    // Claude records carry no ordinal; the uuid is the stable identity, and
+    // ordinal-regression detection is simply skipped for this stream.
+    let id = value
+        .get("uuid")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("ts:{}", ts_ms));
+    Some(ObservedRecord {
+        ordinal: None,
+        value: InterruptRecord {
+            id: id.clone(),
+            reason: "jsonl-request-interrupted",
+            ts_ms,
+        },
+        id,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PendingCancelMarker {
+    seen_at_ms: i64,
+    is_codex: bool,
+}
+
+fn pending_cancel_cell() -> &'static Mutex<Option<PendingCancelMarker>> {
+    static CELL: OnceLock<Mutex<Option<PendingCancelMarker>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum CancelResolution {
+    /// Nothing to do this tick: no record, and any pending marker is still
+    /// inside its deferral window.
+    Wait,
+    /// A declarative record decided. Supersedes any pending PTY marker.
+    Structured {
+        id: String,
+        reason: &'static str,
+        record_lag_ms: i64,
+        pty_marker_seen: bool,
+    },
+    /// No record arrived within the window; the PTY marker carries the case.
+    PtyFallback { deferred_ms: i64, is_codex: bool },
+}
+
+// Pure decision so both paths are testable without a PTY or a filesystem.
+fn resolve_cancel(
+    pending: Option<PendingCancelMarker>,
+    records: &[InterruptRecord],
+    now_ms: i64,
+) -> CancelResolution {
+    if let Some(record) = records.first() {
+        return CancelResolution::Structured {
+            id: record.id.clone(),
+            reason: record.reason,
+            record_lag_ms: now_ms - record.ts_ms,
+            pty_marker_seen: pending.is_some(),
+        };
+    }
+    if let Some(marker) = pending {
+        if now_ms - marker.seen_at_ms >= CANCEL_DEFER_MS {
+            return CancelResolution::PtyFallback {
+                deferred_ms: now_ms - marker.seen_at_ms,
+                is_codex: marker.is_codex,
+            };
+        }
+    }
+    CancelResolution::Wait
+}
+
+// The cancel action itself, shared by both paths so precedence changes cannot
+// drift the effects apart.
+fn apply_user_cancel<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str, is_codex: bool) {
+    clear_active_sentinel_with_reason(app, reason);
+    if is_codex {
+        if menu_hook_owns_slot() {
+            // Unkeyed: the user cancelled the whole turn -- drain the claim
+            // queue.
+            clear_hook_permission_menu(app, "codex", "?", reason, None, None);
+        }
+        kill_current_codex_turn_from_pty_cancel(app);
     }
 }
 
@@ -6077,8 +6305,8 @@ fn emit_compaction<R: tauri::Runtime>(app: &AppHandle<R>, active: bool, provider
 mod compaction_shape_tests {
     use super::{
         compaction_progress_shape, parse_codex_compaction_line, pty_output_clears_inflight,
-        CodexCompactionObserver, CodexCompactionRecord, CompactionReadReset, CompactionTracker,
-        CompactionTransition, COMPACTION_PENDING_MS,
+        observe_codex_compaction, CodexCompactionRecord, CompactionReadReset,
+        CompactionTracker, CompactionTransition, JsonlTailObserver, COMPACTION_PENDING_MS,
     };
 
     const NO_RECORDS: &[CodexCompactionRecord] = &[];
@@ -6326,11 +6554,11 @@ mod compaction_shape_tests {
         // compaction records causes no lifecycle mutation.
         let body = compacted_line("w1", "w0", 10, "2026-08-21T04:14:24.077Z");
         let path = temp_rollout("resume", &body);
-        let mut observer = CodexCompactionObserver::new();
+        let mut observer = JsonlTailObserver::new();
         let len = std::fs::metadata(&path).unwrap().len();
         observer.attach("sess-a".to_string(), len);
 
-        let (records, reset) = observer.poll(&path, "sess-a");
+        let (records, reset) = observer.poll(&path, "sess-a", observe_codex_compaction);
         assert!(records.is_empty(), "pre-attach records are historical");
         assert_eq!(reset, CompactionReadReset::None);
 
@@ -6339,7 +6567,7 @@ mod compaction_shape_tests {
         use std::io::Write;
         f.write_all(compacted_line("w2", "w1", 20, "2026-08-21T04:44:03.213Z").as_bytes())
             .unwrap();
-        let (records, _) = observer.poll(&path, "sess-a");
+        let (records, _) = observer.poll(&path, "sess-a", observe_codex_compaction);
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].window_id, "w2");
         let _ = std::fs::remove_file(&path);
@@ -6350,11 +6578,11 @@ mod compaction_shape_tests {
         // A session Bram launched has no history, so nothing is baselined away
         // and a fast first compaction is not lost.
         let path = temp_rollout("launched", "");
-        let mut observer = CodexCompactionObserver::new();
+        let mut observer = JsonlTailObserver::new();
         observer.attach("sess-new".to_string(), 0);
 
         std::fs::write(&path, compacted_line("w1", "w0", 10, "2026-08-21T04:14:24.077Z")).unwrap();
-        let (records, _) = observer.poll(&path, "sess-new");
+        let (records, _) = observer.poll(&path, "sess-new", observe_codex_compaction);
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].window_id, "w1");
         let _ = std::fs::remove_file(&path);
@@ -6363,17 +6591,17 @@ mod compaction_shape_tests {
     #[test]
     fn observer_ignores_a_partial_trailing_line() {
         let path = temp_rollout("partial", "");
-        let mut observer = CodexCompactionObserver::new();
+        let mut observer = JsonlTailObserver::new();
         observer.attach("sess-p".to_string(), 0);
 
         let full = compacted_line("w1", "w0", 10, "2026-08-21T04:14:24.077Z");
         let partial = &full[..full.len() / 2];
         std::fs::write(&path, partial).unwrap();
-        let (records, _) = observer.poll(&path, "sess-p");
+        let (records, _) = observer.poll(&path, "sess-p", observe_codex_compaction);
         assert!(records.is_empty(), "half a record must not parse");
 
         std::fs::write(&path, &full).unwrap();
-        let (records, _) = observer.poll(&path, "sess-p");
+        let (records, _) = observer.poll(&path, "sess-p", observe_codex_compaction);
         assert_eq!(records.len(), 1);
         let _ = std::fs::remove_file(&path);
     }
@@ -6383,7 +6611,7 @@ mod compaction_shape_tests {
         // No inode tracking (issue #268 Q2): a shrink invalidates the offset,
         // the re-read from zero is idempotent because dedup is content-keyed.
         let path = temp_rollout("replace", "");
-        let mut observer = CodexCompactionObserver::new();
+        let mut observer = JsonlTailObserver::new();
         observer.attach("sess-r".to_string(), 0);
 
         let first = compacted_line("w1", "w0", 10, "2026-08-21T04:14:24.077Z");
@@ -6395,7 +6623,7 @@ mod compaction_shape_tests {
             "x".repeat(400)
         ) + "\n";
         std::fs::write(&path, format!("{}{}{}", first, second, padding)).unwrap();
-        let (records, _) = observer.poll(&path, "sess-r");
+        let (records, _) = observer.poll(&path, "sess-r", observe_codex_compaction);
         assert_eq!(records.len(), 2);
 
         // Replaced in place with a shorter file carrying the same episodes
@@ -6411,7 +6639,7 @@ mod compaction_shape_tests {
             ),
         )
         .unwrap();
-        let (records, reset) = observer.poll(&path, "sess-r");
+        let (records, reset) = observer.poll(&path, "sess-r", observe_codex_compaction);
         assert_eq!(reset, CompactionReadReset::Shrank);
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].window_id, "w3");
@@ -6424,12 +6652,12 @@ mod compaction_shape_tests {
         // conversation is a new identity space, baselined not replayed.
         let body = compacted_line("w1", "w0", 10, "2026-08-21T04:14:24.077Z");
         let path = temp_rollout("rotate", &body);
-        let mut observer = CodexCompactionObserver::new();
+        let mut observer = JsonlTailObserver::new();
         observer.attach("sess-old".to_string(), 0);
-        let (records, _) = observer.poll(&path, "sess-old");
+        let (records, _) = observer.poll(&path, "sess-old", observe_codex_compaction);
         assert_eq!(records.len(), 1);
 
-        let (records, reset) = observer.poll(&path, "sess-new");
+        let (records, reset) = observer.poll(&path, "sess-new", observe_codex_compaction);
         assert_eq!(reset, CompactionReadReset::SessionChanged);
         assert!(records.is_empty(), "rotation baselines, never replays");
         let _ = std::fs::remove_file(&path);
@@ -6460,6 +6688,318 @@ mod compaction_shape_tests {
     fn compaction_marker_does_not_masquerade_as_interruption() {
         assert!(!pty_output_clears_inflight(b"Context compacted"));
         assert!(pty_output_clears_inflight(b"Conversation interrupted"));
+    }
+}
+
+#[cfg(test)]
+mod structured_interrupt_tests {
+    use super::{
+        observe_claude_interrupt, observe_codex_interrupt, resolve_cancel, CancelResolution,
+        InterruptRecord, JsonlTailObserver, PendingCancelMarker, CANCEL_DEFER_MS,
+    };
+
+    // Verbatim shapes from the live rollout / this project's transcripts.
+    const CODEX_ABORT: &str = r#"{"timestamp":"2026-08-21T04:46:23.957Z","ordinal":1469,"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"01a022a4-2cfa-7780-8459-cc2775fdfbf2","reason":"interrupted","started_at":1787287579,"completed_at":1787287583,"duration_ms":4048}}"#;
+    const CODEX_TASK_COMPLETE: &str = r#"{"timestamp":"2026-08-21T04:44:00.000Z","ordinal":1461,"type":"event_msg","payload":{"type":"task_complete","turn_id":"01a022a2-aa72-7243-b0f0-3e6388ff547e"}}"#;
+
+    // The three-way discrimination, all from one real transcript
+    // (6faeee3f…jsonl lines 163 / 701 / 707).
+    const CLAUDE_REAL: &str = r#"{"type":"user","timestamp":"2026-08-21T05:20:00.000Z","uuid":"0aa75e32-1111-2222-3333-444444444444","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}"#;
+    const CLAUDE_TOOL_RESULT_ECHO: &str = r#"{"type":"user","timestamp":"2026-08-21T05:21:00.000Z","uuid":"bbbbbbbb-1111-2222-3333-444444444444","message":{"role":"user","content":[{"tool_use_id":"toolu_01JBCJk2sf8ABW3C1GLyyWJH","type":"tool_result","content":"   1 [Request interrupted by user for tool use]","is_error":false}]}}"#;
+    const CLAUDE_ASSISTANT_PROSE: &str = r#"{"type":"assistant","timestamp":"2026-08-21T05:22:00.000Z","uuid":"cccccccc-1111-2222-3333-444444444444","message":{"role":"assistant","content":[{"type":"text","text":"A naive search for [Request interrupted by user] would match this sentence."}]}}"#;
+
+    fn temp_jsonl(name: &str, body: &str) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!("bram-interrupt-{}-{}.jsonl", name, std::process::id()));
+        std::fs::write(&path, body).expect("write jsonl fixture");
+        path
+    }
+
+    #[test]
+    fn codex_turn_aborted_is_the_interrupt_edge() {
+        let observed = observe_codex_interrupt(CODEX_ABORT).expect("turn_aborted parses");
+        assert_eq!(observed.id, "01a022a4-2cfa-7780-8459-cc2775fdfbf2");
+        assert_eq!(observed.ordinal, Some(1469));
+        assert_eq!(observed.value.reason, "jsonl-turn-aborted");
+        assert_eq!(observed.value.ts_ms, 1787287583957);
+        // A normal completion is not an interrupt.
+        assert!(observe_codex_interrupt(CODEX_TASK_COMPLETE).is_none());
+    }
+
+    #[test]
+    fn codex_abort_without_turn_id_falls_back_to_ordinal() {
+        let line = r#"{"timestamp":"2026-08-21T04:46:23.957Z","ordinal":99,"type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted"}}"#;
+        let observed = observe_codex_interrupt(line).expect("legacy abort parses");
+        assert_eq!(observed.id, "ordinal:99");
+    }
+
+    #[test]
+    fn claude_sentinel_is_discriminated_from_its_echoes() {
+        // The whole point: a naive substring search over the JSONL matches all
+        // three of these. Only the first is an interrupt.
+        let observed = observe_claude_interrupt(CLAUDE_REAL).expect("sentinel parses");
+        assert_eq!(observed.id, "0aa75e32-1111-2222-3333-444444444444");
+        assert_eq!(observed.value.reason, "jsonl-request-interrupted");
+        assert_eq!(observed.ordinal, None, "Claude records carry no ordinal");
+
+        assert!(
+            observe_claude_interrupt(CLAUDE_TOOL_RESULT_ECHO).is_none(),
+            "a tool_result quoting the sentinel is not an interrupt"
+        );
+        assert!(
+            observe_claude_interrupt(CLAUDE_ASSISTANT_PROSE).is_none(),
+            "assistant prose discussing interrupts is not an interrupt"
+        );
+    }
+
+    #[test]
+    fn all_three_claude_sentinel_variants_are_recognized() {
+        // 167 / 58 / 3 occurrences respectively across 16 project sessions.
+        for text in [
+            "[Request interrupted by user]",
+            "[Request interrupted by user for tool use]",
+            "[Request interrupted by user\u{2026}]",
+        ] {
+            let line = format!(
+                r#"{{"type":"user","uuid":"u-{}","message":{{"role":"user","content":[{{"type":"text","text":"{}"}}]}}}}"#,
+                text.len(),
+                text
+            );
+            assert!(
+                observe_claude_interrupt(&line).is_some(),
+                "variant not recognized: {}",
+                text
+            );
+        }
+    }
+
+    #[test]
+    fn observer_baselines_history_then_yields_new_interrupts_once() {
+        let path = temp_jsonl("dedup", &format!("{}\n", CODEX_ABORT));
+        let mut observer = JsonlTailObserver::new();
+        // First poll on an unknown session baselines at end-of-file, so a
+        // resumed transcript's historical aborts never replay.
+        let (records, _) = observer.poll(&path, "sess-i", observe_codex_interrupt);
+        assert!(records.is_empty(), "history must not replay");
+
+        let second = r#"{"timestamp":"2026-08-21T05:04:20.921Z","ordinal":1628,"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"01a022b3-a317-7c91-8477-794cb2ee29e1","reason":"interrupted"}}"#;
+        std::fs::write(&path, format!("{}\n{}\n", CODEX_ABORT, second)).unwrap();
+        let (records, _) = observer.poll(&path, "sess-i", observe_codex_interrupt);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, "01a022b3-a317-7c91-8477-794cb2ee29e1");
+
+        // A forced full re-read is inert: dedup is content-keyed.
+        std::fs::write(&path, format!("{}\n", second)).unwrap();
+        let (records, _) = observer.poll(&path, "sess-i", observe_codex_interrupt);
+        assert!(records.is_empty(), "replay must be inert");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn structured_record_supersedes_a_pending_pty_marker() {
+        let pending = Some(PendingCancelMarker {
+            seen_at_ms: 1_000,
+            is_codex: true,
+        });
+        let records = vec![InterruptRecord {
+            id: "w1".to_string(),
+            reason: "jsonl-turn-aborted",
+            ts_ms: 1_100,
+        }];
+        // Inside the deferral window the record wins outright.
+        assert_eq!(
+            resolve_cancel(pending, &records, 1_200),
+            CancelResolution::Structured {
+                id: "w1".to_string(),
+                reason: "jsonl-turn-aborted",
+                record_lag_ms: 100,
+                pty_marker_seen: true,
+            }
+        );
+    }
+
+    #[test]
+    fn structured_record_acts_with_no_pty_marker_at_all() {
+        // The case the Esc window used to drop on the floor: a real
+        // cancellation whose PTY marker never corroborated.
+        let records = vec![InterruptRecord {
+            id: "t1".to_string(),
+            reason: "jsonl-request-interrupted",
+            ts_ms: 5_000,
+        }];
+        assert!(matches!(
+            resolve_cancel(None, &records, 5_050),
+            CancelResolution::Structured {
+                pty_marker_seen: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn pty_marker_falls_back_only_after_the_deferral_window() {
+        let pending = Some(PendingCancelMarker {
+            seen_at_ms: 1_000,
+            is_codex: false,
+        });
+        // Still waiting for a record.
+        assert_eq!(
+            resolve_cancel(pending, &[], 1_000 + CANCEL_DEFER_MS - 1),
+            CancelResolution::Wait
+        );
+        assert_eq!(
+            resolve_cancel(pending, &[], 1_000 + CANCEL_DEFER_MS),
+            CancelResolution::PtyFallback {
+                deferred_ms: CANCEL_DEFER_MS,
+                is_codex: false,
+            }
+        );
+        // No marker, no record: nothing happens.
+        assert_eq!(resolve_cancel(None, &[], 9_999), CancelResolution::Wait);
+    }
+
+    // Corpus validation against real transcripts on this machine. `#[ignore]`d
+    // because it depends on $HOME and on sessions that exist only where an
+    // agent has actually run; skips cleanly rather than failing when they are
+    // absent. Run explicitly:
+    //   cargo test -- --ignored --nocapture corpus
+    //
+    // Its value is the differential it prints for Claude: raw occurrences of
+    // the sentinel string in the file versus records the extractor accepts.
+    // The gap IS the false-positive filtering (tool_result echoes, assistant
+    // prose), measured on production data rather than on fixtures I wrote.
+    fn jsonl_files_under(root: std::path::PathBuf) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                    out.push(path);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    #[ignore]
+    fn corpus_codex_turn_aborted_extraction_matches_ground_truth() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let root = std::path::PathBuf::from(home).join(".codex/sessions");
+        let files = jsonl_files_under(root);
+        if files.is_empty() {
+            eprintln!("corpus: no Codex rollouts found, skipping");
+            return;
+        }
+        let (mut raw, mut extracted) = (0usize, 0usize);
+        for path in &files {
+            let Ok(content) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            for line in content.lines() {
+                if line.contains(r#""type":"turn_aborted""#) {
+                    raw += 1;
+                }
+                if observe_codex_interrupt(line).is_some() {
+                    extracted += 1;
+                }
+            }
+        }
+        eprintln!(
+            "corpus codex: files={} raw_turn_aborted={} extracted={}",
+            files.len(),
+            raw,
+            extracted
+        );
+        // turn_aborted is unambiguous: every one should extract, none invented.
+        assert_eq!(raw, extracted, "Codex extraction must be exact");
+    }
+
+    #[test]
+    #[ignore]
+    fn corpus_claude_interrupt_extraction_filters_its_echoes() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let root = std::path::PathBuf::from(home).join(".claude/projects");
+        let files = jsonl_files_under(root);
+        if files.is_empty() {
+            eprintln!("corpus: no Claude sessions found, skipping");
+            return;
+        }
+        let (mut raw, mut extracted, mut assistant_hits, mut tool_result_hits) =
+            (0usize, 0usize, 0usize, 0usize);
+        for path in &files {
+            let Ok(content) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            for line in content.lines() {
+                let mentions = line.contains("[Request interrupted");
+                if mentions {
+                    raw += 1;
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                        match v.get("type").and_then(|t| t.as_str()) {
+                            Some("assistant") => assistant_hits += 1,
+                            Some("user") if observe_claude_interrupt(line).is_none() => {
+                                tool_result_hits += 1
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if observe_claude_interrupt(line).is_some() {
+                    extracted += 1;
+                }
+            }
+        }
+        eprintln!(
+            "corpus claude: files={} lines_mentioning={} extracted={} \
+             rejected_assistant={} rejected_user_nontext={}",
+            files.len(),
+            raw,
+            extracted,
+            assistant_hits,
+            tool_result_hits
+        );
+        assert!(extracted > 0, "expected real interrupts in the corpus");
+        assert!(
+            extracted <= raw,
+            "extractor cannot find more than the string appears"
+        );
+        // Every extracted record must be a genuine user text record.
+        assert_eq!(
+            assistant_hits + tool_result_hits + extracted <= raw,
+            true,
+            "classification must not double-count"
+        );
+    }
+
+    #[test]
+    fn replayed_codex_repaint_burst_yields_no_interrupt_edge() {
+        // The repaint class that motivated both this and #268: terminal text
+        // is not a record, so no amount of it produces an edge.
+        let mut observer = JsonlTailObserver::new();
+        let path = temp_jsonl("repaint", "");
+        observer.poll(&path, "sess-r", observe_codex_interrupt);
+        let mut body = String::new();
+        for _ in 0..16 {
+            body.push_str(
+                r#"{"timestamp":"2026-08-21T04:43:00.000Z","ordinal":1,"type":"event_msg","payload":{"type":"agent_message","message":"Conversation interrupted - tell the model what to do differently."}}"#,
+            );
+            body.push('\n');
+        }
+        std::fs::write(&path, &body).unwrap();
+        let (records, _) = observer.poll(&path, "sess-r", observe_codex_interrupt);
+        assert!(records.is_empty(), "prose is not a turn_aborted record");
+        let _ = std::fs::remove_file(&path);
     }
 }
 
@@ -11502,7 +12042,11 @@ fn single_esc_soft_end_should_fire(
 // new turn, no normal finish). No finished verb -- same no-fallback-verb policy
 // as `schedule_pty_turn_finished` -- and the kill stamp keeps the row down
 // until the next user turn, exactly the double-Esc cancel behavior. Only Claude
-// needs this; Codex writes an explicit `task_complete` marker on cancel.
+// needs this: a cancelled Codex turn is closed by its own `turn_aborted` record
+// (see the structured interrupt edge above). It is NOT closed by
+// `task_complete`, as this comment previously claimed -- an aborted turn emits
+// `turn_aborted` INSTEAD of `task_complete`, which is why the accounting in the
+// live rollout reads 18 `task_started` = 15 `task_complete` + 3 `turn_aborted`.
 fn schedule_single_esc_soft_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, escape_ts_ms: i64) {
     let app_handle = app.clone();
     std::thread::spawn(move || {
@@ -13761,7 +14305,11 @@ fn pty_spawn(
             // definition) -- structurally different from terminal_attention
             // above, which gates on byte-silence.
             let mut compaction = CompactionTracker::new();
-            let mut compaction_observer = CodexCompactionObserver::new();
+            let mut compaction_observer = JsonlTailObserver::new();
+            // structured-interrupt-edge-both-providers: same reader, different
+            // extractor. Baselining falls out of the session-change path, so a
+            // resumed transcript's historical interrupt records never replay.
+            let mut interrupt_observer = JsonlTailObserver::new();
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(TICK_MS));
                 let bytes = pty_throughput_bytes().swap(0, Ordering::Relaxed);
@@ -13915,28 +14463,111 @@ fn pty_spawn(
                 // from repaintable terminal text. The observer is a dumb tail
                 // reader; CompactionTracker owns correlation, the hold, and the
                 // single re-arm per episode.
-                let compaction_records = if provider == "codex" {
-                    match active_session_path(&app_for_throughput) {
-                        Ok(Some(path)) => match codex_session_meta(&path) {
-                            Ok(Some((session_id, _cwd))) => {
-                                let (records, reset) =
-                                    compaction_observer.poll(&path, &session_id);
-                                if reset != CompactionReadReset::None && bram_trace_enabled() {
-                                    append_bram_trace_line(
-                                        &app_for_throughput,
-                                        "compaction",
-                                        &format!("op=reread reason={:?}", reset),
-                                    );
-                                }
-                                records
-                            }
-                            _ => Vec::new(),
-                        },
-                        _ => Vec::new(),
+                // Both observers read the active session JSONL, so resolve the
+                // path and a session identity once. Codex identity comes from
+                // the rollout's session_meta; Claude sessions are named by the
+                // file stem, which is the session uuid.
+                let session_path = active_session_path(&app_for_throughput)
+                    .ok()
+                    .flatten();
+                let session_key = session_path.as_ref().and_then(|path| {
+                    if provider == "codex" {
+                        codex_session_meta(path)
+                            .ok()
+                            .flatten()
+                            .map(|(session_id, _cwd)| session_id)
+                    } else {
+                        path.file_stem()
+                            .and_then(|s| s.to_str())
+                            .map(|s| s.to_string())
                     }
-                } else {
-                    Vec::new()
-                };
+                });
+
+                let mut compaction_records = Vec::new();
+                let mut interrupt_records: Vec<InterruptRecord> = Vec::new();
+                if let (Some(path), Some(session_key)) =
+                    (session_path.as_ref(), session_key.as_ref())
+                {
+                    if provider == "codex" {
+                        let (records, reset) = compaction_observer.poll(
+                            path,
+                            session_key,
+                            observe_codex_compaction,
+                        );
+                        if reset != CompactionReadReset::None && bram_trace_enabled() {
+                            append_bram_trace_line(
+                                &app_for_throughput,
+                                "compaction",
+                                &format!("op=reread reason={:?}", reset),
+                            );
+                        }
+                        compaction_records = records;
+                    }
+                    let (records, _reset) = if provider == "codex" {
+                        interrupt_observer.poll(path, session_key, observe_codex_interrupt)
+                    } else {
+                        interrupt_observer.poll(path, session_key, observe_claude_interrupt)
+                    };
+                    interrupt_records = records;
+                }
+
+                // structured-interrupt-edge-both-providers: a declarative
+                // record decides; the PTY marker is the traced fallback.
+                let pending_cancel = pending_cancel_cell()
+                    .lock()
+                    .ok()
+                    .and_then(|slot| *slot);
+                match resolve_cancel(pending_cancel, &interrupt_records, now_ms) {
+                    CancelResolution::Wait => {}
+                    CancelResolution::Structured {
+                        id,
+                        reason,
+                        record_lag_ms,
+                        pty_marker_seen,
+                    } => {
+                        if let Ok(mut slot) = pending_cancel_cell().lock() {
+                            *slot = None;
+                        }
+                        if bram_trace_enabled() {
+                            append_bram_trace_line(
+                                &app_for_throughput,
+                                "interrupt",
+                                &format!(
+                                    "op=interrupt reason={} id={} record_lag_ms={} pty_marker_seen={}",
+                                    reason, id, record_lag_ms, pty_marker_seen
+                                ),
+                            );
+                        }
+                        apply_user_cancel(
+                            &app_for_throughput,
+                            reason,
+                            provider == "codex",
+                        );
+                    }
+                    CancelResolution::PtyFallback {
+                        deferred_ms,
+                        is_codex,
+                    } => {
+                        if let Ok(mut slot) = pending_cancel_cell().lock() {
+                            *slot = None;
+                        }
+                        if bram_trace_enabled() {
+                            append_bram_trace_line(
+                                &app_for_throughput,
+                                "interrupt",
+                                &format!(
+                                    "op=interrupt reason=pty-fallback deferred_ms={} provider={}",
+                                    deferred_ms, provider
+                                ),
+                            );
+                        }
+                        apply_user_cancel(
+                            &app_for_throughput,
+                            "pty-output-user-cancel",
+                            is_codex,
+                        );
+                    }
+                }
                 for transition in compaction.step(
                     bytes,
                     || pty_tail_snippet(COMPACTION_TAIL_CHARS),
@@ -14103,24 +14734,21 @@ fn pty_spawn(
                         has_cancel_marker
                     };
                     if cancel_is_current {
-                        clear_active_sentinel_with_reason(
-                            &app_for_thread,
-                            "pty-output-user-cancel",
-                        );
-                        if is_codex {
-                            if menu_hook_owns_slot() {
-                                // Unkeyed: the user cancelled the whole
-                                // turn — drain the claim queue.
-                                clear_hook_permission_menu(
-                                    &app_for_thread,
-                                    "codex",
-                                    "?",
-                                    "pty-output-user-cancel",
-                                    None,
-                                    None,
-                                );
+                        // structured-interrupt-edge-both-providers: do not act
+                        // on repaintable evidence here. Arm a deferred marker;
+                        // the throughput ticker resolves it, giving a
+                        // declarative JSONL record the chance to supersede it.
+                        // If none arrives within CANCEL_DEFER_MS the fallback
+                        // fires with exactly the previous effects. Keep the
+                        // FIRST marker: a repaint storm must not keep pushing
+                        // the deadline out.
+                        if let Ok(mut slot) = pending_cancel_cell().lock() {
+                            if slot.is_none() {
+                                *slot = Some(PendingCancelMarker {
+                                    seen_at_ms: unix_now_ms(),
+                                    is_codex,
+                                });
                             }
-                            kill_current_codex_turn_from_pty_cancel(&app_for_thread);
                         }
                     }
                     // Prefix every frame with the cumulative output offset
@@ -34520,6 +35148,21 @@ fn claude_jsonl_completion_decision(content: &str) -> JsonlCompletionDecision {
         let Ok(entry) = serde_json::from_str::<serde_json::Value>(trimmed) else {
             continue;
         };
+        // issue #259: an interrupted turn's last assistant record is
+        // permanently non-final -- no `stop_reason: end_turn` is ever coming --
+        // so the veto below never lifts and the status pins at "working" until
+        // the next turn starts. Claude's declarative interrupt record IS the
+        // missing terminal edge, and it is written after that assistant
+        // record, so this reverse scan meets it first. Checked before the
+        // `assistant` filter for exactly that reason. A stale interrupt from an
+        // earlier turn cannot leak forward: the current turn's own records are
+        // newer and decide first.
+        if claude_record_is_interrupt(&entry) {
+            return JsonlCompletionDecision {
+                detected: true,
+                reason: "user-interrupted",
+            };
+        }
         if entry.get("type").and_then(|v| v.as_str()) != Some("assistant") {
             continue;
         }
@@ -34752,6 +35395,17 @@ fn codex_jsonl_completion_decision(content: &str) -> JsonlCompletionDecision {
                 return JsonlCompletionDecision {
                     detected: true,
                     reason: "task_complete",
+                };
+            }
+            // issue #259: a cancelled Codex turn emits `turn_aborted` INSTEAD
+            // of `task_complete`, so without this arm the detector finds no
+            // terminal record for it and the turn is vetoed as non-final
+            // forever. Same terminal weight as task_complete -- the turn is
+            // over either way; only the reason differs.
+            if payload_type == "turn_aborted" {
+                return JsonlCompletionDecision {
+                    detected: true,
+                    reason: "turn_aborted",
                 };
             }
             if payload_type == "agent_message" {
@@ -38283,6 +38937,91 @@ mod turn_completion_tests {
         let decision = codex_jsonl_completion_decision(content);
         assert!(decision.detected);
         assert_eq!(decision.reason, "task_complete");
+    }
+
+    // ---- issue #259: an interrupt is a terminal edge, not a permanent veto ----
+
+    #[test]
+    fn codex_turn_aborted_ends_the_turn() {
+        // A cancelled Codex turn emits turn_aborted INSTEAD of task_complete.
+        // Without this the tail has no terminal record and the status pins at
+        // "working" forever.
+        let content = r#"
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"partial"}}
+{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"t1","reason":"interrupted","duration_ms":4048}}
+"#;
+        let decision = codex_jsonl_completion_decision(content);
+        assert!(decision.detected);
+        assert_eq!(decision.reason, "turn_aborted");
+    }
+
+    #[test]
+    fn codex_turn_in_flight_is_still_not_complete() {
+        // Guard the other direction: no terminal record means no completion.
+        let content = r#"
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"thinking"}}
+"#;
+        assert!(!codex_jsonl_completion_decision(content).detected);
+    }
+
+    #[test]
+    fn claude_interrupt_record_lifts_the_nonfinal_veto() {
+        // The #259 symptom exactly: the last assistant record is non-final and
+        // no end_turn is ever coming, so before this the veto never lifted.
+        let content = r#"
+{"type":"assistant","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"text","text":"running"}]}}
+{"type":"user","uuid":"u1","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}
+"#;
+        let decision = claude_jsonl_completion_decision(content);
+        assert!(decision.detected);
+        assert_eq!(decision.reason, "user-interrupted");
+    }
+
+    #[test]
+    fn claude_mid_turn_tool_result_tail_still_vetoes() {
+        // The false-positive class #259's graduation criterion turns on:
+        // assistant(tool_use) -> user(tool_result) is ordinary mid-turn flow
+        // and must NOT read as a completed turn.
+        let content = r#"
+{"type":"assistant","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_1","name":"Bash"}]}}
+{"type":"user","uuid":"u1","message":{"role":"user","content":[{"tool_use_id":"toolu_1","type":"tool_result","content":"ok","is_error":false}]}}
+"#;
+        let decision = claude_jsonl_completion_decision(content);
+        assert!(!decision.detected);
+        assert_eq!(decision.reason, "non-final-assistant");
+    }
+
+    #[test]
+    fn claude_echoed_sentinel_does_not_end_the_turn() {
+        // Both echo shapes occur in real transcripts. Neither is an interrupt:
+        // a tool_result whose OUTPUT quotes the sentinel, and assistant prose
+        // discussing it. A naive substring search over the file matches both.
+        let tool_result_echo = r#"
+{"type":"assistant","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_1","name":"Bash"}]}}
+{"type":"user","uuid":"u1","message":{"role":"user","content":[{"tool_use_id":"toolu_1","type":"tool_result","content":"   1 [Request interrupted by user for tool use]","is_error":false}]}}
+"#;
+        assert!(!claude_jsonl_completion_decision(tool_result_echo).detected);
+
+        let assistant_prose = r#"
+{"type":"assistant","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"text","text":"A search for [Request interrupted by user] matches this sentence."}]}}
+"#;
+        assert!(!claude_jsonl_completion_decision(assistant_prose).detected);
+    }
+
+    #[test]
+    fn claude_end_turn_still_wins_over_an_older_interrupt() {
+        // A completed turn following an earlier interrupted one reports its own
+        // completion; the reverse scan meets the newest record first.
+        let content = r#"
+{"type":"user","uuid":"u1","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}
+{"type":"user","uuid":"u2","message":{"role":"user","content":[{"type":"text","text":"try again"}]}}
+{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}
+"#;
+        let decision = claude_jsonl_completion_decision(content);
+        assert!(decision.detected);
+        assert_eq!(decision.reason, "end_turn");
     }
 
     #[test]

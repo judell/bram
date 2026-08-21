@@ -2000,6 +2000,20 @@ window.__bramWorklist2RowClaimed = function (claim, itemId) {
 window.__bramWorklist2Begun = function (item, claim) {
   if (!item) return false;
   if ((item.status || "proposed") === "applied") return true;
+  // worklist2-begun-survives-claim-clear: the inflight claim is TRANSIENT --
+  // host turn-completion detectors clear it mid-apply on ordinary end-turn
+  // signals -- but "has work on this item begun?" is DURABLE. Resting the
+  // whole gate on the claim made a row whose files were visibly modified
+  // regress to "No changes yet" (live capture: changeSummary read
+  // "files: 1 of 2 planned - lines: +779, -130 - edits: 7" while the strip
+  // said otherwise, .inflight-claim.json absent 6m into the apply).
+  // The approved authorization record is the host fact whose lifetime
+  // matches the question: it is consumed at `mutate op:"advance"`, the same
+  // call that flips status to `applied`, so these three branches cover the
+  // apply window continuously. Age is deliberately not consulted -- an old
+  // approval is still an approval, and ageing the gate would reintroduce a
+  // time-based proxy for a fact the record already states outright.
+  if (item.activeAuthorization === "approved") return true;
   return !!window.__bramItemInflightKind(claim, item.id, "", "", 0);
 };
 

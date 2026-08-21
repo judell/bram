@@ -14,7 +14,7 @@
   <!-- Worklist2: the redesigned, evidence-first gate (tutorial gist v3).
        Binds the same /__worklist payload Workspace uses, so the two tabs
        cannot disagree about state. Two-level compression: a row-level
-       expander with Files touched / Before / After / Diff sections.
+       expander with the file table plus Before / After / Diff sections.
 
        worklist2-keyed-expansion: expansion is CONTROLLED — it lives only
        in expandedKeys (persisted, id-keyed), never in component
@@ -192,21 +192,13 @@
           when="{(expandedKeys || []).includes($item.id)}"
           gap="$space-2"
           paddingLeft="$space-6">
-          <HStack
+          <!-- No section header: the table renders directly on row expand
+               (review 2026-08-20: "On expand the table tells the story with
+               one less click"). Plan-vs-activity survives in the CONTENT:
+               plain name list for plans, activity table for begun rows. -->
+          <VStack
             when="{($item.changedFiles || window.__bramWorklistItemFiles($item)).length > 0}"
             gap="$space-1"
-            verticalAlignment="center"
-            onClick="expandedKeys = window.__bramFlipExpansionKey(expandedKeys, $item.id + '::files')">
-            <!-- Constant section name (review 2026-08-20: the Will-touch
-                 label flip read as regression). Plan-vs-activity survives
-                 in the CONTENT: plain name list for plans, activity table
-                 for begun rows. -->
-            <Text value="Files touched" />
-          </HStack>
-          <VStack
-            when="{(expandedKeys || []).includes($item.id + '::files') &amp;&amp; ($item.changedFiles || window.__bramWorklistItemFiles($item)).length > 0}"
-            gap="$space-1"
-            paddingLeft="$space-6"
             var.rowBegun="{window.__bramWorklist2Begun($item, inflightClaim.value)}">
             <!-- Files touched as a Table (Status.xmlui idiom). Per-file
                  shared-files flags live here beside the file they concern,

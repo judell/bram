@@ -1952,6 +1952,13 @@ window.__bramWorklist2Strip = function (item, claim) {
   if (!begun) return withCloses("No changes yet");
   return "";
 };
+// worklist2-checkbox-during-action: the row checkbox stays ticked and
+// disabled while a live claim covers the item — the tick is part of the
+// sentence ("Approve 1" = this row), so it freezes until the action
+// resolves. Thin wrapper so the Checkbox bindings stay single calls.
+window.__bramWorklist2RowClaimed = function (claim, itemId) {
+  return !!window.__bramItemInflightKind(claim, itemId, "", "", 0);
+};
 window.__bramWorklist2Begun = function (item, claim) {
   if (!item) return false;
   if ((item.status || "proposed") === "applied") return true;

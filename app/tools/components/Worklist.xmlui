@@ -159,7 +159,8 @@
              toggling region so ticking never flips expansion. -->
         <HStack gap="$space-2" verticalAlignment="center">
           <Checkbox
-            initialValue="{(worklist2Selected || []).includes($item.id)}"
+            initialValue="{(worklist2Selected || []).includes($item.id) || window.__bramWorklist2RowClaimed(inflightClaim.value, $item.id)}"
+            enabled="{!window.__bramWorklist2RowClaimed(inflightClaim.value, $item.id)}"
             onDidChange="(v) => worklist2Selected = window.__bramToggleRowSelection(worklist2Selected || [], $item.id, v)" />
           <HStack
             gap="$space-2"

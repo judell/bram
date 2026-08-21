@@ -5596,116 +5596,461 @@ mod terminal_attention_tests {
     }
 }
 
-// compaction-in-progress-banner: a hidden terminal that is compacting
-// context looks identical to a frozen agent -- there is no PTY silence to
-// hang a detector on. Compaction actively prints a spinner, so `bytes > 0`
-// on essentially every tick while it runs; the terminal_attention detector
-// just above is structurally the wrong tool (it fires on byte-SILENCE and
-// would never trigger, then immediately clear on any activity tick). This
-// is a sibling, text-PRESENCE detector on the same pty-throughput ticker:
-// fire when the live tail contains the provider's compaction progress
-// line, clear the instant it no longer does (compaction finished). Anchor
-// pinned from the rotated trace archives: both Claude and Codex print
-// "Compacting conversation" (Codex's full line is "Compacting
-// conversation…"; Claude's spinner carries the same substring) during
-// compaction, and no ordinary prose merely *discussing* compaction matches
-// it (case-sensitive, not the bare word "compaction").
+// ---------------------------------------------------------------------------
+// Codex compaction: progress banner (PTY) + completion edge (structured JSONL)
+// ---------------------------------------------------------------------------
+//
+// compaction-in-progress-banner: a hidden terminal that is compacting context
+// looks identical to a frozen agent -- there is no PTY silence to hang a
+// detector on. Compaction actively prints a spinner, so `bytes > 0` on
+// essentially every tick while it runs; the terminal_attention detector just
+// above is structurally the wrong tool (it fires on byte-SILENCE and would
+// never trigger, then immediately clear on any activity tick). This is a
+// sibling, text-PRESENCE detector on the same pty-throughput ticker.
+//
+// issue #268: the two halves of a compaction episode come from two different
+// sources, and conflating them was the original defect.
+//
+//   * PROGRESS is a PTY fact. "Compacting conversation" is a live spinner
+//     line (Codex's full line is "Compacting conversation…"; Claude's spinner
+//     carries the same substring), and no ordinary prose merely *discussing*
+//     compaction matches it -- the test is case-sensitive, not the bare word
+//     "compaction". While Bram can see that shape the hidden-terminal banner
+//     should be up. Sampling is lossy by nature: a 500 ms ticker against a
+//     repainting TUI will miss short episodes entirely.
+//
+//   * COMPLETION is NOT a PTY fact. Commit 9867a72 latched the terminal text
+//     "Context compacted", but Codex repaints historical rows, so one real
+//     compaction re-armed that latch indefinitely: the archived trace shows
+//     16 consumptions at ~920 ms cadence across 04:43:00-04:43:44Z on
+//     2026-08-21, each emitting a clear and re-arming the turn detector.
+//     Elapsed-time de-duplication cannot repair it -- the same historical
+//     marker repainted again 31 s after the previous burst, so no fixed
+//     window is an episode boundary. Codex's rollout JSONL carries the real
+//     edge: exactly one top-level `type:"compacted"` record per episode, with
+//     a stable `window_id` and a `previous_window_id` that chains them.
+//
+// So identity is `(session_id, window_id)` and the PTY completion latch is
+// deleted. `Fire` keeps its original meaning -- Bram actually observed the
+// progress shape -- and a completion discovered only from JSONL never
+// manufactures one.
 const COMPACTION_TAIL_CHARS: usize = 600;
-const CODEX_CONTEXT_COMPACTED_MARKER: &[u8] = b"Context compacted";
 
-// `Context compacted` is a short, one-frame Codex marker. The 500 ms
-// throughput ticker can miss it after subsequent TUI redraws push it out of
-// COMPACTION_TAIL_CHARS (the 2026-08-20 specimen did exactly that). Latch the
-// append edge in pty_menu_update, then consume it on the ticker that owns the
-// CompactionTracker. This stays a lifecycle observation only: it must not end
-// the turn, because Codex continues the same turn after compaction.
-static CODEX_CONTEXT_COMPACTED_SEEN: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+// Bound on how long the turn detector is held after the progress shape
+// disappears while waiting for the structured record. NOT a tuned value: the
+// only correlated pair on record (JSONL 04:44:03.213Z, Bram 04:44:03.351Z)
+// puts the healthy lag at ~138 ms, and the repaint bursts that look like
+// 19-second lags are not progress episodes at all. Its single job is to keep
+// an old Codex CLI that writes no `compacted` record from holding the turn
+// forever. Erring long is the safe direction: a late release holds a turn at
+// Working, while a short bound mislabels healthy episodes `progress-fallback`.
+// Graduation: the `hold_ms` / `record_lag_ms` fields on `op=complete` give a
+// real distribution over Progress -> Pending -> JSONL episodes; pin the bound
+// from that with a regression test once the soak has them.
+const COMPACTION_PENDING_MS: i64 = 30_000;
 
-fn appended_tail_contains_marker(tail: &[u8], appended_at: usize, marker: &[u8]) -> bool {
-    if marker.is_empty() || tail.len() < marker.len() {
-        return false;
-    }
-    let scan_from = appended_at.saturating_sub(marker.len().saturating_sub(1));
-    tail[scan_from..]
-        .windows(marker.len())
-        .any(|window| window == marker)
-}
+// Both clocks are local, but the JSONL timestamp is written by Codex and the
+// episode start is sampled by Bram's ticker, so a small tolerance keeps a
+// record that legitimately closes an episode from being read as predating it.
+const COMPACTION_TS_SKEW_MS: i64 = 2_000;
 
 fn compaction_progress_shape(stripped_tail: &str) -> bool {
     stripped_tail.contains("Compacting conversation")
 }
 
+fn parse_iso_to_epoch_ms(s: &str) -> Option<i64> {
+    time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
+        .ok()
+        .map(|dt| (dt.unix_timestamp_nanos() / 1_000_000) as i64)
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct CodexCompactionRecord {
+    window_id: String,
+    previous_window_id: Option<String>,
+    window_number: Option<u64>,
+    ordinal: u64,
+    ts_ms: i64,
+}
+
+// Feature-detected, never version-gated (issue #268 open question 1): a record
+// that predates `window_id` still gets a usable identity from its top-level
+// ordinal, which is monotonic within a rollout.
+fn parse_codex_compaction_line(line: &str) -> Option<CodexCompactionRecord> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    if value.get("type").and_then(|v| v.as_str()) != Some("compacted") {
+        return None;
+    }
+    let payload = value.get("payload")?;
+    let ordinal = value.get("ordinal").and_then(|v| v.as_u64()).unwrap_or(0);
+    let ts_ms = value
+        .get("timestamp")
+        .and_then(|v| v.as_str())
+        .and_then(parse_iso_to_epoch_ms)
+        .unwrap_or(0);
+    let window_id = payload
+        .get("window_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("ordinal:{}", ordinal));
+    Some(CodexCompactionRecord {
+        window_id,
+        previous_window_id: payload
+            .get("previous_window_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        window_number: payload.get("window_number").and_then(|v| v.as_u64()),
+        ordinal,
+        ts_ms,
+    })
+}
+
+// Incremental tail reader over the active Codex rollout. Deliberately dumb: it
+// yields unseen structured records and owns no lifecycle policy -- correlation,
+// the turn hold, and re-arming all belong to CompactionTracker.
+//
+// No inode tracking (issue #268 open question 2). De-duplication is
+// content-keyed on `(session_id, window_id)`, which makes a full re-read
+// idempotent, and once replay is harmless file identity has no job left. What
+// does break under in-place replacement is the byte offset, so the offset is
+// invalidated on a shrink, a session-id change, or an ordinal regression.
+#[derive(Debug, Default)]
+struct CodexCompactionObserver {
+    session_id: Option<String>,
+    offset: u64,
+    last_ordinal: Option<u64>,
+    seen: std::collections::HashSet<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CompactionReadReset {
+    None,
+    SessionChanged,
+    Shrank,
+    OrdinalRegressed,
+}
+
+impl CodexCompactionObserver {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    // Baseline an already-populated rollout without reading it: everything
+    // present when Bram first attaches is historical by construction, so the
+    // offset starts at end-of-file. A Bram-launched session's rollout is empty
+    // or absent at attach, so its baseline is 0 and every record is live --
+    // which is why this is an offset rule and not a first-scan content scan.
+    fn attach(&mut self, session_id: String, len: u64) {
+        self.session_id = Some(session_id);
+        self.offset = len;
+        self.last_ordinal = None;
+        self.seen.clear();
+    }
+
+    fn poll(&mut self, path: &std::path::Path, session_id: &str) -> (Vec<CodexCompactionRecord>, CompactionReadReset) {
+        use std::io::{BufRead, BufReader, Seek, SeekFrom};
+
+        let Ok(meta) = std::fs::metadata(path) else {
+            return (Vec::new(), CompactionReadReset::None);
+        };
+        let len = meta.len();
+
+        let mut reset = CompactionReadReset::None;
+        if self.session_id.as_deref() != Some(session_id) {
+            // A different conversation: new identity space entirely.
+            self.attach(session_id.to_string(), len);
+            return (Vec::new(), CompactionReadReset::SessionChanged);
+        }
+        if len < self.offset {
+            reset = CompactionReadReset::Shrank;
+            self.offset = 0;
+            // The replay that follows walks the file from the start, so the
+            // ordinal sequence legitimately steps backwards once. Clearing the
+            // cursor keeps that from reporting as a second, phantom cause.
+            self.last_ordinal = None;
+        }
+
+        if len == self.offset {
+            return (Vec::new(), reset);
+        }
+
+        let Ok(file) = std::fs::File::open(path) else {
+            return (Vec::new(), reset);
+        };
+        let mut reader = BufReader::new(file);
+        if reader.seek(SeekFrom::Start(self.offset)).is_err() {
+            return (Vec::new(), reset);
+        }
+
+        let mut out = Vec::new();
+        let mut consumed = self.offset;
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let Ok(read) = reader.read_line(&mut line) else {
+                break;
+            };
+            if read == 0 {
+                break;
+            }
+            // A trailing partial line means Codex is mid-append; leave it for
+            // the next poll rather than parsing half a record.
+            if !line.ends_with('\n') {
+                break;
+            }
+            consumed += read as u64;
+            let Some(record) = parse_codex_compaction_line(&line) else {
+                continue;
+            };
+            if let Some(last) = self.last_ordinal {
+                // First cause wins: a shrink already explains the re-read, and
+                // reporting its downstream effects would obscure the trigger.
+                if record.ordinal < last && reset == CompactionReadReset::None {
+                    reset = CompactionReadReset::OrdinalRegressed;
+                }
+            }
+            self.last_ordinal = Some(record.ordinal);
+            if self.seen.insert(record.window_id.clone()) {
+                out.push(record);
+            }
+        }
+        self.offset = consumed;
+        (out, reset)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum CompactionPhase {
+    Idle,
+    Progress {
+        started_at_ms: i64,
+    },
+    Pending {
+        started_at_ms: i64,
+        deadline_ms: i64,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum CompactionTransition {
+    /// Bram observed the progress shape: banner on.
     Fire,
-    Clear { reason: &'static str },
+    /// Progress shape gone: banner off. Does NOT end the episode -- the hold
+    /// outlives the banner until a structured record or the fallback bound.
+    ClearBanner { reason: &'static str },
+    /// The one lifecycle edge. Exactly one per episode key, ever.
+    Complete {
+        reason: &'static str,
+        progress_seen: bool,
+        window_id: Option<String>,
+        hold_ms: i64,
+        record_lag_ms: i64,
+    },
+    /// A record that arrived after its episode already completed via the
+    /// fallback bound: attaches identity to history, never re-arms.
+    Attach { window_id: String },
+    /// A live record older than the episode currently being observed. Recorded
+    /// into history; performs no lifecycle mutation.
+    Stale { window_id: String },
+    /// `previous_window_id` did not chain from the last window Bram saw, so an
+    /// episode was missed. Still exactly one re-arm.
+    Gap {
+        expected: Option<String>,
+        got: String,
+    },
 }
 
 #[derive(Debug)]
 struct CompactionTracker {
-    active: bool,
+    phase: CompactionPhase,
+    completed_windows: std::collections::HashSet<String>,
+    last_window_id: Option<String>,
+    /// Episode completed by the fallback bound, kept just long enough for a
+    /// late structured record to attach its identity without re-arming.
+    recently_completed: Option<i64>,
 }
 
 impl CompactionTracker {
     fn new() -> Self {
-        Self { active: false }
+        Self {
+            phase: CompactionPhase::Idle,
+            completed_windows: std::collections::HashSet::new(),
+            last_window_id: None,
+            recently_completed: None,
+        }
     }
 
-    // `tail_fn` is invoked at most once per tick, and only when `bytes > 0`
-    // -- on pure silence nothing about the tail could have changed, so
-    // there is nothing to re-evaluate (unlike terminal_attention, silence
-    // here is not itself informative: it just means "no new frame", and an
-    // already-active episode simply stays active until the next tick with
-    // output shows the shape gone).
+    fn episode_started_at(&self) -> Option<i64> {
+        match &self.phase {
+            CompactionPhase::Idle => None,
+            CompactionPhase::Progress { started_at_ms }
+            | CompactionPhase::Pending { started_at_ms, .. } => Some(*started_at_ms),
+        }
+    }
+
+    // Test-only accessor: production reads the hold through the transitions,
+    // not the phase. Kept because "does the hold outlive the banner" is the
+    // invariant the decoupling exists for, and it deserves a direct assertion.
+    #[cfg(test)]
+    fn is_holding(&self) -> bool {
+        !matches!(self.phase, CompactionPhase::Idle)
+    }
+
+    // `tail_fn` is invoked at most once per tick, and only when `bytes > 0` --
+    // on pure silence nothing about the tail could have changed, so there is
+    // nothing to re-evaluate (unlike terminal_attention, silence here is not
+    // itself informative: it just means "no new frame").
     fn step<F: FnOnce() -> String>(
         &mut self,
         bytes: usize,
-        context_compacted_seen: bool,
         tail_fn: F,
+        records: &[CodexCompactionRecord],
+        now_ms: i64,
     ) -> Vec<CompactionTransition> {
         let mut out = Vec::new();
-        // The explicit completion marker outranks a stale progress line that
-        // may still be present in PTY_TAIL. Always emit the clear, even when
-        // the sampling loop missed the corresponding Fire, so the replayable
-        // compaction state is repaired deterministically.
-        if context_compacted_seen {
-            self.active = false;
-            out.push(CompactionTransition::Clear {
-                reason: "compaction-done",
+
+        if bytes > 0 {
+            let matches = compaction_progress_shape(&tail_fn());
+            match (&self.phase, matches) {
+                (CompactionPhase::Idle, true) => {
+                    self.phase = CompactionPhase::Progress {
+                        started_at_ms: now_ms,
+                    };
+                    out.push(CompactionTransition::Fire);
+                }
+                (CompactionPhase::Progress { started_at_ms }, false) => {
+                    self.phase = CompactionPhase::Pending {
+                        started_at_ms: *started_at_ms,
+                        deadline_ms: now_ms + COMPACTION_PENDING_MS,
+                    };
+                    out.push(CompactionTransition::ClearBanner {
+                        reason: "progress-gone",
+                    });
+                }
+                (CompactionPhase::Pending { started_at_ms, .. }, true) => {
+                    // The spinner came back inside the pending window: same
+                    // episode resuming, banner back up.
+                    self.phase = CompactionPhase::Progress {
+                        started_at_ms: *started_at_ms,
+                    };
+                    out.push(CompactionTransition::Fire);
+                }
+                _ => {}
+            }
+        }
+
+        for record in records {
+            if self.completed_windows.contains(&record.window_id) {
+                continue;
+            }
+            if let Some(expected) = self.last_window_id.clone() {
+                if record.previous_window_id.as_deref() != Some(expected.as_str()) {
+                    out.push(CompactionTransition::Gap {
+                        expected: Some(expected),
+                        got: record.window_id.clone(),
+                    });
+                }
+            }
+
+            let started_at = self.episode_started_at();
+            if let Some(started_at_ms) = started_at {
+                if record.ts_ms + COMPACTION_TS_SKEW_MS < started_at_ms {
+                    // Live, unseen, but predates the episode in flight -- it
+                    // cannot be the record that closes it. "Unseen" is a
+                    // de-duplication property, never freshness evidence.
+                    self.last_window_id = Some(record.window_id.clone());
+                    self.completed_windows.insert(record.window_id.clone());
+                    out.push(CompactionTransition::Stale {
+                        window_id: record.window_id.clone(),
+                    });
+                    continue;
+                }
+            }
+
+            self.last_window_id = Some(record.window_id.clone());
+            self.completed_windows.insert(record.window_id.clone());
+
+            if let Some(completed_started_at) = self.recently_completed {
+                if record.ts_ms + COMPACTION_TS_SKEW_MS >= completed_started_at {
+                    self.recently_completed = None;
+                    out.push(CompactionTransition::Attach {
+                        window_id: record.window_id.clone(),
+                    });
+                    continue;
+                }
+            }
+
+            let progress_seen = started_at.is_some();
+            let hold_ms = started_at.map(|s| now_ms - s).unwrap_or(0);
+            self.phase = CompactionPhase::Idle;
+            out.push(CompactionTransition::Complete {
+                reason: "jsonl-compacted",
+                progress_seen,
+                window_id: Some(record.window_id.clone()),
+                hold_ms,
+                record_lag_ms: now_ms - record.ts_ms,
             });
-            return out;
         }
-        if bytes == 0 {
-            return out;
+
+        if let CompactionPhase::Pending {
+            started_at_ms,
+            deadline_ms,
+        } = self.phase
+        {
+            if now_ms >= deadline_ms {
+                self.phase = CompactionPhase::Idle;
+                self.recently_completed = Some(started_at_ms);
+                out.push(CompactionTransition::Complete {
+                    reason: "progress-fallback",
+                    progress_seen: true,
+                    window_id: None,
+                    hold_ms: now_ms - started_at_ms,
+                    record_lag_ms: -1,
+                });
+            }
         }
-        let tail = tail_fn();
-        let matches = compaction_progress_shape(&tail);
-        if matches && !self.active {
-            self.active = true;
-            out.push(CompactionTransition::Fire);
-        } else if !matches && self.active {
-            self.active = false;
-            out.push(CompactionTransition::Clear {
-                reason: "compaction-done",
-            });
-        }
+
         out
     }
 }
 
-fn trace_compaction_transition<R: tauri::Runtime>(app: &AppHandle<R>, transition: &CompactionTransition) {
+fn trace_compaction_transition<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    transition: &CompactionTransition,
+) {
     if !bram_trace_enabled() {
         return;
     }
-    match transition {
-        CompactionTransition::Fire => {
-            append_bram_trace_line(app, "compaction", "op=fire reason=shape-present")
+    let line = match transition {
+        CompactionTransition::Fire => "op=fire reason=shape-present".to_string(),
+        CompactionTransition::ClearBanner { reason } => format!("op=clear reason={}", reason),
+        CompactionTransition::Complete {
+            reason,
+            progress_seen,
+            window_id,
+            hold_ms,
+            record_lag_ms,
+        } => format!(
+            "op=complete reason={} progress_seen={} window={} hold_ms={} record_lag_ms={}",
+            reason,
+            progress_seen,
+            window_id.as_deref().unwrap_or("none"),
+            hold_ms,
+            record_lag_ms
+        ),
+        CompactionTransition::Attach { window_id } => {
+            format!("op=attach window={}", window_id)
         }
-        CompactionTransition::Clear { reason } => {
-            append_bram_trace_line(app, "compaction", &format!("op=clear reason={}", reason))
+        CompactionTransition::Stale { window_id } => {
+            format!("op=stale window={}", window_id)
         }
-    }
+        CompactionTransition::Gap { expected, got } => format!(
+            "op=gap expected={} got={}",
+            expected.as_deref().unwrap_or("none"),
+            got
+        ),
+    };
+    append_bram_trace_line(app, "compaction", &line);
 }
 
 // Mirrors emit_terminal_attention: a replayable payload (via
@@ -5731,9 +6076,42 @@ fn emit_compaction<R: tauri::Runtime>(app: &AppHandle<R>, active: bool, provider
 #[cfg(test)]
 mod compaction_shape_tests {
     use super::{
-        appended_tail_contains_marker, compaction_progress_shape, pty_output_clears_inflight,
-        CompactionTracker, CompactionTransition, CODEX_CONTEXT_COMPACTED_MARKER,
+        compaction_progress_shape, parse_codex_compaction_line, pty_output_clears_inflight,
+        CodexCompactionObserver, CodexCompactionRecord, CompactionReadReset, CompactionTracker,
+        CompactionTransition, COMPACTION_PENDING_MS,
     };
+
+    const NO_RECORDS: &[CodexCompactionRecord] = &[];
+
+    fn record(window: &str, previous: Option<&str>, ordinal: u64, ts_ms: i64) -> CodexCompactionRecord {
+        CodexCompactionRecord {
+            window_id: window.to_string(),
+            previous_window_id: previous.map(|s| s.to_string()),
+            window_number: None,
+            ordinal,
+            ts_ms,
+        }
+    }
+
+    fn completions(out: &[CompactionTransition]) -> Vec<&CompactionTransition> {
+        out.iter()
+            .filter(|t| matches!(t, CompactionTransition::Complete { .. }))
+            .collect()
+    }
+
+    fn temp_rollout(name: &str, body: &str) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!("bram-compaction-{}-{}.jsonl", name, std::process::id()));
+        std::fs::write(&path, body).expect("write rollout fixture");
+        path
+    }
+
+    fn compacted_line(window: &str, previous: &str, ordinal: u64, ts: &str) -> String {
+        format!(
+            r#"{{"timestamp":"{}","ordinal":{},"type":"compacted","payload":{{"message":"","window_number":1,"first_window_id":"w0","previous_window_id":"{}","window_id":"{}","replacement_history":[]}}}}"#,
+            ts, ordinal, previous, window
+        ) + "\n"
+    }
 
     #[test]
     fn provider_progress_lines_classify() {
@@ -5755,70 +6133,327 @@ mod compaction_shape_tests {
     }
 
     #[test]
-    fn tracker_fires_on_present_then_clears_on_absent() {
+    fn extraction_reads_the_real_record_shape() {
+        // Field-for-field the payload Codex CLI 0.148.0 writes.
+        let line = compacted_line(
+            "01a022a2-170b-7073-8162-30a019c5b39e",
+            "01a02286-f14a-73a3-bde2-d8ac4efe54bc",
+            1404,
+            "2026-08-21T04:44:03.213Z",
+        );
+        let parsed = parse_codex_compaction_line(&line).expect("compacted record parses");
+        assert_eq!(parsed.window_id, "01a022a2-170b-7073-8162-30a019c5b39e");
+        assert_eq!(
+            parsed.previous_window_id.as_deref(),
+            Some("01a02286-f14a-73a3-bde2-d8ac4efe54bc")
+        );
+        assert_eq!(parsed.ordinal, 1404);
+        assert_eq!(parsed.ts_ms, 1787287443213);
+        // Other record types are not compaction edges.
+        assert!(parse_codex_compaction_line(r#"{"type":"event_msg","payload":{}}"#).is_none());
+        assert!(parse_codex_compaction_line("not json").is_none());
+    }
+
+    #[test]
+    fn extraction_falls_back_to_ordinal_without_window_id() {
+        // Feature-detected, not version-gated: an older record still gets an
+        // identity so de-duplication keeps working.
+        let line = r#"{"timestamp":"2026-08-21T04:44:03.213Z","ordinal":77,"type":"compacted","payload":{"message":""}}"#;
+        let parsed = parse_codex_compaction_line(line).expect("legacy record parses");
+        assert_eq!(parsed.window_id, "ordinal:77");
+        assert_eq!(parsed.previous_window_id, None);
+    }
+
+    #[test]
+    fn progress_fires_then_clears_the_banner_but_keeps_the_hold() {
         let mut tracker = CompactionTracker::new();
         assert_eq!(
-            tracker.step(64, false, || {
-                "Compacting conversation… 500 tokens".to_string()
-            }),
+            tracker.step(64, || "Compacting conversation… 500 tokens".to_string(), NO_RECORDS, 1_000),
             vec![CompactionTransition::Fire]
         );
         // Still compacting on the next tick with output -- no repeat fire.
-        assert_eq!(
-            tracker.step(64, false, || {
-                "Compacting conversation… 900 tokens".to_string()
-            }),
-            Vec::<CompactionTransition>::new()
-        );
+        assert!(tracker
+            .step(64, || "Compacting conversation… 900 tokens".to_string(), NO_RECORDS, 1_500)
+            .is_empty());
         // Silence mid-compaction: nothing to evaluate, stays active.
+        assert!(tracker
+            .step(0, || unreachable!("tail_fn must not run on silence"), NO_RECORDS, 2_000)
+            .is_empty());
+        // Progress shape gone: the banner clears, but the episode is NOT over
+        // -- banner lifetime and hold lifetime are deliberately decoupled.
         assert_eq!(
-            tracker.step(0, false, || unreachable!("tail_fn must not run on silence")),
-            Vec::<CompactionTransition>::new()
-        );
-        // Compaction finished -- the tail no longer carries the shape.
-        assert_eq!(
-            tracker.step(32, false, || "~/bram$ ".to_string()),
-            vec![CompactionTransition::Clear {
-                reason: "compaction-done"
+            tracker.step(32, || "~/bram$ ".to_string(), NO_RECORDS, 2_500),
+            vec![CompactionTransition::ClearBanner {
+                reason: "progress-gone"
             }]
         );
+        assert!(tracker.is_holding(), "hold must outlive the banner");
     }
 
     #[test]
-    fn short_codex_compaction_is_latched_across_an_append_boundary() {
-        let prefix = b"\x1b[2mContext comp";
-        let mut tail = prefix.to_vec();
-        let appended_at = tail.len();
-        tail.extend_from_slice(b"acted\x1b[0m\r\n");
-        assert!(appended_tail_contains_marker(
-            &tail,
-            appended_at,
-            CODEX_CONTEXT_COMPACTED_MARKER
-        ));
-    }
-
-    #[test]
-    fn completion_marker_repairs_a_missed_progress_sample_and_rearms() {
+    fn structured_record_completes_an_observed_episode_exactly_once() {
         let mut tracker = CompactionTracker::new();
+        tracker.step(64, || "Compacting conversation…".to_string(), NO_RECORDS, 1_000);
+        tracker.step(32, || "done".to_string(), NO_RECORDS, 2_000);
+
+        let out = tracker.step(16, || "…".to_string(), &[record("w1", None, 10, 2_100)], 2_200);
         assert_eq!(
-            tracker.step(286, true, || {
-                unreachable!("completion marker must outrank the sampled tail")
-            }),
-            vec![CompactionTransition::Clear {
-                reason: "compaction-done"
+            completions(&out),
+            vec![&CompactionTransition::Complete {
+                reason: "jsonl-compacted",
+                progress_seen: true,
+                window_id: Some("w1".to_string()),
+                hold_ms: 1_200,
+                record_lag_ms: 100,
             }]
         );
-        // A normal continuation owns the eventual outcome; compaction itself
-        // neither finishes nor interrupts the turn.
+        assert!(!tracker.is_holding());
+
+        // Re-delivery of the same record (a full re-read after offset
+        // invalidation) is inert: at most one completion per episode key.
+        let replay = tracker.step(16, || "…".to_string(), &[record("w1", None, 10, 2_100)], 2_300);
+        assert!(completions(&replay).is_empty());
+    }
+
+    #[test]
+    fn completion_only_episode_records_truthfully_without_a_synthetic_fire() {
+        // The fast-compaction case the 500 ms ticker never sampled. It must
+        // NOT manufacture a Fire -- `Fire` means Bram saw the progress shape.
+        let mut tracker = CompactionTracker::new();
+        let out = tracker.step(16, || "ordinary output".to_string(), &[record("w1", None, 10, 5_000)], 5_050);
         assert_eq!(
-            tracker.step(128, false, || "Working on the request".to_string()),
-            Vec::<CompactionTransition>::new()
+            out,
+            vec![CompactionTransition::Complete {
+                reason: "jsonl-compacted",
+                progress_seen: false,
+                window_id: Some("w1".to_string()),
+                hold_ms: 0,
+                record_lag_ms: 50,
+            }]
         );
-        // The tracker is re-armed for a later compaction episode.
+        assert!(!out.iter().any(|t| matches!(t, CompactionTransition::Fire)));
+    }
+
+    #[test]
+    fn stale_record_during_active_progress_does_not_complete_that_episode() {
+        // The hazard behind issue #268's Q1: on a resumed session every record
+        // is "unseen", so unseen-ness cannot be freshness evidence. A record
+        // predating the episode in flight is history, not its completion.
+        let mut tracker = CompactionTracker::new();
+        tracker.step(64, || "Compacting conversation…".to_string(), NO_RECORDS, 10_000);
+
+        let out = tracker.step(64, || "Compacting conversation…".to_string(), &[record("old", None, 5, 1_000)], 10_500);
         assert_eq!(
-            tracker.step(128, false, || "Compacting conversation…".to_string()),
-            vec![CompactionTransition::Fire]
+            out,
+            vec![CompactionTransition::Stale {
+                window_id: "old".to_string()
+            }]
         );
+        assert!(tracker.is_holding(), "the live episode must survive a stale record");
+    }
+
+    #[test]
+    fn fallback_releases_the_hold_when_no_record_ever_arrives() {
+        let mut tracker = CompactionTracker::new();
+        tracker.step(64, || "Compacting conversation…".to_string(), NO_RECORDS, 0);
+        tracker.step(32, || "done".to_string(), NO_RECORDS, 500);
+        // Inside the bound: still held, nothing published.
+        assert!(tracker
+            .step(0, || unreachable!(), NO_RECORDS, 500 + COMPACTION_PENDING_MS - 1)
+            .is_empty());
+        assert!(tracker.is_holding());
+
+        let out = tracker.step(0, || unreachable!(), NO_RECORDS, 500 + COMPACTION_PENDING_MS);
+        assert_eq!(completions(&out).len(), 1);
+        assert!(matches!(
+            out[0],
+            CompactionTransition::Complete {
+                reason: "progress-fallback",
+                progress_seen: true,
+                ..
+            }
+        ));
+        assert!(!tracker.is_holding());
+    }
+
+    #[test]
+    fn late_record_after_fallback_attaches_without_a_second_rearm() {
+        let mut tracker = CompactionTracker::new();
+        tracker.step(64, || "Compacting conversation…".to_string(), NO_RECORDS, 0);
+        tracker.step(32, || "done".to_string(), NO_RECORDS, 500);
+        let fallback = tracker.step(0, || unreachable!(), NO_RECORDS, 500 + COMPACTION_PENDING_MS);
+        assert_eq!(completions(&fallback).len(), 1);
+
+        let late = tracker.step(
+            16,
+            || "…".to_string(),
+            &[record("w9", None, 42, 600)],
+            600 + COMPACTION_PENDING_MS,
+        );
+        assert_eq!(
+            late,
+            vec![CompactionTransition::Attach {
+                window_id: "w9".to_string()
+            }]
+        );
+        assert!(
+            completions(&late).is_empty(),
+            "exactly one re-arm per episode, ever"
+        );
+    }
+
+    #[test]
+    fn broken_window_chain_traces_a_gap_and_still_completes_once() {
+        let mut tracker = CompactionTracker::new();
+        tracker.step(16, || "…".to_string(), &[record("w1", None, 10, 1_000)], 1_050);
+        // w3 claims to follow w2, but Bram last saw w1: an episode was missed.
+        let out = tracker.step(
+            16,
+            || "…".to_string(),
+            &[record("w3", Some("w2"), 30, 2_000)],
+            2_050,
+        );
+        assert!(out.iter().any(|t| matches!(
+            t,
+            CompactionTransition::Gap { got, .. } if got == "w3"
+        )));
+        assert_eq!(completions(&out).len(), 1);
+    }
+
+    #[test]
+    fn observer_baselines_a_resumed_rollout_without_replaying_history() {
+        // Acceptance criterion: resuming a rollout that already contains
+        // compaction records causes no lifecycle mutation.
+        let body = compacted_line("w1", "w0", 10, "2026-08-21T04:14:24.077Z");
+        let path = temp_rollout("resume", &body);
+        let mut observer = CodexCompactionObserver::new();
+        let len = std::fs::metadata(&path).unwrap().len();
+        observer.attach("sess-a".to_string(), len);
+
+        let (records, reset) = observer.poll(&path, "sess-a");
+        assert!(records.is_empty(), "pre-attach records are historical");
+        assert_eq!(reset, CompactionReadReset::None);
+
+        // A genuinely new record appended after attach IS live.
+        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        use std::io::Write;
+        f.write_all(compacted_line("w2", "w1", 20, "2026-08-21T04:44:03.213Z").as_bytes())
+            .unwrap();
+        let (records, _) = observer.poll(&path, "sess-a");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].window_id, "w2");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn observer_starts_empty_for_a_bram_launched_session() {
+        // A session Bram launched has no history, so nothing is baselined away
+        // and a fast first compaction is not lost.
+        let path = temp_rollout("launched", "");
+        let mut observer = CodexCompactionObserver::new();
+        observer.attach("sess-new".to_string(), 0);
+
+        std::fs::write(&path, compacted_line("w1", "w0", 10, "2026-08-21T04:14:24.077Z")).unwrap();
+        let (records, _) = observer.poll(&path, "sess-new");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].window_id, "w1");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn observer_ignores_a_partial_trailing_line() {
+        let path = temp_rollout("partial", "");
+        let mut observer = CodexCompactionObserver::new();
+        observer.attach("sess-p".to_string(), 0);
+
+        let full = compacted_line("w1", "w0", 10, "2026-08-21T04:14:24.077Z");
+        let partial = &full[..full.len() / 2];
+        std::fs::write(&path, partial).unwrap();
+        let (records, _) = observer.poll(&path, "sess-p");
+        assert!(records.is_empty(), "half a record must not parse");
+
+        std::fs::write(&path, &full).unwrap();
+        let (records, _) = observer.poll(&path, "sess-p");
+        assert_eq!(records.len(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn observer_survives_in_place_replacement_via_offset_invalidation() {
+        // No inode tracking (issue #268 Q2): a shrink invalidates the offset,
+        // the re-read from zero is idempotent because dedup is content-keyed.
+        let path = temp_rollout("replace", "");
+        let mut observer = CodexCompactionObserver::new();
+        observer.attach("sess-r".to_string(), 0);
+
+        let first = compacted_line("w1", "w0", 10, "2026-08-21T04:14:24.077Z");
+        let second = compacted_line("w2", "w1", 20, "2026-08-21T04:44:03.213Z");
+        // Padding stands in for the ordinary records that dominate a real
+        // rollout; dropping it is what makes the rewritten file shorter.
+        let padding = format!(
+            r#"{{"timestamp":"2026-08-21T04:45:00.000Z","ordinal":21,"type":"event_msg","payload":{{"text":"{}"}}}}"#,
+            "x".repeat(400)
+        ) + "\n";
+        std::fs::write(&path, format!("{}{}{}", first, second, padding)).unwrap();
+        let (records, _) = observer.poll(&path, "sess-r");
+        assert_eq!(records.len(), 2);
+
+        // Replaced in place with a shorter file carrying the same episodes
+        // plus a new one: the shrink forces a full re-read, dedup makes the
+        // replay inert, and only the new window survives.
+        std::fs::write(
+            &path,
+            format!(
+                "{}{}{}",
+                first,
+                second,
+                compacted_line("w3", "w2", 30, "2026-08-21T05:00:00.000Z")
+            ),
+        )
+        .unwrap();
+        let (records, reset) = observer.poll(&path, "sess-r");
+        assert_eq!(reset, CompactionReadReset::Shrank);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].window_id, "w3");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn observer_rebaselines_on_session_change() {
+        // Identity is (session_id, window_id); a path carrying a different
+        // conversation is a new identity space, baselined not replayed.
+        let body = compacted_line("w1", "w0", 10, "2026-08-21T04:14:24.077Z");
+        let path = temp_rollout("rotate", &body);
+        let mut observer = CodexCompactionObserver::new();
+        observer.attach("sess-old".to_string(), 0);
+        let (records, _) = observer.poll(&path, "sess-old");
+        assert_eq!(records.len(), 1);
+
+        let (records, reset) = observer.poll(&path, "sess-new");
+        assert_eq!(reset, CompactionReadReset::SessionChanged);
+        assert!(records.is_empty(), "rotation baselines, never replays");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn captured_pty_repaint_storm_is_inert() {
+        // Replay of the defect this issue exists to kill: the 2026-08-21
+        // 04:43:00-04:43:44Z burst was 16 repaints of one historical
+        // "Context compacted" line. Under the structured design those bytes
+        // carry no completion meaning at all -- no completions, no re-arms.
+        let mut tracker = CompactionTracker::new();
+        let mut now = 0i64;
+        let mut all = Vec::new();
+        for _ in 0..16 {
+            now += 920;
+            all.extend(tracker.step(
+                286,
+                || "\x1b[2mContext compacted\x1b[0m\r\n~/bram$ ".to_string(),
+                NO_RECORDS,
+                now,
+            ));
+        }
+        assert!(all.is_empty(), "repaints must mutate nothing, got {:?}", all);
     }
 
     #[test]
@@ -7811,8 +8446,16 @@ fn agent_turn_state_clear_active() {
     }
 }
 
+// Forward-only by construction (issue #268): re-arming clears the detector so
+// post-compaction output can re-establish Working; it never forces Working and
+// never rewrites a turn already published as complete. When the detector is
+// already idle there is nothing to clear, so this is a no-op rather than a
+// state change. CompactionTracker guarantees at most one call per episode.
 fn agent_turn_state_rearm_after_compaction() {
     if let Ok(mut state) = agent_turn_state_cell().lock() {
+        if !state.is_active {
+            return;
+        }
         state.last_spinner_at = None;
         state.is_active = false;
         state.last_emit_at = None;
@@ -8844,13 +9487,11 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
         Ok(g) => g,
         Err(_) => return,
     };
-    let appended_at = tail.len();
     tail.extend_from_slice(chunk);
-    if matches!(current_provider(app), Some(SessionProvider::Codex))
-        && appended_tail_contains_marker(&tail, appended_at, CODEX_CONTEXT_COMPACTED_MARKER)
-    {
-        CODEX_CONTEXT_COMPACTED_SEEN.store(true, std::sync::atomic::Ordering::Release);
-    }
+    // issue #268: no completion latch here. Codex repaints historical rows, so
+    // the terminal text "Context compacted" is not an episode edge -- it fired
+    // 16 times for one real compaction. Completion now comes from the rollout
+    // JSONL's `compacted` record; PTY repaints mutate no lifecycle state.
     // Bumped from 8 KB to 64 KB for incident #182 #17: a wider scan
     // window gives Claude's TUI redraws more chances to bring the
     // current menu's bytes back into the detector's view. Byte-pattern
@@ -13120,6 +13761,7 @@ fn pty_spawn(
             // definition) -- structurally different from terminal_attention
             // above, which gates on byte-silence.
             let mut compaction = CompactionTracker::new();
+            let mut compaction_observer = CodexCompactionObserver::new();
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(TICK_MS));
                 let bytes = pty_throughput_bytes().swap(0, Ordering::Relaxed);
@@ -13269,23 +13911,55 @@ fn pty_spawn(
                         TerminalAttentionTransition::Candidate { .. } => {}
                     }
                 }
-                let context_compacted_latched = CODEX_CONTEXT_COMPACTED_SEEN
-                    .swap(false, std::sync::atomic::Ordering::AcqRel);
-                let context_compacted_seen = provider == "codex" && context_compacted_latched;
-                if context_compacted_seen {
-                    agent_turn_state_rearm_after_compaction();
-                }
-                for transition in compaction.step(bytes, context_compacted_seen, || {
-                    pty_tail_snippet(COMPACTION_TAIL_CHARS)
-                }) {
+                // issue #268: completion comes from Codex's rollout JSONL, not
+                // from repaintable terminal text. The observer is a dumb tail
+                // reader; CompactionTracker owns correlation, the hold, and the
+                // single re-arm per episode.
+                let compaction_records = if provider == "codex" {
+                    match active_session_path(&app_for_throughput) {
+                        Ok(Some(path)) => match codex_session_meta(&path) {
+                            Ok(Some((session_id, _cwd))) => {
+                                let (records, reset) =
+                                    compaction_observer.poll(&path, &session_id);
+                                if reset != CompactionReadReset::None && bram_trace_enabled() {
+                                    append_bram_trace_line(
+                                        &app_for_throughput,
+                                        "compaction",
+                                        &format!("op=reread reason={:?}", reset),
+                                    );
+                                }
+                                records
+                            }
+                            _ => Vec::new(),
+                        },
+                        _ => Vec::new(),
+                    }
+                } else {
+                    Vec::new()
+                };
+                for transition in compaction.step(
+                    bytes,
+                    || pty_tail_snippet(COMPACTION_TAIL_CHARS),
+                    &compaction_records,
+                    now_ms,
+                ) {
                     trace_compaction_transition(&app_for_throughput, &transition);
                     match transition {
                         CompactionTransition::Fire => {
                             emit_compaction(&app_for_throughput, true, &provider, now_ms)
                         }
-                        CompactionTransition::Clear { .. } => {
+                        CompactionTransition::ClearBanner { .. } => {
                             emit_compaction(&app_for_throughput, false, &provider, now_ms)
                         }
+                        // The one lifecycle edge. No banner event: a completed
+                        // episode has nothing left to show the user, and a
+                        // same-tick true->false pair would only flash.
+                        CompactionTransition::Complete { .. } => {
+                            agent_turn_state_rearm_after_compaction();
+                        }
+                        CompactionTransition::Attach { .. }
+                        | CompactionTransition::Stale { .. }
+                        | CompactionTransition::Gap { .. } => {}
                     }
                 }
             }

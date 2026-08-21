@@ -162,8 +162,8 @@ change is "small":
   turn begins literally with `skip-worklist: ` followed by the
   request text. Same family as `approved:` / `drop:` / `iterate:`,
   but for authorizing a direct edit rather than a lifecycle
-  transition. The user-facing affordance is the **Skip worklist**
-  button next to the Worklist tab's message-agent input — it prepends
+  transition. The user-facing affordance is the **skip worklist**
+  button beside the message input in Bram's footer — it prepends
   the prefix and submits. Same convention as for Approve / Drop /
   Iterate: tell users to click the button, do not instruct them to
   type or paste the wire format. When the host's `toTurn` write path
@@ -339,11 +339,13 @@ when metadata (`files`, `closesIssues`, etc.) shifts.
   Set conservatively: only when the commit truly closes the issue, not
   when it merely cross-references (`see #N`, `related to #N`, partial
   multi-step work). Omit or use `[]` to skip the dialog.
-- `status` controls the Worklist tab badge:
-  - `"proposed"` (default if omitted) → **TO APPLY**. User is approving
-    you to make the change.
-  - `"applied"` → **TO COMMIT**. Change is on disk, user is approving
-    `git commit`. Push decided separately via the Push button.
+- `status` tracks the item's stage:
+  - `"proposed"` (default if omitted): user is approving you to make
+    the change. The Worklist row's strip reads "No changes yet" until
+    work begins; the legacy tab badges this **TO APPLY**.
+  - `"applied"`: change is on disk, user is approving `git commit`
+    (legacy badge **TO COMMIT**). Push decided separately via the Push
+    button.
 
 Default to the two-stage flow: approved `proposed` → advance to
 `applied` → user approves a separate commit → prune. Skip the
@@ -365,8 +367,11 @@ serves an empty default; the Worklist tab creates the file (and
    `approved:` / `drop:` / `iterate:` payloads — the Worklist tab's
    buttons generate the `{id, feedback}` shape.
 
-2. **User triages** — unchecks anything they don't want, then clicks
-   one of the buttons. All three action buttons emit the same payload
+2. **User triages** — ticks the rows to act on, optionally types one
+   message in the box beside the buttons, and clicks one of them. The
+   message fans out to every selected item, so a plural payload's items
+   may carry identical feedback text; treat each item's feedback on its
+   own terms. All action buttons emit the same payload
    shape: `{"items":[{"id":"...","feedback":"..."}, ...]}`
    — ids plus optional per-item feedback. Never parse these turn lines
    for content yourself; `/__worklist/resolve` returns the recorded
@@ -460,8 +465,10 @@ proposal, then `mutate op:"advance"`.
 
 **Apply-and-commit gate: skip `advance` — edit, then `worklist-commit`.**
 When an approved item's `gate` is `apply-and-commit` (the user clicked the
-one-click **Approve & commit** button on a `proposed` item — shown unless
-`worklist.oneClickApproveCommit` is set to `false`; on by default), collapse both gates into one
+one-click **Approve & commit** button — on the Worklist it appears whenever
+every selected item is a proposal with no changes on disk;
+`worklist.oneClickApproveCommit` gates only the legacy tab's per-item
+button), collapse both gates into one
 turn: make the proposed file edits, then call `worklist-commit { ids, message }`
 directly. Do **not** `mutate op:"advance"` first — the host commits the
 still-`proposed` item's files (authorized by the `commitToo` auth record the
@@ -1661,7 +1668,7 @@ grep for:
 | `input-latency` | input responsiveness probe in `helpers.js` (keydown/pointerdown, rAF-measured, ≥100ms — floor dropped from 200ms for the describe-backfill-pacing soak; the felt band lives at 50-200ms) | `event`, `latencyMs`, `hadFocus`, `target`, `route` (active tab hash — the per-tab felt map); `describeInflight`, `lastLongTaskMs`, `lastLongTaskName`, `lastLongTaskAgoMs` (blockedBy attribution, describe-backfill-observability) | One line per slow input event: rAF delta ≥200ms from dispatch. The blockedBy fields are written at emit time — how many describe fetches were in flight and the most recent `long-task` within 1.5s — so a slow keystroke names its suspect directly (the 2026-07-30 storm needed three-subkind timestamp correlation to convict). |
 | `refetch-called` | Workspace.xmlui debounce after `talk-session-changed` | `context`, `correlation_id`, `at_host_ms`, `delta_to_emit_ms` (host emit minus refetch-fire time, so it includes the 400 ms debounce coalesce) | Post-debounce refetch tick. A `delta_to_emit_ms` far above 400 ms means the iframe main thread was busy between emit and refetch. |
 | `inspector-tap-tick` | `__inspectorTapTick` in `helpers.js` | `batch` (entries forwarded this tick), `available` (entries ready), `ms` (loop wall time) | Per-non-empty tick of the Inspector tap poller. Empty ticks are silent so this is a slow-tick alarm: a tick with `ms` ≫ 200 (the tick interval) means the IPC channel is backed up while the poller serializes entries through `logToHost`. Pairs with `inspector-event` / `inspector-overflow`. |
-| `click` | UI Button onClick handlers (Workspace) | `target` (`approve` \| `drop` \| `iterate`), `item` | Worklist tab user actions. |
+| `click` | UI Button onClick handlers (Worklist gate row and legacy Workspace) | Worklist: `target` (`worklist2-batch-approve` \| `worklist2-batch-approve-commit` \| `worklist2-batch-commit` \| `worklist2-batch-iterate` \| `worklist2-batch-drop` \| `worklist2-new-item`), `count` (or `issue` for new-item); legacy: `target` (`approve` \| `drop` \| `iterate`), `item` | Worklist user actions. |
 | `queue` | queue mutation helpers in `helpers.js` (`__bramQueueAdd` / `__bramQueueUpdate` / `__bramQueueRemove` / `__bramQueueReorder` / `__bramQueueSend`) | `op` (`add` \| `update` \| `delete` \| `reorder` \| `send`), `id`, `chars`; `count` on `reorder`; `mode` (`message` \| `iterate`) on `send` | Queue-tab (`AgentMessageQueue`) mutation audit (queue-mutation-trace). `chars` is the note's text **length, never its content** (queue prose is user-authored, kept secret-safe like the describe redaction). A `send` logs `op=send` only — the internal removal suppresses its `op=delete` — so `delete` marks a user Delete, the recoverability signal for a mistaken removal. |
 | `skill-invoke` | `__bramRunSkill` in `helpers.js` (Skills launcher) | `name`, `args_len` | One line per project-skill launch from the agent-pane Skills control (issue-221-skill-launcher). The turn itself rides `toTurn` (`/name args`) / `toShell` for Edit-first; this records which skill ran and its argument length. |
 | `inflight-set` / `inflight-clear` | Workspace selectors + `inflightClaim` DataSource | `item`, `via`, `target`, `reason` | Inflight sentinel transitions; complements the host-side `[inflight-sentinel]` log entries. |

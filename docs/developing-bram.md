@@ -30,7 +30,16 @@ each kind of code should live, and how XMLUI markup calls into it.
   xs) and the few helpers whose proximity to that state earns them a
   place here. Engine restrictions: no async/await, no setTimeout, no
   fetch, no Promise chaining outside DataSource. Top-level
-  `function foo(...)` declarations auto-hoist onto `window.foo`.
+  `function foo(...)` declarations auto-hoist onto `window.foo` —
+  but that binding is engine-scoped: it makes `foo` bare-callable
+  from XMLUI attribute expressions and lets an xs name shadow a
+  helpers.js export, yet the function is NOT reliably reachable as
+  `window.foo(...)` from real-JS contexts in helpers.js. Live
+  receipt (2026-08-20): a helpers.js click path calling
+  `window.initCloseIssueState(...)` failed with "is not a function"
+  though the xs declaration existed; the fix was a self-contained
+  helpers.js replica. Code that must be callable from both sides
+  lives in helpers.js, never in Globals.xs.
 - **`window.*`** — the shared namespace. helpers.js writes here
   explicitly; `Globals.xs` writes here implicitly via hoisting. The
   `__bram*` prefix exists to give helpers.js a collision-safe space
@@ -130,6 +139,15 @@ Learned from real incidents; each is a hard rule, not a preference:
   breaking features unrelated to the edit (menu, voice,
   talk-session). Function *definitions* referencing later names are
   fine; top-level *invocations* are not.
+- **`ExpandableItem` expansion state is uncontrolled and positional.**
+  Inside an `Items` loop, when the list shrinks (a Worklist prune),
+  the component instances are reused by position, so an expansion
+  opened on row 3 silently transfers to whatever item now occupies
+  row 3. Fix: controlled expansion keyed by item id — a `when`-gated
+  body plus an explicit chevron/header toggle writing an id-keyed
+  map (the Worklist rows are the live pattern). Filed upstream as an
+  ask; until then, never rely on `ExpandableItem`'s own state in
+  loops whose membership changes.
 
 ### Post-edit verification ritual
 

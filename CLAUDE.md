@@ -60,8 +60,10 @@ the cross-target half that Setup seeds into every managed project.
 ### Files you'll edit most (Bram)
 
 - `app/tools/Main.xmlui` — the agent-pane surface
-- `app/tools/components/*.xmlui` — Workspace, Sessions, Toolbar,
-  Architecture, etc.
+- `app/tools/components/*.xmlui` — Worklist (the primary gate, route
+  `/worklist2`), Sessions, Toolbar, Architecture, etc.;
+  `Workspace.xmlui` is the legacy Worklist, shown only behind
+  Settings → Show legacy Worklist
 - `app/tools/config.json` — XMLUI app config (resources, appGlobals)
 - `app/tools/resources/*.svg` — custom icons; register in `config.json`
   under `resources` with the `icon.<name>` prefix

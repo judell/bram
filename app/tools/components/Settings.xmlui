@@ -174,7 +174,7 @@
         </VStack>
         <Switch
           id="mirrorIssuesSwitch"
-          label="Mirror worklist lifecycle to GitHub issues"
+          label="Mirror Worklist lifecycle to GitHub issues"
           initialValue="{!!(settingsValue &amp;&amp; settingsValue.mirrorWorklistLifecycleToIssue)}"
           onDidChange="(v) => saveSettings.execute({ mirrorWorklistLifecycleToIssue: v })" />
       </VStack>

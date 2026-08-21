@@ -6027,6 +6027,18 @@ fn emit_pty_menu_with_prose<R: tauri::Runtime>(app: &AppHandle<R>, payload: &Opt
     PANE_MENU_DISPLAYED.store(payload.is_some(), std::sync::atomic::Ordering::Relaxed);
     let mut value = serde_json::to_value(payload).unwrap_or(serde_json::Value::Null);
     if let Some(obj) = value.as_object_mut() {
+        // identity-checked-menu-answer: carry the host's exact lifecycle id
+        // with the rendered prompt; it is transport metadata, not menu content.
+        if let Some(prompt_id) = prompt_open_cell()
+            .lock()
+            .ok()
+            .and_then(|open| open.as_ref().map(|p| p.prompt_id.clone()))
+        {
+            obj.insert(
+                "promptId".to_string(),
+                serde_json::Value::String(prompt_id),
+            );
+        }
         if let Some(prose) = latest_grid_menu_cell()
             .lock()
             .ok()
@@ -13425,6 +13437,39 @@ fn menu_echo_numeral_shape(data: &str) -> Option<&'static str> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuAnswerIdentityVerdict {
+    Accept,
+    MissingSubmittedId,
+    NoOpenPrompt,
+    StalePrompt,
+}
+
+impl MenuAnswerIdentityVerdict {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::Accept => "accept",
+            Self::MissingSubmittedId => "missing-submitted-id",
+            Self::NoOpenPrompt => "no-open-prompt",
+            Self::StalePrompt => "stale-prompt",
+        }
+    }
+}
+
+fn menu_answer_identity_verdict(
+    current_prompt_id: Option<&str>,
+    submitted_prompt_id: &str,
+) -> MenuAnswerIdentityVerdict {
+    if submitted_prompt_id.is_empty() {
+        return MenuAnswerIdentityVerdict::MissingSubmittedId;
+    }
+    match current_prompt_id {
+        Some(current) if current == submitted_prompt_id => MenuAnswerIdentityVerdict::Accept,
+        Some(_) => MenuAnswerIdentityVerdict::StalePrompt,
+        None => MenuAnswerIdentityVerdict::NoOpenPrompt,
+    }
+}
+
 // menu-echo-numeral-turn-observer (observe-only): a menu-answer-shaped
 // write arriving while NO menu is displayed, shortly after a prompt
 // resolution, is the stray-turn candidate — a keystroke aimed at a
@@ -13554,7 +13599,8 @@ fn pty_write_internal<R: tauri::Runtime>(
 }
 
 // Disk-mediated relay for right-pane click intents (#86). The right-pane
-// helpers (`toShell` / `toTurn` / `sendKeys` in `app/__shell/helpers.js`)
+// helpers (`toShell` / `toTurn` / `sendKeys` / `__bramSendMenuAnswer` in
+// `app/__shell/helpers.js`)
 // call this instead of `pty_write` directly. Each invocation appends a
 // JSONL line to `resources/.pty-intent.jsonl` then drains the queue
 // under a process-wide mutex so concurrent calls can't race the
@@ -13622,8 +13668,16 @@ fn queue_pty_intent(
         .and_then(|v| v.as_str())
         .ok_or("missing data")?
         .to_string();
-    if !matches!(kind.as_str(), "toShell" | "toTurn" | "sendKeys") {
+    let prompt_id = payload
+        .get("promptId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if !matches!(kind.as_str(), "toShell" | "toTurn" | "sendKeys" | "menuAnswer") {
         return Err(format!("unknown kind: {}", kind));
+    }
+    if kind == "menuAnswer" && prompt_id.is_empty() {
+        return Err("missing promptId for menuAnswer".to_string());
     }
     let Some(path) = pty_intent_file(&app) else {
         return Err("project root unknown".to_string());
@@ -13633,12 +13687,22 @@ fn queue_pty_intent(
     }
     let seq = PTY_INTENT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let id = format!("intent-{}-{}", unix_now_ms(), seq);
-    let line = serde_json::json!({
-        "id": id,
-        "kind": kind,
-        "data": data,
-        "at": unix_now_ms(),
-    });
+    let line = if kind == "menuAnswer" {
+        serde_json::json!({
+            "id": id,
+            "kind": kind,
+            "data": data,
+            "promptId": prompt_id,
+            "at": unix_now_ms(),
+        })
+    } else {
+        serde_json::json!({
+            "id": id,
+            "kind": kind,
+            "data": data,
+            "at": unix_now_ms(),
+        })
+    };
     let line_str = serde_json::to_string(&line).map_err(|e| e.to_string())?;
 
     let _drain_guard = pty_intent_lock().lock().map_err(|e| e.to_string())?;
@@ -13699,7 +13763,7 @@ fn drain_pty_intents<R: tauri::Runtime>(
     let mut drain_error: Option<String> = None;
 
     // send-gate: hold toShell/toTurn intents while a blocking menu is
-    // displayed (sendKeys always passes — pane menu answers ride it, and
+    // displayed (sendKeys and identity-checked menuAnswer always pass —
     // answering the menu is what releases the hold). No operational
     // timeout: a long hold warns (`op=hold-stale`, from the ticker) but
     // only menu-clear evidence releases the sends.
@@ -13721,6 +13785,10 @@ fn drain_pty_intents<R: tauri::Runtime>(
         };
         let kind = intent.get("kind").and_then(|v| v.as_str()).unwrap_or("");
         let data = intent.get("data").and_then(|v| v.as_str()).unwrap_or("");
+        let prompt_id = intent
+            .get("promptId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if blocking_tool.is_some() && matches!(kind, "toShell" | "toTurn") {
             held += 1;
             remaining.push(line.to_string());
@@ -13733,6 +13801,30 @@ fn drain_pty_intents<R: tauri::Runtime>(
             }
             "toTurn" => write_pty_turn_intent(app, state, data),
             "sendKeys" => pty_write_internal(app, state, data, "pty-intent-sendKeys"),
+            "menuAnswer" => {
+                let current_prompt_id = prompt_open_cell()
+                    .lock()
+                    .ok()
+                    .and_then(|open| open.as_ref().map(|p| p.prompt_id.clone()));
+                let verdict = menu_answer_identity_verdict(current_prompt_id.as_deref(), prompt_id);
+                if verdict == MenuAnswerIdentityVerdict::Accept {
+                    pty_write_internal(app, state, data, "pty-intent-menuAnswer")
+                } else {
+                    if bram_trace_enabled() {
+                        append_bram_trace_line(
+                            app,
+                            "pty-intent",
+                            &format!(
+                                "op=menu-answer-rejected reason={} prompt_id={} current_prompt_id={}",
+                                verdict.reason(),
+                                prompt_id,
+                                current_prompt_id.as_deref().unwrap_or("none"),
+                            ),
+                        );
+                    }
+                    Ok(())
+                }
+            }
             _ => continue,
         };
         match write_result {
@@ -29646,8 +29738,8 @@ const WORKLIST_PUSH_MIRROR_REL: &str = "resources/.worklist-push-mirror.json";
 // the lifecycle verifiable.
 const INFLIGHT_CLAIM_REL: &str = "resources/.inflight-claim.json";
 // Right-pane pty-intent relay (#86). Append-only JSONL queue persisted
-// to disk so right-pane clicks (toShell / toTurn / sendKeys) survive an
-// iframe-reload-mid-click. Drained synchronously by queue_pty_intent;
+// to disk so right-pane clicks (toShell / toTurn / sendKeys / menuAnswer)
+// survive an iframe-reload-mid-click. Drained synchronously by queue_pty_intent;
 // startup cleanup deletes any stale queue from a prior session.
 const PTY_INTENT_REL: &str = "resources/.pty-intent.jsonl";
 // On Unix, the bare path runs via the script's `#!/usr/bin/env python3`
@@ -45710,6 +45802,43 @@ mod menu_echo_shape_tests {
         assert_eq!(menu_echo_numeral_shape(""), None);
         assert_eq!(menu_echo_numeral_shape("\r"), None);
         assert_eq!(menu_echo_numeral_shape("approved: {}"), None);
+    }
+}
+
+#[cfg(test)]
+mod menu_answer_identity_tests {
+    use super::{menu_answer_identity_verdict, MenuAnswerIdentityVerdict};
+
+    #[test]
+    fn matching_live_prompt_is_accepted() {
+        assert_eq!(
+            menu_answer_identity_verdict(Some("p-live"), "p-live"),
+            MenuAnswerIdentityVerdict::Accept
+        );
+    }
+
+    #[test]
+    fn duplicate_after_resolution_is_rejected() {
+        assert_eq!(
+            menu_answer_identity_verdict(None, "p-resolved"),
+            MenuAnswerIdentityVerdict::NoOpenPrompt
+        );
+    }
+
+    #[test]
+    fn answer_for_superseded_prompt_is_rejected() {
+        assert_eq!(
+            menu_answer_identity_verdict(Some("p-current"), "p-stale"),
+            MenuAnswerIdentityVerdict::StalePrompt
+        );
+    }
+
+    #[test]
+    fn missing_identity_is_rejected() {
+        assert_eq!(
+            menu_answer_identity_verdict(Some("p-current"), ""),
+            MenuAnswerIdentityVerdict::MissingSubmittedId
+        );
     }
 }
 

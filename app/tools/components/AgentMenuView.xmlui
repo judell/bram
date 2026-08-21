@@ -14,6 +14,7 @@
     when="{$props.menu}"
     gap="$space-2"
     var.menuIdentity="{window.__bramMenuIdentity($props.menu)}"
+    var.promptId="{($props.menu &amp;&amp; $props.menu.promptId) || ''}"
     var.menuPreviewOpen="{true}"
     var.previewModalOpen="{false}"
     var.menuHeaderSource="{$props.menu.toolCallSignature || $props.menu.text || ''}"
@@ -149,7 +150,8 @@
               label="{($item.key || '')}"
               variant="outlined"
               size="sm"
-              onClick="sendKeys(answerKeys)" />
+              enabled="{!!promptId}"
+              onClick="window.__bramSendMenuAnswer(answerKeys, promptId)" />
             <VStack width="*" gap="$space-0_5">
               <Text
                 value="{($item.label || '')}"
@@ -172,9 +174,9 @@
       when="{!$props.menu.options || $props.menu.options.length === 0}"
       gap="$space-2"
       wrapContent="true">
-      <Button label="1. Yes" variant="outlined" size="sm" onClick="sendKeys('1\r')" />
-      <Button label="2. Yes, allow and don't ask again" variant="outlined" size="sm" onClick="sendKeys('2\r')" />
-      <Button label="3. No, and tell agent what to do" variant="outlined" size="sm" onClick="sendKeys('3\r')" />
+      <Button label="1. Yes" variant="outlined" size="sm" enabled="{!!promptId}" onClick="window.__bramSendMenuAnswer('1\r', promptId)" />
+      <Button label="2. Yes, allow and don't ask again" variant="outlined" size="sm" enabled="{!!promptId}" onClick="window.__bramSendMenuAnswer('2\r', promptId)" />
+      <Button label="3. No, and tell agent what to do" variant="outlined" size="sm" enabled="{!!promptId}" onClick="window.__bramSendMenuAnswer('3\r', promptId)" />
     </HStack>
 
     <!-- Overflow modal (component-owned so it works on both surfaces). The

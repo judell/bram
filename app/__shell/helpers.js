@@ -678,6 +678,44 @@ window.sendKeys = function (text) {
     } catch (le) {}
   });
 };
+// Permission-menu answers are not generic PTY keystrokes. Carry the host's
+// prompt identity so a button that survives one render past dismissal cannot
+// submit its numeral into the composer. The client-side set closes the
+// immediate double-click window synchronously; the host independently checks
+// the identity against its current OpenPrompt before writing any bytes.
+if (!window.__bramSentMenuAnswerIds) window.__bramSentMenuAnswerIds = new Set();
+window.__bramSendMenuAnswer = function (text, promptId) {
+  var id = String(promptId || "");
+  var data = String(text || "");
+  var invoke = getTauriInvoke();
+  if (!invoke || !id || !data) return;
+  if (window.__bramSentMenuAnswerIds.has(id)) {
+    window.__bramIframeTrace("menu-answer-client", {
+      op: "duplicate-rejected",
+      promptId: id,
+    });
+    return;
+  }
+  while (window.__bramSentMenuAnswerIds.size >= 64) {
+    window.__bramSentMenuAnswerIds.delete(window.__bramSentMenuAnswerIds.values().next().value);
+  }
+  window.__bramSentMenuAnswerIds.add(id);
+  invoke("queue_pty_intent", {
+    payload: { kind: "menuAnswer", data: data, promptId: id },
+  }).catch(function (e) {
+    window.__bramSentMenuAnswerIds.delete(id);
+    console.error("menuAnswer queue_pty_intent", e);
+    try {
+      window.logToHost({
+        kind: "iframe-trace",
+        subkind: "menu-answer-invoke-failed",
+        promptId: id,
+        error: String((e && e.message) || e),
+        at: new Date().toISOString(),
+      });
+    } catch (le) {}
+  });
+};
 window.__bramAgentSwitcherTrace = function (stage, fields) {
   try {
     var payload = Object.assign({ stage: stage, at: new Date().toISOString() }, fields || {});

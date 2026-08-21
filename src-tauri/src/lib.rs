@@ -10372,6 +10372,28 @@ fn pty_output_clears_inflight(output: &[u8]) -> bool {
         || text.contains("Conversation interrupted")
 }
 
+// Codex redraws historical transcript rows as fresh PTY bytes. A bare
+// `Conversation interrupted` substring therefore cannot identify a new
+// cancellation: the 2026-08-20 specimen replayed the prior turn's banner,
+// stamped the live turn killed, and left the pane Finished while the TUI kept
+// Working. A real Codex cancellation follows the user's Esc immediately, so
+// require that edge to belong to this turn and remain within a short output
+// window. Claude keeps the existing marker-only behavior in the reader.
+const CODEX_CANCEL_OUTPUT_AFTER_ESCAPE_MS: i64 = 5_000;
+
+fn codex_cancel_output_is_current(
+    has_cancel_marker: bool,
+    last_escape_ms: i64,
+    turn_started_ms: i64,
+    now_ms: i64,
+) -> bool {
+    has_cancel_marker
+        && last_escape_ms > 0
+        && now_ms >= last_escape_ms
+        && now_ms - last_escape_ms <= CODEX_CANCEL_OUTPUT_AFTER_ESCAPE_MS
+        && (turn_started_ms <= 0 || last_escape_ms >= turn_started_ms)
+}
+
 // Called from pty_write on user input. Records the dismissed menu's
 // tool name into PTY_MENU_SUPPRESSED so the detector won't immediately
 // re-fire when the next PTY chunk arrives (the dismissed text is still
@@ -13378,15 +13400,40 @@ fn pty_spawn(
                     pty_menu_update(&app_for_thread, &buf[..n]);
                     pty_agent_turn_update(&app_for_thread, &buf[..n]);
                     pty_agent_status_update(&app_for_thread);
-                    if pty_output_clears_inflight(&buf[..n]) {
+                    let has_cancel_marker = pty_output_clears_inflight(&buf[..n]);
+                    let is_codex = matches!(
+                        current_provider(&app_for_thread),
+                        Some(SessionProvider::Codex)
+                    );
+                    let cancel_is_current = if has_cancel_marker && is_codex {
+                        let last_escape_ms = last_pty_escape_ms_cell()
+                            .lock()
+                            .map(|g| *g)
+                            .unwrap_or(0);
+                        let turn_started_ms = turn_state_cell()
+                            .lock()
+                            .ok()
+                            .and_then(|s| {
+                                s.turn_stamp
+                                    .as_deref()
+                                    .and_then(|stamp| stamp.parse::<i64>().ok())
+                            })
+                            .unwrap_or(0);
+                        codex_cancel_output_is_current(
+                            true,
+                            last_escape_ms,
+                            turn_started_ms,
+                            unix_now_ms(),
+                        )
+                    } else {
+                        has_cancel_marker
+                    };
+                    if cancel_is_current {
                         clear_active_sentinel_with_reason(
                             &app_for_thread,
                             "pty-output-user-cancel",
                         );
-                        if matches!(
-                            current_provider(&app_for_thread),
-                            Some(SessionProvider::Codex)
-                        ) {
+                        if is_codex {
                             if menu_hook_owns_slot() {
                                 // Unkeyed: the user cancelled the whole
                                 // turn — drain the claim queue.
@@ -36548,10 +36595,10 @@ mod agent_status_tests {
 #[cfg(test)]
 mod pty_menu_tests {
     use super::{
-        codex_command_policy_prefix, extract_pending_tool_call_from_jsonl,
-        format_pending_tool_call, pty_menu_input_clears_inflight, pty_menu_preview_chars,
-        pty_menu_preview_source, pty_menu_same_identity_for_option_carry,
-        pty_output_clears_inflight, st_edit_tool_diff,
+        codex_cancel_output_is_current, codex_command_policy_prefix,
+        extract_pending_tool_call_from_jsonl, format_pending_tool_call,
+        pty_menu_input_clears_inflight, pty_menu_preview_chars, pty_menu_preview_source,
+        pty_menu_same_identity_for_option_carry, pty_output_clears_inflight, st_edit_tool_diff,
     };
     use serde_json::json;
 
@@ -37425,6 +37472,27 @@ mod pty_menu_tests {
         ));
         assert!(pty_output_clears_inflight(
             b"Conversation interrupted - tell the model what to do differently."
+        ));
+    }
+
+    #[test]
+    fn codex_replayed_cancel_without_a_current_turn_escape_is_ignored() {
+        assert!(!codex_cancel_output_is_current(true, 0, 40_000, 50_000));
+        assert!(!codex_cancel_output_is_current(
+            true, 39_999, 40_000, 40_100
+        ));
+        assert!(!codex_cancel_output_is_current(
+            true, 44_999, 40_000, 50_000
+        ));
+    }
+
+    #[test]
+    fn codex_cancel_after_a_current_turn_escape_is_accepted() {
+        assert!(codex_cancel_output_is_current(
+            true, 49_950, 40_000, 50_000
+        ));
+        assert!(!codex_cancel_output_is_current(
+            false, 49_950, 40_000, 50_000
         ));
     }
 

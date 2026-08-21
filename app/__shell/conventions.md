@@ -465,16 +465,17 @@ proposal, then `mutate op:"advance"`.
 
 **Apply-and-commit gate: skip `advance` — edit, then `worklist-commit`.**
 When an approved item's `gate` is `apply-and-commit` (the user clicked the
-one-click **Approve & commit** button — on the Worklist it appears whenever
-every selected item is a proposal with no changes on disk;
-`worklist.oneClickApproveCommit` gates only the legacy tab's per-item
-button), collapse both gates into one
+one-click **Approve & commit** button), collapse both gates into one
 turn: make the proposed file edits, then call `worklist-commit { ids, message }`
 directly. Do **not** `mutate op:"advance"` first — the host commits the
 still-`proposed` item's files (authorized by the `commitToo` auth record the
 click wrote, the `allow_proposed` path) and prunes, exactly as the commit gate
 does. `closesIssues` / close-on-push behave identically to a normal commit. The
 host sets the sentinel at approval time and `worklist-commit` clears it.
+`worklist.oneClickApproveCommit` gates this action in both the current
+Worklist's selected-proposal controls and the legacy tab's per-item controls.
+It defaults to `true`; when explicitly `false`, both surfaces hide the action
+and the host rejects any stale `apply-and-commit` submission as a backstop.
 
 **Commit gate: call `worklist-commit`.** For approved TO COMMIT items,
 send one request with `{ ids, message }`. The host verifies approved auth,

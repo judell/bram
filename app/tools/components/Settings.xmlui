@@ -168,7 +168,7 @@
           backgroundColor="{highlightKey === 'oneClickApproveCommit' ? '$color-primary-100' : 'transparent'}">
           <Switch
             id="oneClickSwitch"
-            label="One-click Approve &amp; commit (legacy Worklist only)"
+            label="One-click Approve &amp; commit"
             initialValue="{settingsOneClickApproveCommit(settingsValue)}"
             onDidChange="(v) => saveSettings.execute({ worklist: { oneClickApproveCommit: v } })" />
         </VStack>

@@ -1546,8 +1546,8 @@ window.settingsInfoBodies = {
     "## Advanced\n\n" +
     "Launch arguments are extra CLI flags. First command is sent to the agent's TUI after startup. Both apply whichever startup choice is used.",
   batchCommitActions:
-    "## One-click Approve & commit (legacy Worklist only)\n\n" +
-    "Adds a per-item Approve & commit button on the legacy tab. The Worklist always offers Approve & commit when every selected row is a plan (no changes on disk yet). No setting needed.\n\n" +
+    "## One-click Approve & commit\n\n" +
+    "Shows Approve & commit for proposed items in both Worklist surfaces. It is on by default; turn it off to require the two-stage Approve → review at TO COMMIT → Commit flow.\n\n" +
     "## Mirror Worklist lifecycle to GitHub issues\n\n" +
     "Post Worklist lifecycle comments to linked GitHub issues.",
   ui:

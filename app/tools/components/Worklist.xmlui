@@ -315,6 +315,11 @@
                   initialValue="{true}"
                   onDidChange="(v) => worklist2Close = window.__bramInlineCloseToggle(worklist2Close, witem.id, issue.number, v, witem.closesIssues)" />
                 <Text value="{'#' + issue.number}" fontSize="$fontSize-sm" tooltip="{issue.title || ''}" />
+                <TextBox
+                  when="{window.__bramWorklist2Begun(witem, inflightClaim.value)}"
+                  width="16rem"
+                  placeholder="comment (optional)"
+                  onDidChange="(v) => worklist2Close = window.__bramInlineCloseComment(worklist2Close, witem.id, issue.number, v, witem.closesIssues)" />
               </HStack>
             </Items>
           </HStack>

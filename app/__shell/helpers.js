@@ -1995,6 +1995,19 @@ window.__bramInlineCloseToggle = function (map, itemId, issueNumber, checked, cl
   next[itemId] = updated;
   return next;
 };
+// issue-267-close-comment-box: optional per-issue note, prepended by the
+// host to the automatic "Closed by <commit-url>" comment. Same map shape
+// as the toggle; the composer already emits `close-issue: N comment: "..."`
+// when comment is non-empty.
+window.__bramInlineCloseComment = function (map, itemId, issueNumber, text, closesIssues) {
+  var next = Object.assign({}, map || {});
+  var st = next[itemId] || __bramDefaultCloseState(closesIssues || []);
+  var prev = st[issueNumber] || { close: true, comment: "" };
+  var updated = Object.assign({}, st);
+  updated[issueNumber] = Object.assign({}, prev, { comment: text || "" });
+  next[itemId] = updated;
+  return next;
+};
 
 // issue-265: per-item indicator text. Animated dots come from a tick the
 // caller advances; the verb comes from __bramItemInflightKind so the row and

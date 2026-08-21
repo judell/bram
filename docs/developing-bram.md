@@ -256,3 +256,109 @@ The Bram binary embeds the `app/` tree at build time
 rule exists for shell/runtime assets: a plain restart of the wrong
 binary, or a build followed by relaunching that wrong binary, still
 runs stale code.
+
+## Developing and testing the startup dance
+
+Startup — Setup seeding a project, hook registration, currency and
+staleness checks, the needs-setup and first-run banners — was for a
+long time the least testable part of Bram, and it shows in the issue
+record: #99, #102, #173, #211, #247 and #249 were all found by a
+person noticing, several of them after shipping. #249's gate 1 is the
+representative artifact, a hand-run expectation table scored "3 of 4
+pass, 1 real finding".
+
+The reason it stayed manual is that verifying startup appeared to
+require restarting *your own* Bram — which kills the agent session
+doing the verifying. It does not.
+
+### Run a second instance against a throwaway project
+
+`bram <path>` takes a project root (`determine_project_root`,
+`src-tauri/src/lib.rs`), and there is no single-instance guard. Each
+instance binds its own loopback port and writes its own
+`resources/.bram-port`. So a full Bram can run against a scratch
+directory while your working session keeps going, untouched:
+
+```sh
+BRAM_TRACE=1 ./bram /tmp/scratch-project
+```
+
+Two details that are easy to get wrong:
+
+- **`BRAM_TRACE=1` is required, not optional.** Traces are opt-in per
+  project and a scratch project has no `.bram.json` yet, so the
+  environment variable is the only thing that turns them on — and
+  nearly every startup assertion worth making reads the trace.
+- **Kill by PID, never `pkill bram`.** Your own session is a `bram`
+  process too.
+
+### The stale-binary trap
+
+`cargo build` replaces the binary file, but a running process keeps
+executing the inode it started with. A Bram launched before your build
+will happily keep running the old code, and its behavior looks like a
+real result. Before trusting any startup finding, check the binary's
+mtime against the process start time. This is the concrete form of the
+rebuild-and-relaunch rule above; the rule says to relaunch, this says
+why a stale run is so easy to mistake for a genuine one.
+
+### Startup is observable without the UI
+
+Setup's effects are entirely inspectable over the loopback port, which
+is what makes them assertable:
+
+| what | how |
+|---|---|
+| installed / needs-setup / currency flags | `GET /__enhance/status` |
+| run Setup headlessly | `GET /__enhance/run?force=true` |
+| what Setup seeded | the file tree (`.claude/`, `AGENTS.md`, `CLAUDE.md`, `resources/.worklist-authorization.json`) |
+| what startup did | `resources/bram-traces/bram-trace.log` |
+
+`/__enhance/status` fields answer *different questions* and can
+legitimately disagree — a fact that was itself a bug for a while.
+`claudeNeedsSetup` / `codexNeedsSetup` are about installation currency
+and key on `core_installed` (the worklist authorization file plus
+per-provider hook registration). `firstRun` asks whether this project
+has ever been managed at all. Before 2026-08-20 `firstRun` keyed only
+on `.bram.json` / `.xmlui-desktop.json` — the *settings* files, written
+when a setting is first saved and never by Setup — so a successful
+Setup left the "Bram is starting for the first time in this repo"
+banner up, with the banner's own text claiming Setup writes
+`.bram.json`. Same shape as #211.
+
+### The harness
+
+`scripts/setup-harness.sh` automates the above: per scenario it creates
+a pristine temp project, launches the locally built binary against it,
+drives Setup over the port, asserts, checks that a second Setup is
+byte-idempotent, and tears down (keeping the directory on failure).
+
+```sh
+scripts/setup-harness.sh                 # all scenarios
+scripts/setup-harness.sh pristine_git    # one
+BRAM_BIN=/path/to/bram scripts/setup-harness.sh
+```
+
+Exit status is the number of failed assertions. Scenarios vary the
+*starting state* rather than the steps, because that is where the
+historical failures were: `pristine_nogit`, `pristine_git`,
+`already_setup` (the cross-machine re-run from #249), `legacy_hooks`
+(retired generic hook names, #173), and `nested` (a managed parent).
+
+Every assertion traces to a bug the record actually caught, which is
+the standard for adding another one. Notably `already_setup` asserts
+that re-running Setup leaves **tracked** files unmodified — #249's real
+failure — while untracked seeded files are expected on a fresh project.
+
+Two boundaries worth keeping:
+
+- **The source repo is deliberately not a scenario.** `is_source_repo`
+  takes a different path (#102) and pointing the harness at it would
+  dirty your working tree.
+- **It is not wired into CI**, because launching the app needs a
+  windowing session. It is a command you or an agent runs on demand.
+
+When a startup assertion fails, prefer fixing the *fixture* over the
+product until you have shown the failure reproduces outside the
+harness — the first `already_setup` failure was the harness committing
+its own live trace log, not Setup churn.

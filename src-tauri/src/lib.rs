@@ -33548,7 +33548,20 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
     // one — it has no vocabulary for "you did not mean to be here" (observed
     // 2026-08-18: the tint changed and was read past).
     let root = project_root(Some(app));
-    let first_run = root.as_ref().map(|p| !has_project_settings(p)).unwrap_or(false);
+    // `has_project_settings` tests for `.bram.json` / `.xmlui-desktop.json`,
+    // which are the SETTINGS files -- written when a setting is first saved,
+    // never by Setup. On its own it made the "first time in this repo" banner
+    // survive a successful Setup on every new project (found 2026-08-20 by
+    // scripts/setup-harness.sh; same shape as #211, and the banner's own text
+    // claiming "Setup writes .bram.json" is why it read as plausible). The
+    // question the banner asks is whether this project has ever been set up,
+    // so gate it on that too. Not fixed by having Setup write a default
+    // `.bram.json`: #249 is a long account of the damage from Setup writing to
+    // tracked files across machines.
+    let first_run = root
+        .as_ref()
+        .map(|p| !has_project_settings(p) && !core_installed)
+        .unwrap_or(false);
     // A parent carrying .bram.json means this launch is nested inside an
     // already-managed project, which is near-certainly a mistake: nested
     // managed projects are not a configuration anyone wants.

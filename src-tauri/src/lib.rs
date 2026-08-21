@@ -5611,6 +5611,26 @@ mod terminal_attention_tests {
 // compaction, and no ordinary prose merely *discussing* compaction matches
 // it (case-sensitive, not the bare word "compaction").
 const COMPACTION_TAIL_CHARS: usize = 600;
+const CODEX_CONTEXT_COMPACTED_MARKER: &[u8] = b"Context compacted";
+
+// `Context compacted` is a short, one-frame Codex marker. The 500 ms
+// throughput ticker can miss it after subsequent TUI redraws push it out of
+// COMPACTION_TAIL_CHARS (the 2026-08-20 specimen did exactly that). Latch the
+// append edge in pty_menu_update, then consume it on the ticker that owns the
+// CompactionTracker. This stays a lifecycle observation only: it must not end
+// the turn, because Codex continues the same turn after compaction.
+static CODEX_CONTEXT_COMPACTED_SEEN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn appended_tail_contains_marker(tail: &[u8], appended_at: usize, marker: &[u8]) -> bool {
+    if marker.is_empty() || tail.len() < marker.len() {
+        return false;
+    }
+    let scan_from = appended_at.saturating_sub(marker.len().saturating_sub(1));
+    tail[scan_from..]
+        .windows(marker.len())
+        .any(|window| window == marker)
+}
 
 fn compaction_progress_shape(stripped_tail: &str) -> bool {
     stripped_tail.contains("Compacting conversation")
@@ -5638,8 +5658,24 @@ impl CompactionTracker {
     // here is not itself informative: it just means "no new frame", and an
     // already-active episode simply stays active until the next tick with
     // output shows the shape gone).
-    fn step<F: FnOnce() -> String>(&mut self, bytes: usize, tail_fn: F) -> Vec<CompactionTransition> {
+    fn step<F: FnOnce() -> String>(
+        &mut self,
+        bytes: usize,
+        context_compacted_seen: bool,
+        tail_fn: F,
+    ) -> Vec<CompactionTransition> {
         let mut out = Vec::new();
+        // The explicit completion marker outranks a stale progress line that
+        // may still be present in PTY_TAIL. Always emit the clear, even when
+        // the sampling loop missed the corresponding Fire, so the replayable
+        // compaction state is repaired deterministically.
+        if context_compacted_seen {
+            self.active = false;
+            out.push(CompactionTransition::Clear {
+                reason: "compaction-done",
+            });
+            return out;
+        }
         if bytes == 0 {
             return out;
         }
@@ -5694,8 +5730,10 @@ fn emit_compaction<R: tauri::Runtime>(app: &AppHandle<R>, active: bool, provider
 
 #[cfg(test)]
 mod compaction_shape_tests {
-    use super::{CompactionTracker, CompactionTransition};
-    use super::compaction_progress_shape;
+    use super::{
+        appended_tail_contains_marker, compaction_progress_shape, pty_output_clears_inflight,
+        CompactionTracker, CompactionTransition, CODEX_CONTEXT_COMPACTED_MARKER,
+    };
 
     #[test]
     fn provider_progress_lines_classify() {
@@ -5720,23 +5758,73 @@ mod compaction_shape_tests {
     fn tracker_fires_on_present_then_clears_on_absent() {
         let mut tracker = CompactionTracker::new();
         assert_eq!(
-            tracker.step(64, || "Compacting conversation… 500 tokens".to_string()),
+            tracker.step(64, false, || {
+                "Compacting conversation… 500 tokens".to_string()
+            }),
             vec![CompactionTransition::Fire]
         );
         // Still compacting on the next tick with output -- no repeat fire.
         assert_eq!(
-            tracker.step(64, || "Compacting conversation… 900 tokens".to_string()),
+            tracker.step(64, false, || {
+                "Compacting conversation… 900 tokens".to_string()
+            }),
             Vec::<CompactionTransition>::new()
         );
         // Silence mid-compaction: nothing to evaluate, stays active.
-        assert_eq!(tracker.step(0, || unreachable!("tail_fn must not run on silence")), Vec::<CompactionTransition>::new());
+        assert_eq!(
+            tracker.step(0, false, || unreachable!("tail_fn must not run on silence")),
+            Vec::<CompactionTransition>::new()
+        );
         // Compaction finished -- the tail no longer carries the shape.
         assert_eq!(
-            tracker.step(32, || "~/bram$ ".to_string()),
+            tracker.step(32, false, || "~/bram$ ".to_string()),
             vec![CompactionTransition::Clear {
                 reason: "compaction-done"
             }]
         );
+    }
+
+    #[test]
+    fn short_codex_compaction_is_latched_across_an_append_boundary() {
+        let prefix = b"\x1b[2mContext comp";
+        let mut tail = prefix.to_vec();
+        let appended_at = tail.len();
+        tail.extend_from_slice(b"acted\x1b[0m\r\n");
+        assert!(appended_tail_contains_marker(
+            &tail,
+            appended_at,
+            CODEX_CONTEXT_COMPACTED_MARKER
+        ));
+    }
+
+    #[test]
+    fn completion_marker_repairs_a_missed_progress_sample_and_rearms() {
+        let mut tracker = CompactionTracker::new();
+        assert_eq!(
+            tracker.step(286, true, || {
+                unreachable!("completion marker must outrank the sampled tail")
+            }),
+            vec![CompactionTransition::Clear {
+                reason: "compaction-done"
+            }]
+        );
+        // A normal continuation owns the eventual outcome; compaction itself
+        // neither finishes nor interrupts the turn.
+        assert_eq!(
+            tracker.step(128, false, || "Working on the request".to_string()),
+            Vec::<CompactionTransition>::new()
+        );
+        // The tracker is re-armed for a later compaction episode.
+        assert_eq!(
+            tracker.step(128, false, || "Compacting conversation…".to_string()),
+            vec![CompactionTransition::Fire]
+        );
+    }
+
+    #[test]
+    fn compaction_marker_does_not_masquerade_as_interruption() {
+        assert!(!pty_output_clears_inflight(b"Context compacted"));
+        assert!(pty_output_clears_inflight(b"Conversation interrupted"));
     }
 }
 
@@ -7723,6 +7811,15 @@ fn agent_turn_state_clear_active() {
     }
 }
 
+fn agent_turn_state_rearm_after_compaction() {
+    if let Ok(mut state) = agent_turn_state_cell().lock() {
+        state.last_spinner_at = None;
+        state.is_active = false;
+        state.last_emit_at = None;
+        state.active_since = None;
+    }
+}
+
 // 800ms threshold: activity ticks are 100-200ms apart while thinking;
 // 800ms of no spinner/activity reliably indicates the agent stopped
 // updating.
@@ -8747,7 +8844,13 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
         Ok(g) => g,
         Err(_) => return,
     };
+    let appended_at = tail.len();
     tail.extend_from_slice(chunk);
+    if matches!(current_provider(app), Some(SessionProvider::Codex))
+        && appended_tail_contains_marker(&tail, appended_at, CODEX_CONTEXT_COMPACTED_MARKER)
+    {
+        CODEX_CONTEXT_COMPACTED_SEEN.store(true, std::sync::atomic::Ordering::Release);
+    }
     // Bumped from 8 KB to 64 KB for incident #182 #17: a wider scan
     // window gives Claude's TUI redraws more chances to bring the
     // current menu's bytes back into the detector's view. Byte-pattern
@@ -13144,7 +13247,15 @@ fn pty_spawn(
                         TerminalAttentionTransition::Candidate { .. } => {}
                     }
                 }
-                for transition in compaction.step(bytes, || pty_tail_snippet(COMPACTION_TAIL_CHARS)) {
+                let context_compacted_latched = CODEX_CONTEXT_COMPACTED_SEEN
+                    .swap(false, std::sync::atomic::Ordering::AcqRel);
+                let context_compacted_seen = provider == "codex" && context_compacted_latched;
+                if context_compacted_seen {
+                    agent_turn_state_rearm_after_compaction();
+                }
+                for transition in compaction.step(bytes, context_compacted_seen, || {
+                    pty_tail_snippet(COMPACTION_TAIL_CHARS)
+                }) {
                     trace_compaction_transition(&app_for_throughput, &transition);
                     match transition {
                         CompactionTransition::Fire => {

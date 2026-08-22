@@ -10,7 +10,8 @@
   var.worklist2Sent="{{}}"
   var.worklist2Selected="{[]}"
   var.worklist2BatchText="{''}"
-  var.w2BatchVoiceRecording="{false}">
+  var.w2BatchVoiceRecording="{false}"
+  var.overlapDismissed="{window.__bramRestoreWorklistOverlapDismissed()}">
   <!-- Worklist2: the redesigned, evidence-first gate (tutorial gist v3).
        Binds the same /__worklist payload Workspace uses, so the two tabs
        cannot disagree about state. Two-level compression: a row-level
@@ -402,6 +403,29 @@
         onClick="window.__bramIframeTrace('click', {target: 'worklist2-batch-drop', count: (worklist2Selected || []).length}); const ids = window.__bramSelectionIds(worklist.value.items, worklist2Selected, ''); worklist2Sent = window.__bramWorklist2CaptureSent(worklist2Sent, ids, worklist2BatchText, Date.now()); const r = window.__bramPrepareBatchWorklistActionSubmission({kind: 'drop', items: worklist.value.items, selectedIds: ids, feedbackDraftsById: window.__bramFanFeedback(ids, window.__bramWithStagedImageMarkers(worklist2BatchText, 'feedback'))}); worklist2Selected = []; worklist2BatchText = ''; window.__bramWorklistActApply(r)" />
     </HStack>
     <PastedImageStrip target="feedback" />
+    <!-- worklist-shared-file-split-hint: the "shared with" column names the
+         entanglement; this says what can be done about it. Shown only while an
+         overlap exists, and dismissed per-overlap (see the helpers) so a later,
+         different entanglement is not silenced by an earlier dismissal. -->
+    <VStack
+      when="{window.__bramWorklistOverlapSignature(worklist.value &amp;&amp; worklist.value.items) !== '' &amp;&amp; window.__bramWorklistOverlapSignature(worklist.value &amp;&amp; worklist.value.items) !== overlapDismissed}"
+      backgroundColor="$color-info-100"
+      padding="$space-2"
+      gap="$space-2"
+      marginTop="$space-2">
+      <Text
+        fontSize="$fontSize-sm"
+        value="{window.__bramWorklistOverlapText(worklist.value &amp;&amp; worklist.value.items)}" />
+      <HStack gap="$space-2" verticalAlignment="center">
+        <SpaceFiller />
+        <Button
+          label="✕"
+          variant="ghost"
+          size="xs"
+          tooltip="Dismiss — a different overlap raises this again"
+          onClick="overlapDismissed = window.__bramWorklistOverlapSignature(worklist.value &amp;&amp; worklist.value.items); writeLocalStorage('bram.worklistOverlapDismissed', overlapDismissed)" />
+      </HStack>
+    </VStack>
     </VStack>
     <!-- Parity: You/Agent last-exchange dock (old tab's shape, simplified:
          no fullscreen image viewer; dim while a newer user message awaits

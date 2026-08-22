@@ -8787,6 +8787,73 @@ window.__bramRestoreUpdateBannerDismissed = function () {
   return __bramReadLS("bram.updateBannerDismissedVersion", "");
 };
 
+// worklist-shared-file-split-hint: the Worklist already shows WHICH other item
+// touches a file (the "shared with" column, fed by the host's sharedWith on
+// changedFiles). It does not say what to do about it, and the commit gate
+// stages whole files -- so approving one entangled item alone carries the
+// other's changes into that commit. From the pane the only inferable options
+// are "commit together" or "give up on separate commits"; separating the
+// overlapping changes first is a third, and it was invisible.
+//
+// The dismiss is keyed on the OVERLAP, not on a version (the tool-desc idiom)
+// and not on time. Dismiss silences this overlap; a later, different overlap
+// raises a fresh banner. Same reasoning as the compaction banner's
+// episode-keyed dismiss: a situational warning that never returns is worse
+// than one that never appeared, because absence stops meaning anything.
+window.__bramWorklistOverlapPaths = function (items) {
+  var list = items || [];
+  var seen = {};
+  var out = [];
+  for (var i = 0; i < list.length; i++) {
+    var files = (list[i] && list[i].changedFiles) || [];
+    for (var j = 0; j < files.length; j++) {
+      var f = files[j];
+      if (!f || !f.sharedWith || !f.sharedWith.length) continue;
+      if (seen[f.path]) continue;
+      seen[f.path] = true;
+      out.push(f.path);
+    }
+  }
+  return out.sort();
+};
+
+// Identity of the current entanglement: the shared paths plus every item id
+// involved, so adding a third item to an existing overlap counts as new.
+window.__bramWorklistOverlapSignature = function (items) {
+  var paths = window.__bramWorklistOverlapPaths(items);
+  if (!paths.length) return "";
+  var list = items || [];
+  var ids = {};
+  for (var i = 0; i < list.length; i++) {
+    var files = (list[i] && list[i].changedFiles) || [];
+    for (var j = 0; j < files.length; j++) {
+      var f = files[j];
+      if (!f || !f.sharedWith || !f.sharedWith.length) continue;
+      ids[list[i].id] = true;
+      for (var k = 0; k < f.sharedWith.length; k++) ids[f.sharedWith[k]] = true;
+    }
+  }
+  return paths.join("|") + "::" + Object.keys(ids).sort().join(",");
+};
+
+window.__bramWorklistOverlapText = function (items) {
+  var paths = window.__bramWorklistOverlapPaths(items);
+  if (!paths.length) return "";
+  var subject =
+    paths.length === 1
+      ? paths[0] + " is changed by more than one item"
+      : paths.join(", ") + " are each changed by more than one item";
+  return (
+    subject +
+    ", so committing either one on its own would include the other's changes to it. " +
+    "If you'd rather commit them separately, say so — the agent can separate the shared changes first."
+  );
+};
+
+window.__bramRestoreWorklistOverlapDismissed = function () {
+  return __bramReadLS("bram.worklistOverlapDismissed", "");
+};
+
 window.__bramSendLedgerNotice = function (payload, dismissedKey) {
   var entries = (payload && payload.entries) || [];
   var nowMs = (payload && payload.nowMs) || Date.now();

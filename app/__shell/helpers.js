@@ -1987,8 +1987,76 @@ window.__bramWorklist2Strip = function (item, claim) {
       cs.diskLabel + " · " + cs.activityLabel + (t ? " · last: " + t : ""),
     );
   }
-  if (!begun) return withCloses("No changes yet");
+  if (!begun) {
+    window.__bramWorklistStripAnomaly(item, claim, cs);
+    return withCloses("No changes yet");
+  }
   return "";
+};
+
+// strip-vs-diff-disagreement-instrument. A row was observed printing
+// "No changes yet" directly above a rendered diff of its own edits
+// (2026-08-21 ~07:12Z, on 0.5.0), correcting itself at the next refetch about
+// a minute later. The two halves have different sources of truth, which is why
+// they CAN disagree: `diff` / `changedFiles` derive from disk state (997017a),
+// while this strip is gated on `__bramWorklist2Begun` — a status/authorization
+// fact. Three inputs could each have produced it (a payload predating the
+// approval, an authorization consumed earlier than assumed, or
+// `changeSummary.changed === 0` beside a non-empty `changedFiles`), and the
+// existing trace records none of them: `/__worklist` route lines carry only
+// method, status, body size and duration.
+//
+// So this records the CONTRADICTION with the fields that discriminate, rather
+// than guessing which of the three to fix. Same conclusion #259 reached after
+// 420 observations that could not self-classify: a better instrument, not more
+// soak.
+//
+// This is a TRIPWIRE, not a soak observer. It fires only when the row is
+// actively lying, so its steady state is zero lines — and a tripwire's zero is
+// indistinguishable from a dead instrument's zero in a grep. Its provenance
+// check is a deliberate fire, never a wait. Deduped per item per contradicting
+// signature so a re-render storm cannot bury the first occurrence.
+var __bramStripAnomalySeen = {};
+window.__bramWorklistStripAnomaly = function (item, claim, cs) {
+  try {
+    if (!item) return;
+    var files = item.changedFiles || [];
+    var moved = 0;
+    for (var i = 0; i < files.length; i++) {
+      var f = files[i];
+      if (!f) continue;
+      if ((f.added || 0) > 0 || (f.removed || 0) > 0) moved++;
+    }
+    // No moved files means "No changes yet" is simply true.
+    if (!moved) return;
+    var sig =
+      String(item.id) +
+      "|" +
+      String(item.status || "") +
+      "|" +
+      String(item.activeAuthorization || "") +
+      "|" +
+      String((cs && cs.changed) || 0) +
+      "|" +
+      moved;
+    if (__bramStripAnomalySeen[sig]) return;
+    __bramStripAnomalySeen[sig] = true;
+    window.__bramIframeTrace("worklist-strip", {
+      op: "anomaly",
+      reason: "no-changes-yet-with-changed-files",
+      item: item.id,
+      status: item.status || "",
+      claimed: !!window.__bramItemInflightKind(claim, item.id, "", "", 0),
+      auth: item.activeAuthorization || "",
+      auth_age_ms: item.authorizationAgeMs == null ? -1 : item.authorizationAgeMs,
+      cs_changed: (cs && cs.changed) || 0,
+      cs_total: (cs && cs.total) || 0,
+      files_moved: moved,
+      files_total: files.length,
+    });
+  } catch (e) {
+    /* an instrument must never break the surface it watches */
+  }
 };
 // worklist2-checkbox-during-action: the row checkbox stays ticked and
 // disabled while a live claim covers the item — the tick is part of the

@@ -8868,54 +8868,139 @@ window.__bramRestoreUpdateBannerDismissed = function () {
 // raises a fresh banner. Same reasoning as the compaction banner's
 // episode-keyed dismiss: a situational warning that never returns is worse
 // than one that never appeared, because absence stops meaning anything.
-window.__bramWorklistOverlapPaths = function (items) {
+// "A", "A and B", "A, B and C"
+window.__bramJoinNames = function (names) {
+  var n = names || [];
+  if (!n.length) return "";
+  if (n.length === 1) return n[0];
+  if (n.length === 2) return n[0] + " and " + n[1];
+  return n.slice(0, -1).join(", ") + " and " + n[n.length - 1];
+};
+
+// Entanglements worth reporting, grouped by path: [{ path, ids }].
+//
+// MATERIALITY GATE. A path qualifies only when at least one item sharing it has
+// actually changed it. Two plans that merely PREDICT the same file are not
+// entangled -- they are two intentions, and either may revise its `files` list
+// before any work happens. The first version of this banner fired on declared
+// overlap and told the user that "committing either one on its own would
+// include the other's changes", while both items sat at +0 -0 on the shared
+// path: a consequence with no changes behind it, stated as present fact. A
+// warning the reader cannot verify is how a banner earns being ignored.
+window.__bramWorklistOverlapGroups = function (items, claim) {
   var list = items || [];
-  var seen = {};
-  var out = [];
-  for (var i = 0; i < list.length; i++) {
-    var files = (list[i] && list[i].changedFiles) || [];
-    for (var j = 0; j < files.length; j++) {
+  var byPath = {};
+  var i, j;
+  for (i = 0; i < list.length; i++) {
+    var item = list[i];
+    var files = (item && item.changedFiles) || [];
+    // BEGUN is the attribution proxy, and it is a proxy because Bram records
+    // no per-item hunk attribution anywhere. `changedFiles` counts are
+    // per-PATH disk truth: every item declaring a path reports that path's
+    // total uncommitted change, so two items declaring the same file both
+    // show the same numbers even when only one of them did the work (live
+    // case 2026-08-22: parallel-begin-single-claimant and history-file-links
+    // both reported +70 on lib.rs; all 70 were the latter's).
+    //
+    // So "which items changed this path" is not answerable. "Which items
+    // could have" is: an item that has never been approved has not run, and
+    // cannot have contributed. Same host facts __bramWorklist2Begun uses --
+    // status, a live claim, an approved authorization -- never agent-state
+    // inference.
+    if (!window.__bramWorklist2Begun(item, claim)) continue;
+    for (j = 0; j < files.length; j++) {
       var f = files[j];
-      if (!f || !f.sharedWith || !f.sharedWith.length) continue;
-      if (seen[f.path]) continue;
-      seen[f.path] = true;
-      out.push(f.path);
+      if (!f) continue;
+      // The path must actually have changes: nothing to sweep, no warning.
+      if ((f.added || 0) <= 0 && (f.removed || 0) <= 0) continue;
+      if (!byPath[f.path]) byPath[f.path] = {};
+      byPath[f.path][item.id] = true;
     }
   }
-  return out.sort();
+  var out = [];
+  var paths = Object.keys(byPath).sort();
+  for (i = 0; i < paths.length; i++) {
+    var ids = Object.keys(byPath[paths[i]]).sort();
+    // TWO or more begun items on a changed path. One begun item alongside
+    // another's un-started intention is not an entanglement: committing the
+    // first sweeps in nothing, because the second has not run.
+    if (ids.length < 2) continue;
+    out.push({ path: paths[i], ids: ids });
+  }
+  return out;
 };
 
 // Identity of the current entanglement: the shared paths plus every item id
-// involved, so adding a third item to an existing overlap counts as new.
-window.__bramWorklistOverlapSignature = function (items) {
-  var paths = window.__bramWorklistOverlapPaths(items);
-  if (!paths.length) return "";
-  var list = items || [];
-  var ids = {};
-  for (var i = 0; i < list.length; i++) {
-    var files = (list[i] && list[i].changedFiles) || [];
-    for (var j = 0; j < files.length; j++) {
-      var f = files[j];
-      if (!f || !f.sharedWith || !f.sharedWith.length) continue;
-      ids[list[i].id] = true;
-      for (var k = 0; k < f.sharedWith.length; k++) ids[f.sharedWith[k]] = true;
-    }
+// involved, so adding a third item to an existing overlap counts as new and
+// raises a fresh banner rather than staying silenced by an earlier dismissal.
+// Selection is deliberately NOT part of it -- dismissing silences the
+// entanglement, not a way of looking at it.
+window.__bramWorklistOverlapSignature = function (items, claim) {
+  var groups = window.__bramWorklistOverlapGroups(items, claim);
+  if (!groups.length) return "";
+  var parts = [];
+  for (var i = 0; i < groups.length; i++) {
+    parts.push(groups[i].path + ">" + groups[i].ids.join(","));
   }
-  return paths.join("|") + "::" + Object.keys(ids).sort().join(",");
+  return parts.join("|");
 };
 
-window.__bramWorklistOverlapText = function (items) {
-  var paths = window.__bramWorklistOverlapPaths(items);
-  if (!paths.length) return "";
-  var subject =
-    paths.length === 1
-      ? paths[0] + " is changed by more than one item"
-      : paths.join(", ") + " are each changed by more than one item";
-  return (
-    subject +
-    ", so committing either one on its own would include the other's changes to it. " +
-    "If you'd rather commit them separately, say so — the agent can separate the shared changes first."
-  );
+// One sentence per entangled path. Selection changes WHICH consequence is
+// imminent; it never hides the banner. A full selection is not consent to a
+// single commit -- it only means both rows are ticked -- so going quiet there
+// would decide one-commit-or-several by omission, which is the very gap this
+// banner exists to close.
+window.__bramWorklistOverlapLines = function (items, selectedIds, claim) {
+  var groups = window.__bramWorklistOverlapGroups(items, claim);
+  var selected = selectedIds || [];
+  var lines = [];
+  for (var i = 0; i < groups.length; i++) {
+    var ids = groups[i].ids;
+    var path = groups[i].path;
+    var sel = [];
+    var others = [];
+    for (var j = 0; j < ids.length; j++) {
+      if (selected.indexOf(ids[j]) !== -1) sel.push(ids[j]);
+      else others.push(ids[j]);
+    }
+
+    if (sel.length && others.length) {
+      // A proper subset is ticked: committing it sweeps in the rest.
+      lines.push(
+        "Committing " +
+          window.__bramJoinNames(sel) +
+          (sel.length === 1 ? " alone" : "") +
+          " will also commit changes from " +
+          window.__bramJoinNames(others) +
+          " to " +
+          path +
+          ". Ask the agent to separate them if you want them in different commits."
+      );
+    } else if (sel.length && !others.length) {
+      // The whole set is ticked: one commit, unless you say otherwise.
+      lines.push(
+        window.__bramJoinNames(ids) +
+          (ids.length === 2 ? " both change " : " all change ") +
+          path +
+          " and will be committed together. Ask the agent to separate them if " +
+          "you want a commit each."
+      );
+    } else {
+      // Nothing relevant ticked: name the parties and both routes.
+      var rest = ids.slice(1);
+      lines.push(
+        ids[0] +
+          " touches " +
+          path +
+          ", and " +
+          window.__bramJoinNames(rest) +
+          (rest.length === 1 ? " does" : " do") +
+          " too. The agent can combine them into a single commit, or you can " +
+          "ask for separate commits."
+      );
+    }
+  }
+  return lines;
 };
 
 window.__bramRestoreWorklistOverlapDismissed = function () {

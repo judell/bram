@@ -408,14 +408,17 @@
          overlap exists, and dismissed per-overlap (see the helpers) so a later,
          different entanglement is not silenced by an earlier dismissal. -->
     <VStack
-      when="{window.__bramWorklistOverlapSignature(worklist.value &amp;&amp; worklist.value.items) !== '' &amp;&amp; window.__bramWorklistOverlapSignature(worklist.value &amp;&amp; worklist.value.items) !== overlapDismissed}"
+      when="{window.__bramWorklistOverlapSignature(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value) !== '' &amp;&amp; window.__bramWorklistOverlapSignature(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value) !== overlapDismissed}"
       backgroundColor="$color-info-100"
       padding="$space-2"
       gap="$space-2"
       marginTop="$space-2">
-      <Text
-        fontSize="$fontSize-sm"
-        value="{window.__bramWorklistOverlapText(worklist.value &amp;&amp; worklist.value.items)}" />
+      <!-- One line per entangled path. Selection picks which consequence is
+           imminent (sweep vs single commit); it never hides the banner, since
+           a full selection is not consent to one commit. -->
+      <Items data="{window.__bramWorklistOverlapLines(worklist.value &amp;&amp; worklist.value.items, worklist2Selected, inflightClaim.value)}">
+        <Text fontSize="$fontSize-sm" value="{$item}" />
+      </Items>
       <HStack gap="$space-2" verticalAlignment="center">
         <SpaceFiller />
         <Button
@@ -423,7 +426,7 @@
           variant="ghost"
           size="xs"
           tooltip="Dismiss — a different overlap raises this again"
-          onClick="overlapDismissed = window.__bramWorklistOverlapSignature(worklist.value &amp;&amp; worklist.value.items); writeLocalStorage('bram.worklistOverlapDismissed', overlapDismissed)" />
+          onClick="overlapDismissed = window.__bramWorklistOverlapSignature(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value); writeLocalStorage('bram.worklistOverlapDismissed', overlapDismissed)" />
       </HStack>
     </VStack>
     </VStack>

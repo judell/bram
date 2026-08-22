@@ -40506,6 +40506,132 @@ fn write_worklist_authorization_record<R: tauri::Runtime>(
 // cleared while the item lives; pruned with it. Existing stamps are left
 // alone -- the first approval is when work began, and a later re-approval
 // (an iterate, a second gate) must not move the timestamp.
+// reconcile-dropped-advance, phase 1 (observe only).
+//
+// Applying an approved item is two agent-driven steps -- edit the files, then
+// `mutate op:"advance"` -- and nothing reconciles them. If the turn ends
+// between, the item sits `proposed` with its work on disk indefinitely: no
+// detector notices, nothing ages out or retries, and the only signal is a
+// person reading a row and thinking the button looks wrong. That happened at
+// least three times on 2026-08-22, twice from mid-apply interrupts and once
+// from an agent that resumed and dropped the outstanding advance.
+//
+// The state is cheap to recognise -- `proposed`, begun, and carrying changes --
+// but "mid-apply right now" and "abandoned" are the SAME observation in a
+// single sample. They differ only in what happens next, which is why this
+// ships as an observer rather than a fix. `op=pending` is rate-limited per
+// item and carries the discriminators; `op=cleared` fires when an item leaves
+// the state, so the soak is a grep rather than an inference:
+//
+//   short age + live claim + recent change   -> mid-apply, expect a clear
+//   long age + no claim + stale change       -> a dropped advance
+//
+// Graduation (from the item's draft, falsifiable against the soak): every fire
+// that is genuinely mid-apply resolves within one turn, and fires that persist
+// past a turn boundary correspond to a real dropped advance. Phase 2 -- surface
+// or reconcile -- is deliberately undecided until that data exists, because
+// auto-advancing work that is merely INCOMPLETE would assert a completeness
+// nobody checked.
+fn pending_advance_state_cell() -> &'static Mutex<std::collections::HashMap<String, (i64, i64)>> {
+    // id -> (first_seen_ms, last_emit_ms)
+    static CELL: OnceLock<Mutex<std::collections::HashMap<String, (i64, i64)>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+const PENDING_ADVANCE_EMIT_INTERVAL_MS: i64 = 60_000;
+
+fn observe_pending_advances<R: tauri::Runtime>(app: &AppHandle<R>, doc: &serde_json::Value) {
+    if !bram_trace_enabled() {
+        return;
+    }
+    let now_ms = unix_now_ms();
+    let claimed: std::collections::HashSet<String> = inflight_claim_ids_and_claimed_at(app)
+        .map(|(ids, _)| ids.into_iter().collect())
+        .unwrap_or_default();
+
+    let mut in_state: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if let Some(items) = doc.get("items").and_then(|v| v.as_array()) {
+        for item in items {
+            let Some(id) = item.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if item.get("status").and_then(|v| v.as_str()).unwrap_or("proposed") != "proposed" {
+                continue;
+            }
+            // Durable begun (1b74dc3). Before that stamp this check would have
+            // keyed on a displaceable authorization and silently stopped
+            // noticing as soon as another item was approved.
+            let Some(begun_at_ms) = item.get("begunAtMs").and_then(|v| v.as_i64()) else {
+                continue;
+            };
+            let summary = item.get("changeSummary");
+            let changed = summary
+                .and_then(|s| s.get("changed"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            if changed <= 0 {
+                continue;
+            }
+            let total = summary
+                .and_then(|s| s.get("total"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let last_change_ms = summary
+                .and_then(|s| s.get("lastChangeMs"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let last_change_ago = if last_change_ms > 0 {
+                now_ms - last_change_ms
+            } else {
+                -1
+            };
+            in_state.insert(
+                id.to_string(),
+                format!(
+                    "age_ms={} claim={} files_changed={} files_total={} last_change_ago_ms={}",
+                    now_ms - begun_at_ms,
+                    if claimed.contains(id) { "live" } else { "none" },
+                    changed,
+                    total,
+                    last_change_ago
+                ),
+            );
+        }
+    }
+
+    let Ok(mut tracked) = pending_advance_state_cell().lock() else {
+        return;
+    };
+    // Left the state: advanced, pruned, or its changes went away.
+    let gone: Vec<String> = tracked
+        .keys()
+        .filter(|id| !in_state.contains_key(*id))
+        .cloned()
+        .collect();
+    for id in gone {
+        if let Some((first_seen, _)) = tracked.remove(&id) {
+            append_bram_trace_line(
+                app,
+                "worklist-advance",
+                &format!("op=cleared item={} pending_ms={}", id, now_ms - first_seen),
+            );
+        }
+    }
+    for (id, fields) in in_state {
+        let entry = tracked.entry(id.clone()).or_insert((now_ms, 0));
+        if now_ms - entry.1 < PENDING_ADVANCE_EMIT_INTERVAL_MS {
+            continue;
+        }
+        entry.1 = now_ms;
+        let pending_ms = now_ms - entry.0;
+        append_bram_trace_line(
+            app,
+            "worklist-advance",
+            &format!("op=pending item={} pending_ms={} {}", id, pending_ms, fields),
+        );
+    }
+}
+
 fn stamp_worklist_items_begun<R: tauri::Runtime>(app: &AppHandle<R>, ids: &[String]) {
     if ids.is_empty() {
         return;
@@ -44503,6 +44629,7 @@ fn route_request<R: tauri::Runtime>(
                 }
             }
         }
+        observe_pending_advances(app, &doc);
         let body = serde_json::to_vec(&doc).unwrap_or_default();
         return (200, "application/json; charset=utf-8", body);
     }

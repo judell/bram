@@ -8424,16 +8424,13 @@ fn schedule_pty_turn_finished<R: tauri::Runtime>(
                     Some(SessionProvider::Codex) => {
                         codex_jsonl_completion_decision(&content).detected
                     }
-                    _ => {
-                        claude_jsonl_completion_decision(&content).detected
-                            && !claude_jsonl_end_is_stale(
-                                claude_jsonl_last_assistant_ts_ms(&content),
-                                claude_turn_stats_cell()
-                                    .lock()
-                                    .ok()
-                                    .and_then(|g| g.as_ref().map(|s| s.user_ts_ms)),
-                            )
-                    }
+                    _ => claude_turn_is_done(
+                        &content,
+                        claude_turn_stats_cell()
+                            .lock()
+                            .ok()
+                            .and_then(|g| g.as_ref().map(|s| s.user_ts_ms)),
+                    ),
                 },
                 Err(_) => true,
             },
@@ -35153,6 +35150,17 @@ fn jsonl_tail_shape(content: &str, max_records: usize) -> String {
 }
 
 fn claude_jsonl_completion_decision(content: &str) -> JsonlCompletionDecision {
+    claude_jsonl_completion_decision_at(content).0
+}
+
+// The decision, plus the timestamp of the record it was decided from.
+//
+// Callers that also apply a freshness check need that second value, because
+// testing the freshness of a DIFFERENT record than the one the decision came
+// from is how an interrupted turn stayed open forever (#259; see
+// `claude_turn_is_done`). For an ordinary turn the deciding record IS the last
+// assistant record, so this changes nothing there.
+fn claude_jsonl_completion_decision_at(content: &str) -> (JsonlCompletionDecision, Option<i64>) {
     for line in content.lines().rev() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -35161,6 +35169,10 @@ fn claude_jsonl_completion_decision(content: &str) -> JsonlCompletionDecision {
         let Ok(entry) = serde_json::from_str::<serde_json::Value>(trimmed) else {
             continue;
         };
+        let deciding_ts_ms = entry
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .and_then(parse_iso_to_ms);
         // issue #259: an interrupted turn's last assistant record is
         // permanently non-final -- no `stop_reason: end_turn` is ever coming --
         // so the veto below never lifts and the status pins at "working" until
@@ -35171,10 +35183,13 @@ fn claude_jsonl_completion_decision(content: &str) -> JsonlCompletionDecision {
         // earlier turn cannot leak forward: the current turn's own records are
         // newer and decide first.
         if claude_record_is_interrupt(&entry) {
-            return JsonlCompletionDecision {
-                detected: true,
-                reason: "user-interrupted",
-            };
+            return (
+                JsonlCompletionDecision {
+                    detected: true,
+                    reason: "user-interrupted",
+                },
+                deciding_ts_ms,
+            );
         }
         if entry.get("type").and_then(|v| v.as_str()) != Some("assistant") {
             continue;
@@ -35184,19 +35199,25 @@ fn claude_jsonl_completion_decision(content: &str) -> JsonlCompletionDecision {
             .and_then(|m| m.get("stop_reason"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        return JsonlCompletionDecision {
-            detected: stop_reason == "end_turn",
-            reason: if stop_reason == "end_turn" {
-                "end_turn"
-            } else {
-                "non-final-assistant"
+        return (
+            JsonlCompletionDecision {
+                detected: stop_reason == "end_turn",
+                reason: if stop_reason == "end_turn" {
+                    "end_turn"
+                } else {
+                    "non-final-assistant"
+                },
             },
-        };
+            deciding_ts_ms,
+        );
     }
-    JsonlCompletionDecision {
-        detected: false,
-        reason: "no-assistant-record",
-    }
+    (
+        JsonlCompletionDecision {
+            detected: false,
+            reason: "no-assistant-record",
+        },
+        None,
+    )
 }
 
 // A `user` JSONL record that is a real user message, not a tool_result. Normal
@@ -35360,9 +35381,115 @@ fn claude_jsonl_end_is_stale(
     matches!((turn_user_ts_ms, last_assistant_ts_ms), (Some(u), Some(a)) if a < u)
 }
 
+// Is this Claude turn over? The completion decision AND a freshness check,
+// which is the shape the call sites have always used -- the staleness guard
+// stops a PREVIOUS turn's `end_turn` from closing the current one.
+//
+// The two halves must be computed from the SAME record, which is the whole
+// point of this function existing. They were not: the decision came from
+// whichever record `claude_jsonl_completion_decision` stopped on, while the
+// freshness check always used the last *assistant* record. For an ordinary turn
+// those are the same record and the mismatch is invisible.
+//
+// An interrupt is where they diverge. The interrupt marker is itself a `user`
+// record, so `compute_claude_turn_stats` adopts its timestamp as the turn's
+// user timestamp (it is not a `tool_result`, so the reverse scan stops there),
+// which places it after every assistant record in the file. Nothing can follow
+// it, because the turn ended there. So the staleness test compared an assistant
+// record that necessarily predates the interrupt against the interrupt itself,
+// returned "stale" forever, and the conjunction could never close -- the status
+// pinned at "working" and every gate keyed to it stayed held (#259).
+//
+// Observed live on 0.5.0 before this fix: `decision=user-interrupted` twice,
+// eighty seconds of byte-silence, and the turn still open.
+fn claude_turn_is_done(content: &str, turn_user_ts_ms: Option<i64>) -> bool {
+    let (decision, deciding_ts_ms) = claude_jsonl_completion_decision_at(content);
+    decision.detected && !claude_jsonl_end_is_stale(deciding_ts_ms, turn_user_ts_ms)
+}
+
 #[cfg(test)]
 mod claude_jsonl_freshness_tests {
-    use super::{claude_jsonl_end_is_stale, claude_jsonl_last_assistant_ts_ms};
+    use super::{
+        claude_jsonl_completion_decision, claude_jsonl_end_is_stale,
+        claude_jsonl_last_assistant_ts_ms, claude_turn_is_done, compute_claude_turn_stats,
+    };
+
+    // An interrupted turn, in the shape Claude Code actually writes it: the
+    // user's request, a non-final assistant record, then the interrupt marker
+    // as a `user` record with a text block.
+    const INTERRUPTED: &str = concat!(
+        r#"{"type":"user","timestamp":"2026-08-22T18:48:00.000Z","message":{"role":"user","content":[{"type":"text","text":"do the thing"}]}}"#,
+        "\n",
+        r#"{"type":"assistant","timestamp":"2026-08-22T18:48:30.000Z","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_1","name":"Bash"}]}}"#,
+        "\n",
+        r#"{"type":"user","timestamp":"2026-08-22T18:48:45.000Z","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#,
+        "\n",
+    );
+
+    #[test]
+    fn interrupt_marker_becomes_the_turn_user_timestamp() {
+        // Not incidental: the interrupt record is a `user` record whose first
+        // content block is text, not tool_result, so the reverse scan in
+        // compute_claude_turn_stats stops there and adopts its timestamp. That
+        // is what places the turn's user timestamp AFTER every assistant
+        // record, and it is the mechanism behind the bug below.
+        let stats = compute_claude_turn_stats(INTERRUPTED.as_bytes()).expect("turn stats");
+        let interrupt_ts = 1787424525000i64; // 2026-08-22T18:48:45.000Z
+        assert_eq!(stats.user_ts_ms, interrupt_ts);
+        assert!(
+            claude_jsonl_last_assistant_ts_ms(INTERRUPTED).unwrap() < stats.user_ts_ms,
+            "the last assistant record necessarily predates the interrupt"
+        );
+    }
+
+    #[test]
+    fn interrupted_turn_resolves_as_done() {
+        // #259. The decision half already recognises the interrupt (9a7e4ef);
+        // the freshness half then vetoes it forever, because it compares a
+        // different record than the one the decision was made from. Nothing
+        // can ever follow the interrupt, so the veto never lifts.
+        let decision = claude_jsonl_completion_decision(INTERRUPTED);
+        assert!(decision.detected, "the interrupt is recognised");
+        assert_eq!(decision.reason, "user-interrupted");
+
+        let stats = compute_claude_turn_stats(INTERRUPTED.as_bytes()).expect("turn stats");
+        assert!(
+            claude_turn_is_done(INTERRUPTED, Some(stats.user_ts_ms)),
+            "an interrupted turn is over; the freshness check must not veto the \
+             decision by testing a record the decision was not made from"
+        );
+    }
+
+    #[test]
+    fn ordinary_completed_turn_still_resolves_as_done() {
+        let content = concat!(
+            r#"{"type":"user","timestamp":"2026-08-22T18:48:00.000Z","message":{"role":"user","content":[{"type":"text","text":"go"}]}}"#,
+            "\n",
+            r#"{"type":"assistant","timestamp":"2026-08-22T18:48:30.000Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}"#,
+            "\n",
+        );
+        let stats = compute_claude_turn_stats(content.as_bytes()).expect("turn stats");
+        assert!(claude_turn_is_done(content, Some(stats.user_ts_ms)));
+    }
+
+    #[test]
+    fn prior_turn_end_does_not_close_the_current_turn() {
+        // The reason the staleness guard exists. A completed turn followed by a
+        // NEW user message must not read as done: the end_turn predates the
+        // new request.
+        let content = concat!(
+            r#"{"type":"assistant","timestamp":"2026-08-22T18:48:00.000Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}"#,
+            "\n",
+            r#"{"type":"user","timestamp":"2026-08-22T18:49:00.000Z","message":{"role":"user","content":[{"type":"text","text":"next request"}]}}"#,
+            "\n",
+        );
+        let stats = compute_claude_turn_stats(content.as_bytes()).expect("turn stats");
+        assert!(
+            !claude_turn_is_done(content, Some(stats.user_ts_ms)),
+            "a prior turn's end_turn must not close the turn that follows it"
+        );
+    }
+
 
     #[test]
     fn end_is_stale_only_when_record_predates_turn() {
@@ -35668,10 +35795,13 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
     // PRIOR turn's assistant record. Gate BOTH consumers below on this -- the
     // finished-cue emit AND the inflight-sentinel clear -- so a stale end neither
     // flips the banner to Finished nor clears the Worklist spinner mid-turn.
+    // `detected && !done` is exactly `detected && stale`, but routed through
+    // claude_turn_is_done so this consumer and the fire-time guard cannot drift
+    // apart on which record freshness is measured against (#259).
     let claude_stale_end = provider == JsonlCompletionProvider::Claude
         && decision.detected
-        && claude_jsonl_end_is_stale(
-            claude_jsonl_last_assistant_ts_ms(&content),
+        && !claude_turn_is_done(
+            &content,
             claude_turn_stats_cell()
                 .lock()
                 .ok()
@@ -38967,6 +39097,26 @@ mod turn_completion_tests {
         let decision = codex_jsonl_completion_decision(content);
         assert!(decision.detected);
         assert_eq!(decision.reason, "turn_aborted");
+    }
+
+    #[test]
+    fn codex_aborted_turn_does_not_leak_into_the_next_turn() {
+        // The Codex counterpart of the Claude staleness guard, and the reason
+        // Codex needs no such guard: turn boundaries are encoded IN the reverse
+        // scan. A new task_started after the abort is met first and returns
+        // not-done, so an old turn_aborted cannot close the turn that follows
+        // it. Claude's decision only looks for the last assistant record, which
+        // is why it needed an external freshness comparison -- and that
+        // external comparison is what #259 broke. The asymmetry is deliberate,
+        // not an oversight, and this test pins it.
+        let content = r#"
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}
+{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"t1","reason":"interrupted"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"t2"}}
+"#;
+        let decision = codex_jsonl_completion_decision(content);
+        assert!(!decision.detected, "a new task must not read as complete");
+        assert_eq!(decision.reason, "next-task-started");
     }
 
     #[test]

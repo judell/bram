@@ -4858,142 +4858,71 @@ window.subscribeTauriEvent("__bramNativeToolbarPtyMenuUnsub",
   window.parent.postMessage({ type: "bram-terminal-visibility-request" }, "*");
 })();
 
-// Host terminal-attention + parent terminal-visibility join (issue-234).
-// The Rust host owns the no-open-turn + byte-silent + prompt-shape
-// predicate (`terminal-attention-changed`); main.js owns terminal
-// visibility. This isolated bridge derives the footer banner's displayed
-// state: active only when BOTH the host says an unattended prompt is
-// showing AND the terminal pane is hidden. Deliberately simpler than the
-// suspicious-silence bridge just above (no per-episode dismissal, no
-// self-test hook, no explicit "reopen dismisses it" bookkeeping) because
-// this banner has no dismiss button — it clears itself the moment either
-// side of the join goes false (host clear on PTY activity, or the terminal
-// becoming visible), so there is no dismissed-episode state to track.
-(function () {
-  var subscribers = new Set();
-  var hostValue = null;
-  var terminalHidden = null;
-  var lastValue = { active: false, shape: null, terminalHidden: null };
-  var lastSignature = "";
-  var hostSubscribed = false;
-
-  var derivedValue = function () {
-    var active = !!(hostValue && hostValue.active && terminalHidden === true);
-    return Object.assign({}, hostValue || {}, {
-      active: active,
-      terminalHidden: terminalHidden,
-    });
-  };
-  var notify = function () {
-    var next = derivedValue();
-    var signature = JSON.stringify(next);
-    if (signature === lastSignature) return;
-    var wasActive = !!(lastValue && lastValue.active);
-    lastSignature = signature;
-    lastValue = next;
-    if (wasActive !== !!next.active) {
-      window.__bramIframeTrace("terminal-attention", {
-        op: next.active ? "warn" : "cleared",
-        terminalHidden: terminalHidden,
-        shape: next.shape || "",
-        atMs: next.atMs || 0,
-      });
-    }
-    subscribers.forEach(function (fn) {
-      try { fn(); } catch (e) { console.error("[bram] terminal-attention subscriber threw:", e); }
-    });
-  };
-
-  // Duplicated rather than shared with the suspicious-silence listener
-  // above: each footer bridge in this file owns its own isolated
-  // "bram-terminal-visibility" listener so one subscriber's derived-state
-  // recompute never depends on another's internal ordering. Same
-  // per-component-isolation rationale as FooterAgentStatus.xmlui's PushSource
-  // split.
-  window.addEventListener("message", function (event) {
-    var data = event && event.data;
-    if (!data || event.source !== window.parent) return;
-    if (data.type !== "bram-terminal-visibility") return;
-    terminalHidden = !!data.hidden;
-    notify();
-  });
-
-  var ensureHostSubscribed = function () {
-    if (hostSubscribed) return;
-    hostSubscribed = true;
-    window.subscribeTauriEvent(
-      "__bramNativeTerminalAttentionUnsub",
-      "terminal-attention-changed",
-      function (event) {
-        hostValue = (event && event.payload) || null;
-        notify();
-      }
-    );
-  };
-
-  window.bramSubscribeTerminalAttention = (function () {
-    var factory;
-    return function () {
-      if (factory) return factory;
-      ensureHostSubscribed();
-      factory = function (emit) {
-        var fire = function () { emit(lastValue); };
-        subscribers.add(fire);
-        fire();
-        return function () { subscribers.delete(fire); };
-      };
-      return factory;
-    };
-  })();
-
-  // Banner button (issue-234 iterate): reveal the terminal from the pane,
-  // via the parent's existing bram-open-terminal handler (the
-  // suspicious-silence button's mechanism). No episode bookkeeping — the
-  // reveal flips terminalHidden, which alone clears the derived banner.
-  window.__bramOpenTerminalForAttention = function () {
-    window.parent.postMessage({ type: "bram-open-terminal" }, "*");
-  };
-
-  window.parent.postMessage({ type: "bram-terminal-visibility-request" }, "*");
-})();
-
-// Host compaction + parent terminal-visibility join
-// (compaction-in-progress-banner). The Rust host owns a text-PRESENCE
-// detector (`compaction-changed`) that is deliberately NOT the
-// terminal-attention byte-silence path above: compaction actively prints a
-// spinner, so it fires when the live PTY tail CONTAINS the provider's
-// "Compacting conversation" progress line and clears the instant it no
-// longer does. This bridge derives the footer banner's displayed state
-// (active only when BOTH the host says compaction is in progress AND the
-// terminal pane is hidden — same join shape as terminal-attention above)
-// and layers an episode-keyed dismiss on top, modeled on the
-// suspicious-silence bridge further up this file: a ✕ click suppresses
-// only the CURRENT compaction episode, and the next compaction (a fresh
-// host Fire, which carries a new `atMs`) re-shows the banner. The host
-// payload has no explicit episode id, so `atMs` — stable for the whole
-// active span since the host only emits on Fire/Clear, not continuously —
-// stands in as the episode key.
-(function () {
+// Terminal-visibility banner bridge factory (issue-270).
+//
+// The two bridges below answer the same question -- is the host reporting an
+// active condition AND is the terminal pane hidden? -- and each used to carry
+// its own copy of the same scaffolding: a "bram-terminal-visibility" listener,
+// a hostValue slot, a terminalHidden flag, a derived-state flip guard, a
+// __bramIframeTrace emit, and a subscriber fan-out with per-subscriber
+// try/catch. Adding a shape meant another copy.
+//
+// The per-bridge ISOLATION those copies provided is deliberate and is kept
+// here: every call builds a fresh closure set with its own listener, its own
+// state, and its own subscriber list, so one subscriber's derived-state
+// recompute still cannot depend on another's internal ordering (the same
+// rationale as FooterAgentStatus.xmlui's PushSource split). What is shared is
+// the code that BUILDS a bridge, never anything two bridges hold at runtime.
+// #270 originally asked for one consolidated bridge, which would have reverted
+// that isolation; the issue carries a correction and this is the corrected
+// shape.
+//
+// The suspicious-silence bridge above is deliberately NOT built on this. It
+// carries machinery the other two have no analogue for -- reopening the
+// terminal dismisses the episode and posts back to the parent, its notify()
+// threads a reason through to the trace, and its self-test payload is far
+// richer. Folding it in would mean four more hooks in this spec, and the
+// factory would become harder to read than the copy it replaced. Fold it in
+// only if a shape ever needs that reopen-dismisses behavior too.
+//
+// spec:
+//   event        Tauri event name carrying the host payload
+//   unsubGlobal  window key handed to subscribeTauriEvent
+//   subkind      __bramIframeTrace subkind for the warn/cleared flip
+//   initial      value emitted to subscribers before the first host payload
+//   traceFields  optional (next) -> extra fields merged into the trace line
+//   episodeOf    optional (hostValue) -> episode key; supplying it enables
+//                dismiss(), which suppresses only the current episode
+//   testType     optional parent message type carrying a self-test payload
+//   onTest       optional (data) -> synthetic host payload for that message
+//
+// Returns { subscribe, dismiss }. `subscribe` is the memoized
+// factory-of-factories the XMLUI PushSources expect.
+window.__bramMakeTerminalVisibilityBridge = function (spec) {
   var subscribers = new Set();
   var hostValue = null;
   var terminalHidden = null;
   var suppressedEpisode = "";
-  var lastValue = { active: false, provider: "", terminalHidden: null };
+  var lastValue = spec.initial || { active: false, terminalHidden: null };
   var lastSignature = "";
   var hostSubscribed = false;
 
   var episodeOf = function (value) {
-    return value && value.active ? String(value.atMs || "") : "";
+    return spec.episodeOf ? spec.episodeOf(value) : "";
   };
+
   var derivedValue = function () {
-    var episode = episodeOf(hostValue);
-    var active = !!(hostValue && hostValue.active && terminalHidden === true &&
-      (!suppressedEpisode || suppressedEpisode !== episode));
+    var active = !!(hostValue && hostValue.active && terminalHidden === true);
+    if (active && spec.episodeOf && suppressedEpisode &&
+        suppressedEpisode === episodeOf(hostValue)) {
+      active = false;
+    }
     return Object.assign({}, hostValue || {}, {
       active: active,
       terminalHidden: terminalHidden,
     });
   };
+
   var notify = function () {
     var next = derivedValue();
     var signature = JSON.stringify(next);
@@ -5002,37 +4931,26 @@ window.subscribeTauriEvent("__bramNativeToolbarPtyMenuUnsub",
     lastSignature = signature;
     lastValue = next;
     if (wasActive !== !!next.active) {
-      window.__bramIframeTrace("compaction", {
+      var fields = {
         op: next.active ? "warn" : "cleared",
         terminalHidden: terminalHidden,
-        provider: next.provider || "",
-        atMs: next.atMs || 0,
-      });
+      };
+      if (spec.traceFields) Object.assign(fields, spec.traceFields(next));
+      window.__bramIframeTrace(spec.subkind, fields);
     }
     subscribers.forEach(function (fn) {
-      try { fn(); } catch (e) { console.error("[bram] compaction subscriber threw:", e); }
+      try { fn(); } catch (e) {
+        console.error("[bram] " + spec.subkind + " subscriber threw:", e);
+      }
     });
   };
 
-  // Duplicated rather than shared with the other footer bridges above:
-  // each owns its own isolated "bram-terminal-visibility" listener so one
-  // subscriber's derived-state recompute never depends on another's
-  // internal ordering. Same per-component-isolation rationale as
-  // FooterAgentStatus.xmlui's PushSource split.
   window.addEventListener("message", function (event) {
     var data = event && event.data;
     if (!data || event.source !== window.parent) return;
-    if (data.type === "bram-compaction-test") {
-      // Self-test hook (compaction-in-progress-banner testing), dispatched
-      // by app/main.js's postCompactionSelfTest -- parallel to the
-      // suspicious-silence self-test above, but posted directly as a fake
-      // host payload rather than routed through a real Tauri event.
-      hostValue = {
-        active: !!data.active,
-        provider: data.provider || "self-test",
-        atMs: Number(data.atMs) || Date.now(),
-      };
-      if (!hostValue.active) suppressedEpisode = "";
+    if (spec.testType && data.type === spec.testType) {
+      hostValue = spec.onTest(data);
+      if (!hostValue || !hostValue.active) suppressedEpisode = "";
       notify();
       return;
     }
@@ -5044,18 +4962,14 @@ window.subscribeTauriEvent("__bramNativeToolbarPtyMenuUnsub",
   var ensureHostSubscribed = function () {
     if (hostSubscribed) return;
     hostSubscribed = true;
-    window.subscribeTauriEvent(
-      "__bramCompactionUnsub",
-      "compaction-changed",
-      function (event) {
-        hostValue = (event && event.payload) || null;
-        if (!hostValue || !hostValue.active) suppressedEpisode = "";
-        notify();
-      }
-    );
+    window.subscribeTauriEvent(spec.unsubGlobal, spec.event, function (event) {
+      hostValue = (event && event.payload) || null;
+      if (!hostValue || !hostValue.active) suppressedEpisode = "";
+      notify();
+    });
   };
 
-  window.bramSubscribeCompaction = (function () {
+  var subscribe = (function () {
     var factory;
     return function () {
       if (factory) return factory;
@@ -5070,17 +4984,92 @@ window.subscribeTauriEvent("__bramNativeToolbarPtyMenuUnsub",
     };
   })();
 
-  // Banner ✕ (compaction-in-progress-banner): suppress only the episode
-  // active right now. A later compaction fires a new `atMs`, a new
-  // episode key, and re-shows the banner unconditionally.
-  window.__bramDismissCompaction = function () {
-    if (hostValue && hostValue.active) {
-      suppressedEpisode = episodeOf(hostValue);
-      notify();
-    }
-  };
-
   window.parent.postMessage({ type: "bram-terminal-visibility-request" }, "*");
+
+  return {
+    subscribe: subscribe,
+    dismiss: function () {
+      if (hostValue && hostValue.active) {
+        suppressedEpisode = episodeOf(hostValue);
+        notify();
+      }
+    },
+  };
+};
+
+// Host terminal-attention + parent terminal-visibility join (issue-234).
+// The Rust host owns the no-open-turn + byte-silent + prompt-shape
+// predicate (`terminal-attention-changed`); main.js owns terminal
+// visibility. The banner is active only when BOTH the host says an
+// unattended prompt is showing AND the terminal pane is hidden. No episode
+// bookkeeping and no dismiss: this banner has no ✕ — it clears itself the
+// moment either side of the join goes false (host clear on PTY activity, or
+// the terminal becoming visible), so there is no dismissed-episode state to
+// track and no episodeOf in its spec.
+(function () {
+  var bridge = window.__bramMakeTerminalVisibilityBridge({
+    event: "terminal-attention-changed",
+    unsubGlobal: "__bramNativeTerminalAttentionUnsub",
+    subkind: "terminal-attention",
+    initial: { active: false, shape: null, terminalHidden: null },
+    traceFields: function (next) {
+      return { shape: next.shape || "", atMs: next.atMs || 0 };
+    },
+  });
+  window.bramSubscribeTerminalAttention = bridge.subscribe;
+
+  // Banner button (issue-234 iterate): reveal the terminal from the pane,
+  // via the parent's existing bram-open-terminal handler (the
+  // suspicious-silence button's mechanism). No episode bookkeeping — the
+  // reveal flips terminalHidden, which alone clears the derived banner.
+  window.__bramOpenTerminalForAttention = function () {
+    window.parent.postMessage({ type: "bram-open-terminal" }, "*");
+  };
+})();
+
+// Host compaction + parent terminal-visibility join
+// (compaction-in-progress-banner). The Rust host owns a text-PRESENCE
+// detector (`compaction-changed`) that is deliberately NOT the
+// terminal-attention byte-silence path above: compaction actively prints a
+// spinner, so it fires when the live PTY tail CONTAINS the provider's
+// "Compacting conversation" progress line and clears the instant it no
+// longer does. Same join shape as terminal-attention, plus an episode-keyed
+// dismiss modeled on the suspicious-silence bridge further up this file: a ✕
+// click suppresses only the CURRENT compaction episode, and the next
+// compaction (a fresh host Fire, which carries a new `atMs`) re-shows the
+// banner. The host payload has no explicit episode id, so `atMs` — stable
+// for the whole active span since the host only emits on Fire/Clear, not
+// continuously — stands in as the episode key.
+(function () {
+  var bridge = window.__bramMakeTerminalVisibilityBridge({
+    event: "compaction-changed",
+    unsubGlobal: "__bramCompactionUnsub",
+    subkind: "compaction",
+    initial: { active: false, provider: "", terminalHidden: null },
+    traceFields: function (next) {
+      return { provider: next.provider || "", atMs: next.atMs || 0 };
+    },
+    episodeOf: function (value) {
+      return value && value.active ? String(value.atMs || "") : "";
+    },
+    // Self-test hook (compaction-in-progress-banner testing), dispatched by
+    // app/main.js's postCompactionSelfTest -- posted directly as a fake host
+    // payload rather than routed through a real Tauri event.
+    testType: "bram-compaction-test",
+    onTest: function (data) {
+      return {
+        active: !!data.active,
+        provider: data.provider || "self-test",
+        atMs: Number(data.atMs) || Date.now(),
+      };
+    },
+  });
+  window.bramSubscribeCompaction = bridge.subscribe;
+
+  // Banner ✕ (compaction-in-progress-banner): suppress only the episode
+  // active right now. A later compaction fires a new `atMs`, a new episode
+  // key, and re-shows the banner unconditionally.
+  window.__bramDismissCompaction = bridge.dismiss;
 })();
 
 // External-driven PTY-throughput bridge (transcript-nav-activity-sparkline).

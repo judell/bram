@@ -40524,10 +40524,99 @@ fn write_worklist_authorization_record<R: tauri::Runtime>(
 // or reconcile -- is deliberately undecided until that data exists, because
 // auto-advancing work that is merely INCOMPLETE would assert a completeness
 // nobody checked.
-fn pending_advance_state_cell() -> &'static Mutex<std::collections::HashMap<String, (i64, i64)>> {
-    // id -> (first_seen_ms, last_emit_ms)
-    static CELL: OnceLock<Mutex<std::collections::HashMap<String, (i64, i64)>>> = OnceLock::new();
+//
+// The map is persisted to the app cache dir and hydrated on first use, so a
+// restart does not break the pairing: an item advanced while Bram was down
+// still emits `op=cleared` on the next observation, and `pending_ms` keeps
+// counting from the original sighting. Entries that outlived a process carry
+// `carried=true` on both ops, because their `pending_ms` includes downtime and
+// the "resolved within one turn" reading does not apply to them as written.
+#[derive(Clone, Copy)]
+struct PendingAdvanceEntry {
+    first_seen_ms: i64,
+    last_emit_ms: i64,
+    // True when this entry was loaded from a previous process. Its
+    // `pending_ms` then spans downtime, so the soak's "resolved within one
+    // turn" reading does not apply to it unmodified.
+    carried: bool,
+}
+
+fn pending_advance_state_cell() -> &'static Mutex<std::collections::HashMap<String, PendingAdvanceEntry>>
+{
+    // id -> PendingAdvanceEntry
+    static CELL: OnceLock<Mutex<std::collections::HashMap<String, PendingAdvanceEntry>>> =
+        OnceLock::new();
     CELL.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn pending_advance_state_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+    let root = project_root(Some(app)).ok_or("could not resolve project root")?;
+    let abs = strip_unc_prefix(root.canonicalize().map_err(|e| e.to_string())?);
+    let encoded = encode_path_for_filename(&abs);
+    let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+    Ok(cache_dir
+        .join("worklist-advance-pending")
+        .join(format!("{}.json", encoded)))
+}
+
+fn load_pending_advance_state<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> std::collections::HashMap<String, PendingAdvanceEntry> {
+    let mut out = std::collections::HashMap::new();
+    let Ok(path) = pending_advance_state_path(app) else {
+        return out;
+    };
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return out;
+    };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return out;
+    };
+    let Some(map) = doc.as_object() else {
+        return out;
+    };
+    for (id, rec) in map {
+        let first_seen_ms = rec.get("firstSeenMs").and_then(|v| v.as_i64()).unwrap_or(0);
+        if first_seen_ms <= 0 {
+            continue;
+        }
+        out.insert(
+            id.clone(),
+            PendingAdvanceEntry {
+                first_seen_ms,
+                last_emit_ms: rec.get("lastEmitMs").and_then(|v| v.as_i64()).unwrap_or(0),
+                carried: true,
+            },
+        );
+    }
+    out
+}
+
+fn save_pending_advance_state<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    tracked: &std::collections::HashMap<String, PendingAdvanceEntry>,
+) {
+    let Ok(path) = pending_advance_state_path(app) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    let mut doc = serde_json::Map::new();
+    for (id, entry) in tracked {
+        doc.insert(
+            id.clone(),
+            serde_json::json!({
+                "firstSeenMs": entry.first_seen_ms,
+                "lastEmitMs": entry.last_emit_ms,
+            }),
+        );
+    }
+    if let Ok(text) = serde_json::to_string(&serde_json::Value::Object(doc)) {
+        let _ = std::fs::write(&path, text);
+    }
 }
 
 const PENDING_ADVANCE_EMIT_INTERVAL_MS: i64 = 60_000;
@@ -40682,6 +40771,17 @@ fn observe_pending_advances<R: tauri::Runtime>(app: &AppHandle<R>, doc: &serde_j
     let Ok(mut tracked) = pending_advance_state_cell().lock() else {
         return;
     };
+    // Hydrate once per process. Without this a restart between an `op=pending`
+    // emit and the advance drops the `op=cleared` half -- and "fired pending,
+    // never cleared" is exactly the dropped-advance signature, so every
+    // relaunch mid-apply would mint a permanent false positive in the log.
+    static HYDRATED: OnceLock<()> = OnceLock::new();
+    if HYDRATED.set(()).is_ok() {
+        for (id, entry) in load_pending_advance_state(app) {
+            tracked.entry(id).or_insert(entry);
+        }
+    }
+    let mut dirty = false;
     // Left the state: advanced, pruned, or its changes went away.
     let gone: Vec<String> = tracked
         .keys()
@@ -40689,26 +40789,47 @@ fn observe_pending_advances<R: tauri::Runtime>(app: &AppHandle<R>, doc: &serde_j
         .cloned()
         .collect();
     for id in gone {
-        if let Some((first_seen, _)) = tracked.remove(&id) {
+        if let Some(entry) = tracked.remove(&id) {
+            dirty = true;
             append_bram_trace_line(
                 app,
                 "worklist-advance",
-                &format!("op=cleared item={} pending_ms={}", id, now_ms - first_seen),
+                &format!(
+                    "op=cleared item={} pending_ms={} carried={}",
+                    id,
+                    now_ms - entry.first_seen_ms,
+                    entry.carried
+                ),
             );
         }
     }
     for (id, fields) in in_state {
-        let entry = tracked.entry(id.clone()).or_insert((now_ms, 0));
-        if now_ms - entry.1 < PENDING_ADVANCE_EMIT_INTERVAL_MS {
+        let entry = tracked.entry(id.clone()).or_insert_with(|| {
+            dirty = true;
+            PendingAdvanceEntry {
+                first_seen_ms: now_ms,
+                last_emit_ms: 0,
+                carried: false,
+            }
+        });
+        if now_ms - entry.last_emit_ms < PENDING_ADVANCE_EMIT_INTERVAL_MS {
             continue;
         }
-        entry.1 = now_ms;
-        let pending_ms = now_ms - entry.0;
+        entry.last_emit_ms = now_ms;
+        dirty = true;
+        let pending_ms = now_ms - entry.first_seen_ms;
+        let carried = entry.carried;
         append_bram_trace_line(
             app,
             "worklist-advance",
-            &format!("op=pending item={} pending_ms={} {}", id, pending_ms, fields),
+            &format!(
+                "op=pending item={} pending_ms={} carried={} {}",
+                id, pending_ms, carried, fields
+            ),
         );
+    }
+    if dirty {
+        save_pending_advance_state(app, &tracked);
     }
 }
 

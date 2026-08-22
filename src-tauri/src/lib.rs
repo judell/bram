@@ -5384,6 +5384,11 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
     // markers missed on the banner's first live test. Marker upkeep is
     // specimen-driven: every entry here must trace to a logged
     // op=candidate or incident capture, never speculation.
+    //
+    // Re-confirmed 2026-08-22 against Codex CLI v0.148.0 by clearing the
+    // trusted_hash entries in ~/.codex/config.toml and relaunching: the live
+    // prompt matched three of these four markers independently, so no entry
+    // was added. That specimen is pinned whole in terminal_attention_tests.
     const HOOKS_TRUST_MARKERS: &[&str] = &[
         "hooks need review",
         "hook needs review",
@@ -5576,6 +5581,37 @@ mod terminal_attention_tests {
             ),
             Some("hooks-trust")
         );
+    }
+
+    // The live 2026-08-22 22:41:45Z capture, Codex CLI v0.148.0: the first
+    // hooks-trust specimen confirmed end to end (op=fire, a banner the user
+    // actually saw, op=clear on the answer) rather than reconstructed from an
+    // incident report. Pinned as one contiguous ANSI-stripped tail, which is
+    // what the assertions above do not cover -- they prove each marker matches
+    // its own text, this proves the shape survives the prompt chrome the grid
+    // draws around it.
+    #[test]
+    fn hooks_trust_codex_specimen_2026_08_22() {
+        const TAIL: &str = "Hooks need review 3 hooks are new or changed. Hooks can run outside the sandbox after you trust the \u{203a} 1. Review hooks 2. Trust all and continue 3. Continue without trusting (hooks won't run) Press enter to confirm or esc to go back";
+        assert_eq!(terminal_attention_prompt_shape(TAIL), Some("hooks-trust"));
+
+        // Three markers match this one specimen, and each suffices alone --
+        // the property actually worth guarding, because it means Codex can
+        // reword any two of these lines without blinding the detector. A
+        // refactor that narrowed the marker list to a single entry would still
+        // pass the assertion above and fail here.
+        for line in [
+            "Hooks need review",
+            "2. Trust all and continue",
+            "Press enter to confirm or esc to go back",
+        ] {
+            assert!(TAIL.contains(line), "specimen no longer contains {line:?}");
+            assert_eq!(
+                terminal_attention_prompt_shape(line),
+                Some("hooks-trust"),
+                "{line:?} should classify on its own"
+            );
+        }
     }
 
     #[test]

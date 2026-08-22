@@ -40485,7 +40485,96 @@ fn write_worklist_authorization_record<R: tauri::Runtime>(
         app,
         audit_authorization_record(&record.kind, &record.ids, &record.source, record.commit_too),
     );
+    // durable-begun-record: capture "work on this item has begun" HERE, where
+    // it is first true, because the record we just wrote is displaceable. The
+    // authorization file holds exactly one record, so any later approval
+    // overwrites this one, and `.inflight-claim.json` is likewise single-slot
+    // and cleared by turn-completion detectors. Both were being used to answer
+    // a durable question, so an item with real work on disk could report "No
+    // changes yet" once another item was approved (2026-08-22:
+    // history-file-links, 70 uncommitted lines in lib.rs, reported as
+    // untouched). Worse, the overlap banner's attribution proxy reads the same
+    // signal, so a displaced authorization silences an entanglement warning
+    // exactly when a second item starts work.
+    if record.kind == "approved" {
+        stamp_worklist_items_begun(app, &record.ids);
+    }
     Ok(record)
+}
+
+// Write `begunAtMs` onto each named item in worklist.json, once. Never
+// cleared while the item lives; pruned with it. Existing stamps are left
+// alone -- the first approval is when work began, and a later re-approval
+// (an iterate, a second gate) must not move the timestamp.
+fn stamp_worklist_items_begun<R: tauri::Runtime>(app: &AppHandle<R>, ids: &[String]) {
+    if ids.is_empty() {
+        return;
+    }
+    let Some(path) = worklist_file(app) else {
+        return;
+    };
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return;
+    };
+    let now_ms = unix_now_ms();
+    let mut changed = false;
+    if let Some(items) = doc.get_mut("items").and_then(|v| v.as_array_mut()) {
+        for item in items.iter_mut() {
+            let Some(id) = item.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if !ids.iter().any(|want| want == id) {
+                continue;
+            }
+            if item.get("begunAtMs").and_then(|v| v.as_i64()).is_some() {
+                continue;
+            }
+            if let Some(obj) = item.as_object_mut() {
+                obj.insert(
+                    "begunAtMs".to_string(),
+                    serde_json::Value::from(now_ms),
+                );
+                changed = true;
+            }
+        }
+    }
+    if !changed {
+        return;
+    }
+    // The guards enforce a version bump on every worklist.json write, and the
+    // mutate route does the same on its own read-modify-write path.
+    let next_version = doc
+        .get("version")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0)
+        .saturating_add(1);
+    if let Some(obj) = doc.as_object_mut() {
+        obj.insert("version".to_string(), serde_json::Value::from(next_version));
+    }
+    match serde_json::to_string_pretty(&doc) {
+        Ok(body) => {
+            if let Err(e) = std::fs::write(&path, format!("{}\n", body)) {
+                eprintln!("[worklist-begun] write {} failed: {}", path.display(), e);
+                return;
+            }
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "worklist-begun",
+                    &format!(
+                        "op=stamp ids={} at_ms={}",
+                        serde_json::to_string(ids).unwrap_or_else(|_| "[]".to_string()),
+                        now_ms
+                    ),
+                );
+            }
+            emit_replayable_signal(app, "worklist-changed");
+        }
+        Err(e) => eprintln!("[worklist-begun] serialize failed: {}", e),
+    }
 }
 
 #[tauri::command]

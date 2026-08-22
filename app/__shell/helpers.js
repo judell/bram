@@ -1991,7 +1991,13 @@ window.__bramWorklist2Strip = function (item, claim) {
     window.__bramWorklistStripAnomaly(item, claim, cs);
     return withCloses("No changes yet");
   }
-  return "";
+  // Begun, but nothing on disk yet. This used to return "" and be brief: an
+  // item was only begun while its authorization was live, so the blank strip
+  // lasted until work started, usually the same turn. `begunAtMs` makes
+  // begun-ness permanent, which would make the blank permanent too -- an
+  // approved-but-unworked row losing its label for good. The sentence is about
+  // changed FILES, not about begun-ness, so it is equally true here.
+  return withCloses("No changes yet");
 };
 
 // strip-vs-diff-disagreement-instrument. A row was observed printing
@@ -2068,6 +2074,16 @@ window.__bramWorklist2RowClaimed = function (claim, itemId) {
 window.__bramWorklist2Begun = function (item, claim) {
   if (!item) return false;
   if ((item.status || "proposed") === "applied") return true;
+  // durable-begun-record: the host stamps this when it first records an
+  // approved authorization covering the item. The two signals below are both
+  // TRANSIENT and single-slot — the authorization file holds one record that
+  // any later approval overwrites, and the claim is cleared by turn-completion
+  // detectors — so on their own they answered a durable question with facts
+  // that expire. Live consequence (2026-08-22): approving one item displaced
+  // another's approval, and that item reported "No changes yet" while carrying
+  // 70 uncommitted lines. The overlap banner reads this same predicate for
+  // attribution, so the displacement also silenced an entanglement warning.
+  if (typeof item.begunAtMs === "number" && item.begunAtMs > 0) return true;
   // worklist2-begun-survives-claim-clear: the inflight claim is TRANSIENT --
   // host turn-completion detectors clear it mid-apply on ordinary end-turn
   // signals -- but "has work on this item begun?" is DURABLE. Resting the

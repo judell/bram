@@ -339,6 +339,17 @@ when metadata (`files`, `closesIssues`, etc.) shifts.
   Set conservatively: only when the commit truly closes the issue, not
   when it merely cross-references (`see #N`, `related to #N`, partial
   multi-step work). Omit or use `[]` to skip the dialog.
+- `begunAtMs` is **host-written, never authored by an agent**. The host
+  stamps it when it first records an `approved` authorization covering
+  the item, and never clears or moves it while the item lives — a
+  re-approval (iterate, second gate) leaves the original stamp. It is
+  the durable answer to "has work on this item begun?", which the
+  Worklist strip and the overlap banner both need. The other two signals
+  for that question — the authorization record and the inflight claim —
+  are single-slot and displaceable, so on their own they let an item
+  with real work on disk report "No changes yet" as soon as another item
+  was approved. Don't set it by hand; don't rely on its absence meaning
+  anything except "never approved".
 - `status` tracks the item's stage:
   - `"proposed"` (default if omitted): user is approving you to make
     the change. The Worklist row's strip reads "No changes yet" until

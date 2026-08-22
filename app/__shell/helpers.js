@@ -8085,7 +8085,22 @@ window.__bramHistoryBlockRows = function (g) {
   }];
   if (before) rows.push({ id: "before", kind: "before", body: before });
   if (after) rows.push({ id: "after", kind: "after", body: after });
-  if (files.length) rows.push({ id: "files", kind: "files", files: files });
+  if (files.length) {
+    // history-file-links: pair each path with its URL at the commit this entry
+    // records. The host builds them through the forge adapter (path shape
+    // differs per forge) and emits none when the entry has no commit -- a
+    // dropped or in-flight entry has no sha to pin to, and linking to HEAD
+    // would answer a different question, wrongly, precisely when the file has
+    // since changed. Those rows keep rendering as plain text.
+    var fileUrls = (g && g.fileUrls) || {};
+    rows.push({
+      id: "files",
+      kind: "files",
+      files: files.map(function (path) {
+        return { path: path, url: fileUrls[path] || "" };
+      }),
+    });
+  }
   if (siblings.length) rows.push({ id: "committed", kind: "committed", ids: siblings });
   if (commitUrl) rows.push({ id: "commit", kind: "commit", url: commitUrl });
   rows.push({ id: "phases-header", kind: "phases-header" });

@@ -13487,6 +13487,25 @@ trait ForgeAdapter: Sync {
     fn commit_url(&self, html_base: &str, full_sha: &str) -> String {
         format!("{}/commit/{}", html_base, full_sha)
     }
+    // history-file-links: a file at a specific commit. Same reason commit_url
+    // lives here -- the path shape is forge-specific (`/blob/` on GitHub,
+    // `/-/blob/` on GitLab), so deriving it by string-editing a commit URL on
+    // the client would encode one forge's shape in the layer that exists to
+    // stay neutral, and break silently on the other.
+    fn blob_url(&self, html_base: &str, full_sha: &str, path: &str) -> String {
+        format!("{}/blob/{}/{}", html_base, full_sha, path)
+    }
+    // The inverse of commit_url: recover (html_base, sha) from a stored commit
+    // URL. Worklist history keeps the commit URL in its changelog rather than
+    // the pieces, so a blob URL has to be rebuilt from it.
+    fn parse_commit_url(&self, url: &str) -> Option<(String, String)> {
+        let (base, sha) = url.trim().split_once("/commit/")?;
+        let sha = sha.split(['/', '#', '?']).next().unwrap_or("");
+        if base.is_empty() || sha.is_empty() {
+            return None;
+        }
+        Some((base.to_string(), sha.to_string()))
+    }
     // issue-257: the forge's own answer for the default branch, used only
     // when the local refs cannot supply it. None by default so an adapter
     // without the capability falls back to the git-based steps rather than
@@ -13510,6 +13529,65 @@ trait ForgeAdapter: Sync {
 
 struct GitHubForge;
 struct GitLabForge;
+
+#[cfg(test)]
+mod forge_url_tests {
+    use super::{ForgeAdapter, GitHubForge, GitLabForge};
+
+    // history-file-links. The two forges disagree on the path segment
+    // (`/commit/` vs `/-/commit/`, `/blob/` vs `/-/blob/`), which is exactly
+    // why deriving a blob URL by string-editing a commit URL on the client
+    // would work on one forge and silently produce a 404 on the other.
+    #[test]
+    fn blob_urls_use_each_forge_s_own_shape() {
+        let sha = "9d3bee23f8eec12477cd410aa3d8960c0297a23a";
+        assert_eq!(
+            GitHubForge.blob_url("https://github.com/judell/bram", sha, "docs/apis.md"),
+            format!("https://github.com/judell/bram/blob/{}/docs/apis.md", sha)
+        );
+        assert_eq!(
+            GitLabForge.blob_url("https://gitlab.com/someone/proj", sha, "docs/apis.md"),
+            format!("https://gitlab.com/someone/proj/-/blob/{}/docs/apis.md", sha)
+        );
+    }
+
+    #[test]
+    fn commit_urls_round_trip_through_parse() {
+        // Worklist history stores the commit URL, not its pieces, so a blob
+        // URL has to be rebuilt from it. Parse must invert construction.
+        let sha = "9d3bee23f8eec12477cd410aa3d8960c0297a23a";
+        for (adapter, base) in [
+            (&GitHubForge as &dyn ForgeAdapter, "https://github.com/judell/bram"),
+            (&GitLabForge as &dyn ForgeAdapter, "https://gitlab.com/someone/proj"),
+        ] {
+            let url = adapter.commit_url(base, sha);
+            let parsed = adapter.parse_commit_url(&url).expect("round trip");
+            assert_eq!(parsed, (base.to_string(), sha.to_string()), "url was {}", url);
+        }
+    }
+
+    #[test]
+    fn parse_tolerates_trailing_noise_and_rejects_non_commit_urls() {
+        let sha = "abc123";
+        assert_eq!(
+            GitHubForge
+                .parse_commit_url(&format!("https://github.com/o/r/commit/{}#diff-1", sha))
+                .map(|(_, s)| s),
+            Some(sha.to_string())
+        );
+        assert!(GitHubForge
+            .parse_commit_url("https://github.com/o/r/pull/1")
+            .is_none());
+        // A GitLab URL must not parse as GitHub-shaped: the GitHub matcher
+        // would otherwise capture a base ending in `/-`.
+        let gl = GitLabForge.commit_url("https://gitlab.com/o/r", sha);
+        assert_eq!(
+            GitHubForge.parse_commit_url(&gl).map(|(b, _)| b),
+            Some("https://gitlab.com/o/r/-".to_string()),
+            "documents the cross-forge hazard: each adapter must parse its own URLs"
+        );
+    }
+}
 
 fn forge_adapter<R: tauri::Runtime>(app: &AppHandle<R>) -> &'static dyn ForgeAdapter {
     match project_forge(app) {
@@ -13760,6 +13838,19 @@ impl ForgeAdapter for GitLabForge {
 
     fn commit_url(&self, html_base: &str, full_sha: &str) -> String {
         format!("{}/-/commit/{}", html_base, full_sha)
+    }
+
+    fn blob_url(&self, html_base: &str, full_sha: &str, path: &str) -> String {
+        format!("{}/-/blob/{}/{}", html_base, full_sha, path)
+    }
+
+    fn parse_commit_url(&self, url: &str) -> Option<(String, String)> {
+        let (base, sha) = url.trim().split_once("/-/commit/")?;
+        let sha = sha.split(['/', '#', '?']).next().unwrap_or("");
+        if base.is_empty() || sha.is_empty() {
+            return None;
+        }
+        Some((base.to_string(), sha.to_string()))
     }
 }
 
@@ -41202,6 +41293,12 @@ struct WorklistHistoryGroup {
     commit_context_label: String,
     commit_sibling_ids: Vec<String>,
     details_restored_label: String,
+    // history-file-links: `{ path: url }` for this entry's files, pinned to the
+    // commit the entry records. Empty when the entry has no commit -- dropped,
+    // or still in flight -- because there is no sha to pin to, and linking to
+    // HEAD would answer a different question, wrongly, exactly when the file
+    // has since changed.
+    file_urls: serde_json::Value,
 }
 
 #[derive(Clone)]
@@ -42531,6 +42628,7 @@ fn recent_worklist_history_groups<R: tauri::Runtime>(
                             commit_context_label: String::new(),
                             commit_sibling_ids: Vec::new(),
                             details_restored_label: String::new(),
+                            file_urls: serde_json::Value::Null,
                         });
                         idx
                     }
@@ -42604,6 +42702,7 @@ fn recent_worklist_history_groups<R: tauri::Runtime>(
                 commit_context_label: String::new(),
                 commit_sibling_ids: Vec::new(),
                 details_restored_label: String::new(),
+                            file_urls: serde_json::Value::Null,
             });
         }
     }
@@ -42637,9 +42736,39 @@ fn recent_worklist_history_groups<R: tauri::Runtime>(
         }
     }
 
+    let adapter = forge_adapter(app);
     for group in &mut groups {
         group.phases.sort_by(|a, b| a.ts.cmp(&b.ts));
         group.phase_count = group.phases.len();
+        // Same rule the client used to pick the commit link: the LAST phase
+        // whose summary says it committed. Built here rather than on the
+        // client so the forge's path shape stays inside the adapter.
+        let committed_url = group
+            .phases
+            .iter()
+            .rev()
+            .find(|p| p.summary.to_lowercase().contains("committed") && !p.commit_url.trim().is_empty())
+            .map(|p| p.commit_url.trim().to_string())
+            .unwrap_or_default();
+        if !committed_url.is_empty() {
+            if let Some((base, sha)) = adapter.parse_commit_url(&committed_url) {
+                let files = group
+                    .current_item
+                    .as_ref()
+                    .map(|item| worklist_item_files(item))
+                    .unwrap_or_default();
+                let mut map = serde_json::Map::new();
+                for path in files {
+                    map.insert(
+                        path.clone(),
+                        serde_json::Value::String(adapter.blob_url(&base, &sha, &path)),
+                    );
+                }
+                if !map.is_empty() {
+                    group.file_urls = serde_json::Value::Object(map);
+                }
+            }
+        }
         if let Some(phase) = group.phases.last() {
             group.latest_ts = phase.ts;
             group.latest_iso = phase.iso.clone();

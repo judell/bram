@@ -45,10 +45,22 @@
             highlightActiveIndex="{$item.__activeOcc}" />
         </VStack>
 
+        <!-- history-file-links: each file links to itself at the commit this
+             entry records, matching the Commit row below. Entries with no
+             commit (dropped, or still in flight) carry no url and stay plain
+             text — there is no sha to pin to, and HEAD would be the wrong
+             answer exactly when the file has since changed. -->
         <VStack when="{$item.kind === 'files'}" gap="$space-2">
           <Text value="Files" fontWeight="$fontWeight-bold" />
           <Items data="{$item.files}">
-            <Text value="{$item}" variant="code" fontSize="$fontSize-sm" />
+            <Link when="{$item.url}" noIndicator onClick="openExternal($item.url)">
+              <Text value="{$item.path}" variant="code" fontSize="$fontSize-sm" />
+            </Link>
+            <Text
+              when="{!$item.url}"
+              value="{$item.path}"
+              variant="code"
+              fontSize="$fontSize-sm" />
           </Items>
         </VStack>
 

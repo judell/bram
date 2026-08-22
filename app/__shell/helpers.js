@@ -8979,39 +8979,40 @@ window.__bramWorklistOverlapLines = function (items, selectedIds, claim) {
       else others.push(ids[j]);
     }
 
+    // Every form LEADS with the shared fact, which is true at any stage, and
+    // mentions committing only as the eventual consequence. Leading with a
+    // verb tied the opening word to a step the selection may not have reached:
+    // with two `proposed` items ticked the gate offers Approve while the
+    // banner said "will be committed together", sending the reader to look for
+    // a Commit button that is not there.
+    var lead =
+      window.__bramJoinNames(ids) +
+      (ids.length === 2 ? " both change " : " all change ") +
+      path;
+
     if (sel.length && others.length) {
       // A proper subset is ticked: committing it sweeps in the rest.
       lines.push(
-        "Committing " +
+        lead +
+          ". Committing " +
           window.__bramJoinNames(sel) +
-          (sel.length === 1 ? " alone" : "") +
-          " will also commit changes from " +
+          " will also carry changes from " +
           window.__bramJoinNames(others) +
-          " to " +
-          path +
-          ". Ask the agent to separate them if you want them in different commits."
+          ". Ask the agent to separate them if you want a commit each."
       );
     } else if (sel.length && !others.length) {
       // The whole set is ticked: one commit, unless you say otherwise.
       lines.push(
-        window.__bramJoinNames(ids) +
-          (ids.length === 2 ? " both change " : " all change ") +
-          path +
-          " and will be committed together. Ask the agent to separate them if " +
-          "you want a commit each."
+        lead +
+          ", so they will land in one commit. Ask the agent to separate the " +
+          "shared changes if you want a commit each."
       );
     } else {
       // Nothing relevant ticked: name the parties and both routes.
-      var rest = ids.slice(1);
       lines.push(
-        ids[0] +
-          " touches " +
-          path +
-          ", and " +
-          window.__bramJoinNames(rest) +
-          (rest.length === 1 ? " does" : " do") +
-          " too. The agent can combine them into a single commit, or you can " +
-          "ask for separate commits."
+        lead +
+          ". They can go in one commit, or the agent can separate the shared " +
+          "changes so each gets its own."
       );
     }
   }

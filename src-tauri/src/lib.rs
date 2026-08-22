@@ -13487,14 +13487,6 @@ trait ForgeAdapter: Sync {
     fn commit_url(&self, html_base: &str, full_sha: &str) -> String {
         format!("{}/commit/{}", html_base, full_sha)
     }
-    // history-file-links: a file at a specific commit. Same reason commit_url
-    // lives here -- the path shape is forge-specific (`/blob/` on GitHub,
-    // `/-/blob/` on GitLab), so deriving it by string-editing a commit URL on
-    // the client would encode one forge's shape in the layer that exists to
-    // stay neutral, and break silently on the other.
-    fn blob_url(&self, html_base: &str, full_sha: &str, path: &str) -> String {
-        format!("{}/blob/{}/{}", html_base, full_sha, path)
-    }
     // The inverse of commit_url: recover (html_base, sha) from a stored commit
     // URL. Worklist history keeps the commit URL in its changelog rather than
     // the pieces, so a blob URL has to be rebuilt from it.
@@ -13538,19 +13530,6 @@ mod forge_url_tests {
     // (`/commit/` vs `/-/commit/`, `/blob/` vs `/-/blob/`), which is exactly
     // why deriving a blob URL by string-editing a commit URL on the client
     // would work on one forge and silently produce a 404 on the other.
-    #[test]
-    fn blob_urls_use_each_forge_s_own_shape() {
-        let sha = "9d3bee23f8eec12477cd410aa3d8960c0297a23a";
-        assert_eq!(
-            GitHubForge.blob_url("https://github.com/judell/bram", sha, "docs/apis.md"),
-            format!("https://github.com/judell/bram/blob/{}/docs/apis.md", sha)
-        );
-        assert_eq!(
-            GitLabForge.blob_url("https://gitlab.com/someone/proj", sha, "docs/apis.md"),
-            format!("https://gitlab.com/someone/proj/-/blob/{}/docs/apis.md", sha)
-        );
-    }
-
     #[test]
     fn commit_urls_round_trip_through_parse() {
         // Worklist history stores the commit URL, not its pieces, so a blob
@@ -13838,10 +13817,6 @@ impl ForgeAdapter for GitLabForge {
 
     fn commit_url(&self, html_base: &str, full_sha: &str) -> String {
         format!("{}/-/commit/{}", html_base, full_sha)
-    }
-
-    fn blob_url(&self, html_base: &str, full_sha: &str, path: &str) -> String {
-        format!("{}/-/blob/{}/{}", html_base, full_sha, path)
     }
 
     fn parse_commit_url(&self, url: &str) -> Option<(String, String)> {
@@ -20907,6 +20882,23 @@ fn run_issue_index_pass<R: tauri::Runtime>(
 static HISTORY_LAST_MAXMTIME: std::sync::atomic::AtomicI64 =
     std::sync::atomic::AtomicI64::new(-1);
 
+/// Shape stamp for the serialized group carried in each history row's `extra`.
+///
+/// The mtime gate above notices changes to history FILES. It cannot notice a
+/// change to `WorklistHistoryGroup` itself — and `extra` is a serialization of
+/// that struct, so a field added or removed in code leaves every existing row
+/// serving the old shape indefinitely. History files only move on worklist
+/// commits and drops, so the stale rows can outlive many releases.
+///
+/// Live receipt (2026-08-22, history-file-links-local-at-commit): swapping
+/// per-file `fileUrls` for `commitSha` left the History tab reading cached
+/// groups that still had `fileUrls` and no `commitSha`, so every file rendered
+/// as plain text and the feature looked broken. Same class as
+/// `COMMIT_DIFF_SCHEMA` above, and the same remedy.
+///
+/// **Bump this whenever `WorklistHistoryGroup`'s serialized shape changes.**
+const HISTORY_GROUP_SCHEMA: i64 = 1;
+
 fn run_history_index_pass<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> Result<(usize, usize, usize, i64), String> {
@@ -20941,7 +20933,7 @@ fn run_history_index_pass<R: tauri::Runtime>(
     for g in groups {
         let key = format!("history:{}", g.id);
         let token = g.latest_ts;
-        if !search_index::needs_index(&conn, &key, token, 0).unwrap_or(true) {
+        if !search_index::needs_index(&conn, &key, token, HISTORY_GROUP_SCHEMA).unwrap_or(true) {
             skipped += 1;
             continue;
         }
@@ -20978,7 +20970,7 @@ fn run_history_index_pass<R: tauri::Runtime>(
             // Search expander renders it directly (no recency-limited re-fetch).
             extra: serde_json::to_string(&g).unwrap_or_default(),
         };
-        search_index::index_doc(&conn, &row, token, 0).map_err(|e| e.to_string())?;
+        search_index::index_doc(&conn, &row, token, HISTORY_GROUP_SCHEMA).map_err(|e| e.to_string())?;
         indexed += 1;
     }
     HISTORY_LAST_MAXMTIME.store(newest, std::sync::atomic::Ordering::Relaxed);
@@ -40540,6 +40532,94 @@ fn pending_advance_state_cell() -> &'static Mutex<std::collections::HashMap<Stri
 
 const PENDING_ADVANCE_EMIT_INTERVAL_MS: i64 = 60_000;
 
+// Serve a file as of one commit, via `git show <sha>:<path>`.
+//
+// Containment differs from the working-tree path above and is simpler: the
+// argument is a git PATHSPEC, not a filesystem path, so it cannot reach outside
+// the repository by construction -- `git show` resolves it against the tree
+// object, and `..` or a leading `/` simply fails to match an entry. The checks
+// below are belt-and-braces against a malformed request reaching the command
+// line, and the sha is validated as hex so it cannot smuggle arguments.
+fn local_file_preview_at_commit<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    sha: &str,
+    rel_path: &str,
+    line: Option<u64>,
+) -> serde_json::Value {
+    const MAX_PREVIEW_BYTES: usize = 200_000;
+    let err = |msg: &str| {
+        serde_json::json!({
+            "ok": false,
+            "displayPath": rel_path,
+            "title": "File unavailable",
+            "line": line,
+            "language": "",
+            "renderMode": "error",
+            "content": "",
+            "error": msg,
+        })
+    };
+    let sha_ok = sha.len() >= 7
+        && sha.len() <= 40
+        && sha.chars().all(|c| c.is_ascii_hexdigit());
+    if !sha_ok {
+        return err("Not a commit id.");
+    }
+    let clean = rel_path.trim().trim_start_matches("./");
+    if clean.is_empty()
+        || clean.starts_with('/')
+        || clean.starts_with('~')
+        || clean.split('/').any(|seg| seg == "..")
+    {
+        return err("Only repository-relative paths can be shown at a commit.");
+    }
+    let content = match git_run(app, &["show", &format!("{}:{}", sha, clean)]) {
+        Ok(text) => text,
+        Err(e) => {
+            return err(&format!("Not in commit {}: {}", &sha[..7.min(sha.len())], e));
+        }
+    };
+    let truncated = content.len() > MAX_PREVIEW_BYTES;
+    let content = if truncated {
+        content.chars().take(MAX_PREVIEW_BYTES).collect::<String>()
+    } else {
+        content
+    };
+    if content.bytes().any(|b| b == 0) {
+        return err("Binary files are not previewed in Bram.");
+    }
+    let as_path = PathBuf::from(clean);
+    let name = as_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("File")
+        .to_string();
+    let language = local_file_preview_language(&as_path);
+    let render_mode = if language == "markdown" {
+        "markdown"
+    } else {
+        "code"
+    };
+    let short = &sha[..7.min(sha.len())];
+    serde_json::json!({
+        "ok": true,
+        "path": clean,
+        "displayPath": format!("{} @ {}", clean, short),
+        "repoPath": clean,
+        "name": name,
+        // The title says which revision, so a reader is never left wondering
+        // whether this is the working copy.
+        "title": format!("{} @ {}", name, short),
+        "sha": sha,
+        "line": line,
+        "language": language,
+        "renderMode": render_mode,
+        "content": content,
+        "truncated": truncated,
+        "size": content.len(),
+    })
+}
+
 fn observe_pending_advances<R: tauri::Runtime>(app: &AppHandle<R>, doc: &serde_json::Value) {
     if !bram_trace_enabled() {
         return;
@@ -41508,12 +41588,13 @@ struct WorklistHistoryGroup {
     commit_context_label: String,
     commit_sibling_ids: Vec<String>,
     details_restored_label: String,
-    // history-file-links: `{ path: url }` for this entry's files, pinned to the
-    // commit the entry records. Empty when the entry has no commit -- dropped,
-    // or still in flight -- because there is no sha to pin to, and linking to
-    // HEAD would answer a different question, wrongly, exactly when the file
-    // has since changed.
-    file_urls: serde_json::Value,
+    // history-file-links-local-at-commit: the commit this entry records, so
+    // the client can open each file AS OF that commit (`git show <sha>:<path>`)
+    // rather than the working tree. Empty when the entry has no commit --
+    // dropped, or still in flight -- and the files then render as plain text,
+    // because there is no revision to show and the working copy would answer a
+    // different question.
+    commit_sha: String,
 }
 
 #[derive(Clone)]
@@ -42843,7 +42924,7 @@ fn recent_worklist_history_groups<R: tauri::Runtime>(
                             commit_context_label: String::new(),
                             commit_sibling_ids: Vec::new(),
                             details_restored_label: String::new(),
-                            file_urls: serde_json::Value::Null,
+                            commit_sha: String::new(),
                         });
                         idx
                     }
@@ -42917,7 +42998,7 @@ fn recent_worklist_history_groups<R: tauri::Runtime>(
                 commit_context_label: String::new(),
                 commit_sibling_ids: Vec::new(),
                 details_restored_label: String::new(),
-                            file_urls: serde_json::Value::Null,
+                            commit_sha: String::new(),
             });
         }
     }
@@ -42965,23 +43046,16 @@ fn recent_worklist_history_groups<R: tauri::Runtime>(
             .find(|p| p.summary.to_lowercase().contains("committed") && !p.commit_url.trim().is_empty())
             .map(|p| p.commit_url.trim().to_string())
             .unwrap_or_default();
+        // history-file-links-local-at-commit: the client needs the SHA, not
+        // per-file forge URLs. `626e73d` emitted blob URLs, but the route the
+        // History tab uses skips the commit-visibility check for cost
+        // (`skip_commit_resolution`), so those links 404 for every unpushed
+        // commit -- most of a working session. Files now open locally via
+        // `git show <sha>:<path>`, which is correct unpushed, offline, and on
+        // private repos; the Commit row remains the one forge destination.
         if !committed_url.is_empty() {
-            if let Some((base, sha)) = adapter.parse_commit_url(&committed_url) {
-                let files = group
-                    .current_item
-                    .as_ref()
-                    .map(|item| worklist_item_files(item))
-                    .unwrap_or_default();
-                let mut map = serde_json::Map::new();
-                for path in files {
-                    map.insert(
-                        path.clone(),
-                        serde_json::Value::String(adapter.blob_url(&base, &sha, &path)),
-                    );
-                }
-                if !map.is_empty() {
-                    group.file_urls = serde_json::Value::Object(map);
-                }
+            if let Some((_base, sha)) = adapter.parse_commit_url(&committed_url) {
+                group.commit_sha = sha;
             }
         }
         if let Some(phase) = group.phases.last() {
@@ -43528,12 +43602,28 @@ fn route_request<R: tauri::Runtime>(
         const MAX_PREVIEW_BYTES: u64 = 200_000;
         let mut file_path = String::new();
         let mut line: Option<u64> = None;
+        let mut sha = String::new();
         for pair in query.split('&') {
             if let Some(enc) = pair.strip_prefix("path=") {
                 file_path = percent_decode(enc);
             } else if let Some(enc) = pair.strip_prefix("line=") {
                 line = percent_decode(enc).parse::<u64>().ok();
+            } else if let Some(enc) = pair.strip_prefix("sha=") {
+                sha = percent_decode(enc);
             }
+        }
+        // history-file-links-local-at-commit: with a sha, serve the file as
+        // THAT COMMIT had it rather than the working tree. A history entry
+        // records what happened, so the working copy answers a different
+        // question -- and answers it wrongly exactly when the file has changed
+        // since, which is when history is being read. `git show` is local, so
+        // this works for unpushed commits, offline, and on private repos,
+        // where the forge blob URL 404s.
+        if !sha.is_empty() {
+            let body = local_file_preview_at_commit(app, &sha, &file_path, line)
+                .to_string()
+                .into_bytes();
+            return (200, "application/json; charset=utf-8", body);
         }
         let root = project_root(Some(app)).unwrap_or_else(|| PathBuf::from("."));
         let expanded = expand_tilde(&file_path);

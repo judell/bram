@@ -1,4 +1,5 @@
-<Component name="HistoryDetail">
+<Component name="HistoryDetail"
+  var.atCommitPath="{''}">
   <!-- issue-230: the worklist-history detail block. Takes a WorklistHistoryGroup
        as `group`; optional `height` and `query` (initial/current find term).
        findable-list-udc: the occurrence-granular find spine lives in
@@ -10,7 +11,7 @@
        kind is a zero-match metadata row. See xmlui-org/xmlui#3713. -->
   <VStack gap="$space-2" padding="$space-2">
     <FindableList when="{$props.group}"
-      data="{window.__bramHistoryBlockRows($props.group)}"
+      data="{window.__bramHistoryBlockRows($props.group, atCommitPath, atCommitFile.value)}"
       markedText="__bramHistoryMarkedText"
       query="{$props.query || ''}"
       placeholder="Find in history entry…"
@@ -45,23 +46,66 @@
             highlightActiveIndex="{$item.__activeOcc}" />
         </VStack>
 
-        <!-- history-file-links: each file links to itself at the commit this
-             entry records, matching the Commit row below. Entries with no
-             commit (dropped, or still in flight) carry no url and stay plain
-             text — there is no sha to pin to, and HEAD would be the wrong
-             answer exactly when the file has since changed. -->
+        <!-- history-file-links-local-at-commit: each file opens LOCALLY as of
+             the commit this entry records, through the same LocalLinkPreview
+             modal that `path:line` references in agent prose use. Local rather
+             than the forge because a blob URL 404s for any unpushed commit —
+             most of a working session — while `git show` is exact, offline,
+             and works on private repos. The Commit row below stays the one
+             forge destination: a commit URL is something you send someone, a
+             file here is something you read. Entries with no commit (dropped,
+             or still in flight) carry no sha and stay plain text; the working
+             copy would be the wrong revision. -->
         <VStack when="{$item.kind === 'files'}" gap="$space-2">
           <Text value="Files" fontWeight="$fontWeight-bold" />
           <Items data="{$item.files}">
-            <Link when="{$item.url}" noIndicator onClick="openExternal($item.url)">
+            <Link
+              when="{$item.sha}"
+              noIndicator
+              onClick="atCommitPath = (atCommitPath === $item.path ? '' : $item.path)">
               <Text value="{$item.path}" variant="code" fontSize="$fontSize-sm" />
             </Link>
             <Text
-              when="{!$item.url}"
+              when="{!$item.sha}"
               value="{$item.path}"
               variant="code"
               fontSize="$fontSize-sm" />
           </Items>
+          <!-- Opens directly under Files, where the click happened. Below the
+               list it needed scrolling and read as unavailable. One at a time
+               by construction: atCommitPath is a single component var, so a
+               second file replaces the first and re-clicking collapses. The
+               state is keyed by PATH and lives on the component, not on the
+               row, so nothing here depends on row position — the trap that
+               transferred expansion between items in the Worklist. -->
+          <VStack
+            when="{$item.openPath}"
+            gap="$space-2"
+            padding="$space-2"
+            marginTop="$space-1"
+            border="1px solid $color-surface-200"
+            borderRadius="$borderRadius">
+            <HStack gap="$space-2" verticalAlignment="center">
+              <Text variant="code" fontSize="$fontSize-sm" value="{$item.openLabel}" />
+              <SpaceFiller />
+              <Button
+                label="✕"
+                variant="ghost"
+                size="xs"
+                tooltip="Close file"
+                onClick="atCommitPath = ''" />
+            </HStack>
+            <Text
+              when="{$item.openLoading}"
+              color="$textColor-secondary"
+              fontSize="$fontSize-sm"
+              value="Loading…" />
+            <Markdown
+              when="{!$item.openLoading}"
+              overflowMode="scroll"
+              content="{$item.openBody}"
+              interpolateBindings="false" allowHtml="false" />
+          </VStack>
         </VStack>
 
         <VStack when="{$item.kind === 'committed'}" gap="$space-2">
@@ -91,5 +135,26 @@
         </VStack>
       </property>
     </FindableList>
+    <!-- history-file-links-local-at-commit: the file opens INLINE, not in a
+         second ModalDialog. HistoryDetail is itself rendered in the browse-tab
+         detail modal, so the shared LocalLinkPreview stacked a modal on a
+         modal. One modal deep is the house style; two is not. Rendering goes
+         through __bramFormatLocalLinkPreview, the same helper LocalLinkPreview
+         uses, so markdown-vs-code and fencing stay identical across both
+         surfaces.
+
+         The fetch lives here, at component scope, while the panel renders up
+         in the Files row — the response is threaded INTO the row data by
+         __bramHistoryBlockRows rather than read from this DataSource inside
+         the template. Naming `atCommitFile` from within the row template
+         silently aborted analysis of that whole subtree, including the Link's
+         onClick, so clicking a file did nothing. State is keyed by path on the
+         component, not per row: the list is virtualized with a find spine, and
+         row-scoped state would be positional — the trap keyed expansion exists
+         to avoid. -->
+    <DataSource
+      id="atCommitFile"
+      when="{!!atCommitPath}"
+      url="{'/__local-file-preview?path=' + encodeURIComponent(atCommitPath) + '&amp;sha=' + encodeURIComponent($props.group.commitSha)}" />
   </VStack>
 </Component>

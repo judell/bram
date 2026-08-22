@@ -5614,6 +5614,12 @@ window.__bramOpenLocalLinkPreview = function (request) {
   if (!request || !request.path) return;
   var qs = "path=" + encodeURIComponent(request.path);
   if (request.line) qs += "&line=" + encodeURIComponent(String(request.line));
+  // history-file-links-local-at-commit: with a sha the host serves the file as
+  // that commit had it (`git show <sha>:<path>`) instead of the working tree.
+  // A History entry records what happened, so the working copy answers a
+  // different question — wrongly, whenever the file changed since, which is
+  // exactly when history is being read.
+  if (request.sha) qs += "&sha=" + encodeURIComponent(String(request.sha));
   window.__bramSetLocalLinkPreview({
     ok: true,
     href: request.href || request.path,
@@ -8083,7 +8089,14 @@ window.__bramIssueMarkedText = function (row) {
 // the current section order. Computed metadata is baked in (frozen row-scope
 // trap); searchable rows (before/after/feedback-phase) carry `body`, every
 // other kind is a zero-match metadata/header row (markedText -> "").
-window.__bramHistoryBlockRows = function (g) {
+// `openPath` / `openPreview` carry the inline at-commit file view INTO the row
+// data. The rowTemplate must read only `$item.*`: referencing a DataSource id
+// declared outside the FindableList silently aborts analysis of the whole row
+// subtree — the click handler included — so the symptom is a link that does
+// nothing rather than an error (2026-08-22). Threading the state through the
+// data also re-renders the row on change, which a virtualized list will not do
+// for an external variable.
+window.__bramHistoryBlockRows = function (g, openPath, openPreview) {
   if (!g) return [];
   var files = window.__bramWorklistItemFiles(g) || [];
   var commitUrl = window.__bramHistoryCommitUrl(g) || "";
@@ -8102,19 +8115,34 @@ window.__bramHistoryBlockRows = function (g) {
   if (before) rows.push({ id: "before", kind: "before", body: before });
   if (after) rows.push({ id: "after", kind: "after", body: after });
   if (files.length) {
-    // history-file-links: pair each path with its URL at the commit this entry
-    // records. The host builds them through the forge adapter (path shape
-    // differs per forge) and emits none when the entry has no commit -- a
-    // dropped or in-flight entry has no sha to pin to, and linking to HEAD
-    // would answer a different question, wrongly, precisely when the file has
-    // since changed. Those rows keep rendering as plain text.
-    var fileUrls = (g && g.fileUrls) || {};
+    // history-file-links-local-at-commit: pair each path with the sha this
+    // entry records, so the row opens the file as it stood at that commit via
+    // `git show`. An entry with no commit -- dropped, or still in flight --
+    // has no sha to pin to, and the working copy would answer a different
+    // question, wrongly, precisely when the file has since changed. Those rows
+    // keep rendering as plain text.
+    //
+    // The open panel's content is computed HERE rather than read from the
+    // DataSource inside the row template: the template is a virtualized
+    // subtree, and a name it cannot resolve (a DataSource declared outside the
+    // list) silently aborts analysis of the whole subtree -- taking the Link's
+    // own onClick with it, so the click did nothing at all.
+    var commitSha = (g && g.commitSha) || "";
+    var open = openPath || "";
     rows.push({
       id: "files",
       kind: "files",
       files: files.map(function (path) {
-        return { path: path, url: fileUrls[path] || "" };
+        return { path: path, sha: commitSha };
       }),
+      openPath: open,
+      openLabel: open ? open + " @ " + String(commitSha).slice(0, 7) : "",
+      // Formatted here, through the same helper LocalLinkPreview uses, so
+      // markdown-vs-code and fence handling cannot drift between surfaces.
+      openBody: open && openPreview
+        ? window.__bramFormatLocalLinkPreview(openPreview)
+        : "",
+      openLoading: !!open && !openPreview,
     });
   }
   if (siblings.length) rows.push({ id: "committed", kind: "committed", ids: siblings });

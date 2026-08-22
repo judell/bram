@@ -1214,6 +1214,20 @@ git commit -F <new-msg>     # one combined commit
 Verify with `git log --oneline -3` and `git log --oneline @{u}..HEAD`.
 Never squash already-pushed commits without explicit force-push consent.
 
+### Don't rewrite a commit the worklist history has recorded
+
+Being unpushed is not sufficient license to rebase. `resources/worklist-history/`
+stores each entry's commit URL **by SHA**, and the History tab renders those
+links — so rewriting a recorded commit orphans them permanently. That is a
+different failure from an unpushed link, which 404s only until you push and
+then heals; an orphaned SHA never resolves again.
+
+So the usual "it's unpushed, amend freely" reasoning does not apply to any
+commit that produced a history entry, which is every commit made through the
+commit gate. Prefer a follow-up commit. (Found 2026-08-22 while deciding whether
+to amend `626e73d`: the rewrite would have broken the very file-link feature
+that commit introduced, in Bram's own history.)
+
 ### Don't quote unpushed-commit counts in chat
 
 After a commit lands, confirm with its short SHA and subject and stop.

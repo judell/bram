@@ -39,11 +39,42 @@ derivation:
    turn-completion detectors*. Read by the legacy Workspace gate.
 
 They are not independent. All three descend from turn completion, so a root that
-cannot end a turn holds all three open at once — which is exactly what happened:
-the same interrupted turn that pinned the status also held the Queue's Send
-dimmed. **Fixing the source is therefore sufficient; no consumer holds
+cannot end a turn holds open **every consumer whose state is live for that
+turn**. **Fixing the source is therefore sufficient; no consumer holds
 independently of it.** That was the open question this inventory existed to
 answer, and the answer is no.
+
+Which consumers are live depends on the turn. Two samples from
+`scripts/turn-state-probe.sh` make the distinction concrete.
+
+An ordinary message turn — no approved item in flight:
+
+```
+agent-status.state           working
+inflight claim               (none)
+send-ledger.awaitingTurn     true
+--
+Queue Send (gate)            HELD (agent working — hold)
+Worklist gate                buttons enabled (no claim)
+Workspace legacy (gate)      HELD (awaitingResponse)
+```
+
+A claimed turn — an approved item being applied:
+
+```
+agent-status.state           working
+inflight claim               turn-state-probe (kind=approved)
+send-ledger.awaitingTurn     true
+--
+Queue Send (gate)            HELD (agent working — hold)
+Worklist gate                HELD (claim live: turn-state-probe)
+Workspace legacy (gate)      HELD (awaitingResponse)
+```
+
+So the Worklist gate participates only in the second case: a message turn has no
+claim to hold. An earlier draft of this document said a stuck root "holds all
+three at once", which is true only of a claimed turn — corrected here after one
+probe run showed an empty claim where a hold had been asserted.
 
 What the three derivations buy is the ability to *disagree in transit*. Each has
 its own event, its own refetch timing, and its own intermediate state, so one can
@@ -90,9 +121,34 @@ every gate releases.** That is the cheapest way to produce the condition
 deliberately, and it exercises the shared root rather than each consumer's
 plumbing.
 
-`scripts/setup-harness.sh` is the wrong home for it — that harness owns startup
-— but its shape is the model: drive a real instance against a throwaway project,
-assert observable state, kill by PID. The same second-instance technique applies
+`scripts/turn-state-probe.sh` samples all four inputs at once and prints what
+each consumer derives. It is read-only and takes no arguments; `--watch` samples
+on an interval, since the observation that matters is a transition or its
+absence.
+
+### What the probe can establish, and what it cannot yet
+
+- **Testable now — coupling.** Interrupt a turn, probe, and confirm
+  `agent-status` stays `working` and `awaitingTurn` stays `true` while the
+  terminal sits idle. That is the shared-root evidence, and it is available
+  today precisely *because* the root is broken.
+- **Not testable until `interrupt-end-staleness-conjunct` lands — release.**
+  The positive half — every gate clearing when the root clears — cannot be
+  observed while the root never clears after an interrupt. The probe exists
+  before the fix so that fix arrives with a before-and-after rather than with a
+  reading of its own diff.
+- **The Worklist gate needs a claimed turn.** Interrupting mid-apply rather than
+  mid-message. Worth doing once, deliberately, rather than folding into the
+  routine check.
+
+The probe deliberately prints rather than asserts. The release half cannot pass
+until the staleness fix lands, and a check that is red for reasons unrelated to
+the change under test teaches people to ignore it. Graduate to assertions once
+the root is fixed.
+
+`scripts/setup-harness.sh` is the wrong home for this — that harness owns
+startup and drives throwaway projects, while this needs a live agent session
+with a real turn to interrupt. Same technique, different subject
 (`docs/developing-bram.md`, *Developing and testing the startup dance*).
 
 ## Known open

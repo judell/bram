@@ -1943,7 +1943,178 @@ window.__bramInflightBlocker = function (claim) {
 // says NOTHING — badge alone (the just-committed drain window and the
 // stale applied-with-no-work shape alike): badge and message appear
 // together or neither appears.
-window.__bramWorklist2Strip = function (item, claim) {
+// Split an item's CHANGED paths into the ones only it claims and the ones
+// another BEGUN item claims too.
+//
+// `changedFiles` counts are per-PATH: every item declaring a path reports that
+// path's whole uncommitted diff, so an item that has done nothing shows its
+// neighbour's work as its own. Live 2026-08-22: `notice-banner-component`
+// displayed "files: 1 of 7 planned · lines: +128 −23 · edits: 2" while its
+// six other files were clean and the seventh -- the component the item exists
+// to create -- did not exist. Every one of those lines was another item's edit
+// to a shared Worklist.xmlui, and the row read as work in progress.
+//
+// Authorship is not recoverable -- nothing records which item wrote which
+// hunk. But EXCLUSIVITY is: a changed path no other begun item claims cannot
+// be anyone else's, so its numbers are safely this item's. That is the half
+// worth reporting, and the rest is reported as shared rather than as owned.
+// Un-begun sharers are ignored on the same reasoning __bramWorklistOverlapGroups
+// uses: an item that has never been approved has not run, so it cannot have
+// contributed.
+window.__bramItemChangedSplit = function (item, items, claim) {
+  var out = { exclusive: [], shared: [], sharedDeclared: [], added: 0, removed: 0, sharedAdded: 0, sharedRemoved: 0 };
+  var files = (item && item.changedFiles) || [];
+  var byId = {};
+  var list = items || [];
+  for (var i = 0; i < list.length; i++) byId[list[i].id] = list[i];
+  for (var j = 0; j < files.length; j++) {
+    var f = files[j];
+    if (!f) continue;
+    var sharers = f.sharedWith || [];
+    var begunSharer = false;
+    for (var k = 0; k < sharers.length; k++) {
+      var other = byId[sharers[k]];
+      if (other && window.__bramWorklist2Begun(other, claim)) begunSharer = true;
+    }
+    // Declared-shared is independent of whether anything changed there: the
+    // stage tooltip reports what an item SHARES, a standing fact, while the
+    // strip reports what CHANGED.
+    if (begunSharer) out.sharedDeclared.push(f.path);
+    if ((f.added || 0) <= 0 && (f.removed || 0) <= 0) continue;
+    if (begunSharer) {
+      out.shared.push(f.path);
+      out.sharedAdded += f.added || 0;
+      out.sharedRemoved += f.removed || 0;
+    } else {
+      out.exclusive.push(f.path);
+      out.added += f.added || 0;
+      out.removed += f.removed || 0;
+    }
+  }
+  return out;
+};
+
+// The shared paths behind the strip's counts. Filenames only -- the row
+// stays a scan line and the paths are one hover away.
+window.__bramWorklist2StripTooltip = function (item, claim, items) {
+  var split = window.__bramItemChangedSplit(item, items, claim);
+  if (!split.shared.length) return "";
+  return split.shared.join("\n");
+};
+
+// Can every ticked item still be STARTED? Only if none of them has been.
+//
+// The gate keyed on `status` alone, so Start was offered to rows already
+// started -- and "Start & commit", the FRESH-PLAN one-click, was offered to an
+// item green-lit an hour earlier, because __bramSelectionAllPlans checks
+// status and absence of changes but never begun-ness.
+//
+// Removing Start from a begun item loses nothing: the reason to press it there
+// would be "you approved this and nothing happened, do it now", and Iterate
+// says that better because it carries a message.
+window.__bramSelectionAllUnstarted = function (items, sel, claim) {
+  var chosen = sel || [];
+  if (!chosen.length) return false;
+  var picked = (items || []).filter(function (i) { return chosen.indexOf(i.id) !== -1; });
+  if (picked.length !== chosen.length) return false;
+  return picked.every(function (i) {
+    return (i.status || "proposed") !== "applied" && !window.__bramWorklist2Begun(i, claim);
+  });
+};
+
+// Can every ticked item be committed right now?
+//
+// The gate verb read raw `status`, so an item carrying finished work on disk
+// was offered Start -- a step already taken -- and never Commit. Live
+// 2026-08-22: a row showing changes on disk sat beside a Start button, and the
+// reading from the chair was flat -- "we are obviously started, i can commit".
+//
+// `applied` is not the only committable state. What makes an item committable
+// is having work of its own on disk, and a begun `proposed` item with
+// EXCLUSIVE changes has exactly that. Exclusivity is load-bearing: an item
+// whose every changed path is shared must NOT offer Commit, because committing
+// it would land a neighbour's work under its name.
+//
+// No host change was needed -- `gate: "apply-and-commit"` sets `commit_too`,
+// which is what lets worklist_commit_files_for_ids accept `proposed`
+// (allow_proposed). This widens WHEN the pane offers it, not what the host
+// permits, so it inherits the same worklist.oneClickApproveCommit config gate.
+//
+// This predicate is also what the stage icon and the strip key on, so all
+// three surfaces agree by construction rather than by coincidence.
+window.__bramSelectionAllCommittable = function (items, sel, claim, oneClickEnabled) {
+  var chosen = sel || [];
+  if (!chosen.length) return false;
+  var list = items || [];
+  var picked = list.filter(function (i) { return chosen.indexOf(i.id) !== -1; });
+  if (picked.length !== chosen.length) return false;
+  var anyProposed = false;
+  for (var i = 0; i < picked.length; i++) {
+    var it = picked[i];
+    if ((it.status || "proposed") === "applied") continue;
+    anyProposed = true;
+    if (!window.__bramWorklist2Begun(it, claim)) return false;
+    if (!window.__bramItemChangedSplit(it, list, claim).exclusive.length) return false;
+  }
+  if (anyProposed && oneClickEnabled === false) return false;
+  return true;
+};
+
+// Does this commit need the allow_proposed path? True when any ticked item is
+// still `proposed`, which is what the payload's `gate` has to declare.
+window.__bramSelectionNeedsProposedCommit = function (items, sel) {
+  var chosen = sel || [];
+  return (items || []).some(function (i) {
+    return chosen.indexOf(i.id) !== -1 && (i.status || "proposed") !== "applied";
+  });
+};
+
+// The item's stage: THREE states, keyed on what you can DO.
+//
+// This was four states for a while, splitting "changed but not advanced"
+// (file±) from "advanced" (✓✓). That split had to go. `advance` is a
+// bookkeeping call the agent makes after editing, and it says nothing reliable
+// about the work: an agent can finish and forget to advance (the whole reason
+// reconcile-dropped-advance exists), or advance work that is not good. Nothing
+// observable on disk differs between the two. So the icons were reporting
+// whether the agent remembered a protocol step -- an implementation detail
+// wearing a user-facing label, exactly the defect that got "apply" removed
+// from the vocabulary earlier. Naming a transition the user never performs and
+// cannot verify is the smell; it was still on screen as an icon after the word
+// was gone.
+//
+// The user-facing question is what can I do, and there are three answers, so
+// three icons. ✓✓ now means COMMITTABLE rather than recorded -- the same
+// predicate that drives the Commit button, so every icon predicts its own
+// button instead of encoding a parallel fact. `applied` vs `proposed` becomes
+// invisible, which is correct: the user neither makes that transition nor can
+// check it.
+//
+// Checks count what you can act on: one when you have started it, two when
+// there is something to commit. Nothing counts a protocol step.
+//
+// Whose turn still rides on COLOUR (pre-attentive, and a binary): full
+// strength for the two states waiting on you, muted for the one waiting on the
+// agent. Changes are read EXCLUSIVE-only via __bramSelectionAllCommittable, so
+// an item can never be promoted on a neighbour's work.
+window.__bramWorklist2Stage = function (item, claim, items) {
+  var list = items || [];
+  if (!window.__bramWorklist2Begun(item, claim)) {
+    return { icon: "play", label: "Not started", yours: true };
+  }
+  if (window.__bramSelectionAllCommittable(list, [item.id], claim, true)) {
+    return { icon: "check-check", label: "Has changes you can commit", yours: true };
+  }
+  // "nothing of YOURS" is what unifies this state's two sub-cases -- an item
+  // with nothing changed anywhere, and one whose only changed paths are shared
+  // and therefore unattributable. Both have nothing of the item's own to
+  // commit, which is also exactly why the Commit button is dark. Earlier
+  // wording ("started", "started. shares 2 files") named the sub-case or the
+  // entanglement and never said why there was no action.
+  return { icon: "checkmark", label: "Started, nothing of yours to commit", yours: false };
+};
+
+window.__bramWorklist2Strip = function (item, claim, items) {
   if (!item) return "";
   // issue-266: the close declaration belongs on the status line for
   // scannability, never buried in the expanded body.
@@ -1983,8 +2154,40 @@ window.__bramWorklist2Strip = function (item, claim) {
   var cs = item.changeSummary;
   if (begun && cs && cs.changed > 0) {
     var t = cs.lastChangeMs ? new Date(cs.lastChangeMs).toLocaleTimeString() : "";
+    var split = window.__bramItemChangedSplit(item, items, claim);
+    var sharedNote = split.shared.length
+      ? " · " + split.shared.length + " shared"
+      : "";
+    // COMMITTABLE, not `applied`: the strip keys on the same predicate as the
+    // icon and the Commit button, so all three agree. It used to key on
+    // `applied`, which meant an advanced item and a not-yet-advanced one with
+    // identical disk state printed different sentences for a difference the
+    // user cannot see or cause (live 2026-08-22: throwaway-commit-a and -b,
+    // identical strips and file tables, differing only in an icon).
+    if (window.__bramSelectionAllCommittable(items || [], [item.id], claim, true)) {
+      // Two readings in one line, both action-relevant: what a commit would
+      // TAKE (whole files, whoever wrote them) and how far the work has got
+      // against its own plan -- "1 of 2 planned" is the signal that a commit
+      // now would be committing something unfinished.
+      return withCloses(
+        "Will commit +" + (split.added + split.sharedAdded) +
+          " \u2212" + (split.removed + split.sharedRemoved) +
+          // Files a commit would TAKE, which is exclusive + shared: a commit
+          // stages whole files regardless of who else claims them. Counting
+          // only exclusives printed "0 of 2 planned" beside "+471 −125" for an
+          // item whose changes are all on shared paths.
+          " in " + (split.exclusive.length + split.shared.length) +
+          " of " + (cs.total || 0) + " planned" + sharedNote +
+          (t ? " · last: " + t : ""),
+      );
+    }
+    // Not committable: every changed path is claimed by another begun item, so
+    // not one line is attributable here. Reporting the totals would credit a
+    // neighbour's work to this row -- the bug that started this whole thread.
+    var nShared = split.shared.length;
     return withCloses(
-      cs.diskLabel + " · " + cs.activityLabel + (t ? " · last: " + t : ""),
+      "Nothing of its own changed · " + nShared + " shared file" +
+        (nShared === 1 ? "" : "s") + " changed",
     );
   }
   if (!begun) {
@@ -8925,16 +9128,30 @@ window.__bramJoinNames = function (names) {
   return n.slice(0, -1).join(", ") + " and " + n[n.length - 1];
 };
 
-// Entanglements worth reporting, grouped by path: [{ path, ids }].
+// Entanglements worth reporting, grouped by path: [{ path, ids, tier }],
+// changed tier first.
 //
-// MATERIALITY GATE. A path qualifies only when at least one item sharing it has
-// actually changed it. Two plans that merely PREDICT the same file are not
-// entangled -- they are two intentions, and either may revise its `files` list
-// before any work happens. The first version of this banner fired on declared
-// overlap and told the user that "committing either one on its own would
-// include the other's changes", while both items sat at +0 -0 on the shared
-// path: a consequence with no changes behind it, stated as present fact. A
-// warning the reader cannot verify is how a banner earns being ignored.
+// MATERIALITY GATE. Begun-ness is the gate; having-changed-it is the TIER.
+// The first version of this banner fired on declared overlap between items
+// with no work behind them, and told the user that "committing either one on
+// its own would include the other's changes" while both sat at +0 -0 on the
+// shared path: a consequence with no changes behind it, stated as present
+// fact. A warning the reader cannot verify is how a banner earns being
+// ignored.
+//
+// The fix for that was to require two BEGUN items -- items the user approved
+// to do exactly this work. Requiring changes ON TOP of that was one step too
+// far, and it suppressed the case where the warning is worth most (live
+// 2026-08-22: two begun items both listing Worklist.xmlui at +0 -0, banner
+// silent). Once both have written to a path, the mixing already happened and
+// the remedy is manual separation. Before either writes, the remedy is free --
+// commit the first, then start the second. So an unchanged path is not a
+// non-entanglement; it is the same entanglement while it is still cheap, and
+// it gets its own sentence saying so.
+//
+// A plain `proposed` item still triggers nothing, which is what the original
+// rationale was actually protecting: two intentions, either free to revise
+// its `files` list before any work happens.
 window.__bramWorklistOverlapGroups = function (items, claim) {
   var list = items || [];
   var byPath = {};
@@ -8959,101 +9176,129 @@ window.__bramWorklistOverlapGroups = function (items, claim) {
     for (j = 0; j < files.length; j++) {
       var f = files[j];
       if (!f) continue;
-      // The path must actually have changes: nothing to sweep, no warning.
-      if ((f.added || 0) <= 0 && (f.removed || 0) <= 0) continue;
-      if (!byPath[f.path]) byPath[f.path] = {};
-      byPath[f.path][item.id] = true;
+      if (!byPath[f.path]) byPath[f.path] = { ids: {}, added: 0, removed: 0 };
+      byPath[f.path].ids[item.id] = true;
+      // Per-PATH totals, so every sharer reports the same numbers. Taking the
+      // max rather than summing is the point: these are the same disk facts
+      // seen twice, not two contributions to add up.
+      byPath[f.path].added = Math.max(byPath[f.path].added, f.added || 0);
+      byPath[f.path].removed = Math.max(byPath[f.path].removed, f.removed || 0);
     }
   }
   var out = [];
   var paths = Object.keys(byPath).sort();
   for (i = 0; i < paths.length; i++) {
-    var ids = Object.keys(byPath[paths[i]]).sort();
-    // TWO or more begun items on a changed path. One begun item alongside
-    // another's un-started intention is not an entanglement: committing the
-    // first sweeps in nothing, because the second has not run.
+    var entry = byPath[paths[i]];
+    var ids = Object.keys(entry.ids).sort();
+    // TWO or more begun items on the path. One begun item alongside another's
+    // un-started intention is not an entanglement: committing the first
+    // sweeps in nothing, because the second has not run.
     if (ids.length < 2) continue;
-    out.push({ path: paths[i], ids: ids });
+    out.push({
+      path: paths[i],
+      ids: ids,
+      added: entry.added,
+      removed: entry.removed,
+      tier: entry.added > 0 || entry.removed > 0 ? "changed" : "planned",
+    });
   }
+  // Changed first: an entanglement that already exists outranks one that
+  // has not happened yet.
+  out.sort(function (a, b) {
+    if (a.tier !== b.tier) return a.tier === "changed" ? -1 : 1;
+    return a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
+  });
   return out;
 };
 
-// Identity of the current entanglement: the shared paths plus every item id
-// involved, so adding a third item to an existing overlap counts as new and
-// raises a fresh banner rather than staying silenced by an earlier dismissal.
-// Selection is deliberately NOT part of it -- dismissing silences the
-// entanglement, not a way of looking at it.
-window.__bramWorklistOverlapSignature = function (items, claim) {
-  var groups = window.__bramWorklistOverlapGroups(items, claim);
-  if (!groups.length) return "";
-  var parts = [];
-  for (var i = 0; i < groups.length; i++) {
-    parts.push(groups[i].path + ">" + groups[i].ids.join(","));
-  }
-  return parts.join("|");
+// Appends the shared-file commit choice to the feedback the gate buttons send.
+// Folded into the existing actions rather than given its own submit button --
+// the same reasoning as the close-on-commit dialog's `close-issue:` lines, and
+// the pane convention against a third decision point beside Approve/Drop.
+// Inert on the default ("together"), so every call site can wrap
+// unconditionally.
+window.__bramWithShareMode = function (text, mode) {
+  if (mode !== "split") return text;
+  var body = text || "";
+  return (
+    (body ? body + "\n\n" : "") +
+    "split-shared-files: separate the shared-file changes so each item " +
+    "commits on its own, rather than letting one commit take the whole file."
+  );
 };
 
-// One sentence per entangled path. Selection changes WHICH consequence is
-// imminent; it never hides the banner. A full selection is not consent to a
-// single commit -- it only means both rows are ticked -- so going quiet there
-// would decide one-commit-or-several by omission, which is the very gap this
-// banner exists to close.
-window.__bramWorklistOverlapLines = function (items, selectedIds, claim) {
+// One ROW per entangled path, for the banner's table: { path, disk,
+// claimants, hint, tier }.
+//
+// This replaced one prose sentence per path. Two things were wrong with the
+// sentences, and only the second is about reading.
+//
+// ACCURACY. They asserted attribution -- "committing X will also carry changes
+// from Y" -- which Bram cannot know. `changedFiles` counts are per-PATH, and
+// no per-item record of who wrote what exists anywhere. Live 2026-08-22:
+// helpers.js sat at +68 -21, ALL of it one item's work, while its co-claimant
+// had written nothing; the banner named that bystander as a contributor.
+// Begun-ness was the proxy for "could have contributed" and it is far too
+// weak -- an approved item that has done nothing looks identical to one that
+// did everything.
+//
+// So the rows assert QUANTITIES, never causes. "+68 -21" and "one commit takes
+// all of it" are true whoever wrote them, and check against the number already
+// on the row. Attribution is the user's half: they asked for the work, so they
+// know whose it is. Guessing at their half and getting it wrong is worse than
+// leaving it to them.
+//
+// READING. Prose grew a paragraph per PAIR and restructured itself on every
+// selection tick, so it had to be re-parsed rather than re-scanned. Rows grow
+// one line per FILE and are selection-independent -- which the accuracy fix
+// makes correct as well as calmer, since without an attribution claim the
+// consequence no longer varies with what is ticked: anything claiming this
+// path takes all of it.
+//
+// The banner keeps this job rather than the row's "shared with" column,
+// because that column lives inside the per-row expanded file table. With rows
+// collapsed it is invisible, and entanglement is a relation BETWEEN rows --
+// the banner is the only surface that sees them all at once.
+window.__bramWorklistOverlapRows = function (items, claim) {
   var groups = window.__bramWorklistOverlapGroups(items, claim);
-  var selected = selectedIds || [];
-  var lines = [];
+  var rows = [];
   for (var i = 0; i < groups.length; i++) {
-    var ids = groups[i].ids;
-    var path = groups[i].path;
-    var sel = [];
-    var others = [];
-    for (var j = 0; j < ids.length; j++) {
-      if (selected.indexOf(ids[j]) !== -1) sel.push(ids[j]);
-      else others.push(ids[j]);
-    }
-
-    // Every form LEADS with the shared fact, which is true at any stage, and
-    // mentions committing only as the eventual consequence. Leading with a
-    // verb tied the opening word to a step the selection may not have reached:
-    // with two `proposed` items ticked the gate offers Approve while the
-    // banner said "will be committed together", sending the reader to look for
-    // a Commit button that is not there.
-    var lead =
-      window.__bramJoinNames(ids) +
-      (ids.length === 2 ? " both change " : " all change ") +
-      path;
-
-    if (sel.length && others.length) {
-      // A proper subset is ticked: committing it sweeps in the rest.
-      lines.push(
-        lead +
-          ". Committing " +
-          window.__bramJoinNames(sel) +
-          " will also carry changes from " +
-          window.__bramJoinNames(others) +
-          ". Ask the agent to separate them if you want a commit each."
-      );
-    } else if (sel.length && !others.length) {
-      // The whole set is ticked: one commit, unless you say otherwise.
-      lines.push(
-        lead +
-          ", so they will land in one commit. Ask the agent to separate the " +
-          "shared changes if you want a commit each."
-      );
-    } else {
-      // Nothing relevant ticked: name the parties and both routes.
-      lines.push(
-        lead +
-          ". They can go in one commit, or the agent can separate the shared " +
-          "changes so each gets its own."
-      );
-    }
+    var g = groups[i];
+    var changed = g.tier === "changed";
+    rows.push({
+      path: g.path,
+      tier: g.tier,
+      disk: changed ? "+" + g.added + " \u2212" + g.removed : "nothing yet",
+      // Comma-joined, not __bramJoinNames: that helper builds prose ("A and
+      // B") for a sentence. This is a table cell, and a cell wants a list.
+      claimants: g.ids.join(", "),
+    });
   }
-  return lines;
+  return rows;
 };
 
-window.__bramRestoreWorklistOverlapDismissed = function () {
-  return __bramReadLS("bram.worklistOverlapDismissed", "");
+// Should the one-commit / commit-each choice be offered at all?
+//
+// Only when BOTH hold: this selection could commit, and that commit would
+// sweep a path another begun item claims. Without a committable item the
+// question is premature -- nothing is about to be committed. Without a shared
+// path there is nothing to split.
+//
+// It was previously shown whenever the Shared files table was, which is a
+// scope mismatch: the table is BOARD-wide (every overlap, whatever is ticked)
+// while this is SELECTION-scoped (what happens when this commits). Stacking a
+// selection-scoped control under a board-wide table is what made it hard to
+// predict when it should appear.
+window.__bramSelectionCommitSweepsShared = function (items, sel, claim, oneClickEnabled) {
+  if (!window.__bramSelectionAllCommittable(items, sel, claim, oneClickEnabled)) return false;
+  var chosen = sel || [];
+  var list = items || [];
+  return list.some(function (i) {
+    return (
+      chosen.indexOf(i.id) !== -1 &&
+      window.__bramItemChangedSplit(i, list, claim).shared.length > 0
+    );
+  });
 };
 
 window.__bramSendLedgerNotice = function (payload, dismissedKey) {

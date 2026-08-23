@@ -11,7 +11,8 @@
   var.worklist2Selected="{[]}"
   var.worklist2BatchText="{''}"
   var.w2BatchVoiceRecording="{false}"
-  var.overlapDismissed="{window.__bramRestoreWorklistOverlapDismissed()}">
+  var.worklist2ShareMode="{'together'}"
+  >
   <!-- Worklist2: the redesigned, evidence-first gate (tutorial gist v3).
        Binds the same /__worklist payload Workspace uses, so the two tabs
        cannot disagree about state. Two-level compression: a row-level
@@ -193,13 +194,43 @@
                upstream as xmlui-org/xmlui#3814). Contrast matched to
                Search's facet chips via theme vars:
                https://www.xmlui.org/docs/howto/theme-badge-colors-and-sizes -->
+          <!-- The stage, icon-only in a FIXED-WIDTH slot so it forms a column
+               you can read vertically without reading any row. Fixed rather
+               than content-sized because a ragged pseudo-column is what makes
+               scanning fail; with the label gone the slot only has to hold one
+               glyph.
+
+               ✓ / ✓✓ counts what is DONE behind the item -- one, the proposal
+               exists; two, the work exists too -- so nothing claims completion
+               the way a lone check did. The label moves to the tooltip, which
+               Icon supports as cross-cutting TooltipBehavior (absent from its
+               properties page, wired in Icon.tsx) and which also feeds
+               aria-label, so the words survive for screen readers rather than
+               being dropped. -->
+          <!-- Four states, in a FIXED-WIDTH slot so they form a column you
+               read vertically without reading any row. Colour carries WHOSE
+               TURN -- full strength for the two states waiting on you, muted
+               for the two waiting on the agent -- because that binary is the
+               fact that decides whether you act, and colour is seen before the
+               glyph resolves. Shape says which of the four; the tooltip
+               carries the words (Icon feeds it to aria-label too). -->
+          <HStack width="1.75rem" verticalAlignment="center">
+            <Icon
+              name="{window.__bramWorklist2Stage($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items).icon}"
+              size="md"
+              color="{window.__bramWorklist2Stage($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items).yours ? '$textColor-primary' : '$textColor-secondary'}"
+              tooltip="{window.__bramWorklist2Stage($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items).label}" />
+          </HStack>
           <Theme backgroundColor-Badge="$color-primary-600" textColor-Badge="white">
             <Badge value="{$item.id}" />
           </Theme>
+          <!-- Basenames in the line, full paths in the tooltip: the row is a
+               scan line and repo-relative paths would swamp it. -->
           <Text
             fontSize="$fontSize-sm"
             color="$textColor-secondary"
-            value="{window.__bramWorklist2Strip($item, inflightClaim.value)}" />
+            tooltip="{window.__bramWorklist2StripTooltip($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items)}"
+            value="{window.__bramWorklist2Strip($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items)}" />
           </HStack>
         </HStack>
         <VStack
@@ -371,63 +402,99 @@
         initialValue="{worklist2BatchText}"
         onGotFocus="setWorklistVoiceTarget('feedback')"
         onDidChange="(v) => worklist2BatchText = v" />
+      <!-- Dimmed, not hidden. Buttons appearing and vanishing as rows are
+           ticked is what made the gate-explanation matrix seem necessary; the
+           row states itself now, so a greyed Start saying "exists, does not
+           apply here" beats one that silently disappears. -->
       <Button
-        when="{window.__bramSelectionAllStatus(worklist.value.items, worklist2Selected, 'proposed')}"
-        label="{'Approve ' + (worklist2Selected || []).length}"
+        label="{'Start ' + (worklist2Selected || []).length}"
         size="sm"
-        enabled="{!window.__bramInflightBlocker(inflightClaim.value)}"
-        onClick="window.__bramIframeTrace('click', {target: 'worklist2-batch-approve', count: (worklist2Selected || []).length}); const ids = window.__bramSelectionIds(worklist.value.items, worklist2Selected, 'proposed'); worklist2Sent = window.__bramWorklist2CaptureSent(worklist2Sent, ids, worklist2BatchText, Date.now()); const r = window.__bramPrepareBatchWorklistActionSubmission({kind: 'approved', items: worklist.value.items, selectedIds: ids, feedbackDraftsById: window.__bramFanFeedback(ids, window.__bramWithStagedImageMarkers(worklist2BatchText, 'feedback'))}); worklist2Selected = []; worklist2BatchText = ''; window.__bramWorklistActApply(r)" />
+        enabled="{!window.__bramInflightBlocker(inflightClaim.value) &amp;&amp; window.__bramSelectionAllUnstarted(worklist.value.items, worklist2Selected, inflightClaim.value)}"
+        onClick="window.__bramIframeTrace('click', {target: 'worklist2-batch-approve', count: (worklist2Selected || []).length}); const ids = window.__bramSelectionIds(worklist.value.items, worklist2Selected, 'proposed'); worklist2Sent = window.__bramWorklist2CaptureSent(worklist2Sent, ids, worklist2BatchText, Date.now()); const r = window.__bramPrepareBatchWorklistActionSubmission({kind: 'approved', items: worklist.value.items, selectedIds: ids, feedbackDraftsById: window.__bramFanFeedback(ids, window.__bramWithShareMode(window.__bramWithStagedImageMarkers(worklist2BatchText, 'feedback'), worklist2ShareMode))}); worklist2Selected = []; worklist2BatchText = ''; window.__bramWorklistActApply(r)" />
       <Button
-        when="{(!worklistConfig.value || worklistConfig.value.oneClickApproveCommit !== false) &amp;&amp; window.__bramSelectionAllPlans(worklist.value.items, worklist2Selected)}"
-        label="{'Approve & commit ' + (worklist2Selected || []).length}"
+        when="{!worklistConfig.value || worklistConfig.value.oneClickApproveCommit !== false}"
+        label="{'Start & commit ' + (worklist2Selected || []).length}"
         size="sm"
-        enabled="{!window.__bramInflightBlocker(inflightClaim.value)}"
+        enabled="{!window.__bramInflightBlocker(inflightClaim.value) &amp;&amp; window.__bramSelectionAllUnstarted(worklist.value.items, worklist2Selected, inflightClaim.value) &amp;&amp; window.__bramSelectionAllPlans(worklist.value.items, worklist2Selected)}"
         tooltip="One click: apply, then commit when done"
-        onClick="window.__bramIframeTrace('click', {target: 'worklist2-batch-approve-commit', count: (worklist2Selected || []).length}); const ids = window.__bramSelectionIds(worklist.value.items, worklist2Selected, 'proposed'); worklist2Sent = window.__bramWorklist2CaptureSent(worklist2Sent, ids, worklist2BatchText, Date.now()); const r = window.__bramPrepareBatchWorklistActionSubmission({kind: 'approved', oneShot: true, closeMap: worklist2Close, items: worklist.value.items, selectedIds: ids, feedbackDraftsById: window.__bramFanFeedback(ids, window.__bramWithStagedImageMarkers(worklist2BatchText, 'feedback'))}); worklist2Selected = []; worklist2BatchText = ''; window.__bramWorklistActApply(r)" />
+        onClick="window.__bramIframeTrace('click', {target: 'worklist2-batch-approve-commit', count: (worklist2Selected || []).length}); const ids = window.__bramSelectionIds(worklist.value.items, worklist2Selected, 'proposed'); worklist2Sent = window.__bramWorklist2CaptureSent(worklist2Sent, ids, worklist2BatchText, Date.now()); const r = window.__bramPrepareBatchWorklistActionSubmission({kind: 'approved', oneShot: true, closeMap: worklist2Close, items: worklist.value.items, selectedIds: ids, feedbackDraftsById: window.__bramFanFeedback(ids, window.__bramWithShareMode(window.__bramWithStagedImageMarkers(worklist2BatchText, 'feedback'), worklist2ShareMode))}); worklist2Selected = []; worklist2BatchText = ''; window.__bramWorklistActApply(r)" />
       <Button
-        when="{window.__bramSelectionAllStatus(worklist.value.items, worklist2Selected, 'applied')}"
         label="{'Commit ' + (worklist2Selected || []).length}"
         size="sm"
-        enabled="{!window.__bramInflightBlocker(inflightClaim.value)}"
-        onClick="window.__bramIframeTrace('click', {target: 'worklist2-batch-commit', count: (worklist2Selected || []).length}); const ids = window.__bramSelectionIds(worklist.value.items, worklist2Selected, 'applied'); worklist2Sent = window.__bramWorklist2CaptureSent(worklist2Sent, ids, worklist2BatchText, Date.now()); const r = window.__bramPrepareBatchWorklistActionSubmission({kind: 'approved', closeMap: worklist2Close, items: worklist.value.items, selectedIds: ids, feedbackDraftsById: window.__bramFanFeedback(ids, window.__bramWithStagedImageMarkers(worklist2BatchText, 'feedback'))}); worklist2Selected = []; worklist2BatchText = ''; window.__bramWorklistActApply(r)" />
+        enabled="{!window.__bramInflightBlocker(inflightClaim.value) &amp;&amp; window.__bramSelectionAllCommittable(worklist.value.items, worklist2Selected, inflightClaim.value, worklistConfig.value ? worklistConfig.value.oneClickApproveCommit : true)}"
+        onClick="window.__bramIframeTrace('click', {target: 'worklist2-batch-commit', count: (worklist2Selected || []).length}); const ids = window.__bramSelectionIds(worklist.value.items, worklist2Selected, ''); worklist2Sent = window.__bramWorklist2CaptureSent(worklist2Sent, ids, worklist2BatchText, Date.now()); const r = window.__bramPrepareBatchWorklistActionSubmission({kind: 'approved', oneShot: window.__bramSelectionNeedsProposedCommit(worklist.value.items, worklist2Selected), closeMap: worklist2Close, items: worklist.value.items, selectedIds: ids, feedbackDraftsById: window.__bramFanFeedback(ids, window.__bramWithShareMode(window.__bramWithStagedImageMarkers(worklist2BatchText, 'feedback'), worklist2ShareMode))}); worklist2Selected = []; worklist2BatchText = ''; window.__bramWorklistActApply(r)" />
       <Button
         label="{'Iterate ' + (worklist2Selected || []).length}"
         size="sm"
         enabled="{!window.__bramInflightBlocker(inflightClaim.value) &amp;&amp; (worklist2BatchText || '').trim().length > 0}"
         tooltip="One message about the selected set"
-        onClick="window.__bramIframeTrace('click', {target: 'worklist2-batch-iterate', count: (worklist2Selected || []).length}); const iids = window.__bramSelectionIds(worklist.value.items, worklist2Selected, ''); worklist2Sent = window.__bramWorklist2CaptureSent(worklist2Sent, iids, worklist2BatchText, Date.now()); window.__bramWorklist2BatchIterate(iids, window.__bramWithStagedImageMarkers(worklist2BatchText, 'feedback')); worklist2Selected = []; worklist2BatchText = ''" />
+        onClick="window.__bramIframeTrace('click', {target: 'worklist2-batch-iterate', count: (worklist2Selected || []).length}); const iids = window.__bramSelectionIds(worklist.value.items, worklist2Selected, ''); worklist2Sent = window.__bramWorklist2CaptureSent(worklist2Sent, iids, worklist2BatchText, Date.now()); window.__bramWorklist2BatchIterate(iids, window.__bramWithShareMode(window.__bramWithStagedImageMarkers(worklist2BatchText, 'feedback'), worklist2ShareMode)); worklist2Selected = []; worklist2BatchText = ''" />
       <Button
         label="{'Drop ' + (worklist2Selected || []).length}"
         size="sm"
         enabled="{!window.__bramInflightBlocker(inflightClaim.value)}"
-        onClick="window.__bramIframeTrace('click', {target: 'worklist2-batch-drop', count: (worklist2Selected || []).length}); const ids = window.__bramSelectionIds(worklist.value.items, worklist2Selected, ''); worklist2Sent = window.__bramWorklist2CaptureSent(worklist2Sent, ids, worklist2BatchText, Date.now()); const r = window.__bramPrepareBatchWorklistActionSubmission({kind: 'drop', items: worklist.value.items, selectedIds: ids, feedbackDraftsById: window.__bramFanFeedback(ids, window.__bramWithStagedImageMarkers(worklist2BatchText, 'feedback'))}); worklist2Selected = []; worklist2BatchText = ''; window.__bramWorklistActApply(r)" />
+        onClick="window.__bramIframeTrace('click', {target: 'worklist2-batch-drop', count: (worklist2Selected || []).length}); const ids = window.__bramSelectionIds(worklist.value.items, worklist2Selected, ''); worklist2Sent = window.__bramWorklist2CaptureSent(worklist2Sent, ids, worklist2BatchText, Date.now()); const r = window.__bramPrepareBatchWorklistActionSubmission({kind: 'drop', items: worklist.value.items, selectedIds: ids, feedbackDraftsById: window.__bramFanFeedback(ids, window.__bramWithShareMode(window.__bramWithStagedImageMarkers(worklist2BatchText, 'feedback'), worklist2ShareMode))}); worklist2Selected = []; worklist2BatchText = ''; window.__bramWorklistActApply(r)" />
     </HStack>
     <PastedImageStrip target="feedback" />
-    <!-- worklist-shared-file-split-hint: the "shared with" column names the
-         entanglement; this says what can be done about it. Shown only while an
-         overlap exists, and dismissed per-overlap (see the helpers) so a later,
-         different entanglement is not silenced by an earlier dismissal. -->
+    <!-- Shared files. Not a banner: a plain table of state, always present
+         while an overlap exists and NOT dismissible. It became dismissible
+         when it was a warning written in prose, and dismissal outlived its
+         usefulness the moment it stopped asserting a consequence and started
+         reporting disk facts -- a fact panel you can hide is a fact panel
+         that silently lies by omission. (Live 2026-08-22: one ✕ click
+         suppressed it across every later selection, which read as the table
+         reacting to selection.) Removing it also removed the per-overlap
+         dismissal signature that existed only to key that ✕. -->
     <VStack
-      when="{window.__bramWorklistOverlapSignature(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value) !== '' &amp;&amp; window.__bramWorklistOverlapSignature(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value) !== overlapDismissed}"
-      backgroundColor="$color-info-100"
-      padding="$space-2"
-      gap="$space-2"
-      marginTop="$space-2">
-      <!-- One line per entangled path. Selection picks which consequence is
-           imminent (sweep vs single commit); it never hides the banner, since
-           a full selection is not consent to one commit. -->
-      <Items data="{window.__bramWorklistOverlapLines(worklist.value &amp;&amp; worklist.value.items, worklist2Selected, inflightClaim.value)}">
-        <Text fontSize="$fontSize-sm" value="{$item}" />
-      </Items>
-      <HStack gap="$space-2" verticalAlignment="center">
-        <SpaceFiller />
-        <Button
-          label="✕"
-          variant="ghost"
-          size="xs"
-          tooltip="Dismiss — a different overlap raises this again"
-          onClick="overlapDismissed = window.__bramWorklistOverlapSignature(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value); writeLocalStorage('bram.worklistOverlapDismissed', overlapDismissed)" />
-      </HStack>
+      when="{window.__bramWorklistOverlapRows(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value).length > 0}"
+      gap="$space-1"
+      marginTop="$space-3">
+      <Text fontSize="$fontSize-xs" color="$textColor-secondary"
+        value="Shared files" />
+      <!-- One ROW per entangled path, not one sentence per pair. The columns
+           are the two things Bram can verify: what is on disk, and which items
+           claim the path. It never asserts WHOSE changes those are -- counts
+           are per-path and no per-item attribution exists, so naming a source
+           is a guess (see __bramWorklistOverlapRows). Selection is
+           deliberately not an input: without an attribution claim the
+           consequence is the same whatever is ticked, so the table holds still
+           while you work. -->
+      <Table data="{window.__bramWorklistOverlapRows(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value)}">
+        <Column header="file">
+          <Text value="{$item.path}" variant="code" fontSize="$fontSize-sm" />
+        </Column>
+        <Column header="on disk" width="140px">
+          <Text value="{$item.disk}" variant="code" fontSize="$fontSize-sm" />
+        </Column>
+        <Column header="claimed by">
+          <Text value="{$item.claimants}" fontSize="$fontSize-sm"
+            color="$textColor-secondary" />
+        </Column>
+      </Table>
+      <!-- The note under the table became a CHOICE. It had been prose telling
+           the user to "ask the agent to split the shared changes" -- an
+           instruction to compose a sentence, when the whole premise is that
+           the agent knows how and only needs telling. There are exactly two
+           outcomes, so they are two radio options, and the pick rides along
+           with whatever gate button is pressed next (see __bramWithShareMode).
+           No separate submit: the pane convention folds an optional companion
+           input into the existing actions rather than adding a third decision
+           point beside Approve and Drop. -->
+      <!-- Selection-scoped, unlike the board-wide table above it: shown only
+           when this selection could commit AND that commit would sweep a path
+           another begun item claims. Without a committable item the question
+           is premature; without a shared path there is nothing to split. The
+           explanatory sentence that used to sit under it is gone — the two
+           options ARE the explanation, and a caption restating them is the
+           kind of compensating prose that keeps turning out to mean a control
+           was missing. -->
+      <RadioGroup
+        when="{window.__bramSelectionCommitSweepsShared(worklist.value &amp;&amp; worklist.value.items, worklist2Selected, inflightClaim.value, worklistConfig.value ? worklistConfig.value.oneClickApproveCommit : true)}"
+        initialValue="{worklist2ShareMode}"
+        onDidChange="(v) => worklist2ShareMode = v">
+        <Option value="together" label="One commit — claimants of a shared file land together" />
+        <Option value="split" label="A commit each — the agent separates the shared changes first" />
+      </RadioGroup>
     </VStack>
     </VStack>
     <!-- Parity: You/Agent last-exchange dock (old tab's shape, simplified:

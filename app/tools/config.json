@@ -7,7 +7,9 @@
     "xsVerboseLogMax": 200,
     "heartbeatDriftThresholdMs": 250
   },
-  "themes": ["themes/bram.json"],
+  "themes": [
+    "themes/bram.json"
+  ],
   "defaultTheme": "bram",
   "resources": {
     "logo": "resources/xmlui-logo.svg",
@@ -15,6 +17,7 @@
     "icon.down": "resources/down.svg",
     "icon.up": "resources/up.svg",
     "icon.wrench": "resources/wrench.svg",
-    "icon.hat-glasses": "resources/hat-glasses.svg"
+    "icon.hat-glasses": "resources/hat-glasses.svg",
+    "icon.check-check": "resources/check-check.svg"
   }
 }

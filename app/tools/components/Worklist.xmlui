@@ -90,7 +90,7 @@
     initial="{window.__bramProjectedLastExchange(null)}"
     subscribe="{window.bramSubscribeProjectedLastExchange()}" />
   <VStack padding="$space-4" gap="$space-3">
-    <HStack gap="$space-3" verticalAlignment="center">
+    <HStack gap="$space-3" verticalAlignment="center" paddingBottom="$space-2">
       <H2>Worklist</H2>
       <!-- Parity: + New item. Inline ask (the old tab's dialog distilled):
            items are proposed by the agent; this composes that ask. -->
@@ -214,7 +214,7 @@
                fact that decides whether you act, and colour is seen before the
                glyph resolves. Shape says which of the four; the tooltip
                carries the words (Icon feeds it to aria-label too). -->
-          <HStack width="1.75rem" verticalAlignment="center">
+          <HStack width="1.75rem" verticalAlignment="center" horizontalAlignment="center">
             <Icon
               name="{window.__bramWorklist2Stage($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items).icon}"
               size="md"
@@ -271,7 +271,7 @@
             <Table
               when="{$item.changedFiles}"
               data="{$item.changedFiles}">
-              <Column header="files expected to change">
+              <Column header="files expected to change" width="2*">
                 <Text value="{$item.path}" variant="code" fontSize="$fontSize-sm" />
               </Column>
               <Column header="changes" width="140px">
@@ -289,7 +289,7 @@
                    only channel: contrast is not always sufficient, a long id
                    can clip, and `tooltip` feeds aria-label, so the name reaches
                    a screen reader that gets nothing from the hue. -->
-              <Column header="shared with">
+              <Column header="shared with" width="3*">
                 <HStack
                   when="{$item.sharedWith &amp;&amp; $item.sharedWith.length > 0}"
                   gap="$space-1"
@@ -502,22 +502,24 @@
            consequence is the same whatever is ticked, so the table holds still
            while you work. -->
       <Table data="{window.__bramWorklistOverlapRows(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value)}">
-        <Column header="file">
+        <Column header="file" width="2*">
           <Text value="{$item.path}" variant="code" fontSize="$fontSize-sm" />
         </Column>
         <Column header="on disk" width="140px">
           <Text value="{$item.disk}" variant="code" fontSize="$fontSize-sm" />
         </Column>
-        <Column header="claimed by">
+        <Column header="claimed by" width="3*">
           <!-- One Text per claimant rather than a joined string: each needs its
                own colour, matching that item's row badge. -->
-          <Items data="{$item.claimantIds}">
-            <Theme
-              backgroundColor-Badge="{window.__bramItemColor($item, worklist.value &amp;&amp; worklist.value.items)}"
-              textColor-Badge="white">
-              <Badge value="{$item}" tooltip="{'claimed by ' + $item}" />
-            </Theme>
-          </Items>
+          <HStack gap="$space-1" verticalAlignment="center" wrapContent="true">
+            <Items data="{$item.claimantIds}">
+              <Theme
+                backgroundColor-Badge="{window.__bramItemColor($item, worklist.value &amp;&amp; worklist.value.items)}"
+                textColor-Badge="white">
+                <Badge value="{$item}" tooltip="{'claimed by ' + $item}" />
+              </Theme>
+            </Items>
+          </HStack>
         </Column>
       </Table>
       <!-- The note under the table became a CHOICE. It had been prose telling
@@ -538,6 +540,7 @@
            kind of compensating prose that keeps turning out to mean a control
            was missing. -->
       <RadioGroup
+        marginTop="$space-3"
         when="{window.__bramSelectionCommitSweepsShared(worklist.value &amp;&amp; worklist.value.items, worklist2Selected, inflightClaim.value, worklistConfig.value ? worklistConfig.value.oneClickApproveCommit : true)}"
         initialValue="{worklist2ShareMode}"
         onDidChange="(v) => worklist2ShareMode = v">

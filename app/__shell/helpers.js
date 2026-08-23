@@ -2189,28 +2189,59 @@ window.__bramWorklist2Stage = function (item, claim, items) {
     // reads as a control, and nothing happens when you click it -- the actual
     // controls are the row checkbox and the buttons below. A dashed outline
     // says pending without offering to do anything.
-    return { icon: "circle-dashed", label: "Proposed", yours: true };
+    return { icon: "circle-dashed", label: "Start it", yours: true };
   }
   if (window.__bramSelectionAllCommittable(list, [item.id], claim, true)) {
-    return { icon: "checkmark", label: "Has changes you can commit", yours: true };
+    return { icon: "checkmark", label: "Commit it", yours: true };
   }
-  // Name the AUTHORIZATION, not the work.
+  // There never was a "Green-lit" STATE -- only a stamp with a name.
   //
-  // This state and the one above it share a disk state -- planned files, no
-  // changes -- so every phrasing that described work was true of both rows and
-  // distinguished neither. "Nothing to commit" is true of a proposed item too;
-  // "not started" is true of a green-lit item nothing has come of. Six attempts
-  // failed on that, from "with the agent" through "waiting on the agent",
-  // because they were all trying to say something about output.
+  // The button machine has exactly three inputs: needs-start, authorized,
+  // committable. `begunAtMs` is none of them, so the label that read it could
+  // not predict a button, and this column's charter (see the header above) is
+  // that every icon predicts its own. That is the real reason the six
+  // phrasings recorded in this comment's previous form all failed -- "nothing
+  // to commit", "not started", "with the agent", "waiting on the agent" and
+  // the rest. They were competing to describe a state the action model does
+  // not contain. From the chair, 2026-08-23: "Otherwise we have a strip of
+  // facts right? And there never really was a Green-lit?"
   //
-  // The axis is whether YOU green-lit it, which `begunAtMs` has recorded all
-  // along and nothing ever displayed. Proposed / Green-lit are each true of
-  // exactly one of the two rows, which is the test the others failed.
+  // What the old branch actually straddled is two opposite situations, split
+  // here on the predicate the Start button already computes:
   //
-  // "Green-lit" also sidesteps a trap the Start rename created: the past tense
-  // of "start" is "started", which reads as "work has started" and contradicts
-  // a row with no changes. Green-lighting is unambiguously the user's act.
-  return { icon: "circle-dot", label: "Green-lit", yours: false };
+  //   - authorization lapsed -> STALLED. Nothing will happen unless the user
+  //     acts, and Start is already lit. `yours: true`.
+  //   - authorization or claim live -> the agent's move, nothing for the user
+  //     to do. `yours: false`.
+  //
+  // Labels are instructions, not nouns, for the same reason: a row that says
+  // "Stalled" while the user guesses which of five buttons unsticks it is the
+  // defect this split exists to remove.
+  //
+  // Proposed and Stalled deliberately share an instruction (Start) because
+  // they share an ACTION; they differ only in history, which the strip carries.
+  // Stalled keeps its own glyph anyway -- same turn, different diagnosis, and
+  // the diagnosis (an authorization lapsed and nothing came of it, the
+  // reconcile-dropped-advance signature) is worth seeing by shape from across
+  // the list rather than on hover.
+  if (window.__bramItemNeedsStart(item, claim)) {
+    return { icon: "circle-pause", label: "Stalled \u2014 Start again", yours: true };
+  }
+  return { icon: "circle-dot", label: "Nothing to do \u2014 the agent has it", yours: false };
+};
+
+// Coarse age of the green light, for the Stalled strip. Deliberately coarse:
+// the age is what makes Stalled a diagnosis rather than a restatement, but a
+// per-minute value in a binding is re-render churn for no added meaning, so
+// the returned string changes at most once an hour.
+window.__bramGreenLitAge = function (item) {
+  var ms = item && typeof item.begunAtMs === "number" ? item.begunAtMs : 0;
+  if (!(ms > 0)) return "";
+  var hrs = Math.floor((Date.now() - ms) / 3600000);
+  if (hrs < 1) return "under an hour ago";
+  if (hrs < 24) return hrs + "h ago";
+  var days = Math.floor(hrs / 24);
+  return days === 1 ? "yesterday" : days + "d ago";
 };
 
 window.__bramWorklist2Strip = function (item, claim, items) {
@@ -2283,10 +2314,16 @@ window.__bramWorklist2Strip = function (item, claim, items) {
     // Not committable: every changed path is claimed by another begun item, so
     // not one line is attributable here. Reporting the totals would credit a
     // neighbour's work to this row -- the bug that started this whole thread.
+    // ...and if it is ALSO stalled, say which button unsticks it. This is the
+    // branch the motivating row lands in (notice-banner-component: begun,
+    // 1 of 7 files changed, that file shared with issue-269), so omitting the
+    // hint here would have left the very case that prompted the split showing
+    // a Stalled icon above a line that never names Start.
     var nShared = split.shared.length;
     return withCloses(
       "Nothing of its own changed · " + nShared + " shared file" +
-        (nShared === 1 ? "" : "s") + " changed",
+        (nShared === 1 ? "" : "s") + " changed" +
+        (window.__bramItemNeedsStart(item, claim) ? " · Start again" : ""),
     );
   }
   // The strip names the same state the icon does. Both branches used to return
@@ -2294,13 +2331,21 @@ window.__bramWorklist2Strip = function (item, claim, items) {
   // tooltip carried the whole distinction one hover away.
   if (!begun) {
     window.__bramWorklistStripAnomaly(item, claim, cs);
-    return withCloses("Proposed");
+    return withCloses("Proposed · Start to green-light");
   }
-  // Green-lit, nothing on disk yet. Earlier this returned "" (brief, because
-  // begun-ness was transient) and then "No changes yet" (identical to the
-  // branch above, which was the defect). It reports the authorization, which
-  // is the only thing that differs between the two.
-  return withCloses("Green-lit");
+  // Nothing on disk yet, and begun -- the two states the icon now separates.
+  // Earlier this returned "" (brief, because begun-ness was transient), then
+  // "No changes yet" (identical to the branch above, which was the defect),
+  // then the bare word "Green-lit" (a fact, naming no action). The strip's job
+  // is the history the icon cannot carry PLUS the button that acts on it.
+  if (window.__bramItemNeedsStart(item, claim)) {
+    var age = window.__bramGreenLitAge(item);
+    return withCloses(
+      "Green-lit" + (age ? " " + age : "") +
+        ", nothing came of it · Start again",
+    );
+  }
+  return withCloses("With the agent · nothing to do");
 };
 
 // strip-vs-diff-disagreement-instrument. A row was observed printing

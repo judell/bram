@@ -1546,8 +1546,8 @@ window.settingsInfoBodies = {
     "## Advanced\n\n" +
     "Launch arguments are extra CLI flags. First command is sent to the agent's TUI after startup. Both apply whichever startup choice is used.",
   batchCommitActions:
-    "## One-click Approve & commit\n\n" +
-    "Shows Approve & commit for proposed items in both Worklist surfaces. It is on by default; turn it off to require the two-stage Approve → review at TO COMMIT → Commit flow.\n\n" +
+    "## One-click Start & commit\n\n" +
+    "Shows Start & commit for proposed items in both Worklist surfaces. It is on by default; turn it off to require the two-stage Start → review the changes → Commit flow.\n\n" +
     "## Mirror Worklist lifecycle to GitHub issues\n\n" +
     "Post Worklist lifecycle comments to linked GitHub issues.",
   ui:
@@ -1869,8 +1869,10 @@ window.__bramIsWorklistTextVoiceTarget = function (target) {
 
 // Inflight + submitted-message helpers (audit step 6). All pure data
 // transforms; xs delegators in Globals.xs preserve bare-name calls.
+// The `approved` KIND is wire format and does not change; only the word the
+// user reads does. The gate button is Start, so the verb is Starting.
 window.__bramInflightActionLabel = function (kind) {
-  if (kind === "approved") return "Approving";
+  if (kind === "approved") return "Starting";
   if (kind === "iterate") return "Iterating";
   if (kind === "drop") return "Dropping";
   return "";
@@ -1887,7 +1889,11 @@ window.__bramClaimVerb = function (kind, statusLabel) {
   if (kind === "drop") return "Dropping";
   if (kind === "iterate") return "Iterating";
   if (kind === "approved") {
-    return statusLabel === "TO COMMIT" ? "Committing" : "Approving";
+    // The statusLabel test reads the LEGACY tab's badge string, which the host
+    // still writes. Left as-is deliberately: it is a host fact rather than a
+    // label, and changing what the host writes is a wider blast radius than
+    // this rename. Starting/Committing match the two gate buttons.
+    return statusLabel === "TO COMMIT" ? "Committing" : "Starting";
   }
   return kind ? kind.charAt(0).toUpperCase() + kind.slice(1) : "";
 };
@@ -2363,7 +2369,7 @@ window.__bramWorklistStripAnomaly = function (item, claim, cs) {
 };
 // worklist2-checkbox-during-action: the row checkbox stays ticked and
 // disabled while a live claim covers the item — the tick is part of the
-// sentence ("Approve 1" = this row), so it freezes until the action
+// sentence ("Start 1" = this row), so it freezes until the action
 // resolves. Thin wrapper so the Checkbox bindings stay single calls.
 window.__bramWorklist2RowClaimed = function (claim, itemId) {
   return !!window.__bramItemInflightKind(claim, itemId, "", "", 0);
@@ -2567,7 +2573,7 @@ window.__bramWorklistActionStatusLabel = function (item) {
 
 window.__bramWorklistActionDisplay = function (kind, items) {
   var action =
-    kind === "approved" ? "Approved" :
+    kind === "approved" ? "Started" :
     kind === "iterate" ? "Iterated" :
     kind === "drop" ? "Dropped" :
     "Submitted";
@@ -10624,7 +10630,7 @@ window.__bramTipsRegistry = [
   { id: 'batch-actions', priority: 20, route: '/worklist2',
     text: 'Tip: Tick several Worklist rows to act on them together.' },
   { id: 'gate-one-click', priority: 22, route: '/worklist2',
-    text: "Tip: Use 'Approve & commit' to bypass the option to iterate." },
+    text: "Tip: Use 'Start & commit' to bypass the option to iterate." },
   { id: 'gate-shared-message', priority: 24, route: '/worklist2',
     text: "Tip: The Worklist message box applies to whatever button you press. One note fans out to every selected item's feedback." },
   { id: 'queue', priority: 30, route: '/queue?from=tip',

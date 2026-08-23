@@ -668,8 +668,16 @@ that touch multiple issues — use a bare descriptive slug
 The prefix complements `closesIssues` rather than replacing it: the
 id is for human scanning (Worklist tab, `git log`, chat),
 `closesIssues` drives the close-on-commit dialog. Pair them when
-both apply. Existing items keep their names — renaming breaks
-back-references for marginal benefit.
+both apply.
+
+Item ids are **immutable**. Renaming is not supported: removing an
+existing id from `worklist.json` reads as an unauthorized prune and the
+host reverts the write, while any draft file you already moved stays
+moved — leaving the row with `_draftMissing` and no prose until someone
+restores the filename by hand. The rollback is silent; your write
+returns success, so nothing tells you it failed. If an id turns out to
+under-name its item, keep the id and say so in the draft. Tracked in
+judell/bram#276.
 
 #### Keep the `files` list current as understanding evolves
 

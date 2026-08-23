@@ -35021,6 +35021,115 @@ fn clear_inflight_claim_sentinel<R: tauri::Runtime>(
     true
 }
 
+// Outcome of an incremental claim retirement (see shrink_inflight_claim_sentinel).
+#[derive(Debug, PartialEq, Eq)]
+enum ClaimShrink {
+    /// No claim on disk, or it could not be read.
+    NoClaim,
+    /// Some ids are still in flight; the claim was rewritten with the rest.
+    Shrunk { remaining: Vec<String> },
+    /// Nothing left in flight; the claim file was removed.
+    Cleared,
+}
+
+// Retire NAMED ids from the inflight claim, clearing it only when nothing is
+// left. This is deliberately NOT what clear_inflight_claim_sentinel does.
+//
+// That function refuses any clear not fully covering the claim, and the refusal
+// is defensive rather than accidental: `op=clear-partial` was added as a
+// COLLISION observer for concurrent subagent delegation, where a clear covering
+// part of a live claim meant something had gone wrong. Refusing those is right.
+//
+// What was wrong is that a lifecycle route resolving specific ids -- mutate
+// advance/prune, and worklist-commit which delegates to it -- was
+// indistinguishable from that accident. A claim over [a, b] could not retire as
+// its items resolved: resolving `a` was refused as partial, and resolving `b`
+// afterwards was ALSO refused, because the claim still listed `a`. The claim
+// never retired on its own and only an explicit /__worklist/end naming both ids
+// cleared it. That forecloses starting two unentangled items in one click and
+// committing them separately -- every item after the first leaves a spinner up.
+//
+// Only callers that know exactly which ids they resolved may shrink. The blunt
+// clears (turn-end detectors, cancel paths, startup cleanup, the drop policy
+// validator) do not, and keep the all-or-nothing rule.
+//
+// `op=clear-shrink` is a distinct op on purpose. If shrinking were traced as
+// `clear-partial`, that line would stop meaning "collision" and start meaning
+// "collision OR normal progress" -- an instrument quietly losing its edge.
+fn shrink_inflight_claim_sentinel<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    resolved_ids: &[String],
+) -> ClaimShrink {
+    let Some(path) = inflight_claim_file(app) else {
+        return ClaimShrink::NoClaim;
+    };
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return ClaimShrink::NoClaim;
+    };
+    let mut claim: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return ClaimShrink::NoClaim,
+    };
+    let claimed_ids: Vec<String> = claim
+        .get("ids")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let remaining: Vec<String> = claimed_ids
+        .iter()
+        .filter(|cid| !resolved_ids.iter().any(|rid| rid == *cid))
+        .cloned()
+        .collect();
+
+    if remaining.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "inflight-sentinel",
+                &format!(
+                    "op=clear ids={}",
+                    serde_json::to_string(&claimed_ids).unwrap_or_else(|_| "[]".to_string())
+                ),
+            );
+        }
+        emit_replayable_signal(app, "inflight-claim-changed");
+        return ClaimShrink::Cleared;
+    }
+
+    // Rewrite in place so every other field (claimedAt, kind, ...) survives.
+    if let Some(obj) = claim.as_object_mut() {
+        obj.insert("ids".into(), serde_json::json!(remaining));
+    }
+    let Ok(body) = serde_json::to_string_pretty(&claim) else {
+        return ClaimShrink::NoClaim;
+    };
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, format!("{}\n", body)).is_err() {
+        return ClaimShrink::NoClaim;
+    }
+    if std::fs::rename(&tmp, &path).is_err() {
+        return ClaimShrink::NoClaim;
+    }
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "inflight-sentinel",
+            &format!(
+                "op=clear-shrink resolved={} remaining={}",
+                serde_json::to_string(resolved_ids).unwrap_or_else(|_| "[]".to_string()),
+                serde_json::to_string(&remaining).unwrap_or_else(|_| "[]".to_string())
+            ),
+        );
+    }
+    emit_replayable_signal(app, "inflight-claim-changed");
+    ClaimShrink::Shrunk { remaining }
+}
+
 // True iff resources/.inflight-claim.json exists, parses, and lists at
 // least one claimed id. Used by the watcher to decide whether to emit
 // tools-pane-reload now or defer it until the cycle clears (refs #93).
@@ -45539,11 +45648,26 @@ fn handle_iterate_end<R: tauri::Runtime>(
             .map(|(claim_ids, claimed_at)| !claim_ids.is_empty() && unix_now_ms() >= claimed_at)
             .unwrap_or(false),
     );
-    clear_inflight_claim_sentinel(app, &ids);
+    // Report what actually happened. This returned a bare {"ok":true} whether
+    // or not anything was cleared, so a caller ending one id of a two-id claim
+    // got success, a still-live claim, and a spinner it could not explain.
+    let body = match shrink_inflight_claim_sentinel(app, &ids) {
+        ClaimShrink::Cleared => serde_json::json!({ "ok": true, "cleared": true }),
+        ClaimShrink::Shrunk { remaining } => serde_json::json!({
+            "ok": true,
+            "cleared": false,
+            "remaining": remaining,
+        }),
+        ClaimShrink::NoClaim => serde_json::json!({
+            "ok": true,
+            "cleared": false,
+            "remaining": [],
+        }),
+    };
     (
         200,
         "application/json; charset=utf-8",
-        br#"{"ok":true}"#.to_vec(),
+        serde_json::to_vec(&body).unwrap_or_else(|_| br#"{"ok":true}"#.to_vec()),
     )
 }
 
@@ -46344,7 +46468,13 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
                 .map(|(claim_ids, claimed_at)| !claim_ids.is_empty() && unix_now_ms() >= claimed_at)
                 .unwrap_or(false),
         );
-        let cleared = clear_inflight_claim_sentinel(app, completion_ids);
+        // Shrink, not clear: a batch approval creates one claim over several
+        // ids, and each mutate resolves only its own. worklist-commit reaches
+        // this same path by delegating a prune.
+        let cleared = !matches!(
+            shrink_inflight_claim_sentinel(app, completion_ids),
+            ClaimShrink::NoClaim
+        );
         if !cleared {
             // No sentinel existed to clear — the agent reached mutate without a
             // prior /__worklist/resolve (the Codex filesystem path skips resolve;

@@ -255,10 +255,18 @@
                  Only the activity numbers are begun-gated - a plan row
                  shows path + shared-with, never sibling bleed as its own
                  changes. -->
+            <!-- The table renders for every row, including plan rows with
+                 nothing in the numeric columns. Swapping to a plain list when
+                 there was nothing to report made the shape jump between rows
+                 and read as two different displays; the header carries the
+                 meaning instead. "files expected to change" is true before any
+                 work happens (it is the plan) and stays true after (it is what
+                 changed), so one label covers the whole lifecycle and the
+                 empty cells read as not-yet rather than missing. -->
             <Table
               when="{$item.changedFiles}"
               data="{$item.changedFiles}">
-              <Column header="file">
+              <Column header="files expected to change">
                 <Text value="{$item.path}" variant="code" fontSize="$fontSize-sm" />
               </Column>
               <Column header="changes" width="140px">
@@ -274,11 +282,13 @@
                   value="{$item.sharedWith &amp;&amp; $item.sharedWith.length ? '⚠ ' + $item.sharedWith.join(', ') : ''}" />
               </Column>
             </Table>
-            <Text
+            <!-- Fallback for payloads without the rung-1 enrichment, where
+                 there is no changedFiles array to build a table from. -->
+            <Items
               when="{!$item.changedFiles}"
-              variant="code"
-              fontSize="$fontSize-sm"
-              value="{window.__bramWorklistItemFiles($item).join(' · ')}" />
+              data="{window.__bramWorklistItemFiles($item)}">
+              <Text value="{$item}" variant="code" fontSize="$fontSize-sm" />
+            </Items>
           </VStack>
           <HStack
             when="{$item.before}"

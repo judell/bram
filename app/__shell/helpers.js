@@ -2100,18 +2100,22 @@ window.__bramSelectionNeedsProposedCommit = function (items, sel) {
 window.__bramWorklist2Stage = function (item, claim, items) {
   var list = items || [];
   if (!window.__bramWorklist2Begun(item, claim)) {
-    return { icon: "play", label: "Not started", yours: true };
+    // circle-dashed, not play: the glyph sits in a STATUS column but play
+    // reads as a control, and nothing happens when you click it -- the actual
+    // controls are the row checkbox and the buttons below. A dashed outline
+    // says pending without offering to do anything.
+    return { icon: "circle-dashed", label: "Not started", yours: true };
   }
   if (window.__bramSelectionAllCommittable(list, [item.id], claim, true)) {
     return { icon: "check-check", label: "Has changes you can commit", yours: true };
   }
-  // "nothing of YOURS" is what unifies this state's two sub-cases -- an item
-  // with nothing changed anywhere, and one whose only changed paths are shared
-  // and therefore unattributable. Both have nothing of the item's own to
-  // commit, which is also exactly why the Commit button is dark. Earlier
-  // wording ("started", "started. shares 2 files") named the sub-case or the
-  // entanglement and never said why there was no action.
-  return { icon: "checkmark", label: "Started, nothing of yours to commit", yours: false };
+  // Just the consequence. Every longer version named something the reader did
+  // not need -- the sub-case ("started. shares 2 files"), the actor ("with the
+  // agent"), or the authorization ("started, nothing of yours to commit") --
+  // when the only fact that governs what you can do is that there is nothing
+  // to commit. It covers both sub-cases too: nothing changed anywhere, and
+  // changes that are all on shared paths and so not this item's to commit.
+  return { icon: "checkmark", label: "Nothing to commit", yours: false };
 };
 
 window.__bramWorklist2Strip = function (item, claim, items) {

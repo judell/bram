@@ -1875,6 +1875,12 @@ listen("pty-send-sent", (e) => {
   // here, and keeping it stable avoids postMessage-vs-iframe-rebuild races
   // on Approve/Drop clicks while the agent is writing files.
   async function reloadRightPaneOnly() {
+    // A watcher event must not resurrect a pane the user has switched off
+    // (#275) -- otherwise the next file save re-arms it behind display:none.
+    if (!window.__bramTargetPaneArmed) {
+      tracePaneReload("right-reload-skipped", { reason: "target-pane-off" });
+      return;
+    }
     const startedAt = Date.now();
     tracePaneReload("right-listener-fired", {
       priorSrc: RIGHT_PANE_SRC,
@@ -1914,23 +1920,61 @@ listen("pty-send-sent", (e) => {
       src: iframe.getAttribute("src") || "",
     });
   });
-  iframe.src = RIGHT_PANE_SRC;
-  tracePaneReload("right-initial-src-set", {
-    src: RIGHT_PANE_SRC,
-  });
-  setTimeout(() => {
-    if (!loaded) {
-      const retrySrc = bust(RIGHT_PANE_SRC);
-      tracePaneReload("right-initial-retry", {
-        src: retrySrc,
-      });
-      iframe.src = retrySrc;
-    } else {
-      tracePaneReload("right-initial-retry-skipped", {
-        src: iframe.getAttribute("src") || "",
-      });
-    }
-  }, 1500);
+  // #275: do not load the target pane while it is switched off.
+  //
+  // `display: none` (the ui.showTargetApp driver further down this file) hides
+  // the iframe but does NOT stop it loading. So with the pane off -- the
+  // default, and the majority case -- Bram was still booting the project's
+  // index.html on every launch: a synchronous blocking XHR for a config.json
+  // that usually does not exist, then one xmlui component-shadow probe per
+  // built-in tag. Measured here on 2026-08-23: 1,094 404s in a day, for a pane
+  // that was never painted. Gating the src assignment is the fix; hiding it
+  // was only ever cosmetic.
+  //
+  // The flag is exposed on window because the showTargetApp driver is a
+  // separate IIFE and cannot reach `iframe` directly.
+  window.__bramTargetPaneArmed = false;
+  function armRightPane(reason) {
+    if (window.__bramTargetPaneArmed) return;
+    window.__bramTargetPaneArmed = true;
+    loaded = false;
+    iframe.src = RIGHT_PANE_SRC;
+    tracePaneReload("right-initial-src-set", { src: RIGHT_PANE_SRC, reason });
+    setTimeout(() => {
+      if (!window.__bramTargetPaneArmed) return;
+      if (!loaded) {
+        const retrySrc = bust(RIGHT_PANE_SRC);
+        tracePaneReload("right-initial-retry", { src: retrySrc });
+        iframe.src = retrySrc;
+      } else {
+        tracePaneReload("right-initial-retry-skipped", {
+          src: iframe.getAttribute("src") || "",
+        });
+      }
+    }, 1500);
+  }
+  function disarmRightPane(reason) {
+    if (!window.__bramTargetPaneArmed && iframe.getAttribute("src") === "about:blank") return;
+    window.__bramTargetPaneArmed = false;
+    // about:blank rather than removing the attribute: it tears down the
+    // previously loaded document (and any timers/fetches it started) instead
+    // of leaving it running behind display:none.
+    iframe.src = "about:blank";
+    tracePaneReload("right-disarmed", { reason });
+  }
+  window.__bramSetTargetPaneEnabled = function (shown) {
+    if (shown) armRightPane("settings");
+    else disarmRightPane("settings");
+  };
+  // Decide before the first load rather than loading and retracting.
+  iframe.src = "about:blank";
+  fetch("/__settings", { cache: "no-store" })
+    .then((r) => r.json())
+    .then((v) => {
+      if (v && v.ui && v.ui.showTargetApp) armRightPane("startup");
+      else tracePaneReload("right-initial-skipped", { reason: "target-pane-off" });
+    })
+    .catch(() => armRightPane("settings-unreadable"));
   if (tools) {
     const toolsInitialSrc = toolsSrcWithHash(TOOLS_PANE_SRC);
     tools.src = toolsInitialSrc;
@@ -1992,6 +2036,9 @@ listen("pty-send-sent", (e) => {
   function set(next) {
     shown = !!next;
     apply();
+    // #275: display and load are separate concerns. Hiding the pane used to
+    // leave it loading; showing it has to actually start it.
+    if (window.__bramSetTargetPaneEnabled) window.__bramSetTargetPaneEnabled(shown);
   }
   fetch("/__settings")
     .then((r) => r.json())

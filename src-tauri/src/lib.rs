@@ -16405,6 +16405,12 @@ fn pty_resize(cols: u16, rows: u16, state: State<'_, AppState>) -> Result<(), St
 
 // --- Project-server (.bram.json / legacy .xmlui-desktop.json) -------------
 
+// Last (path, content-digest) announced by load_project_config, so an
+// unchanged config is not re-announced on every call. See the comment at the
+// eprintln! below.
+static LAST_PROJECT_CONFIG_LOGGED: std::sync::Mutex<Option<(String, u64)>> =
+    std::sync::Mutex::new(None);
+
 fn load_project_config(root: &Path) -> Option<ProjectConfig> {
     for rel in [".bram.json", ".xmlui-desktop.json"] {
         let path = root.join(rel);
@@ -16414,7 +16420,30 @@ fn load_project_config(root: &Path) -> Option<ProjectConfig> {
         };
         return match serde_json::from_slice::<ProjectConfig>(&bytes) {
             Ok(cfg) => {
-                eprintln!("[project-config] loaded {}", path.display());
+                // Log only when the loaded bytes actually change (#275). This
+                // function has 19 call sites and several are per-request --
+                // `route_request` for `__settings` and `__worklist-config`,
+                // `current_describe_model` once per Tool-Description request,
+                // the search-index depth/limit readers once per pass -- so an
+                // unconditional eprintln! reprinted an unchanged fact hundreds
+                // of times a day. It reached the launch terminal only (never
+                // bram-trace.log), which is why it went unnoticed for so long.
+                //
+                // Keyed on the file's content hash rather than mtime: a
+                // rewrite that restores identical bytes is not a change worth
+                // announcing, and editors touch mtimes freely. The read and
+                // parse still happen every call -- deliberately, because that
+                // is what keeps a hand-edit of .bram.json live -- so this is a
+                // logging fix, not a cache.
+                let digest = bytes.len() as u64 ^ bytes.iter().fold(1469598103934665603u64, |h, b| {
+                    (h ^ (*b as u64)).wrapping_mul(1099511628211)
+                });
+                let key = (path.display().to_string(), digest);
+                let mut last = LAST_PROJECT_CONFIG_LOGGED.lock().unwrap();
+                if last.as_ref() != Some(&key) {
+                    eprintln!("[project-config] loaded {}", path.display());
+                    *last = Some(key);
+                }
                 Some(cfg)
             }
             Err(e) => {
@@ -49338,7 +49367,16 @@ pub fn run() {
             .and_then(|m| m.hook_driven)
             .unwrap_or(true),
     );
-    if !initial_proj.join("index.html").exists() {
+    // Only warn when the target pane is actually enabled (#275). The pane is
+    // off by default -- most users preview their app in their own browser --
+    // so telling a user that a pane they do not use will fail to load is noise
+    // about a consequence that cannot occur.
+    let target_pane_enabled = cfg
+        .as_ref()
+        .and_then(|c| c.ui.as_ref())
+        .and_then(|u| u.show_target_app)
+        .unwrap_or(false);
+    if target_pane_enabled && !initial_proj.join("index.html").exists() {
         eprintln!(
             "[bram] WARNING: no index.html at project root; the right pane will fail to load. Run with `bram /path/to/project` or cd into the project before launching."
         );

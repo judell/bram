@@ -16,7 +16,9 @@ commit, the payload shapes, the authorization flow — is in
 ## What ships today
 
 The redesigned gate became **the** Worklist on 2026-08-20 (`8336553`,
-`98d655e`). The legacy tab survives behind **Settings → Show legacy Worklist**.
+`98d655e`), and picked up two further decisions the same night — see
+*Decided* below. The legacy tab survives behind **Settings → Show legacy
+Worklist**.
 
 ### Rows are evidence-first
 
@@ -25,34 +27,60 @@ A row leads with what is true on disk, not with an item's bookkeeping status.
 user-facing vocabulary; the row instead says whether work has begun and what it
 moved.
 
-### The strip
+### The stage icon and the strip
 
-`__bramWorklist2Strip` (`app/__shell/helpers.js`) resolves the line beside the
-row title, in priority order:
+`__bramWorklist2Stage` (`app/__shell/helpers.js`) resolves each row to one of
+**three** states, shown as an icon plus a tooltip. This used to be four states,
+splitting "changed but not advanced" from "advanced"; that split was removed
+because `advance` is a bookkeeping call the agent makes after editing and
+nothing observable on disk differs between the two sides of it — see *Decided*
+below.
+
+| Icon | Tooltip | Meaning |
+| --- | --- | --- |
+| `circle-dashed` | Not started | not yet begun |
+| `checkmark` | Nothing to commit | begun, but no exclusive changes to land |
+| `check-check` | Has changes you can commit | begun, with committable changes |
+
+Colour on the icon carries whose turn it is — full strength (`$textColor-primary`)
+for the two states waiting on the user, muted (`$textColor-secondary`) for the
+one waiting on the agent.
+
+`__bramWorklist2Strip` resolves the line beside the row title, in priority
+order:
 
 1. **A claim verb**, when an action is in flight for this item — `Approving…`,
-   `Committing…`, `Iterating…`, `Dropping…` (`__bramClaimVerb`). The verb reads
+   `Committing…`, `Iterating…`, `Dropping…` (`__bramClaimVerb`). These verbs
+   predate the Start/Commit rename below and have not been resynced to it; the
+   in-flight line for a Start action still reads `Approving…`. The verb reads
    the claim's `statusLabel`, the gate fixed at approval time, never the moving
    changed-count: an earlier version inferred it and flipped `Approving…` →
    `Committing…` mid-apply as the first edits landed.
-2. **Activity counts**, once the item has begun and its `changeSummary` shows
-   changes: `files: N of M planned · lines: +A, −R · edits: N · last: <time>`.
-   The denominator is the item's own `files` list, so a count that reads
-   `2 of 3` means the plan named a file the work did not need — correct the
-   plan rather than caveat the count.
-3. **`No changes yet`**, when the item has not begun.
+2. **`Will commit +A −B in X of Y planned`**, once the item has begun and has
+   committable changes of its own (the same predicate the stage icon and the
+   Commit button use, so all three agree by construction). `X of Y` counts
+   exclusive-plus-shared files against the item's own planned total — a commit
+   stages whole files, so it is what a commit would *take*, not only what is
+   exclusively this item's.
+3. **`Nothing of its own changed · N shared file(s) changed`**, once begun when
+   every changed path is claimed by another begun item — reporting totals here
+   would credit a neighbour's work to this row.
+4. **`No changes yet`**, when the item has not begun.
 
-"Begun" is `__bramWorklist2Begun`: status `applied`, **or** a live claim covers
-the row, **or** the item carries an approved authorization. All three are host
-facts. None is agent-state inference.
+"Begun" is `__bramWorklist2Begun`: status `applied`, **or** `begunAtMs` is set
+(a durable, host-written stamp from the first recorded approval covering the
+item — see `app/__shell/conventions.md`), **or** `activeAuthorization ===
+"approved"`, **or** a live claim covers the row. All four are host facts. None
+is agent-state inference.
 
-The third clause exists because the first two have shorter lifetimes than the
-question. During an apply the item is still `proposed`, and host turn-completion
-detectors clear the claim on ordinary end-turn signals — so a row demonstrably
-mid-apply regressed to `No changes yet` while its measured changes sat unused in
-the payload (`a1e92ba`).
+The durable `begunAtMs` clause exists because the other three have shorter
+lifetimes than the question: an approval record is single-slot and a later
+approval overwrites it, and host turn-completion detectors clear the claim on
+ordinary end-turn signals — so a row demonstrably mid-apply could regress to
+`No changes yet` while its measured changes sat unused in the payload
+(`a1e92ba`; then again via record displacement, 2026-08-22).
 
-**Plan versus activity is load-bearing, not cosmetic.** A proposed, unclaimed
+**Plan versus activity is load-bearing, not cosmetic.** A proposed, unbegun
 item is a *plan*: sibling work on a shared path is not this item's activity, and
 showing counts for it would let one item claim another's work. That is not
 hypothetical — file overlap between items is common enough to have its own
@@ -62,18 +90,30 @@ A row printing `No changes yet` while its own payload carries files with
 non-zero counts is a contradiction, and one that has occurred; it is now
 recorded as a tripwire (`worklist-strip op=anomaly`, `e5f745d`).
 
-### The file table
+### The file table and Shared files
 
-Per row: **file**, **changes**, **shared with**. It renders for plan rows too —
-only the activity numbers are begun-gated — because the path list and the
-overlap are what a reader needs in order to decide what to do next.
+Per row, on expand: **files expected to change**, **changes**, **shared with**.
+It renders for plan rows too — only the activity numbers are begun-gated —
+because the path list and the overlap are what a reader needs in order to
+decide what to do next. The `shared with` column renders each claimant as the
+same coloured badge that claimant's own row carries (`__bramItemColor`), so the
+join is recognition rather than label comparison.
 
-`sharedWith` comes from the host and names the other items touching that path.
-Since the commit gate stages whole files, an entangled item cannot be committed
-alone without carrying its neighbour's changes. A banner at the foot of the list
-says so and states the remedy (`__bramWorklistOverlapText`, `4d0c114`); it is
-dismissed per *overlap signature*, so a later, different entanglement raises a
-fresh one rather than being silenced by an earlier dismissal.
+Below the action bar, a board-wide **Shared files** table
+(`__bramWorklistOverlapRows`) lists one row per path that more than one begun
+item claims: the path, what is on disk (`+added −removed`, or `nothing yet`),
+and the claiming items' badges. It is a plain fact panel, not a dismissible
+banner — dismissing it once used to suppress it for every later selection.
+
+A selection-scoped `RadioGroup` (`__bramSelectionCommitSweepsShared`) appears
+only when the current selection could commit **and** that commit would sweep a
+path another begun item claims:
+
+- **One commit** — claimants of a shared file land together (default).
+- **A commit each** — the agent separates the shared changes first.
+
+The pick rides along with whichever gate button is pressed next
+(`__bramWithShareMode`); there is no separate submit step.
 
 ### The selection gate
 
@@ -81,16 +121,57 @@ Rows carry tickboxes; **one** action bar acts on the selection. The selection is
 the sentence and the verb is the action, which is why a batch mode is not a
 separate thing. A message typed once fans out to every selected item.
 
-Which verbs appear is derived from the selection, not from a mode:
-`__bramSelectionAllStatus` and `__bramSelectionAllPlans` gate **Approve N**,
-**Approve & commit N** (subject to the `worklist.oneClickApproveCommit`
-setting), **Commit N**, **Iterate N**, **Drop N**.
+Buttons **dim rather than disappear** as the selection changes
+(`__bramInflightBlocker` plus the per-verb selection predicates below) — a
+button appearing and vanishing as rows are ticked is what made a separate
+gate-explanation matrix seem necessary; the row's own stage icon already states
+that, so a greyed-out button reading "exists, does not apply here" beats one
+that silently disappears.
+
+Which verbs are *enabled* is derived from the selection, not from a mode:
+
+- **Start N** — `__bramSelectionAllUnstarted`: every ticked item is unbegun.
+- **Start & commit N** — `__bramSelectionAllUnstarted` **and**
+  `__bramSelectionAllPlans` **and** exactly one item ticked (subject to the
+  `worklist.oneClickApproveCommit` setting). Single-item only for now — a
+  multi-item selection used to fuse every ticked item into one commit with no
+  path to N commits; see #272.
+- **Commit N** — `__bramSelectionAllCommittable`: every ticked item is begun
+  and has *exclusive* changes of its own (not every changed path shared with
+  another begun item).
+- **Iterate N** — any non-empty message.
+- **Drop N** — always enabled while no claim is in flight.
 
 A row's tickbox stays ticked and frozen while its action is in flight, because
 the tick is part of the sentence just submitted.
 
-Row expansion is keyed by item id. It was positional, and pruning the list
-transferred an expansion opened on row 3 to whatever landed at row 3.
+Row expansion is keyed by item id and persisted to `sessionStorage`
+(`__bramRestoreWorklist2Expansion` / `__bramPersistWorklist2Expansion`), so it
+survives tab switches and pane reloads but not an app quit. It used to be
+positional, and pruning the list transferred an expansion opened on row 3 to
+whatever landed at row 3.
+
+## Decided
+
+Brought in-repo (`22a2d80`) with two open questions; both were settled the same
+night the three-state icon shipped:
+
+- **The gate verb.** "Approve" named both gates (the work gate and the commit
+  gate) and "apply" named a transition the agent performs, not one the user
+  takes. The buttons are now **Start**, **Commit**, and **Start & commit** —
+  see the *selection gate* section above. The claim-verb strip text
+  (`Approving…` / `Committing…`) is an internal holdover that has not been
+  renamed to match; see the strip's priority-1 case above.
+- **Whether a begun-but-not-advanced item can commit.** Yes: Commit is offered
+  to any begun item with *exclusive* changes of its own on disk, whether or not
+  it has been advanced to `applied`. No host change was needed for this — the
+  server's `worklist_commit_files_for_ids` already accepts a `proposed` item
+  with disk changes via its `allow_proposed` parameter
+  (`rung6-commit-gate-accepts-proposed-with-work`, `src-tauri/src/lib.rs`); the
+  pane widens *when* it offers Commit, not what the host permits. Exclusivity
+  is enforced client-side by `__bramSelectionAllCommittable` so an item can
+  never be promoted to committable on a neighbour's work — see `docs/apis.md`
+  for the route contract.
 
 ### Serialization, and how it is shown
 

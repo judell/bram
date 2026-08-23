@@ -204,8 +204,12 @@ change is "small":
 names a `file` (or `files`) plus `before` / `after` prose in
 `resources/worklist-drafts/<id>.md`, describing what would change
 on disk. An `applied` item has those changes on disk
-waiting for the user to approve a commit. Items exist to give the
-user explicit veto power over what lands in their repo.
+waiting for the user to approve a commit — and so, now, can a
+`proposed` item that has been begun (approved and started, but not
+advanced): once its changes are on disk and exclusive to it, the pane
+offers Commit on it directly, `status` unchanged. See *Field notes*
+below and *Transports → Apply-and-commit gate*. Items exist to give
+the user explicit veto power over what lands in their repo.
 
 Investigation work does NOT belong in the worklist. Things like:
 
@@ -223,8 +227,9 @@ a runtime configuration issue, the fix was a process restart,
 every check passed. In that case:
 
 - Do NOT call `/__worklist/mutate op:"advance"`. Marking the item
-  as `applied` produces a TO COMMIT row with nothing to commit,
-  which is exactly the user-visible failure mode of #88.
+  as `applied` produces a row with nothing to commit (the legacy tab's
+  TO COMMIT badge on an empty diff), which is exactly the user-visible
+  failure mode of #88.
 - Instead, summarize the finding in chat ("checked X, Y, Z; the
   issue is runtime-only, no code change needed") and explicitly
   recommend the user click **Drop** on that item in the Worklist
@@ -332,8 +337,8 @@ when metadata (`files`, `closesIssues`, etc.) shifts.
 **Field notes:**
 
 - `files: ["path/a", "path/b"]` for multi-file items; `file` (singular)
-  is the older single-file form. The TO COMMIT inline diff
-  concatenates all listed files.
+  is the older single-file form. Once an item is committable, its
+  inline diff concatenates all listed files.
 - `closesIssues` declares which GitHub issues the commit resolves
   (drives the close-on-commit dialog — see *Commit & git etiquette*).
   Set conservatively: only when the commit truly closes the issue, not
@@ -350,19 +355,29 @@ when metadata (`files`, `closesIssues`, etc.) shifts.
   with real work on disk report "No changes yet" as soon as another item
   was approved. Don't set it by hand; don't rely on its absence meaning
   anything except "never approved".
-- `status` tracks the item's stage:
+- `status` tracks the item's stage, but as of 0.5.1 it no longer gates
+  committability by itself (see *Transports → Apply-and-commit gate*):
   - `"proposed"` (default if omitted): user is approving you to make
     the change. The Worklist row's strip reads "No changes yet" until
-    work begins; the legacy tab badges this **TO APPLY**.
+    work begins; the legacy tab badges this **TO APPLY**. The current
+    pane instead reasons about three states keyed on what the user can
+    do — not started, nothing to commit, has changes you can commit —
+    and a `proposed` item can reach that third state on its own, once
+    begun with exclusive changes, without ever becoming `applied`.
   - `"applied"`: change is on disk, user is approving `git commit`
     (legacy badge **TO COMMIT**). Push decided separately via the Push
-    button.
+    button. `applied` still means committable; it is just no longer
+    the only status that does.
 
 Default to the two-stage flow: approved `proposed` → advance to
 `applied` → user approves a separate commit → prune. Skip the
 `applied` stage only when the user says "apply and commit" up front.
 Drops prune directly with no `applied` stage. Don't pre-mark new
-items `"applied"` unless the change is genuinely already on disk.
+items `"applied"` unless the change is genuinely already on disk. This
+default governs how an agent *authors and completes* an item's status;
+it is independent of the pane's own committability judgment, which the
+user exercises through the Commit button regardless of which status
+the item currently carries.
 
 `resources/worklist.json` doesn't need to exist in advance — Bram
 serves an empty default; the Worklist tab creates the file (and
@@ -420,12 +435,16 @@ serves an empty default; the Worklist tab creates the file (and
      `/__worklist` (for resolved draft prose) or
      `resources/worklist.json` (metadata alone), and act per each
      item's current status:
-     - **`proposed` (TO APPLY):** revise the draft file's `before` /
-       `after` prose; update `files` only if scope shifts. Item
-       stays `proposed`, no project file edits.
-     - **`applied` (TO COMMIT):** edit on-disk files per the feedback.
-       Update the draft only if scope materially expanded. Item
-       stays `applied`.
+     - **`proposed`, not yet begun** (no `begunAtMs`, nothing on disk
+       yet): revise the draft file's `before` / `after` prose; update
+       `files` only if scope shifts. Item stays `proposed`, no
+       project file edits.
+     - **`proposed` but already begun** (real edits already on disk,
+       even though `status` is still `proposed` — see *Field notes*),
+       **or `applied`:** edit on-disk files per the feedback. Update
+       the draft only if scope materially expanded. Item stays at its
+       current status either way; iterate never advances or commits
+       on its own.
 
      No agent-side bracket needed. The host detects the `iterate:`
      prefix on the `toTurn` write path and sets the inflight sentinel
@@ -474,26 +493,58 @@ round-trip. Its return value is dead weight for an apply — the bodies are
 the proposal you authored. So an apply-approve is one call: edit from the
 proposal, then `mutate op:"advance"`.
 
-**Apply-and-commit gate: skip `advance` — edit, then `worklist-commit`.**
-When an approved item's `gate` is `apply-and-commit` (the user clicked the
-one-click **Approve & commit** button), collapse both gates into one
-turn: make the proposed file edits, then call `worklist-commit { ids, message }`
-directly. Do **not** `mutate op:"advance"` first — the host commits the
-still-`proposed` item's files (authorized by the `commitToo` auth record the
-click wrote, the `allow_proposed` path) and prunes, exactly as the commit gate
-does. `closesIssues` / close-on-push behave identically to a normal commit. The
-host sets the sentinel at approval time and `worklist-commit` clears it.
-`worklist.oneClickApproveCommit` gates this action in both the current
-Worklist's selected-proposal controls and the legacy tab's per-item controls.
-It defaults to `true`; when explicitly `false`, both surfaces hide the action
-and the host rejects any stale `apply-and-commit` submission as a backstop.
+**Apply-and-commit gate: skip `advance` — edit if needed, then
+`worklist-commit`.** `gate: "apply-and-commit"` is no longer only the
+pre-approval one-click **Approve & commit** button's payload. As of
+0.5.1 the pane also puts a plain **Commit** on a `proposed` item that
+has already begun and whose changes are EXCLUSIVE — every changed path
+free of any other begun item's claim (`window.__bramSelectionAllCommittable`
+in `helpers.js`). Clicking either control submits the identical
+`gate: "apply-and-commit"` shape, and the host side is unchanged between
+them — the widening is entirely in when the pane *offers* the button, not
+in what the host accepts. So the agent handles both triggers the same
+way: whatever produced the payload, do **not** `mutate op:"advance"`
+first. Make any remaining proposed file edits, then call
+`worklist-commit { ids, message }` directly — the host commits the
+still-`proposed` item's files (authorized by the `commitToo` auth record
+the click wrote, the `allow_proposed` path) and prunes, exactly as the
+commit gate does. `closesIssues` / close-on-push behave identically to a
+normal commit. The host sets the sentinel at approval time and
+`worklist-commit` clears it. `worklist.oneClickApproveCommit` gates both
+triggers — the one-click Approve & commit button and the widened
+plain-Commit offer — in both the current Worklist's selected-proposal
+controls and the legacy tab's per-item controls. It defaults to `true`;
+when explicitly `false`, both surfaces hide the action and the host
+rejects any stale `apply-and-commit` submission as a backstop.
 
-**Commit gate: call `worklist-commit`.** For approved TO COMMIT items,
-send one request with `{ ids, message }`. The host verifies approved auth,
-requires every id to be `applied`, stages only those items' files, refuses
-unrelated staged files, commits, prunes the items, consumes auth, and clears
-the sentinel. **Issue close is automatic — the agent does nothing.** When the
-approved feedback carries `close-issue:` selections (from the close-on-commit
+Exclusivity is what makes the widened offer safe, and the host does
+**not** enforce it — only the pane does. `worklist_commit_files_for_ids`
+(`lib.rs`) stages whatever files the approved ids declare, whoever
+changed them; it has no notion of which hunk belongs to which item.
+So an agent driving `worklist-commit` directly for a still-`proposed`
+item — the Codex intent-file transport, or a hand-built curl, neither
+of which goes through the pane's own gate check — must apply the same
+exclusivity rule the pane applies before it would have offered Commit:
+every one of that item's changed paths must be free of any *other*
+begun item's claim (`applied`, or `proposed` with `begunAtMs` set).
+An item whose changed paths are entirely shared with another begun
+item is not committable that way — committing it would take the
+neighbour's uncommitted work and land it under this item's id and
+message, with no record afterward of which item wrote which hunk
+(`worklist.json` carries no per-hunk authorship). Treat that case like
+any other non-committable item: report it in chat and wait, per *Warn
+when a new item would entangle a committable item* below.
+
+**Commit gate: call `worklist-commit`.** This is the traditional
+two-stage path: every id in the request is already `applied`, so
+`gate` is plain `approved`, not `apply-and-commit`. Send one request
+with `{ ids, message }`. The host verifies approved auth, requires
+every id to be `applied` (relaxed to also accept `proposed` only when
+`commitToo` is set — see *Apply-and-commit gate* above), stages only
+those items' files, refuses unrelated staged files, commits, prunes
+the items, consumes auth, and clears the sentinel. **Issue close is
+automatic — the agent does nothing.** When the approved feedback
+carries `close-issue:` selections (from the close-on-commit
 dialog), the host records them at commit time bound to the new SHA, then
 closes each issue automatically after the user's next explicit **Push** (only
 once its commit is visible on origin). There is no agent-reachable close
@@ -1037,9 +1088,11 @@ reference: `docs/apis.md` §11. Agent-side conventions:
   user's next Push. There is no `issue-close` route to call.
 - **`approved:` (apply-and-commit gate)** → `worklist-commit` with
   `{ ids, message }` after editing, with **no** `mutate op:"advance"` step.
-  Set by the one-click **Approve & commit** button on a `proposed` item; the
-  host's `commitToo` auth lets `worklist-commit` stage and commit the
-  still-`proposed` files, then prune. See *Transports → Apply-and-commit gate*.
+  Set by either the one-click **Approve & commit** button or, as of
+  0.5.1, a plain **Commit** on a `proposed` item that has begun with
+  exclusive changes; the host's `commitToo` auth lets `worklist-commit`
+  stage and commit the still-`proposed` files, then prune either way.
+  See *Transports → Apply-and-commit gate*.
 - **`drop:`** → `resolve` → `mutate op:"prune"`. Drops aren't set at
   approval time, so `resolve` is what raises the spinner.
 - **`iterate:`** → no agent-side bracket needed. The host detects the
@@ -1048,6 +1101,36 @@ reference: `docs/apis.md` §11. Agent-side conventions:
   drops); the same turn-finished detectors that clear approve/drop
   sentinels clear iterate's too. (The legacy `/__iterate/begin` and
   `/__iterate/end` routes were removed in the #214 delete phase.)
+
+Several of the bullets above say a mutate/commit call "clears the
+sentinel" — true in the common one-id case, but see *Incremental claim
+retirement* for what actually happens when the claim covers more than
+one id.
+
+### Incremental claim retirement
+
+A claim can cover more than one id — approving several unentangled
+items in one click writes one claim listing all of them. Resolving
+just one of those ids is normal now, not refused: `mutate
+op:"advance"`, `op:"prune"`, and `worklist-commit` (which delegates a
+prune to the same path) each retire exactly the ids they resolved and
+rewrite the claim with whatever is left, tracing
+`[inflight-sentinel] op=clear-shrink resolved=[...] remaining=[...]`.
+The claim file only disappears once the last id resolves. This is what
+lets two disjoint items be started together in one click and then
+completed — applied, committed, or dropped — in separate turns, each
+clearing its own slice of the spinner instead of leaving it stuck until
+every id is accounted for in a single call.
+
+This is distinct from `op=clear-partial`, which is still a refusal: the
+blunt clears — turn-end detectors, cancel paths, startup cleanup, the
+drop policy validator — cannot name which ids they're resolving, so
+they still require full coverage of whatever claim is live, and log
+`op=clear-partial` when a request covers only part of it. That shape
+signals something colliding (a second claimant overwrote or partly
+overlapped the live claim), not ordinary progress — do not read
+`clear-partial` as "working as intended" the way `clear-shrink` is.
+Only routes that resolve specific, named ids may shrink.
 
 ### Failure modes
 
@@ -1065,7 +1148,11 @@ commonly:
   `iterate:` prefix and the turn-finished clearer fires for all
   sentinel kinds. If it does stick, host-side completion detectors
   will clear it on the next normal turn end; `/__worklist/end` remains
-  available as an explicit manual unwind.
+  available as an explicit manual unwind. It now returns
+  `{"ok":true,"cleared":<bool>,"remaining":[...]}` instead of a bare
+  `{"ok":true}` — `cleared:false` with a non-empty `remaining` means
+  the call only resolved part of a multi-id claim (see *Incremental
+  claim retirement* above), not that the call failed.
 - **Premature clear:** silence alone is not authoritative. PTY silence
   can request a sentinel clear, but the host first checks the latest
   provider JSONL completion detector. If JSONL says the assistant turn is
@@ -1095,11 +1182,13 @@ and cleared through `/__inflight` plus host lifecycle events.
 
 ### Don't nudge toward commit approval
 
-A TO COMMIT item sits indefinitely until an `approved:` payload
-covers it. Describe the state factually ("relay is TO COMMIT —
-confidence high on happy path, untested edges noted above") and
-stop. The user clicks Approve when ready, or doesn't. The exception
-is a *minor* change the user explicitly asks you to commit directly.
+A committable item — `applied`, or a begun `proposed` item with
+exclusive changes — sits indefinitely until an `approved:` payload
+covers it. Describe the state factually ("relay has changes ready to
+commit — confidence high on happy path, untested edges noted above")
+and stop. The user clicks Approve (or Commit) when ready, or doesn't.
+The exception is a *minor* change the user explicitly asks you to
+commit directly.
 
 ### Don't infer commit / drop / advance from feedback
 
@@ -1115,35 +1204,37 @@ Voice *task requests* ("voice: create foo.txt", "voice: fix the bug
 in X") are acted on the same as if typed. If a verbal phrase is
 ambiguous, ask one focused question instead of acting.
 
-### Hold the commit while a related TO APPLY is in flight
+### Hold the commit while a related item is still being started
 
-When a TO COMMIT item and a TO APPLY item touch the same surface
-(feature + tuning adjustment, fix + follow-up regression patch),
-don't process the commit if the user's `approved:` covers both.
-Apply the proposed item only; leave the prior in TO COMMIT. The
-user verifies the combined behavior, then approves a single commit
-covering both. This avoids intermediate "kinda-works" commits where
-a feature is split from its companion fix — bad for git history and
-bisect.
+When a committable item and a not-yet-begun `proposed` item touch the
+same surface (feature + tuning adjustment, fix + follow-up regression
+patch), don't process the commit if the user's `approved:` covers
+both. Apply the proposed item only; leave the prior one committable
+and uncommitted. The user verifies the combined behavior, then
+approves a single commit covering both. This avoids intermediate
+"kinda-works" commits where a feature is split from its companion
+fix — bad for git history and bisect.
 
-### Warn when a new item would entangle a TO COMMIT
+### Warn when a new item would entangle a committable item
 
 Whenever you're about to **propose** or **apply** an item whose
-`files` overlaps the `files` of an existing TO COMMIT item, surface
-that fact in chat *before* writing the proposal or applying the
-edits:
+`files` overlaps the `files` of an existing committable item —
+`applied`, or a `proposed` item that has begun (`begunAtMs` set — see
+*Field notes*) — surface that fact in chat *before* writing the
+proposal or applying the edits:
 
-> "issue-X is TO COMMIT and touches the same file(s) — recommend
-> committing it first; otherwise this item's edits will mix into
-> X's on-disk diff and need manual separation later."
+> "issue-X has changes ready to commit and touches the same file(s) —
+> recommend committing it first; otherwise this item's edits will mix
+> into X's on-disk diff and need manual separation later."
 
 Don't auto-block — the user may have a reason to proceed (the two
 items are genuinely meant to ship together, X is about to be
 dropped, etc.). The warning is so the user can decide *order*
 intentionally rather than discovering the entanglement at commit
 time. The check is mechanical: intersect the candidate item's
-`files` list with the union of `files` across `applied`-status items
-in `resources/worklist.json`; non-empty intersection triggers the
+`files` list with the union of `files` across begun items (`applied`
+status, or `proposed` with `begunAtMs` set) in
+`resources/worklist.json`; non-empty intersection triggers the
 warning.
 
 ### Delegating worklist items to subagents
@@ -1163,10 +1254,10 @@ Parallelize the *work*; serialize the *gates*.
 - Before delegating in parallel, intersect the `files` lists of the
   candidate items. **Non-empty intersection → do not parallelize
   those two**; run them in sequence.
-- Attribution: `worklist.json` has no agent field, so a TO COMMIT
-  diff produced by several subagents carries no record of which one
-  made which edit. If that matters for a batch, commit the items
-  separately.
+- Attribution: `worklist.json` has no agent field, so a committable
+  item's diff produced by several subagents carries no record of
+  which one made which edit. If that matters for a batch, commit the
+  items separately.
 - **Hook-enforced on Claude, and verified by deliberate violation.** A
   lifecycle call from a delegated subagent is denied at `PreToolUse`
   (`decision=deny reason=subagent-lifecycle-call`), and the call never
@@ -1264,7 +1355,8 @@ they can be rephrased before the commit exists.
 When an item's `applied` commit would resolve a GitHub issue, set
 `closesIssues: [{number: N, title: "..."}, ...]` on the item (title
 from `gh issue view N --json title`; refresh if you iterate).
-Approving a TO COMMIT item with non-empty `closesIssues` opens a
+Approving a committable item (`applied`, or a begun `proposed` item
+offered Commit) with non-empty `closesIssues` opens a
 confirm dialog — one row per issue plus an optional close-comment
 textbox. Ticking issues records them for automatic close-on-push (see
 below); "commit only" commits without queuing any close. There is no

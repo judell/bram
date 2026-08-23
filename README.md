@@ -68,7 +68,7 @@ agent pane's Worklist, Transcript, and Queue views.
 
 - Header: Switches between agents and adjusts font size.
 
-- Worklist: Where you decide what happens to your repo. Each item shows its plan, the files it alters as work happens, and your feedback history. The most recent conversation exchange stays in view.
+- Worklist: Where you decide what happens to your repo. Each row carries an icon for where it stands — not started, nothing to commit, or has changes you can commit — plus its plan, the files it alters as work happens, and your feedback history. Items that share a file with another started item show up together in a Shared files table. The most recent conversation exchange stays in view.
 
 - Transcript: Shows your terminal session in a more readable form.
 
@@ -91,19 +91,21 @@ agent pane's Worklist, Transcript, and Queue views.
 
 On the *Worklist* tab, create Worklist items in conversation ("Hey agent, let's do x") or with the *+ New item* button, which can also cite an open issue. Either way the agent proposes an item: a short plan with Before and After notes, naming the files it expects to alter.
 
-Each item's row tells you where things stand. A fresh proposal says "No changes yet". Once the agent alters files, the row counts them ("files: 2 of 3 planned"), tallies added and removed lines, and shows the diff. Your past feedback on the item collects in its Feedback section.
+Each item's row tells you where things stand. A fresh proposal says "No changes yet". Once the agent alters files, the row counts them ("2 of 3 planned"), tallies added and removed lines, and shows the diff. Your past feedback on the item collects in its Feedback section.
 
-To act, tick one or more items and use the buttons beside the message box. One action, and one message, covers every item you selected.
+To act, tick one or more items and use the buttons beside the message box. One action, and one message, covers every item you selected. Buttons dim rather than disappear as you tick items, so the row of actions holds still — a dimmed button means it doesn't apply to the current selection, not that it's gone.
 
-- *Approve* accepts a proposal and authorizes the agent to alter files.
+- *Start* accepts a proposal and authorizes the agent to alter files.
 
-- *Commit* commits an item's altered files to git.
+- *Commit* commits an item's altered files to git. Once a started item has changes of its own on disk, you can commit them directly — there's no separate step to mark the item ready first. The one exception: if every file an item changed is also claimed by another started item, it can't commit on its own, because that would land the other item's work under its name.
 
-- *Approve & commit* does both in one step. It is offered only when the selected items are proposals with no changes.
+- *Start & commit* does both in one step. For now it only works on a single, freshly-proposed item (#272).
 
 - *Iterate* sends your message as feedback so the agent can refine a proposal or rework altered files.
 
 - *Drop* retires items you don't want. A dropped item isn't lost: you can resurrect it from the History tab, or ask the agent to file an issue first so the idea survives in GitHub.
+
+When two started items both touch the same file, a Shared files table lists the shared path, what's on disk, and which items claim it — each claimant rendered as the same badge its row carries, so you can match them at a glance. Committing one of those items normally takes the whole shared file with it; when that's about to happen, a radio option lets you ask the agent to split the changes into separate commits instead.
 
 The previous Worklist design remains available for now. Turn on *Show legacy Worklist* in Settings to show it as OldWorklist.
 
@@ -198,7 +200,7 @@ The first time you launch `claude` or `codex` in a repo, Bram checks what that p
 
 Claude and Codex differ in the trust step you see after Bram writes those files:
 
-- **Claude setup** is repo-local. Bram writes `.claude/bram-conventions.md`, `.claude/hooks/worklist-guard.py`, `.claude/hooks/permission-menu-hook.py`, and `.claude/settings.json` registrations. Claude reads that project config on launch; there is no separate Codex-style hook trust menu. The Claude `PreToolUse` hook is the safety gate for `Write`, `Edit`, and `Bash`; the permission hook shows Claude permission and AskUserQuestion prompts in Bram's agent pane.
+- **Claude setup** is repo-local. Bram writes `.claude/bram-conventions.md`, `.claude/hooks/claude-worklist-guard.py`, `.claude/hooks/claude-permission-menu-hook.py`, and `.claude/settings.json` registrations. Claude reads that project config on launch; there is no separate Codex-style hook trust menu. The Claude `PreToolUse` hook is the safety gate for `Write`, `Edit`, and `Bash`; the permission hook shows Claude permission and AskUserQuestion prompts in Bram's agent pane.
 - **Codex setup** has an explicit trust/approval step. Bram writes user-global hook scripts under `~/.bram`, updates `~/.codex/config.toml`, writes Bram `developer_instructions`, and adds a repo-local `AGENTS.md` block. Codex then shows its hook approval screen; approve it only when it points at Bram-owned paths such as `~/.bram/codex-worklist-guard.py`, `~/.bram/codex-permission-menu-hook.py`, `~/.codex/config.toml`, and this repo's `AGENTS.md`. The Codex `PreToolUse` hook gates `apply_patch`, `Bash`, `Write`, `Edit`, and mutation-shaped MCP tools; the Codex permission hook shows `PermissionRequest` / `PostToolUse` menus in Bram's agent pane.
 - **Do not approve unexpected Codex paths.** If the Codex approval screen lists hook scripts somewhere other than `~/.bram` or config changes somewhere other than the expected Codex/project files, stop and inspect them first.
 
@@ -225,17 +227,24 @@ Current behavior:
 When the prompt runs, Bram installs two layers:
 
 - A provider-neutral core: Bram records the latest structured `approved:` / `drop:` payload in `resources/.worklist-authorization.json` and uses that local record when validating Worklist removals. The desktop watcher can revert an invalid prune as a defense-in-depth fallback if a hook ever fails to fire.
-- A Claude adapter: `.claude/hooks/worklist-guard.py`, registered in `.claude/settings.json` as a `PreToolUse` hook for `Write|Edit|Bash`. The hook denies edits to project files not covered by a proposed/applied worklist item (with the explicit opt-out phrase "just do it" in the last user message as the escape hatch), validates worklist-prune authorization for changes to `resources/worklist.json` itself, and blocks mutation-shaped Bash commands without worklist coverage. Setup also installs `.claude/hooks/permission-menu-hook.py` for Claude permission and AskUserQuestion surfacing in the agent pane.
+- A Claude adapter: `.claude/hooks/claude-worklist-guard.py`, registered in `.claude/settings.json` as a `PreToolUse` hook for `Write|Edit|Bash`. The hook denies edits to project files not covered by a proposed/applied worklist item (with the explicit opt-out phrase "just do it" in the last user message as the escape hatch), validates worklist-prune authorization for changes to `resources/worklist.json` itself, and blocks mutation-shaped Bash commands without worklist coverage. Setup also installs `.claude/hooks/claude-permission-menu-hook.py` for Claude permission and AskUserQuestion surfacing in the agent pane.
 - A Codex adapter: `~/.bram/codex-worklist-guard.py`, registered in `~/.codex/config.toml` as a `PreToolUse` hook with matcher `^(apply_patch|Bash|Write|Edit|mcp__.*)$`. Same coverage logic as the Claude hook, broadened to catch Codex's `apply_patch` tool and MCP filesystem write/edit/create/move calls. Setup also writes `developer_instructions` into the Codex config so the gate prose lands in the developer-role context part of every session, not just the user-role `AGENTS.md`, and installs `~/.bram/codex-permission-menu-hook.py` for `PermissionRequest` / `PostToolUse` menu surfacing with the xterm grid retained as fallback. Existing `~/.xmlui-desktop/codex-worklist-guard.py` installs remain accepted during migration; rerunning Setup rewrites the config to the Bram path.
 
-In the Bram source repo, the Claude guard's source of truth is
-`app/__shell/worklist-guard.py`. The `.claude/hooks/worklist-guard.py`
-file is the installed runtime copy, refreshed from the source bundle by
-Setup and by `src-tauri/build.rs` during Cargo builds. Functional edits
-belong in `app/__shell/worklist-guard.py`; editing the installed copy
-directly creates setup drift and may be overwritten. The Codex guard
-uses the same source/installed split: `app/shell/worklist-guard-codex.py`
-is canonical, `~/.bram/codex-worklist-guard.py` is installed.
+In the Bram source repo, every provider hook lives under
+`app/provider-hooks/` with a provider-prefixed name, and that is the
+source of truth. The copies Setup installs are runtime artefacts,
+refreshed from those sources by Setup and by `src-tauri/build.rs`
+during Cargo builds:
+
+| canonical | installed |
+|---|---|
+| `app/provider-hooks/claude-worklist-guard.py` | `.claude/hooks/claude-worklist-guard.py` |
+| `app/provider-hooks/claude-permission-menu-hook.py` | `.claude/hooks/claude-permission-menu-hook.py` |
+| `app/provider-hooks/codex-worklist-guard.py` | `~/.bram/codex-worklist-guard.py` |
+| `app/provider-hooks/codex-permission-menu-hook.py` | `~/.bram/codex-permission-menu-hook.py` |
+
+Functional edits belong in the canonical copy. Editing an installed one
+creates setup drift and may be overwritten by the next build.
 
 PreToolUse hooks are the generic extension point — both Claude Code and codex expose them — so the two adapters share the same shape: each runs *before* the agent invokes a tool, receives a JSON payload describing the pending call on stdin, and can exit 0 to allow, return a deny decision to block (stderr/permissionDecisionReason goes back to the agent as a tool error), or fail to launch.
 

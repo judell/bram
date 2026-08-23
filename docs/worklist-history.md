@@ -76,17 +76,21 @@ summary line —
 
 — and as section headers in the body:
 
-- **proposed** — an item newly written to `worklist.json` (TO APPLY).
-  A worklist item appears here when the agent first asks the user to
-  authorize a change.
+- **proposed** — an item newly written to `worklist.json`. In the
+  current Worklist tab this is the row's "Not started" icon, waiting
+  on Start; the legacy tab still badges it TO APPLY. A worklist item
+  appears here when the agent first asks the user to authorize a
+  change.
 - **advanced** — an item's `status` transitioned. Typically
-  `proposed → applied` after the user approves an apply, but the
-  mechanism is general.
+  `proposed → applied` after the user approves the work, but the
+  mechanism is general. This is an internal bookkeeping step the
+  current tab's row states no longer surface directly — see
+  `docs/worklist-gate-design.md` for why.
 - **renamed** — a new item adopted an old item's identity by
   declaring `rename_from: "<old-id>"`. The pair is reported once as a
   rename, not separately as `proposed + pruned`.
 - **pruned** — an item disappeared from `worklist.json`. Either
-  committed (after a TO COMMIT approval) or dropped (via the `drop:`
+  committed (after a Commit approval) or dropped (via the `drop:`
   UI action).
 
 A snapshot fires when *any* phase has at least one entry, **or** when

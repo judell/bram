@@ -158,8 +158,8 @@ without re-shipping content.
 | `/__worklist-config` | HTTP GET | — | `{ batchCommitActions: bool }` from `.bram.json` `worklist` block; defaults to `false` | agent pane iframe (`Workspace.xmlui` gates batch-commit UI on this) |
 
 - `/__worklist` injects a `diff` field on each `applied` item (the output
-  of `git diff -- <file>`) so the TO COMMIT rows can preview their pending
-  change inline.
+  of `git diff -- <file>`) so rows with changes to commit can preview their
+  pending change inline (the legacy tab badges these rows TO COMMIT).
 - `/__worklist/resolve` returns the most recent verified authorization
   record. Active-record `kind` is one of `approved`, `drop`, `rejected_stale`.
   When `rejected_stale`, the supplied hashes did not match the on-disk
@@ -187,12 +187,16 @@ without re-shipping content.
   `resources/worklist.json` are for proposal authoring and iterate-time
   prose refinement. The chat doesn't render a diff and the server-side
   auth check is uniform.
-- `/__worklist/commit` is the server-side commit gate for approved TO
-  COMMIT items. It requires an `approved` auth record covering every id,
-  requires every id to be `status:"applied"`, stages only those items'
-  listed `file`/`files`, refuses when unrelated files are already staged,
-  commits with the supplied message, then prunes through the same mutation
-  machinery that clears the inflight sentinel and records history.
+- `/__worklist/commit` is the server-side commit gate for approved items
+  with changes to commit. It requires an `approved` auth record covering
+  every id. An id at `status:"applied"` always qualifies; a `status:"proposed"`
+  id also qualifies as long as its own files carry uncommitted changes on
+  disk (`rung6-commit-gate-accepts-proposed-with-work`) — an advance to
+  `applied` is no longer required to commit, though it remains valid. It
+  stages only those items' listed `file`/`files`, refuses when unrelated
+  files are already staged, commits with the supplied message, then prunes
+  through the same mutation machinery that clears the inflight sentinel and
+  records history.
 - **Authorization state-machine enforcement.** `record_worklist_authorization_from_input`
   parses the structured turn and calls `build_worklist_authorization_record`
   to verify each supplied item hash against the resolved on-disk worklist

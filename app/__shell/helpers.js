@@ -2002,24 +2002,44 @@ window.__bramWorklist2StripTooltip = function (item, claim, items) {
   return split.shared.join("\n");
 };
 
-// Can every ticked item still be STARTED? Only if none of them has been.
+// Can every ticked item be STARTED — that is, does each need a fresh
+// green light before the agent can touch its files?
 //
-// The gate keyed on `status` alone, so Start was offered to rows already
-// started -- and "Start & commit", the FRESH-PLAN one-click, was offered to an
-// item green-lit an hour earlier, because __bramSelectionAllPlans checks
-// status and absence of changes but never begun-ness.
+// This gated on begun-ness and got it wrong in a way that produced a dead-end
+// row. `begunAtMs` is DURABLE by design (2585e5f: a displaced approval must
+// not erase the fact that work was authorized). Authorization is TRANSIENT:
+// the record is single-slot, so any later approval displaces it.
 //
-// Removing Start from a begun item loses nothing: the reason to press it there
-// would be "you approved this and nothing happened, do it now", and Iterate
-// says that better because it carries a message.
-window.__bramSelectionAllUnstarted = function (items, sel, claim) {
+// Gating a transient action on a durable fact meant an item green-lit hours
+// earlier, whose authorization had long since been displaced, showed Start
+// dimmed forever — while the agent had no authorization to act and the guard
+// would deny its edits. Live 2026-08-23: notice-banner-component, green-lit
+// eleven hours before, no live authorization, nothing on disk. Start, Start &
+// commit and Commit all dark; only Drop worked. The row could not be advanced,
+// only abandoned.
+//
+// The earlier rationale — "Iterate says it better, because it carries a
+// message" — was wrong for exactly this case. Iterate sends a message to an
+// agent that still cannot touch the files; the message lands and the guard
+// still denies the edit.
+//
+// So: an item needs starting when nothing currently authorizes it. That covers
+// the never-started item (no stamp, no record) and the displaced one (stamp,
+// no record) with the same test, and it stays false while an authorization or
+// a live claim exists, so Start cannot re-fire under a running turn.
+window.__bramItemNeedsStart = function (item, claim) {
+  if (!item) return false;
+  if ((item.status || "proposed") === "applied") return false;
+  if (item.activeAuthorization === "approved") return false;
+  return !window.__bramItemInflightKind(claim, item.id, "", "", 0);
+};
+
+window.__bramSelectionAllNeedStart = function (items, sel, claim) {
   var chosen = sel || [];
   if (!chosen.length) return false;
   var picked = (items || []).filter(function (i) { return chosen.indexOf(i.id) !== -1; });
   if (picked.length !== chosen.length) return false;
-  return picked.every(function (i) {
-    return (i.status || "proposed") !== "applied" && !window.__bramWorklist2Begun(i, claim);
-  });
+  return picked.every(function (i) { return window.__bramItemNeedsStart(i, claim); });
 };
 
 // Can every ticked item be committed right now?
@@ -2163,18 +2183,28 @@ window.__bramWorklist2Stage = function (item, claim, items) {
     // reads as a control, and nothing happens when you click it -- the actual
     // controls are the row checkbox and the buttons below. A dashed outline
     // says pending without offering to do anything.
-    return { icon: "circle-dashed", label: "Not started", yours: true };
+    return { icon: "circle-dashed", label: "Proposed", yours: true };
   }
   if (window.__bramSelectionAllCommittable(list, [item.id], claim, true)) {
-    return { icon: "check-check", label: "Has changes you can commit", yours: true };
+    return { icon: "checkmark", label: "Has changes you can commit", yours: true };
   }
-  // Just the consequence. Every longer version named something the reader did
-  // not need -- the sub-case ("started. shares 2 files"), the actor ("with the
-  // agent"), or the authorization ("started, nothing of yours to commit") --
-  // when the only fact that governs what you can do is that there is nothing
-  // to commit. It covers both sub-cases too: nothing changed anywhere, and
-  // changes that are all on shared paths and so not this item's to commit.
-  return { icon: "checkmark", label: "Nothing to commit", yours: false };
+  // Name the AUTHORIZATION, not the work.
+  //
+  // This state and the one above it share a disk state -- planned files, no
+  // changes -- so every phrasing that described work was true of both rows and
+  // distinguished neither. "Nothing to commit" is true of a proposed item too;
+  // "not started" is true of a green-lit item nothing has come of. Six attempts
+  // failed on that, from "with the agent" through "waiting on the agent",
+  // because they were all trying to say something about output.
+  //
+  // The axis is whether YOU green-lit it, which `begunAtMs` has recorded all
+  // along and nothing ever displayed. Proposed / Green-lit are each true of
+  // exactly one of the two rows, which is the test the others failed.
+  //
+  // "Green-lit" also sidesteps a trap the Start rename created: the past tense
+  // of "start" is "started", which reads as "work has started" and contradicts
+  // a row with no changes. Green-lighting is unambiguously the user's act.
+  return { icon: "circle-dot", label: "Green-lit", yours: false };
 };
 
 window.__bramWorklist2Strip = function (item, claim, items) {
@@ -2253,17 +2283,18 @@ window.__bramWorklist2Strip = function (item, claim, items) {
         (nShared === 1 ? "" : "s") + " changed",
     );
   }
+  // The strip names the same state the icon does. Both branches used to return
+  // "No changes yet", so the visible line distinguished nothing while the
+  // tooltip carried the whole distinction one hover away.
   if (!begun) {
     window.__bramWorklistStripAnomaly(item, claim, cs);
-    return withCloses("No changes yet");
+    return withCloses("Proposed");
   }
-  // Begun, but nothing on disk yet. This used to return "" and be brief: an
-  // item was only begun while its authorization was live, so the blank strip
-  // lasted until work started, usually the same turn. `begunAtMs` makes
-  // begun-ness permanent, which would make the blank permanent too -- an
-  // approved-but-unworked row losing its label for good. The sentence is about
-  // changed FILES, not about begun-ness, so it is equally true here.
-  return withCloses("No changes yet");
+  // Green-lit, nothing on disk yet. Earlier this returned "" (brief, because
+  // begun-ness was transient) and then "No changes yet" (identical to the
+  // branch above, which was the defect). It reports the authorization, which
+  // is the only thing that differs between the two.
+  return withCloses("Green-lit");
 };
 
 // strip-vs-diff-disagreement-instrument. A row was observed printing

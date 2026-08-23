@@ -18,7 +18,7 @@
     "icon.up": "resources/up.svg",
     "icon.wrench": "resources/wrench.svg",
     "icon.hat-glasses": "resources/hat-glasses.svg",
-    "icon.check-check": "resources/check-check.svg",
-    "icon.circle-dashed": "resources/circle-dashed.svg"
+    "icon.circle-dashed": "resources/circle-dashed.svg",
+    "icon.circle-dot": "resources/circle-dot.svg"
   }
 }

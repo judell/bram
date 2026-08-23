@@ -442,7 +442,7 @@
       <Button
         label="{'Start ' + (worklist2Selected || []).length}"
         size="sm"
-        enabled="{!window.__bramInflightBlocker(inflightClaim.value) &amp;&amp; window.__bramSelectionAllUnstarted(worklist.value.items, worklist2Selected, inflightClaim.value)}"
+        enabled="{!window.__bramInflightBlocker(inflightClaim.value) &amp;&amp; window.__bramSelectionAllNeedStart(worklist.value.items, worklist2Selected, inflightClaim.value)}"
         onClick="window.__bramIframeTrace('click', {target: 'worklist2-batch-approve', count: (worklist2Selected || []).length}); const ids = window.__bramSelectionIds(worklist.value.items, worklist2Selected, 'proposed'); worklist2Sent = window.__bramWorklist2CaptureSent(worklist2Sent, ids, worklist2BatchText, Date.now()); const r = window.__bramPrepareBatchWorklistActionSubmission({kind: 'approved', items: worklist.value.items, selectedIds: ids, feedbackDraftsById: window.__bramFanFeedback(ids, window.__bramWithShareMode(window.__bramWithStagedImageMarkers(worklist2BatchText, 'feedback'), worklist2ShareMode))}); worklist2Selected = []; worklist2BatchText = ''; window.__bramWorklistActApply(r)" />
       <!-- Single item only, for now. On a multi-item selection this produced
            ONE commit covering every ticked item, with no path to N commits --
@@ -457,7 +457,7 @@
         when="{!worklistConfig.value || worklistConfig.value.oneClickApproveCommit !== false}"
         label="{'Start & commit ' + (worklist2Selected || []).length}"
         size="sm"
-        enabled="{!window.__bramInflightBlocker(inflightClaim.value) &amp;&amp; (worklist2Selected || []).length === 1 &amp;&amp; window.__bramSelectionAllUnstarted(worklist.value.items, worklist2Selected, inflightClaim.value) &amp;&amp; window.__bramSelectionAllPlans(worklist.value.items, worklist2Selected)}"
+        enabled="{!window.__bramInflightBlocker(inflightClaim.value) &amp;&amp; (worklist2Selected || []).length === 1 &amp;&amp; window.__bramSelectionAllNeedStart(worklist.value.items, worklist2Selected, inflightClaim.value) &amp;&amp; window.__bramSelectionAllPlans(worklist.value.items, worklist2Selected)}"
         tooltip="One click: start, then commit when done. One item at a time — see #272"
         onClick="window.__bramIframeTrace('click', {target: 'worklist2-batch-approve-commit', count: (worklist2Selected || []).length}); const ids = window.__bramSelectionIds(worklist.value.items, worklist2Selected, 'proposed'); worklist2Sent = window.__bramWorklist2CaptureSent(worklist2Sent, ids, worklist2BatchText, Date.now()); const r = window.__bramPrepareBatchWorklistActionSubmission({kind: 'approved', oneShot: true, closeMap: worklist2Close, items: worklist.value.items, selectedIds: ids, feedbackDraftsById: window.__bramFanFeedback(ids, window.__bramWithShareMode(window.__bramWithStagedImageMarkers(worklist2BatchText, 'feedback'), worklist2ShareMode))}); worklist2Selected = []; worklist2BatchText = ''; window.__bramWorklistActApply(r)" />
       <Button

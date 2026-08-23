@@ -221,8 +221,13 @@
               color="{window.__bramWorklist2Stage($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items).yours ? '$textColor-primary' : '$textColor-secondary'}"
               tooltip="{window.__bramWorklist2Stage($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items).label}" />
           </HStack>
-          <Theme backgroundColor-Badge="$color-primary-600" textColor-Badge="white">
-            <Badge value="{$item.id}" />
+          <!-- The badge carries the item's colour, and the Shared files
+               table's claimant names carry the same one, so a claimant can be
+               matched to its row without reading either id. -->
+          <Theme
+            backgroundColor-Badge="{window.__bramItemColor($item.id, worklist.value &amp;&amp; worklist.value.items)}"
+            textColor-Badge="white">
+            <Badge value="{$item.id}" tooltip="{$item.id}" />
           </Theme>
           <!-- Basenames in the line, full paths in the tooltip: the row is a
                scan line and repo-relative paths would swamp it. -->
@@ -275,11 +280,29 @@
                   fontSize="$fontSize-sm"
                   value="{!rowBegun || $item.status === 'unchanged' ? '' : '+' + $item.added + ' −' + $item.removed + ($item.status === 'new' ? ' (new)' : ($item.status === 'deleted' ? ' (deleted)' : ''))}" />
               </Column>
+              <!-- The claimant is rendered as the SAME badge its row carries,
+                   not as coloured text: identical shape, colour and white-on-
+                   colour treatment, so the join is recognition rather than
+                   comparison. A Column takes any component, so there is no
+                   reason to settle for a tinted string.
+                   The tooltip repeats the id because colour must not be the
+                   only channel: contrast is not always sufficient, a long id
+                   can clip, and `tooltip` feeds aria-label, so the name reaches
+                   a screen reader that gets nothing from the hue. -->
               <Column header="shared with">
-                <Text
-                  fontSize="$fontSize-sm"
-                  color="$textColor-secondary"
-                  value="{$item.sharedWith &amp;&amp; $item.sharedWith.length ? '⚠ ' + $item.sharedWith.join(', ') : ''}" />
+                <HStack
+                  when="{$item.sharedWith &amp;&amp; $item.sharedWith.length > 0}"
+                  gap="$space-1"
+                  verticalAlignment="center"
+                  wrapContent="true">
+                  <Items data="{$item.sharedWith}">
+                    <Theme
+                      backgroundColor-Badge="{window.__bramItemColor($item, worklist.value &amp;&amp; worklist.value.items)}"
+                      textColor-Badge="white">
+                      <Badge value="{$item}" tooltip="{'shared with ' + $item}" />
+                    </Theme>
+                  </Items>
+                </HStack>
               </Column>
             </Table>
             <!-- Fallback for payloads without the rung-1 enrichment, where
@@ -477,8 +500,15 @@
           <Text value="{$item.disk}" variant="code" fontSize="$fontSize-sm" />
         </Column>
         <Column header="claimed by">
-          <Text value="{$item.claimants}" fontSize="$fontSize-sm"
-            color="$textColor-secondary" />
+          <!-- One Text per claimant rather than a joined string: each needs its
+               own colour, matching that item's row badge. -->
+          <Items data="{$item.claimantIds}">
+            <Theme
+              backgroundColor-Badge="{window.__bramItemColor($item, worklist.value &amp;&amp; worklist.value.items)}"
+              textColor-Badge="white">
+              <Badge value="{$item}" tooltip="{'claimed by ' + $item}" />
+            </Theme>
+          </Items>
         </Column>
       </Table>
       <!-- The note under the table became a CHOICE. It had been prose telling

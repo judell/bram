@@ -2069,6 +2069,65 @@ window.__bramSelectionNeedsProposedCommit = function (items, sel) {
   });
 };
 
+// A stable colour per item id, so the same item reads the same wherever it
+// appears -- its row badge, and its name in the Shared files table's "claimed
+// by" column. Entanglement is a relation BETWEEN rows, and the table names
+// claimants in text: matching a long kebab-case id back to the row it belongs
+// to meant reading both. Colour makes that join pre-attentive.
+//
+// Hashed from the id rather than assigned by position, because position moves
+// as items are approved, dropped and pruned, and a colour that changes under
+// you is worse than no colour.
+//
+// The six families are the ones xmlui actually defines. `$color-warning` is
+// NOT one of them (the token is `$color-warn`) -- a name that looks right,
+// resolves to nothing, and renders unstyled.
+window.__bramItemColorFamily = function (id) {
+  var families = window.__bramItemColorFamilies;
+  var key = String(id || "");
+  var h = 5381;
+  for (var i = 0; i < key.length; i++) {
+    h = ((h << 5) + h + key.charCodeAt(i)) | 0;
+  }
+  return Math.abs(h) % families.length;
+};
+
+window.__bramItemColorFamilies = ["primary", "success", "info", "danger", "warn", "secondary"];
+
+// Hash alone is not enough: with six families and a handful of items,
+// collisions are likely, and two entangled items sharing a colour defeats the
+// whole point. So hash for a starting bucket, then probe forward for a free
+// one, walking ids in sorted order so the result depends only on WHICH items
+// are on the board, never on their order in the file. Distinct up to six
+// items; beyond that reuse is unavoidable and the probe wraps.
+window.__bramItemColorMap = function (items) {
+  var ids = (items || [])
+    .map(function (i) { return i && i.id; })
+    .filter(Boolean)
+    .sort();
+  var families = window.__bramItemColorFamilies;
+  var taken = {};
+  var out = {};
+  for (var i = 0; i < ids.length; i++) {
+    var start = window.__bramItemColorFamily(ids[i]);
+    var pick = start;
+    for (var step = 0; step < families.length; step++) {
+      var cand = (start + step) % families.length;
+      if (!taken[cand]) { pick = cand; break; }
+    }
+    taken[pick] = true;
+    out[ids[i]] = families[pick];
+  }
+  return out;
+};
+
+window.__bramItemColor = function (id, items, shade) {
+  var fam = window.__bramItemColorMap(items)[id];
+  if (!fam) fam = window.__bramItemColorFamilies[window.__bramItemColorFamily(id)];
+  return "$color-" + fam + "-" + (shade || 600);
+};
+
+
 // The item's stage: THREE states, keyed on what you can DO.
 //
 // This was four states for a while, splitting "changed but not advanced"
@@ -2723,19 +2782,38 @@ window.__bramWorklistActApply = function (r) {
   return r;
 };
 
-// worklist2-remember-expansion: Worklist2 expander state in localStorage
+// worklist2-remember-expansion: Worklist2 expander state, in SESSION storage
 // (its own key, so the two tabs' states never interfere). Keys are
 // <itemId> for rows, <itemId>::<section> for sections. Prune runs on each
 // worklist load against current item ids so dead keys don't accumulate.
+//
+// sessionStorage, not localStorage, because expansion is FOCUS rather than a
+// DECISION. A dismissal is a decision -- "I have seen this, stop telling me" --
+// and re-nagging would undo it, so it belongs in localStorage. An expansion is
+// "I am looking at this now", which is cheap to re-establish and meaningless
+// once the context is gone. Persisting it across restarts made the pane open
+// at whatever density you left days ago, defeating the progressive disclosure
+// the collapsed default provides: you arrive at complexity you did not ask for
+// in this session.
+//
+// Measured, not assumed (2026-08-23, three-step storage probe on the
+// xmlui://localhost origin): sessionStorage is available there, survives a
+// tools-pane reload, and dies with the app. A tab switch is a weaker condition
+// than a reload -- route changes do not reload the iframe at all -- so the
+// requirement "survives tab switches and reloads, not an app quit" is exactly
+// what this primitive gives.
+//
+// Applied here only. Whether the same rule should govern the pane's other
+// persisted state is filed rather than assumed.
 window.__bramPersistWorklist2Expansion = function (keys) {
   try {
-    localStorage.setItem("bram.worklist2.expanded", JSON.stringify(keys || []));
+    sessionStorage.setItem("bram.worklist2.expanded", JSON.stringify(keys || []));
   } catch (e) {}
   return keys || [];
 };
 window.__bramRestoreWorklist2Expansion = function () {
   try {
-    return JSON.parse(localStorage.getItem("bram.worklist2.expanded") || "[]") || [];
+    return JSON.parse(sessionStorage.getItem("bram.worklist2.expanded") || "[]") || [];
   } catch (e) {
     return [];
   }
@@ -9232,7 +9310,7 @@ window.__bramWithShareMode = function (text, mode) {
 };
 
 // One ROW per entangled path, for the banner's table: { path, disk,
-// claimants, hint, tier }.
+// claimantIds, tier }.
 //
 // This replaced one prose sentence per path. Two things were wrong with the
 // sentences, and only the second is about reading.
@@ -9273,9 +9351,9 @@ window.__bramWorklistOverlapRows = function (items, claim) {
       path: g.path,
       tier: g.tier,
       disk: changed ? "+" + g.added + " \u2212" + g.removed : "nothing yet",
-      // Comma-joined, not __bramJoinNames: that helper builds prose ("A and
-      // B") for a sentence. This is a table cell, and a cell wants a list.
-      claimants: g.ids.join(", "),
+      // The ids themselves, not a joined string: each is rendered separately
+      // so it can carry its item's colour (__bramItemColor).
+      claimantIds: g.ids,
     });
   }
   return rows;
@@ -10709,3 +10787,4 @@ window.__bramSkipTip = function (id, tick) {
   if (id) window.__bramTipSkips[id] = true;
   return (Number(tick) || 0) + 1;
 };
+

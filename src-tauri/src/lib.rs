@@ -378,8 +378,6 @@ struct ShellConfig {
 struct WorklistConfig {
     #[serde(default, rename = "batchCommitActions")]
     batch_commit_actions: Option<bool>,
-    #[serde(default, rename = "oneClickApproveCommit")]
-    one_click_approve_commit: Option<bool>,
 }
 
 // Optional UI block. `showTargetApp` controls whether the embedded
@@ -393,11 +391,6 @@ struct UiConfig {
     show_target_app: Option<bool>,
     #[serde(default, rename = "toolsPaneHotReload")]
     tools_pane_hot_reload: Option<bool>,
-    // worklist2 cutover: opt-in visibility for the legacy Worklist tab
-    // (shown above the new one as OldWorklist) while the retirement
-    // clock runs. Default false: the new gate is the Worklist.
-    #[serde(default, rename = "showLegacyWorklist")]
-    show_legacy_worklist: Option<bool>,
 }
 
 #[derive(Default, Clone, serde::Deserialize)]
@@ -16512,17 +16505,6 @@ fn project_config_batch_commit_actions(config: Option<ProjectConfig>) -> bool {
         .unwrap_or(false)
 }
 
-// Default ON: the Approve & commit button shows on proposed items unless
-// the project explicitly sets `worklist.oneClickApproveCommit: false`
-// (Settings → One-click Approve & commit). The two-stage Approve →
-// TO COMMIT flow remains available alongside it either way.
-fn project_config_one_click_approve_commit(config: Option<ProjectConfig>) -> bool {
-    config
-        .and_then(|c| c.worklist)
-        .and_then(|w| w.one_click_approve_commit)
-        .unwrap_or(true)
-}
-
 fn project_config_mirror_worklist_lifecycle_to_issue(config: Option<ProjectConfig>) -> bool {
     config
         .and_then(|c| c.mirror_worklist_lifecycle_to_issue)
@@ -16971,16 +16953,10 @@ fn project_config_trace_archive_after_days(config: Option<&ProjectConfig>) -> u3
 // so the consumer never sees nulls; out-of-scope blocks like `server`
 // stay invisible — they're project infrastructure, not Settings knobs.
 fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value {
-    let show_legacy_worklist = config
-        .as_ref()
-        .and_then(|c| c.ui.as_ref())
-        .and_then(|u| u.show_legacy_worklist)
-        .unwrap_or(false);
     // Default OFF: an API key in Bram's environment is not consent to send
     // commands, diffs, written content, context, or result excerpts to an
     // external model. Only an explicit project setting enables the route.
     let describe_commands = project_config_describe_commands(config.clone());
-    let one_click_approve_commit = project_config_one_click_approve_commit(config.clone());
     let search_commit_depth = search_commit_depth_from_config(config.as_ref());
     let search_issue_limit = search_issue_limit_from_config(config.as_ref());
     let (
@@ -17065,8 +17041,8 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
             // reads startupPolicy; old code still sees its familiar boolean.
             "continueLast": startup_policy != AgentStartupPolicy::NewSession.as_str()
         },
-        "worklist": { "batchCommitActions": batch, "oneClickApproveCommit": one_click_approve_commit },
-        "ui": { "showTargetApp": show_target_app, "toolsPaneHotReload": tools_pane_hot_reload, "showLegacyWorklist": show_legacy_worklist },
+        "worklist": { "batchCommitActions": batch },
+        "ui": { "showTargetApp": show_target_app, "toolsPaneHotReload": tools_pane_hot_reload },
         "traces": {
             "enabled": tracing_enabled,
             "inspectorTap": inspector_tap,
@@ -45289,11 +45265,9 @@ fn route_request<R: tauri::Runtime>(
 
     if path == "__worklist-config" {
         let config = project_root(Some(app)).and_then(|root| load_project_config(&root));
-        let enabled = project_config_batch_commit_actions(config.clone());
-        let one_click = project_config_one_click_approve_commit(config);
+        let enabled = project_config_batch_commit_actions(config);
         let body = serde_json::json!({
             "batchCommitActions": enabled,
-            "oneClickApproveCommit": one_click,
         })
         .to_string()
         .into_bytes();
@@ -46858,15 +46832,6 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| serde_json::json!({}));
     let commit_too = auth.get("commitToo").and_then(|v| v.as_bool()).unwrap_or(false);
-    if commit_too {
-        let config = project_root(Some(app)).and_then(|root| load_project_config(&root));
-        if !project_config_one_click_approve_commit(config) {
-            return worklist_json_error(
-                400,
-                "one-click Approve & commit is disabled (worklist.oneClickApproveCommit); apply and commit as separate steps".to_string(),
-            );
-        }
-    }
     if let Err(e) = ensure_worklist_commit_authorized(&ids, &auth, unix_now_ms()) {
         // issue-255: a refusal used to leave nothing behind but a generic
         // `[route] status=400`, so an incident read as an op=invalidate line

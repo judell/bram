@@ -1713,15 +1713,11 @@ window.settingsInfoBodies = {
     "## Advanced\n\n" +
     "Launch arguments are extra CLI flags. First command is sent to the agent's TUI after startup. Both apply whichever startup choice is used.",
   batchCommitActions:
-    "## One-click Start & commit\n\n" +
-    "Shows Start & commit for proposed items in both Worklist surfaces. It is on by default; turn it off to require the two-stage Start → review the changes → Commit flow.\n\n" +
     "## Mirror Worklist lifecycle to GitHub issues\n\n" +
     "Post Worklist lifecycle comments to linked GitHub issues.",
   ui:
     "## Show target app\n\n" +
     "Show the embedded target-app preview pane. Usually off.\n\n" +
-    "## Show legacy Worklist\n\n" +
-    "Show the pre-redesign Worklist tab as OldWorklist above the Worklist. A transitional escape hatch while the new gate settles in; off by default.\n\n" +
     "## Agent-pane hot-reload\n\n" +
     "Auto-reload the agent pane as you edit Bram's own source. For developing Bram.\n\n" +
     "## Show tips in the footer\n\n" +
@@ -2226,7 +2222,7 @@ window.__bramSelectionAllNeedStart = function (items, sel, claim) {
     // two disagreed about the same row. Testing it here is what survived the
     // icon column (6d5d05b) -- the property outlived the glyphs that showed
     // it.
-    return !window.__bramSelectionAllCommittable(list, [i.id], claim, true);
+    return !window.__bramSelectionAllCommittable(list, [i.id], claim);
   });
 };
 
@@ -2246,25 +2242,23 @@ window.__bramSelectionAllNeedStart = function (items, sel, claim) {
 // No host change was needed -- `gate: "apply-and-commit"` sets `commit_too`,
 // which is what lets worklist_commit_files_for_ids accept `proposed`
 // (allow_proposed). This widens WHEN the pane offers it, not what the host
-// permits, so it inherits the same worklist.oneClickApproveCommit config gate.
+// permits. (The worklist.oneClickApproveCommit gate that once conditioned
+// this was retired in the 0.5.3 run.)
 //
 // This predicate is also what the stage icon and the strip key on, so all
 // three surfaces agree by construction rather than by coincidence.
-window.__bramSelectionAllCommittable = function (items, sel, claim, oneClickEnabled) {
+window.__bramSelectionAllCommittable = function (items, sel, claim) {
   var chosen = sel || [];
   if (!chosen.length) return false;
   var list = items || [];
   var picked = list.filter(function (i) { return chosen.indexOf(i.id) !== -1; });
   if (picked.length !== chosen.length) return false;
-  var anyProposed = false;
   for (var i = 0; i < picked.length; i++) {
     var it = picked[i];
     if ((it.status || "proposed") === "applied") continue;
-    anyProposed = true;
     if (!window.__bramWorklist2Begun(it, claim)) return false;
     if (!window.__bramItemChangedSplit(it, list, claim).exclusive.length) return false;
   }
-  if (anyProposed && oneClickEnabled === false) return false;
   return true;
 };
 
@@ -2400,7 +2394,7 @@ window.__bramWorklist2Strip = function (item, claim, items) {
     // identical disk state printed different sentences for a difference the
     // user cannot see or cause (live 2026-08-22: throwaway-commit-a and -b,
     // identical strips and file tables, differing only in an icon).
-    if (window.__bramSelectionAllCommittable(items || [], [item.id], claim, true)) {
+    if (window.__bramSelectionAllCommittable(items || [], [item.id], claim)) {
       // Two readings in one line, both action-relevant: what a commit would
       // TAKE (whole files, whoever wrote them) and how far the work has got
       // against its own plan -- "1 of 2 planned" is the signal that a commit
@@ -9864,9 +9858,9 @@ window.__bramWorklistOverlapRows = function (items, claim) {
 // while this is SELECTION-scoped (what happens when this commits). Stacking a
 // selection-scoped control under a board-wide table is what made it hard to
 // predict when it should appear.
-window.__bramSelectionCommitSweepsShared = function (items, sel, claim, oneClickEnabled) {
+window.__bramSelectionCommitSweepsShared = function (items, sel, claim) {
   if ((sel || []).length < 2) return false;
-  if (!window.__bramSelectionAllCommittable(items, sel, claim, oneClickEnabled)) return false;
+  if (!window.__bramSelectionAllCommittable(items, sel, claim)) return false;
   var chosen = sel || [];
   var list = items || [];
   return list.some(function (i) {

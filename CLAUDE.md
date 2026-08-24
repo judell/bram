@@ -61,9 +61,8 @@ the cross-target half that Setup seeds into every managed project.
 
 - `app/tools/Main.xmlui` — the agent-pane surface
 - `app/tools/components/*.xmlui` — Worklist (the primary gate, route
-  `/worklist2`), Sessions, Toolbar, Architecture, etc.;
-  `Workspace.xmlui` is the legacy Worklist, shown only behind
-  Settings → Show legacy Worklist
+  `/worklist2`), Sessions, Toolbar, Architecture, etc. (the legacy
+  `Workspace.xmlui` tab was retired in the 0.5.3 run)
 - `app/tools/config.json` — XMLUI app config (resources, appGlobals)
 - `app/tools/resources/*.svg` — custom icons; register in `config.json`
   under `resources` with the `icon.<name>` prefix

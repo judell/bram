@@ -160,18 +160,9 @@
         <!-- Post-cutover (#267 A2): "Batch commit actions" switch removed —
              batch is selection in the Worklist gate, no setting gates it.
              The worklist.batchCommitActions config key still deserializes
-             for compat; only the UI row is gone. -->
-        <VStack
-          testId="setting-oneClickApproveCommit"
-          padding="$space-1"
-          borderRadius="$borderRadius"
-          backgroundColor="{highlightKey === 'oneClickApproveCommit' ? '$color-primary-100' : 'transparent'}">
-          <Switch
-            id="oneClickSwitch"
-            label="One-click Approve &amp; commit"
-            initialValue="{settingsOneClickApproveCommit(settingsValue)}"
-            onDidChange="(v) => saveSettings.execute({ worklist: { oneClickApproveCommit: v } })" />
-        </VStack>
+             for compat; only the UI row is gone. The "One-click Approve &
+             commit" switch followed in the 0.5.3 run: the offer is always
+             available (retire-one-click-approve-commit-setting). -->
         <Switch
           id="mirrorIssuesSwitch"
           label="Mirror Worklist lifecycle to GitHub issues"
@@ -203,12 +194,6 @@
           label="Show target app"
           initialValue="{settingsShowTargetApp(settingsValue)}"
           onDidChange="(v) => saveSettings.execute({ ui: { showTargetApp: v } })" />
-        <!-- worklist2 cutover: the legacy tab, opt-in, shown above the new
-             Worklist as OldWorklist while the retirement clock runs. -->
-        <Switch
-          label="Show legacy Worklist"
-          initialValue="{!!(settingsValue &amp;&amp; settingsValue.ui &amp;&amp; settingsValue.ui.showLegacyWorklist)}"
-          onDidChange="(v) => saveSettings.execute({ ui: { showLegacyWorklist: v } })" />
         <Switch
           id="hotReloadSwitch"
           label="Agent-pane hot-reload"

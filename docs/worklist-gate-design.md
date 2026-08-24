@@ -132,8 +132,9 @@ Which verbs are *enabled* is derived from the selection, not from a mode:
 
 - **Start N** — `__bramSelectionAllUnstarted`: every ticked item is unbegun.
 - **Start & commit N** — `__bramSelectionAllUnstarted` **and**
-  `__bramSelectionAllPlans` **and** exactly one item ticked (subject to the
-  `worklist.oneClickApproveCommit` setting). Single-item only for now — a
+  `__bramSelectionAllPlans` **and** exactly one item ticked (the
+  `worklist.oneClickApproveCommit` setting that once gated this was retired
+  in the 0.5.3 run). Single-item only for now — a
   multi-item selection used to fuse every ticked item into one commit with no
   path to N commits; see #272.
 - **Commit N** — `__bramSelectionAllCommittable`: every ticked item is begun

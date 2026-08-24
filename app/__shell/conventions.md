@@ -571,12 +571,12 @@ still-`proposed` item's files (authorized by the `commitToo` auth record
 the click wrote, the `allow_proposed` path) and prunes, exactly as the
 commit gate does. `closesIssues` / close-on-push behave identically to a
 normal commit. The host sets the sentinel at approval time and
-`worklist-commit` clears it. `worklist.oneClickApproveCommit` gates both
-triggers — the one-click Approve & commit button and the widened
-plain-Commit offer — in both the current Worklist's selected-proposal
-controls and the legacy tab's per-item controls. It defaults to `true`;
-when explicitly `false`, both surfaces hide the action and the host
-rejects any stale `apply-and-commit` submission as a backstop.
+`worklist-commit` clears it. Both triggers — the one-click Approve &
+commit button and the widened plain-Commit offer — are always available.
+(A `worklist.oneClickApproveCommit` setting once gated them; it was
+retired in the 0.5.3 run after its config-off path produced a dead-end
+row — the offer was only ever visibility, never authorization, so
+removing the flag removed a bug class and no capability.)
 
 Exclusivity is what makes the widened offer safe, and the host does
 **not** enforce it — only the pane does. `worklist_commit_files_for_ids`

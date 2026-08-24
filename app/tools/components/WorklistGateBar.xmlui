@@ -88,7 +88,6 @@
       enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
       onClick="window.__bramGateAct('start', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode)" />
     <Button
-      when="{!gateConfig.value || gateConfig.value.oneClickApproveCommit !== false}"
       label="{'Start &amp; commit ' + (gateSel.value || []).length}"
       size="sm"
       enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; (gateSel.value || []).length === 1 &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
@@ -97,7 +96,7 @@
     <Button
       label="{'Commit ' + (gateSel.value || []).length}"
       size="sm"
-      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value, gateConfig.value ? gateConfig.value.oneClickApproveCommit : true)}"
+      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
       onClick="window.__bramGateAct('commit', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode)" />
     <Button
       label="{'Iterate ' + (gateSel.value || []).length}"

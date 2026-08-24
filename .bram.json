@@ -1,4 +1,7 @@
 {
+  "ai": {
+    "describeCommands": true
+  },
   "menus": {
     "hookDriven": true,
     "parseAndDisplay": true
@@ -7,19 +10,21 @@
     "agent": "claude",
     "args": "",
     "continueLast": true,
-    "firstCommand": ""
+    "firstCommand": "",
+    "startupPolicy": "lastActive"
   },
   "traces": {
     "enabled": true,
-    "inspectorTap": false,
-    "gridScanVerbose": false
+    "gridScanVerbose": false,
+    "inspectorTap": false
   },
   "ui": {
     "showTargetApp": false,
     "targetAppMinimized": true,
-    "toolsPaneHotReload": true
+    "toolsPaneHotReload": false
   },
   "worklist": {
-    "batchCommitActions": false
+    "batchCommitActions": false,
+    "gateExplainer": false
   }
 }

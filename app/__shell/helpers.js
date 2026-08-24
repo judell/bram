@@ -2449,6 +2449,149 @@ window.__bramWorklist2Begun = function (item, claim) {
   return !!window.__bramItemInflightKind(claim, item.id, "", "", 0);
 };
 
+// ---------------------------------------------------------------------------
+// #278 rungs 1+2: overlap is a property of FILES, stated once.
+//
+// Colour cannot carry this job. `__bramItemColorMap` has six families and its
+// own comment says the probe wraps past six. Computed exactly (djb2 mod 6,
+// forward probe over sorted ids): seven items is the FIRST collision and ten
+// produces a triple, so past six the surface asserts an identity that is
+// false -- two claimants of one file wearing one hue. These predicates replace
+// that job with counts and navigable ids, neither of which wraps.
+//
+// Begun-ness reuses `__bramWorklist2Begun`, so the index, the row backlink and
+// the stage icon agree by construction rather than by coincidence.
+// ---------------------------------------------------------------------------
+
+window.__bramItemFiles = function (item) {
+  if (!item) return [];
+  if (item.files && item.files.length) return item.files;
+  return item.file ? [item.file] : [];
+};
+
+window.__bramBasename = function (path) {
+  var p = String(path || "");
+  var i = p.lastIndexOf("/");
+  return i >= 0 ? p.slice(i + 1) : p;
+};
+
+// Every path claimed by 2+ items, ordered HAZARD BEFORE POPULARITY.
+//
+// The ordering is not cosmetic. `worklist_commit_files_for_ids` (lib.rs) stages
+// whole files, whoever changed them, so a file with begun claimants is the one
+// that can produce a mixed commit. A file shared by three items with two begun
+// is more consequential than one shared by seventeen unbegun plans.
+// The per-item row backlink that used to live here is GONE, and deliberately.
+// It put a second meaning of "shared" on a line that already had one (the
+// strip counts shared CHANGED files; the backlink counted shared CLAIMED
+// files), and it made the scan line longer for information the file table
+// already carries. Overlap is a property of files -- the index below and the
+// expanded row's file table are its surfaces. See the issue-278 comment in
+// Worklist.xmlui for the live evidence.
+
+window.__bramOverlapIndex = function (items, claim) {
+  var list = items || [];
+  var byId = {};
+  var byPath = {};
+  var i, f, files;
+  for (i = 0; i < list.length; i++) {
+    if (list[i] && list[i].id) byId[list[i].id] = list[i];
+  }
+  for (i = 0; i < list.length; i++) {
+    files = window.__bramItemFiles(list[i]);
+    for (f = 0; f < files.length; f++) {
+      if (!byPath[files[f]]) byPath[files[f]] = [];
+      byPath[files[f]].push(list[i].id);
+    }
+  }
+  var out = [];
+  Object.keys(byPath).forEach(function (path) {
+    var ids = byPath[path];
+    if (ids.length < 2) return;
+    var begun = 0;
+    for (var c = 0; c < ids.length; c++) {
+      if (byId[ids[c]] && window.__bramWorklist2Begun(byId[ids[c]], claim)) begun++;
+    }
+    out.push({ path: path, claimants: ids, begunCount: begun, total: ids.length });
+  });
+  out.sort(function (a, b) {
+    var ao = a.begunCount > 0 ? 1 : 0;
+    var bo = b.begunCount > 0 ? 1 : 0;
+    if (ao !== bo) return bo - ao;
+    if (a.begunCount !== b.begunCount) return b.begunCount - a.begunCount;
+    if (a.total !== b.total) return b.total - a.total;
+    return a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
+  });
+  return out;
+};
+
+// Board header. `across all N items` when a file is claimed by everyone:
+// universality is the useful collapsed fact, and it is what the clique
+// degenerates to.
+window.__bramOverlapHeaderLine = function (items, claim) {
+  var list = items || [];
+  var n = list.length;
+  var index = window.__bramOverlapIndex(list, claim);
+  var head = n + " item" + (n === 1 ? "" : "s");
+  if (!index.length) return head + " \u00b7 no shared files";
+  var touched = {};
+  index.forEach(function (e) { e.claimants.forEach(function (id) { touched[id] = true; }); });
+  var k = Object.keys(touched).length;
+  return head + " \u00b7 " + index.length + " shared file" + (index.length === 1 ? "" : "s") +
+    " across " + (k === n && n > 1 ? "all " : "") + k + " item" + (k === 1 ? "" : "s");
+};
+
+window.__bramOverlapAny = function (items, claim) {
+  return window.__bramOverlapIndex(items, claim).length > 0;
+};
+
+// One index row. `all N items` for a universal file, and the begun reading
+// spelled out -- 1 begun is OCCUPIED (no mixed commit possible yet; starting a
+// neighbour creates one), 2+ is ALREADY ENTANGLED. Conflating those overstates
+// the risk, which an earlier draft did.
+window.__bramOverlapRowCount = function (entry, items) {
+  if (!entry) return "";
+  var n = (items || []).length;
+  return (entry.total === n && n > 1 ? "all " : "") + entry.total + " items";
+};
+
+// "CLEARED TO EDIT", as a ratio, under an explicit column header (Codex's
+// answer to the naming problem, adopted whole).
+//
+// "begun" failed the same self-descriptive test "peers" did: it is Bram's word
+// for "an authorization exists", and nothing on the line teaches it. The
+// obvious replacements were already burned -- "started" reads as work having
+// happened, "in progress" asserts agent activity the UI must never claim, and
+// "has changes" is false for the occupied case. "Cleared to edit" names the
+// USER's act, which is what `begunAtMs` actually records, and claims nothing
+// about whether editing began, continued, or produced anything.
+//
+// Not "approved": Bram uses the same approval gesture again at the commit
+// gate, so the word would be ambiguous about WHICH approval is being counted.
+//
+// The ratio carries the denominator the bare count was missing -- "2 of 3"
+// says how much of the contention is live, which is the judgement the reader
+// is actually making. Zero is an em dash, not "none begun": with the column
+// header present the absence needs no words, and a bare blank would be
+// ambiguous.
+window.__bramOverlapRowCleared = function (entry) {
+  if (!entry) return "";
+  if (!entry.begunCount) return "\u2014";
+  return entry.begunCount + " of " + entry.total;
+};
+
+window.__bramOverlapRowClearedTooltip = function (entry) {
+  if (!entry || !entry.begunCount) {
+    return "No claimant is cleared to edit this file yet \u2014 plan-level overlap only.";
+  }
+  var head = entry.begunCount + " of " + entry.total +
+    " claimant items are cleared to edit this file. ";
+  if (entry.begunCount === 1) {
+    return head + "Occupied: no mixed commit is possible yet \u2014 clearing one of the others would create one.";
+  }
+  return head + "Already entangled: committing any of them stages this whole file, taking the others' uncommitted work.";
+};
+
 // issue-266-close-declaration-inline: state helpers for the inline close
 // declaration at the commit gate. The map holds per-item close state only
 // once the user touches a tickbox; untouched items derive default state

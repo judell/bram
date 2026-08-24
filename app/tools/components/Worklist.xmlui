@@ -9,6 +9,7 @@
   var.worklist2VoiceItemId="{''}"
   var.worklist2Sent="{{}}"
   var.worklist2Selected="{[]}"
+  var.worklist2OverlapOpen="{false}"
   var.worklist2BatchText="{''}"
   var.w2BatchVoiceRecording="{false}"
   var.worklist2ShareMode="{'together'}"
@@ -98,7 +99,107 @@
         label="+ New item"
         size="xs"
         onClick="worklist2NewItemOpen = !worklist2NewItemOpen" />
+      <!-- issue-278 rung 1: the board states its own overlap total, so a
+           reader knows the per-row marks are exhaustive without reading every
+           row. Says "no shared files" when there are none - the absence is
+           worth one word, and it keeps the line from appearing and vanishing.
+           "across all N items" marks universality, which is what the clique
+           degenerates to and the useful collapsed fact when everyone claims
+           one file. -->
+      <SpaceFiller />
+      <Text
+        fontSize="$fontSize-sm"
+        color="$textColor-secondary"
+        value="{window.__bramOverlapHeaderLine(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value)}" />
+      <Button
+        when="{window.__bramOverlapAny(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value)}"
+        label="{worklist2OverlapOpen ? 'Hide overlaps' : 'Review overlaps'}"
+        variant="ghost"
+        size="xs"
+        onClick="worklist2OverlapOpen = !worklist2OverlapOpen" />
     </HStack>
+    <!-- issue-278 rung 2: the overlap index. One disclosure owns the graph,
+         so a row never has to render its peer set - at twenty dense items that
+         is the same news twenty times. Ordered HAZARD BEFORE POPULARITY by
+         __bramOverlapIndex: a file with begun claimants outranks a more
+         popular one with none, because whole-file staging makes the begun case
+         the one that can produce a mixed commit. In document flow, NOT pinned:
+         a large index stuck to the top would consume the viewport it exists to
+         summarise. -->
+    <VStack
+      when="{worklist2OverlapOpen}"
+      gap="$space-1"
+      padding="$space-3"
+      border="1px solid $color-surface-200"
+      borderRadius="$borderRadius">
+      <Text fontWeight="$fontWeight-bold" value="Shared files" />
+      <!-- Table with proportional Columns, not hand-rolled HStacks with fixed
+           rem widths. The hand-rolled version wasted horizontal space on every
+           row (a 22rem FILE column for paths that are mostly shorter) and then
+           had nothing left for CLAIMED BY. Reaching for `FlowLayout` to fix
+           that cell made it worse still - every badge stretched to full
+           container width, one per line - and it was the wrong component
+           regardless: FlowLayout carries an upstream deprecation notice,
+           "Please use HStack with wrapContent set to true; it will overtake
+           the role of FlowLayout" (xmlui `FlowLayout.tsx:26`). Checking the
+           component docs first would have said so; reaching for a layout by
+           name is how a deprecated one gets into a file.
+
+           Jon: "Terrible layout solution. Just wasting all kinds of space. We
+           want these things natural width and wrappable. We already had a
+           solution to that."
+
+           We did: the expanded row's file table right below, which has used
+           `Table` + proportional `Column` + `HStack wrapContent="true"` all
+           along (see the shared-with Column). Same shape, same problem, and it
+           was solved once already - this is that solution, reused rather than
+           reinvented.
+
+           "CLEARED TO EDIT" is the durable fact `begunAtMs` records: the user
+           authorized work on that item. It claims nothing about whether
+           editing began or produced anything. Deliberately not "approved" -
+           the same approval gesture is used again at the commit gate, so the
+           word would not say WHICH approval is counted. Zero renders as an em
+           dash; with the header present the absence needs no words. -->
+      <Table data="{window.__bramOverlapIndex(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value)}">
+        <Column header="file" width="2*">
+          <Text value="{$item.path}" variant="code" fontSize="$fontSize-sm" tooltip="{$item.path}" />
+        </Column>
+        <Column header="items" width="110px">
+          <Text
+            fontSize="$fontSize-sm"
+            color="$textColor-secondary"
+            value="{window.__bramOverlapRowCount($item, worklist.value &amp;&amp; worklist.value.items)}" />
+        </Column>
+        <!-- No colour on the ratio. Jon: "Orange in Cleared to Edit: Not
+             helpful." The ratio already carries the judgement (2 of 3 vs
+             1 of 2); tinting it added a second encoding of the same fact and
+             spent the pane's one accent colour on something that is not a
+             decision point. -->
+        <Column header="cleared to edit" width="150px">
+          <Text
+            fontSize="$fontSize-sm"
+            tooltip="{window.__bramOverlapRowClearedTooltip($item)}"
+            value="{window.__bramOverlapRowCleared($item)}" />
+        </Column>
+        <!-- Natural-width badges that wrap: `wrapContent="true"`, the same
+             property the shared-with Column below already uses. The one
+             surviving colour tie is row badge <-> here, so these keep the
+             item's own colour; the short label carries identity when two
+             items collide on a hue, which they do past six items. -->
+        <Column header="claimed by" width="3*">
+          <HStack gap="$space-1" verticalAlignment="center" wrapContent="true">
+            <Items data="{$item.claimants}">
+              <Theme
+                backgroundColor-Badge="{window.__bramItemColor($item, worklist.value &amp;&amp; worklist.value.items)}"
+                textColor-Badge="white">
+                <Badge value="{$item}" tooltip="{'claims this file: ' + $item}" />
+              </Theme>
+            </Items>
+          </HStack>
+        </Column>
+      </Table>
+    </VStack>
     <!-- worklist2-new-item-parity: thin composition of existing pieces.
          IsolatedDraftEditor brings the placeholder protocol, voice, paste
          and drag-resize as a unit (voice/paste target new-item, shared
@@ -224,18 +325,57 @@
           <!-- The badge carries the item's colour, and the Shared files
                table's claimant names carry the same one, so a claimant can be
                matched to its row without reading either id. -->
+          <HStack width="18rem" verticalAlignment="center" overflowX="hidden">
           <Theme
             backgroundColor-Badge="{window.__bramItemColor($item.id, worklist.value &amp;&amp; worklist.value.items)}"
             textColor-Badge="white">
+            <!-- The id, not a derived short label. Rung 3 shortened these to
+                 `#278 · SEMANTIC` and it did fix the measured problem - badge
+                 width spread fell 22 -> 12 chars, which is what made the
+                 strip's left edge ragged at ten items. But it invented a
+                 SECOND NAME for something that already had one, and the alias
+                 leaked into prose: "commit #278 · OVERLAP" is not an
+                 instruction anyone can act on without translating it back.
+                 Jon: "The short names are making it hard for me to follow your
+                 instructions and that is an indictment of the method."
+
+                 Truncation preserves identity; a derived label creates an
+                 alias. So the raggedness is fixed with WIDTH - a fixed slot
+                 the badge clips inside - and the name stays the id. -->
             <Badge value="{$item.id}" tooltip="{$item.id}" />
           </Theme>
+          </HStack>
           <!-- Basenames in the line, full paths in the tooltip: the row is a
-               scan line and repo-relative paths would swamp it. -->
+               scan line and repo-relative paths would swamp it.
+
+               Base size, not -sm (Jon, on the first live render: "messages
+               need larger font so the new colorized text has a chance to stand
+               out"). At -sm the amber had too little ink to register as a
+               signal at all - the colour was carrying meaning the type was too
+               small to deliver. -->
           <Text
-            fontSize="$fontSize-sm"
             color="$textColor-secondary"
             tooltip="{window.__bramWorklist2StripTooltip($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items)}"
             value="{window.__bramWorklist2Strip($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items)}" />
+          <!-- issue-278: the row backlink is GONE, on live evidence.
+               It was redundant and, worse, it put a SECOND meaning of "shared"
+               on a line that already had one. Live board, 2026-08-24:
+
+                 Will commit +323 -2 in 2 of 2 planned - 1 shared - last: ...
+                                                        ^ shared CHANGED files
+                                        ... shares 2 files with 2 items
+                                                   ^ shared CLAIMED files
+
+               Two numbers, two meanings, one line. Jon: "I don't think the
+               colorized message is helping us here ... they just make the whole
+               message row too long ... a more compact and less misleading
+               solution."
+
+               The expanded row's SHARED WITH column already does this job and
+               does it better: colour-matched claimant badges, per file, where
+               the file is the subject. Overlap is a property of files, so the
+               file table is where it belongs; the scan line keeps one sentence
+               with one meaning. Board-level total stays in the header. -->
           </HStack>
         </HStack>
         <VStack
@@ -280,15 +420,23 @@
                   fontSize="$fontSize-sm"
                   value="{!rowBegun || $item.status === 'unchanged' ? '' : '+' + $item.added + ' −' + $item.removed + ($item.status === 'new' ? ' (new)' : ($item.status === 'deleted' ? ' (deleted)' : ''))}" />
               </Column>
-              <!-- The claimant is rendered as the SAME badge its row carries,
-                   not as coloured text: identical shape, colour and white-on-
-                   colour treatment, so the join is recognition rather than
-                   comparison. A Column takes any component, so there is no
-                   reason to settle for a tinted string.
-                   The tooltip repeats the id because colour must not be the
-                   only channel: contrast is not always sufficient, a long id
-                   can clip, and `tooltip` feeds aria-label, so the name reaches
-                   a screen reader that gets nothing from the hue. -->
+              <!-- Plain text, not badges. This column started as coloured
+                   badges matching each claimant's row badge, then lost its
+                   colour (too many coloured chips in one plane), and now loses
+                   the chip too. Jon: "We don't want the shared with to be
+                   badges at all. Now, just normal primary text."
+
+                   The reasoning that survives from the badge era: a chip is a
+                   recognition affordance, and recognition is what the ONE
+                   surviving colour tie - row badge to CLAIMED BY in the
+                   overlap index - is for. Repeating the shape here, inside
+                   every expanded row, spent the affordance on a surface that
+                   only needs to be read. Short labels made that affordable:
+                   `#278 · SEMANTIC` is legible as prose in a way a 45-char id
+                   never was.
+
+                   Tooltip still carries the full id, because the label is a
+                   derived shortening and `tooltip` feeds aria-label. -->
               <Column header="shared with" width="3*">
                 <HStack
                   when="{$item.sharedWith &amp;&amp; $item.sharedWith.length > 0}"
@@ -296,11 +444,7 @@
                   verticalAlignment="center"
                   wrapContent="true">
                   <Items data="{$item.sharedWith}">
-                    <Theme
-                      backgroundColor-Badge="{window.__bramItemColor($item, worklist.value &amp;&amp; worklist.value.items)}"
-                      textColor-Badge="white">
-                      <Badge value="{$item}" tooltip="{'shared with ' + $item}" />
-                    </Theme>
+                    <Text value="{$item}" tooltip="{'shared with ' + $item}" />
                   </Items>
                 </HStack>
               </Column>

@@ -16118,7 +16118,12 @@ fn pending_session_title_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<P
     project_resource_path(app, ".pending-session-title.json")
 }
 
-fn write_pending_session_title<R: tauri::Runtime>(app: &AppHandle<R>, provider: &str, title: &str) {
+fn write_pending_session_title<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    provider: &str,
+    title: &str,
+    session_id: Option<String>,
+) {
     let Some(path) = pending_session_title_file(app) else {
         return;
     };
@@ -16126,7 +16131,7 @@ fn write_pending_session_title<R: tauri::Runtime>(app: &AppHandle<R>, provider: 
         provider: provider.to_string(),
         title: title.to_string(),
         created_at_ms: unix_now_ms(),
-        session_id: None,
+        session_id,
         previous_session_id: SessionProvider::from_str(provider)
             .and_then(|session_provider| live_session_id(app, session_provider)),
     };
@@ -16361,9 +16366,19 @@ fn create_new_session(
     if trimmed.is_empty() {
         return Err("session name is required".to_string());
     }
+    // Pre-allocate the Claude session id at click time (#274): `--session-id`
+    // makes the sid known before any JSONL exists, so the queued title binds
+    // to exactly this session and rotation detection confirms a known id
+    // instead of inferring one from the newest file. Codex has no equivalent
+    // flag; its sid is claimed when the bootstrap rollout surfaces.
+    let session_id = if provider_key == "claude" {
+        Some(uuid::Uuid::new_v4().to_string())
+    } else {
+        None
+    };
     // Queue the title so the new session is renamed to the exact name when its
     // session file surfaces. The title is metadata, never a user turn.
-    write_pending_session_title(&app, provider_key, &trimmed);
+    write_pending_session_title(&app, provider_key, &trimmed, session_id.clone());
     if bram_trace_enabled() {
         append_bram_trace_line(
             &app,
@@ -16379,7 +16394,7 @@ fn create_new_session(
     std::thread::sleep(std::time::Duration::from_millis(AGENT_INTERRUPT_GAP_MS));
     pty_write_internal(&app, &state, "\x03", "agent-new-interrupt-2")?;
     std::thread::sleep(std::time::Duration::from_millis(AGENT_RELAUNCH_SETTLE_MS));
-    let launch = new_session_launch_command(provider_key, &trimmed);
+    let launch = new_session_launch_command(provider_key, &trimmed, session_id.as_deref());
     pty_write_internal(&app, &state, &format!("{}\r", launch), "agent-new-launch")?;
     // Codex does not create a rollout file until the first real user turn.
     // Refresh now so /__sessions/list can expose the queued title as the
@@ -16529,10 +16544,18 @@ fn agent_launch_command(provider: &str) -> Option<&'static str> {
 // A named fresh session must not be initialized by sending the requested name
 // as a user prompt. Claude has a native display-name flag; Codex creates its
 // session lazily and receives the same name through the pending metadata path
-// above when its first real turn creates the rollout file.
-fn new_session_launch_command(provider: &str, title: &str) -> String {
+// above when its first real turn creates the rollout file. A pre-allocated
+// `session_id` (Claude only, #274) rides along as `--session-id`; ids are
+// uuid-shaped, so no shell quoting.
+fn new_session_launch_command(provider: &str, title: &str, session_id: Option<&str>) -> String {
     match provider.trim().to_ascii_lowercase().as_str() {
-        "claude" | "claud" => format!("claude --name {}", shell_single_quote(title)),
+        "claude" | "claud" => {
+            let mut launch = format!("claude --name {}", shell_single_quote(title));
+            if let Some(sid) = session_id {
+                launch.push_str(&format!(" --session-id {}", sid));
+            }
+            launch
+        }
         "codex" => "codex".to_string(),
         _ => "".to_string(),
     }
@@ -16721,19 +16744,31 @@ mod agent_startup_policy_tests {
     #[test]
     fn named_new_session_uses_provider_metadata_not_a_seed_prompt() {
         assert_eq!(
-            new_session_launch_command("claude", "Design review"),
+            new_session_launch_command("claude", "Design review", None),
             "claude --name 'Design review'"
         );
         assert_eq!(
-            new_session_launch_command("codex", "Design review"),
+            new_session_launch_command("codex", "Design review", None),
             "codex"
+        );
+    }
+
+    #[test]
+    fn named_new_session_carries_preallocated_claude_session_id() {
+        assert_eq!(
+            new_session_launch_command(
+                "claude",
+                "Design review",
+                Some("0192aabb-ccdd-4eef-8899-001122334455")
+            ),
+            "claude --name 'Design review' --session-id 0192aabb-ccdd-4eef-8899-001122334455"
         );
     }
 
     #[test]
     fn named_new_session_shell_quotes_apostrophes() {
         assert_eq!(
-            new_session_launch_command("claude", "R&D's plan"),
+            new_session_launch_command("claude", "R&D's plan", None),
             "claude --name 'R&D'\\''s plan'"
         );
     }

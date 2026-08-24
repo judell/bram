@@ -314,6 +314,7 @@ dependencies = [
  "time",
  "tiny_http",
  "ureq",
+ "uuid",
 ]
 
 [[package]]

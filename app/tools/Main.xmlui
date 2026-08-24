@@ -801,9 +801,12 @@
            in chip styling, so dropdown-overflow agents indicate the same
            way. Falls back to the plain meta line until a rebuilt
            helpers.js provides __bramFooterSessionLine. -->
-      <HStack width="100%" horizontalAlignment="center" paddingHorizontal="$space-1">
+      <HStack
+        when="{window.__bramSessionMetaLine(window.__bramCurrentSessionOf(footerSessions.value))}"
+        width="100%"
+        horizontalAlignment="center"
+        paddingHorizontal="$space-1">
         <Text
-          when="{window.__bramSessionMetaLine(window.__bramCurrentSessionOf(footerSessions.value))}"
           fontSize="$fontSize-sm"
           color="$textColor-secondary"
           maxLines="1"

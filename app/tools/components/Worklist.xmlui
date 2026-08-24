@@ -174,14 +174,7 @@
            `Table` + proportional `Column` + `HStack wrapContent="true"` all
            along (see the shared-with Column). Same shape, same problem, and it
            was solved once already - this is that solution, reused rather than
-           reinvented.
-
-           "CLEARED TO EDIT" is the durable fact `begunAtMs` records: the user
-           authorized work on that item. It claims nothing about whether
-           editing began or produced anything. Deliberately not "approved" -
-           the same approval gesture is used again at the commit gate, so the
-           word would not say WHICH approval is counted. Zero renders as an em
-           dash; with the header present the absence needs no words. -->
+           reinvented. -->
       <Table data="{window.__bramOverlapIndex(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value)}">
         <Column header="file" width="2*">
           <Text value="{$item.path}" variant="code" fontSize="$fontSize-sm" tooltip="{$item.path}" />
@@ -191,17 +184,6 @@
             fontSize="$fontSize-sm"
             color="$textColor-secondary"
             value="{window.__bramOverlapRowCount($item, worklist.value &amp;&amp; worklist.value.items)}" />
-        </Column>
-        <!-- No colour on the ratio. Jon: "Orange in Cleared to Edit: Not
-             helpful." The ratio already carries the judgement (2 of 3 vs
-             1 of 2); tinting it added a second encoding of the same fact and
-             spent the pane's one accent colour on something that is not a
-             decision point. -->
-        <Column header="cleared to edit" width="150px">
-          <Text
-            fontSize="$fontSize-sm"
-            tooltip="{window.__bramOverlapRowClearedTooltip($item)}"
-            value="{window.__bramOverlapRowCleared($item)}" />
         </Column>
         <!-- Natural-width badges that wrap: `wrapContent="true"`, the same
              property the shared-with Column below already uses. The one

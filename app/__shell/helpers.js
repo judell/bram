@@ -2737,51 +2737,11 @@ window.__bramOverlapAny = function (items, claim) {
   return window.__bramOverlapIndex(items, claim).length > 0;
 };
 
-// One index row. `all N items` for a universal file, and the begun reading
-// spelled out -- 1 begun is OCCUPIED (no mixed commit possible yet; starting a
-// neighbour creates one), 2+ is ALREADY ENTANGLED. Conflating those overstates
-// the risk, which an earlier draft did.
+// One index row. `all N items` for a universal file.
 window.__bramOverlapRowCount = function (entry, items) {
   if (!entry) return "";
   var n = (items || []).length;
   return (entry.total === n && n > 1 ? "all " : "") + entry.total + " items";
-};
-
-// "CLEARED TO EDIT", as a ratio, under an explicit column header (Codex's
-// answer to the naming problem, adopted whole).
-//
-// "begun" failed the same self-descriptive test "peers" did: it is Bram's word
-// for "an authorization exists", and nothing on the line teaches it. The
-// obvious replacements were already burned -- "started" reads as work having
-// happened, "in progress" asserts agent activity the UI must never claim, and
-// "has changes" is false for the occupied case. "Cleared to edit" names the
-// USER's act, which is what `begunAtMs` actually records, and claims nothing
-// about whether editing began, continued, or produced anything.
-//
-// Not "approved": Bram uses the same approval gesture again at the commit
-// gate, so the word would be ambiguous about WHICH approval is being counted.
-//
-// The ratio carries the denominator the bare count was missing -- "2 of 3"
-// says how much of the contention is live, which is the judgement the reader
-// is actually making. Zero is an em dash, not "none begun": with the column
-// header present the absence needs no words, and a bare blank would be
-// ambiguous.
-window.__bramOverlapRowCleared = function (entry) {
-  if (!entry) return "";
-  if (!entry.begunCount) return "\u2014";
-  return entry.begunCount + " of " + entry.total;
-};
-
-window.__bramOverlapRowClearedTooltip = function (entry) {
-  if (!entry || !entry.begunCount) {
-    return "No claimant is cleared to edit this file yet \u2014 plan-level overlap only.";
-  }
-  var head = entry.begunCount + " of " + entry.total +
-    " claimant items are cleared to edit this file. ";
-  if (entry.begunCount === 1) {
-    return head + "Occupied: no mixed commit is possible yet \u2014 clearing one of the others would create one.";
-  }
-  return head + "Already entangled: committing any of them stages this whole file, taking the others' uncommitted work.";
 };
 
 // issue-266-close-declaration-inline: state helpers for the inline close

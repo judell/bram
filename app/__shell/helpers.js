@@ -1484,11 +1484,15 @@ window.__bramW2SetCloseMap = function (m) { window.__bramW2CloseMap = m || {}; }
 //   iterate        a DIFFERENT call entirely (__bramWorklist2BatchIterate),
 //                  taking the raw feedback string rather than a fanned map
 window.__bramGateAct = function (kind, items, sel, shareMode) {
+  // Selection is literal user intent. Shared-file handling may change how the
+  // agent prepares the commit, but never which ids this action authorizes.
   var ids0 = sel || [];
   if (!ids0.length) return;
   var text = String(window.__bramMessageAgentText || "");
-  var body = window.__bramWithShareMode(
-    window.__bramWithStagedImageMarkers(text, "feedback"), shareMode || "together");
+  var body = window.__bramWithStagedImageMarkers(text, "feedback");
+  if (kind === "commit" || kind === "start-commit") {
+    body = window.__bramWithShareMode(body, shareMode || "together", items, ids0, null);
+  }
   window.__bramIframeTrace("click", { target: "gatebar-" + kind, count: ids0.length });
   var filter = (kind === "start" || kind === "start-commit") ? "proposed" : "";
   var ids = window.__bramSelectionIds(items, ids0, filter);
@@ -9753,15 +9757,55 @@ window.__bramWorklistOverlapGroups = function (items, claim) {
 // Folded into the existing actions rather than given its own submit button --
 // the same reasoning as the close-on-commit dialog's `close-issue:` lines, and
 // the pane convention against a third decision point beside Approve/Drop.
-// Inert on the default ("together"), so every call site can wrap
-// unconditionally.
-window.__bramWithShareMode = function (text, mode) {
-  if (mode !== "split") return text;
+//
+// Selection remains literal. If an unselected begun claimant shares a path,
+// the agent must isolate that neighbour before committing exactly the chosen
+// ids. With several selected ids, `split` additionally asks for one commit per
+// selected item; `together` keeps the selected set in one commit.
+window.__bramSelectionHasUnselectedShared = function (items, sel, claim) {
+  var list = items || [];
+  var chosen = {};
+  (sel || []).forEach(function (id) { chosen[id] = true; });
+  if (!Object.keys(chosen).length) return false;
+  var byId = {};
+  list.forEach(function (item) { if (item) byId[item.id] = item; });
+  return list.some(function (item) {
+    if (!item || !chosen[item.id]) return false;
+    return (item.changedFiles || []).some(function (file) {
+      return (file.sharedWith || []).some(function (otherId) {
+        var other = byId[otherId];
+        return !chosen[otherId] && other && window.__bramWorklist2Begun(other, claim);
+      });
+    });
+  });
+};
+
+window.__bramSelectionHasBegunShared = function (items, sel, claim) {
+  var list = items || [];
+  var chosen = sel || [];
+  return list.some(function (item) {
+    return item && chosen.indexOf(item.id) !== -1 &&
+      window.__bramItemChangedSplit(item, list, claim).sharedDeclared.length > 0;
+  });
+};
+
+window.__bramWithShareMode = function (text, mode, items, sel, claim) {
   var body = text || "";
+  var chosen = sel || [];
+  var hasShared = window.__bramSelectionHasBegunShared(items, chosen, claim);
+  if (chosen.length > 1 && mode === "split" && hasShared) {
+    return (
+      (body ? body + "\n\n" : "") +
+      "split-shared-files: separate the selected items' shared-file changes " +
+      "so each selected item commits on its own; do not include unselected items."
+    );
+  }
+  if (!window.__bramSelectionHasUnselectedShared(items, chosen, claim)) return body;
   return (
     (body ? body + "\n\n" : "") +
-    "split-shared-files: separate the shared-file changes so each item " +
-    "commits on its own, rather than letting one commit take the whole file."
+    "selected-only-shared-files: isolate the selected items' shared-file changes from " +
+    "unselected claimants before committing; commit exactly the selected item ids" +
+    (chosen.length > 1 ? " together." : ".")
   );
 };
 
@@ -9828,6 +9872,7 @@ window.__bramWorklistOverlapRows = function (items, claim) {
 // selection-scoped control under a board-wide table is what made it hard to
 // predict when it should appear.
 window.__bramSelectionCommitSweepsShared = function (items, sel, claim, oneClickEnabled) {
+  if ((sel || []).length < 2) return false;
   if (!window.__bramSelectionAllCommittable(items, sel, claim, oneClickEnabled)) return false;
   var chosen = sel || [];
   var list = items || [];

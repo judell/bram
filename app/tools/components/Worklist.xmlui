@@ -651,19 +651,16 @@
           <Text overflowMode="flow" value="{window.__bramJoinIds($item.claimantIds)}" />
         </Column>
       </Table>
-      <!-- The note under the table became a CHOICE. It had been prose telling
-           the user to "ask the agent to split the shared changes" — an
-           instruction to compose a sentence, when the whole premise is that
-           the agent knows how and only needs telling. There are exactly two
-           outcomes, so they are two radio options, and the pick rides along
-           with whatever gate button is pressed next (see __bramWithShareMode).
-           No separate submit: the pane convention folds an optional companion
-           input into the existing actions rather than adding a third decision
-           point beside Approve and Drop. -->
+      <!-- With one selected item there is no choice: if its files overlap an
+           unselected begun item, the commit feedback requires separation and
+           authorizes only the selected id. With two or more explicitly
+           selected items, the pick says whether those selected items land
+           together or separately. Selection itself never expands. -->
       <!-- Selection-scoped, unlike the board-wide table above it: shown only
-           when this selection could commit AND that commit would sweep a path
-           another begun item claims. Without a committable item the question
-           is premature; without a shared path there is nothing to split. The
+           with two or more explicitly selected items, when that selection
+           could commit AND its commit would sweep a shared path. Without a
+           committable item the question is premature; without multiple
+           selected items there is no together-versus-each choice. The
            explanatory sentence that used to sit under it is gone — the two
            options ARE the explanation, and a caption restating them is the
            kind of compensating prose that keeps turning out to mean a control
@@ -673,8 +670,8 @@
         when="{window.__bramSelectionCommitSweepsShared(worklist.value &amp;&amp; worklist.value.items, worklist2Selected, inflightClaim.value, worklistConfig.value ? worklistConfig.value.oneClickApproveCommit : true)}"
         initialValue="{worklist2ShareMode}"
         onDidChange="(v) => worklist2ShareMode = v">
-        <Option value="together" label="One commit — claimants of a shared file land together" />
-        <Option value="split" label="A commit each — the agent separates the shared changes first" />
+        <Option value="together" label="One commit — selected items land together" />
+        <Option value="split" label="A commit each — selected items land separately" />
       </RadioGroup>
     </VStack>
     </VStack>

@@ -732,6 +732,8 @@
            the model the subagent ran on. -->
       <HStack
         when="{window.__bramVisibleFooterAgents(footerAgents.value, dismissedAgentIds).length > 0 || (window.__bramDismissedInRoster ? window.__bramDismissedInRoster(footerAgents.value, dismissedAgentIds).length : 0) > 0}"
+        width="100%"
+        horizontalAlignment="center"
         gap="$space-1"
         paddingHorizontal="$space-1"
         verticalAlignment="center">

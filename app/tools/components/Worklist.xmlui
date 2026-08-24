@@ -539,9 +539,14 @@
           </VStack>
           <!-- worklist2-closes-once: the strip already declares closes for
                plans; this row appears only once begun, when its tickboxes
-               and comment box are interactive. -->
+               and comment box are interactive. Not while a live claim
+               covers the item (worklist2-closes-row-not-while-in-flight):
+               from an approval click until the claim resolves, the close
+               selection is already recorded host-side, so the controls
+               would be dead — and on the one-click apply-and-commit path
+               that in-flight span is the row's whole remaining life. -->
           <HStack
-            when="{$item.closesIssues &amp;&amp; $item.closesIssues.length > 0 &amp;&amp; window.__bramWorklist2Begun($item, inflightClaim.value)}"
+            when="{$item.closesIssues &amp;&amp; $item.closesIssues.length > 0 &amp;&amp; window.__bramWorklist2Begun($item, inflightClaim.value) &amp;&amp; !window.__bramItemInflightKind(inflightClaim.value, $item.id, '', '', 0)}"
             gap="$space-2"
             verticalAlignment="center"
             var.witem="{$item}">

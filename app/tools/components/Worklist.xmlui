@@ -649,39 +649,44 @@
           <Text overflowMode="flow" value="{window.__bramJoinIds($item.claimantIds)}" />
         </Column>
       </Table>
-      <!-- With one selected item there is no choice: if its files overlap an
-           unselected begun item, the commit feedback requires separation and
-           authorizes only the selected id. With two or more explicitly
-           selected items, the pick says whether those selected items land
-           together or separately. Selection itself never expands. -->
-      <!-- Selection-scoped, unlike the board-wide table above it: shown only
-           with two or more explicitly selected items, when that selection
-           could commit AND its commit would sweep a shared path. Without a
-           committable item the question is premature; without multiple
-           selected items there is no together-versus-each choice. The
-           explanatory sentence that used to sit under it is gone — the two
-           options ARE the explanation, and a caption restating them is the
-           kind of compensating prose that keeps turning out to mean a control
-           was missing. -->
-      <!-- commit-granularity-and-start-consequence A+B.
-           The gate WAS `__bramSelectionCommitSweepsShared`, so the choice
-           appeared only when it was CONSTRAINED and never when it was free:
-           two disjoint committable items landed in one commit with no way to
-           say "these are unrelated". Now `SweepsShared` picks the option
-           LABELS rather than deciding the control exists.
-           Extracted to `variable` rather than inlined: an inline ternary in a
-           binding defeats dependency tracking (the search-date endpoint labels
-           froze at a transient first-settle domain for exactly this reason,
-           fixed by extraction). -->
-      <variable
-        name="shareChoiceOpen"
-        value="{(worklist2Selected || []).length >= 2 &amp;&amp; window.__bramSelectionAllCommittable(worklist.value &amp;&amp; worklist.value.items, worklist2Selected, inflightClaim.value, worklistConfig.value ? worklistConfig.value.oneClickApproveCommit : true)}" />
-      <variable
-        name="shareChoiceEntangled"
-        value="{window.__bramSelectionCommitSweepsShared(worklist.value &amp;&amp; worklist.value.items, worklist2Selected, inflightClaim.value, worklistConfig.value ? worklistConfig.value.oneClickApproveCommit : true)}" />
-      <variable
-        name="shareSplitLabel"
-        value="{shareChoiceEntangled ? 'A commit each — needs their shared hunks separated first, and that can fail partway' : 'A commit each — selected items land separately'}" />
+    </VStack>
+    <!-- commit-granularity-and-start-consequence A+B.
+         The gate WAS `__bramSelectionCommitSweepsShared`, so the choice
+         appeared only when it was CONSTRAINED and never when it was free: two
+         disjoint committable items landed in one commit with no way to say
+         "these are unrelated". Now `SweepsShared` picks the option LABELS
+         rather than deciding the control exists.
+
+         A SIBLING of the Shared files section, not a child of it. It was first
+         written nested inside, whose VStack is gated on
+         `__bramWorklistOverlapRows(...).length > 0` - so the control asking
+         "one commit or two?" could only appear when the BOARD had overlaps
+         somewhere, which is exactly the disjoint case it was built to serve.
+         Second time in one day: the unclaimed-changes section had the same
+         defect (see 78d0e86). Selection-scoped questions do not belong inside
+         board-scoped containers.
+
+         `var.` attributes on this wrapper rather than nested `<variable>`
+         elements: the documented form is "declare `var.name` on any container
+         element" (xmlui.org/docs/howto/use-accessors-to-simplify-complex-expressions),
+         every `<variable>` in this codebase sits at component-root level, and
+         `Worklist.xmlui:11` already uses the attribute idiom. Extracted at all
+         because an inline ternary in a binding defeats dependency tracking -
+         the search-date endpoint labels froze for exactly that reason.
+
+         With ONE selected item there is no choice to offer: if its files
+         overlap an unselected begun item, the commit feedback requires
+         separation and authorizes only the selected id. With two or more, the
+         pick says whether those selected items land together or separately.
+         Selection itself never expands. The explanatory sentence that used to
+         sit under the options is gone - the two options ARE the explanation,
+         and a caption restating them is the kind of compensating prose that
+         keeps turning out to mean a control was missing. -->
+    <VStack
+      gap="$space-1"
+      var.shareChoiceOpen="{(worklist2Selected || []).length >= 2 &amp;&amp; window.__bramSelectionAllCommittable(worklist.value &amp;&amp; worklist.value.items, worklist2Selected, inflightClaim.value, worklistConfig.value ? worklistConfig.value.oneClickApproveCommit : true)}"
+      var.shareChoiceEntangled="{window.__bramSelectionCommitSweepsShared(worklist.value &amp;&amp; worklist.value.items, worklist2Selected, inflightClaim.value, worklistConfig.value ? worklistConfig.value.oneClickApproveCommit : true)}"
+      var.shareSplitLabel="{shareChoiceEntangled ? 'A commit each — needs their shared hunks separated first, and that can fail partway' : 'A commit each — selected items land separately'}">
       <RadioGroup
         marginTop="$space-3"
         when="{shareChoiceOpen}"

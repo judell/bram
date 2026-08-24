@@ -8,7 +8,7 @@
   var.worklist2VoiceRecording="{false}"
   var.worklist2VoiceItemId="{''}"
   var.worklist2Sent="{{}}"
-  var.worklist2Selected="{[]}"
+  var.worklist2Selected="{(window.__bramW2Selection || []).slice()}"
   var.worklist2OverlapOpen="{false}"
   var.worklist2ShareMode="{'together'}"
   >

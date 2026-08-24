@@ -638,7 +638,7 @@
     backgroundColor-markActive-markdown="$color-warn-400">
     <Pages fallbackPath="/worklist2">
       <Page url="/"><Workspace activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}" /></Page>
-      <Page url="/worklist"><Workspace activeProvider="{enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider}" /></Page>
+      <Page url="/worklist"><Worklist /></Page>
       <Page url="/worklist2"><Worklist /></Page>
       <Page url="/transcript"><Transcript agentId="{transcriptAgentId}" /></Page>
       <Page url="/search"><Search /></Page>
@@ -662,7 +662,7 @@
            The Footer is the surface `vertical-sticky` actually pins, so the
            buttons live here and the composer below serves as their message
            box - one box, whose target is named by its placeholder. -->
-      <WorklistGateBar when="{$pathname === '/worklist2'}" />
+      <WorklistGateBar when="{$pathname === '/worklist2' || $pathname === '/worklist'}" />
       <HStack
         width="100%"
         verticalAlignment="center"

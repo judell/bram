@@ -2221,10 +2221,11 @@ window.__bramSelectionAllNeedStart = function (items, sel, claim) {
     // on a row whose own icon read "Commit it" (Jon, 2026-08-24: "the checked
     // item is ready to commit, start should not be lit").
     //
-    // The stage icon already had this right: __bramWorklist2Stage tests
-    // committable BEFORE needsStart. The button did not consult it at all, so
-    // the two disagreed about the same row. Testing it here restores the
-    // property the icon column claims -- every icon predicts its own button.
+    // The since-removed stage icon had this right: it tested committable
+    // BEFORE needsStart, while the button did not consult it at all, so the
+    // two disagreed about the same row. Testing it here is what survived the
+    // icon column (6d5d05b) -- the property outlived the glyphs that showed
+    // it.
     return !window.__bramSelectionAllCommittable(list, [i.id], claim, true);
   });
 };
@@ -2334,101 +2335,6 @@ window.__bramItemColor = function (id, items, shade) {
   return "$color-" + fam + "-" + (shade || 600);
 };
 
-
-// The item's stage: THREE states, keyed on what you can DO.
-//
-// This was four states for a while, splitting "changed but not advanced"
-// (file±) from "advanced" (✓✓). That split had to go. `advance` is a
-// bookkeeping call the agent makes after editing, and it says nothing reliable
-// about the work: an agent can finish and forget to advance (the whole reason
-// reconcile-dropped-advance exists), or advance work that is not good. Nothing
-// observable on disk differs between the two. So the icons were reporting
-// whether the agent remembered a protocol step -- an implementation detail
-// wearing a user-facing label, exactly the defect that got "apply" removed
-// from the vocabulary earlier. Naming a transition the user never performs and
-// cannot verify is the smell; it was still on screen as an icon after the word
-// was gone.
-//
-// The user-facing question is what can I do, and there are three answers, so
-// three icons. ✓✓ now means COMMITTABLE rather than recorded -- the same
-// predicate that drives the Commit button, so every icon predicts its own
-// button instead of encoding a parallel fact. `applied` vs `proposed` becomes
-// invisible, which is correct: the user neither makes that transition nor can
-// check it.
-//
-// Checks count what you can act on: one when you have started it, two when
-// there is something to commit. Nothing counts a protocol step.
-//
-// Whose turn still rides on COLOUR (pre-attentive, and a binary): full
-// strength for the two states waiting on you, muted for the one waiting on the
-// agent. Changes are read EXCLUSIVE-only via __bramSelectionAllCommittable, so
-// an item can never be promoted on a neighbour's work.
-window.__bramWorklist2Stage = function (item, claim, items) {
-  var list = items || [];
-  if (!window.__bramWorklist2Begun(item, claim)) {
-    // circle-dashed, not play: the glyph sits in a STATUS column but play
-    // reads as a control, and nothing happens when you click it -- the actual
-    // controls are the row checkbox and the buttons below. A dashed outline
-    // says pending without offering to do anything.
-    return { icon: "circle-dashed", label: "Start it", yours: true };
-  }
-  // An active claim outranks committability.
-  //
-  // The spinner, the strip verb and this glyph all report one host transition,
-  // and they disagreed during it: while a row showed the spinner and
-  // "Starting…", the glyph had already advanced to the ready-to-commit check,
-  // because the first edits had landed on disk and committability is computed
-  // from disk. Three indicators, three different phases of the same moment
-  // (live receipt: issue-278-overlap-explorer's apply, 2026-08-24).
-  //
-  // Disk state is the right source for "is there something to commit"; it is
-  // the wrong source for "is this decision still being carried out". The claim
-  // is the host fact for that, and it is what the other two already read - so
-  // deferring to it here makes all three advance together by construction
-  // rather than by timing. The check appears when the claim clears, which is
-  // also when Commit becomes clickable, so the glyph never promises an action
-  // the gate would refuse.
-  if (window.__bramItemInflightKind(claim, item.id, "", "", 0)) {
-    return { icon: "circle-dot", label: "Nothing to do — the agent has it", yours: false };
-  }
-  if (window.__bramSelectionAllCommittable(list, [item.id], claim, true)) {
-    return { icon: "checkmark", label: "Commit it", yours: true };
-  }
-  // There never was a "Green-lit" STATE -- only a stamp with a name.
-  //
-  // The button machine has exactly three inputs: needs-start, authorized,
-  // committable. `begunAtMs` is none of them, so the label that read it could
-  // not predict a button, and this column's charter (see the header above) is
-  // that every icon predicts its own. That is the real reason the six
-  // phrasings recorded in this comment's previous form all failed -- "nothing
-  // to commit", "not started", "with the agent", "waiting on the agent" and
-  // the rest. They were competing to describe a state the action model does
-  // not contain. From the chair, 2026-08-23: "Otherwise we have a strip of
-  // facts right? And there never really was a Green-lit?"
-  //
-  // What the old branch actually straddled is two opposite situations, split
-  // here on the predicate the Start button already computes:
-  //
-  //   - authorization lapsed -> STALLED. Nothing will happen unless the user
-  //     acts, and Start is already lit. `yours: true`.
-  //   - authorization or claim live -> the agent's move, nothing for the user
-  //     to do. `yours: false`.
-  //
-  // Labels are instructions, not nouns, for the same reason: a row that says
-  // "Stalled" while the user guesses which of five buttons unsticks it is the
-  // defect this split exists to remove.
-  //
-  // Proposed and Stalled deliberately share an instruction (Start) because
-  // they share an ACTION; they differ only in history, which the strip carries.
-  // Stalled keeps its own glyph anyway -- same turn, different diagnosis, and
-  // the diagnosis (an authorization lapsed and nothing came of it, the
-  // reconcile-dropped-advance signature) is worth seeing by shape from across
-  // the list rather than on hover.
-  if (window.__bramItemNeedsStart(item, claim)) {
-    return { icon: "circle-pause", label: "Stalled \u2014 Start again", yours: true };
-  }
-  return { icon: "circle-dot", label: "Nothing to do \u2014 the agent has it", yours: false };
-};
 
 // Coarse age of the green light, for the Stalled strip. Deliberately coarse:
 // the age is what makes Stalled a diagnosis rather than a restatement, but a

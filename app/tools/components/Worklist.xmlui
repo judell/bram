@@ -333,11 +333,11 @@
                the TEXT, not new glyphs - and note the 18rem fixed-width badge
                slot tried earlier wrapped to two lines and was worse than the
                raggedness it fixed.
-               `__bramWorklist2Stage` is now DEAD - the icon was its only
-               caller, so `.icon`, `.label` and `.yours` all have zero consumers.
-               Left in `helpers.js` rather than deleted in this edit, which
-               would mean separating hunks in a file already carrying another
-               item's uncommitted work. Its removal is a follow-up. -->
+               `__bramWorklist2Stage` went with it - the icon was its only
+               caller, so `.icon`, `.label` and `.yours` all lost their
+               consumers at once. The four-state logic it carried is not lost:
+               the committable-before-needsStart precedence it established
+               lives on in `__bramSelectionAllNeedStart`. -->
           <!-- The badge carries the item's colour, and the Shared files
                table's claimant names carry the same one, so a claimant can be
                matched to its row without reading either id. -->

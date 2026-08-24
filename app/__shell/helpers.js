@@ -1354,7 +1354,72 @@ window.__bramFlushMessageAgentPerf = function (reason) {
   return summary;
 };
 
+// The Footer composer and WorklistGateBar are isolated sibling components.
+// A plain window mirror lets the gate read the text at click time, but it does
+// not give XMLUI a reactive dependency for the Iterate button's enabled state.
+// Publish the mirror through the same External/PushSource factory shape as the
+// Worklist selection bridge below, so each keystroke invalidates only the gate
+// bar rather than widening the composer's hot render boundary.
+window.__bramMessageAgentText = String(window.__bramMessageAgentText || "");
+window.bramSubscribeMessageAgentText = (function () {
+  var factory;
+  var subscribers = new Set();
+  window.__bramSetMessageAgentText = function (text) {
+    var next = typeof text === "string" ? text : "";
+    if (next === window.__bramMessageAgentText) return;
+    window.__bramMessageAgentText = next;
+    subscribers.forEach(function (fn) {
+      try { fn(); } catch (e) { console.error("[bramSubscribeMessageAgentText] subscriber threw:", e); }
+    });
+  };
+  return function () {
+    if (factory) return factory;
+    factory = function (emit) {
+      var fire = function () { emit(String(window.__bramMessageAgentText || "")); };
+      subscribers.add(fire);
+      fire();
+      return function () { subscribers.delete(fire); };
+    };
+    return factory;
+  };
+})();
+
+// Gate actions run in a sibling component, so let the mounted composer clear
+// its own TextArea inside XMLUI context. Exporting a closure over `composerBox`
+// to a window singleton proved unreliable when the action changed Worklist
+// state before invoking it: the persisted draft cleared, but the live control
+// kept its value when the user returned to another tab.
+window.__bramComposerClearTick = Number(window.__bramComposerClearTick || 0);
+window.bramSubscribeComposerClear = (function () {
+  var factory;
+  var subscribers = new Set();
+  window.__bramRequestComposerClear = function () {
+    window.__bramComposerClearTick += 1;
+    subscribers.forEach(function (fn) {
+      try { fn(); } catch (e) { console.error("[bramSubscribeComposerClear] subscriber threw:", e); }
+    });
+  };
+  return function () {
+    if (factory) return factory;
+    factory = function (emit) {
+      var fire = function () { emit(window.__bramComposerClearTick); };
+      subscribers.add(fire);
+      return function () { subscribers.delete(fire); };
+    };
+    return factory;
+  };
+})();
+
 window.__bramMessageAgentInputChanged = function (text) {
+  // issue-278: live mirror of the composer's text.
+  //
+  // The Worklist had its own "Message about the selection" box, duplicating
+  // this one. Jon: "The duplication of the message box here is resolved by
+  // only having one of them ... when you're on the Worklist page, it's
+  // targeting the selected set." So the gate buttons move to the Footer and
+  // read THIS box. The persisted draft below is debounced and would lag a
+  // click; this mirror is synchronous.
+  window.__bramSetMessageAgentText(text);
   window.__bramPersistWorklistDraft(text);
   if (!__bramMessageAgentPerf.armed || typeof requestAnimationFrame !== "function") return;
   var started = performance.now();
@@ -1366,6 +1431,104 @@ window.__bramMessageAgentInputChanged = function (text) {
       __bramMessageAgentPerf.samples.push(performance.now() - started);
     }
   });
+};
+
+// True when the composer is acting on a Worklist selection rather than
+// speaking to the agent generally. Drives the placeholder and the gate
+// buttons' enablement from one place, so they cannot disagree.
+window.__bramComposerTargetsSelection = function () {
+  var onWorklist = false;
+  try { onWorklist = String(location.hash || "").indexOf("/worklist2") >= 0; } catch (e) {}
+  return onWorklist && (window.__bramW2Selection || []).length > 0;
+};
+
+window.__bramComposerPlaceholder = function () {
+  var sel = window.__bramW2Selection || [];
+  if (!window.__bramComposerTargetsSelection()) {
+    return "Message agent: Enter sends, Shift+Enter newline, Ctrl-V/Cmd-V paste screenshot.";
+  }
+  return "Message about " + sel.length + " selected item" + (sel.length === 1 ? "" : "s") +
+    " — the buttons above act on it. Enter still sends to the agent.";
+};
+
+// The Footer composer is now the Worklist's message box too, so the gate
+// buttons must be able to clear it after a send. Same register/clear shape as
+// registerContextMemorySelector: the composer owns the widget, the gate owns
+// the action, and neither imports the other.
+// One entry point for every gate button, so the five actions cannot drift
+// apart and the markup stays a single call per handler (the xs engine's hard
+// rule). Ports the inline gate row's handlers verbatim; the only substitutions
+// are where the state now lives: selection from the pane-wide store, message
+// text from the single Footer composer.
+window.__bramGateSent = [];
+window.__bramGateBarLabel = function (sel) {
+  var ids = sel || [];
+  if (!ids.length) return "";
+  return ids.length + " selected \u00b7 " + ids[0] +
+    (ids.length > 1 ? " +" + (ids.length - 1) : "");
+};
+window.__bramGateHasText = function () {
+  return String(window.__bramMessageAgentText || "").trim().length > 0;
+};
+window.__bramW2ShareMode = "together";
+window.__bramW2SetShareMode = function (m) { window.__bramW2ShareMode = m || "together"; };
+window.__bramW2CloseMap = {};
+window.__bramW2SetCloseMap = function (m) { window.__bramW2CloseMap = m || {}; };
+
+// Ported verbatim from the five inline gate handlers. The differences between
+// them are real and easy to lose, so they are spelled out rather than folded:
+//   start          kind=approved
+//   start-commit   kind=approved + oneShot + closeMap
+//   commit         kind=approved + oneShot computed from the selection + closeMap
+//   drop           kind=drop
+//   iterate        a DIFFERENT call entirely (__bramWorklist2BatchIterate),
+//                  taking the raw feedback string rather than a fanned map
+window.__bramGateAct = function (kind, items, sel, shareMode) {
+  var ids0 = sel || [];
+  if (!ids0.length) return;
+  var text = String(window.__bramMessageAgentText || "");
+  var body = window.__bramWithShareMode(
+    window.__bramWithStagedImageMarkers(text, "feedback"), shareMode || "together");
+  window.__bramIframeTrace("click", { target: "gatebar-" + kind, count: ids0.length });
+  var filter = (kind === "start" || kind === "start-commit") ? "proposed" : "";
+  var ids = window.__bramSelectionIds(items, ids0, filter);
+  window.__bramGateSent = window.__bramWorklist2CaptureSent(
+    window.__bramGateSent, ids, text, Date.now());
+
+  if (kind === "iterate") {
+    window.__bramWorklist2BatchIterate(ids, body);
+    window.__bramW2SetSelection([]);
+    window.__bramClearComposer();
+    return;
+  }
+
+  var opts = {
+    items: items,
+    selectedIds: ids,
+    feedbackDraftsById: window.__bramFanFeedback(ids, body),
+  };
+  if (kind === "drop") {
+    opts.kind = "drop";
+  } else {
+    opts.kind = "approved";
+    if (kind === "start-commit") {
+      opts.oneShot = true;
+      opts.closeMap = window.__bramW2CloseMap;
+    } else if (kind === "commit") {
+      opts.oneShot = window.__bramSelectionNeedsProposedCommit(items, ids0);
+      opts.closeMap = window.__bramW2CloseMap;
+    }
+  }
+  var r = window.__bramPrepareBatchWorklistActionSubmission(opts);
+  window.__bramW2SetSelection([]);
+  window.__bramClearComposer();
+  window.__bramWorklistActApply(r);
+};
+
+window.__bramClearComposer = function () {
+  window.__bramSetMessageAgentText("");
+  try { window.__bramRequestComposerClear(); } catch (e) {}
+  try { window.__bramClearWorklistDraft(); } catch (e) {}
 };
 
 window.__bramMessageAgentBlur = function () {
@@ -2043,9 +2206,23 @@ window.__bramItemNeedsStart = function (item, claim) {
 window.__bramSelectionAllNeedStart = function (items, sel, claim) {
   var chosen = sel || [];
   if (!chosen.length) return false;
-  var picked = (items || []).filter(function (i) { return chosen.indexOf(i.id) !== -1; });
+  var list = items || [];
+  var picked = list.filter(function (i) { return chosen.indexOf(i.id) !== -1; });
   if (picked.length !== chosen.length) return false;
-  return picked.every(function (i) { return window.__bramItemNeedsStart(i, claim); });
+  return picked.every(function (i) {
+    if (!window.__bramItemNeedsStart(i, claim)) return false;
+    // A committable item does not need starting. `__bramItemNeedsStart` asks
+    // only whether an authorization is live, which is true of an item whose
+    // work is already done and waiting to commit -- so Start lit beside Commit
+    // on a row whose own icon read "Commit it" (Jon, 2026-08-24: "the checked
+    // item is ready to commit, start should not be lit").
+    //
+    // The stage icon already had this right: __bramWorklist2Stage tests
+    // committable BEFORE needsStart. The button did not consult it at all, so
+    // the two disagreed about the same row. Testing it here restores the
+    // property the icon column claims -- every icon predicts its own button.
+    return !window.__bramSelectionAllCommittable(list, [i.id], claim, true);
+  });
 };
 
 // Can every ticked item be committed right now?
@@ -2488,6 +2665,17 @@ window.__bramBasename = function (path) {
 // already carries. Overlap is a property of files -- the index below and the
 // expanded row's file table are its surfaces. See the issue-278 comment in
 // Worklist.xmlui for the live evidence.
+
+// Claimant lists render as one joined string, not N adjacent Text nodes.
+//
+// When these were badges the chip boundary WAS the separator. Dropping the
+// chip left ids butting against each other with only a space between them --
+// "issue-269-drop-not-blocked-by-unrelated-claim issue-278-semantic-colour"
+// reads as one malformed token. A middot cannot be confused with anything
+// inside an id, which is hyphen-and-alphanumeric only.
+window.__bramJoinIds = function (ids) {
+  return (ids || []).join(" \u00b7 ");
+};
 
 window.__bramOverlapIndex = function (items, claim) {
   var list = items || [];
@@ -7019,6 +7207,49 @@ window.bramSubscribeProjectedLastExchange = (function () {
   };
 })();
 
+// issue-278 gate-row docking: the Worklist selection, published pane-wide.
+//
+// The gate row cannot be pinned where it lives. `StickySection stickTo="bottom"`
+// is two CSS rules (`position: sticky; bottom: 0`) and sticky cannot escape its
+// containing block, so wrapping a near-last child buys nothing. The `dock`
+// pattern needs an explicit parent height and `scrollWholePage="false"`, and
+// Bram scrolls the whole page - load-bearing for Transcript and Search.
+//
+// What Bram DOES have is a Footer that this App layout genuinely pins:
+// `vertical-sticky` is documented as "the footer sticks to the bottom", and it
+// demonstrably does - the status line and composer sit there on every screen.
+// So the gate row moves to the one surface that already works, which needs the
+// selection to be readable outside Worklist.xmlui.
+//
+// Same factory shape as bramSubscribeProjectedLastExchange: `emit` is called
+// once on subscribe and on every change; the return value unsubscribes.
+window.__bramW2Selection = [];
+window.bramSubscribeW2Selection = (function () {
+  var factory;
+  return function () {
+    if (factory) return factory;
+    var subscribers = new Set();
+    window.__bramW2SetSelection = function (ids) {
+      var next = (ids || []).slice();
+      var prev = window.__bramW2Selection || [];
+      if (next.length === prev.length && next.every(function (v, i) { return v === prev[i]; })) {
+        return;
+      }
+      window.__bramW2Selection = next;
+      subscribers.forEach(function (fn) {
+        try { fn(); } catch (e) { console.error("[bramSubscribeW2Selection] subscriber threw:", e); }
+      });
+    };
+    factory = function (emit) {
+      var fire = function () { emit((window.__bramW2Selection || []).slice()); };
+      subscribers.add(fire);
+      fire();
+      return function () { subscribers.delete(fire); };
+    };
+    return factory;
+  };
+})();
+
 // transcript-new-below-badge: pane-wide unseen-below counter. The echo guard
 // made READING stable, which removed the yank's accidental "agent responded"
 // signal; this counter feeds the footer status-line chip that replaces it on
@@ -10786,7 +11017,13 @@ window.__bramFooterIndexLabel = function (status) {
   // dropped as noise (footer-drop-per-bucket-additions; history went first in
   // 6884b42) — a growing session re-index made "+N sessions" meaningless, and
   // the commit/issue/history deltas added churn without signal.
-  return Number(status.total || 0).toLocaleString() + ' indexed';
+  //
+  // "Indexed 3,629", not "3,629 indexed": every form this label takes now
+  // leads with the verb and trails with the variable part, so the two states
+  // read as one sentence changing tense rather than two differently-shaped
+  // strings. That is what lets the slot right-align without the label
+  // appearing to jump when it flips between counting and working.
+  return 'Indexed ' + Number(status.total || 0).toLocaleString();
 };
 
 // settings-highlight-deeplink: scroll the setting anchored as
@@ -11012,4 +11249,3 @@ window.__bramSkipTip = function (id, tick) {
   if (id) window.__bramTipSkips[id] = true;
   return (Number(tick) || 0) + 1;
 };
-

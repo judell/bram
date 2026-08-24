@@ -1,0 +1,79 @@
+<Component name="WorklistGateBar" var.gateSent="{[]}">
+  <!-- issue-278: the Worklist gate, in the Footer.
+       The gate row cannot be pinned where it lived - `position: sticky` cannot
+       escape its containing block, and `dock` needs a bounded parent height
+       plus scrollWholePage="false", which this shell does not have. The Footer
+       is the one surface `vertical-sticky` genuinely pins.
+       Self-contained DataSources so it needs nothing from App scope; the
+       selection arrives by PushSource and the message text from the single
+       Footer composer, which now serves both roles. -->
+  <DataSource id="gateWorklist" url="/__worklist" />
+  <DataSource id="gateConfig" url="/__worklist-config" />
+  <DataSource id="gateClaim" url="/__inflight" />
+  <PushSource id="gateSel" subscribe="{window.bramSubscribeW2Selection()}" />
+  <!-- The composer is an isolated sibling component. Reading its window
+       mirror through a helper is not reactive, so Iterate stayed dim after
+       typing until some unrelated gate render happened. This push source is
+       the explicit dependency: input and clear both publish synchronously. -->
+  <PushSource id="gateText" subscribe="{window.bramSubscribeMessageAgentText()}" />
+  <PushSource
+    id="gateWorklistChanged"
+    subscribe="{window.bramSubscribeTauriEvent('worklist-changed')}" />
+  <ChangeListener
+    listenTo="{gateWorklistChanged.value}"
+    onDidChange="() => { gateWorklist.refetch(); gateClaim.refetch(); }" />
+
+  <HStack
+    when="{(gateSel.value || []).length > 0}"
+    verticalAlignment="center"
+    horizontalAlignment="center"
+    gap="$space-2"
+    paddingHorizontal="$space-1"
+    paddingTop="$space-1"
+    paddingBottom="$space-3">
+    <!-- No "N selected · <id>" label, and the count on each button is the
+         whole mechanism.
+         The consensus design argued a docked bar MUST name its target, since
+         docked it can sit far from the ticked row. The premise is right - Jon:
+         "almost any expansion is going to lose disjoint selections whose check
+         boxes are below the fold" - but the conclusion was wrong, and for a
+         reason worth keeping: the count does not have to identify the
+         selection, only to say how big it is.
+         `Start 2` with one checkbox visible tells you there is a second one
+         and sends you to find it. Scrolling or collapsing to it is cheap.
+         Naming both would mean enumerating an unbounded set in a fixed band,
+         "competing with the buttons" for the space they need - a losing
+         proposition. And the obvious escape, an expand-all/collapse-all
+         control, "is always a bad smell".
+         So this is deliberately a bounded signal that points, not a complete
+         one that describes. -->
+    <Button
+      label="{'Start ' + (gateSel.value || []).length}"
+      size="sm"
+      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
+      onClick="window.__bramGateAct('start', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode)" />
+    <Button
+      when="{!gateConfig.value || gateConfig.value.oneClickApproveCommit !== false}"
+      label="{'Start &amp; commit ' + (gateSel.value || []).length}"
+      size="sm"
+      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; (gateSel.value || []).length === 1 &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
+      tooltip="One click: start, then commit when done. One item at a time — see #272"
+      onClick="window.__bramGateAct('start-commit', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode)" />
+    <Button
+      label="{'Commit ' + (gateSel.value || []).length}"
+      size="sm"
+      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value, gateConfig.value ? gateConfig.value.oneClickApproveCommit : true)}"
+      onClick="window.__bramGateAct('commit', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode)" />
+    <Button
+      label="{'Iterate ' + (gateSel.value || []).length}"
+      size="sm"
+      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; (gateText.value || '').trim().length > 0}"
+      tooltip="One message about the selected set"
+      onClick="window.__bramGateAct('iterate', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode)" />
+    <Button
+      label="{'Drop ' + (gateSel.value || []).length}"
+      size="sm"
+      enabled="{!window.__bramInflightBlocker(gateClaim.value)}"
+      onClick="window.__bramGateAct('drop', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode)" />
+  </HStack>
+</Component>

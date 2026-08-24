@@ -6,6 +6,16 @@
        TextArea's high-frequency internal state cannot invalidate Main.xmlui's
        App-scope footer sources, listeners, pages, or status bindings. See
        https://docs.xmlui.org/howto/confine-a-hot-input-to-its-own-component . -->
+  <!-- issue-278: one message box. The Worklist's own "Message about the
+       selection" box is gone; this one names its target instead. -->
+  <PushSource id="w2Sel" subscribe="{window.bramSubscribeW2Selection()}" />
+  <PushSource
+    id="composerClear"
+    initial="{0}"
+    subscribe="{window.bramSubscribeComposerClear()}" />
+  <ChangeListener
+    listenTo="{composerClear.value}"
+    onDidChange="() => composerBox.setValue('')" />
   <PushSource
     id="voiceArrival"
     initial="{null}"
@@ -43,7 +53,7 @@
       <TextArea
         id="composerBox"
         initialValue="{window.__bramRestoreWorklistDraft()}"
-        placeholder="Message agent: Enter sends, Shift+Enter newline, Ctrl-V/Cmd-V paste screenshot."
+        placeholder="{(w2Sel.value || []).length >= 0 ? window.__bramComposerPlaceholder() : ''}"
         enterSubmits="true"
         autoSize="true"
         minRows="2"

@@ -10,8 +10,6 @@
   var.worklist2Sent="{{}}"
   var.worklist2Selected="{[]}"
   var.worklist2OverlapOpen="{false}"
-  var.worklist2BatchText="{''}"
-  var.w2BatchVoiceRecording="{false}"
   var.worklist2ShareMode="{'together'}"
   >
   <!-- Worklist2: the redesigned, evidence-first gate (tutorial gist v3).
@@ -86,6 +84,21 @@
     id="w2VoiceArrival"
     initial="{null}"
     subscribe="{window.bramSubscribeVoiceArrival()}" />
+  <!-- issue-278: publish the selection so the Footer's gate bar can read it.
+       The gate row is moving to the Footer because that is the one surface
+       this App layout pins ("vertical-sticky ... the footer sticks to the
+       bottom"); the rows keep owning the selection, they just announce it. -->
+  <ChangeListener
+    listenTo="{worklist2Selected}"
+    onDidChange="() => window.__bramW2SetSelection(worklist2Selected)" />
+  <!-- The close-issue toggles live in the row expansions but the Commit
+       buttons are now in the Footer, so the map has to cross too. -->
+  <ChangeListener
+    listenTo="{worklist2Close}"
+    onDidChange="() => window.__bramW2SetCloseMap(worklist2Close)" />
+  <ChangeListener
+    listenTo="{worklist2ShareMode}"
+    onDidChange="() => window.__bramW2SetShareMode(worklist2ShareMode)" />
   <PushSource
     id="projectedTurnsDS"
     initial="{window.__bramProjectedLastExchange(null)}"
@@ -188,15 +201,7 @@
              item's own colour; the short label carries identity when two
              items collide on a hue, which they do past six items. -->
         <Column header="claimed by" width="3*">
-          <HStack gap="$space-1" verticalAlignment="center" wrapContent="true">
-            <Items data="{$item.claimants}">
-              <Theme
-                backgroundColor-Badge="{window.__bramItemColor($item, worklist.value &amp;&amp; worklist.value.items)}"
-                textColor-Badge="white">
-                <Badge value="{$item}" tooltip="{'claims this file: ' + $item}" />
-              </Theme>
-            </Items>
-          </HStack>
+          <Text overflowMode="flow" value="{window.__bramJoinIds($item.claimants)}" />
         </Column>
       </Table>
     </VStack>
@@ -325,10 +330,7 @@
           <!-- The badge carries the item's colour, and the Shared files
                table's claimant names carry the same one, so a claimant can be
                matched to its row without reading either id. -->
-          <HStack width="18rem" verticalAlignment="center" overflowX="hidden">
-          <Theme
-            backgroundColor-Badge="{window.__bramItemColor($item.id, worklist.value &amp;&amp; worklist.value.items)}"
-            textColor-Badge="white">
+
             <!-- The id, not a derived short label. Rung 3 shortened these to
                  `#278 · SEMANTIC` and it did fix the measured problem - badge
                  width spread fell 22 -> 12 chars, which is what made the
@@ -342,9 +344,14 @@
                  Truncation preserves identity; a derived label creates an
                  alias. So the raggedness is fixed with WIDTH - a fixed slot
                  the badge clips inside - and the name stays the id. -->
-            <Badge value="{$item.id}" tooltip="{$item.id}" />
-          </Theme>
-          </HStack>
+          <!-- Plain primary text, no background. This was the last Badge in
+               the Worklist; the grey chip was the residue of the colour
+               encoding after the colour itself was removed, and a chip with no
+               colour is just a background asking to be read as one.
+               Natural width, so it never wraps (Jon: "make the main badges not
+               wrap"); the earlier fixed-width slot is what forced two-line
+               ids. -->
+          <Text value="{$item.id}" tooltip="{$item.id}" />
           <!-- Basenames in the line, full paths in the tooltip: the row is a
                scan line and repo-relative paths would swamp it.
 
@@ -438,15 +445,10 @@
                    Tooltip still carries the full id, because the label is a
                    derived shortening and `tooltip` feeds aria-label. -->
               <Column header="shared with" width="3*">
-                <HStack
+<Text
                   when="{$item.sharedWith &amp;&amp; $item.sharedWith.length > 0}"
-                  gap="$space-1"
-                  verticalAlignment="center"
-                  wrapContent="true">
-                  <Items data="{$item.sharedWith}">
-                    <Text value="{$item}" tooltip="{'shared with ' + $item}" />
-                  </Items>
-                </HStack>
+                  overflowMode="flow"
+                  value="{window.__bramJoinIds($item.sharedWith)}" />
               </Column>
             </Table>
             <!-- Fallback for payloads without the rung-1 enrichment, where
@@ -555,73 +557,54 @@
          one or several — the Iterate-N principle applied to every verb.
          Appears when anything is ticked; the message is about the set and
          fans out to each selected item's payload entry. -->
+    <!-- issue-278 rung 4: the gate row is never out of reach while a
+         selection is live.
+
+         The failure it fixes is structural, not incidental. This surface is
+         gated on a selection existing and rendered INLINE after the list, so:
+         tick a row -> the controls appear below the list -> expand the row you
+         are deciding about -> the list grows -> the controls leave the
+         viewport. Reading the thing you are deciding about is what hides the
+         control for deciding. Jon: "the problem is losing the button row below
+         the fold. That is the first, most important next thing to fix."
+
+         StickySection stickTo="bottom" is the XMLUI-native answer and already
+         the pane's idiom for the top edge (Transcript.xmlui:162,
+         Search.xmlui:253).
+         https://www.xmlui.org/docs/reference/components/StickySection
+
+         Sticky gives most of the agreed contract structurally rather than by
+         care: it IS an inline anchor that pins only when it would scroll out
+         of view, so "inline when visible, docked when not" and the reserved
+         height are the primitive's own behaviour. It repositions rather than
+         re-creates, which satisfies the rule with teeth - the message box
+         calls setWorklistVoiceTarget('feedback') on focus and paste routing
+         reads that mirror, so a remount would drop focus, a half-typed
+         message, or the paste target, and a pasted screenshot would land in
+         the wrong box. Sticky cannot remount it.
+
+         What sticky does NOT give is the latch (dock on first occlusion, stay
+         docked until the selection clears): native sticky releases as soon as
+         the anchor scrolls back into view, so collapsing a row pops the bar
+         back inline. Deliberately not added yet - the flap may not be
+         perceptible when the trigger is a deliberate expand/collapse rather
+         than incidental scrolling, and that is worth observing before it is
+         engineered around. -->
     <VStack
       when="{(worklist2Selected || []).length > 0}"
       gap="$space-1"
       padding="$space-2"
       borderRadius="$borderRadius"
       backgroundColor="$color-surface-50">
-    <HStack gap="$space-2" verticalAlignment="center">
-      <Button
-        label="{w2BatchVoiceRecording ? (worklistVoiceRecordingActive ? '⏹' : '⏳') : '🎤'}"
-        size="sm"
-        variant="ghost"
-        enabled="{!isWorklistVoiceProcessingTarget('feedback') &amp;&amp; (!w2BatchVoiceRecording || worklistVoiceRecordingActive)}"
-        onClick="setWorklistVoiceTarget('feedback'); w2BatchVoiceRecording = toggleVoiceForCurrentTarget(w2BatchVoiceRecording)" />
-      <ChangeListener
-        listenTo="{w2VoiceArrival.value &amp;&amp; w2VoiceArrival.value.at}"
-        onDidChange="() => { const ev = w2VoiceArrival.value || null; const tr = (ev &amp;&amp; ev.transcript) || ''; const target = (ev &amp;&amp; ev.meta &amp;&amp; ev.meta.target) || ''; if (target === 'feedback') { if (tr) { const nv = window.__bramAppendVoiceToBox(w2BatchBox, tr); if (nv !== false) worklist2BatchText = nv; } w2BatchVoiceRecording = false; worklistVoiceRecordingActive = false; }}" />
-      <TextArea
-        id="w2BatchBox"
-        width="24rem"
-        resize="vertical"
-        placeholder="{window.__bramEditorPlaceholder('Message about the selection', true, true)}"
-        initialValue="{worklist2BatchText}"
-        onGotFocus="setWorklistVoiceTarget('feedback')"
-        onDidChange="(v) => worklist2BatchText = v" />
-      <!-- Dimmed, not hidden. Buttons appearing and vanishing as rows are
-           ticked is what made the gate-explanation matrix seem necessary; the
-           row states itself now, so a greyed Start saying "exists, does not
-           apply here" beats one that silently disappears. -->
-      <Button
-        label="{'Start ' + (worklist2Selected || []).length}"
-        size="sm"
-        enabled="{!window.__bramInflightBlocker(inflightClaim.value) &amp;&amp; window.__bramSelectionAllNeedStart(worklist.value.items, worklist2Selected, inflightClaim.value)}"
-        onClick="window.__bramIframeTrace('click', {target: 'worklist2-batch-approve', count: (worklist2Selected || []).length}); const ids = window.__bramSelectionIds(worklist.value.items, worklist2Selected, 'proposed'); worklist2Sent = window.__bramWorklist2CaptureSent(worklist2Sent, ids, worklist2BatchText, Date.now()); const r = window.__bramPrepareBatchWorklistActionSubmission({kind: 'approved', items: worklist.value.items, selectedIds: ids, feedbackDraftsById: window.__bramFanFeedback(ids, window.__bramWithShareMode(window.__bramWithStagedImageMarkers(worklist2BatchText, 'feedback'), worklist2ShareMode))}); worklist2Selected = []; worklist2BatchText = ''; window.__bramWorklistActApply(r)" />
-      <!-- Single item only, for now. On a multi-item selection this produced
-           ONE commit covering every ticked item, with no path to N commits --
-           a one-way fusion of items that shared no files and could each have
-           had a clean commit. Dimmed rather than hidden, like every other gate
-           button: one that vanishes as you tick rows reads as arbitrary. The
-           decision about what it should do for a batch is #272; this only
-           stops the door closing while it is open. The config gate below still
-           HIDES the button when the feature is off, which is a different
-           thing -- a disabled feature should not advertise itself. -->
-      <Button
-        when="{!worklistConfig.value || worklistConfig.value.oneClickApproveCommit !== false}"
-        label="{'Start & commit ' + (worklist2Selected || []).length}"
-        size="sm"
-        enabled="{!window.__bramInflightBlocker(inflightClaim.value) &amp;&amp; (worklist2Selected || []).length === 1 &amp;&amp; window.__bramSelectionAllNeedStart(worklist.value.items, worklist2Selected, inflightClaim.value) &amp;&amp; window.__bramSelectionAllPlans(worklist.value.items, worklist2Selected)}"
-        tooltip="One click: start, then commit when done. One item at a time — see #272"
-        onClick="window.__bramIframeTrace('click', {target: 'worklist2-batch-approve-commit', count: (worklist2Selected || []).length}); const ids = window.__bramSelectionIds(worklist.value.items, worklist2Selected, 'proposed'); worklist2Sent = window.__bramWorklist2CaptureSent(worklist2Sent, ids, worklist2BatchText, Date.now()); const r = window.__bramPrepareBatchWorklistActionSubmission({kind: 'approved', oneShot: true, closeMap: worklist2Close, items: worklist.value.items, selectedIds: ids, feedbackDraftsById: window.__bramFanFeedback(ids, window.__bramWithShareMode(window.__bramWithStagedImageMarkers(worklist2BatchText, 'feedback'), worklist2ShareMode))}); worklist2Selected = []; worklist2BatchText = ''; window.__bramWorklistActApply(r)" />
-      <Button
-        label="{'Commit ' + (worklist2Selected || []).length}"
-        size="sm"
-        enabled="{!window.__bramInflightBlocker(inflightClaim.value) &amp;&amp; window.__bramSelectionAllCommittable(worklist.value.items, worklist2Selected, inflightClaim.value, worklistConfig.value ? worklistConfig.value.oneClickApproveCommit : true)}"
-        onClick="window.__bramIframeTrace('click', {target: 'worklist2-batch-commit', count: (worklist2Selected || []).length}); const ids = window.__bramSelectionIds(worklist.value.items, worklist2Selected, ''); worklist2Sent = window.__bramWorklist2CaptureSent(worklist2Sent, ids, worklist2BatchText, Date.now()); const r = window.__bramPrepareBatchWorklistActionSubmission({kind: 'approved', oneShot: window.__bramSelectionNeedsProposedCommit(worklist.value.items, worklist2Selected), closeMap: worklist2Close, items: worklist.value.items, selectedIds: ids, feedbackDraftsById: window.__bramFanFeedback(ids, window.__bramWithShareMode(window.__bramWithStagedImageMarkers(worklist2BatchText, 'feedback'), worklist2ShareMode))}); worklist2Selected = []; worklist2BatchText = ''; window.__bramWorklistActApply(r)" />
-      <Button
-        label="{'Iterate ' + (worklist2Selected || []).length}"
-        size="sm"
-        enabled="{!window.__bramInflightBlocker(inflightClaim.value) &amp;&amp; (worklist2BatchText || '').trim().length > 0}"
-        tooltip="One message about the selected set"
-        onClick="window.__bramIframeTrace('click', {target: 'worklist2-batch-iterate', count: (worklist2Selected || []).length}); const iids = window.__bramSelectionIds(worklist.value.items, worklist2Selected, ''); worklist2Sent = window.__bramWorklist2CaptureSent(worklist2Sent, iids, worklist2BatchText, Date.now()); window.__bramWorklist2BatchIterate(iids, window.__bramWithShareMode(window.__bramWithStagedImageMarkers(worklist2BatchText, 'feedback'), worklist2ShareMode)); worklist2Selected = []; worklist2BatchText = ''" />
-      <Button
-        label="{'Drop ' + (worklist2Selected || []).length}"
-        size="sm"
-        enabled="{!window.__bramInflightBlocker(inflightClaim.value)}"
-        onClick="window.__bramIframeTrace('click', {target: 'worklist2-batch-drop', count: (worklist2Selected || []).length}); const ids = window.__bramSelectionIds(worklist.value.items, worklist2Selected, ''); worklist2Sent = window.__bramWorklist2CaptureSent(worklist2Sent, ids, worklist2BatchText, Date.now()); const r = window.__bramPrepareBatchWorklistActionSubmission({kind: 'drop', items: worklist.value.items, selectedIds: ids, feedbackDraftsById: window.__bramFanFeedback(ids, window.__bramWithShareMode(window.__bramWithStagedImageMarkers(worklist2BatchText, 'feedback'), worklist2ShareMode))}); worklist2Selected = []; worklist2BatchText = ''; window.__bramWorklistActApply(r)" />
-    </HStack>
-    <PastedImageStrip target="feedback" />
+    <!-- issue-278: the composer and the gate buttons moved to the Footer.
+         There were two message boxes - this one and the agent composer - and
+         the fix is one box whose target is named by its placeholder (Jon: "The
+         duplication of the message box here is resolved by only having one of
+         them ... when you're on the Worklist page, it's targeting the selected
+         set"). The buttons went with it, because the Footer is the only
+         surface `vertical-sticky` pins; see WorklistGateBar.xmlui.
+         What stays here is selection-scoped CONTENT - the shared-files table
+         and the share-mode choice - which is reading material, not controls. -->
     <!-- Shared files. Not a banner: a plain table of state, always present
          while an overlap exists and NOT dismissible. It became dismissible
          when it was a warning written in prose, and dismissal outlived its
@@ -653,17 +636,11 @@
           <Text value="{$item.disk}" variant="code" fontSize="$fontSize-sm" />
         </Column>
         <Column header="claimed by" width="3*">
-          <!-- One Text per claimant rather than a joined string: each needs its
-               own colour, matching that item's row badge. -->
-          <HStack gap="$space-1" verticalAlignment="center" wrapContent="true">
-            <Items data="{$item.claimantIds}">
-              <Theme
-                backgroundColor-Badge="{window.__bramItemColor($item, worklist.value &amp;&amp; worklist.value.items)}"
-                textColor-Badge="white">
-                <Badge value="{$item}" tooltip="{'claimed by ' + $item}" />
-              </Theme>
-            </Items>
-          </HStack>
+          <!-- One badge per claimant, no colour. Identity is the id; colour
+               was an accelerator that stopped being true past six items and is
+               now removed everywhere (Jon: "Try getting rid of color entirely
+               and make the main badges not wrap"). -->
+          <Text overflowMode="flow" value="{window.__bramJoinIds($item.claimantIds)}" />
         </Column>
       </Table>
       <!-- The note under the table became a CHOICE. It had been prose telling
@@ -697,8 +674,16 @@
          no fullscreen image viewer; dim while a newer user message awaits
          its answer). -->
     <VStack var.dockExchange="{projectedTurnsDS.value || window.__bramProjectedLastExchange(null)}">
+      <!-- Dim the last exchange while a selection is live (Jon: "Dim the last
+           message and response while this is going on, while any selections
+           are active and while the buttons are then visible below").
+           With a selection the gate bar is showing in the Footer and the
+           question on screen is what to DO with the ticked rows; the previous
+           turn is context, not the subject. Recedes rather than disappears -
+           it is often what you are deciding about. -->
       <VStack
         when="{(dockExchange.lastExchange &amp;&amp; dockExchange.lastExchange.userText) || (dockExchange.lastAssistantText &amp;&amp; dockExchange.lastAssistantText.text)}"
+        opacity="{(worklist2Selected || []).length > 0 ? 0.4 : 1}"
         gap="$space-2"
         width="100%"
         paddingTop="$space-4">

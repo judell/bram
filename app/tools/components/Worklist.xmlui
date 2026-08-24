@@ -663,13 +663,32 @@
            options ARE the explanation, and a caption restating them is the
            kind of compensating prose that keeps turning out to mean a control
            was missing. -->
+      <!-- commit-granularity-and-start-consequence A+B.
+           The gate WAS `__bramSelectionCommitSweepsShared`, so the choice
+           appeared only when it was CONSTRAINED and never when it was free:
+           two disjoint committable items landed in one commit with no way to
+           say "these are unrelated". Now `SweepsShared` picks the option
+           LABELS rather than deciding the control exists.
+           Extracted to `variable` rather than inlined: an inline ternary in a
+           binding defeats dependency tracking (the search-date endpoint labels
+           froze at a transient first-settle domain for exactly this reason,
+           fixed by extraction). -->
+      <variable
+        name="shareChoiceOpen"
+        value="{(worklist2Selected || []).length >= 2 &amp;&amp; window.__bramSelectionAllCommittable(worklist.value &amp;&amp; worklist.value.items, worklist2Selected, inflightClaim.value, worklistConfig.value ? worklistConfig.value.oneClickApproveCommit : true)}" />
+      <variable
+        name="shareChoiceEntangled"
+        value="{window.__bramSelectionCommitSweepsShared(worklist.value &amp;&amp; worklist.value.items, worklist2Selected, inflightClaim.value, worklistConfig.value ? worklistConfig.value.oneClickApproveCommit : true)}" />
+      <variable
+        name="shareSplitLabel"
+        value="{shareChoiceEntangled ? 'A commit each — needs their shared hunks separated first, and that can fail partway' : 'A commit each — selected items land separately'}" />
       <RadioGroup
         marginTop="$space-3"
-        when="{window.__bramSelectionCommitSweepsShared(worklist.value &amp;&amp; worklist.value.items, worklist2Selected, inflightClaim.value, worklistConfig.value ? worklistConfig.value.oneClickApproveCommit : true)}"
+        when="{shareChoiceOpen}"
         initialValue="{worklist2ShareMode}"
         onDidChange="(v) => worklist2ShareMode = v">
         <Option value="together" label="One commit — selected items land together" />
-        <Option value="split" label="A commit each — selected items land separately" />
+        <Option value="split" label="{shareSplitLabel}" />
       </RadioGroup>
     </VStack>
     </VStack>

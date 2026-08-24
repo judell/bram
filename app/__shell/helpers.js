@@ -2737,6 +2737,54 @@ window.__bramHasUnclaimedChanges = function (worklistValue) {
   return window.__bramUnclaimedChangedFiles(worklistValue).length > 0;
 };
 
+// commit-granularity-and-start-consequence part C: does the SELECTION itself
+// contain two or more items claiming one path? __bramOverlapIndex is board-wide
+// and selection-blind, which is right for the Shared files table and wrong for
+// this question -- the user is about to act on the ticked rows, not the board.
+//
+// Answers the pre-Start question, so it deliberately does NOT require begun or
+// committable: the consequential click is Start, which is what forecloses
+// committing either item alone. By the time exclusivity can be evaluated the
+// work is already done.
+window.__bramSelectionSharedFileCount = function (items, sel, claim) {
+  var chosen = sel || [];
+  if (chosen.length < 2) return 0;
+  var index = window.__bramOverlapIndex(items, claim) || [];
+  var n = 0;
+  for (var i = 0; i < index.length; i++) {
+    var ids = index[i].claimants || [];
+    var hits = 0;
+    for (var c = 0; c < ids.length; c++) {
+      if (chosen.indexOf(ids[c]) !== -1) hits++;
+    }
+    if (hits >= 2) n++;
+  }
+  return n;
+};
+
+window.__bramSelectionSharesFiles = function (items, sel, claim) {
+  return window.__bramSelectionSharedFileCount(items, sel, claim) > 0;
+};
+
+// The Start-time consequence line. Empty string when there is nothing to say,
+// so the caller is one binding with no ternary.
+window.__bramStartConsequence = function (items, sel, claim) {
+  // Two earlier wordings were wrong in instructive ways.
+  // "can only be committed together" was false twice over: while both are
+  // `proposed` and begun neither is committable AT ALL (`SweepsShared` requires
+  // `AllCommittable`, which fails for both), and separate commits stay possible.
+  // "separating the hunks by hand" then implied the USER does manual git
+  // surgery. They do not -- the agent does, and it is a request, not a penalty.
+  // So: state the choice that remains open, and name who acts on it.
+  var n = window.__bramSelectionSharedFileCount(items, sel, claim);
+  if (!n) return "";
+  return (
+    "These share " + (n === 1 ? "a file" : n + " files") +
+    ". Started together, their edits mix. You can later choose to commit " +
+    "together or ask the agent to separate them."
+  );
+};
+
 window.__bramOverlapIndex = function (items, claim) {
   var list = items || [];
   var byId = {};

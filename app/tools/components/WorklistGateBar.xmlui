@@ -33,6 +33,31 @@
     listenTo="{gateSel.value}"
     onDidChange="() => window.__bramIframeTrace('w2-selection', {op: 'receive', count: (gateSel.value || []).length, render: (gateSel.value || []).length > 0, store: (window.__bramW2Selection || []).length})" />
 
+  <!-- commit-granularity-and-start-consequence C: the consequential click is
+       Start, not Commit. Starting two items that share a path is what makes
+       `__bramItemChangedSplit(...).exclusive` empty for BOTH, so neither offers
+       Commit afterwards - together or separately, since the `SweepsShared`
+       rescue also requires `AllCommittable`. The exits are advancing one to
+       `applied` (which skips the exclusivity check and sweeps the other's
+       hunks) or the manual split-shared-files pass.
+       A message, never a block: shipping two items as one change is legitimate,
+       and the gate's job is to inform the decision rather than make it - the
+       same reasoning that keeps unclaimed-changes detection report-only.
+       `__bramStartConsequence` returns "" when there is nothing to say, so this
+       stays one call with no ternary. -->
+  <!-- Centered by an HStack wrapper, matching the button row below. A bare
+       `horizontalAlignment` on the Text centers content INSIDE the Text's own
+       box, which is content-sized - so the line sat wherever its box landed
+       rather than centered in the footer. -->
+  <HStack
+    when="{!!window.__bramStartConsequence(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)}"
+    horizontalAlignment="center"
+    paddingHorizontal="$space-4"
+    paddingTop="$space-1">
+    <Text
+      value="{window.__bramStartConsequence(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)}"
+      textAlign="center" />
+  </HStack>
   <HStack
     when="{(gateSel.value || []).length > 0}"
     verticalAlignment="center"

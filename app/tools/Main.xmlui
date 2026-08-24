@@ -663,20 +663,25 @@
            buttons live here and the composer below serves as their message
            box - one box, whose target is named by its placeholder. -->
       <WorklistGateBar when="{$pathname === '/worklist2'}" />
-      <HStack verticalAlignment="center" paddingHorizontal="$space-1" paddingBottom="$space-2" gap="$space-0_5">
-        <!-- Isolated in its own component so PTY-throughput churn does not
-             re-render this footer's message composer. -->
-        <ActivitySparkline />
+      <HStack
+        width="100%"
+        verticalAlignment="center"
+        paddingHorizontal="$space-1"
+        paddingBottom="$space-2"
+        gap="$space-0_5">
         <!-- Agent-status labels isolated into their own component (own
              agent-status subscription) so the frequent status pushes no longer
              re-render this footer's message composer. The working-verb/spinner
              rationale now lives in FooterAgentStatus.xmlui. Measured by the
              footer-churn / heartbeat-batch instrument. -->
-        <!-- footer-fixed-width-slots: each dynamic element sits in a
-             fixed-width slot so the row never reflows as the agent-status
-             timer ticks, the chip appears/disappears, or the indexing message
-             flips between count and "Indexing…". -->
-        <HStack width="28rem" verticalAlignment="center">
+        <!-- Equal flexible side zones keep the optional badge geometrically
+             centered while the status stays flush left and indexing stays
+             flush right. Each zone absorbs its own text churn without moving
+             either of the other two. -->
+        <HStack width="*" verticalAlignment="center" gap="$space-0_5">
+          <!-- Isolated in its own component so PTY-throughput churn does not
+               re-render this footer's message composer. -->
+          <ActivitySparkline />
           <FooterAgentStatus enhanceStatus="{enhanceStatus.value}" />
         </HStack>
         <!-- transcript-new-below-badge chip: on the footer's first line,
@@ -685,7 +690,7 @@
              corner got lost, app header wasn't where the eye goes). One
              click to the transcript's live edge from any tab. The slot
              reserves its width even when the chip is hidden. -->
-        <HStack width="6rem" verticalAlignment="center">
+        <HStack width="6rem" verticalAlignment="center" horizontalAlignment="center">
           <Button
             when="{transcriptUnseen.value > 0}"
             label="{'▼ ' + transcriptUnseen.value + ' new'}"
@@ -696,7 +701,7 @@
         </HStack>
         <!-- footer-indexing-status: names the bucket being indexed, or the
              idle doc count + last cycle's per-bucket additions. -->
-        <HStack width="16rem" verticalAlignment="center" horizontalAlignment="end">
+        <HStack width="*" verticalAlignment="center" horizontalAlignment="end">
           <Text
             when="{footerIndexStatus.value &amp;&amp; window.__bramFooterIndexLabel(footerIndexStatus.value)}"
             fontSize="$fontSize-sm"
@@ -796,13 +801,14 @@
            in chip styling, so dropdown-overflow agents indicate the same
            way. Falls back to the plain meta line until a rebuilt
            helpers.js provides __bramFooterSessionLine. -->
-      <Text
-        when="{window.__bramSessionMetaLine(window.__bramCurrentSessionOf(footerSessions.value))}"
-        fontSize="$fontSize-sm"
-        color="$textColor-secondary"
-        maxLines="1"
-        paddingHorizontal="$space-1"
-        value="{(window.__bramFooterSessionLine || window.__bramSessionMetaLine)(window.__bramCurrentSessionOf(footerSessions.value), transcriptAgentId, footerAgents.value)}" />
+      <HStack width="100%" horizontalAlignment="center" paddingHorizontal="$space-1">
+        <Text
+          when="{window.__bramSessionMetaLine(window.__bramCurrentSessionOf(footerSessions.value))}"
+          fontSize="$fontSize-sm"
+          color="$textColor-secondary"
+          maxLines="1"
+          value="{(window.__bramFooterSessionLine || window.__bramSessionMetaLine)(window.__bramCurrentSessionOf(footerSessions.value), transcriptAgentId, footerAgents.value)}" />
+      </HStack>
       <!-- Passive send-ledger note — in the sticky footer so it's always
            visible. Text comes from the host ledger's resolved outcomes;
            recovery is automatic. Dismissal is keyed to the producing

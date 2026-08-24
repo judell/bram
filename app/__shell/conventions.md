@@ -244,6 +244,41 @@ explain the finding in chat, recommend Drop on the resulting TO
 COMMIT row. The user's Drop click works equally well on `proposed`
 and `applied` items. No special undo path needed.
 
+**Drop removes the item, not the bytes — and orphaned changes are
+misattributed, not merely unattributed.** Every surface in the pane reasons
+about changed files *through items*: the overlap index walks `item.files`,
+`changeSummary` is computed per item, and exclusivity asks whether another
+**begun** item claims the path. A changed file that no item declares is not
+shown as belonging to nobody; it is credited to whichever begun item happens
+to declare it, and is committable under that item's id and message with
+nothing recording the mistake afterwards.
+
+Two live cases, hours apart on 2026-08-24:
+
+- `notice-banner-component` was green-lit two days earlier and produced
+  nothing — its component file was never created and five of its seven declared
+  files were untouched. The row nevertheless read
+  `✓ Will commit +10 −35 in 1 of 7 planned` and offered **Commit**, because it
+  was the only *begun* claimant of a file that edits made outside any
+  authorized item had landed in. Exclusivity passed honestly.
+- `issue-278-overlap-explorer` was dropped after its React Flow view lost to
+  the table it was meant to improve on. The drop left 326 changed lines across
+  three files plus 230 KB of vendored extension belonging to nothing.
+
+So, when dropping an item that has **begun**:
+
+- Say what remains on disk before the drop completes, and propose one of:
+  revert it, re-home it under another item's `files`, or leave it
+  deliberately — then say which was chosen. Both cases above had a defensible
+  resolution and they were different ones.
+- Prefer `git stash push -m "<item id> (dropped): <what>"` over discarding.
+  The judgement that work is worthless is usually made minutes after making
+  it; a stash costs nothing and keeps it recoverable.
+
+This is also the strongest argument for not editing outside an authorized
+item: unauthorized edits do not merely skip an audit trail, they are credited
+to someone else.
+
 ### Placeholder items (droppable reminders)
 
 One shape of item carries no diff yet and is still legitimate: a

@@ -514,15 +514,24 @@
             paddingLeft="$space-6">
             <Markdown content="{$item.after}" interpolateBindings="false" allowHtml="false" />
           </VStack>
+          <!-- worklist2-diff-section-plan-gate: $item.diff is computed from
+               disk state per DECLARED file with no per-hunk authorship, so
+               on a plan row (proposed, never begun) any diff it shows is a
+               NEIGHBOUR's uncommitted work on a shared path. The strip
+               already applies this principle (worklist2-plan-vs-activity:
+               plans show "No changes yet", activity counts suppressed);
+               gate the Diff surfaces on the same begun predicate so the
+               two never disagree. Begun rows on shared files still show
+               blended diffs - the Shared-with column carries that caveat. -->
           <HStack
-            when="{$item.diff}"
+            when="{$item.diff &amp;&amp; window.__bramWorklist2Begun($item, inflightClaim.value)}"
             gap="$space-1"
             verticalAlignment="center"
             onClick="expandedKeys = window.__bramFlipExpansionKey(expandedKeys, $item.id + '::diff')">
             <Text value="Diff" />
           </HStack>
           <VStack
-            when="{(expandedKeys || []).includes($item.id + '::diff') &amp;&amp; $item.diff}"
+            when="{(expandedKeys || []).includes($item.id + '::diff') &amp;&amp; $item.diff &amp;&amp; window.__bramWorklist2Begun($item, inflightClaim.value)}"
             gap="$space-1"
             paddingLeft="$space-6">
             <DiffView text="{cappedDiffText($item.diff || '')}" />

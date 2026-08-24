@@ -16345,6 +16345,41 @@ mod pending_session_title_tests {
         assert!(entries[0].pending);
         assert!(!entries[1].current);
     }
+
+    // issue-274-claude-pending-session-row: the Claude shape of the pending
+    // [current] row — the record carries a pre-allocated sid (#274), so the
+    // row arrives under its real uuid before any JSONL exists, and the
+    // previous session loses the current marker.
+    #[test]
+    fn pending_claude_row_shows_before_first_jsonl() {
+        let mut entries = vec![SessionEntry {
+            id: "3298af2e-39ed-4ac9-a80d-5f084364b9ba".to_string(),
+            mtime: 1,
+            size: 27_191,
+            title: Some("post 5.1".to_string()),
+            provider: SessionProvider::Claude,
+            current: true,
+            pending: false,
+        }];
+        let pending = SessionEntry {
+            id: "0192aabb-ccdd-4eef-8899-001122334455".to_string(),
+            mtime: 2,
+            size: 0,
+            title: Some("post 5.2".to_string()),
+            provider: SessionProvider::Claude,
+            current: true,
+            pending: true,
+        };
+
+        merge_pending_session_entry(&mut entries, pending, Some(20));
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].id, "0192aabb-ccdd-4eef-8899-001122334455");
+        assert!(entries[0].current);
+        assert!(entries[0].pending);
+        assert_eq!(entries[0].title.as_deref(), Some("post 5.2"));
+        assert!(!entries[1].current);
+    }
 }
 
 // sessions-new-named-session: start a fresh agent session (kill + relaunch
@@ -19640,15 +19675,29 @@ fn sessions_for_provider<R: tauri::Runtime>(
 
 fn count_claude_sessions<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<usize, String> {
     let lookup = claude_sessions_dir_lookup(app)?;
-    let entries = match std::fs::read_dir(&lookup.chosen) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(e) => return Err(e.to_string()),
-    };
     let mut count = 0usize;
-    for entry in entries {
-        let Ok(entry) = entry else { continue };
-        if entry.path().extension().and_then(|s| s.to_str()) == Some("jsonl") {
+    match std::fs::read_dir(&lookup.chosen) {
+        Ok(entries) => {
+            for entry in entries {
+                let Ok(entry) = entry else { continue };
+                if entry.path().extension().and_then(|s| s.to_str()) == Some("jsonl") {
+                    count += 1;
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.to_string()),
+    }
+    // Same already-listed-aware pending bump count_codex_sessions has: the
+    // queued session counts until its JSONL is discoverable. The Claude
+    // record carries a pre-allocated sid (#274), so listed-ness is a direct
+    // file-existence check.
+    if let Some(rec) = read_pending_session_title(app, SessionProvider::Claude) {
+        let already_listed = rec
+            .session_id
+            .as_deref()
+            .is_some_and(|id| lookup.chosen.join(format!("{}.jsonl", id)).exists());
+        if !already_listed {
             count += 1;
         }
     }
@@ -21744,10 +21793,8 @@ fn list_sessions<R: tauri::Runtime>(
             }
         })
         .collect();
-    if provider == SessionProvider::Codex {
-        if let Some(pending) = pending_codex_session_entry(app) {
-            merge_pending_session_entry(&mut entries, pending, limit);
-        }
+    if let Some(pending) = pending_session_entry(app, provider) {
+        merge_pending_session_entry(&mut entries, pending, limit);
     }
     append_bram_trace_line(
         app,
@@ -21765,8 +21812,17 @@ fn list_sessions<R: tauri::Runtime>(
     Ok(entries)
 }
 
-fn pending_codex_session_entry<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<SessionEntry> {
-    let rec = read_pending_session_title(app, SessionProvider::Codex)?;
+// Provider-parameterized since issue-274-claude-pending-session-row: the
+// pending [current] row was Codex-only, on the assumption that Claude's JSONL
+// exists from launch. It does not — Claude Code also defers the file to the
+// first user turn — so both providers need the bridge row between the
+// New-session click and first-turn discovery. A pre-allocated Claude sid
+// (#274) rides in as the row's real id.
+fn pending_session_entry<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    provider: SessionProvider,
+) -> Option<SessionEntry> {
+    let rec = read_pending_session_title(app, provider)?;
     Some(SessionEntry {
         id: rec
             .session_id
@@ -21774,7 +21830,7 @@ fn pending_codex_session_entry<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<
         mtime: rec.created_at_ms.max(0) as u64 / 1_000,
         size: 0,
         title: Some(rec.title),
-        provider: SessionProvider::Codex,
+        provider,
         current: true,
         pending: true,
     })

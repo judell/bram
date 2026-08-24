@@ -117,6 +117,26 @@
   <ChangeListener
     listenTo="{worklist2Selected}"
     onDidChange="() => window.__bramIframeTrace('w2-selection', {op: 'publish', count: (worklist2Selected || []).length, items: ((worklist.value &amp;&amp; worklist.value.items) || []).length, store: (window.__bramW2Selection || []).length})" />
+  <!-- w2-selection-store-to-page-sync: the missing return direction. The
+       gate-bar submit path clears the STORE directly (helpers.js,
+       __bramW2SetSelection([])), which the 2026-08-24 capture showed as a
+       publish-less `receive count=0` while this page kept `selected=1`
+       and the row Checkbox stayed ticked - a selection matching no
+       buttons, stable forever because the store setter early-returns on
+       equal input. Bridge the store back in (same subscription the
+       Footer's gateSel consumes) so the store is the source of truth in
+       both directions. No ping-pong: the trace proves ChangeListener
+       compares by value (prune's fresh-array assigns never fired
+       publish), and __bramW2SetSelection early-returns regardless. The
+       Checkbox needs no change: initialValue re-evaluates when
+       worklist2Selected changes (shared-array idiom,
+       https://www.xmlui.org/docs/howto/toggle-multiple-items-with-shared-state). -->
+  <PushSource
+    id="w2SelStore"
+    subscribe="{window.bramSubscribeW2Selection()}" />
+  <ChangeListener
+    listenTo="{w2SelStore.value}"
+    onDidChange="() => worklist2Selected = (w2SelStore.value || []).slice()" />
   <!-- The close-issue toggles live in the row expansions but the Commit
        buttons are now in the Footer, so the map has to cross too. -->
   <ChangeListener

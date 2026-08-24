@@ -538,14 +538,21 @@ when a new item would entangle a committable item* below.
 **Commit gate: call `worklist-commit`.** This is the traditional
 two-stage path: every id in the request is already `applied`, so
 `gate` is plain `approved`, not `apply-and-commit`. Send one request
-with `{ ids, message }`. The host verifies approved auth, requires
-every id to be `applied` (relaxed to also accept `proposed` only when
-`commitToo` is set — see *Apply-and-commit gate* above), stages only
-those items' files, refuses unrelated staged files, commits, prunes
-the items, consumes auth, and clears the sentinel. **Issue close is
+with `{ ids, message }` when the selected items land together. For
+`split-shared-files`, isolate one item's hunks on disk, call
+`worklist-commit` for that id, restore the next item's isolated hunks,
+and repeat. Each successful subset call retires only those ids from the
+authorization and inflight claim; the remaining ids and embedded item
+bodies stay live for the later commits, and the final call consumes the
+record. The host verifies approved auth, requires every requested id to
+be `applied` (relaxed to also accept `proposed` only when `commitToo` is
+set — see *Apply-and-commit gate* above), stages only those items' files,
+refuses unrelated staged files, commits, and prunes the requested
+items. **Issue close is
 automatic — the agent does nothing.** When the approved feedback
 carries `close-issue:` selections (from the close-on-commit
-dialog), the host records them at commit time bound to the new SHA, then
+dialog), the host records only the requested ids' selections at commit
+time bound to that commit's SHA, then
 closes each issue automatically after the user's next explicit **Push** (only
 once its commit is visible on origin). There is no agent-reachable close
 route — `/__issue/close` was removed — so there is nothing for the agent to
@@ -1112,10 +1119,10 @@ reference: `docs/apis.md` §11. Agent-side conventions:
 
 Several of the bullets above say a mutate/commit call "clears the
 sentinel" — true in the common one-id case, but see *Incremental claim
-retirement* for what actually happens when the claim covers more than
-one id.
+and authorization retirement* for what actually happens when the claim
+covers more than one id.
 
-### Incremental claim retirement
+### Incremental claim and authorization retirement
 
 A claim can cover more than one id — approving several unentangled
 items in one click writes one claim listing all of them. Resolving
@@ -1129,6 +1136,16 @@ lets two disjoint items be started together in one click and then
 completed — applied, committed, or dropped — in separate turns, each
 clearing its own slice of the spinner instead of leaving it stuck until
 every id is accounted for in a single call.
+
+The authorization record retires by the same named subset. Until the
+last id resolves it keeps `consumedAtMs` empty, removes the completed ids
+and their embedded bodies, and traces
+`[auth-record] op=consume-shrink resolved=[...] remaining=[...]`. This
+is load-bearing for `split-shared-files`: one plural Commit approval can
+produce several sequential `worklist-commit` calls without the first
+commit consuming authority for the rest. The original `issuedAtMs` and
+interrupt flag remain unchanged, so TTL and cancel fail-closed behavior
+still cover the entire sequence.
 
 This is distinct from `op=clear-partial`, which is still a refusal: the
 blunt clears — turn-end detectors, cancel paths, startup cleanup, the

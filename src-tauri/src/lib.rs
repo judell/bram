@@ -41208,7 +41208,60 @@ fn read_active_worklist_authorization<R: tauri::Runtime>(
     }
 }
 
-fn consume_worklist_authorization<R: tauri::Runtime>(app: &AppHandle<R>) {
+#[derive(Debug, PartialEq)]
+enum WorklistAuthRetirement {
+    AlreadyConsumed,
+    Unchanged,
+    Shrunk(Vec<String>),
+    Consumed,
+}
+
+// Retire only the ids a mechanical lifecycle call actually resolved. A
+// plural commit approval may deliberately produce one commit per item; the
+// first worklist-commit must leave the remaining ids publishable under the
+// same user decision. Full consumption preserves the final record for audit;
+// partial retirement narrows both ids and embedded bodies so a later resolve
+// cannot resurrect an already-completed item.
+fn retire_worklist_authorization_record(
+    record: &mut WorklistAuthorizationRecord,
+    resolved_ids: Option<&[String]>,
+    now_ms: i64,
+) -> WorklistAuthRetirement {
+    if record.consumed_at_ms.is_some() {
+        return WorklistAuthRetirement::AlreadyConsumed;
+    }
+    let Some(resolved_ids) = resolved_ids else {
+        record.consumed_at_ms = Some(now_ms);
+        return WorklistAuthRetirement::Consumed;
+    };
+    let remaining: Vec<String> = record
+        .ids
+        .iter()
+        .filter(|id| !resolved_ids.iter().any(|resolved| resolved == *id))
+        .cloned()
+        .collect();
+    if remaining.len() == record.ids.len() {
+        return WorklistAuthRetirement::Unchanged;
+    }
+    if remaining.is_empty() {
+        record.consumed_at_ms = Some(now_ms);
+        return WorklistAuthRetirement::Consumed;
+    }
+    record.ids = remaining.clone();
+    record.items.retain(|item| {
+        item.get("id")
+            .and_then(|v| v.as_str())
+            .map_or(false, |id| {
+                remaining.iter().any(|remaining_id| remaining_id == id)
+            })
+    });
+    WorklistAuthRetirement::Shrunk(remaining)
+}
+
+fn retire_worklist_authorization<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    resolved_ids: Option<&[String]>,
+) {
     let Some(path) = worklist_auth_file(app) else {
         return;
     };
@@ -41220,9 +41273,13 @@ fn consume_worklist_authorization<R: tauri::Runtime>(app: &AppHandle<R>) {
         Ok(r) => r,
         Err(_) => return,
     };
-    if record.consumed_at_ms.is_some() {
-        if bram_trace_enabled() {
-            append_bram_trace_line(
+    let outcome = retire_worklist_authorization_record(&mut record, resolved_ids, unix_now_ms());
+    if bram_trace_enabled() {
+        let resolved = resolved_ids
+            .map(|ids| serde_json::to_string(ids).unwrap_or_else(|_| "[]".to_string()))
+            .unwrap_or_else(|| "all".to_string());
+        match &outcome {
+            WorklistAuthRetirement::AlreadyConsumed => append_bram_trace_line(
                 app,
                 "auth-record",
                 &format!(
@@ -41231,27 +41288,55 @@ fn consume_worklist_authorization<R: tauri::Runtime>(app: &AppHandle<R>) {
                     record.consumed_at_ms.unwrap_or(0),
                     serde_json::to_string(&record.ids).unwrap_or_else(|_| "[]".to_string())
                 ),
-            );
+            ),
+            WorklistAuthRetirement::Unchanged => append_bram_trace_line(
+                app,
+                "auth-record",
+                &format!("op=retire-no-match kind={} resolved={}", record.kind, resolved),
+            ),
+            WorklistAuthRetirement::Shrunk(remaining) => append_bram_trace_line(
+                app,
+                "auth-record",
+                &format!(
+                    "op=consume-shrink kind={} resolved={} remaining={}",
+                    record.kind,
+                    resolved,
+                    serde_json::to_string(remaining).unwrap_or_else(|_| "[]".to_string())
+                ),
+            ),
+            WorklistAuthRetirement::Consumed => append_bram_trace_line(
+                app,
+                "auth-record",
+                &format!(
+                    "op=consume kind={} ids={}",
+                    record.kind,
+                    serde_json::to_string(&record.ids).unwrap_or_else(|_| "[]".to_string())
+                ),
+            ),
         }
+    }
+    if matches!(
+        outcome,
+        WorklistAuthRetirement::AlreadyConsumed | WorklistAuthRetirement::Unchanged
+    ) {
         return;
     }
-    if bram_trace_enabled() {
-        append_bram_trace_line(
-            app,
-            "auth-record",
-            &format!(
-                "op=consume kind={} ids={}",
-                record.kind,
-                serde_json::to_string(&record.ids).unwrap_or_else(|_| "[]".to_string())
-            ),
-        );
-    }
-    record.consumed_at_ms = Some(unix_now_ms());
     let body = match serde_json::to_string_pretty(&record) {
         Ok(s) => s,
         Err(_) => return,
     };
     let _ = std::fs::write(&path, format!("{}\n", body));
+}
+
+fn consume_worklist_authorization<R: tauri::Runtime>(app: &AppHandle<R>) {
+    retire_worklist_authorization(app, None);
+}
+
+fn retire_worklist_authorization_ids<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    resolved_ids: &[String],
+) {
+    retire_worklist_authorization(app, Some(resolved_ids));
 }
 
 // security-h4: mark the active (unconsumed, un-interrupted) worklist
@@ -41377,7 +41462,7 @@ fn maybe_enforce_worklist_policy<R: tauri::Runtime>(
             // divergence.
             write_inflight_claim_sentinel(app, &dropped_via_auth, "drop");
             clear_inflight_claim_sentinel(app, &dropped_via_auth);
-            consume_worklist_authorization(app);
+            retire_worklist_authorization_ids(app, &dropped_via_auth);
         }
         return true;
     }
@@ -42388,27 +42473,46 @@ fn parse_close_issue_selections(feedback: &str) -> Vec<(u64, Option<String>)> {
     out
 }
 
-// From an approved-auth record's embedded items, enqueue a close intent per
-// ticked issue bound to the just-created commit SHA. Called by the commit gate.
+fn worklist_auth_feedback_for_ids(
+    auth: &serde_json::Value,
+    committed_ids: &[String],
+) -> Vec<String> {
+    auth.get("items")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter(|item| {
+                    let item_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    committed_ids.iter().any(|id| id == item_id)
+                })
+                .filter_map(|item| {
+                    item.get("feedback")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+// From the committed subset of an approved-auth record's embedded items,
+// enqueue a close intent per ticked issue bound to the just-created commit
+// SHA. Scoping matters when one plural authorization produces several commits.
 fn enqueue_issue_closes_from_auth<R: tauri::Runtime>(
     app: &AppHandle<R>,
     auth: &serde_json::Value,
+    committed_ids: &[String],
     commit_sha: &str,
 ) {
     let Some(path) = issue_close_queue_file(app) else {
         return;
     };
-    let Some(items) = auth.get("items").and_then(|v| v.as_array()) else {
-        return;
-    };
     // Recorded once per commit: the rebase-stable identity the flush falls
     // back to when the Push button's auto-rebase rewrites this SHA.
     let patch_id = project_root(Some(app)).and_then(|root| git_commit_patch_id(&root, commit_sha));
-    for item in items {
-        let Some(feedback) = item.get("feedback").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        for (issue, comment) in parse_close_issue_selections(feedback) {
+    for feedback in worklist_auth_feedback_for_ids(auth, committed_ids) {
+        for (issue, comment) in parse_close_issue_selections(&feedback) {
             let record = PendingIssueClose {
                 issue,
                 commit_sha: commit_sha.to_string(),
@@ -46523,17 +46627,15 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
             emit_replayable_signal(app, "inflight-claim-changed");
         }
     }
-    // Consume the auth at the mechanical completion point. Drop prunes
-    // consume here; approved advances consume here too so the apply gate
-    // can skip /__worklist/resolve (previously the sole consumer of approved
-    // auth) without leaving a stale pending Authorization record — the same
-    // failure class as the auth-consume-noop-prune fix. Idempotent: if
-    // resolve already consumed it (old apply flow, or the commit gate),
-    // consume_worklist_authorization no-ops on the already-consumed record.
+    // Retire these ids from the auth at the mechanical completion point.
+    // The final id consumes the record; a plural approval keeps its remaining
+    // ids live so split commits and incremental batches can finish under the
+    // same decision. If resolve already consumed it (the old apply flow), the
+    // retirement helper is an idempotent no-op.
     if (op == "prune" && (auth_kind == "drop" || auth_kind == "approved"))
         || (op == "advance" && auth_kind == "approved")
     {
-        consume_worklist_authorization(app);
+        retire_worklist_authorization_ids(app, completion_ids);
     }
     promote_feedback_drafts_for_items(app, completion_ids, op);
 
@@ -46799,7 +46901,7 @@ fn handle_worklist_commit<R: tauri::Runtime>(
     // close-on-push-automatic: record the commit-gate dialog's close-issue
     // selections as pending closes bound to this SHA. Nothing closes now; the
     // user's next Push triggers flush_pending_issue_closes.
-    enqueue_issue_closes_from_auth(app, &auth, &sha);
+    enqueue_issue_closes_from_auth(app, &auth, &ids, &sha);
 
     // worklist-commit-refresh-commits-cache: the gate just created the
     // commit, so refresh the commits:list cache now (local git, ~tens of ms)
@@ -46851,15 +46953,15 @@ mod worklist_authorization_tests {
         draft_markdown_path, enqueue_pending_worklist_push_mirror_path,
         ensure_no_unrelated_staged_files, ensure_worklist_commit_authorized, feedback_draft_path,
         inflight_claim_fully_covered, installed_twins_for, parse_worklist_authorization_message,
-        ParsedWorklistAuthorization, WORKLIST_AUTH_TTL_MS,
         parse_worklist_authorization_payload, read_pending_worklist_push_mirrors,
-        resource_relative_path, turn_text_has_direct_edit_opt_out,
-        validate_post_commit_prune_status, validate_worklist_advance_status,
-        validate_worklist_mutate_authorization, worklist_commit_add_args,
-        worklist_commit_files_for_ids, worklist_draft_path, worklist_feedback_ref_item_id,
-        worklist_iteration_comment_body, worklist_lifecycle_comment_body,
-        worklist_lifecycle_item_issue_numbers, worklist_pushed_lifecycle_comment_body,
-        PendingWorklistPushMirror,
+        resource_relative_path, retire_worklist_authorization_record,
+        turn_text_has_direct_edit_opt_out, validate_post_commit_prune_status,
+        validate_worklist_advance_status, validate_worklist_mutate_authorization,
+        worklist_auth_feedback_for_ids, worklist_commit_add_args, worklist_commit_files_for_ids,
+        worklist_draft_path, worklist_feedback_ref_item_id, worklist_iteration_comment_body,
+        worklist_lifecycle_comment_body, worklist_lifecycle_item_issue_numbers,
+        worklist_pushed_lifecycle_comment_body, ParsedWorklistAuthorization,
+        PendingWorklistPushMirror, WorklistAuthRetirement, WORKLIST_AUTH_TTL_MS,
     };
     use serde_json::json;
     use std::path::Path;
@@ -46967,6 +47069,62 @@ mod worklist_authorization_tests {
         };
         let record = build_worklist_authorization_record(parsed, &[], None, 123, "test");
         assert!(record.commit_too);
+    }
+
+    #[test]
+    fn plural_authorization_retires_committed_ids_incrementally() {
+        let parsed = ParsedWorklistAuthorization {
+            kind: "approved".to_string(),
+            requests: vec![
+                ("a".to_string(), Some("first".to_string())),
+                ("b".to_string(), Some("second".to_string())),
+            ],
+            commit_too: false,
+        };
+        let on_disk = vec![json!({"id":"a"}), json!({"id":"b"})];
+        let mut record = build_worklist_authorization_record(parsed, &on_disk, None, 100, "test");
+
+        let first = ids(&["a"]);
+        assert_eq!(
+            retire_worklist_authorization_record(&mut record, Some(&first), 200),
+            WorklistAuthRetirement::Shrunk(ids(&["b"]))
+        );
+        assert_eq!(record.ids, ids(&["b"]));
+        assert_eq!(
+            record
+                .items
+                .iter()
+                .filter_map(|item| item.get("id").and_then(|v| v.as_str()))
+                .collect::<Vec<_>>(),
+            vec!["b"]
+        );
+        assert_eq!(record.consumed_at_ms, None);
+
+        let second = ids(&["b"]);
+        assert_eq!(
+            retire_worklist_authorization_record(&mut record, Some(&second), 300),
+            WorklistAuthRetirement::Consumed
+        );
+        assert_eq!(record.ids, ids(&["b"]));
+        assert_eq!(record.consumed_at_ms, Some(300));
+    }
+
+    #[test]
+    fn split_commit_close_feedback_is_scoped_to_committed_ids() {
+        let auth = json!({
+            "items": [
+                {"id":"a", "feedback":"close-issue: 10"},
+                {"id":"b", "feedback":"close-issue: 20"}
+            ]
+        });
+        assert_eq!(
+            worklist_auth_feedback_for_ids(&auth, &ids(&["a"])),
+            vec!["close-issue: 10".to_string()]
+        );
+        assert_eq!(
+            worklist_auth_feedback_for_ids(&auth, &ids(&["b"])),
+            vec!["close-issue: 20".to_string()]
+        );
     }
 
     #[test]

@@ -168,8 +168,13 @@
          the one that can produce a mixed commit. In document flow, NOT pinned:
          a large index stuck to the top would consume the viewport it exists to
          summarise. -->
+    <!-- Gated on overlaps existing, matching the toggle Button's own gate:
+         when the last overlap vanishes while the panel is open, the button
+         disappears and an open panel would otherwise strand as an empty
+         "No data available" table with no control left to close it
+         (observed post-teardown, 2026-08-24). -->
     <VStack
-      when="{worklist2OverlapOpen}"
+      when="{worklist2OverlapOpen &amp;&amp; window.__bramOverlapAny(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value)}"
       gap="$space-1"
       padding="$space-3"
       border="1px solid $color-surface-200"

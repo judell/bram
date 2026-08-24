@@ -280,8 +280,13 @@
     </Text>
     <Items data="{worklist.value &amp;&amp; worklist.value.items ? worklist.value.items : []}">
       <!-- Row separation (review 2026-08-20): breathing room between
-           items, which matters most when rows are expanded. -->
-      <VStack gap="$space-1" paddingBottom="$space-4">
+           items, which matters most when rows are expanded. Tightened
+           2026-08-24 from $space-4 to $space-2 — with the stage glyph column
+           gone (6d5d05b) each collapsed row is a single line of text, and
+           four units of padding under a one-line row read as a gap rather
+           than as separation. Expanded rows still get their air from the
+           inner gap. -->
+      <VStack gap="$space-1" paddingBottom="$space-2">
         <!-- worklist2-remove-expander-chrome: no indicator glyphs (History's
              chrome-free section headers are the precedent); the header line
              itself is the toggle. The selection Checkbox sits OUTSIDE the

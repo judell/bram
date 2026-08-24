@@ -2372,6 +2372,25 @@ window.__bramWorklist2Stage = function (item, claim, items) {
     // says pending without offering to do anything.
     return { icon: "circle-dashed", label: "Start it", yours: true };
   }
+  // An active claim outranks committability.
+  //
+  // The spinner, the strip verb and this glyph all report one host transition,
+  // and they disagreed during it: while a row showed the spinner and
+  // "Starting…", the glyph had already advanced to the ready-to-commit check,
+  // because the first edits had landed on disk and committability is computed
+  // from disk. Three indicators, three different phases of the same moment
+  // (live receipt: issue-278-overlap-explorer's apply, 2026-08-24).
+  //
+  // Disk state is the right source for "is there something to commit"; it is
+  // the wrong source for "is this decision still being carried out". The claim
+  // is the host fact for that, and it is what the other two already read - so
+  // deferring to it here makes all three advance together by construction
+  // rather than by timing. The check appears when the claim clears, which is
+  // also when Commit becomes clickable, so the glyph never promises an action
+  // the gate would refuse.
+  if (window.__bramItemInflightKind(claim, item.id, "", "", 0)) {
+    return { icon: "circle-dot", label: "Nothing to do — the agent has it", yours: false };
+  }
   if (window.__bramSelectionAllCommittable(list, [item.id], claim, true)) {
     return { icon: "checkmark", label: "Commit it", yours: true };
   }

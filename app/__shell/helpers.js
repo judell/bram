@@ -2531,7 +2531,10 @@ window.__bramWorklist2Strip = function (item, claim, items) {
   // tooltip carried the whole distinction one hover away.
   if (!begun) {
     window.__bramWorklistStripAnomaly(item, claim, cs);
-    return withCloses("Proposed · Start to green-light");
+    // Just the state. The "· Start to green-light" tail instructed the user to
+    // press a button that is already sitting in the footer, labelled -- the
+    // strip's job is to name where the item IS, not to narrate the next click.
+    return withCloses("Proposed");
   }
   // Nothing on disk yet, and begun -- the two states the icon now separates.
   // Earlier this returned "" (brief, because begun-ness was transient), then

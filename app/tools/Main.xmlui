@@ -656,6 +656,13 @@
   <Footer>
     <Theme fontSize-TextArea="$fontSize-lg" fontSize-placeholder-TextArea="$fontSize-lg">
     <VStack width="100%" gap="$space-1">
+      <!-- issue-278: the Worklist gate, docked. The gate row could not be
+           pinned where it lived (sticky cannot escape its containing block;
+           `dock` needs a bounded parent height and scrollWholePage="false").
+           The Footer is the surface `vertical-sticky` actually pins, so the
+           buttons live here and the composer below serves as their message
+           box - one box, whose target is named by its placeholder. -->
+      <WorklistGateBar when="{$pathname === '/worklist2'}" />
       <HStack verticalAlignment="center" paddingHorizontal="$space-1" paddingBottom="$space-2" gap="$space-0_5">
         <!-- Isolated in its own component so PTY-throughput churn does not
              re-render this footer's message composer. -->
@@ -689,7 +696,7 @@
         </HStack>
         <!-- footer-indexing-status: names the bucket being indexed, or the
              idle doc count + last cycle's per-bucket additions. -->
-        <HStack width="16rem" verticalAlignment="center">
+        <HStack width="16rem" verticalAlignment="center" horizontalAlignment="end">
           <Text
             when="{footerIndexStatus.value &amp;&amp; window.__bramFooterIndexLabel(footerIndexStatus.value)}"
             fontSize="$fontSize-sm"

@@ -127,8 +127,27 @@
     height="100%"
     padding="$space-4"
     gap="$space-2"
-    onInit="window.__bramRegisterTranscriptScroll(() => { atBottom = window.__bramFollowTransition(false, 'footer-arrow-up', $props.agentId); transcriptList.scrollToTop(); }, () => { window.__bramClearTranscriptFind('footer-arrow-down'); atBottom = window.__bramFollowTransition(true, 'footer-arrow-down', $props.agentId); window.__bramBottomJumpRetry(transcriptList, 'footer-arrow-down', $props.agentId, events.length); }); window.__bramTranscriptMount()"
-    onCleanup="window.__bramSetTranscriptMounted(false); window.__bramSetVisibleRange(Object.assign({}, window.__bramVisibleRange || {}, { atBottom: atBottom, total: events.length }))"
+    <!-- issue-275-a1 step 1: canonical lifecycle names. `onInit` / `onCleanup`
+         are documented as legacy compatibility ALIASES for `onMount` /
+         `onUnmount` (xmlui.org/docs/managed-react/managed-lifecycle-vocabulary).
+         Renaming is safe here because only the legacy names were declared -
+         had both been present XMLUI would run the canonical one and warn.
+
+         This is step 1 of the lifecycle-violation fix, done alone so it can be
+         falsified alone. The violation is "async unmount handler is not
+         awaited"; the contract is that `onUnmount` is synchronous only. The
+         remaining suspect is the two-statement body below, which is also
+         against this repo's own rule that attribute handlers stay a single
+         call. If the violation survives this rename, the fix is collapsing
+         those two statements into one `window.*` helper - which lives in
+         helpers.js and therefore costs a rebuild.
+
+         NOT `onBeforeDispose`, which the item originally proposed: that hook
+         is exposed only by container components (App, Page, Form, NestedApp,
+         Container). This is a VStack, so moving the body there would silently
+         do nothing. -->
+    onMount="window.__bramRegisterTranscriptScroll(() => { atBottom = window.__bramFollowTransition(false, 'footer-arrow-up', $props.agentId); transcriptList.scrollToTop(); }, () => { window.__bramClearTranscriptFind('footer-arrow-down'); atBottom = window.__bramFollowTransition(true, 'footer-arrow-down', $props.agentId); window.__bramBottomJumpRetry(transcriptList, 'footer-arrow-down', $props.agentId, events.length); }); window.__bramTranscriptMount()"
+    onUnmount="window.__bramTranscriptUnmount(atBottom, events.length)"
     var.events="{window.__bramTranscriptEventsFromTurns($props.agentId ? subagentTurns.value : turnsEvt.value, null)}"
     var.eventsVersion="{($props.agentId ? (subagentTurns.value &amp;&amp; subagentTurns.value.total) : (turnsEvt.value &amp;&amp; turnsEvt.value.revision)) || events.length}"
     var.expanded="{[]}"

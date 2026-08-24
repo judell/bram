@@ -2785,6 +2785,29 @@ window.__bramStartConsequence = function (items, sel, claim) {
   );
 };
 
+// issue-275-a1: the Transcript's unmount cleanup as ONE synchronous call.
+// `onUnmount` is synchronous-only by contract and async handlers report a
+// lifecycle violation
+// (xmlui.org/docs/managed-react/managed-lifecycle-vocabulary). The handler was
+// two statements plus an inline Object.assign, which the engine classified as
+// async -- so `__bramSetTranscriptMounted(false)` never ran, leaving the
+// mounted flag true from another tab. helpers.js:6870 already carries a
+// route-check workaround for exactly that consequence.
+//
+// NOT moved to `onBeforeDispose`, which the engine's own error message
+// recommends: that hook is exposed only by container components (App, Page,
+// Form, NestedApp, Container). The Transcript's root is a VStack, so the
+// advice does not apply and following it would have silently done nothing.
+window.__bramTranscriptUnmount = function (atBottom, total) {
+  window.__bramSetTranscriptMounted(false);
+  window.__bramSetVisibleRange(
+    Object.assign({}, window.__bramVisibleRange || {}, {
+      atBottom: atBottom,
+      total: total,
+    }),
+  );
+};
+
 window.__bramOverlapIndex = function (items, claim) {
   var list = items || [];
   var byId = {};

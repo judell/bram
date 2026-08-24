@@ -22,6 +22,16 @@
   <ChangeListener
     listenTo="{gateWorklistChanged.value}"
     onDidChange="() => { gateWorklist.refetch(); gateClaim.refetch(); }" />
+  <!-- instrument-w2-selection-handoff (observe only, TRIPWIRE): the receiving
+       half. `render` is the actual gate on the button row below - buttons are
+       ABSENT when it is false, as opposed to greyed, since they gate on
+       `enabled=`. A `receive count=0` with the page still showing a ticked
+       checkbox is the divergence; a publish with no matching receive is the
+       boundary dropping it. Steady state emits pairs, so this is not a
+       zero-is-success grep - the anomaly is a mismatch, not a count. -->
+  <ChangeListener
+    listenTo="{gateSel.value}"
+    onDidChange="() => window.__bramIframeTrace('w2-selection', {op: 'receive', count: (gateSel.value || []).length, render: (gateSel.value || []).length > 0, store: (window.__bramW2Selection || []).length})" />
 
   <HStack
     when="{(gateSel.value || []).length > 0}"

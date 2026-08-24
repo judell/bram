@@ -37,6 +37,12 @@
   <ChangeListener
     listenTo="{worklist.value &amp;&amp; worklist.value.items}"
     onDidChange="() => worklist2Selected = window.__bramSelectionIds(worklist.value &amp;&amp; worklist.value.items, worklist2Selected)" />
+  <!-- instrument-w2-selection-handoff: the prune's own view, logged before the
+       assignment above lands, so a refetch that arrives with zero items is
+       visible as the cause rather than inferred from the publish that follows. -->
+  <ChangeListener
+    listenTo="{worklist.value &amp;&amp; worklist.value.items}"
+    onDidChange="() => window.__bramIframeTrace('w2-selection', {op: 'prune-input', items: ((worklist.value &amp;&amp; worklist.value.items) || []).length, selected: (worklist2Selected || []).length})" />
   <!-- one-click-approve-commit-shared-setting: the host enforces this
        setting for apply-and-commit from every Worklist surface. Default
        on while the config loads, matching the host's missing-key default;
@@ -99,6 +105,18 @@
   <ChangeListener
     listenTo="{worklist2Selected}"
     onDidChange="() => window.__bramW2SetSelection(worklist2Selected)" />
+  <!-- instrument-w2-selection-handoff (observe only, TRIPWIRE).
+       A sibling listener rather than extra statements in the one above:
+       attribute handlers stay a single call.
+       `items` is the discriminator. The leading hypothesis is that the prune
+       listener above fires during a refetch when `worklist.value.items` is
+       momentarily empty, wiping the selection - while the row Checkbox uses
+       `initialValue` (UNCONTROLLED, same class as the ExpandableItem trap) so
+       it keeps showing ticked. That shape reads `op=publish count=0 items=0`
+       and settles it in one grep, which reading the code twice did not. -->
+  <ChangeListener
+    listenTo="{worklist2Selected}"
+    onDidChange="() => window.__bramIframeTrace('w2-selection', {op: 'publish', count: (worklist2Selected || []).length, items: ((worklist.value &amp;&amp; worklist.value.items) || []).length, store: (window.__bramW2Selection || []).length})" />
   <!-- The close-issue toggles live in the row expansions but the Commit
        buttons are now in the Footer, so the map has to cross too. -->
   <ChangeListener

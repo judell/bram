@@ -5,30 +5,47 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>target app</title>
     <script>
+      // Bram's demo target-app shim. Loaded only when ui.showTargetApp is on;
+      // main.js otherwise leaves the pane at about:blank and never fetches this.
+      //
+      // config.json is fetched ASYNCHRONOUSLY and its absence is a normal
+      // state, not an error to recover from. It was a synchronous
+      // XMLHttpRequest (`open(..., false)`) that blocked the main thread on a
+      // request which 404s in every project that has no target app of its own
+      // -- see judell/bram#275 A3(ii). A blocking request for a file that is
+      // absent by construction is wrong even when the pane is enabled.
+      //
+      // document.write is gone with it: the scripts are injected in order via
+      // onload, which is what lets the config arrive first without blocking.
       (function () {
-        var cfg = {};
-        try {
-          var cfgXhr = new XMLHttpRequest();
-          cfgXhr.open("GET", "config.json?_=" + Date.now(), false);
-          cfgXhr.send();
-          if (cfgXhr.status >= 200 && cfgXhr.status < 300 && cfgXhr.responseText) {
-            cfg = JSON.parse(cfgXhr.responseText);
+        function inject(src, onload) {
+          var s = document.createElement("script");
+          s.src = src;
+          s.onload = onload || null;
+          document.head.appendChild(s);
+        }
+        function log(stage) {
+          if (typeof window.logToHost === "function") {
+            window.logToHost({ kind: "boot", stage: stage, at: new Date().toISOString() });
           }
-        } catch (e) {}
-        window.APP_CONFIG = cfg;
-        window.appGlobals = cfg.appGlobals || {};
-        window.APP_VERSION = "dev-" + Date.now();
+        }
+        function boot(cfg) {
+          cfg = cfg || {};
+          window.APP_CONFIG = cfg;
+          window.appGlobals = cfg.appGlobals || {};
+          window.APP_VERSION = "dev-" + Date.now();
+          inject("/__shell/helpers.js", function () {
+            log("before-xmlui-load");
+            inject("/__vendor/xmlui-standalone.umd.js?v=" + Date.now(), function () {
+              log("after-xmlui-load");
+            });
+          });
+        }
+        fetch("config.json?_=" + Date.now())
+          .then(function (r) { return r.ok ? r.json() : {}; })
+          .then(boot)
+          .catch(function () { boot({}); });
       })();
-    </script>
-    <script src="/__shell/helpers.js"></script>
-    <script>
-      logToHost({ kind: "boot", stage: "before-xmlui-load", at: new Date().toISOString() });
-    </script>
-    <script>
-      document.write('<script src="/__vendor/xmlui-standalone.umd.js?v=' + Date.now() + '"><\/script>');
-    </script>
-    <script>
-      logToHost({ kind: "boot", stage: "after-xmlui-load", at: new Date().toISOString() });
     </script>
   </head>
   <body></body>

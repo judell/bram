@@ -29,6 +29,14 @@
     id="worklist"
     url="/__worklist"
     onLoaded="(d) => expandedKeys = window.__bramPruneWorklist2Expansion(d && d.items ? d.items.map(i => i.id) : [])" />
+  <!-- The component-local selection resets on a Worklist remount, but the
+       Footer's shared selection bridge survives it. Reconcile on the
+       authoritative item set so a prune/remount publishes [] instead of
+       leaving buttons lit for an id whose row no longer exists. Surviving
+       selected ids are retained. -->
+  <ChangeListener
+    listenTo="{worklist.value &amp;&amp; worklist.value.items}"
+    onDidChange="() => worklist2Selected = window.__bramSelectionIds(worklist.value &amp;&amp; worklist.value.items, worklist2Selected)" />
   <!-- one-click-approve-commit-shared-setting: the host enforces this
        setting for apply-and-commit from every Worklist surface. Default
        on while the config loads, matching the host's missing-key default;

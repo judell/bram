@@ -2619,6 +2619,24 @@ window.__bramWorklistStripAnomaly = function (item, claim, cs) {
 window.__bramWorklist2RowClaimed = function (claim, itemId) {
   return !!window.__bramItemInflightKind(claim, itemId, "", "", 0);
 };
+
+// Can this row's checkbox be toggled right now?
+//
+// The board already serializes decisions while a claim is in flight -- every
+// gate button reads `__bramInflightBlocker`, "the single reason buttons ever
+// disable". The checkboxes did not: only the CLAIMED row was locked, so an
+// unrelated item could still be ticked while another said "Iterating…". That
+// builds a selection whose every action is disabled, and it obscures which
+// item owns the turn.
+//
+// Same fact, same lock: while any claim is live no row changes. The claimed
+// row stays visibly ticked (its `initialValue` already reports the claim), so
+// the selection remains represented but inert, and ordinary selection resumes
+// the moment the claim clears -- no local latch to go stale if the claim is
+// cleared by a turn-completion detector rather than by us.
+window.__bramWorklist2RowSelectable = function (claim) {
+  return !window.__bramInflightBlocker(claim);
+};
 window.__bramWorklist2Begun = function (item, claim) {
   if (!item) return false;
   if ((item.status || "proposed") === "applied") return true;

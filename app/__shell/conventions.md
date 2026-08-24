@@ -432,7 +432,9 @@ serves an empty default; the Worklist tab creates the file (and
    message in the box beside the buttons, and clicks one of them. The
    message fans out to every selected item, so a plural payload's items
    may carry identical feedback text; treat each item's feedback on its
-   own terms. All action buttons emit the same payload
+   own terms, but answer identical fanned-out feedback **once** in chat,
+   never repeated per item — the per-item copies belong to the items'
+   histories, not the transcript. All action buttons emit the same payload
    shape: `{"items":[{"id":"...","feedback":"..."}, ...]}`
    — ids plus optional per-item feedback. Never parse these turn lines
    for content yourself; `/__worklist/resolve` returns the recorded

@@ -528,6 +528,32 @@ round-trip. Its return value is dead weight for an apply — the bodies are
 the proposal you authored. So an apply-approve is one call: edit from the
 proposal, then `mutate op:"advance"`.
 
+**The third outcome: approved, investigated, nothing to apply.** An approve
+gate has three endings, not two. Besides "work applied" and "work applied and
+committed", there is the case where the first step of the approved item
+falsifies its own premise — the investigation shows the change is unnecessary,
+or the hypothesis it rested on is wrong. This is a normal ending, not a
+failure, and it has its own handling:
+
+- **Do not `mutate op:"advance"`.** Advancing asserts the work is on disk. It
+  is not, and marking the item `applied` produces a row with nothing to
+  commit.
+- **Retire the claim explicitly.** The host set the inflight sentinel at
+  approval time and nothing on this path clears it, so the spinner runs and —
+  because row selection is locked while a claim is live — the user cannot even
+  click Drop to resolve it. Call
+  `POST /__worklist/end` with `{"ids": [...]}` naming the approved ids.
+  Both the method and the body are required; a `GET` returns `POST only` and
+  an empty body returns `{"error":"ids[] required"}`.
+- **Report the finding in chat and recommend Drop**, exactly as the
+  *investigation reveals nothing to commit* guidance above prescribes for the
+  `advance` case. This extends that rule to cover the claim.
+
+Live case, 2026-08-24: `issue-275-transcript-row-remount-churn` was approved to
+apply, its first step disproved the item's own hypothesis, no files changed,
+and no lifecycle call was correct to make. The claim stayed live and locked the
+row until it was unwound by hand.
+
 **Apply-and-commit gate: skip `advance` — edit if needed, then
 `worklist-commit`.** `gate: "apply-and-commit"` is no longer only the
 pre-approval one-click **Approve & commit** button's payload. As of
@@ -1202,8 +1228,14 @@ JSONL `task_complete`, PTY silence, and explicit cancellation paths. Most
 commonly:
 
 - **Approved/drop stuck:** `mutate` was never called, or errored
-  before the clear. Recovery: call mutate manually, or restart Bram
-  (`cleanup_stale_inflight_claim` runs at startup).
+  before the clear — or the turn ended in the third outcome above, where
+  no `mutate` was ever *correct* to call. Recovery, in order:
+  `POST /__worklist/end` with `{"ids": [...]}` naming the claimed ids (the
+  route is not iterate-specific, despite appearing only under *Iterate stuck*
+  in earlier revisions of this file); or call `mutate` manually if the work
+  really is on disk; or restart Bram (`cleanup_stale_inflight_claim` runs at
+  startup), which is the heaviest option and ends any agent session running
+  inside it.
 - **Iterate stuck:** rare now that the host auto-detects the
   `iterate:` prefix and the turn-finished clearer fires for all
   sentinel kinds. If it does stick, host-side completion detectors

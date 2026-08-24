@@ -456,7 +456,12 @@ file / event reference.
   - `iterate` — written by the host on the `toTurn` write path when an
     `iterate:` prefix is detected; cleared by the same turn-finished
     detectors that clear `approved` and `drop` sentinels.
-    `POST /__worklist/end` remains as the explicit manual unwind.
+    `POST /__worklist/end` remains as the explicit manual unwind. It is
+    **not iterate-specific** — it is the correct unwind for any live claim,
+    including an `approved` claim whose turn ended with nothing to apply.
+    Body: `{"ids": [...]}` naming the claimed ids. Both are required; a
+    `GET` returns `POST only`, and an empty body returns
+    `{"error":"ids[] required"}`.
 - **Coverage rule for clears.** `clear` operations are no-ops unless
   every id currently claimed is in the supplied ids. Partial coverage
   intentionally leaves the file in place — a stuck sentinel is the

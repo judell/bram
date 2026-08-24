@@ -42539,6 +42539,18 @@ fn write_pending_issue_closes(path: &Path, records: &[PendingIssueClose]) -> Res
     std::fs::write(path, format!("{}\n", body)).map_err(|e| e.to_string())
 }
 
+// issue-close-enqueue-flush-race: one lock for EVERY writer of the close
+// queue file. FLUSH_LOCK (now this) serialized flush-vs-flush (#266's
+// double-close), but the commit-gate enqueue was a third, unlocked writer —
+// and every close-carrying commit fires the refs-watch flush at the same
+// instant it enqueues, so the flush's snapshot-read/probe/write-back span
+// clobbered the enqueue landing inside it (live 2026-08-24: 73f5a92's
+// close-issue: 277 enqueued, audit-recorded, and gone).
+fn issue_close_queue_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 // Enqueue a close intent, deduped by (issue, commit_sha). A later record for
 // the same pair updates the comment (the dialog's last word wins) but never
 // duplicates.
@@ -42621,6 +42633,9 @@ fn enqueue_issue_closes_from_auth<R: tauri::Runtime>(
     let Some(path) = issue_close_queue_file(app) else {
         return;
     };
+    let _guard = issue_close_queue_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     // Recorded once per commit: the rebase-stable identity the flush falls
     // back to when the Push button's auto-rebase rewrites this SHA.
     let patch_id = project_root(Some(app)).and_then(|root| git_commit_patch_id(&root, commit_sha));
@@ -42637,6 +42652,16 @@ fn enqueue_issue_closes_from_auth<R: tauri::Runtime>(
             if let Err(e) = enqueue_pending_issue_close_path(&path, record) {
                 eprintln!("[issue-close-queue] enqueue #{} failed: {}", issue, e);
             } else {
+                // The audit ledger caught the 2026-08-24 clobber while the
+                // trace was blind to it: the queue's writes belong in the
+                // same grep as its flushes.
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        app,
+                        "issue-close-queue",
+                        &format!("op=enqueued issue={} sha={}", issue, commit_sha),
+                    );
+                }
                 // issue-257: the ledger carried only authorization and commit
                 // records, so "did Bram close this, when, against what?" was
                 // unanswerable once the opt-in trace rotated away.
@@ -42736,9 +42761,7 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>, trigger: &s
     // comments one second apart. Under the lock the second trigger re-reads
     // and finds pending=0 — its flush honestly reports nothing to do, which
     // is this fix's regression signature.
-    static FLUSH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    let _guard = FLUSH_LOCK
-        .get_or_init(|| Mutex::new(()))
+    let _guard = issue_close_queue_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let Some(path) = issue_close_queue_file(app) else {

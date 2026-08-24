@@ -308,33 +308,31 @@
                upstream as xmlui-org/xmlui#3814). Contrast matched to
                Search's facet chips via theme vars:
                https://www.xmlui.org/docs/howto/theme-badge-colors-and-sizes -->
-          <!-- The stage, icon-only in a FIXED-WIDTH slot so it forms a column
-               you can read vertically without reading any row. Fixed rather
-               than content-sized because a ragged pseudo-column is what makes
-               scanning fail; with the label gone the slot only has to hold one
-               glyph.
-
-               ✓ / ✓✓ counts what is DONE behind the item — one, the proposal
-               exists; two, the work exists too — so nothing claims completion
-               the way a lone check did. The label moves to the tooltip, which
-               Icon supports as cross-cutting TooltipBehavior (absent from its
-               properties page, wired in Icon.tsx) and which also feeds
-               aria-label, so the words survive for screen readers rather than
-               being dropped. -->
-          <!-- Four states, in a FIXED-WIDTH slot so they form a column you
-               read vertically without reading any row. Colour carries WHOSE
-               TURN — full strength for the two states waiting on you, muted
-               for the two waiting on the agent — because that binary is the
-               fact that decides whether you act, and colour is seen before the
-               glyph resolves. Shape says which of the four; the tooltip
-               carries the words (Icon feeds it to aria-label too). -->
-          <HStack width="1.75rem" verticalAlignment="center" horizontalAlignment="center">
-            <Icon
-              name="{window.__bramWorklist2Stage($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items).icon}"
-              size="md"
-              color="{window.__bramWorklist2Stage($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items).yours ? '$textColor-primary' : '$textColor-secondary'}"
-              tooltip="{window.__bramWorklist2Stage($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items).label}" />
-          </HStack>
+          <!-- The stage glyph column is GONE (2026-08-24). It sat in a
+               fixed-width slot precisely so state could be read vertically
+               without reading any row - but the strip beside it already names
+               the same state in words, three characters to the right, so the
+               glyph said nothing the word did not and cost a legend to learn.
+               Same argument that retired the per-item colours: an accelerator
+               that stopped paying for itself.
+               The four designed states collapsed to three in practice (Jon:
+               "with the agent, proposed, and will commit are the only three
+               states you are likely to see"), and encoding that few as shapes
+               is a legend for a distinction nobody needed help with.
+               What was genuinely lost: the glyphs formed a straight left edge,
+               and the strip text cannot, since it trails a variable-length id.
+               That was judged not load-bearing because the states differ by
+               length and colour, not subtly - a lone "Will commit +70 -2 ..."
+               row is unmissable among "Proposed" rows. If state-scanning ever
+               does get hard at higher density, the fix is an aligned column for
+               the TEXT, not new glyphs - and note the 18rem fixed-width badge
+               slot tried earlier wrapped to two lines and was worse than the
+               raggedness it fixed.
+               `__bramWorklist2Stage` is now DEAD - the icon was its only
+               caller, so `.icon`, `.label` and `.yours` all have zero consumers.
+               Left in `helpers.js` rather than deleted in this edit, which
+               would mean separating hunks in a file already carrying another
+               item's uncommitted work. Its removal is a follow-up. -->
           <!-- The badge carries the item's colour, and the Shared files
                table's claimant names carry the same one, so a claimant can be
                matched to its row without reading either id. -->

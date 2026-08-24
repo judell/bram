@@ -2718,6 +2718,22 @@ window.__bramJoinIds = function (ids) {
   return (ids || []).join(" \u00b7 ");
 };
 
+// Changed files no item declares. The host computes the set (the client
+// cannot -- /__worklist carries changedFiles per item, scoped to that item's
+// own paths, so a path nobody declares appears in nobody's payload).
+//
+// TRIPWIRE, not a soak observer: the normal state is zero rows, so zero is
+// success rather than absent evidence -- and a tripwire's zero looks identical
+// to a dead instrument's zero. Its provenance check is a deliberate fire:
+// change a file no item declares, see the row, revert, see it clear.
+window.__bramUnclaimedChangedFiles = function (worklistValue) {
+  return (worklistValue && worklistValue.unclaimedChangedFiles) || [];
+};
+
+window.__bramHasUnclaimedChanges = function (worklistValue) {
+  return window.__bramUnclaimedChangedFiles(worklistValue).length > 0;
+};
+
 window.__bramOverlapIndex = function (items, claim) {
   var list = items || [];
   var byId = {};

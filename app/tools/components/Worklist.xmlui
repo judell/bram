@@ -194,6 +194,34 @@
           <Text overflowMode="flow" value="{window.__bramJoinIds($item.claimants)}" />
         </Column>
       </Table>
+      <!-- Changed files no item declares.
+           Same table, same idiom, because it answers the same question one
+           step further out: the rows above say who claims a contested file,
+           this says which changed files nobody claims at all. That matters
+           because the pane does not treat such a file as belonging to nobody
+           -- it credits it to whichever begun item happens to declare the
+           path, and it is then committable under that item's id and message
+           (see the drop convention, d44e112).
+           Reports only. Deliberately no auto-revert, auto-assign, or
+           drop-blocking: both live cases had a defensible resolution and they
+           were different ones -- one wanted a revert, the other wanted the
+           work re-homed. -->
+      <VStack
+        when="{window.__bramHasUnclaimedChanges(worklist.value)}"
+        gap="$space-1"
+        paddingTop="$space-3">
+        <Text
+          fontWeight="$fontWeight-bold"
+          color="$color-warn-700"
+          value="Not claimed by any item" />
+        <Text
+          fontSize="$fontSize-sm"
+          color="$textColor-secondary"
+          value="Changed on disk, declared by no item — committable under whichever item claims the path." />
+        <Items data="{window.__bramUnclaimedChangedFiles(worklist.value)}">
+          <Text value="{$item}" variant="code" fontSize="$fontSize-sm" />
+        </Items>
+      </VStack>
     </VStack>
     <!-- worklist2-new-item-parity: thin composition of existing pieces.
          IsolatedDraftEditor brings the placeholder protocol, voice, paste

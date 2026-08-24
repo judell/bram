@@ -45118,6 +45118,72 @@ fn route_request<R: tauri::Runtime>(
                 }
             }
         }
+        // Changed files that NO item declares.
+        //
+        // Every other surface reasons about changed files through item.files,
+        // so a path no item declares is not shown as belonging to nobody -- it
+        // is credited to whichever begun item happens to declare it, and is
+        // committable under that item's id (see the drop convention landed in
+        // d44e112, and the two live cases behind it). This is the one set
+        // nothing computed: the client cannot derive it, because /__worklist
+        // carries changedFiles per item scoped to that item's own paths.
+        //
+        // Ambient churn is excluded or the indicator is never zero, and a
+        // tripwire whose normal state is non-zero is noise rather than signal:
+        // `resources/` is host-managed runtime state (worklist, drafts,
+        // traces, port files) and the settings files are the user's, so
+        // neither is ever item work. Everything else counts -- including an
+        // untracked file nobody declared, which is exactly the orphan case
+        // (the dropped explorer left vendored bundles that way).
+        let claimed: std::collections::HashSet<String> = doc
+            .get("items")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .flat_map(|item| {
+                        let mut out: Vec<String> = Vec::new();
+                        if let Some(fs) = item.get("files").and_then(|v| v.as_array()) {
+                            for f in fs {
+                                if let Some(p) = f.as_str() {
+                                    out.push(p.to_string());
+                                }
+                            }
+                        }
+                        if let Some(p) = item.get("file").and_then(|v| v.as_str()) {
+                            out.push(p.to_string());
+                        }
+                        out
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut unclaimed: Vec<serde_json::Value> = Vec::new();
+        let porcelain = git_run(app, &["status", "--porcelain", "--no-renames"])
+            .unwrap_or_default();
+        for line in porcelain.lines() {
+            if line.len() < 4 {
+                continue;
+            }
+            let path = line[2..].trim_start().trim_matches('"').to_string();
+            if path.is_empty()
+                || path.starts_with("resources/")
+                || path == ".bram.json"
+                || path == ".xmlui-desktop.json"
+                || claimed.contains(&path)
+            {
+                continue;
+            }
+            unclaimed.push(serde_json::Value::String(path));
+        }
+        unclaimed.sort_by(|a, b| a.as_str().unwrap_or("").cmp(b.as_str().unwrap_or("")));
+        if let Some(obj) = doc.as_object_mut() {
+            // Always present, so the pane never has to tell absent from empty.
+            obj.insert(
+                "unclaimedChangedFiles".to_string(),
+                serde_json::Value::Array(unclaimed),
+            );
+        }
         observe_pending_advances(app, &doc);
         let body = serde_json::to_vec(&doc).unwrap_or_default();
         return (200, "application/json; charset=utf-8", body);

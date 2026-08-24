@@ -30,6 +30,12 @@
           <Link when="{$item.commitUrl}" noIndicator onClick="openExternal($item.commitUrl)">
             <Text value="view commit" fontSize="$fontSize-sm" />
           </Link>
+          <!-- issue-277 A2: an orphaned SHA's forge link would never heal
+               (a rebase rewrote the commit), so say so instead of linking —
+               a dead link renders identically to a live one. -->
+          <Text when="{$item.commitStatus === 'orphaned'}"
+            value="recorded commit was orphaned by a rebase — forge link removed (see #277)"
+            color="$textColor-secondary" fontSize="$fontSize-sm" />
         </VStack>
 
         <VStack when="{$item.kind === 'before'}" gap="$space-2">

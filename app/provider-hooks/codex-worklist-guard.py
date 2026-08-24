@@ -37,6 +37,7 @@ crossboundary_signature_verdict.
 import json
 import os
 import re
+import subprocess
 import sys
 
 NL = chr(10)
@@ -581,6 +582,44 @@ def crossboundary_signature_verdict(command, cwd):
     if body_is_signed(body):
         return "signed", reason
     return "unsigned", reason
+
+
+# issue-277 B: a full 40-hex SHA written into a forge artifact is
+# uncheckable by eye and 404s silently when fabricated or orphaned by a
+# rebase. Verify each one locally before the write leaves the machine.
+# Short SHAs deliberately out of scope (false positives); the \b
+# boundaries mean a longer hex run (e.g. a sha256) never yields a
+# 40-char window. Fails open like the signature check: unreadable body
+# and git errors pass; only a positive local miss denies.
+_FULL_SHA_RX = re.compile(r"\b[0-9a-f]{40}\b")
+
+
+def forge_sha_verdict(command, cwd):
+    """('skip'|'ok'|'unparsed'|'bad', detail) for full SHAs in a forge write."""
+    if not isinstance(command, str) or not command:
+        return "skip", "no-command"
+    if not _FORGE_WRITE_RX.search(command):
+        return "skip", "not-forge-write"
+    body, reason = crossboundary_body(command, cwd)
+    if body is None:
+        return "unparsed", reason
+    shas = sorted(set(_FULL_SHA_RX.findall(body)))
+    if not shas:
+        return "ok", "no-full-shas"
+    for sha in shas:
+        try:
+            probe = subprocess.run(
+                ["git", "cat-file", "-e", sha + "^{commit}"],
+                cwd=cwd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        except Exception:
+            return "unparsed", "git-unavailable"
+        if probe.returncode != 0:
+            return "bad", sha
+    return "ok", "verified:" + str(len(shas))
 
 
 # MCP tool naming convention is `mcp__<server>__<tool>` (verified in
@@ -1503,6 +1542,34 @@ def main():
                 (cmd or "")[:200],
                 "allow",
                 "crossboundary-" + _cb_verdict + ":" + _cb_detail,
+                cwd,
+            )
+        # issue-277 B: full-SHA verification, same trigger and fail-open
+        # terms as the signature check above. Non-terminal on pass.
+        _sha_verdict, _sha_detail = forge_sha_verdict(cmd or "", cwd)
+        if _sha_verdict == "bad":
+            _trace_hook(
+                "PreToolUse",
+                "Bash",
+                (cmd or "")[:200],
+                "deny",
+                "forge-sha-unresolved:" + _sha_detail,
+                cwd,
+            )
+            deny(
+                "The body contains a full commit SHA that does not resolve in "
+                "this repository:\n    " + _sha_detail + "\n"
+                "A fabricated or rebase-orphaned SHA renders as an ordinary "
+                "link and 404s silently. Resolve the real hash with "
+                "`git rev-parse <short-sha>` and retry. See judell/bram#277."
+            )
+        elif _sha_verdict in ("ok", "unparsed") and _sha_detail != "not-forge-write":
+            _trace_hook(
+                "PreToolUse",
+                "Bash",
+                (cmd or "")[:200],
+                "allow",
+                "forge-sha-" + _sha_verdict + ":" + _sha_detail,
                 cwd,
             )
         if not bash_writes(cmd):

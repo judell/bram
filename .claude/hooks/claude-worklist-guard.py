@@ -38,6 +38,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 
 NL = chr(10)
@@ -347,6 +348,51 @@ def crossboundary_signature_verdict(command, cwd):
     if body_is_signed(body):
         return "signed", reason
     return "unsigned", reason
+
+
+# issue-277 B: a full 40-hex SHA written into a forge artifact is
+# uncheckable by eye (right length, right alphabet, the short prefix is
+# usually correct) and 404s silently when fabricated or orphaned by a
+# rebase. Verify each one locally before the write leaves the machine.
+# Short SHAs are deliberately out of scope — too many false positives
+# against ordinary hex in prose. The \b boundaries mean a longer hex run
+# (e.g. a sha256) never yields a 40-char window.
+_FULL_SHA_RX = re.compile(r"\b[0-9a-f]{40}\b")
+
+
+def forge_sha_verdict(command, cwd):
+    """('skip'|'ok'|'unparsed'|'bad', detail) for full SHAs in a forge write.
+
+    Fails open on the signature check's terms: a body that cannot be read
+    is allowed through ('unparsed'), and so is any git error — the check
+    only ever denies on a positive local determination that a named
+    40-hex string is not a commit in this repo. That also catches the
+    rebase-orphan case: a rewritten commit's old SHA stops resolving.
+    """
+    if not isinstance(command, str) or not command:
+        return "skip", "no-command"
+    if not _FORGE_WRITE_RX.search(command):
+        return "skip", "not-forge-write"
+    body, reason = crossboundary_body(command, cwd)
+    if body is None:
+        return "unparsed", reason
+    shas = sorted(set(_FULL_SHA_RX.findall(body)))
+    if not shas:
+        return "ok", "no-full-shas"
+    for sha in shas:
+        try:
+            probe = subprocess.run(
+                ["git", "cat-file", "-e", sha + "^{commit}"],
+                cwd=cwd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        except Exception:
+            return "unparsed", "git-unavailable"
+        if probe.returncode != 0:
+            return "bad", sha
+    return "ok", "verified:" + str(len(shas))
 
 
 # Worklist lifecycle routes are single-claimant: one inflight sentinel, one
@@ -1202,6 +1248,37 @@ def main():
                 preview,
                 "allow",
                 "crossboundary-" + cb_verdict + ":" + cb_detail,
+                cwd,
+            )
+        # issue-277 B: full-SHA verification, same trigger and fail-open
+        # terms as the signature check above. Non-terminal on pass.
+        sha_verdict, sha_detail = forge_sha_verdict(command, cwd)
+        if sha_verdict == "bad":
+            _trace_hook(
+                "PreToolUse",
+                "Bash",
+                preview,
+                "deny",
+                "forge-sha-unresolved:" + sha_detail,
+                cwd,
+            )
+            print(
+                "The body contains a full commit SHA that does not resolve in "
+                "this repository:\n    " + sha_detail + "\n"
+                "A fabricated or rebase-orphaned SHA renders as an ordinary "
+                "link and 404s silently. Resolve the real hash with "
+                "`git rev-parse <short-sha>` (or `git log --oneline`) and "
+                "retry. See judell/bram#277.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        elif sha_verdict in ("ok", "unparsed") and sha_detail != "not-forge-write":
+            _trace_hook(
+                "PreToolUse",
+                "Bash",
+                preview,
+                "allow",
+                "forge-sha-" + sha_verdict + ":" + sha_detail,
                 cwd,
             )
         sl_verdict, sl_detail = subagent_lifecycle_verdict(

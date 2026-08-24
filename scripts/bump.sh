@@ -80,10 +80,54 @@ fi
 echo "Fetching origin..."
 git fetch origin --quiet
 
+# issue-277 A1: worklist-history entries embed full-SHA forge URLs, and a
+# rebase orphans them permanently (unlike unpushed links, which heal on
+# push). The behind-origin error below steers the user into exactly that
+# rebase, so check the recorded SHAs first and name any entry whose commit
+# is no longer an ancestor of HEAD — orphaning becomes a decision instead
+# of a silent side effect discovered as dead History-tab links.
+HIST_DIR="resources/worklist-history"
+if [ -d "$HIST_DIR" ]; then
+  # Scope to entries newer than the last release tag: a first full-history
+  # scan found 71 orphans accumulated over months, and re-prompting about
+  # all of them on every release forever is noise. The decision this
+  # preflight exists to surface is the CURRENT release window's.
+  CUTOFF_MS=0
+  LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
+  if [ -n "$LAST_TAG" ]; then
+    CUTOFF_MS=$(( $(git log -1 --format=%ct "$LAST_TAG") * 1000 ))
+  fi
+  ORPHANS=""
+  for f in "$HIST_DIR"/*.md; do
+    [ -e "$f" ] || continue
+    ENTRY_MS=$(basename "$f" .md)
+    case "$ENTRY_MS" in *[!0-9]*) ENTRY_MS=0 ;; esac
+    [ "$ENTRY_MS" -ge "$CUTOFF_MS" ] || continue
+    for sha in $(grep -ohE '\b[0-9a-f]{40}\b' "$f" | sort -u); do
+      if ! git merge-base --is-ancestor "$sha" HEAD 2>/dev/null; then
+        ORPHANS="$ORPHANS
+  $f: $sha"
+      fi
+    done
+  done
+  if [ -n "$ORPHANS" ]; then
+    echo "warning: worklist-history entries reference commits that are not ancestors of HEAD" >&2
+    echo "         (rebase-orphaned History links — see judell/bram#277):$ORPHANS" >&2
+    printf "Release anyway? [y/N] " >&2
+    read -r REPLY || REPLY=""
+    case "$REPLY" in
+      y|Y|yes|YES) ;;
+      *) echo "aborted" >&2; exit 1 ;;
+    esac
+  fi
+fi
+
 AHEAD_OF_LOCAL=$(git rev-list "HEAD..origin/$BRANCH" --count)
 if [ "$AHEAD_OF_LOCAL" -ne 0 ]; then
   echo "error: local '$BRANCH' is $AHEAD_OF_LOCAL commit(s) behind origin/$BRANCH" >&2
   echo "       pull or rebase before releasing" >&2
+  echo "       note: rebasing rewrites local commits recorded by worklist-history;" >&2
+  echo "       rerun bump.sh afterward and the preflight above will name any orphans" >&2
   exit 1
 fi
 

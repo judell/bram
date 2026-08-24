@@ -1413,6 +1413,15 @@ commit gate. Prefer a follow-up commit. (Found 2026-08-22 while deciding whether
 to amend `626e73d`: the rewrite would have broken the very file-link feature
 that commit introduced, in Bram's own history.)
 
+Since #277 the tooling holds this line with you rather than against you:
+`scripts/bump.sh` preflights the current release window's history entries
+and names any whose SHA is no longer an ancestor of HEAD before the
+behind-origin error steers you into a rebase; the History tab marks an
+orphaned entry ("orphaned by a rebase") instead of rendering a dead forge
+link; and both provider guards deny a forge write whose body contains a
+full 40-hex SHA that does not resolve locally — which catches fabricated
+hashes and rebase-orphaned citations with the same test.
+
 ### Don't quote unpushed-commit counts in chat
 
 After a commit lands, confirm with its short SHA and subject and stop.

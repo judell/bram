@@ -42027,6 +42027,12 @@ struct WorklistHistoryPhase {
     changelog: String,
     diff: String,
     commit_url: String,
+    // issue-277 A2: local classification of the recorded SHA. "" = no
+    // commit or not checked; "ok" = ancestor of HEAD; "orphaned" = the
+    // commit no longer exists in this history (a rebase rewrote it, or
+    // the hash never resolved) — its forge link will never heal, unlike
+    // an unpushed commit's, which 404s only until the next push.
+    commit_status: String,
     // Markdown body for kind:"feedback" phases (the user's iterate note,
     // woven in chronologically). Empty for transition/snapshot phases.
     body: String,
@@ -42162,6 +42168,32 @@ fn visible_worklist_history_commit_url<R: tauri::Runtime>(
             );
             String::new()
         }
+    }
+}
+
+// issue-277 A2: classify the recorded SHA against the local repository.
+// Local and instant (one git spawn), unlike the gh visibility probe, and it
+// answers a different question: visibility says "is it on origin yet",
+// ancestry says "can it EVER be" — a rebase-orphaned SHA fails ancestry
+// forever while an unpushed one passes and heals on push.
+fn worklist_history_commit_status<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    raw_url: &str,
+) -> String {
+    let Some((_slug, sha)) = parse_github_commit_url(raw_url) else {
+        return String::new();
+    };
+    let Some(root) = project_root(Some(app)) else {
+        return String::new();
+    };
+    match std::process::Command::new("git")
+        .current_dir(&root)
+        .args(["merge-base", "--is-ancestor", &sha, "HEAD"])
+        .status()
+    {
+        Ok(st) if st.success() => String::from("ok"),
+        Ok(_) => String::from("orphaned"),
+        Err(_) => String::new(),
     }
 }
 
@@ -43339,8 +43371,17 @@ fn recent_worklist_history_groups<R: tauri::Runtime>(
         let changelog = std::fs::read_to_string(&md_path).unwrap_or_default();
         let summary = worklist_history_summary(&changelog);
         let raw_commit_url = worklist_history_commit_url(&changelog);
+        let commit_status = if skip_commit_resolution {
+            String::new()
+        } else {
+            worklist_history_commit_status(app, &raw_commit_url)
+        };
         let commit_url = if skip_commit_resolution {
             raw_commit_url.trim().to_string()
+        } else if commit_status == "orphaned" {
+            // A dead link is worse than no link; the pane renders the
+            // orphaned note from commit_status instead.
+            String::new()
         } else {
             visible_worklist_history_commit_url(app, &raw_commit_url, repo_slug.as_deref())
         };
@@ -43382,6 +43423,7 @@ fn recent_worklist_history_groups<R: tauri::Runtime>(
                     changelog: String::new(),
                     diff: cap_history_diff(&diff),
                     commit_url: commit_url.clone(),
+                    commit_status: commit_status.clone(),
                     body: String::new(),
                 };
                 let group_idx = match by_id.get(&id).copied() {
@@ -43457,6 +43499,7 @@ fn recent_worklist_history_groups<R: tauri::Runtime>(
                 changelog: String::new(),
                 diff: String::from("No single item diff is available for this snapshot."),
                 commit_url,
+                commit_status,
                 body: String::new(),
             };
             groups.push(WorklistHistoryGroup {
@@ -43507,6 +43550,7 @@ fn recent_worklist_history_groups<R: tauri::Runtime>(
                 changelog: String::new(),
                 diff: String::new(),
                 commit_url: String::new(),
+                commit_status: String::new(),
                 body: body.clone(),
             });
         }

@@ -33,13 +33,14 @@
     listenTo="{gateSel.value}"
     onDidChange="() => window.__bramIframeTrace('w2-selection', {op: 'receive', count: (gateSel.value || []).length, render: (gateSel.value || []).length > 0, store: (window.__bramW2Selection || []).length})" />
 
-  <!-- commit-granularity-and-start-consequence C: the consequential click is
-       Start, not Commit. Starting two items that share a path is what makes
-       `__bramItemChangedSplit(...).exclusive` empty for BOTH, so neither offers
-       Commit afterwards - together or separately, since the `SweepsShared`
-       rescue also requires `AllCommittable`. The exits are advancing one to
-       `applied` (which skips the exclusivity check and sweeps the other's
-       hunks) or the manual split-shared-files pass.
+  <!-- gate-button-combo-explainer: why THIS button combo, for the current
+       selection. The line is derived in `__bramStartConsequence` from the
+       same predicates that light the buttons (begun-ness via
+       `__bramWorklist2Begun`, exclusivity via `__bramItemChangedSplit`), and
+       may only name a lit action - or a dim one together with why it is dim
+       and the selection change that would light it. Empty for unsurprising
+       combos: an always-on explainer is furniture (the deleted 2026-08-23
+       matrix's lesson).
        A message, never a block: shipping two items as one change is legitimate,
        and the gate's job is to inform the decision rather than make it - the
        same reasoning that keeps unclaimed-changes detection report-only.
@@ -48,15 +49,52 @@
   <!-- Centered by an HStack wrapper, matching the button row below. A bare
        `horizontalAlignment` on the Text centers content INSIDE the Text's own
        box, which is content-sized - so the line sat wherever its box landed
-       rather than centered in the footer. -->
+       rather than centered in the footer. The Text takes width="100%" because
+       text wraps by default only in a width-constrained container
+       (xmlui.org/docs/howto/wrap-long-text-in-a-link); content-sized, the
+       long explainer wordings overflowed the footer edge-to-edge unwrapped.
+       Left-justified (Text's default): centered multi-line prose reads
+       ragged both sides; the wrapped explainer scans better flush left. -->
+  <!-- worklist.gateExplainer: held in RESERVE, not a product surface. A
+       .bram.json that says nothing about it never produces the explainer,
+       and there is deliberately no Settings toggle — hand-edit .bram.json
+       to bring it back for a debugging/wording exercise (0.5.3 gate run:
+       useful for articulating the messages in context, not wanted as
+       permanent UI). -->
   <HStack
-    when="{!!window.__bramStartConsequence(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)}"
+    when="{gateConfig.value &amp;&amp; gateConfig.value.gateExplainer === true &amp;&amp; !!window.__bramStartConsequence(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)}"
     horizontalAlignment="center"
-    paddingHorizontal="$space-4"
+    paddingHorizontal="$space-8"
     paddingTop="$space-1">
     <Text
-      value="{window.__bramStartConsequence(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)}"
-      textAlign="center" />
+      width="100%"
+      value="{window.__bramStartConsequence(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)}" />
+  </HStack>
+  <!-- commit-granularity share-mode choice, moved here from the page body
+       (0.5.3 gate run: "the radio group belongs above the buttons in the
+       footer otherwise can get lost below the fold like the buttons did").
+       Writes the window store the gate actions already read
+       (__bramW2ShareMode / __bramW2SetShareMode); the page no longer renders
+       it. Original design rationale (why the control exists whenever 2+
+       committable items are selected, entangled or not) lives in git history
+       at Worklist.xmlui, commit-granularity A+B. -->
+  <!-- `when` carries the full expression rather than a same-element var:
+       a `var.` declared on an element scopes to its CHILDREN, so a `when`
+       on that element referencing it fails silently and the control never
+       renders (caught live, first render after the move). -->
+  <HStack
+    var.shareChoiceEntangled="{window.__bramSelectionSharesFiles(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)}"
+    var.shareSplitLabel="{shareChoiceEntangled ? 'A commit each — the agent will separate them' : 'A commit each — selected items land separately'}"
+    when="{(gateSel.value || []).length >= 2 &amp;&amp; window.__bramSelectionAllCommittable(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)}"
+    horizontalAlignment="center"
+    paddingHorizontal="$space-8"
+    paddingTop="$space-1">
+    <RadioGroup
+      initialValue="{window.__bramW2ShareMode}"
+      onDidChange="(v) => window.__bramW2SetShareMode(v)">
+      <Option value="together" label="One commit — selected items land together" />
+      <Option value="split" label="{shareSplitLabel}" />
+    </RadioGroup>
   </HStack>
   <HStack
     when="{(gateSel.value || []).length > 0}"

@@ -2222,6 +2222,11 @@ window.__bramSelectionAllNeedStart = function (items, sel, claim) {
     // two disagreed about the same row. Testing it here is what survived the
     // icon column (6d5d05b) -- the property outlived the glyphs that showed
     // it.
+    //
+    // (An earlier oneClickApproveCommit setting made "committable" config-
+    // dependent, and a hardcoded `true` here produced a Drop-only dead-end
+    // row when the flag was off — 0.5.3 gate run, Phase 9. The setting was
+    // retired in that same run; committable is unconditional again.)
     return !window.__bramSelectionAllCommittable(list, [i.id], claim);
   });
 };
@@ -2666,22 +2671,166 @@ window.__bramSelectionSharesFiles = function (items, sel, claim) {
   return window.__bramSelectionSharedFileCount(items, sel, claim) > 0;
 };
 
-// The Start-time consequence line. Empty string when there is nothing to say,
-// so the caller is one binding with no ternary.
+// Names offending items instead of counting them. A bare count collides with
+// the ordinal reading -- "1 already has changes" parses just as easily as
+// "item number 1" -- and a count cannot be acted on, while a name can be
+// unticked. (Resurrected from the 2026-08-23 gate-explainer attempt.)
+window.__bramNameList = function (ids, max) {
+  var n = ids || [];
+  // Cap 2: real item ids are long kebab-case names, and three of them turn a
+  // one-line explainer into a paragraph.
+  var cap = max || 2;
+  if (!n.length) return "";
+  if (n.length === 1) return n[0];
+  if (n.length <= cap) {
+    return n.slice(0, -1).join(", ") + " and " + n[n.length - 1];
+  }
+  return n.slice(0, cap).join(", ") + " and " + (n.length - cap) + " more";
+};
+
+// The gate-bar explainer: why THIS button combo, for the current selection.
+// Empty string when there is nothing to say, so the caller is one binding
+// with no ternary.
+//
+// The design rule, learned four times over (two wordings deleted 2026-08-23,
+// two more caught in the 2026-08-24 0.5.3 release-gate run): the line is
+// DERIVED from the same predicates that light the buttons -- begun-ness
+// (`__bramWorklist2Begun`) and exclusivity (`__bramItemChangedSplit`, the
+// same call `__bramSelectionAllCommittable` makes) -- and it may only name
+// an action the footer currently offers, or name a dim action together with
+// why it is dim and the selection change that would light it. Prose written
+// PARALLEL to the gating inevitably asserts off-screen buttons ("Approve &
+// commit does the apply and the commit in one turn" beside a footer without
+// that button; "Commit p1 first" beside a footer whose only lit button was
+// Drop). Silence for unsurprising combos is deliberate: an always-on
+// explainer is furniture (the deleted matrix's lesson).
 window.__bramStartConsequence = function (items, sel, claim) {
-  // Two earlier wordings were wrong in instructive ways.
-  // "can only be committed together" was false twice over: while both are
-  // `proposed` and begun neither is committable AT ALL (`SweepsShared` requires
-  // `AllCommittable`, which fails for both), and separate commits stay possible.
-  // "separating the hunks by hand" then implied the USER does manual git
-  // surgery. They do not -- the agent does, and it is a request, not a penalty.
-  // So: state the choice that remains open, and name who acts on it.
+  var chosen = sel || [];
+  if (!chosen.length) return "";
+  var list = items || [];
+  var byId = {};
+  for (var i = 0; i < list.length; i++) if (list[i]) byId[list[i].id] = list[i];
+  var begun = [];
+  var unbegun = [];
+  for (var s = 0; s < chosen.length; s++) {
+    var it = byId[chosen[s]];
+    if (!it) continue;
+    (window.__bramWorklist2Begun(it, claim) ? begun : unbegun).push(it.id);
+  }
   var n = window.__bramSelectionSharedFileCount(items, sel, claim);
+
+  // Mixed begun + unbegun: Start is foreclosed by the begun items, Commit by
+  // the unbegun ones, so no joint Start or Commit exists for this selection.
+  // Direct the selection change that unlocks each half. Names appear once, in
+  // the first half; the guidance half refers back ("the started item") rather
+  // than repeating long kebab-case ids.
+  if (begun.length && unbegun.length) {
+    return (
+      window.__bramNameList(begun) +
+      (begun.length === 1 ? " already has" : " already have") +
+      " changes and " + window.__bramNameList(unbegun) +
+      (unbegun.length === 1 ? " has" : " have") +
+      " not started, so this selection has no joint Start or Commit. Select " +
+      (begun.length === 1 ? "the started item alone" : "only the started items") +
+      " to commit, or " +
+      (unbegun.length === 1 ? "the proposed one to start it" : "one or more proposed ones to start them") +
+      (n ? " (their edits would then mix)" : "") + "."
+    );
+  }
+
+  // All unbegun: Start is lit, and the consequence of clicking it is the
+  // one thing worth saying -- and only when the items share files.
+  if (!begun.length) {
+    if (!n) return "";
+    return (
+      "These share " + (n === 1 ? "a file" : n + " files") +
+      ". Started together, their edits mix. You can later choose to commit " +
+      "together or ask the agent to separate them."
+    );
+  }
+
+  // All begun. Find items Commit is withheld from: `proposed` with no
+  // exclusive changed path (applied items skip exclusivity, mirroring
+  // __bramSelectionAllCommittable), and collect who blocks them.
+  var blocked = [];
+  var blockerSet = {};
+  var sharedPathSet = {};
+  for (var b = 0; b < begun.length; b++) {
+    var itb = byId[begun[b]];
+    if ((itb.status || "proposed") === "applied") continue;
+    var split = window.__bramItemChangedSplit(itb, list, claim);
+    if (split.exclusive.length) continue;
+    blocked.push(itb.id);
+    var paths = split.shared.concat(split.sharedDeclared);
+    for (var p = 0; p < paths.length; p++) sharedPathSet[paths[p]] = true;
+    var files = itb.changedFiles || [];
+    for (var f = 0; f < files.length; f++) {
+      var sharers = (files[f] && files[f].sharedWith) || [];
+      for (var w = 0; w < sharers.length; w++) {
+        var o = byId[sharers[w]];
+        if (o && o.id !== itb.id && window.__bramWorklist2Begun(o, claim)) {
+          blockerSet[o.id] = true;
+        }
+      }
+    }
+  }
+  if (blocked.length) {
+    var who = Object.keys(blockerSet);
+    var pathCount = Object.keys(sharedPathSet).length;
+    // Advise committing a blocker first only when some blocker is itself
+    // committable alone; mutually-entangled proposed items have no such
+    // exit, and "commit X first" would name another withheld button.
+    var advisable = [];
+    var mutual = true;
+    for (var a = 0; a < who.length; a++) {
+      if (blocked.indexOf(who[a]) !== -1) continue;
+      mutual = false;
+      var oa = byId[who[a]];
+      if (!oa) continue;
+      if (window.__bramSelectionAllCommittable(list, [oa.id], claim)) {
+        advisable.push(oa.id);
+      }
+    }
+    if (mutual) {
+      return (
+        window.__bramNameList(blocked) + "'s edits are entangled in " +
+        (pathCount === 1 ? "a shared file" : "shared files") +
+        "; " + (blocked.length === 2 ? "neither" : "none") +
+        " has exclusive changes, so Commit is withheld. Ask the agent to " +
+        "separate their edits."
+      );
+    }
+    var head =
+      window.__bramNameList(blocked) + "'s changes share " +
+      (pathCount === 1 ? "a file" : "files") + " with " +
+      window.__bramNameList(who) +
+      "'s, so nothing is exclusively " +
+      (blocked.length === 1 ? "its" : "their") +
+      " own and Commit is withheld. ";
+    if (advisable.length) {
+      // No repeated names in the guidance half: the blockers were just named,
+      // so refer back -- unless advisable is a strict subset of them, where
+      // the pronoun would be ambiguous and the names earn their keep.
+      var advRef =
+        advisable.length === who.length
+          ? (advisable.length === 1 ? "it alone" : "only those")
+          : (advisable.length === 1 ? advisable[0] + " alone" : "only " + window.__bramNameList(advisable));
+      return (
+        head + "Select " + advRef +
+        " to commit first, or ask the agent to separate their edits."
+      );
+    }
+    return head + "Ask the agent to separate their edits.";
+  }
+
+  // All begun, all committable: the radio group carries the granularity
+  // choice; the line only flags that shared edits are already mixed.
   if (!n) return "";
   return (
-    "These share " + (n === 1 ? "a file" : n + " files") +
-    ". Started together, their edits mix. You can later choose to commit " +
-    "together or ask the agent to separate them."
+    "These share " + (n === 1 ? "a file" : n + " files") + ". " +
+    (begun.length === 2 ? "Both" : "All") +
+    " already have changes on disk; their edits in shared files mix. " +
+    "You can commit together or ask the agent to separate them."
   );
 };
 

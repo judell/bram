@@ -378,6 +378,8 @@ struct ShellConfig {
 struct WorklistConfig {
     #[serde(default, rename = "batchCommitActions")]
     batch_commit_actions: Option<bool>,
+    #[serde(default, rename = "gateExplainer")]
+    gate_explainer: Option<bool>,
 }
 
 // Optional UI block. `showTargetApp` controls whether the embedded
@@ -16502,6 +16504,18 @@ fn project_config_batch_commit_actions(config: Option<ProjectConfig>) -> bool {
     config
         .and_then(|c| c.worklist)
         .and_then(|w| w.batch_commit_actions)
+        .unwrap_or(false)
+}
+
+// Held in RESERVE (0.5.3 gate run, 2026-08-24): the gate-bar explainer line
+// (why this button combo, for the current selection) is a debugging/wording
+// instrument, not permanent UI. Absent key => off; there is deliberately no
+// Settings toggle — enable by hand-editing `worklist.gateExplainer: true`
+// in .bram.json for an exercise, then remove the key.
+fn project_config_gate_explainer(config: Option<ProjectConfig>) -> bool {
+    config
+        .and_then(|c| c.worklist)
+        .and_then(|w| w.gate_explainer)
         .unwrap_or(false)
 }
 
@@ -45265,9 +45279,11 @@ fn route_request<R: tauri::Runtime>(
 
     if path == "__worklist-config" {
         let config = project_root(Some(app)).and_then(|root| load_project_config(&root));
-        let enabled = project_config_batch_commit_actions(config);
+        let enabled = project_config_batch_commit_actions(config.clone());
+        let gate_explainer = project_config_gate_explainer(config);
         let body = serde_json::json!({
             "batchCommitActions": enabled,
+            "gateExplainer": gate_explainer,
         })
         .to_string()
         .into_bytes();

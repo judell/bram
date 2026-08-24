@@ -10,7 +10,6 @@
   var.worklist2Sent="{{}}"
   var.worklist2Selected="{(window.__bramW2Selection || []).slice()}"
   var.worklist2OverlapOpen="{false}"
-  var.worklist2ShareMode="{'together'}"
   >
   <!-- Worklist2: the redesigned, evidence-first gate (tutorial gist v3).
        Binds the same /__worklist payload Workspace uses, so the two tabs
@@ -43,19 +42,6 @@
   <ChangeListener
     listenTo="{worklist.value &amp;&amp; worklist.value.items}"
     onDidChange="() => window.__bramIframeTrace('w2-selection', {op: 'prune-input', items: ((worklist.value &amp;&amp; worklist.value.items) || []).length, selected: (worklist2Selected || []).length})" />
-  <!-- one-click-approve-commit-shared-setting: the host enforces this
-       setting for apply-and-commit from every Worklist surface. Default
-       on while the config loads, matching the host's missing-key default;
-       refetch from the settings push event so toggling it takes effect
-       without polling or a pane reload. -->
-  <DataSource id="worklistConfig" url="/__worklist-config" />
-  <PushSource
-    id="worklistSettingsChangedEvt"
-    initial="{null}"
-    subscribe="{window.bramSubscribeTauriEvent('settings-changed')}" />
-  <ChangeListener
-    listenTo="{worklistSettingsChangedEvt.value &amp;&amp; worklistSettingsChangedEvt.value.tick}"
-    onDidChange="worklistConfig.refetch()" />
   <!-- strip-label-tense-for-applied-items: the summary strip's first
        priority is the host's claim record (Approving…/Iterating…/…), so
        read /__inflight and refetch on its push event — the same payload
@@ -142,9 +128,6 @@
   <ChangeListener
     listenTo="{worklist2Close}"
     onDidChange="() => window.__bramW2SetCloseMap(worklist2Close)" />
-  <ChangeListener
-    listenTo="{worklist2ShareMode}"
-    onDidChange="() => window.__bramW2SetShareMode(worklist2ShareMode)" />
   <PushSource
     id="projectedTurnsDS"
     initial="{window.__bramProjectedLastExchange(null)}"
@@ -291,8 +274,8 @@
     </VStack>
     <!-- Cutover complete: this IS the Worklist (nav label, heading,
          component name). Only the /worklist2 route remembers the preview
-         era; the legacy tab survives behind Settings -> Show legacy
-         Worklist as OldWorklist on the /worklist route. -->
+         era; the legacy Workspace tab and its setting were retired in the
+         0.5.3 run. -->
     <Text
       when="{worklist.value &amp;&amp; (!worklist.value.items || worklist.value.items.length === 0)}"
       color="$textColor-secondary">
@@ -648,93 +631,19 @@
          them ... when you're on the Worklist page, it's targeting the selected
          set"). The buttons went with it, because the Footer is the only
          surface `vertical-sticky` pins; see WorklistGateBar.xmlui.
-         What stays here is selection-scoped CONTENT - the shared-files table
-         and the share-mode choice - which is reading material, not controls. -->
-    <!-- Shared files. Not a banner: a plain table of state, always present
-         while an overlap exists and NOT dismissible. It became dismissible
-         when it was a warning written in prose, and dismissal outlived its
-         usefulness the moment it stopped asserting a consequence and started
-         reporting disk facts — a fact panel you can hide is a fact panel
-         that silently lies by omission. (Live 2026-08-22: one ✕ click
-         suppressed it across every later selection, which read as the table
-         reacting to selection.) Removing it also removed the per-overlap
-         dismissal signature that existed only to key that ✕. -->
-    <VStack
-      when="{window.__bramWorklistOverlapRows(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value).length > 0}"
-      gap="$space-1"
-      marginTop="$space-3">
-      <Text fontSize="$fontSize-xs" color="$textColor-secondary"
-        value="Shared files" />
-      <!-- One ROW per entangled path, not one sentence per pair. The columns
-           are the two things Bram can verify: what is on disk, and which items
-           claim the path. It never asserts WHOSE changes those are — counts
-           are per-path and no per-item attribution exists, so naming a source
-           is a guess (see __bramWorklistOverlapRows). Selection is
-           deliberately not an input: without an attribution claim the
-           consequence is the same whatever is ticked, so the table holds still
-           while you work. -->
-      <Table data="{window.__bramWorklistOverlapRows(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value)}">
-        <Column header="file" width="2*">
-          <Text value="{$item.path}" variant="code" fontSize="$fontSize-sm" />
-        </Column>
-        <Column header="on disk" width="140px">
-          <Text value="{$item.disk}" variant="code" fontSize="$fontSize-sm" />
-        </Column>
-        <Column header="claimed by" width="3*">
-          <!-- One badge per claimant, no colour. Identity is the id; colour
-               was an accelerator that stopped being true past six items and is
-               now removed everywhere (Jon: "Try getting rid of color entirely
-               and make the main badges not wrap"). -->
-          <Text overflowMode="flow" value="{window.__bramJoinIds($item.claimantIds)}" />
-        </Column>
-      </Table>
-    </VStack>
-    <!-- commit-granularity-and-start-consequence A+B.
-         The gate WAS `__bramSelectionCommitSweepsShared`, so the choice
-         appeared only when it was CONSTRAINED and never when it was free: two
-         disjoint committable items landed in one commit with no way to say
-         "these are unrelated". Now `SweepsShared` picks the option LABELS
-         rather than deciding the control exists.
+         What stays here is selection-scoped CONTENT - the share-mode
+         choice - which is reading material, not controls. -->
+    <!-- The board-wide Shared files table that sat here was removed
+         (0.5.3 gate run, 2026-08-24): a board-scoped fact panel stacked
+         under a selection-scoped decision, and its content is now carried
+         by the per-row "N shared" strip counts, the expanded rows'
+         Shared-with column, the gate explainer line, and on demand by the
+         header's Review overlaps disclosure — which remains the one home
+         of the whole-board view. -->
 
-         A SIBLING of the Shared files section, not a child of it. It was first
-         written nested inside, whose VStack is gated on
-         `__bramWorklistOverlapRows(...).length > 0` - so the control asking
-         "one commit or two?" could only appear when the BOARD had overlaps
-         somewhere, which is exactly the disjoint case it was built to serve.
-         Second time in one day: the unclaimed-changes section had the same
-         defect (see 78d0e86). Selection-scoped questions do not belong inside
-         board-scoped containers.
-
-         `var.` attributes on this wrapper rather than nested `<variable>`
-         elements: the documented form is "declare `var.name` on any container
-         element" (xmlui.org/docs/howto/use-accessors-to-simplify-complex-expressions),
-         every `<variable>` in this codebase sits at component-root level, and
-         `Worklist.xmlui:11` already uses the attribute idiom. Extracted at all
-         because an inline ternary in a binding defeats dependency tracking -
-         the search-date endpoint labels froze for exactly that reason.
-
-         With ONE selected item there is no choice to offer: if its files
-         overlap an unselected begun item, the commit feedback requires
-         separation and authorizes only the selected id. With two or more, the
-         pick says whether those selected items land together or separately.
-         Selection itself never expands. The explanatory sentence that used to
-         sit under the options is gone - the two options ARE the explanation,
-         and a caption restating them is the kind of compensating prose that
-         keeps turning out to mean a control was missing. -->
-    <VStack
-      gap="$space-1"
-      var.shareChoiceOpen="{(worklist2Selected || []).length >= 2 &amp;&amp; window.__bramSelectionAllCommittable(worklist.value &amp;&amp; worklist.value.items, worklist2Selected, inflightClaim.value, worklistConfig.value ? worklistConfig.value.oneClickApproveCommit : true)}"
-      var.shareChoiceEntangled="{window.__bramSelectionCommitSweepsShared(worklist.value &amp;&amp; worklist.value.items, worklist2Selected, inflightClaim.value, worklistConfig.value ? worklistConfig.value.oneClickApproveCommit : true)}"
-      var.shareSplitLabel="{shareChoiceEntangled ? 'A commit each — needs their shared hunks separated first, and that can fail partway' : 'A commit each — selected items land separately'}">
-      <RadioGroup
-        marginTop="$space-3"
-        when="{shareChoiceOpen}"
-        initialValue="{worklist2ShareMode}"
-        onDidChange="(v) => worklist2ShareMode = v">
-        <Option value="together" label="One commit — selected items land together" />
-        <Option value="split" label="{shareSplitLabel}" />
-      </RadioGroup>
-    </VStack>
+    <!-- The commit-granularity share-mode radio moved to the footer
+         (WorklistGateBar.xmlui), above the gate buttons, so it can never
+         sit below the fold. -->
     </VStack>
     <!-- Parity: You/Agent last-exchange dock (old tab's shape, simplified:
          no fullscreen image viewer; dim while a newer user message awaits

@@ -28,7 +28,7 @@
   <DataSource
     id="worklist"
     url="/__worklist"
-    onLoaded="(d) => expandedKeys = window.__bramPruneWorklist2Expansion(d && d.items ? d.items.map(i => i.id) : [])" />
+    onLoaded="(d) => expandedKeys = window.__bramPruneWorklist2Expansion(d &amp;&amp; d.items ? d.items.map(i => i.id) : [])" />
   <!-- The component-local selection resets on a Worklist remount, but the
        Footer's shared selection bridge survives it. Reconcile on the
        authoritative item set so a prune/remount publishes [] instead of
@@ -314,8 +314,8 @@
                scanning fail; with the label gone the slot only has to hold one
                glyph.
 
-               ✓ / ✓✓ counts what is DONE behind the item -- one, the proposal
-               exists; two, the work exists too -- so nothing claims completion
+               ✓ / ✓✓ counts what is DONE behind the item — one, the proposal
+               exists; two, the work exists too — so nothing claims completion
                the way a lone check did. The label moves to the tooltip, which
                Icon supports as cross-cutting TooltipBehavior (absent from its
                properties page, wired in Icon.tsx) and which also feeds
@@ -323,8 +323,8 @@
                being dropped. -->
           <!-- Four states, in a FIXED-WIDTH slot so they form a column you
                read vertically without reading any row. Colour carries WHOSE
-               TURN -- full strength for the two states waiting on you, muted
-               for the two waiting on the agent -- because that binary is the
+               TURN — full strength for the two states waiting on you, muted
+               for the two waiting on the agent — because that binary is the
                fact that decides whether you act, and colour is seen before the
                glyph resolves. Shape says which of the four; the tooltip
                carries the words (Icon feeds it to aria-label too). -->
@@ -617,7 +617,7 @@
          while an overlap exists and NOT dismissible. It became dismissible
          when it was a warning written in prose, and dismissal outlived its
          usefulness the moment it stopped asserting a consequence and started
-         reporting disk facts -- a fact panel you can hide is a fact panel
+         reporting disk facts — a fact panel you can hide is a fact panel
          that silently lies by omission. (Live 2026-08-22: one ✕ click
          suppressed it across every later selection, which read as the table
          reacting to selection.) Removing it also removed the per-overlap
@@ -630,7 +630,7 @@
         value="Shared files" />
       <!-- One ROW per entangled path, not one sentence per pair. The columns
            are the two things Bram can verify: what is on disk, and which items
-           claim the path. It never asserts WHOSE changes those are -- counts
+           claim the path. It never asserts WHOSE changes those are — counts
            are per-path and no per-item attribution exists, so naming a source
            is a guess (see __bramWorklistOverlapRows). Selection is
            deliberately not an input: without an attribution claim the
@@ -652,7 +652,7 @@
         </Column>
       </Table>
       <!-- The note under the table became a CHOICE. It had been prose telling
-           the user to "ask the agent to split the shared changes" -- an
+           the user to "ask the agent to split the shared changes" — an
            instruction to compose a sentence, when the whole premise is that
            the agent knows how and only needs telling. There are exactly two
            outcomes, so they are two radio options, and the pick rides along

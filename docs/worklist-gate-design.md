@@ -175,10 +175,16 @@ night the three-state icon shipped:
 
 ### Serialization, and how it is shown
 
-`__bramInflightBlocker` is **the single reason gate buttons ever disable**: an
-unconsumed authorization is being carried out. All five gate buttons bind it, so
-while a claim is live the entire action bar is inert and the claimed row shows
-its verb.
+`__bramInflightBlocker` is **the single global reason all gate buttons disable
+together**: an unconsumed authorization is being carried out. All five gate
+buttons bind it, so while a claim is live the entire action bar is inert and the
+claimed row shows its verb.
+
+Outside that global block, each action still has ordinary eligibility rules.
+The gate needs a valid selection; Start and Commit require compatible item
+stages, Start & commit requires exactly one item, and Iterate additionally
+requires non-empty feedback. Those action-specific dimmed states mean “not
+applicable to this selection,” not “another action is in flight.”
 
 The helper returns the first claimed id rather than a boolean, deliberately:
 

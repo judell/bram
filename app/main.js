@@ -730,6 +730,35 @@ const TOOLS_ROUTE_KEY = "bram.tools.route";
 const LEGACY_TOOLS_ROUTE_KEY = "xmlui-desktop.tools.route";
 const TOOLS_ROUTE_POLL_MS = 500;
 
+// #279: localStorage is one shared store per machine (tauri://localhost
+// origin), so an unsuffixed TOOLS_ROUTE_KEY lets every Bram instance —
+// regardless of which project it's running against — read and overwrite
+// the same saved tab. Suffix the key by projectKey (from GET /__app-info,
+// the project's absolute root) so instances stop fighting over one slot.
+// helpers.js (iframe side) computes the identical key from the same
+// projectKey; keep the two formulas in sync.
+const toolsRouteKeyFor = (projectKey) =>
+  projectKey ? TOOLS_ROUTE_KEY + ":" + projectKey : TOOLS_ROUTE_KEY;
+
+// One-shot migration: the first project to read after upgrade inherits
+// whatever was in the old unsuffixed/legacy keys, then those keys are
+// removed so no later project can inherit them again. No-op when there's
+// no projectKey to suffix with (suffixedKey === TOOLS_ROUTE_KEY) — that
+// case keeps the pre-#279 plain-key behavior untouched.
+const migrateToolsRouteKey = (storage, suffixedKey) => {
+  if (!storage || suffixedKey === TOOLS_ROUTE_KEY) return;
+  try {
+    if (storage.getItem(suffixedKey)) return;
+    const legacy =
+      storage.getItem(TOOLS_ROUTE_KEY) || storage.getItem(LEGACY_TOOLS_ROUTE_KEY);
+    if (legacy) {
+      storage.setItem(suffixedKey, legacy);
+      storage.removeItem(TOOLS_ROUTE_KEY);
+      storage.removeItem(LEGACY_TOOLS_ROUTE_KEY);
+    }
+  } catch {}
+};
+
 const logShellEvent = (payload) => {
   try {
     invoke("log_from_right_pane", { payload }).catch(() => {});
@@ -1727,11 +1756,33 @@ listen("pty-send-sent", (e) => {
   const iframe = document.getElementById("right-pane");
   if (!iframe) return;
   let RIGHT_PANE_SRC, TOOLS_PANE_SRC;
+  // #279: default to the unsuffixed key so a projectKey fetch failure
+  // (or a project with no root, e.g. is_source_repo edge cases) falls
+  // back to the pre-#279 shared-key behavior rather than breaking
+  // startup — readSavedToolsHash still falls further back to
+  // TOOLS_ROUTE_KEY/LEGACY_TOOLS_ROUTE_KEY below regardless.
+  let toolsRouteKey = TOOLS_ROUTE_KEY;
   try {
-    [RIGHT_PANE_SRC, TOOLS_PANE_SRC] = await Promise.all([
+    const [rightSrc, toolsSrc, appInfo] = await Promise.all([
       invoke("get_right_pane_url"),
       invoke("get_tools_pane_url"),
+      // Relative fetch: main.js is served from tauri://localhost, and
+      // handle_tauri_scheme proxies /__* paths to this instance's own
+      // loopback regardless of which project is loaded — no port lookup
+      // needed. Swallow failure locally so it can't reject the Promise.all
+      // and take down pane startup with it.
+      fetch("/__app-info", { cache: "no-store" })
+        .then((r) => r.json())
+        .catch(() => null),
     ]);
+    RIGHT_PANE_SRC = rightSrc;
+    TOOLS_PANE_SRC = toolsSrc;
+    const projectKey =
+      appInfo && typeof appInfo.projectKey === "string" ? appInfo.projectKey : "";
+    if (projectKey) {
+      toolsRouteKey = toolsRouteKeyFor(projectKey);
+      migrateToolsRouteKey(localStorage, toolsRouteKey);
+    }
   } catch (e) {
     console.error("get_*_pane_url failed", e);
     return;
@@ -1753,6 +1804,7 @@ listen("pty-send-sent", (e) => {
   const readSavedToolsHash = () => {
     try {
       const saved =
+        localStorage.getItem(toolsRouteKey) ||
         localStorage.getItem(TOOLS_ROUTE_KEY) ||
         localStorage.getItem(LEGACY_TOOLS_ROUTE_KEY) ||
         "";
@@ -1773,7 +1825,7 @@ listen("pty-send-sent", (e) => {
     try {
       const route = normalizeToolsRoute(toolsWindow?.location);
       if (route && route !== lastPersistedToolsRoute) {
-        localStorage.setItem(TOOLS_ROUTE_KEY, route);
+        localStorage.setItem(toolsRouteKey, route);
         lastPersistedToolsRoute = route;
         logShellEvent({
           kind: "tools-route-save",

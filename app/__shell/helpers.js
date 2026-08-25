@@ -259,50 +259,107 @@ window._xsLogs = window._xsLogs || [];
       } catch (e) {}
     }, 0);
   }
+
+  // #279: localStorage is one shared store per machine (tauri://localhost
+  // origin), so the plain `key` lets every Bram instance — regardless of
+  // which project it's running against — read and overwrite the same
+  // saved tab. Suffix by projectKey (from GET /__app-info) so instances
+  // stop fighting over one slot. app/main.js computes the identical key
+  // from the same projectKey; keep the two formulas in sync.
+  function toolsRouteKeyFor(projectKey) {
+    return projectKey ? key + ":" + projectKey : key;
+  }
+  // One-shot migration: the first project to read after upgrade inherits
+  // whatever was in the old unsuffixed/legacy keys, then those keys are
+  // removed so no later project can inherit them again. No-op when
+  // there's no projectKey to suffix with.
+  function migrateToolsRouteKey(storage, suffixedKey) {
+    if (!storage || suffixedKey === key) return;
+    try {
+      if (storage.getItem(suffixedKey)) return;
+      var legacy = storage.getItem(key) || storage.getItem(legacyKey);
+      if (legacy) {
+        storage.setItem(suffixedKey, legacy);
+        storage.removeItem(key);
+        storage.removeItem(legacyKey);
+      }
+    } catch (e) {}
+  }
+
+  function boot(routeKey) {
+    try {
+      var current = window.location.hash;
+      var saved =
+        localStorage.getItem(routeKey) ||
+        localStorage.getItem(key) ||
+        localStorage.getItem(legacyKey) ||
+        "";
+      trace("tools-route-boot", {
+        current: current || "",
+        saved: saved,
+        pathname: window.location.pathname || "",
+      });
+      if (!current || current === "#/") {
+        if (saved && saved !== "#/") {
+          window.location.hash = saved;
+          trace("tools-route-restore", {
+            from: current || "",
+            route: saved,
+          });
+        }
+      }
+      // react-router-dom uses history.pushState which doesn't fire
+      // hashchange, so poll instead of listening.
+      setInterval(function () {
+        var h = window.location.hash;
+        var stored = localStorage.getItem(routeKey) || "";
+        if (
+          h === "#/" &&
+          stored &&
+          stored !== "#/" &&
+          Date.now() - bootedAt < STARTUP_SUPPRESS_MS
+        ) {
+          trace("tools-route-skip-root-save", {
+            stored: stored,
+            elapsedMs: Date.now() - bootedAt,
+          });
+          return;
+        }
+        if (h && h !== localStorage.getItem(routeKey)) {
+          localStorage.setItem(routeKey, h);
+          trace("tools-route-save", {
+            route: h,
+            previous: stored,
+            elapsedMs: Date.now() - bootedAt,
+          });
+        }
+      }, 500);
+    } catch (e) {}
+  }
+
+  // Relative fetch: this iframe is served from tauri://localhost/tools/…,
+  // and handle_tauri_scheme proxies /__* paths to this instance's own
+  // loopback regardless of which project is loaded — no port lookup
+  // needed (the .bram-port file is for out-of-band tooling, not this
+  // same-origin iframe). On any failure, fall back to the plain
+  // unsuffixed key so a saved route still restores.
   try {
-    var current = window.location.hash;
-    var saved = localStorage.getItem(key) || localStorage.getItem(legacyKey) || "";
-    trace("tools-route-boot", {
-      current: current || "",
-      saved: saved,
-      pathname: window.location.pathname || "",
-    });
-    if (!current || current === "#/") {
-      if (saved && saved !== "#/") {
-        window.location.hash = saved;
-        trace("tools-route-restore", {
-          from: current || "",
-          route: saved,
-        });
-      }
-    }
-    // react-router-dom uses history.pushState which doesn't fire
-    // hashchange, so poll instead of listening.
-    setInterval(function () {
-      var h = window.location.hash;
-      var stored = localStorage.getItem(key) || "";
-      if (
-        h === "#/" &&
-        stored &&
-        stored !== "#/" &&
-        Date.now() - bootedAt < STARTUP_SUPPRESS_MS
-      ) {
-        trace("tools-route-skip-root-save", {
-          stored: stored,
-          elapsedMs: Date.now() - bootedAt,
-        });
-        return;
-      }
-      if (h && h !== localStorage.getItem(key)) {
-        localStorage.setItem(key, h);
-        trace("tools-route-save", {
-          route: h,
-          previous: stored,
-          elapsedMs: Date.now() - bootedAt,
-        });
-      }
-    }, 500);
-  } catch (e) {}
+    fetch("/__app-info", { cache: "no-store" })
+      .then(function (r) {
+        return r.json();
+      })
+      .then(function (info) {
+        var projectKey = info && typeof info.projectKey === "string" ? info.projectKey : "";
+        var routeKey = toolsRouteKeyFor(projectKey);
+        if (projectKey) migrateToolsRouteKey(localStorage, routeKey);
+        boot(routeKey);
+      })
+      .catch(function () {
+        boot(key);
+      });
+  } catch (e) {
+    boot(key);
+  }
 })();
 
 // Main-thread heartbeat for the drawer iframe. setInterval scheduled

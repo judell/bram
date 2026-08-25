@@ -499,6 +499,15 @@ serves an empty default; the Worklist tab creates the file (and
      text never rode the PTY paste channel. Feedback refs are allocated
      per click, typically `<unix-ms>-<item-id>`; they are not item ids.
      The feedback text is the new user-authored submission for this turn.
+     An item may instead carry inline `{id, feedback}` — that is the
+     **degradation fallback only**, taken per item when its draft write
+     failed, so an iterate still lands rather than blocking the click
+     (its text has ridden the paste channel and is subject to the
+     collapse above). For a while after the worklist2 rewrite the gate's
+     Iterate emitted inline unconditionally while the Queue tab drafted —
+     an accidental fork, repaired under #285; both emitters draft first
+     now, and both opt-out matchers (guard-side and host-side) read the
+     drafts (#171, #284).
      Successful `/__worklist/mutate` advance/prune promotes matching
      drafts from `feedback-drafts/` to `feedback-history/` so drafts do
      not accumulate. Each draft write emits a `[feedback-draft] op=write`

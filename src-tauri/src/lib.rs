@@ -41349,11 +41349,56 @@ fn worklist_active_authorization_summary<R: tauri::Runtime>(
     Some((kind.to_string(), now.saturating_sub(issued), ids))
 }
 
+// issue-284 / issue-285: an Iterate turn's real text lives in
+// resources/feedback-drafts/<feedbackRef>.md — the toTurn payload carries
+// only the reference, so an opt-out phrase typed into iterate feedback was
+// invisible to this matcher. When the outgoing text is an `iterate:`
+// payload, gather the referenced draft texts; the pane sequences
+// draft-write before toTurn on both emitters, so the files exist by the
+// time this runs. Fails open to empty on any parse or read miss.
+fn iterate_feedback_draft_text<R: tauri::Runtime>(app: &AppHandle<R>, turn_text: &str) -> String {
+    let stripped = turn_text.trim();
+    let Some(json_part) = stripped.strip_prefix("iterate:") else {
+        return String::new();
+    };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(json_part.trim()) else {
+        return String::new();
+    };
+    let Some(items) = doc.get("items").and_then(|v| v.as_array()) else {
+        return String::new();
+    };
+    let Some(root) = project_root(Some(app)) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for it in items {
+        let Some(r) = it.get("feedbackRef").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        // Refs are host-allocated basenames; anything path-shaped is
+        // refused rather than resolved.
+        if r.is_empty() || r.contains('/') || r.contains('\\') || r.contains("..") {
+            continue;
+        }
+        let path = root
+            .join("resources")
+            .join("feedback-drafts")
+            .join(format!("{}.md", r));
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            out.push_str(&text);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 fn record_codex_direct_edit_authorization<R: tauri::Runtime>(app: &AppHandle<R>, turn_text: &str) {
     if !matches!(current_provider(app), Some(SessionProvider::Codex)) {
         return;
     }
-    if !turn_text_has_direct_edit_opt_out(turn_text) {
+    if !turn_text_has_direct_edit_opt_out(turn_text)
+        && !turn_text_has_direct_edit_opt_out(&iterate_feedback_draft_text(app, turn_text))
+    {
         return;
     }
     let Some(path) = worklist_auth_file(app) else {

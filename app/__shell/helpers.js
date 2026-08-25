@@ -3589,22 +3589,41 @@ window.__bramFanFeedback = function (ids, text) {
   return map;
 };
 window.__bramWorklist2BatchIterate = function (ids, text) {
-  var items = (ids || []).map(function (id) {
-    return { id: id, feedback: text || "" };
+  // issue-285: one iterate wire shape. The gate adopts the queue path's
+  // draft-first mechanism — inline feedback rides toTurn, whose `\s+`
+  // collapse and the receiving TUI's paste limits mangle anything long
+  // (#144, the reason drafts exist). One draft per selected id, ref
+  // `<unix-ms>-<item-id>`; a failed draft write degrades THAT item to the
+  // inline shape rather than blocking the click, the same fallback
+  // sendIterateWithFeedbackDraft has carried all along. Draft writes
+  // complete before toTurn fires, so the host-side opt-out matcher (and
+  // the agent) read files that exist.
+  var list = ids || [];
+  var body = text || "";
+  var now = Date.now();
+  var writes = list.map(function (id) {
+    var ref = now + "-" + id;
+    return window.queueFeedbackDraft(ref, body).then(function (wroteDraft) {
+      return wroteDraft
+        ? { id: id, feedbackRef: ref }
+        : { id: id, feedback: body };
+    });
   });
-  var r = {
-    turnText: "iterate: " + JSON.stringify({ items: items }),
-    authorizationPayload: null,
-    submitting: true,
-    submittedItemId: items.length ? items[0].id : null,
-    submittedKind: window.__bramSetWorklistSubmittedKind("action"),
-    actionProgressScope: "batch",
-    actionProgressKind: "iterate",
-    actionProgressTick: 0,
-    expandedItemIds: [],
-    feedbackDraftsById: {},
-  };
-  return window.__bramWorklistActApply(r);
+  return Promise.all(writes).then(function (items) {
+    var r = {
+      turnText: "iterate: " + JSON.stringify({ items: items }),
+      authorizationPayload: null,
+      submitting: true,
+      submittedItemId: items.length ? items[0].id : null,
+      submittedKind: window.__bramSetWorklistSubmittedKind("action"),
+      actionProgressScope: "batch",
+      actionProgressKind: "iterate",
+      actionProgressTick: 0,
+      expandedItemIds: [],
+      feedbackDraftsById: {},
+    };
+    return window.__bramWorklistActApply(r);
+  });
 };
 
 // Selection state helpers for the row tickboxes and the plural action bar.

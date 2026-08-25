@@ -1432,6 +1432,21 @@ Don't say "N unpushed commits now" or list unpushed SHAs in prose — the
 Commits tab has the exact count and list; any number you'd state is
 guesswork.
 
+### Commit-then-push: the post-commit grace
+
+`worklist-commit` prunes its items, so an emptied board would deny the very
+`git push` the user just asked to follow the commit ("commit this, then push
+and raise a PR" — #283, where the denial even advised proposing an item for
+a change that no longer exists). Both guards therefore allow a push-shaped
+Bash command for **10 minutes after a gate commit**, keyed on the consumed
+`approved` authorization already on disk (trace reason
+`post-commit-push-grace`). The grace covers only `git push`; it is a window,
+not a standing permission. Outside it, the Push path is the user's: the
+denial names the **Push** button in the Commits tab. Agent-driven push
+within the grace is legitimate exactly when the user asked for it in the
+approval; unprompted, prefer reporting the committable state and stopping,
+per *Don't nudge toward commit approval* above.
+
 ### Push button auto-rebases on non-fast-forward
 
 The Commits-tab Push button does `git push`; if rejected as

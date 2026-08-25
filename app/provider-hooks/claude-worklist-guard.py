@@ -131,6 +131,14 @@ _GH_ISSUE_WRITE_RX = re.compile(
     r"(^|[\s;&|`(])gh\s+issue\s+(close|reopen|edit|comment|create|delete|transfer|pin|unpin|lock|unlock)\b"
 )
 
+# judell/bram#283: post-commit push grace. `worklist-commit` prunes items on
+# success, so "commit, then push" self-defeats -- the emptied board denies
+# the follow-up `git push` at the Bash coverage gate below. This classifier
+# recognizes push-shaped commands (`git push`, `git -C <path> push`, and
+# either form chained after `&&`/`;`) so the grace predicate can allow them
+# in a short post-commit window. `\b` after `push` keeps `pushd` out.
+_PUSH_CMD_RX = re.compile(r"(^|[\s;&|`(])git\s+(-C\s+\S+\s+)?push\b")
+
 # The redirect entry needs extra logic (see _pattern_is_write /
 # bash-write-nonrepo-target below), so it's named rather than inlined below.
 _REDIRECT_WRITE_RX = re.compile(r"(^|[\s;&|`(])>+\s*[^\s>&]")  # > file or >> file
@@ -748,6 +756,33 @@ def fresh_bypass(project_root, path_rel):
     return path_rel in paths or "*" in paths
 
 
+# judell/bram#283: the approval that produced a commit implies publishing
+# exactly that commit, not a standing push permission -- so the window is
+# short (a grace), not open-ended.
+POST_COMMIT_PUSH_GRACE_MS = 10 * 60 * 1000
+
+
+def post_commit_push_grace(project_root):
+    """True iff resources/.worklist-authorization.json (relative to
+    project_root) records a commit-gate authorization ("approved") that was
+    consumed within the last POST_COMMIT_PUSH_GRACE_MS. That is the on-disk
+    evidence a gate commit just happened -- worklist-commit consumes the
+    approved auth record and stamps consumedAtMs as part of committing, then
+    prunes the item(s), so a fresh consumedAtMs is the only trace left once
+    the board is empty again. Any read/parse failure returns False."""
+    try:
+        with open(os.path.join(project_root, AUTH_REL), encoding="utf-8") as f:
+            rec = json.load(f)
+    except Exception:
+        return False
+    if not isinstance(rec, dict) or rec.get("kind") != "approved":
+        return False
+    consumed = rec.get("consumedAtMs") or rec.get("consumed_at_ms") or 0
+    if not consumed:
+        return False
+    return (time.time() * 1000 - consumed) <= POST_COMMIT_PUSH_GRACE_MS
+
+
 def deny_coverage(target_rel, opt_out_attempted, project_root=None):
     msg = (
         f"Blocked: writing to {target_rel} requires either a proposed/applied "
@@ -833,6 +868,13 @@ def deny_bash_coverage(command, cwd=None, project_root=None):
             f"marker file captured this subtree — remove that {AUTH_REL})"
         )
         reason += f":root={project_root}"
+    push_line = ""
+    if _PUSH_CMD_RX.search(command or ""):
+        push_line = (
+            "\n  - This looks like a push. The user can click Push in the "
+            "Commits tab; an agent push is allowed only in the 10-minute "
+            "window after a gate commit (see judell/bram#283)."
+        )
     _trace_hook(
         "PreToolUse",
         "Bash",
@@ -849,7 +891,8 @@ def deny_bash_coverage(command, cwd=None, project_root=None):
         "approved: payload, then retry.\n"
         "  - The user can authorize a direct edit by ending their message "
         "with \"just do it\", or by clicking the Skip worklist button."
-        + root_line,
+        + root_line
+        + push_line,
         file=sys.stderr,
     )
     sys.exit(2)
@@ -1395,6 +1438,16 @@ def main():
             _trace_hook("PreToolUse", "Bash", preview, "allow", "covered-by-worklist-item", cwd)
             sys.exit(0)
         if opt_out_clears(project_root, payload, "Bash", preview):
+            sys.exit(0)
+        # judell/bram#283: worklist-commit prunes on success, so a push
+        # right after a gate commit would otherwise find an empty board and
+        # get denied. The recent "approved" consumption is the on-disk
+        # evidence a gate commit just happened.
+        if _PUSH_CMD_RX.search(command) and post_commit_push_grace(project_root):
+            _trace_hook(
+                "PreToolUse", "Bash", preview, "allow",
+                "post-commit-push-grace", cwd,
+            )
             sys.exit(0)
         deny_bash_coverage(command, cwd, project_root=project_root)
 

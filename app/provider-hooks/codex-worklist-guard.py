@@ -320,6 +320,29 @@ def fresh_bypass(cwd, path_rel):
     return path_rel in paths or "*" in paths
 
 
+# judell/bram#283: the approval that produced a commit implies publishing
+# exactly that commit, not a standing push permission -- so the window is
+# short (a grace), not open-ended. Mirrors the Claude guard's copy.
+POST_COMMIT_PUSH_GRACE_MS = 10 * 60 * 1000
+
+
+def post_commit_push_grace(cwd):
+    """True iff resources/.worklist-authorization.json (rooted at cwd)
+    records a commit-gate authorization ("approved") that was consumed
+    within the last POST_COMMIT_PUSH_GRACE_MS. That is the on-disk evidence
+    a gate commit just happened -- worklist-commit consumes the approved
+    auth record and stamps consumedAtMs as part of committing, then prunes
+    the item(s), so a fresh consumedAtMs is the only trace left once the
+    board is empty again. Any read/parse failure returns False."""
+    rec = load_json(os.path.join(cwd, AUTH_REL))
+    if not isinstance(rec, dict) or rec.get("kind") != "approved":
+        return False
+    consumed = rec.get("consumedAtMs") or rec.get("consumed_at_ms") or 0
+    if not consumed:
+        return False
+    return (time.time() * 1000 - consumed) <= POST_COMMIT_PUSH_GRACE_MS
+
+
 def normalize_target(cwd, target):
     """Return project-relative path for target if it's inside cwd, else None."""
     if not isinstance(target, str) or not target:
@@ -403,6 +426,15 @@ def patch_text(tool_input):
 # The redirect entry needs extra logic (see _pattern_is_write /
 # bash-write-nonrepo-target below), so it's named rather than inlined below.
 _REDIRECT_WRITE_RX = re.compile(r"(^|[\s;&|`(])>+\s*[^\s>&]")  # > file or >> file
+
+# judell/bram#283: post-commit push grace. `worklist-commit` prunes items on
+# success, so "commit, then push" self-defeats -- the emptied board denies
+# the follow-up `git push` at the Bash coverage gate below. This classifier
+# recognizes push-shaped commands (`git push`, `git -C <path> push`, and
+# either form chained after `&&`/`;`) so the grace predicate can allow them
+# in a short post-commit window. `\b` after `push` keeps `pushd` out.
+# Mirrors the Claude guard's copy; keep in sync.
+_PUSH_CMD_RX = re.compile(r"(^|[\s;&|`(])git\s+(-C\s+\S+\s+)?push\b")
 
 # Bash commands we deny without worklist coverage. The list is intentionally
 # narrow: codex needs to run plenty of read-only shell during investigation,
@@ -1614,12 +1646,26 @@ def main():
         # (too fragile); presence of any pending/applied work is the gate.
         if covered or fresh_bypass(cwd, "*"):
             allow()
+        # judell/bram#283: worklist-commit prunes on success, so a push
+        # right after a gate commit would otherwise find an empty board and
+        # get denied. The recent "approved" consumption is the on-disk
+        # evidence a gate commit just happened.
+        if _PUSH_CMD_RX.search(cmd or "") and post_commit_push_grace(cwd):
+            allow("post-commit-push-grace")
+        push_line = ""
+        if _PUSH_CMD_RX.search(cmd or ""):
+            push_line = (
+                "\n  - This looks like a push. The user can click Push in "
+                "the Commits tab; an agent push is allowed only in the "
+                "10-minute window after a gate commit (see judell/bram#283)."
+            )
         deny(
             "Bash blocked: this command writes to the filesystem, and "
             "resources/worklist.json has no proposed or applied items "
             "covering the change. Propose the work in the worklist first, "
             "or have the user issue a direct-edit authorization."
             + coverage_root_line(cwd)
+            + push_line
         )
 
     if tool_name.startswith("mcp__"):

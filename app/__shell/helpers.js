@@ -2987,7 +2987,7 @@ window.__bramOverlapRowCount = function (entry, items) {
 // because the table row already names its claimants. The trigger is the
 // engine's Table rowEnter/rowLeave pair (vendored 869cc89): enter fires
 // once per row (not per cell), leave is the documented clearing pair.
-window.__bramOverlapFocus = { itemIds: [] };
+window.__bramOverlapFocus = { itemIds: [], pinnedKey: null };
 var __bramOverlapFocusSubscribers = new Set();
 
 function __bramPublishOverlapFocus(next) {
@@ -3012,19 +3012,47 @@ window.bramSubscribeOverlapFocus = (function () {
 })();
 
 window.__bramSetOverlapFocus = function (claimantIds) {
+  if (window.__bramOverlapFocus && window.__bramOverlapFocus.pinnedKey) return; // pin wins over hover
   var ids = (claimantIds || []).filter(Boolean);
   var cur = (window.__bramOverlapFocus && window.__bramOverlapFocus.itemIds) || [];
   if (cur.length === ids.length && ids.every(function (id, i) { return cur[i] === id; })) return;
-  __bramPublishOverlapFocus({ itemIds: ids });
+  __bramPublishOverlapFocus({ itemIds: ids, pinnedKey: null });
 };
 
 window.__bramClearOverlapFocus = function () {
+  if (window.__bramOverlapFocus && window.__bramOverlapFocus.pinnedKey) return; // pin survives rowLeave
   if (!((window.__bramOverlapFocus && window.__bramOverlapFocus.itemIds) || []).length) return;
-  __bramPublishOverlapFocus({ itemIds: [] });
+  __bramPublishOverlapFocus({ itemIds: [], pinnedKey: null });
+};
+
+// overlap-pin-on-click: click a row in the overlap table to hold its
+// highlight across scrolling. Same-row click releases (falling back to
+// hover state, since the pointer is on the row); a different row moves
+// the pin. Collapsing the disclosure releases via
+// __bramOverlapToggleOpen.
+window.__bramToggleOverlapPin = function (key, claimantIds) {
+  var ids = (claimantIds || []).filter(Boolean);
+  var cur = window.__bramOverlapFocus || {};
+  if (cur.pinnedKey === key) {
+    __bramPublishOverlapFocus({ itemIds: ids, pinnedKey: null });
+  } else {
+    __bramPublishOverlapFocus({ itemIds: ids, pinnedKey: key });
+  }
+};
+
+window.__bramOverlapToggleOpen = function (open) {
+  if (open && window.__bramOverlapFocus && window.__bramOverlapFocus.pinnedKey) {
+    __bramPublishOverlapFocus({ itemIds: [], pinnedKey: null });
+  }
+  return !open;
 };
 
 window.__bramOverlapFocusedRow = function (focus, itemId) {
   return !!(focus && focus.itemIds && focus.itemIds.includes(itemId));
+};
+
+window.__bramOverlapPinnedRow = function (focus, key) {
+  return !!(focus && focus.pinnedKey === key);
 };
 
 // issue-266-close-declaration-inline: state helpers for the inline close

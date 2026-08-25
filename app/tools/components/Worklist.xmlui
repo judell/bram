@@ -165,7 +165,7 @@
         label="{worklist2OverlapOpen ? 'Hide overlaps' : 'Review overlaps'}"
         variant="ghost"
         size="xs"
-        onClick="worklist2OverlapOpen = !worklist2OverlapOpen" />
+        onClick="worklist2OverlapOpen = window.__bramOverlapToggleOpen(worklist2OverlapOpen)" />
     </HStack>
     <!-- issue-278 rung 2: the overlap index. One disclosure owns the graph,
          so a row never has to render its peer set - at twenty dense items that
@@ -213,18 +213,37 @@
            clearing pair — the engine events vendored in 869cc89). Worklist
            rows subscribe and tint: the claimant→row tie the issue-278 graph
            was recruited for, delivered on the surface that won. -->
+      <!-- overlap-pin-on-click: clicking a row pins its highlight so
+           scrolling can review the full correlation; same-row click
+           releases, another row moves the pin, collapsing the disclosure
+           releases (__bramOverlapToggleOpen). Clicks live on full-width
+           cell wrappers because Table has no row-click event yet (the
+           xmlui-side board is proposing one; collapse to onRowClick when
+           it lands). The cell tint doubles as the pinned-row cue. -->
       <Table
         data="{window.__bramOverlapIndex(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value)}"
         onRowEnter="(item) => window.__bramSetOverlapFocus(item.claimants)"
         onRowLeave="window.__bramClearOverlapFocus()">
         <Column header="file" width="2*">
-          <Text value="{$item.path}" variant="code" fontSize="$fontSize-sm" tooltip="{$item.path}" />
+          <HStack
+            width="100%"
+            cursor="pointer"
+            backgroundColor="{window.__bramOverlapPinnedRow(overlapFocus.value, $item.path) ? '$color-primary-100' : 'transparent'}"
+            onClick="window.__bramToggleOverlapPin($item.path, $item.claimants)">
+            <Text value="{$item.path}" variant="code" fontSize="$fontSize-sm" tooltip="{$item.path}" />
+          </HStack>
         </Column>
         <Column header="items" width="110px">
-          <Text
-            fontSize="$fontSize-sm"
-            color="$textColor-secondary"
-            value="{window.__bramOverlapRowCount($item, worklist.value &amp;&amp; worklist.value.items)}" />
+          <HStack
+            width="100%"
+            cursor="pointer"
+            backgroundColor="{window.__bramOverlapPinnedRow(overlapFocus.value, $item.path) ? '$color-primary-100' : 'transparent'}"
+            onClick="window.__bramToggleOverlapPin($item.path, $item.claimants)">
+            <Text
+              fontSize="$fontSize-sm"
+              color="$textColor-secondary"
+              value="{window.__bramOverlapRowCount($item, worklist.value &amp;&amp; worklist.value.items)}" />
+          </HStack>
         </Column>
         <!-- Natural-width badges that wrap: `wrapContent="true"`, the same
              property the shared-with Column below already uses. The one
@@ -232,7 +251,13 @@
              item's own colour; the short label carries identity when two
              items collide on a hue, which they do past six items. -->
         <Column header="claimed by" width="3*">
-          <Text overflowMode="flow" value="{window.__bramJoinIds($item.claimants)}" />
+          <HStack
+            width="100%"
+            cursor="pointer"
+            backgroundColor="{window.__bramOverlapPinnedRow(overlapFocus.value, $item.path) ? '$color-primary-100' : 'transparent'}"
+            onClick="window.__bramToggleOverlapPin($item.path, $item.claimants)">
+            <Text overflowMode="flow" value="{window.__bramJoinIds($item.claimants)}" />
+          </HStack>
         </Column>
       </Table>
     </VStack>

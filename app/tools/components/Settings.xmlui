@@ -104,7 +104,14 @@
               { value: 'agentRecent', label: 'Resume selected agent’s most recent session' },
               { value: 'lastActive', label: 'Resume most-recently-active agent’s session' },
               { value: 'newSession', label: 'Start a new session' }
-            ]}" />
+            ]}">
+            <!-- Long labels wrap flush-left instead of centered: the same
+                 valueTemplate + width-bound Text as the Worklist's issue
+                 Select (dd155b7; Select#valuetemplate). -->
+            <property name="valueTemplate">
+              <Text width="100%" value="{$item.label}" />
+            </property>
+          </Select>
           <Theme paddingLeft-summary-ExpandableItem="0">
             <ExpandableItem
               summary="Advanced"

@@ -37,6 +37,16 @@
       enabled="{findBarBox.value &amp;&amp; findBarBox.value.length > 0}"
       tooltip="Clear find"
       onClick="findBarBox.setValue(''); emitEvent('needleChange', '')" />
+    <!-- findbar-first-last: jump buttons ride the existing step(delta)
+         contract with computed deltas — every consumer's cursor math is the
+         shared modulo-wrap helper ((cur + delta + n) % n), which lands
+         step(-current) on 0 and step(matchCount-1-current) on n-1 exactly.
+         No new event, no host changes. Position-aware enablement: dim when
+         already at that end. -->
+    <Button size="xs" variant="outlined" label="⤒"
+      enabled="{($props.matchCount || 0) > 0 &amp;&amp; ($props.current || 0) > 0}"
+      tooltip="First match"
+      onClick="emitEvent('step', -($props.current || 0))" />
     <Button size="xs" variant="outlined" label="▲"
       enabled="{($props.matchCount || 0) > 0}"
       tooltip="Previous match"
@@ -45,6 +55,10 @@
       enabled="{($props.matchCount || 0) > 0}"
       tooltip="Next match"
       onClick="emitEvent('step', 1)" />
+    <Button size="xs" variant="outlined" label="⤓"
+      enabled="{($props.matchCount || 0) > 0 &amp;&amp; ($props.current || 0) < ($props.matchCount || 0) - 1}"
+      tooltip="Last match"
+      onClick="emitEvent('step', ($props.matchCount || 0) - 1 - ($props.current || 0))" />
     <Text fontSize="$fontSize-sm" color="$textColor-secondary"
       when="{$props.showCount}"
       value="{($props.matchCount || 0) ? (($props.current + 1) + ' / ' + $props.matchCount + ' matches') : 'No matches'}" />

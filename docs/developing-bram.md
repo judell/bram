@@ -257,6 +257,17 @@ rule exists for shell/runtime assets: a plain restart of the wrong
 binary, or a build followed by relaunching that wrong binary, still
 runs stale code.
 
+## Hand-testing the Worklist gate
+
+The gate's selection matrix — which buttons light for which combination of
+items, entanglement, and lifecycle state — is exercised by the walkthrough
+in `docs/worklist-gate-walkthrough.md`: probe items doing trivial real work,
+phase-by-phase expectations, deliberate wedge attempts, and teardown trace
+greps. Born as the 0.5.3 release gate (three findings, all fixed in-run).
+Run it before a release or after touching the gate surfaces. Its graduation
+target is an automated test on transient instances, per the harness pattern
+below; the host-observable half could graduate first.
+
 ## Developing and testing the startup dance
 
 Startup — Setup seeding a project, hook registration, currency and

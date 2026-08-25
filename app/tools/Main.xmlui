@@ -657,7 +657,13 @@
            The Footer is the surface `vertical-sticky` actually pins, so the
            buttons live here and the composer below serves as their message
            box - one box, whose target is named by its placeholder. -->
-      <WorklistGateBar when="{$pathname === '/worklist2' || $pathname === '/worklist'}" />
+      <!-- The gate bar follows the Worklist page onto every route that
+           renders it — including '/', which 1cd9315 remapped from the
+           deleted Workspace. A route serving the page without its footer
+           gate produced a working board whose ticks lit no buttons
+           (xmlui instance, 2026-08-25: publish with no subscriber until a
+           route change mounted the bar). -->
+      <WorklistGateBar when="{$pathname === '/worklist2' || $pathname === '/worklist' || $pathname === '/'}" />
       <HStack
         width="100%"
         verticalAlignment="center"

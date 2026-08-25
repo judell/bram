@@ -41116,6 +41116,107 @@ fn observe_pending_advances<R: tauri::Runtime>(app: &AppHandle<R>, doc: &serde_j
     }
 }
 
+// issue-273-worklist-attribution-observe: observe-only tripwire. The
+// exclusivity rule in worklist_change_activity's sharedWith enrichment
+// attributes a changed path to an item when no OTHER begun item also
+// declares it -- but that proves only that no sibling is a *plausible*
+// author, never that THIS item is the actual one. Work landed outside the
+// worklist (a direct edit, an edit made before the item was ever approved,
+// a build regenerating the file) lands on whichever item happens to
+// declare the path. When an item's own exclusive changed path has an
+// mtime that PREDATES the item's begunAtMs stamp, the file could not be
+// this item's authorized work -- it was already different before the
+// green light. No payload field, no behavior change: trace only.
+fn observe_worklist_attribution<R: tauri::Runtime>(app: &AppHandle<R>, doc: &serde_json::Value) {
+    if !bram_trace_enabled() {
+        return;
+    }
+    let Some(items) = doc.get("items").and_then(|v| v.as_array()) else {
+        return;
+    };
+    // begunAtMs per item id. Needed to re-derive exclusivity restricted to
+    // BEGUN siblings -- changedFiles' `sharedWith` lists any sibling that
+    // merely *declares* the path, begun or not, which is a looser test
+    // than the one the pane's own committability check applies.
+    let begun_by_id: std::collections::HashMap<&str, i64> = items
+        .iter()
+        .filter_map(|item| {
+            let id = item.get("id").and_then(|v| v.as_str())?;
+            let begun = item.get("begunAtMs").and_then(|v| v.as_i64())?;
+            Some((id, begun))
+        })
+        .collect();
+    if begun_by_id.is_empty() {
+        return;
+    }
+    let Some(root) = project_root(Some(app)) else {
+        return;
+    };
+    static REPORTED: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    let reported = REPORTED.get_or_init(|| Mutex::new(Default::default()));
+    for item in items {
+        let Some(id) = item.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(&begun_at_ms) = begun_by_id.get(id) else {
+            continue;
+        };
+        let Some(records) = item.get("changedFiles").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for rec in records {
+            let added = rec.get("added").and_then(|v| v.as_i64()).unwrap_or(0);
+            let removed = rec.get("removed").and_then(|v| v.as_i64()).unwrap_or(0);
+            if added + removed <= 0 {
+                continue;
+            }
+            let Some(path) = rec.get("path").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            // Exclusive to THIS item only if no sibling that also declares
+            // the path is itself begun.
+            let exclusive = match rec.get("sharedWith").and_then(|v| v.as_array()) {
+                None => true,
+                Some(shared) => !shared
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .any(|sid| begun_by_id.contains_key(sid)),
+            };
+            if !exclusive {
+                continue;
+            }
+            // Deleted file: skip silently, no emit, no error.
+            let Ok(md) = std::fs::metadata(root.join(path)) else {
+                continue;
+            };
+            let Ok(modified) = md.modified() else {
+                continue;
+            };
+            let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH) else {
+                continue;
+            };
+            let mtime_ms = dur.as_millis() as i64;
+            if mtime_ms >= begun_at_ms {
+                continue;
+            }
+            let dedup_key = format!("{}|{}|{}", id, path, mtime_ms);
+            if let Ok(mut g) = reported.lock() {
+                if !g.insert(dedup_key) {
+                    continue;
+                }
+            }
+            let summary = format!(
+                "op=predates-greenlight item={} path={} mtime_ms={} begun_ms={}",
+                id, path, mtime_ms, begun_at_ms
+            );
+            eprintln!("[worklist-attribution] {}", summary);
+            if bram_trace_enabled() {
+                append_bram_trace_line(app, "worklist-attribution", &summary);
+            }
+        }
+    }
+}
+
 fn stamp_worklist_items_begun<R: tauri::Runtime>(app: &AppHandle<R>, ids: &[String]) {
     if ids.is_empty() {
         return;
@@ -45530,6 +45631,7 @@ fn route_request<R: tauri::Runtime>(
             );
         }
         observe_pending_advances(app, &doc);
+        observe_worklist_attribution(app, &doc);
         let body = serde_json::to_vec(&doc).unwrap_or_default();
         return (200, "application/json; charset=utf-8", body);
     }

@@ -257,7 +257,16 @@
         placeholder="Optional: cite an open issue"
         data="{((w2OpenIssues.value) || []).filter(i => i.state === 'OPEN').map(i => ({value: i.number, label: '#' + i.number + ' ' + i.title}))}"
         initialValue="{worklist2NewItemIssue}"
-        onDidChange="(v) => worklist2NewItemIssue = v" />
+        onDidChange="(v) => worklist2NewItemIssue = v">
+        <!-- new-item-select-left-justify: the default value renderer centers
+             wrapped titles. A width-constrained Text wraps flush-left (its
+             default alignment); no theme var covers value alignment, so the
+             template is the mechanism
+             (xmlui.org/docs/reference/components/Select#valuetemplate). -->
+        <property name="valueTemplate">
+          <Text width="100%" value="{$item.label}" />
+        </property>
+      </Select>
       <IsolatedDraftEditor
         id="w2NewItemEditor"
         placeholder="Describe what the item should change"

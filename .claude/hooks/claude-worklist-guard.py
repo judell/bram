@@ -748,7 +748,7 @@ def fresh_bypass(project_root, path_rel):
     return path_rel in paths or "*" in paths
 
 
-def deny_coverage(target_rel, opt_out_attempted):
+def deny_coverage(target_rel, opt_out_attempted, project_root=None):
     msg = (
         f"Blocked: writing to {target_rel} requires either a proposed/applied "
         f"item in resources/worklist.json covering this path, or an explicit "
@@ -765,12 +765,27 @@ def deny_coverage(target_rel, opt_out_attempted):
             "match the expected phrasing. The verbal opt-out is exactly "
             "\"just do it\"; otherwise use the Skip worklist button.)"
         )
+    # issue-280: name the root this denial was judged against. A stray
+    # AUTH_REL marker in a subdirectory silently captures everything beneath
+    # it, and the only symptom used to be an unexpectedly short relative
+    # `target` — three denials and a source-read to diagnose, live 2026-08-24
+    # in the xmlui repo. One line makes the wrong root self-announcing (and
+    # `cwd` in the trace is a red herring for Edit/Write, whose root comes
+    # from the TARGET's directory).
+    reason = "no-coverage-no-opt-out"
+    if project_root:
+        msg += (
+            f"\nresolved_project_root={project_root} "
+            f"(marker: {AUTH_REL}; if this is not the repo root, a stray "
+            f"marker file captured this subtree — remove that {AUTH_REL})"
+        )
+        reason += f":root={project_root}"
     _trace_hook(
         "PreToolUse",
         os.environ.get("__BRAM_TRACE_TOOL", "Write"),
         target_rel,
         "deny",
-        "no-coverage-no-opt-out",
+        reason,
     )
     print(msg, file=sys.stderr)
     sys.exit(2)
@@ -806,14 +821,24 @@ def opt_out_clears(project_root, payload, tool_name, target_rel):
     return True
 
 
-def deny_bash_coverage(command, cwd=None):
+def deny_bash_coverage(command, cwd=None, project_root=None):
     preview = (command or "")[:200]
+    reason = "bash-write-no-coverage"
+    root_line = ""
+    if project_root:
+        # issue-280: see deny_coverage. For Bash the walk starts at cwd.
+        root_line = (
+            f"\nresolved_project_root={project_root} "
+            f"(marker: {AUTH_REL}; if this is not the repo root, a stray "
+            f"marker file captured this subtree — remove that {AUTH_REL})"
+        )
+        reason += f":root={project_root}"
     _trace_hook(
         "PreToolUse",
         "Bash",
         preview,
         "deny",
-        "bash-write-no-coverage",
+        reason,
         cwd,
     )
     print(
@@ -823,7 +848,8 @@ def deny_bash_coverage(command, cwd=None):
         "  - Propose the work in the worklist first, wait for the user's "
         "approved: payload, then retry.\n"
         "  - The user can authorize a direct edit by ending their message "
-        "with \"just do it\", or by clicking the Skip worklist button.",
+        "with \"just do it\", or by clicking the Skip worklist button."
+        + root_line,
         file=sys.stderr,
     )
     sys.exit(2)
@@ -1370,7 +1396,7 @@ def main():
             sys.exit(0)
         if opt_out_clears(project_root, payload, "Bash", preview):
             sys.exit(0)
-        deny_bash_coverage(command, cwd)
+        deny_bash_coverage(command, cwd, project_root=project_root)
 
     if tool_name.startswith("mcp__"):
         os.environ["__BRAM_TRACE_TOOL"] = tool_name
@@ -1429,7 +1455,7 @@ def main():
         if violations:
             if opt_out_clears(project_root, payload, tool_name, violations[0]):
                 sys.exit(0)
-            deny_coverage(violations[0], opt_out_attempted=False)
+            deny_coverage(violations[0], opt_out_attempted=False, project_root=project_root)
         _trace_hook(
             "PreToolUse", tool_name, ",".join(candidates)[:120], "allow",
             "covered-by-worklist-item", cwd,
@@ -1519,7 +1545,7 @@ def main():
     if opt_out_clears(project_root, payload, tool_name, rel):
         sys.exit(0)
     last_msg = last_user_text(payload.get("transcript_path", ""))
-    deny_coverage(rel, opt_out_attempted=("worklist" in (last_msg or "").lower()
+    deny_coverage(rel, project_root=project_root, opt_out_attempted=("worklist" in (last_msg or "").lower()
                                           and "no" in (last_msg or "").lower()))
 
 

@@ -157,6 +157,18 @@ def pre_tool_use_deny_response(reason):
     }
 
 
+def coverage_root_line(cwd):
+    """issue-280: name the root a coverage denial was judged against. Unlike
+    the Claude guard, this guard never walks up — its root is always cwd —
+    so the stray-marker-captures-a-subtree class cannot occur here; the line
+    exists for parity, so both guards' denials read alike and a wrong cwd
+    is self-announcing."""
+    return (
+        f"\nresolved_project_root={os.path.abspath(cwd or '.')} "
+        f"(marker: {AUTH_REL}, anchored at cwd)"
+    )
+
+
 def deny(reason):
     _trace_hook(
         _HOOK_CTX["event"] or "PreToolUse",
@@ -1488,6 +1500,7 @@ def main():
                 f"direct-edit authorization covers it. Propose the change in "
                 f"the worklist first (status: 'proposed'), wait for the user's "
                 f"approved: payload, then retry."
+                + coverage_root_line(cwd)
             )
         allow()
 
@@ -1606,6 +1619,7 @@ def main():
             "resources/worklist.json has no proposed or applied items "
             "covering the change. Propose the work in the worklist first, "
             "or have the user issue a direct-edit authorization."
+            + coverage_root_line(cwd)
         )
 
     if tool_name.startswith("mcp__"):
@@ -1683,6 +1697,7 @@ def main():
                 f"direct-edit authorization covers it. Propose the change in "
                 f"the worklist first, wait for the user's approved: payload, "
                 f"then retry."
+                + coverage_root_line(cwd)
             )
         allow()
 

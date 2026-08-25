@@ -84,6 +84,13 @@
     id="w2VoiceArrival"
     initial="{null}"
     subscribe="{window.bramSubscribeVoiceArrival()}" />
+  <!-- overlap-hover-row-emphasis: focus published by the Review-overlaps
+       table's rowEnter/rowLeave; rows tint below while their id is in the
+       focused claimant set. -->
+  <PushSource
+    id="overlapFocus"
+    initial="{window.__bramOverlapFocus}"
+    subscribe="{window.bramSubscribeOverlapFocus()}" />
   <!-- issue-278: publish the selection so the Footer's gate bar can read it.
        The gate row is moving to the Footer because that is the one surface
        this App layout pins ("vertical-sticky ... the footer sticks to the
@@ -201,7 +208,15 @@
            along (see the shared-with Column). Same shape, same problem, and it
            was solved once already - this is that solution, reused rather than
            reinvented. -->
-      <Table data="{window.__bramOverlapIndex(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value)}">
+      <!-- overlap-hover-row-emphasis: hovering a row publishes its claimant
+           ids (rowEnter fires once per row, not per cell; rowLeave is the
+           clearing pair — the engine events vendored in 869cc89). Worklist
+           rows subscribe and tint: the claimant→row tie the issue-278 graph
+           was recruited for, delivered on the surface that won. -->
+      <Table
+        data="{window.__bramOverlapIndex(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value)}"
+        onRowEnter="(item) => window.__bramSetOverlapFocus(item.claimants)"
+        onRowLeave="window.__bramClearOverlapFocus()">
         <Column header="file" width="2*">
           <Text value="{$item.path}" variant="code" fontSize="$fontSize-sm" tooltip="{$item.path}" />
         </Column>
@@ -294,7 +309,11 @@
            four units of padding under a one-line row read as a gap rather
            than as separation. Expanded rows still get their air from the
            inner gap. -->
-      <VStack gap="$space-1" paddingBottom="$space-2">
+      <VStack
+        gap="$space-1"
+        paddingBottom="$space-2"
+        borderRadius="$borderRadius"
+        backgroundColor="{window.__bramOverlapFocusedRow(overlapFocus.value, $item.id) ? '$color-primary-100' : 'transparent'}">
         <!-- worklist2-remove-expander-chrome: no indicator glyphs (History's
              chrome-free section headers are the precedent); the header line
              itself is the toggle. The selection Checkbox sits OUTSIDE the

@@ -2920,6 +2920,56 @@ window.__bramOverlapRowCount = function (entry, items) {
   return (entry.total === n && n > 1 ? "all " : "") + entry.total + " items";
 };
 
+// overlap-hover-row-emphasis: the claimant→row tie. Hovering a Shared files
+// row in the Review-overlaps disclosure publishes its claimant ids; worklist
+// rows subscribe and tint while their id is in the focused set. This is the
+// one thing the dropped issue-278 graph was recruited to deliver
+// ("the linking channel isn't wasted work; it's wired to the wrong
+// surface") — the store/subscription shape is cherry-picked from that
+// item's stash, simplified from graph-neighborhood keys to bare item ids
+// because the table row already names its claimants. The trigger is the
+// engine's Table rowEnter/rowLeave pair (vendored 869cc89): enter fires
+// once per row (not per cell), leave is the documented clearing pair.
+window.__bramOverlapFocus = { itemIds: [] };
+var __bramOverlapFocusSubscribers = new Set();
+
+function __bramPublishOverlapFocus(next) {
+  window.__bramOverlapFocus = next;
+  __bramOverlapFocusSubscribers.forEach(function (fn) {
+    try { fn(next); } catch (e) { console.error("[bramSubscribeOverlapFocus] subscriber threw:", e); }
+  });
+}
+
+window.bramSubscribeOverlapFocus = (function () {
+  var factory;
+  return function () {
+    if (factory) return factory;
+    factory = function (emit) {
+      var fire = function (value) { emit(value || window.__bramOverlapFocus); };
+      __bramOverlapFocusSubscribers.add(fire);
+      fire();
+      return function () { __bramOverlapFocusSubscribers.delete(fire); };
+    };
+    return factory;
+  };
+})();
+
+window.__bramSetOverlapFocus = function (claimantIds) {
+  var ids = (claimantIds || []).filter(Boolean);
+  var cur = (window.__bramOverlapFocus && window.__bramOverlapFocus.itemIds) || [];
+  if (cur.length === ids.length && ids.every(function (id, i) { return cur[i] === id; })) return;
+  __bramPublishOverlapFocus({ itemIds: ids });
+};
+
+window.__bramClearOverlapFocus = function () {
+  if (!((window.__bramOverlapFocus && window.__bramOverlapFocus.itemIds) || []).length) return;
+  __bramPublishOverlapFocus({ itemIds: [] });
+};
+
+window.__bramOverlapFocusedRow = function (focus, itemId) {
+  return !!(focus && focus.itemIds && focus.itemIds.includes(itemId));
+};
+
 // issue-266-close-declaration-inline: state helpers for the inline close
 // declaration at the commit gate. The map holds per-item close state only
 // once the user touches a tickbox; untouched items derive default state
@@ -3881,6 +3931,21 @@ window.__bramHistoryCommitUrl = function (group) {
     var summary = (phase.summary || "").toLowerCase();
     var url = typeof phase.commitUrl === "string" ? phase.commitUrl.trim() : "";
     if (url && summary.indexOf("committed") >= 0) return url;
+  }
+  return "";
+};
+
+// issue-277 A2: the group-level twin of __bramHistoryCommitUrl for the
+// host's local SHA classification. "orphaned" means the recorded commit is
+// no longer an ancestor of HEAD (rebase rewrote it) and its forge link
+// would never heal — the detail header says so instead of linking.
+window.__bramHistoryCommitStatus = function (group) {
+  var phases = (group && group.phases) || [];
+  for (var i = phases.length - 1; i >= 0; i--) {
+    var phase = phases[i] || {};
+    var summary = (phase.summary || "").toLowerCase();
+    var st = typeof phase.commitStatus === "string" ? phase.commitStatus : "";
+    if (st && summary.indexOf("committed") >= 0) return st;
   }
   return "";
 };
@@ -8981,6 +9046,7 @@ window.__bramHistoryBlockRows = function (g, openPath, openPreview) {
     commitContextLabel: g.commitContextLabel,
     detailsRestoredLabel: g.detailsRestoredLabel,
     commitUrl: commitUrl,
+    commitStatus: window.__bramHistoryCommitStatus(g) || "",
   }];
   if (before) rows.push({ id: "before", kind: "before", body: before });
   if (after) rows.push({ id: "after", kind: "after", body: after });

@@ -619,6 +619,46 @@ def has_opt_out(msg):
     return any(rx.search(msg) for rx in _OPT_OUT_PATTERNS)
 
 
+def iterate_feedback_text(project_root, last_msg):
+    """issue-171: an Iterate turn's real text lives in
+    resources/feedback-drafts/<feedbackRef>.md — the transcript carries only
+    the structured `iterate:` payload, so an opt-out phrase typed into
+    iterate feedback was invisible to the matcher (observed live in #170:
+    "just do it" in feedback, denied anyway; only retyping in plain chat
+    unblocked). When the last user message is an iterate payload, return the
+    concatenated draft texts so has_opt_out sees what the user actually
+    typed. Fails open to "" on any parse or read miss — absence of drafts
+    must never widen or narrow anything beyond current behavior."""
+    if not isinstance(last_msg, str) or not project_root:
+        return ""
+    stripped = last_msg.strip()
+    if not stripped.startswith("iterate:"):
+        return ""
+    try:
+        doc = json.loads(stripped[len("iterate:"):].strip())
+        items = doc.get("items", [])
+    except Exception:
+        return ""
+    if not isinstance(items, list):
+        return ""
+    out = []
+    for it in items:
+        ref = it.get("feedbackRef") if isinstance(it, dict) else None
+        if not isinstance(ref, str) or not ref:
+            continue
+        # Refs are host-allocated basenames; anything path-shaped is refused
+        # rather than resolved.
+        if "/" in ref or "\\" in ref or ".." in ref:
+            continue
+        path = os.path.join(project_root, "resources", "feedback-drafts", ref + ".md")
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                out.append(f.read())
+        except Exception:
+            continue
+    return "\n".join(out)
+
+
 def _post_direct_edit_audit_breadcrumb(project_root, last_msg):
     """Best-effort breadcrumb POST to /__audit/direct-edit so a Claude
     prose opt-out lands in the audit ledger the same way a Codex prose
@@ -845,7 +885,13 @@ def opt_out_clears(project_root, payload, tool_name, target_rel):
     """
     last_msg = last_user_text(payload.get("transcript_path", ""))
     if not has_opt_out(last_msg):
-        return False
+        # issue-171: an Iterate turn's transcript message is the structured
+        # payload; the user's actual words ride the feedback draft. Match
+        # those too before concluding there was no opt-out.
+        draft_text = iterate_feedback_text(project_root, last_msg)
+        if not (draft_text and has_opt_out(draft_text)):
+            return False
+        last_msg = draft_text
     _post_direct_edit_audit_breadcrumb(project_root, last_msg)
     # Pass project_root as cwd: it is the project the decision applies to, and
     # it is where _post_hook_trace finds resources/.bram-port. Defaulting to

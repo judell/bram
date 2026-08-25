@@ -13548,6 +13548,19 @@ trait ForgeAdapter: Sync {
             .map_err(|e| e.to_string())?;
         Ok(out.status.success() && !String::from_utf8_lossy(&out.stdout).trim().is_empty())
     }
+    // issue-282: cheap forge-state lookup for the issue-close queue's
+    // already-closed retire check. Default reuses issue_view (already
+    // forge-normalized state), which is the "adapter's equivalent" for
+    // forges (GitLab) with no cheaper state-only endpoint wired up.
+    // Overridden on GitHub with a state-only fetch since this runs once
+    // per pending queue record.
+    fn issue_state(&self, root: &Path, number: u64) -> Option<String> {
+        let issue = self.issue_view(root, number).ok()?;
+        issue
+            .get("state")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    }
 }
 
 struct GitHubForge;
@@ -13780,6 +13793,21 @@ impl ForgeAdapter for GitHubForge {
                 Err(stderr)
             }
         }
+    }
+
+    // issue-282: state-only fetch — flush_pending_issue_closes calls this
+    // once per pending record, so skip the body/comments the full
+    // issue_view pulls.
+    fn issue_state(&self, root: &Path, number: u64) -> Option<String> {
+        let n = number.to_string();
+        let stdout = gh_json_out(
+            root,
+            &["issue", "view", &n, "--json", "state", "--jq", ".state"],
+            "gh issue view state",
+        )
+        .ok()?;
+        let state = String::from_utf8_lossy(&stdout).trim().to_string();
+        (!state.is_empty()).then_some(state)
     }
 }
 
@@ -42746,6 +42774,67 @@ fn commit_on_origin_default<R: tauri::Runtime>(app: &AppHandle<R>, sha: &str) ->
     Some(anc.success())
 }
 
+// issue-282: a queue record can outlive the issue it targets — the PR
+// flow, or a person, may have already closed it while this record sat
+// deferred. Fail safe: any lookup failure or ambiguous state reads as
+// "still open" so the record stays queued rather than being silently
+// dropped on a shaky answer.
+fn issue_already_closed<R: tauri::Runtime>(app: &AppHandle<R>, number: u64) -> bool {
+    let Some(root) = project_root(Some(app)) else {
+        return false;
+    };
+    match forge_adapter(app).issue_state(&root, number) {
+        Some(state) => state.eq_ignore_ascii_case("closed"),
+        None => false,
+    }
+}
+
+// issue-282: GitHub-only. In squash-merge repos the commit SHA recorded at
+// commit time never lands on the default branch — the merge commit does —
+// so commit_on_origin_default defers this record forever even though the
+// fix shipped. `commits/{sha}/pulls` names the PR(s) that contain the
+// commit; a merged one is the visible artifact standing in for the commit
+// itself. None on any failure or when no PR both contains the commit and
+// is merged — the caller defers exactly as it did before this existed.
+fn gh_merged_pr_for_commit<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    repo_slug: &str,
+    sha: &str,
+) -> Option<(u64, String)> {
+    let root = project_root(Some(app))?;
+    let path = format!("repos/{}/commits/{}/pulls", repo_slug, sha);
+    let out = std::process::Command::new("gh")
+        .current_dir(&root)
+        .args(["api", &path])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let prs: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).ok()?;
+    prs.into_iter().find_map(|pr| {
+        let merged = pr.get("merged_at").map(|v| !v.is_null()).unwrap_or(false);
+        if !merged {
+            return None;
+        }
+        let number = pr.get("number").and_then(|n| n.as_u64())?;
+        let url = pr.get("html_url").and_then(|u| u.as_str())?.to_string();
+        Some((number, url))
+    })
+}
+
+// issue-282: same "Closed by ..." shape as close_issue_commit_comment,
+// but for the closed-via-PR path — the URL is a merged PR's html_url,
+// not a commit URL built through adapter.commit_url.
+fn close_issue_pr_comment(pr_url: &str, subject: &str) -> String {
+    let trimmed_subject = subject.trim();
+    if trimmed_subject.is_empty() {
+        format!("Closed by {}", pr_url)
+    } else {
+        format!("Closed by {}\n\nCommit: {}", pr_url, trimmed_subject)
+    }
+}
+
 // On an observed push, close each queued issue whose commit is now
 // visible on origin, with the commit-link comment (plus any user comment).
 // Records whose commit isn't visible yet stay queued. NOT gated on the
@@ -42809,6 +42898,34 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>, trigger: &s
     let mut remaining: Vec<PendingIssueClose> = Vec::new();
     let mut closed: Vec<u64> = Vec::new();
     for mut record in records {
+        // issue-282: retire before touching SHA visibility at all — an
+        // issue the PR flow (or a person) already closed has nothing left
+        // for this record to do, regardless of where its commit sits.
+        if issue_already_closed(app, record.issue) {
+            eprintln!(
+                "[issue-close-queue] op=retired-already-closed issue={} sha={}",
+                record.issue, record.commit_sha
+            );
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "issue-close-queue",
+                    &format!(
+                        "op=retired-already-closed issue={} sha={}",
+                        record.issue, record.commit_sha
+                    ),
+                );
+            }
+            append_audit_record(
+                app,
+                serde_json::json!({
+                    "kind": "issue-close-retired-already-closed",
+                    "issue": record.issue,
+                    "commit": record.commit_sha,
+                }),
+            );
+            continue;
+        }
         // issue-close-queue-survives-rebase: a SHA absent from origin may be
         // a rebase-rewritten twin. Re-anchor by patch-id over recent origin
         // history and adopt the new SHA; if nothing matches, defer as before
@@ -42826,6 +42943,16 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>, trigger: &s
         let deferred_unmerged = !visible
             && default_check == Some(false)
             && matches!(gh_commit_visible(app, &repo_slug, &record.commit_sha), Ok(true));
+        // issue-282: squash-merge repos never land this commit on the
+        // default branch — the merge commit does — so deferred_unmerged
+        // would hold the record open forever even after the fix shipped.
+        // GitHub only: check whether a merged PR already contains the
+        // commit before falling into the deferred-not-on-default path.
+        let closed_via_pr = if deferred_unmerged && project_forge(app) == Forge::GitHub {
+            gh_merged_pr_for_commit(app, &repo_slug, &record.commit_sha)
+        } else {
+            None
+        };
         if unknown_default {
             eprintln!(
                 "[issue-close-queue] op=deferred-unknown-default issue={} sha={}",
@@ -42851,7 +42978,7 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>, trigger: &s
                 }),
             );
         }
-        if deferred_unmerged {
+        if deferred_unmerged && closed_via_pr.is_none() {
             eprintln!(
                 "[issue-close-queue] op=deferred-not-on-default issue={} sha={}",
                 record.issue, record.commit_sha
@@ -42963,6 +43090,55 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>, trigger: &s
                     }
                 }
             }
+        } else if let Some((pr_number, pr_url)) = closed_via_pr {
+            // issue-282: same close/audit/refresh bookkeeping as the
+            // visible branch above, but the "Closed by" URL is the merged
+            // PR's html_url rather than a commit URL.
+            let full_sha = git_full_commit_sha(app, &record.commit_sha)
+                .unwrap_or_else(|_| record.commit_sha.clone());
+            let subject = git_commit_subject(app, &full_sha).unwrap_or_default();
+            let mut comment = close_issue_pr_comment(&pr_url, &subject);
+            if let Some(user) = record.comment.as_deref().filter(|s| !s.is_empty()) {
+                comment = format!("{}\n\n{}", user, comment);
+            }
+            if let Err(e) = gh_issue_close(app, record.issue, &comment) {
+                eprintln!(
+                    "[issue-close-queue] close #{} sha={} failed: {}",
+                    record.issue, record.commit_sha, e
+                );
+                remaining.push(record);
+            } else {
+                closed.push(record.issue);
+                eprintln!(
+                    "[issue-close-queue] op=closed-via-pr issue={} pr={} sha={}",
+                    record.issue, pr_number, full_sha
+                );
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        app,
+                        "issue-close-queue",
+                        &format!(
+                            "op=closed-via-pr issue={} pr={} sha={}",
+                            record.issue, pr_number, full_sha
+                        ),
+                    );
+                }
+                append_audit_record(
+                    app,
+                    serde_json::json!({
+                        "kind": "issue-close-fired",
+                        "issue": record.issue,
+                        "commit": full_sha,
+                        "branch": git_current_branch(app).unwrap_or_default(),
+                    }),
+                );
+                if let Err(e) = refresh_issue_now(app, record.issue) {
+                    eprintln!(
+                        "[issue-close-queue] refresh #{} after close failed: {}",
+                        record.issue, e
+                    );
+                }
+            }
         } else {
             remaining.push(record);
         }
@@ -43014,9 +43190,30 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>, trigger: &s
 #[cfg(test)]
 mod close_on_push_tests {
     use super::{
-        enqueue_pending_issue_close_path, parse_close_issue_selections, read_pending_issue_closes,
-        PendingIssueClose,
+        close_issue_pr_comment, enqueue_pending_issue_close_path, parse_close_issue_selections,
+        read_pending_issue_closes, PendingIssueClose,
     };
+
+    // issue-282: same shape as close_issue_commit_comment's tests, for the
+    // closed-via-PR path's comment format.
+    #[test]
+    fn generated_pr_close_comment_uses_pr_html_url_without_trailing_period() {
+        let comment = close_issue_pr_comment(
+            "https://github.com/judell/bram/pull/283",
+            "Fix draft-backed worklist history",
+        );
+        assert_eq!(
+            comment,
+            "Closed by https://github.com/judell/bram/pull/283\n\nCommit: Fix draft-backed worklist history"
+        );
+        assert!(!comment.ends_with('.'));
+    }
+
+    #[test]
+    fn generated_pr_close_comment_tolerates_missing_subject() {
+        let comment = close_issue_pr_comment("https://github.com/judell/bram/pull/283", "");
+        assert_eq!(comment, "Closed by https://github.com/judell/bram/pull/283");
+    }
 
     #[test]
     fn parses_bare_and_commented_close_lines_only() {

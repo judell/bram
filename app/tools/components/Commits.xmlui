@@ -108,7 +108,7 @@
       when="{((closeQueue.value &amp;&amp; closeQueue.value.pending) || []).filter(p => !(commits.value || []).some(c => !c.pushed &amp;&amp; c.sha === p.commitSha)).length > 0}"
       fontSize="$fontSize-sm"
       color="$textColor-secondary"
-      value="{'close queued for ' + ((closeQueue.value &amp;&amp; closeQueue.value.pending) || []).filter(p => !(commits.value || []).some(c => !c.pushed &amp;&amp; c.sha === p.commitSha)).map(p => '#' + p.issue).join(', ') + ' — completes when the commit is visible on origin'}" />
+      value="{'close queued for ' + ((closeQueue.value &amp;&amp; closeQueue.value.pending) || []).filter(p => !(commits.value || []).some(c => !c.pushed &amp;&amp; c.sha === p.commitSha)).map(p => '#' + p.issue).join(', ') + ' — completes when the commit reaches the default branch'}" />
 
     <VStack gap="$space-1" when="{commits.value &amp;&amp; commits.value.length > 0}">
       <!-- browse-tabs-adopt-searchresults: rows render through the shared

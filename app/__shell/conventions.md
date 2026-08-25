@@ -617,7 +617,10 @@ carries `close-issue:` selections (from the close-on-commit
 dialog), the host records only the requested ids' selections at commit
 time bound to that commit's SHA, then
 closes each issue automatically after the user's next explicit **Push** (only
-once its commit is visible on origin). There is no agent-reachable close
+once its commit reaches the default branch; in a squash-merge repo, a merged
+PR containing the commit completes the close instead, and a queued close
+whose issue is already closed by other means retires — #282). There is no
+agent-reachable close
 route — `/__issue/close` was removed — so there is nothing for the agent to
 call and no close step to instruct the user to run; closing follows Push with
 no further action (close-on-push-automatic, security H5). Closing never pushes.
@@ -1493,9 +1496,14 @@ close-issue: 50 comment: "shipped, see commit message"
 automatic, security H5).** At the commit gate the host itself parses these
 verified `close-issue:` selections and records a pending close bound to the
 new commit SHA. Nothing closes or pushes at commit time. On the user's next
-explicit **Push**, once each commit is visible on origin, the host closes
-its issue automatically with the `Closed by <commit-url>` comment (prefixed
-with the user's comment when one was given).
+explicit **Push**, once each commit reaches the default branch, the host
+closes its issue automatically with the `Closed by <commit-url>` comment
+(prefixed with the user's comment when one was given). Two refinements
+(#282, found where squash-merge made the original predicate unsatisfiable):
+a record whose issue is already closed by other means retires quietly
+(`op=retired-already-closed`), and on GitHub a **merged PR** containing the
+bound commit completes the close (`op=closed-via-pr`, `Closed by <pr-url>`)
+even though the squashed SHA itself never lands on the default branch.
 
 So after `worklist-commit` returns its `sha`, you are **done** — do not
 resolve the SHA and do not tell the user to run a close step. There is no
@@ -1843,8 +1851,9 @@ sentinel anomalies, route errors, agent-turn-end detection,
 heartbeat drift, close-cycle verification (`grep
 "[issue-close-queue] op=closed" resources/bram-traces/bram-trace.log` —
 one line per issue the host auto-closed after a Push; absence around a
-known close timestamp means the commit wasn't visible on origin yet, or
-no close was queued at the commit gate).
+known close timestamp means the commit hadn't reached the default branch
+yet, or no close was queued at the commit gate; see also
+`op=retired-already-closed` and `op=closed-via-pr`, #282).
 
 **Inspector Export** — XMLUI runtime trace (events, state changes,
 handler invocations) for Bram's own XMLUI UI, captured on demand.

@@ -57,8 +57,12 @@ of 2026-08-24; re-triage before trusting it):
 | message | status |
 |---|---|
 | `ResizeObserver loop completed with undelivered notifications` | known, #275 A2, unfixed |
-| `Lifecycle violation on '': async 'unmount' handler…` | known, upstream xmlui#3823, no in-app fix |
 | `Failed to load resource … 404` for `components/*.xmlui` | known, upstream xmlui#3822 |
+
+(The `Lifecycle violation on '': async 'unmount' handler…` row retired
+2026-08-25: fixed upstream by xmlui#3825, vendored, and verified absent on a
+fresh boot where it previously fired within minutes. If it reappears, that
+is a finding, not noise.)
 
 **Anything else in the console is a finding.** That is the whole value of
 clearing it first.

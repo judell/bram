@@ -99,7 +99,7 @@
             label="On Bram launch"
             labelPosition="start"
             labelWidth="10rem"
-            width="70%"
+            width="100%"
             data="{[
               { value: 'agentRecent', label: 'Resume selected agent’s most recent session' },
               { value: 'lastActive', label: 'Resume most-recently-active agent’s session' },

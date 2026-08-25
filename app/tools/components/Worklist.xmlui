@@ -264,7 +264,7 @@
              template is the mechanism
              (xmlui.org/docs/reference/components/Select#valuetemplate). -->
         <property name="valueTemplate">
-          <Text width="100%" value="{$item.label}" />
+          <Text width="100%" textAlign="start" value="{$item.label}" />
         </property>
       </Select>
       <IsolatedDraftEditor

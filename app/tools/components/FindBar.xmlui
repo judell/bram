@@ -47,12 +47,15 @@
       enabled="{($props.matchCount || 0) > 0 &amp;&amp; ($props.current || 0) > 0}"
       tooltip="First match"
       onClick="emitEvent('step', -($props.current || 0))" />
+    <!-- findbar-no-wraparound: steppers share the jump buttons'
+         position-aware enablement, so the buttons cannot wrap past an end.
+         Buttons only — the hosts' modulo cursor math is untouched. -->
     <Button size="xs" variant="outlined" label="▲"
-      enabled="{($props.matchCount || 0) > 0}"
+      enabled="{($props.matchCount || 0) > 0 &amp;&amp; ($props.current || 0) > 0}"
       tooltip="Previous match"
       onClick="emitEvent('step', -1)" />
     <Button size="xs" variant="outlined" label="▼"
-      enabled="{($props.matchCount || 0) > 0}"
+      enabled="{($props.matchCount || 0) > 0 &amp;&amp; ($props.current || 0) < ($props.matchCount || 0) - 1}"
       tooltip="Next match"
       onClick="emitEvent('step', 1)" />
     <Button size="xs" variant="outlined" label="⤓"

@@ -675,23 +675,23 @@
              re-render this footer's message composer. The working-verb/spinner
              rationale now lives in FooterAgentStatus.xmlui. Measured by the
              footer-churn / heartbeat-batch instrument. -->
-        <!-- Equal flexible side zones keep the optional badge geometrically
-             centered while the status stays flush left and indexing stays
-             flush right. Each zone absorbs its own text churn without moving
-             either of the other two. -->
+        <!-- footer-status-respects-chip-slot: the old three-zone layout
+             reserved a centered 6rem slot for the chip, and a long status
+             painted over it (overflowMode="none" let the label escape its
+             star zone). Review verdict: overlap is worse than losing chip
+             centering — so the chip now renders IN FLOW directly after the
+             status verb (the placement its comment always described; the
+             fixed slot only approximated it), the status ellipsizes within
+             its star width (see FooterAgentStatus), and nothing on the line
+             can overlap anything. Nothing reserves space when the chip is
+             hidden. -->
         <HStack width="*" verticalAlignment="center" gap="$space-0_5">
           <!-- Isolated in its own component so PTY-throughput churn does not
                re-render this footer's message composer. -->
           <ActivitySparkline />
-          <FooterAgentStatus enhanceStatus="{enhanceStatus.value}" />
-        </HStack>
-        <!-- transcript-new-below-badge chip: on the footer's first line,
-             right after the agent status verb — "the most obvious place to
-             look for status" (third placement per review feedback; bottom
-             corner got lost, app header wasn't where the eye goes). One
-             click to the transcript's live edge from any tab. The slot
-             reserves its width even when the chip is hidden. -->
-        <HStack width="6rem" verticalAlignment="center" horizontalAlignment="center">
+          <FooterAgentStatus width="*" enhanceStatus="{enhanceStatus.value}" />
+          <!-- transcript-new-below-badge chip: one click to the transcript's
+               live edge from any tab. -->
           <Button
             when="{transcriptUnseen.value > 0}"
             label="{'▼ ' + transcriptUnseen.value + ' new'}"

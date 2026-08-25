@@ -6,7 +6,15 @@
        per-component subscription isolation as ActivitySparkline /
        PastedImageStrip. enhanceStatus changes rarely (provider setup), so it
        is passed in as a prop rather than subscribed here. -->
+  <!-- footer-status-respects-chip-slot: the labels used to carry
+       overflowMode="none", which is licensed to paint past the zone — a
+       long status overwrote the "new below" chip. Review verdict: overlap
+       is the one intolerable outcome. Every label now ellipsizes within
+       the width this component is given (maxLines=1 + overflowMode=
+       "ellipsis", per xmlui.org/docs/reference/components/Text#overflowmode)
+       and carries its full text as a tooltip. -->
   <HStack
+    width="100%"
     gap="$space-0_5"
     verticalAlignment="center"
     var.lastSeenVerb="{''}">
@@ -52,27 +60,35 @@
       fontSize="$fontSize-lg"
       fontStyle="italic"
       color="$textColor-secondary"
-      overflowMode="none"
+      maxLines="1"
+      overflowMode="ellipsis"
+      tooltip="{window.providerDisplayName(agentStatus.value, $props.enhanceStatus)}"
       value="{window.providerDisplayName(agentStatus.value, $props.enhanceStatus)}" />
     <HStack
       when="{agentStatus.value &amp;&amp; agentStatus.value.state === 'working'}"
+      width="100%"
       gap="$space-1"
       verticalAlignment="center">
       <Text
         fontSize="$fontSize-lg"
         fontStyle="italic"
-        overflowMode="none"
+        maxLines="1"
+        overflowMode="ellipsis"
+        tooltip="{window.headerWorkingLabel(agentStatus.value, $props.enhanceStatus)}"
         value="{window.headerWorkingLabel(agentStatus.value, $props.enhanceStatus)}" />
     </HStack>
     <HStack
       when="{agentStatus.value &amp;&amp; agentStatus.value.state === 'finished'}"
+      width="100%"
       gap="$space-1"
       verticalAlignment="center">
       <Text
         fontSize="$fontSize-lg"
         fontStyle="italic"
         color="$textColor-secondary"
-        overflowMode="none"
+        maxLines="1"
+        overflowMode="ellipsis"
+        tooltip="{window.headerFinishedLabel(agentStatus.value, $props.enhanceStatus, lastSeenVerb)}"
         value="{window.headerFinishedLabel(agentStatus.value, $props.enhanceStatus, lastSeenVerb)}" />
     </HStack>
   </HStack>

@@ -820,21 +820,93 @@ def worklist_covered_files(project_root):
     return covered
 
 
-def fresh_bypass(project_root, path_rel):
-    """True iff the auth record carries a recent direct-edit bypass
-    covering path_rel."""
+def _bypass_lookup_detail(project_root, path_rel):
+    """Inspect project_root's AUTH_REL for a fresh direct-edit bypass
+    covering path_rel. Returns (matched, detail):
+
+    - (False, "absent")            -- no readable/parseable record there.
+    - (False, "wrong-kind")        -- a record exists but isn't direct-edit.
+    - (False, "stale")             -- a direct-edit record there expired
+                                       (>BYPASS_TTL_SECONDS old).
+    - (False, "path-not-covered")  -- a fresh direct-edit record there
+                                       doesn't list path_rel or "*".
+    - (True, "ok")                 -- matched.
+
+    `detail` exists so a denial can name what it found at each root it
+    checked (issue-262), not just that the bypass failed.
+    """
     try:
         with open(os.path.join(project_root, AUTH_REL), encoding="utf-8") as f:
             rec = json.load(f)
     except Exception:
-        return False
+        return False, "absent"
     if not isinstance(rec, dict) or rec.get("kind") != "direct-edit":
-        return False
+        return False, "wrong-kind"
     issued = rec.get("issuedAtMs") or rec.get("issued_at_ms") or 0
     if (time.time() * 1000 - issued) > BYPASS_TTL_SECONDS * 1000:
-        return False
+        return False, "stale"
     paths = rec.get("paths") or []
-    return path_rel in paths or "*" in paths
+    if path_rel in paths or "*" in paths:
+        return True, "ok"
+    return False, "path-not-covered"
+
+
+def fresh_bypass(project_root, path_rel):
+    """True iff the auth record carries a recent direct-edit bypass
+    covering path_rel."""
+    matched, _ = _bypass_lookup_detail(project_root, path_rel)
+    return matched
+
+
+def resolve_session_root(payload):
+    """The driving session's own project root -- walk up from the
+    payload's `cwd` (present on every PreToolUse payload) to the same
+    AUTH_REL marker find_project_root uses for a target path. Returns None
+    when cwd is absent/unusable, or when no managed project sits above it
+    (an unmanaged cwd simply has no worklist-authorization surface of its
+    own to check -- not a failure)."""
+    cwd = payload.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        return None
+    return find_project_root(cwd)
+
+
+def cross_root_bypass_verdict(target_root, path_rel, session_root):
+    """issue-262: a `skip-worklist:` turn writes its one-turn direct-edit
+    record into the ACTIVE (session/cwd) project's AUTH_REL, but Write/Edit
+    resolves project_root from the TARGET file's path -- for a cross-project
+    edit those are two different roots, so the record is written correctly
+    and never found. Consult BOTH roots for the bypass: the target
+    project's own record (default, checked first -- unchanged for every
+    same-project edit) and the session project's record, only when it
+    differs from the target root. A fresh direct-edit record in either
+    authorizes. This widening applies ONLY to the direct-edit bypass --
+    coverage checks, worklist reads, and everything else stay target-rooted,
+    because a direct-edit record is written by an explicit, fresh,
+    user-initiated act in the driving session, which is exactly what the
+    verbal "just do it" opt-out already honors regardless of project root
+    (see has_opt_out / opt_out_clears, which read the transcript, not a
+    root -- the asymmetry issue-262 reports).
+
+    Returns (matched, matched_via, target_detail, session_detail):
+    - matched_via is "target" | "session" | None.
+    - target_detail is always populated (the first, and default, lookup).
+    - session_detail is None when the second lookup never ran: no usable
+      session_root, or session_root == target_root (degenerate case --
+      skip the redundant second lookup; behavior is single-root/unchanged).
+      Otherwise it carries the same detail vocabulary as target_detail.
+    """
+    matched, target_detail = _bypass_lookup_detail(target_root, path_rel)
+    if matched:
+        return True, "target", target_detail, None
+    if not session_root:
+        return False, None, target_detail, None
+    if os.path.abspath(session_root) == os.path.abspath(target_root):
+        return False, None, target_detail, None
+    session_matched, session_detail = _bypass_lookup_detail(session_root, path_rel)
+    if session_matched:
+        return True, "session", target_detail, session_detail
+    return False, None, target_detail, session_detail
 
 
 # judell/bram#283: the approval that produced a commit implies publishing
@@ -864,7 +936,18 @@ def post_commit_push_grace(project_root):
     return (time.time() * 1000 - consumed) <= POST_COMMIT_PUSH_GRACE_MS
 
 
-def deny_coverage(target_rel, opt_out_attempted, project_root=None):
+_BYPASS_DETAIL_LABELS = {
+    "absent": "no resources/.worklist-authorization.json there",
+    "wrong-kind": "a record exists there but isn't a direct-edit bypass",
+    "stale": "a direct-edit record there has expired (>1h old)",
+    "path-not-covered": "a fresh direct-edit record there doesn't cover this path",
+}
+
+
+def deny_coverage(
+    target_rel, opt_out_attempted, project_root=None,
+    session_root=None, session_bypass_detail=None,
+):
     msg = (
         f"Blocked: writing to {target_rel} requires either a proposed/applied "
         f"item in resources/worklist.json covering this path, or an explicit "
@@ -896,6 +979,18 @@ def deny_coverage(target_rel, opt_out_attempted, project_root=None):
             f"marker file captured this subtree — remove that {AUTH_REL})"
         )
         reason += f":root={project_root}"
+    # issue-262: when the cwd-derived session root differs from the target
+    # root, the bypass check above also looked there for a skip-worklist:
+    # direct-edit record -- name what it found (or didn't) so a
+    # cross-project miss explains itself instead of looking like the host
+    # never wrote the record at all.
+    if session_root and session_bypass_detail is not None:
+        label = _BYPASS_DETAIL_LABELS.get(session_bypass_detail, session_bypass_detail)
+        msg += (
+            f"\nAlso checked the session project's direct-edit bypass "
+            f"(cwd-derived root: {session_root}): {label}."
+        )
+        reason += f":session_root={session_root}:{session_bypass_detail}"
     _trace_hook(
         "PreToolUse",
         os.environ.get("__BRAM_TRACE_TOOL", "Write"),
@@ -1368,6 +1463,116 @@ def self_test():
         "skip", None
     )
 
+    # judell/bram#262: cross-project direct-edit bypass. A skip-worklist:
+    # turn's direct-edit record lands in the SESSION (cwd) project's
+    # resources/.worklist-authorization.json, but Write/Edit resolves its
+    # project_root from the TARGET file's path -- for a cross-project edit
+    # those are two different roots. cross_root_bypass_verdict must consult
+    # both: the target root (default, checked first) and the session root,
+    # only when it differs from the target root.
+    with _tempfile.TemporaryDirectory() as base:
+        target_root = os.path.join(base, "target-project")
+        session_root = os.path.join(base, "session-project")
+        os.makedirs(os.path.join(target_root, "resources"))
+        os.makedirs(os.path.join(session_root, "resources"))
+
+        def _write_auth(root, kind="direct-edit", paths=("*",), age_ms=0):
+            rec = {
+                "kind": kind,
+                "paths": list(paths),
+                "issuedAtMs": time.time() * 1000 - age_ms,
+            }
+            with open(os.path.join(root, AUTH_REL), "w", encoding="utf-8") as f:
+                json.dump(rec, f)
+
+        def _clear_auth(root):
+            p = os.path.join(root, AUTH_REL)
+            if os.path.exists(p):
+                os.remove(p)
+
+        # resolve_session_root derives the same root find_project_root would
+        # for a path inside it, walking up from a nested cwd too, and fails
+        # quietly (None) for an unusable or unmanaged cwd.
+        _write_auth(session_root)
+        assert resolve_session_root({"cwd": session_root}) == os.path.abspath(session_root)
+        assert resolve_session_root(
+            {"cwd": os.path.join(session_root, "nested", "dir")}
+        ) == os.path.abspath(session_root)
+        assert resolve_session_root({"cwd": base}) is None  # no marker above base
+        assert resolve_session_root({}) is None
+        assert resolve_session_root({"cwd": 123}) is None
+        _clear_auth(session_root)
+
+        # (a) direct-edit record in target root only -> allow, matched via
+        # target -- the existing, unchanged, same-project behavior. Session
+        # is never consulted once the target matches.
+        _write_auth(target_root)
+        matched, via, target_detail, session_detail = cross_root_bypass_verdict(
+            target_root, "some/file.txt", session_root
+        )
+        assert (matched, via, target_detail, session_detail) == (True, "target", "ok", None)
+        assert fresh_bypass(target_root, "some/file.txt")
+        _clear_auth(target_root)
+
+        # (b) record in the SESSION root only, cwd differs from target ->
+        # allow, matched via session. This is the fix: a target-only lookup
+        # (the pre-262 behavior) would deny here even though the host wrote
+        # a fresh, correct record.
+        _write_auth(session_root)
+        assert not fresh_bypass(target_root, "some/file.txt")
+        matched, via, target_detail, session_detail = cross_root_bypass_verdict(
+            target_root, "some/file.txt", session_root
+        )
+        assert (matched, via, target_detail, session_detail) == (
+            True, "session", "absent", "ok",
+        )
+        _clear_auth(session_root)
+
+        # (c) record in neither -> deny, both lookups run and both report
+        # absent, since the roots differ.
+        matched, via, target_detail, session_detail = cross_root_bypass_verdict(
+            target_root, "some/file.txt", session_root
+        )
+        assert (matched, via, target_detail, session_detail) == (
+            False, None, "absent", "absent",
+        )
+
+        # (d) stale record in the session root -> deny; the session lookup
+        # names the staleness rather than reporting a false "ok".
+        _write_auth(session_root, age_ms=(BYPASS_TTL_SECONDS + 60) * 1000)
+        matched, via, target_detail, session_detail = cross_root_bypass_verdict(
+            target_root, "some/file.txt", session_root
+        )
+        assert (matched, via, target_detail, session_detail) == (
+            False, None, "absent", "stale",
+        )
+        _clear_auth(session_root)
+
+        # (e) session root == target root -> the second lookup never runs
+        # (degenerate case); behavior is identical to the single-root path
+        # in both the matched and unmatched cases.
+        _write_auth(target_root)
+        matched, via, target_detail, session_detail = cross_root_bypass_verdict(
+            target_root, "some/file.txt", target_root
+        )
+        assert (matched, via, target_detail, session_detail) == (True, "target", "ok", None)
+        _clear_auth(target_root)
+        matched, via, target_detail, session_detail = cross_root_bypass_verdict(
+            target_root, "some/file.txt", target_root
+        )
+        assert (matched, via, target_detail, session_detail) == (
+            False, None, "absent", None,
+        )
+
+        # No session_root at all (e.g. cwd absent from payload) -> single
+        # lookup, same shape as (e).
+        matched, via, target_detail, session_detail = cross_root_bypass_verdict(
+            target_root, "some/file.txt", None
+        )
+        assert (matched, via, target_detail, session_detail) == (
+            False, None, "absent", None,
+        )
+
 
 def main():
     payload = json.load(sys.stdin)
@@ -1790,14 +1995,32 @@ def main():
     if rel in covered:
         _trace_hook("PreToolUse", tool_name, rel, "allow", "covered-by-worklist-item")
         sys.exit(0)
-    if fresh_bypass(project_root, rel):
-        _trace_hook("PreToolUse", tool_name, rel, "allow", "fresh-bypass")
+    # issue-262: consult both the target project's own bypass record and,
+    # when it differs, the session (cwd) project's -- a skip-worklist:
+    # direct-edit record lands in the ACTIVE project, which for a
+    # cross-project edit is the session root, not this target's.
+    session_root = resolve_session_root(payload)
+    bypass_ok, bypass_via, target_bypass_detail, session_bypass_detail = (
+        cross_root_bypass_verdict(project_root, rel, session_root)
+    )
+    if bypass_ok:
+        reason = (
+            "fresh-bypass" if bypass_via == "target"
+            else "fresh-bypass:session-root=" + session_root
+        )
+        _trace_hook("PreToolUse", tool_name, rel, "allow", reason)
         sys.exit(0)
     if opt_out_clears(project_root, payload, tool_name, rel):
         sys.exit(0)
     last_msg = last_user_text(payload.get("transcript_path", ""))
-    deny_coverage(rel, project_root=project_root, opt_out_attempted=("worklist" in (last_msg or "").lower()
-                                          and "no" in (last_msg or "").lower()))
+    deny_coverage(
+        rel, project_root=project_root,
+        opt_out_attempted=(
+            "worklist" in (last_msg or "").lower()
+            and "no" in (last_msg or "").lower()
+        ),
+        session_root=session_root, session_bypass_detail=session_bypass_detail,
+    )
 
 
 if __name__ == "__main__":

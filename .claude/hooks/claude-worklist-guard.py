@@ -449,6 +449,47 @@ def subagent_lifecycle_verdict(command, agent_id):
     return "allow", "no-agent-id"
 
 
+# judell/bram#287: the lifecycle-route check above covers the Bash branch's
+# curl calls, but the Write/Edit branch's own worklist surfaces --
+# resources/worklist.json and resources/worklist-drafts/*.md -- have no
+# comparable check. Both are implicitly-authorized "lifecycle channel" paths
+# (see is_lifecycle_path / emit_allow_for_lifecycle), which is exactly what
+# let a delegated subagent write them directly with no denial: a subagent
+# widened its own item's `files` via a direct worklist.json edit, unnoticed
+# until the item was later found committing more than it should have.
+_WORKLIST_WRITE_PATHS_PREFIXES = (WORKLIST_DRAFTS_PREFIX,)
+
+
+def subagent_worklist_write_verdict(rel, agent_id):
+    """('skip'|'deny', detail) for a Write/Edit (or Bash-redirect) targeting
+    resources/worklist.json or resources/worklist-drafts/*, keyed on whether
+    the call carries a subagent's `agent_id`.
+
+    'skip' means either rel isn't a worklist proposal/claim path at all, or
+    agent_id is absent/whitespace-only -- the orchestrator's own path, which
+    must never be blocked (fail-open, mirroring subagent_lifecycle_verdict
+    above). 'deny' means both conditions hold: a subagent-originated call
+    directly editing the worklist's proposal metadata or claim/draft prose.
+
+    Worklist proposals and claim edits are supposed to happen only in the
+    orchestrator's own turn -- conventions.md's "Delegating worklist items to
+    subagents" says subagents receive file paths and instructions only, never
+    lifecycle authority. This check is this file's second attempt at
+    enforcing that boundary for the Write/Edit surface (the first,
+    is_lifecycle_path's blanket allow, has no agent_id test at all) and, like
+    subagent_lifecycle_verdict's original transcript_path check, it has not
+    yet been proven live by a deliberate violation -- that fire is planned
+    from the xmlui-side session.
+    """
+    if rel == WORKLIST_REL or (
+        isinstance(rel, str) and rel.startswith(_WORKLIST_WRITE_PATHS_PREFIXES)
+    ):
+        if isinstance(agent_id, str) and agent_id.strip():
+            return "deny", None
+        return "skip", "no-agent-id"
+    return "skip", None
+
+
 # MCP is the third write surface, at parity with the Codex guard: a user
 # with a filesystem MCP server configured can route writes through
 # mcp__filesystem__write_file / edit_file / move_file, bypassing the
@@ -1303,6 +1344,30 @@ def self_test():
         # here so the fixture stays live rather than becoming dead setup.
         assert isinstance(main_transcript, str)
 
+    # judell/bram#287: subagent worklist-write gate. Same shape of test as
+    # subagent_lifecycle_verdict above, but for direct Write/Edit/Bash-redirect
+    # writes to the worklist proposal/claim surface itself.
+    assert subagent_worklist_write_verdict(WORKLIST_REL, "b1iz1vf6f") == (
+        "deny", None
+    )
+    assert subagent_worklist_write_verdict(
+        "resources/worklist-drafts/some-item.md", "b1iz1vf6f"
+    ) == ("deny", None)
+    # The orchestrator's own writes (no agent_id) must never be blocked.
+    assert subagent_worklist_write_verdict(WORKLIST_REL, "") == (
+        "skip", "no-agent-id"
+    )
+    assert subagent_worklist_write_verdict(WORKLIST_REL, None) == (
+        "skip", "no-agent-id"
+    )
+    assert subagent_worklist_write_verdict(WORKLIST_REL, "   ") == (
+        "skip", "no-agent-id"
+    )
+    # Any other target is out of scope regardless of agent_id.
+    assert subagent_worklist_write_verdict("app/tools/Main.xmlui", "b1iz1vf6f") == (
+        "skip", None
+    )
+
 
 def main():
     payload = json.load(sys.stdin)
@@ -1476,6 +1541,43 @@ def main():
         if project_root is None:
             _trace_hook("PreToolUse", "Bash", preview, "allow", "unmanaged-repo", cwd)
             sys.exit(0)
+        # judell/bram#287: same gap as the Write/Edit branch's
+        # subagent_worklist_write_verdict, but for a Bash redirect that
+        # writes the worklist proposal/claim surface directly -- the
+        # lifecycle-channel allow just below is otherwise unconditional
+        # (any write-shaped command merely mentioning the drafts path
+        # passes, subagent or not). Reuses _redirect_targets, the target
+        # extraction _pattern_is_write already builds for redirect_is_write
+        # (this branch only runs once bash_writes(command) is True, above),
+        # rather than parsing the command a second time. tee / heredoc
+        # targets are not extracted anywhere in this guard, so they stay out
+        # of scope here rather than growing new parsing for this check. Like
+        # subagent_worklist_write_verdict, this fire is still awaited.
+        agent_id = payload.get("agent_id", "")
+        if isinstance(agent_id, str) and agent_id.strip():
+            for raw_target in _redirect_targets(command):
+                candidate = (
+                    raw_target if os.path.isabs(raw_target)
+                    else os.path.join(cwd, raw_target)
+                )
+                rel_target = normalize_target(project_root, candidate)
+                sw_verdict, _ = subagent_worklist_write_verdict(rel_target, agent_id)
+                if sw_verdict == "deny":
+                    _trace_hook(
+                        "PreToolUse", "Bash", preview, "deny",
+                        "subagent-worklist-write", cwd,
+                    )
+                    print(
+                        "Worklist proposals and claim edits "
+                        "(resources/worklist.json, "
+                        "resources/worklist-drafts/*) stay in the "
+                        "orchestrator's own turn. A delegated subagent "
+                        "cannot write them directly. See 'Delegating "
+                        "worklist items to subagents' in conventions.md "
+                        "and judell/bram#287.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
         if WORKLIST_DRAFTS_PREFIX in command or ".worklist-intent.json" in command:
             _trace_hook("PreToolUse", "Bash", preview, "allow", "bram-lifecycle-channel", cwd)
             sys.exit(0)
@@ -1544,6 +1646,29 @@ def main():
                     file=sys.stderr,
                 )
                 sys.exit(2)
+            # judell/bram#287: same subagent gate as the Write/Edit and
+            # Bash-redirect branches. WORKLIST_REL is already denied for
+            # every MCP caller above; without this, a subagent's MCP write
+            # to worklist-drafts/* would pass through is_lifecycle_path's
+            # blanket allow just below.
+            sw_verdict, _ = subagent_worklist_write_verdict(
+                rel, payload.get("agent_id", "")
+            )
+            if sw_verdict == "deny":
+                _trace_hook(
+                    "PreToolUse", tool_name, rel, "deny",
+                    "subagent-worklist-write", cwd,
+                )
+                print(
+                    "Worklist proposals and claim edits "
+                    "(resources/worklist.json, resources/worklist-drafts/*) "
+                    "stay in the orchestrator's own turn. A delegated "
+                    "subagent cannot write them directly. See 'Delegating "
+                    "worklist items to subagents' in conventions.md and "
+                    "judell/bram#287.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
             if is_lifecycle_path(rel):
                 continue
             if rel in covered:
@@ -1584,6 +1709,33 @@ def main():
         # Target is outside the project tree (e.g., editing files in
         # ~/.codex/ or /tmp/). The worklist gate doesn't apply.
         sys.exit(0)
+
+    # judell/bram#287: subagent worklist-write gate. Must run BEFORE the
+    # lifecycle-channel short-circuits just below -- both worklist.json and
+    # worklist-drafts/*.md are treated as implicitly-authorized "lifecycle
+    # channel" paths with no agent_id test, which is exactly the gap this
+    # closes. See subagent_worklist_write_verdict for the full rationale.
+    sw_verdict, sw_detail = subagent_worklist_write_verdict(
+        rel, payload.get("agent_id", "")
+    )
+    if sw_verdict == "deny":
+        _trace_hook(
+            "PreToolUse",
+            tool_name,
+            rel,
+            "deny",
+            "subagent-worklist-write",
+        )
+        print(
+            "Worklist proposals and claim edits (resources/worklist.json, "
+            "resources/worklist-drafts/*) stay in the orchestrator's own "
+            "turn. A delegated subagent cannot write them directly -- it "
+            "can widen its own item's coverage, author new items, or edit "
+            "claim state with no denial. See 'Delegating worklist items to "
+            "subagents' in conventions.md and judell/bram#287.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     # Pre-Branch-1: lifecycle coordination paths the user already authorized
     # implicitly. Emit allow-via-JSON so Claude does not surface a native

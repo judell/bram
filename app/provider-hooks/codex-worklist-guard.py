@@ -1491,6 +1491,24 @@ def main():
                 # the gate for non-project paths.
                 continue
             if rel == WORKLIST_REL:
+                # judell/bram#287: the Claude guard denies this same shape of
+                # write (resources/worklist.json / resources/worklist-drafts/)
+                # when the PreToolUse payload carries a subagent's `agent_id`
+                # -- see subagent_worklist_write_verdict in
+                # claude-worklist-guard.py. This guard's stdin payload
+                # (documented at the top of this file:
+                # {session_id, turn_id, cwd, hook_event_name, model,
+                # permission_mode, tool_name, tool_input, tool_use_id}) carries
+                # no subagent/agent identity field at all -- Codex's
+                # PreToolUse hook input has nothing this check could key on,
+                # unlike Claude's `agent_id` (documented at
+                # https://code.claude.com/docs/en/hooks.md as populated only
+                # for subagent-originated calls). Until Codex's hook payload
+                # exposes an equivalent identity field, this branch cannot
+                # distinguish an orchestrator's own worklist.json write from a
+                # delegated subagent's, so it continues to allow both --
+                # exactly like the write-shaped Bash command below at
+                # "resources/worklist-drafts/" -- with no agent_id gate to add.
                 continue  # writing to the worklist itself is how proposing works
             if is_worklist_draft(rel):
                 continue  # draft prose files are proposal-authoring inputs
@@ -1626,6 +1644,9 @@ def main():
                 allow("bash-write-nonrepo-target")
             allow()
         if "resources/worklist-drafts/" in (cmd or ""):
+            # judell/bram#287: same no-agent-identity gap noted at the
+            # apply_patch branch's `rel == WORKLIST_REL` case above -- this
+            # guard's stdin payload has no field to key a subagent check on.
             allow()
         if ".worklist-intent.json" in (cmd or ""):
             iv_verdict, iv_detail = intent_write_verdict(cwd)

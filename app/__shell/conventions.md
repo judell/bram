@@ -565,6 +565,18 @@ apply, its first step disproved the item's own hypothesis, no files changed,
 and no lifecycle call was correct to make. The claim stayed live and locked the
 row until it was unwound by hand.
 
+The same rule covers a subtler ending: **a turn that ends by asking the user
+a decision must not leave a claim live.** Holding the claim "while you
+decide" locks the row, so the two buttons that ARE the answer (Approve /
+Drop) are unavailable, the spinner implies work that is not happening, and
+the only remaining channel — a verbal reply in chat — is advertised nowhere
+on the surface. Call `POST /__worklist/end` before ending the turn; the
+row unlocks and the decision gets ordinary affordances. (Live case,
+2026-08-26: `issue-262-cross-project-direct-edit-auth`'s apply surfaced a
+premise conflict with the issue's recorded disposition; the orchestrator
+held the claim across the question and the user was left asking "nobody is
+working but we are still spinning" with no visible way to respond.)
+
 **Apply-and-commit gate: skip `advance` — edit if needed, then
 `worklist-commit`.** `gate: "apply-and-commit"` is no longer only the
 pre-approval one-click **Approve & commit** button's payload. As of

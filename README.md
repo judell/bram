@@ -25,8 +25,11 @@ Bram has opinions. It thinks versioning and collaboration are well-handled by gi
 </table>
 -->
 
- <img width="1090" height="1025" alt="image" src="https://github.com/user-attachments/assets/a1913a63-09df-4fc4-a982-27854f8d7706" />
+## Demo
 
+This storyboard shows Bram and XMLUI co-evolving on August 26, 2026. In the ~/xmlui repo we burn down a set of issues and stress-test Bram's ability to manage file entanglement across items being handled by parallel subagents. In the ~/bram repo we burn down issues raised in response to findings from ~/xmlui. Real work happened on both sides while each helped improve the other.
+
+https://gist.github.com/judell/663ac00adf36a01096f2bdcdd08642ae
 
 
 ## Blog

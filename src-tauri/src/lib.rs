@@ -670,9 +670,14 @@ fn bram_trace_env_override() -> Option<bool> {
 }
 
 fn init_bram_trace_from_env() {
-    let on = bram_trace_env_override().unwrap_or(false);
+    let over = bram_trace_env_override();
+    // Default ON: absent env and absent setting both mean tracing.
+    // apply_bram_trace_from_config re-applies the project setting (or the
+    // same default) once config loads; an explicit `false` there, or
+    // BRAM_TRACE=0 here, turns tracing off.
+    let on = over.unwrap_or(true);
     BRAM_TRACE_ENABLED.store(on, std::sync::atomic::Ordering::Relaxed);
-    if on {
+    if over == Some(true) {
         eprintln!(
             "[bram-trace] enabled (BRAM_TRACE=1); live trace destination: <project_root>/resources/bram-traces/bram-trace.log; previous runs archived at startup as <project_root>/resources/bram-traces/bram-trace-YYYY-MM-DD*.log"
         );
@@ -17042,7 +17047,9 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
                 ui.as_ref().and_then(|u| u.show_target_app).unwrap_or(false),
                 // Default OFF — only explicit `true` enables.
                 ui.and_then(|u| u.tools_pane_hot_reload).unwrap_or(false),
-                traces.as_ref().and_then(|t| t.enabled).unwrap_or(false),
+                // Default ON — tracing is the observability backbone; an
+                // explicit `false` (or BRAM_TRACE=0) turns it off.
+                traces.as_ref().and_then(|t| t.enabled).unwrap_or(true),
                 traces
                     .as_ref()
                     .and_then(|t| t.inspector_tap)
@@ -17065,7 +17072,7 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
             false,
             false,
             false,
-            false,
+            true,
             false,
             DEFAULT_TRACE_ARCHIVE_AFTER_DAYS,
             false,
@@ -18550,13 +18557,15 @@ fn handle_settings_post<R: tauri::Runtime>(
     // body. PushSource consumers see the canonical state immediately; the
     // filesystem watcher echo is deduplicated by emit_settings_changed.
     let config = load_project_config(&root);
-    if let Some(enabled) = config
-        .as_ref()
-        .and_then(|c| c.traces.as_ref())
-        .and_then(|t| t.enabled)
-    {
-        apply_bram_trace_from_config(enabled);
-    }
+    // Default ON when the setting is absent; env override still wins
+    // inside apply_bram_trace_from_config.
+    apply_bram_trace_from_config(
+        config
+            .as_ref()
+            .and_then(|c| c.traces.as_ref())
+            .and_then(|t| t.enabled)
+            .unwrap_or(true),
+    );
     apply_bram_menus_parse_from_config(
         config
             .as_ref()
@@ -50090,17 +50099,18 @@ pub fn run() {
     // handle_permission_menu early-returns applied:false, and
     // parse_and_display=false disables the grid fallback, so NO menus surface
     // at all. Read through cfg.as_ref() so None still yields the intended
-    // defaults (hook_driven=true, parse_and_display=false). The traces apply
-    // stays conditional: init_bram_trace_from_env already set the env-based
-    // value, and only an explicit setting should override it.
+    // defaults (hook_driven=true, parse_and_display=false). Traces default
+    // ON: absent setting resolves to true here (init_bram_trace_from_env
+    // already seeded the same default pre-config); an explicit false in
+    // .bram.json, or a BRAM_TRACE env override (which wins inside
+    // apply_bram_trace_from_config), turns tracing off.
     let cfg = load_project_config(&initial_proj);
-    if let Some(enabled) = cfg
-        .as_ref()
-        .and_then(|c| c.traces.as_ref())
-        .and_then(|t| t.enabled)
-    {
-        apply_bram_trace_from_config(enabled);
-    }
+    apply_bram_trace_from_config(
+        cfg.as_ref()
+            .and_then(|c| c.traces.as_ref())
+            .and_then(|t| t.enabled)
+            .unwrap_or(true),
+    );
     apply_bram_menus_parse_from_config(
         cfg.as_ref()
             .and_then(|c| c.menus.as_ref())

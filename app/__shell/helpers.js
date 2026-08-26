@@ -1805,8 +1805,9 @@ window.settingsInfoBodies = {
     "(50–2,000, default 500).",
   traces:
     "## Tracing enabled\n\n" +
-    "Master switch for writes to `bram-trace.log`. `BRAM_TRACE` in the " +
-    "environment overrides it.\n\n" +
+    "Master switch for writes to `bram-trace.log`. **On by default** — " +
+    "switch it off here to silence traces for this project. `BRAM_TRACE` " +
+    "in the environment overrides either way.\n\n" +
     "## Inspector trace tap\n\n" +
     "Forward XMLUI Inspector events into the trace log. Requires Tracing " +
     "enabled.\n\n" +

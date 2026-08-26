@@ -296,10 +296,11 @@ BRAM_TRACE=1 ./bram /tmp/scratch-project
 
 Two details that are easy to get wrong:
 
-- **`BRAM_TRACE=1` is required, not optional.** Traces are opt-in per
-  project and a scratch project has no `.bram.json` yet, so the
-  environment variable is the only thing that turns them on — and
-  nearly every startup assertion worth making reads the trace.
+- **`BRAM_TRACE=1` is belt-and-braces, no longer load-bearing.** Traces
+  default ON (they were opt-in until 2026-08-26), so a scratch project
+  with no `.bram.json` traces without it. Keeping the variable pins the
+  intent against the project setting and costs nothing — and nearly
+  every startup assertion worth making reads the trace.
 - **Kill by PID, never `pkill bram`.** Your own session is a `bram`
   process too.
 

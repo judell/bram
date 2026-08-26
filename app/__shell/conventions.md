@@ -1859,8 +1859,9 @@ streams; the third is a dashboard that derives signals from them.
 
 **`resources/bram-traces/bram-trace.log`** — host-side rolling log of HTTP
 routes, iframe events, and inflight-sentinel writes / clears.
-Opt-in through **Settings → Traces** unless `BRAM_TRACE` explicitly overrides
-the project setting; grep it directly when enabled. PTY previews and serialized
+**On by default**; switch it off per project through **Settings → Traces**,
+and `BRAM_TRACE` in the environment overrides the project setting either
+way. Grep it directly when enabled. PTY previews and serialized
 iframe payloads use Bram's `loomweave-scanner`-backed credential redactor before
 persistence; Bram adds narrow structural expansion for complete PEM blocks and
 Authorization/assignment values. Redaction is defense in depth, not a guarantee

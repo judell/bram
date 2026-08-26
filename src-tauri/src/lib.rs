@@ -38628,6 +38628,34 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
         "info"
     };
 
+    // status-dual-source-visibility: each dual-source row carries both
+    // sides verbatim in a `sources` object — the pane shows a ⇄ marker and
+    // reports them on hover. Present only when the mirror db is reachable;
+    // a degraded file-only row is not dual-source, and serde renders the
+    // None as null, which the pane's `$item.sources ?` guard treats as
+    // absent.
+    let claim_sources = ws_conn.as_ref().map(|_| {
+        serde_json::json!({
+            "db": match &ws_live_claim {
+                Some((k, ids, _)) => format!(
+                    "kind={} ids={}",
+                    k,
+                    ids.join(",").if_empty("none")
+                ),
+                None => "no live claim".to_string(),
+            },
+            "file": if file_claim_kind.is_empty() && claim_ids.is_empty() {
+                "no live claim".to_string()
+            } else {
+                format!(
+                    "kind={} ids={}",
+                    file_claim_kind.clone().if_empty("none"),
+                    claim_ids.join(",").if_empty("none")
+                )
+            },
+        })
+    });
+
     // "Claim pairs" (formerly "Trace pairs"): an outright upgrade from the
     // bram-trace.log grep to always-on counts from the mirror's transitions
     // ledger — not blind across log rotation, not blind when traces are
@@ -38639,6 +38667,18 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
         .and_then(|c| worklist_state::claim_pair_counts(c).ok())
         .unwrap_or((0, 0, None));
     let claim_pairs_warn = claim_writes > claim_clears + 1;
+    // Both sides for the hover report: the ledger counts beside the trace
+    // grep the row replaced — the old source kept honest as a comparator.
+    let claim_pairs_sources = ws_conn.as_ref().map(|_| {
+        serde_json::json!({
+            "db": format!("{} writes / {} clears (mirror ledger)", claim_writes, claim_clears),
+            "file": format!(
+                "{} writes / {} clears (bram-trace.log grep)",
+                trace["inflightWrites"].as_i64().unwrap_or(0),
+                trace["inflightClears"].as_i64().unwrap_or(0)
+            ),
+        })
+    });
 
     // "Auth history (mirror)": last-N auth_records rows with issue->consume
     // latency, which the single-slot .worklist-authorization.json file
@@ -38648,6 +38688,42 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
         .as_ref()
         .and_then(|c| worklist_state::recent_auth_records(c, 5).ok())
         .unwrap_or_default();
+    // File side of the auth hover report: the single-slot record as it
+    // stands on disk, summarized the same way as the db side's entries.
+    let auth_file_summary = worklist_auth_file(app)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .map(|v| {
+            let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("?").to_string();
+            let n = v.get("ids").and_then(|i| i.as_array()).map(|a| a.len()).unwrap_or(0);
+            let consumed = v.get("consumedAtMs").map(|c| !c.is_null()).unwrap_or(false);
+            format!(
+                "{} ({} ids, {})",
+                kind,
+                n,
+                if consumed { "consumed" } else { "pending" }
+            )
+        })
+        .unwrap_or_else(|| "no record on disk".to_string());
+    let auth_sources = ws_conn.as_ref().map(|_| {
+        serde_json::json!({
+            "db": ws_auth_history
+                .first()
+                .map(|(_, kind, ids_json, consumed_at_ms)| {
+                    let n = serde_json::from_str::<Vec<String>>(ids_json)
+                        .map(|v| v.len())
+                        .unwrap_or(0);
+                    format!(
+                        "newest: {} ({} ids, {})",
+                        kind,
+                        n,
+                        if consumed_at_ms.is_some() { "consumed" } else { "pending" }
+                    )
+                })
+                .unwrap_or_else(|| "no rows".to_string()),
+            "file": auth_file_summary,
+        })
+    });
     let auth_history_row = if ws_auth_history.is_empty() {
         serde_json::json!({
             "signal": "Auth history (mirror)",
@@ -38655,6 +38731,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
             "state": "0 records",
             "detail": "No auth_records rows in the mirror yet",
             "seen": "",
+            "sources": auth_sources,
         })
     } else {
         let newest_issued_ms = ws_auth_history[0].0;
@@ -38680,6 +38757,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
             "state": format!("{} records", ws_auth_history.len()),
             "detail": detail,
             "seen": format_iso_utc_ms(newest_issued_ms),
+            "sources": auth_sources,
         })
     };
     let mut authorization_rows = authorization_rows;
@@ -38854,6 +38932,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
                         "state": current_claim_state,
                         "detail": current_claim_detail,
                         "seen": current_claim_seen,
+                        "sources": claim_sources,
                     },
                     {
                         "signal": "Claim pairs",
@@ -38861,6 +38940,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
                         "state": format!("{} writes / {} clears", claim_writes, claim_clears),
                         "detail": "Mirror ledger counts (claim-write vs claim-clear transitions) — replaces the old bram-trace.log grep, so it stays accurate across log rotation and when traces are off",
                         "seen": claim_pairs_last_ms.map(format_iso_utc_ms).unwrap_or_default(),
+                        "sources": claim_pairs_sources,
                     },
                     {
                         "signal": "Turn completion",

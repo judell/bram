@@ -89,10 +89,18 @@
               color="{$item.level === 'error' ? '$color-danger-700' : ($item.level === 'warn' ? '$color-warn-700' : ($item.level === 'ok' ? '$color-success-700' : '$textColor-secondary'))}"
               value="{$item.level || 'n/a'}" />
           </Column>
-          <Column header="state" width="150px">
+          <!-- status-dual-source-visibility: rows cross-checked against the
+               mirror db carry a `sources` object; the ⇄ marker identifies
+               them at a glance and hover reports both sides verbatim
+               (Column tooltip evaluates per cell with $item in scope).
+               On a warn row the tooltip shows exactly what disagrees. -->
+          <Column
+            header="state"
+            width="150px"
+            tooltip="{$item.sources ? 'db: ' + $item.sources.db + ' · file: ' + $item.sources.file : ''}">
             <Text
               fontWeight="$fontWeight-bold"
-              value="{$item.state}" />
+              value="{$item.state}{$item.sources ? ' ⇄' : ''}" />
           </Column>
           <Column header="detail">
             <Text value="{$item.detail}" overflowMode="flow" breakMode="word" />

@@ -69,9 +69,15 @@ the cross-target half that Setup seeds into every managed project.
 - `app/__shell/helpers.js` — window helpers loaded by `index.html` via
   `xmlui://localhost/__shell/helpers.js`
 
-Reload boundary: only `app/tools/**` is hot-reloadable; everything else
-(including `helpers.js`) is rebuild-from-`src-tauri/` + relaunch `./bram`
-territory — full table and launch discipline in `@docs/developing-bram.md`.
+Reload boundary (settled 2026-08-26): under the documented `./bram`
+symlink launch, ALL of `app/**` is served from disk per request —
+`tools/**`, `helpers.js`, and `vendor/**` go live on a pane reload
+(no rebuild); parent-shell files (`main.js`, `index.html`,
+`styles.css`) need an app relaunch to re-execute but no rebuild.
+Only `src-tauri/**` (Rust) is rebuild + relaunch territory. Launched
+any other way (raw binary, installed bundle), everything serves from
+the embedded tree and the old rebuild-everything rule applies — full
+table, proofs, and launch discipline in `@docs/developing-bram.md`.
 
 ## Working on the target app
 

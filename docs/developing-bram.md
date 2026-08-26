@@ -219,43 +219,50 @@ can't go (hard freezes, remote machines, semantic attribution) — but
 the ordering lesson stands: category attribution before semantic
 attribution.
 
-## Build vs. hot-reload boundary
+## Build vs. reload boundary
+
+**Settled 2026-08-26 (the helpers.js-needs-rebuild mantra was wrong,
+and launch mode is the variable.)** Bram registers its own `tauri`
+scheme handler, which serves every `app/**` asset through
+`serve_app_file` (`lib.rs`) — and that function prefers an **on-disk
+`app/` root**, falling back to the `include_dir!` embedded tree only
+when no candidate directory exists. The candidate that fires under the
+documented launch is `exe_dir/app`: launching via the **`./bram`
+symlink at the repo root** keeps the executable's parent at the repo
+root, where the live source `app/` sits. The symlink is load-bearing.
+
+So, **when launched via `./bram` at the repo root**:
 
 | path | rule |
 |---|---|
-| `app/tools/**` | Hot-reloadable tools XMLUI app code: `Main.xmlui`, `components/**`, `Globals.xs`, `config.json`, `themes/**`, `resources/**`. (Reload is automatic only when the project's `ui.toolsPaneHotReload` setting is on; otherwise the user reloads the pane manually.) Hot reload covers **edits to existing files only** — a **new** file (e.g. a new `components/*.xmlui`) is absent from the running binary's embedded `app/` tree and fails to load until rebuild + relaunch. |
-| `app/__shell/**` | Rebuild from `src-tauri/`, then relaunch `./bram`. This includes `helpers.js`. |
-| `app/main.js`, `app/index.html`, `app/styles.css` | Rebuild + relaunch. Parent-shell code is not hot-reloaded. |
-| `app/vendor/**` | Rebuild + relaunch. |
-| `src-tauri/**` | Rebuild + relaunch. |
+| `app/tools/**` | Served from disk per request. Pane reload picks up edits AND new files. (Auto-reload only when `ui.toolsPaneHotReload` is on; otherwise reload the pane manually.) |
+| `app/__shell/**` (incl. `helpers.js`) | Served from disk per request. Pane reload re-fetches and re-executes it. No rebuild. Proven three ways on 2026-08-26: source chain, a live pane-reload observation, and a loopback probe showing a pre-edit process serving post-edit bytes. |
+| `app/vendor/**` | Served from disk per request. `cp` the new build, reload the pane. No rebuild. |
+| `app/main.js`, `app/index.html`, `app/styles.css` | Served from disk, but the parent window doesn't reload with the tools iframe — **relaunch the app** to re-execute them. Still no rebuild. |
+| `src-tauri/**` | **Rebuild + relaunch.** The only genuinely rebuild-gated path. |
 
-Do not describe `app/__shell/helpers.js`, parent-shell assets, vendor
-assets, or Rust as hot-reloadable. Even if the watcher reloads an
-iframe, those paths are shell/runtime code and their behavior can
-depend on pre-XMLUI globals, parent-window state, custom scheme
-handling, Tauri commands, or long-lived listeners. Validate those
-edits only after a fresh build and relaunch of the locally built
-binary.
+**When launched any other way** — the raw `target/debug/bram` binary,
+or an installed bundle with no adjacent `app/` directory — no disk
+candidate exists and everything serves from the **embedded** tree
+baked at the last `cargo build` of the binary actually running. There
+the old mantra is true: rebuild + relaunch for any `app/**` change,
+and a running process keeps its launch-time embedded tree regardless
+of later builds. This is also why `cargo build` still matters even
+for pure-JS changes you validated via reload: it refreshes the
+embedded fallback that installed binaries will serve.
 
-Launch discipline:
-
-1. For `app/tools/**`, save the file and let (or have the user) reload
-   the tools iframe.
-2. For every other Bram runtime path, run `cargo build` from
-   `src-tauri/`, then relaunch the locally built `./bram` symlink
-   (`src-tauri/target/debug/bram`), not an installed/older app.
+Residual caution, kept on purpose: a pane reload re-executes
+`helpers.js` in the iframe, but long-lived listeners, pre-XMLUI
+globals, and parent-window state can carry stale behavior across a
+reload. For subtle shell-runtime changes, a full relaunch remains the
+clean-room validation even though the bytes were already fresh.
 
 **Always `cargo build` (debug), never `cargo build --release`, when
 validating changes** — debug builds are seconds, release builds are
 minutes, and release is for shipping. Don't suggest `cargo run`
-either; the rebuild + relaunch loop is the workflow.
-
-The Bram binary embeds the `app/` tree at build time
-(`include_dir!("$CARGO_MANIFEST_DIR/../app")`, plus Tauri
-`frontendDist: "../app"`). That embedding is the reason the rebuild
-rule exists for shell/runtime assets: a plain restart of the wrong
-binary, or a build followed by relaunching that wrong binary, still
-runs stale code.
+either. And always launch the `./bram` symlink at the repo root, not
+an installed/older app — both for fresh code and because the symlink
+is what makes disk serving resolve at all.
 
 ## Hand-testing the Worklist gate
 

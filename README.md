@@ -4,6 +4,8 @@
 
 A desktop app that wraps Claude Code and Codex in a GUI and embeds them in a structured, audited, and search-enabled workflow that connects to GitHub or GitLab.
 
+## Why the name?
+
 Bram runs agents mindfully.
 
 ## Who is it for?

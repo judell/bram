@@ -8,6 +8,12 @@ use std::thread;
 // Foundation only (schema + smoke test); not yet wired into the app.
 mod search_index;
 
+// state-mirror-store-and-ledger: phase-A SQLite shadow of worklist
+// lifecycle state (auth records, inflight claims, an append-only
+// transitions ledger). Mirror only — files remain the sole truth this
+// phase. See worklist_state.rs's module doc comment.
+mod worklist_state;
+
 use include_dir::{include_dir, Dir};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use tauri::{http, ipc::Channel, AppHandle, Emitter, Manager, State};
@@ -19794,6 +19800,95 @@ fn search_index_db_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf
     Some(dir.join(format!("{}.db", encode_path_for_filename(&root))))
 }
 
+// state-mirror-store-and-ledger: the phase-A shadow db for worklist
+// lifecycle state, one per project, same project-key derivation as
+// search_index_db_path above.
+fn worklist_state_db_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    let cache = app.path().app_cache_dir().ok()?;
+    let root = project_root(Some(app))?;
+    let dir = cache.join("worklist-state");
+    let _ = std::fs::create_dir_all(&dir);
+    Some(dir.join(format!("{}.db", encode_path_for_filename(&root))))
+}
+
+// True on the FIRST successful open of the mirror db this process (used to
+// gate the one-time `op=open` trace line the item's prompt asks for).
+static WORKLIST_STATE_DB_OPENED_ONCE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+// Open the state-mirror db for `app`, tracing `op=open` on the first
+// successful open this process and `op=error stage=open` on any failure.
+// Returns None on any failure — every caller treats that as "mirror
+// unavailable, skip" and never blocks the file-write path.
+fn worklist_state_open<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<rusqlite::Connection> {
+    let path = worklist_state_db_path(app)?;
+    let existed = path.exists();
+    match worklist_state::open(&path.to_string_lossy()) {
+        Ok(conn) => {
+            if bram_trace_enabled()
+                && !WORKLIST_STATE_DB_OPENED_ONCE.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                append_bram_trace_line(
+                    app,
+                    "state-mirror",
+                    &format!(
+                        "op=open path={} state={}",
+                        path.display(),
+                        if existed { "existing" } else { "created" }
+                    ),
+                );
+            }
+            Some(conn)
+        }
+        Err(e) => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "state-mirror",
+                    &format!("op=error stage=open detail={}", e),
+                );
+            }
+            None
+        }
+    }
+}
+
+// Run `f` against a freshly-opened mirror connection, tracing `op=apply
+// kind=<kind> ms=<n>` on success and `op=error stage=apply detail=<err>` on
+// failure. Every call site wraps its mirror_* call with this so a mirror
+// failure is trace-only and never propagates — the file write it follows
+// has already succeeded and must not be affected by anything here.
+fn worklist_state_apply<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    kind: &str,
+    f: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<()>,
+) {
+    let Some(conn) = worklist_state_open(app) else {
+        return;
+    };
+    let start = std::time::Instant::now();
+    match f(&conn) {
+        Ok(()) => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "state-mirror",
+                    &format!("op=apply kind={} ms={}", kind, start.elapsed().as_millis()),
+                );
+            }
+        }
+        Err(e) => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "state-mirror",
+                    &format!("op=error stage=apply kind={} detail={}", kind, e),
+                );
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct SessionSearchExtraction {
     content: String,
@@ -35020,9 +35115,10 @@ fn write_inflight_claim_sentinel<R: tauri::Runtime>(
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    let written_at_ms = unix_now_ms();
     let payload = serde_json::json!({
         "ids": ids,
-        "claimedAt": unix_now_ms(),
+        "claimedAt": written_at_ms,
         "kind": kind,
     });
     let body = match serde_json::to_string_pretty(&payload) {
@@ -35034,6 +35130,15 @@ fn write_inflight_claim_sentinel<R: tauri::Runtime>(
         return;
     }
     let _ = std::fs::rename(&tmp, &path);
+    // state-mirror-store-and-ledger: mirror the write we just made. Trace-
+    // only on failure — never blocks or alters the file path above.
+    {
+        let ids = ids.to_vec();
+        let kind = kind.to_string();
+        worklist_state_apply(app, "claim-write", move |conn| {
+            worklist_state::mirror_claim_write(conn, written_at_ms, &kind, &ids, "inflight-claim-sentinel")
+        });
+    }
     if bram_trace_enabled() {
         let extra = match &prior_claim {
             Some((prior_ids, prior_kind, claimed_at)) => format!(
@@ -35156,6 +35261,15 @@ fn clear_inflight_claim_sentinel<R: tauri::Runtime>(
         return false;
     }
     let _ = std::fs::remove_file(&path);
+    // state-mirror-store-and-ledger: mirror the clear. Trace-only on
+    // failure — never blocks or alters the file path above.
+    {
+        let ids = claimed_ids.clone();
+        let at_ms = unix_now_ms();
+        worklist_state_apply(app, "claim-clear", move |conn| {
+            worklist_state::mirror_claim_clear(conn, &ids, at_ms, "inflight-claim-sentinel")
+        });
+    }
     if bram_trace_enabled() {
         append_bram_trace_line(
             app,
@@ -35258,6 +35372,15 @@ fn shrink_inflight_claim_sentinel<R: tauri::Runtime>(
 
     if remaining.is_empty() {
         let _ = std::fs::remove_file(&path);
+        // state-mirror-store-and-ledger: mirror the clear. Trace-only on
+        // failure — never blocks or alters the file path above.
+        {
+            let ids = claimed_ids.clone();
+            let at_ms = unix_now_ms();
+            worklist_state_apply(app, "claim-clear", move |conn| {
+                worklist_state::mirror_claim_clear(conn, &ids, at_ms, "inflight-claim-sentinel-shrink")
+            });
+        }
         if bram_trace_enabled() {
             append_bram_trace_line(
                 app,
@@ -35285,6 +35408,16 @@ fn shrink_inflight_claim_sentinel<R: tauri::Runtime>(
     }
     if std::fs::rename(&tmp, &path).is_err() {
         return ClaimShrink::NoClaim;
+    }
+    // state-mirror-store-and-ledger: mirror the shrink. Trace-only on
+    // failure — never blocks or alters the file path above.
+    {
+        let resolved = resolved_ids.to_vec();
+        let remaining_ids = remaining.clone();
+        let at_ms = unix_now_ms();
+        worklist_state_apply(app, "claim-shrink", move |conn| {
+            worklist_state::mirror_claim_shrink(conn, &resolved, &remaining_ids, at_ms, "inflight-claim-sentinel-shrink")
+        });
     }
     if bram_trace_enabled() {
         append_bram_trace_line(
@@ -40789,6 +40922,18 @@ fn write_worklist_authorization_record<R: tauri::Runtime>(
         eprintln!("[worklist-auth] write {} failed: {}", path.display(), e);
         return Err(format!("write {}: {}", path.display(), e));
     }
+    // state-mirror-store-and-ledger: mirror the write we just made. Trace-
+    // only on failure — never blocks or alters the file path above.
+    {
+        let issued_at_ms = record.issued_at_ms;
+        let kind = record.kind.clone();
+        let ids = record.ids.clone();
+        let commit_too = record.commit_too;
+        let src = record.source.clone();
+        worklist_state_apply(app, "auth-record", move |conn| {
+            worklist_state::mirror_auth_record(conn, issued_at_ms, &kind, &ids, commit_too, &src, issued_at_ms)
+        });
+    }
     append_audit_record(
         app,
         audit_authorization_record(&record.kind, &record.ids, &record.source, record.commit_too),
@@ -41561,7 +41706,8 @@ fn retire_worklist_authorization<R: tauri::Runtime>(
         Ok(r) => r,
         Err(_) => return,
     };
-    let outcome = retire_worklist_authorization_record(&mut record, resolved_ids, unix_now_ms());
+    let retire_now_ms = unix_now_ms();
+    let outcome = retire_worklist_authorization_record(&mut record, resolved_ids, retire_now_ms);
     if bram_trace_enabled() {
         let resolved = resolved_ids
             .map(|ids| serde_json::to_string(ids).unwrap_or_else(|_| "[]".to_string()))
@@ -41614,6 +41760,46 @@ fn retire_worklist_authorization<R: tauri::Runtime>(
         Err(_) => return,
     };
     let _ = std::fs::write(&path, format!("{}\n", body));
+    // state-mirror-store-and-ledger: mirror the write we just made. Trace-
+    // only on failure — never blocks or alters the file path above. Only
+    // the two outcomes that actually rewrote the file (Shrunk, Consumed)
+    // mirror; AlreadyConsumed/Unchanged already returned above.
+    match &outcome {
+        WorklistAuthRetirement::Consumed => {
+            let issued_at_ms = record.issued_at_ms;
+            let kind = record.kind.clone();
+            let ids = record.ids.clone();
+            let consumed_at_ms = record.consumed_at_ms.unwrap_or(retire_now_ms);
+            worklist_state_apply(app, "auth-consume", move |conn| {
+                worklist_state::mirror_auth_consume(
+                    conn,
+                    issued_at_ms,
+                    &kind,
+                    &ids,
+                    consumed_at_ms,
+                    "retire-worklist-authorization",
+                )
+            });
+        }
+        WorklistAuthRetirement::Shrunk(remaining) => {
+            let issued_at_ms = record.issued_at_ms;
+            let kind = record.kind.clone();
+            let resolved = resolved_ids.map(|v| v.to_vec()).unwrap_or_default();
+            let remaining = remaining.clone();
+            worklist_state_apply(app, "auth-consume-shrink", move |conn| {
+                worklist_state::mirror_auth_consume_shrink(
+                    conn,
+                    issued_at_ms,
+                    &kind,
+                    &resolved,
+                    &remaining,
+                    retire_now_ms,
+                    "retire-worklist-authorization",
+                )
+            });
+        }
+        WorklistAuthRetirement::AlreadyConsumed | WorklistAuthRetirement::Unchanged => {}
+    }
 }
 
 fn consume_worklist_authorization<R: tauri::Runtime>(app: &AppHandle<R>) {

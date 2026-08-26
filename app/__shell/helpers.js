@@ -2427,6 +2427,20 @@ window.__bramWorklist2Strip = function (item, claim, items) {
   };
   var kind = window.__bramItemInflightKind(claim, item.id, "", "", 0);
   if (kind) {
+    // worklist-advance-verify-window (#286): a live claim covering this item
+    // (which is also what makes it begun, by construction — see
+    // `__bramWorklist2Begun`'s last branch) plus a change summary showing
+    // every planned file already moved is NOT "still working" — it is an
+    // apply whose edits are done and whose agent is verifying before calling
+    // advance. The 2026-08-25 specimen ran minutes of legitimate
+    // verification on a three-item apply; the generic verb below read
+    // "Starting…" the whole time, indistinguishable from a stuck spinner.
+    // Named separately so it takes priority over the generic verb, never the
+    // reverse.
+    var csDone = item.changeSummary;
+    if (csDone && csDone.total > 0 && csDone.changed === csDone.total) {
+      return withCloses("Changes complete, not yet advanced");
+    }
     // header-inflight-verbs, corrected (2026-08-20 sighting: the strip
     // flipped Approving… → Committing… mid-apply as the first edits
     // landed): the verb reads the claim's statusLabel — the gate FIXED at

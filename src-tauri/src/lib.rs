@@ -45675,6 +45675,21 @@ fn route_request<R: tauri::Runtime>(
                 serde_json::Value::Array(unclaimed),
             );
         }
+        // #286: the ids the currently live inflight claim covers, so an
+        // agent reading the board mid-turn can see which ids it still
+        // holds without a separate /__inflight round trip. Empty array
+        // when no claim is live — reuses the same on-disk claim
+        // (resources/.inflight-claim.json) that write_inflight_claim_sentinel
+        // and worklist_active_authorization_summary already read.
+        let claimed_ids: Vec<serde_json::Value> = inflight_claim_ids_and_claimed_at(app)
+            .map(|(ids, _claimed_at)| ids.into_iter().map(serde_json::Value::String).collect())
+            .unwrap_or_default();
+        if let Some(obj) = doc.as_object_mut() {
+            obj.insert(
+                "claimedIds".to_string(),
+                serde_json::Value::Array(claimed_ids),
+            );
+        }
         observe_pending_advances(app, &doc);
         observe_worklist_attribution(app, &doc);
         let body = serde_json::to_vec(&doc).unwrap_or_default();

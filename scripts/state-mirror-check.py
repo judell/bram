@@ -4,16 +4,28 @@ worklist lifecycle *files* (the sole truth) and the phase-A SQLite mirror
 built by `worklist_state.rs` (see that module's doc comment and the
 `state-mirror-store-and-ledger` worklist item).
 
-Scope: this script checks only what that item mirrors —
+Scope: this script checks —
 
   - `resources/.worklist-authorization.json` vs the matching row in the
     mirror's `auth_records` table (keyed by `issuedAtMs` / `issued_at_ms`).
   - `resources/.inflight-claim.json` vs the live (uncleared) row in the
     mirror's `claims` table.
+  - with `--items`, `resources/worklist.json` items vs the mirror's
+    `items` table (id/status/begunAtMs/files), un-tombstoned rows only
+    (`state-mirror-items-shadow`). Silently downgrades to a SKIPPED note
+    (not a failure) when the mirror db predates that item and has no
+    `items` table yet.
 
-It does not validate `worklist.json` itself, or anything about the
-`transitions` ledger's content beyond a row count — those are out of this
-item's scope.
+It does not validate anything about the `transitions` ledger's content
+beyond a row count — that's out of this item's scope.
+
+Cold-start note (state-mirror-divergence-tripwire): a freshly created
+mirror db necessarily has no row for any auth/claim record whose own
+timestamp (`issuedAtMs` / `claimedAt`) predates the db file's own creation
+time — the mirror simply didn't exist yet to catch that write. Those cases
+print as `PRE-MIRROR (informational)` rather than `MISMATCH` and do not
+affect the exit code; a record timestamped AFTER the db was created that
+still disagrees with (or is absent from) the mirror is a real `MISMATCH`.
 
 Usage:
 
@@ -91,6 +103,23 @@ def derive_default_db_path(project_root: Path) -> Path | None:
     return cache_dir / "worklist-state" / f"{key}.db"
 
 
+def db_creation_ms(db_path: Path) -> int | None:
+    """Best-effort creation time of the mirror db file, in Unix ms. Prefers
+    `st_birthtime` (true creation time, available on macOS/BSD) and falls
+    back to `st_ctime` (metadata-change time on POSIX — not creation, but
+    the closest portable proxy) when birthtime isn't reported. Returns None
+    only if stat() itself fails, which main() already guards against via
+    the earlier `db_path.exists()` check."""
+    try:
+        st = db_path.stat()
+    except OSError:
+        return None
+    ts = getattr(st, "st_birthtime", None)
+    if ts is None:
+        ts = st.st_ctime
+    return int(ts * 1000)
+
+
 def load_json(path: Path):
     if not path.exists():
         return None
@@ -101,7 +130,17 @@ def load_json(path: Path):
         return "ERROR"
 
 
-def check_auth(conn: sqlite3.Connection, project_root: Path) -> bool:
+def _report(check: str, msg: str, pre_mirror: bool) -> bool:
+    """Print one PRE-MIRROR/MISMATCH problem line and return the ok=False
+    verdict — PRE-MIRROR is informational only and does not fail the run."""
+    if pre_mirror:
+        print(f"PRE-MIRROR (informational) {check}: {msg}")
+        return True
+    print(f"MISMATCH {check}: {msg}")
+    return False
+
+
+def check_auth(conn: sqlite3.Connection, project_root: Path, db_created_ms: int | None) -> bool:
     auth_path = project_root / WORKLIST_AUTH_REL
     record = load_json(auth_path)
     if record == "ERROR":
@@ -126,17 +165,27 @@ def check_auth(conn: sqlite3.Connection, project_root: Path) -> bool:
     file_kind = record.get("kind")
     file_ids = set(record.get("ids") or [])
     file_consumed = record.get("consumedAtMs")
+    # state-mirror-divergence-tripwire cold-start refinement: this file
+    # record predates the mirror db's own existence, so the mirror never had
+    # a chance to observe its write — any disagreement below is expected,
+    # not a bug.
+    pre_mirror = (
+        db_created_ms is not None
+        and isinstance(issued_at_ms, (int, float))
+        and issued_at_ms < db_created_ms
+    )
 
     row = conn.execute(
         "SELECT kind, ids, consumed_at_ms FROM auth_records WHERE issued_at_ms = ?",
         (issued_at_ms,),
     ).fetchone()
     if row is None:
-        print(
-            f"MISMATCH auth-record: file=issuedAtMs={issued_at_ms} kind={file_kind} "
-            f"ids={sorted(file_ids)} db=no matching row"
+        return _report(
+            "auth-record",
+            f"file=issuedAtMs={issued_at_ms} kind={file_kind} ids={sorted(file_ids)} "
+            f"db=no matching row",
+            pre_mirror,
         )
-        return False
 
     db_kind, db_ids_json, db_consumed = row
     db_ids = set(json.loads(db_ids_json))
@@ -155,13 +204,12 @@ def check_auth(conn: sqlite3.Connection, project_root: Path) -> bool:
         problems.append(f"consumedAtMs file={file_consumed} db={db_consumed}")
 
     if problems:
-        print(f"MISMATCH auth-record: {'; '.join(problems)}")
-        return False
+        return _report("auth-record", "; ".join(problems), pre_mirror)
     print(f"OK auth-record: issuedAtMs={issued_at_ms} kind={file_kind} ids={sorted(file_ids)}")
     return True
 
 
-def check_claim(conn: sqlite3.Connection, project_root: Path) -> bool:
+def check_claim(conn: sqlite3.Connection, project_root: Path, db_created_ms: int | None) -> bool:
     claim_path = project_root / INFLIGHT_CLAIM_REL
     claim = load_json(claim_path)
     if claim == "ERROR":
@@ -184,17 +232,23 @@ def check_claim(conn: sqlite3.Connection, project_root: Path) -> bool:
     written_at_ms = claim.get("claimedAt")
     file_kind = claim.get("kind")
     file_ids = set(claim.get("ids") or [])
+    pre_mirror = (
+        db_created_ms is not None
+        and isinstance(written_at_ms, (int, float))
+        and written_at_ms < db_created_ms
+    )
 
     row = conn.execute(
         "SELECT kind, ids, cleared_at_ms FROM claims WHERE written_at_ms = ?",
         (written_at_ms,),
     ).fetchone()
     if row is None:
-        print(
-            f"MISMATCH claim: file=claimedAt={written_at_ms} kind={file_kind} "
-            f"ids={sorted(file_ids)} db=no matching row"
+        return _report(
+            "claim",
+            f"file=claimedAt={written_at_ms} kind={file_kind} ids={sorted(file_ids)} "
+            f"db=no matching row",
+            pre_mirror,
         )
-        return False
 
     db_kind, db_ids_json, db_cleared = row
     db_ids = set(json.loads(db_ids_json))
@@ -208,10 +262,95 @@ def check_claim(conn: sqlite3.Connection, project_root: Path) -> bool:
         problems.append(f"db row already cleared_at_ms={db_cleared} but file is still live")
 
     if problems:
-        print(f"MISMATCH claim: {'; '.join(problems)}")
-        return False
+        return _report("claim", "; ".join(problems), pre_mirror)
     print(f"OK claim: claimedAt={written_at_ms} kind={file_kind} ids={sorted(file_ids)}")
     return True
+
+
+def table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    row = conn.execute(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone()
+    return bool(row and row[0])
+
+
+def _item_files(item: dict) -> list:
+    if isinstance(item.get("files"), list):
+        return sorted(f for f in item["files"] if f)
+    f = item.get("file")
+    return [f] if f else []
+
+
+def check_items(conn: sqlite3.Connection, project_root: Path) -> bool:
+    """Compare worklist.json's items against the mirror's `items` table
+    (un-tombstoned rows only) — id/status/begunAtMs/files, the same fields
+    `worklist_state::compare_divergence`'s items check covers in the Rust
+    tripwire. No PRE-MIRROR carve-out here: unlike auth_records/claims,
+    `items` is fully re-synced from the current worklist.json on every
+    `/__worklist` read and on every watcher/mutate event
+    (`state-mirror-items-shadow`), so a mismatch found once that machinery
+    has run is a live disagreement, not a pre-mirror artifact."""
+    if not table_exists(conn, "items"):
+        print(
+            "SKIPPED items: mirror db has no items table yet "
+            "(state-mirror-items-shadow not deployed to this db, or no sync has run)"
+        )
+        return True
+
+    worklist_path = project_root / "resources" / "worklist.json"
+    doc = load_json(worklist_path)
+    if doc == "ERROR":
+        return False
+    file_items = (doc or {}).get("items") or []
+
+    file_by_id = {}
+    for item in file_items:
+        iid = item.get("id")
+        if not iid:
+            continue
+        file_by_id[iid] = {
+            "status": item.get("status", "proposed"),
+            "begunAtMs": item.get("begunAtMs"),
+            "files": _item_files(item),
+        }
+
+    rows = conn.execute(
+        "SELECT id, status, begun_at_ms, files FROM items WHERE pruned_at_ms IS NULL"
+    ).fetchall()
+    db_by_id = {}
+    for iid, status, begun_at_ms, files_json in rows:
+        try:
+            files = sorted(json.loads(files_json)) if files_json else []
+        except json.JSONDecodeError:
+            files = []
+        db_by_id[iid] = {"status": status, "begunAtMs": begun_at_ms, "files": files}
+
+    ok = True
+    for iid, f in file_by_id.items():
+        d = db_by_id.get(iid)
+        if d is None:
+            print(f"MISMATCH items[{iid}]: file present, db=absent-or-tombstoned")
+            ok = False
+            continue
+        problems = []
+        if d["status"] != f["status"]:
+            problems.append(f"status file={f['status']} db={d['status']}")
+        if d["begunAtMs"] != f["begunAtMs"]:
+            problems.append(f"begunAtMs file={f['begunAtMs']} db={d['begunAtMs']}")
+        if d["files"] != f["files"]:
+            problems.append(f"files file={f['files']} db={d['files']}")
+        if problems:
+            print(f"MISMATCH items[{iid}]: {'; '.join(problems)}")
+            ok = False
+        else:
+            print(f"OK items[{iid}]: status={f['status']}")
+
+    for iid, d in db_by_id.items():
+        if iid not in file_by_id:
+            print(f"MISMATCH items[{iid}]: file=absent db=present (status={d['status']})")
+            ok = False
+
+    return ok
 
 
 def main() -> int:
@@ -236,6 +375,13 @@ def main() -> int:
         "platform and project root — pass this explicitly if that guess is "
         "wrong or the platform is unrecognized.",
     )
+    parser.add_argument(
+        "--items",
+        action="store_true",
+        help="Also compare resources/worklist.json items against the mirror's "
+        "items table (state-mirror-items-shadow). Silently downgrades to a "
+        "SKIPPED note, not a failure, when the mirror db has no items table.",
+    )
     args = parser.parse_args()
 
     project_root = Path(args.project_root).resolve()
@@ -255,16 +401,21 @@ def main() -> int:
         print(f"MISMATCH db: {db_path} does not exist")
         return 1
 
+    created_ms = db_creation_ms(db_path)
+    if created_ms is not None:
+        print(f"db created: {created_ms} ({db_path})")
+
     conn = sqlite3.connect(str(db_path))
     try:
-        ok_auth = check_auth(conn, project_root)
-        ok_claim = check_claim(conn, project_root)
+        ok_auth = check_auth(conn, project_root, created_ms)
+        ok_claim = check_claim(conn, project_root, created_ms)
+        ok_items = check_items(conn, project_root) if args.items else True
         transitions = conn.execute("SELECT count(*) FROM transitions").fetchone()[0]
         print(f"transitions rows: {transitions}")
     finally:
         conn.close()
 
-    return 0 if (ok_auth and ok_claim) else 1
+    return 0 if (ok_auth and ok_claim and ok_items) else 1
 
 
 if __name__ == "__main__":

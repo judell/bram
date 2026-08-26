@@ -19816,6 +19816,14 @@ fn worklist_state_db_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathB
 static WORKLIST_STATE_DB_OPENED_ONCE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+// state-mirror-divergence-tripwire: count of distinct (deduped)
+// `[state-mirror] op=divergence` lines emitted this process. Read by the
+// Status tab's "State Mirror" section ("Divergences (this process)") so
+// mirror health is a glance instead of a grep. Zero is the success
+// condition for this tripwire.
+static STATE_MIRROR_DIVERGENCE_COUNT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 // Open the state-mirror db for `app`, tracing `op=open` on the first
 // successful open this process and `op=error stage=open` on any failure.
 // Returns None on any failure — every caller treats that as "mirror
@@ -19886,6 +19894,288 @@ fn worklist_state_apply<R: tauri::Runtime>(
                 );
             }
         }
+    }
+}
+
+// state-mirror-items-shadow: mirror the current contents of worklist.json
+// into the items table. Unlike auth_records/claims (one mirror_* call per
+// host-side write), items is a full-file re-sync — agents author and
+// revise proposals by writing worklist.json directly, so there is no
+// single choke point to hang a mirror call off. Callers instead call this
+// from wherever the current file contents are known to be authoritative:
+// the filesystem watcher (after `maybe_enforce_worklist_policy`'s revert
+// logic has run, so a reverted write mirrors the restored truth, not the
+// rejected one), the `/__worklist/mutate` advance/prune completion point
+// (which `worklist-commit`'s delegated prune also reaches), and the
+// reconcile-on-read backstop below for a request landing before either.
+//
+// Reads worklist.json fresh (not `worklist_doc`'s enriched, draft-resolved
+// payload — this mirror only needs the raw metadata fields) and extracts
+// plain data before crossing into worklist_state.rs, matching that
+// module's existing convention of taking ints/`&str`/`&[String]` rather
+// than any host or serde_json type.
+fn worklist_state_mirror_items<R: tauri::Runtime>(app: &AppHandle<R>, source: &str) {
+    let Some(path) = worklist_file(app) else {
+        return;
+    };
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return;
+    };
+    let Some(items) = doc.get("items").and_then(|v| v.as_array()) else {
+        return;
+    };
+
+    struct Extracted {
+        id: String,
+        status: String,
+        begun_at_ms: Option<i64>,
+        files_json: String,
+        closes_issues_json: String,
+    }
+    let extracted: Vec<Extracted> = items
+        .iter()
+        .filter_map(|item| {
+            let id = item.get("id").and_then(|v| v.as_str())?.to_string();
+            let status = item
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("proposed")
+                .to_string();
+            let begun_at_ms = item.get("begunAtMs").and_then(|v| v.as_i64());
+            let files_json = serde_json::to_string(&worklist_item_files(item))
+                .unwrap_or_else(|_| "[]".to_string());
+            let closes_issues_json = item
+                .get("closesIssues")
+                .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string()))
+                .unwrap_or_else(|| "[]".to_string());
+            Some(Extracted {
+                id,
+                status,
+                begun_at_ms,
+                files_json,
+                closes_issues_json,
+            })
+        })
+        .collect();
+
+    let now_ms = unix_now_ms();
+    let snapshots: Vec<worklist_state::WorklistItemSnapshot> = extracted
+        .iter()
+        .map(|e| worklist_state::WorklistItemSnapshot {
+            id: &e.id,
+            status: &e.status,
+            begun_at_ms: e.begun_at_ms,
+            files_json: &e.files_json,
+            closes_issues_json: &e.closes_issues_json,
+        })
+        .collect();
+
+    // worklist_state_apply's closure returns rusqlite::Result<()>, so it
+    // can't hand the counts back directly — stash them via a Cell the
+    // closure sets, then fold them into a dedicated trace line below. This
+    // is a second line alongside the wrapper's own generic
+    // `op=apply kind=items-sync ms=<n>` timing line, not a replacement for
+    // it.
+    let counts_cell: std::cell::Cell<Option<worklist_state::ItemsSyncCounts>> =
+        std::cell::Cell::new(None);
+    worklist_state_apply(app, "items-sync", |conn| {
+        let counts = worklist_state::mirror_items_sync(conn, now_ms, &snapshots, source)?;
+        counts_cell.set(Some(counts));
+        Ok(())
+    });
+    if let Some(counts) = counts_cell.get() {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "state-mirror",
+                &format!(
+                    "op=items-sync source={} upserts={} tombstones={} transitions={}",
+                    source, counts.upserts, counts.tombstones, counts.transitions
+                ),
+            );
+        }
+    }
+}
+
+// state-mirror-items-shadow: reconcile-on-read backstop for /__worklist.
+// If worklist.json's mtime is newer than the items table's most recent
+// last_synced_ms, the mirror hasn't caught up with this write yet (a
+// request landing inside the watcher's 200ms debounce window, or before
+// any watcher event has fired at all) — resync before serving. Cheap when
+// fresh: one mtime stat plus one MAX() query, no-op once the watcher or a
+// mutate call has already synced past this mtime.
+fn worklist_state_maybe_reconcile_items<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let Some(path) = worklist_file(app) else {
+        return;
+    };
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return;
+    };
+    let Ok(modified) = meta.modified() else {
+        return;
+    };
+    let mtime_ms = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let Some(conn) = worklist_state_open(app) else {
+        return;
+    };
+    let max_synced: Option<i64> = conn
+        .query_row("SELECT MAX(last_synced_ms) FROM items", [], |r| r.get(0))
+        .unwrap_or(None);
+    drop(conn);
+    let stale = match max_synced {
+        Some(synced_ms) => mtime_ms > synced_ms,
+        None => true,
+    };
+    if stale {
+        worklist_state_mirror_items(app, "reconcile-on-read");
+    }
+}
+
+// state-mirror-divergence-tripwire: derive the db view of worklist lifecycle
+// state and diff it against the file-derived `doc` the /__worklist route
+// just built. This is a TRIPWIRE (Log-first development, conventions.md):
+// zero divergences is the success condition, and its deny-path reachability
+// is proven by the deliberate-fire tests in worklist_state.rs's
+// `compare_divergence` suite, never by waiting on a soak. Trace-only --
+// never alters the response, and any db error here degrades to a
+// `[state-mirror] op=error` line, matching every other mirror call site's
+// fail-open contract.
+//
+// Cold-db tolerance: this runs AFTER `worklist_state_maybe_reconcile_items`
+// (already called earlier in the /__worklist handler), so a fresh db has
+// already caught up to the current file contents for items before this
+// comparison runs -- no separate "empty tables" special-case is needed here
+// (see `compare_divergence`'s doc comment for the same point from the db
+// side).
+fn observe_state_mirror_divergence<R: tauri::Runtime>(app: &AppHandle<R>, doc: &serde_json::Value) {
+    if !bram_trace_enabled() {
+        return;
+    }
+    let Some(conn) = worklist_state_open(app) else {
+        return;
+    };
+
+    // Items snapshot: same extraction `worklist_state_mirror_items` uses,
+    // read from the already-built response doc rather than re-reading the
+    // file, so what we compare is exactly what a concurrent mirror sync
+    // would have been told to write.
+    let items_val = doc
+        .get("items")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    struct Extracted {
+        id: String,
+        status: String,
+        begun_at_ms: Option<i64>,
+        files_json: String,
+    }
+    let extracted: Vec<Extracted> = items_val
+        .iter()
+        .filter_map(|item| {
+            let id = item.get("id").and_then(|v| v.as_str())?.to_string();
+            let status = item
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("proposed")
+                .to_string();
+            let begun_at_ms = item.get("begunAtMs").and_then(|v| v.as_i64());
+            let files_json = serde_json::to_string(&worklist_item_files(item))
+                .unwrap_or_else(|_| "[]".to_string());
+            Some(Extracted { id, status, begun_at_ms, files_json })
+        })
+        .collect();
+    let item_snapshots: Vec<worklist_state::WorklistItemSnapshot> = extracted
+        .iter()
+        .map(|e| worklist_state::WorklistItemSnapshot {
+            id: &e.id,
+            status: &e.status,
+            begun_at_ms: e.begun_at_ms,
+            files_json: &e.files_json,
+            closes_issues_json: "[]",
+        })
+        .collect();
+
+    // Claim snapshot: .inflight-claim.json absent (or unparsable) = none.
+    let claim_raw: Option<serde_json::Value> = inflight_claim_file(app)
+        .and_then(|p| std::fs::read_to_string(&p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok());
+    let claim_kind: Option<String> = claim_raw
+        .as_ref()
+        .and_then(|v| v.get("kind"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let claim_ids: Vec<String> = claim_raw
+        .as_ref()
+        .and_then(|v| v.get("ids"))
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let claim_snapshot = claim_kind
+        .as_ref()
+        .map(|k| worklist_state::FileClaimSnapshot { kind: k.as_str(), ids: &claim_ids });
+
+    // Auth snapshot: .worklist-authorization.json absent = skip the auth
+    // comparison entirely (nothing to key a db row lookup on).
+    let auth_raw: Option<serde_json::Value> = worklist_auth_file(app)
+        .and_then(|p| std::fs::read_to_string(&p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok());
+    let auth_ids: Vec<String> = auth_raw
+        .as_ref()
+        .and_then(|v| v.get("ids"))
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let auth_snapshot = auth_raw.as_ref().and_then(|v| {
+        let issued_at_ms = v.get("issuedAtMs").and_then(|v| v.as_i64())?;
+        let kind = v.get("kind").and_then(|v| v.as_str())?;
+        let consumed = v.get("consumedAtMs").and_then(|v| v.as_i64()).is_some();
+        Some(worklist_state::FileAuthSnapshot { issued_at_ms, kind, ids: &auth_ids, consumed })
+    });
+
+    let snapshot = worklist_state::FileStateSnapshot {
+        items: &item_snapshots,
+        claim: claim_snapshot,
+        auth: auth_snapshot,
+    };
+
+    let divergences = match worklist_state::compare_divergence(&conn, &snapshot) {
+        Ok(d) => d,
+        Err(e) => {
+            append_bram_trace_line(
+                app,
+                "state-mirror",
+                &format!("op=error stage=divergence detail={}", e),
+            );
+            return;
+        }
+    };
+    if divergences.is_empty() {
+        return;
+    }
+
+    static REPORTED: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    let reported = REPORTED.get_or_init(|| Mutex::new(Default::default()));
+    for d in divergences {
+        let item_key = d.item.clone().unwrap_or_else(|| "-".to_string());
+        let dedup_key = format!("{}|{}|{}", d.field, item_key, d.detail);
+        if let Ok(mut g) = reported.lock() {
+            if !g.insert(dedup_key) {
+                continue;
+            }
+        }
+        STATE_MIRROR_DIVERGENCE_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        append_bram_trace_line(
+            app,
+            "state-mirror",
+            &format!("op=divergence field={} item={} {}", d.field, item_key, d.detail),
+        );
     }
 }
 
@@ -38007,13 +38297,10 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
     let claim_age_ms = if claimed_at > 0 { now - claimed_at } else { 0 };
-    let claim_level = if claim_ids.is_empty() {
-        "ok"
-    } else if claim_age_ms > 120000 {
-        "warn"
-    } else {
-        "info"
-    };
+    // `claim_level` is computed below (state-mirror-divergence-tripwire,
+    // dual-source conversion) from the mirror's live claim vs this file,
+    // not from claim_ids/claim_age_ms alone — see the `claim_agrees` block
+    // near the "Current claim" row assembly.
 
     let trace_text = bram_trace_log_file(app)
         .and_then(|p| std::fs::read_to_string(p).ok())
@@ -38271,23 +38558,191 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
         "seen": format_iso_utc_ms(now),
     });
     let (authorization_rows, orphan_auth, orphan_auth_detail) = authorization_rows(app, now);
-    let current_claim_state = if claim_ids.is_empty() {
-        "idle".to_string()
+
+    // state-mirror-divergence-tripwire, dual-source conversion: open the
+    // mirror once and derive "Current claim" / "Claim pairs" / the new
+    // "Auth history (mirror)" row from it. `None` (mirror db unavailable)
+    // degrades every db-derived row below back to file-only behavior rather
+    // than failing the request — the mirror is a shadow, never load-bearing.
+    let ws_conn = worklist_state_open(app);
+
+    let ws_live_claim: Option<(String, Vec<String>, i64)> = ws_conn
+        .as_ref()
+        .and_then(|c| worklist_state::live_claim(c).ok().flatten())
+        .map(|(kind, ids_json, written_at_ms)| {
+            let ids: Vec<String> = serde_json::from_str(&ids_json).unwrap_or_default();
+            (kind, ids, written_at_ms)
+        });
+    let file_claim_kind = inflight
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    // Disagreement is the tripwire's human-visible half: db and file should
+    // always name the same live claim, so a mismatch here is exactly the
+    // shape state-mirror-divergence-tripwire's op=divergence line also
+    // catches — this row makes it visible on every Status tab open, not
+    // just in the trace.
+    let claim_agrees = match &ws_live_claim {
+        Some((db_kind, db_ids, _)) => {
+            let mut db_sorted = db_ids.clone();
+            db_sorted.sort();
+            let mut file_sorted = claim_ids.clone();
+            file_sorted.sort();
+            *db_kind == file_claim_kind && db_sorted == file_sorted
+        }
+        None => claim_ids.is_empty(),
+    };
+    let (current_claim_state, current_claim_detail_base) = match &ws_live_claim {
+        Some((db_kind, db_ids, written_at_ms)) => (
+            format!("{} {}", db_kind, coordination_ago(*written_at_ms, now)),
+            if db_ids.is_empty() {
+                "No active spinner sentinel".to_string()
+            } else {
+                db_ids.join(", ")
+            },
+        ),
+        None => ("idle".to_string(), "No active spinner sentinel".to_string()),
+    };
+    let current_claim_detail = if claim_agrees {
+        current_claim_detail_base
     } else {
         format!(
-            "{} {}",
-            inflight
-                .get("kind")
-                .and_then(|v| v.as_str())
-                .unwrap_or("claim"),
-            coordination_ago(claimed_at, now)
+            "{} — db/file disagree (file: kind={} ids={})",
+            current_claim_detail_base,
+            file_claim_kind.clone().if_empty("none"),
+            claim_ids.join(",").if_empty("none")
         )
     };
-    let current_claim_detail = if claim_ids.is_empty() {
-        "No active spinner sentinel".to_string()
+    let current_claim_seen = ws_live_claim
+        .as_ref()
+        .map(|(_, _, written_at_ms)| format_iso_utc_ms(*written_at_ms))
+        .unwrap_or_default();
+    let claim_level = if !claim_agrees {
+        "warn"
+    } else if claim_ids.is_empty() {
+        "ok"
+    } else if claim_age_ms > 120000 {
+        "warn"
     } else {
-        claim_ids.join(", ")
+        "info"
     };
+
+    // "Claim pairs" (formerly "Trace pairs"): an outright upgrade from the
+    // bram-trace.log grep to always-on counts from the mirror's transitions
+    // ledger — not blind across log rotation, not blind when traces are
+    // off. `clears` counts `claim-clear` transitions only; that kind already
+    // covers a shrink that terminated a claim (see
+    // worklist_state::claim_pair_counts's doc comment).
+    let (claim_writes, claim_clears, claim_pairs_last_ms) = ws_conn
+        .as_ref()
+        .and_then(|c| worklist_state::claim_pair_counts(c).ok())
+        .unwrap_or((0, 0, None));
+    let claim_pairs_warn = claim_writes > claim_clears + 1;
+
+    // "Auth history (mirror)": last-N auth_records rows with issue->consume
+    // latency, which the single-slot .worklist-authorization.json file
+    // cannot show. Appended beside the existing file-derived rows rather
+    // than replacing them.
+    let ws_auth_history = ws_conn
+        .as_ref()
+        .and_then(|c| worklist_state::recent_auth_records(c, 5).ok())
+        .unwrap_or_default();
+    let auth_history_row = if ws_auth_history.is_empty() {
+        serde_json::json!({
+            "signal": "Auth history (mirror)",
+            "level": "none",
+            "state": "0 records",
+            "detail": "No auth_records rows in the mirror yet",
+            "seen": "",
+        })
+    } else {
+        let newest_issued_ms = ws_auth_history[0].0;
+        let detail = ws_auth_history
+            .iter()
+            .map(|(issued_at_ms, kind, ids_json, consumed_at_ms)| {
+                let ids: Vec<String> = serde_json::from_str(ids_json).unwrap_or_default();
+                match consumed_at_ms {
+                    Some(c) => format!(
+                        "{} ({} ids, consumed {}s)",
+                        kind,
+                        ids.len(),
+                        ((c - issued_at_ms).max(0)) / 1000
+                    ),
+                    None => format!("{} ({} ids, pending)", kind, ids.len()),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
+        serde_json::json!({
+            "signal": "Auth history (mirror)",
+            "level": "ok",
+            "state": format!("{} records", ws_auth_history.len()),
+            "detail": detail,
+            "seen": format_iso_utc_ms(newest_issued_ms),
+        })
+    };
+    let mut authorization_rows = authorization_rows;
+    authorization_rows.push(auth_history_row);
+
+    // "State Mirror" section: db presence/size, last apply time,
+    // transitions count, and the tripwire's own divergence counter — the
+    // soak's dashboard, per state-mirror-divergence-tripwire.
+    let ws_db_path = worklist_state_db_path(app);
+    let ws_db_meta = ws_db_path.as_ref().and_then(|p| std::fs::metadata(p).ok());
+    let ws_db_size_kb = ws_db_meta.as_ref().map(|m| (m.len() + 1023) / 1024).unwrap_or(0);
+    let ws_db_path_tail = ws_db_path
+        .as_ref()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ws_db_seen = ws_db_meta
+        .as_ref()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| format_iso_utc_ms(d.as_millis() as i64))
+        .unwrap_or_default();
+    let (ws_transitions_count, ws_last_apply_ms) = ws_conn
+        .as_ref()
+        .and_then(|c| worklist_state::mirror_health(c).ok())
+        .unwrap_or((0, None));
+    let ws_divergence_count =
+        STATE_MIRROR_DIVERGENCE_COUNT.load(std::sync::atomic::Ordering::SeqCst);
+    let state_mirror_rows = vec![
+        serde_json::json!({
+            "signal": "Mirror db",
+            "level": if ws_conn.is_some() { "ok" } else { "none" },
+            "state": if ws_conn.is_some() { format!("{} KB", ws_db_size_kb) } else { "absent".to_string() },
+            "detail": if ws_conn.is_some() { ws_db_path_tail.clone() } else { "Not yet created — no mirror write has happened in this project".to_string() },
+            "seen": ws_db_seen,
+        }),
+        serde_json::json!({
+            "signal": "Last apply",
+            "level": if ws_last_apply_ms.is_some() { "ok" } else { "none" },
+            "state": ws_last_apply_ms.map(|ms| coordination_ago(ms, now)).unwrap_or_else(|| "never".to_string()),
+            "detail": "Most recent transitions.at_ms row in the mirror ledger",
+            "seen": ws_last_apply_ms.map(format_iso_utc_ms).unwrap_or_default(),
+        }),
+        serde_json::json!({
+            "signal": "Transitions",
+            "level": if ws_transitions_count > 0 { "ok" } else { "none" },
+            "state": format!("{} rows", ws_transitions_count),
+            "detail": "Append-only lifecycle ledger row count (auth-record, claim-write/clear/shrink, item-*)",
+            "seen": ws_last_apply_ms.map(format_iso_utc_ms).unwrap_or_default(),
+        }),
+        serde_json::json!({
+            "signal": "Divergences (this process)",
+            "level": if ws_divergence_count > 0 { "warn" } else { "ok" },
+            "state": format!("{}", ws_divergence_count),
+            "detail": if ws_divergence_count > 0 {
+                "db/file mismatch observed by the /__worklist tripwire — see [state-mirror] op=divergence in bram-trace.log".to_string()
+            } else {
+                "0 is the success condition for this tripwire".to_string()
+            },
+            "seen": "",
+        }),
+    ];
+
     let completion_monitor = current_turn_completion_monitor();
     let completion_after_claim = if claimed_at > 0 {
         completion_monitor.seen_at_ms >= claimed_at && completion_monitor.claimed_after
@@ -38311,8 +38766,6 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
             completion_monitor.detail
         )
     };
-    let trace_pairs_warn = trace["inflightWrites"].as_i64().unwrap_or(0)
-        > trace["inflightClears"].as_i64().unwrap_or(0) + 1;
     let stale_reject_warn = trace["staleRejects"].as_i64().unwrap_or(0) > 0;
     let guard_warn = trace["guardBlocks"].as_i64().unwrap_or(0) > 0;
     let _ = (orphan_auth, orphan_auth_detail);
@@ -38400,14 +38853,14 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
                         "level": claim_level,
                         "state": current_claim_state,
                         "detail": current_claim_detail,
-                        "seen": if claimed_at > 0 { format_iso_utc_ms(claimed_at) } else { String::new() },
+                        "seen": current_claim_seen,
                     },
                     {
-                        "signal": "Trace pairs",
-                        "level": if trace_pairs_warn { "warn" } else { "ok" },
-                        "state": format!("{} writes / {} clears", trace["inflightWrites"].as_i64().unwrap_or(0), trace["inflightClears"].as_i64().unwrap_or(0)),
-                        "detail": "Recent [inflight-sentinel] records from bram-trace.log",
-                        "seen": trace["lastInflight"].as_str().unwrap_or(""),
+                        "signal": "Claim pairs",
+                        "level": if claim_pairs_warn { "warn" } else { "ok" },
+                        "state": format!("{} writes / {} clears", claim_writes, claim_clears),
+                        "detail": "Mirror ledger counts (claim-write vs claim-clear transitions) — replaces the old bram-trace.log grep, so it stays accurate across log rotation and when traces are off",
+                        "seen": claim_pairs_last_ms.map(format_iso_utc_ms).unwrap_or_default(),
                     },
                     {
                         "signal": "Turn completion",
@@ -38419,6 +38872,10 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
                     port_row,
                     loopback_row
                 ]
+            },
+            {
+                "title": "State Mirror",
+                "rows": state_mirror_rows
             },
             {
                 "title": "Hooks",
@@ -45625,6 +46082,10 @@ fn route_request<R: tauri::Runtime>(
     // changes (rung 2: evidence follows disk state, not status — TO APPLY
     // rows with work on disk show their diff too).
     if path == "__worklist" {
+        // state-mirror-items-shadow: reconcile-on-read backstop — cheap
+        // no-op once the watcher/mutate mirror calls have caught up to
+        // this file's mtime.
+        worklist_state_maybe_reconcile_items(app);
         let mut doc = worklist_doc(app);
         // issue-223-surface-unconsumed-approval: annotate items covered by
         // a live, unconsumed authorization so the tab can show that state
@@ -45911,6 +46372,7 @@ fn route_request<R: tauri::Runtime>(
         }
         observe_pending_advances(app, &doc);
         observe_worklist_attribution(app, &doc);
+        observe_state_mirror_divergence(app, &doc);
         let body = serde_json::to_vec(&doc).unwrap_or_default();
         return (200, "application/json; charset=utf-8", body);
     }
@@ -47430,6 +47892,14 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
         retire_worklist_authorization_ids(app, completion_ids);
     }
     promote_feedback_drafts_for_items(app, completion_ids, op);
+
+    // state-mirror-items-shadow: the write above already landed on disk, so
+    // mirror it now rather than waiting on the watcher's 200ms debounce.
+    // worklist-commit's prune reaches this same function by delegation
+    // (handle_worklist_commit calls handle_worklist_mutate directly), so
+    // this one call site covers both the mutate and worklist-commit
+    // choke points named in the item's spec.
+    worklist_state_mirror_items(app, "mutate");
 
     let result_key = if op == "prune" { "pruned" } else { "advanced" };
     let response = format!(
@@ -50817,6 +51287,15 @@ pub fn run() {
                             // Event-driven indexing: worklist-history files are
                             // written on commit/prune — reindex history now.
                             search_index_request(IndexBucket::History);
+                            // state-mirror-items-shadow: this debounce window
+                            // has already absorbed every raw event in the
+                            // burst, so any maybe_snapshot_worklist /
+                            // maybe_enforce_worklist_policy revert for this
+                            // change has already run synchronously in an
+                            // earlier loop iteration — mirror the settled,
+                            // possibly-restored file contents, not a
+                            // mid-burst or rejected one.
+                            worklist_state_mirror_items(&app_handle, "watcher");
                             pending_worklist_since = None;
                         }
                     }

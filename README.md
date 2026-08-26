@@ -2,7 +2,7 @@
 
 ## What is it?
 
-A desktop app that helps you make best use of git and GitHub for AI-assisted software development.
+A desktop app that wraps Claude Code and Codex in a GUI and embeds them in a structured, audited, and search-enabled workflow that connects to GitHub or GitLab.
 
 Bram runs agents mindfully.
 

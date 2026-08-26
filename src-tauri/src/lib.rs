@@ -29873,6 +29873,10 @@ fn format_worklist_payload_text<R: tauri::Runtime>(
         let mut labels: Vec<String> = Vec::new();
         let mut fb_images: Vec<String> = Vec::new();
         let mut display_verb: Option<&str> = None;
+        // dedupe-fanned-feedback-in-projection: (id, feedback) pairs kept
+        // separate so a triage message fanned out to every selected item
+        // renders once as a shared tail instead of once per item.
+        let mut pairs: Vec<(String, String)> = Vec::new();
         if let Ok(payload) = serde_json::from_str::<serde_json::Value>(rest.trim()) {
             let empty: Vec<serde_json::Value> = Vec::new();
             let items = payload
@@ -29880,7 +29884,7 @@ fn format_worklist_payload_text<R: tauri::Runtime>(
                 .and_then(|v| v.as_array())
                 .unwrap_or(&empty);
             for it in items {
-                let mut label = it
+                let label = it
                     .get("id")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
@@ -29914,12 +29918,32 @@ fn format_worklist_payload_text<R: tauri::Runtime>(
                 fb_images.extend(st_extract_image_paths(&fb));
                 let fb_clean = st_strip_image_paths(&fb);
                 let fb_compact = fb_clean.split_whitespace().collect::<Vec<_>>().join(" ");
-                if !fb_compact.is_empty() {
-                    label = format!("{} — {}", label, fb_compact);
-                }
                 if !label.is_empty() {
-                    labels.push(label);
+                    pairs.push((label, fb_compact));
                 }
+            }
+        }
+        // Identical non-empty feedback across a plural payload is the gate's
+        // one triage message fanned out, not N authored texts — show it once.
+        // Mixed or partially-empty feedback stays per-item: distinct texts
+        // are genuinely per-item and keep their attribution.
+        let fanned = pairs.len() > 1
+            && !pairs[0].1.is_empty()
+            && pairs.iter().all(|(_, fb)| *fb == pairs[0].1);
+        if fanned {
+            let shared = pairs[0].1.clone();
+            labels.extend(pairs.into_iter().map(|(id, _)| id));
+            let shown = display_verb.unwrap_or(verb);
+            return Some((
+                format!("{} {} — {}", shown, labels.join(", "), shared),
+                fb_images,
+            ));
+        }
+        for (id, fb) in pairs {
+            if fb.is_empty() {
+                labels.push(id);
+            } else {
+                labels.push(format!("{} — {}", id, fb));
             }
         }
         let shown = display_verb.unwrap_or(verb);

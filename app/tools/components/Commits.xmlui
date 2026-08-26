@@ -122,7 +122,7 @@
             <Text when="{$item.pushed}" value="✓" color="$color-success-600" fontSize="$fontSize-xs" width="12px" />
             <Text when="{!$item.pushed}" value=" " width="12px" />
             <Text value="{$item.sha.slice(0, 7)}" variant="code" fontSize="$fontSize-xs" color="$textColor-secondary" width="64px" />
-            <Text value="{formatDateTime($item.commit.author.date, 'MM-dd HH:mm')}" fontSize="$fontSize-xs" color="$textColor-secondary" overflowMode="none" width="74px" />
+            <Text value="{formatDateTime($item.commit.author.date, 'MM-dd HH:mm')}" fontSize="$fontSize-xs" color="$textColor-secondary" overflowMode="none" width="88px" />
             <HStack width="232px" gap="$space-1" verticalAlignment="center">
               <Text value="{$item.commit.author.login || $item.commit.author.name}" fontSize="$fontSize-sm" color="$textColor-secondary" width="*" maxLines="1" />
               <HStack gap="8px" verticalAlignment="center">

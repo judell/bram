@@ -8,22 +8,7 @@ Bram runs agents mindfully.
 
 ## Who is it for?
 
-Anyone who wants to use AI coding agents in a safe, orderly, and accountable way.
-
-Bram has opinions. It thinks versioning and collaboration are well-handled by git and GitHub, so it guides agents to make best use of them on your behalf, in conversation with you. And it thinks GitHub is great for accountability, so it also guides agents to join you in orderly and well-documented collaboration that leaves an auditable trail.
-
-<!--
-<table>
-  <tr>
-    <td width="50%">
-      <img src="https://github.com/user-attachments/assets/0fce4634-8912-4a53-9b1e-ddb99edf4e05" alt="image" width="100%" />
-    </td>
-    <td width="50%">
-      <img src="https://github.com/user-attachments/assets/07129b4a-6c17-4cff-b095-150de8b2ed8c" alt="image" width="100%" />
-    </td>
-  </tr>
-</table>
--->
+Anyone who uses Claude Code and/or Codex.
 
 ## Demo
 

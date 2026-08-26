@@ -15599,6 +15599,22 @@ fn record_skip_worklist_authorization<R: tauri::Runtime>(app: &AppHandle<R>, tur
     if let Ok(body) = serde_json::to_string_pretty(&record) {
         match std::fs::write(&path, format!("{}\n", body)) {
             Ok(()) => {
+                // mirror-direct-edit-auth-records: this writer bypasses
+                // write_worklist_authorization_record, so it mirrors its own
+                // write — the gap the divergence tripwire's first real fire
+                // found (2026-08-26). TTL-expiry records never consume;
+                // mirrored faithfully with no consumed stamp.
+                worklist_state_apply(app, "auth-record", move |conn| {
+                    worklist_state::mirror_auth_record(
+                        conn,
+                        issued_at_ms,
+                        "direct-edit",
+                        &[] as &[String],
+                        false,
+                        "host-skip-worklist-prefix",
+                        issued_at_ms,
+                    )
+                });
                 let provider = current_provider(app)
                     .map(session_provider_label)
                     .unwrap_or_default();
@@ -42151,6 +42167,19 @@ fn record_codex_direct_edit_authorization<R: tauri::Runtime>(app: &AppHandle<R>,
         eprintln!("[worklist-auth] write {} failed: {}", path.display(), e);
         return;
     }
+    // mirror-direct-edit-auth-records: the Codex opt-out writer also
+    // bypasses write_worklist_authorization_record; same gap, same fix.
+    worklist_state_apply(app, "auth-record", move |conn| {
+        worklist_state::mirror_auth_record(
+            conn,
+            issued_at_ms,
+            "direct-edit",
+            &[] as &[String],
+            false,
+            "host-to-turn-opt-out",
+            issued_at_ms,
+        )
+    });
     let mut rec = audit_authorization_record(
         "direct-edit",
         &[] as &[String],

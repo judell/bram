@@ -104,11 +104,18 @@
       fontSize="$fontSize-sm"
       color="$textColor-secondary"
       value="{'Push will close ' + (commits.value || []).filter(c => !c.pushed &amp;&amp; c.pendingCloses &amp;&amp; c.pendingCloses.length > 0).map(c => c.pendingCloses.map(p => '#' + p.issue).join(', ')).join(', ')}" />
+    <!-- close-queue-banner-rebase-stale: the exclusion asks "does an
+         unpushed row already carry this close?" via the host's
+         rebase-stable pendingCloses join, NOT raw SHA equality — the
+         Push button's auto-rebase rewrites local SHAs while the queue
+         record keeps the original, and the raw compare made this
+         banner claim phase-2 (pushed, awaiting default branch) during
+         phase-1 (unpushed), tripling the voices for one close. -->
     <Text
-      when="{((closeQueue.value &amp;&amp; closeQueue.value.pending) || []).filter(p => !(commits.value || []).some(c => !c.pushed &amp;&amp; c.sha === p.commitSha)).length > 0}"
+      when="{((closeQueue.value &amp;&amp; closeQueue.value.pending) || []).filter(p => !(commits.value || []).some(c => !c.pushed &amp;&amp; (c.pendingCloses || []).some(x => x.issue === p.issue))).length > 0}"
       fontSize="$fontSize-sm"
       color="$textColor-secondary"
-      value="{'close queued for ' + ((closeQueue.value &amp;&amp; closeQueue.value.pending) || []).filter(p => !(commits.value || []).some(c => !c.pushed &amp;&amp; c.sha === p.commitSha)).map(p => '#' + p.issue).join(', ') + ' — completes when the commit reaches the default branch'}" />
+      value="{'close queued for ' + ((closeQueue.value &amp;&amp; closeQueue.value.pending) || []).filter(p => !(commits.value || []).some(c => !c.pushed &amp;&amp; (c.pendingCloses || []).some(x => x.issue === p.issue))).map(p => '#' + p.issue).join(', ') + ' — completes when the commit reaches the default branch'}" />
 
     <VStack gap="$space-1" when="{commits.value &amp;&amp; commits.value.length > 0}">
       <!-- browse-tabs-adopt-searchresults: rows render through the shared

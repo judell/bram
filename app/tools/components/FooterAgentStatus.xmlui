@@ -77,6 +77,13 @@
         tooltip="{window.headerWorkingLabel(agentStatus.value, $props.enhanceStatus)}"
         value="{window.headerWorkingLabel(agentStatus.value, $props.enhanceStatus)}" />
     </HStack>
+    <!-- surface-delegated-work-in-flight: $props.runningSubagentCount is
+         computed in Main.xmlui from the footerAgents DataSource
+         (window.__bramRunningSubagentCount(footerAgents.value)), the same
+         roster the chips strip renders — so the "Finished" label stops
+         lying when delegated subagents are still running. Threaded as a
+         prop (not read from a store here) so it stays a tracked binding
+         dependency, same idiom as $props.enhanceStatus above. -->
     <HStack
       when="{agentStatus.value &amp;&amp; agentStatus.value.state === 'finished'}"
       width="100%"
@@ -88,8 +95,8 @@
         color="$textColor-secondary"
         maxLines="1"
         overflowMode="ellipsis"
-        tooltip="{window.headerFinishedLabel(agentStatus.value, $props.enhanceStatus, lastSeenVerb)}"
-        value="{window.headerFinishedLabel(agentStatus.value, $props.enhanceStatus, lastSeenVerb)}" />
+        tooltip="{window.headerFinishedLabel(agentStatus.value, $props.enhanceStatus, lastSeenVerb, $props.runningSubagentCount)}"
+        value="{window.headerFinishedLabel(agentStatus.value, $props.enhanceStatus, lastSeenVerb, $props.runningSubagentCount)}" />
     </HStack>
   </HStack>
 </Component>

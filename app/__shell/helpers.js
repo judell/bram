@@ -1909,10 +1909,18 @@ window.headerWorkingLabel = function (mainAgentStatus, enhanceStatusValue) {
   return detail ? label + " (" + detail + ")" : label;
 };
 
-// "<provider> <verb> · <elapsed>" for the finished state. Verb
-// fall-through: status.verb (when finished) → status.verb (when
+// "<provider> <verb> · <elapsed>[ · N subagent(s) working]" for the finished
+// state. Verb fall-through: status.verb (when finished) → status.verb (when
 // non-working) → lastSeenAgentVerb (when non-working) → "Finished".
-window.headerFinishedLabel = function (mainAgentStatus, enhanceStatusValue, lastSeenAgentVerb) {
+// surface-delegated-work-in-flight: the optional 4th arg is the count of
+// still-running roster entries. Kept as a plain number (not a store read)
+// so the caller controls reactivity — FooterAgentStatus.xmlui passes it as
+// a $props value derived from the footerAgents DataSource in Main.xmlui,
+// which the binding engine tracks as a dependency the same way it already
+// tracks $props.enhanceStatus. A store read inside this function would NOT
+// re-evaluate on roster change; this function stays pure (label in, label
+// out) precisely to avoid that trap.
+window.headerFinishedLabel = function (mainAgentStatus, enhanceStatusValue, lastSeenAgentVerb, runningSubagentCount) {
   var s = mainAgentStatus || {};
   var verb;
   if (s.state === "finished") {
@@ -1925,7 +1933,12 @@ window.headerFinishedLabel = function (mainAgentStatus, enhanceStatusValue, last
     verb = "Finished";
   }
   var base = window.providerDisplayName(mainAgentStatus, enhanceStatusValue) + ": " + verb;
-  return base + (s.elapsedText ? " · " + s.elapsedText : "");
+  var label = base + (s.elapsedText ? " · " + s.elapsedText : "");
+  var n = runningSubagentCount || 0;
+  if (n > 0) {
+    label += " · " + n + " " + (n === 1 ? "subagent" : "subagents") + " working";
+  }
+  return label;
 };
 
 // Compute the next sort state for a clickable table-header. If the
@@ -9879,6 +9892,21 @@ window.__bramDismissedInRoster = function (roster, dismissed) {
   return agents.filter(function (a) {
     return a && dismissed.indexOf(a.agentId) !== -1;
   });
+};
+
+// Count of not-yet-finished entries in the footer subagent roster
+// (surface-delegated-work-in-flight). Deliberately dismissal-blind — an
+// agent still running is still running whether or not its chip is hidden,
+// so this counts against the raw roster, not __bramVisibleFooterAgents.
+// Feeds headerFinishedLabel's "· N subagent(s) working" suffix via a
+// $props value threaded from Main.xmlui (see FooterAgentStatus.xmlui).
+window.__bramRunningSubagentCount = function (roster) {
+  var agents = (roster && roster.agents) || [];
+  var n = 0;
+  for (var i = 0; i < agents.length; i++) {
+    if (agents[i] && !agents[i].finished) n++;
+  }
+  return n;
 };
 
 // Footer session-info line with the transcript viewport spliced in after

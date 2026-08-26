@@ -689,7 +689,10 @@
           <!-- Isolated in its own component so PTY-throughput churn does not
                re-render this footer's message composer. -->
           <ActivitySparkline />
-          <FooterAgentStatus width="*" enhanceStatus="{enhanceStatus.value}" />
+          <FooterAgentStatus
+            width="*"
+            enhanceStatus="{enhanceStatus.value}"
+            runningSubagentCount="{window.__bramRunningSubagentCount(footerAgents.value)}" />
           <!-- transcript-new-below-badge chip: one click to the transcript's
                live edge from any tab. -->
           <Button
@@ -752,10 +755,18 @@
              Main chip is intentionally never dismissible. -->
         <Items data="{window.__bramVisibleFooterAgents(footerAgents.value, dismissedAgentIds).slice(-3).reverse()}">
           <HStack gap="0" verticalAlignment="center">
+            <!-- surface-delegated-work-in-flight: the ● glyph
+                 (__bramAgentChipLabel) was the only truthful signal that a
+                 subagent is still running, and it read as the quietest
+                 pixel on the page. A running chip now goes solid+primary
+                 (filled, accent) instead of the quiet outlined+secondary a
+                 finished chip keeps — Button's own themeColor/variant
+                 props, no new component. -->
             <Button
               label="{window.__bramAgentChipLabel($item)}"
               size="xs"
-              variant="outlined"
+              variant="{$item.finished ? 'outlined' : 'solid'}"
+              themeColor="{$item.finished ? 'secondary' : 'primary'}"
               tooltip="{(window.__bramAgentChipTooltip || window.__bramAgentChipLabel)($item)}"
               onClick="transcriptAgentId = $item.agentId; window.__bramSetVisibleRange(null); navigate('/transcript')" />
             <Button

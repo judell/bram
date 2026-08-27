@@ -1453,6 +1453,15 @@ Don't say "N unpushed commits now" or list unpushed SHAs in prose — the
 Commits tab has the exact count and list; any number you'd state is
 guesswork.
 
+The same goes for recommending Push: don't advise it from a remembered
+state — the user pushes without narrating it, so a session-long tally
+of "commits made" says nothing about what's still unpushed (live
+pattern, 2026-08-27: repeated "push the stack" advice while
+`@{u}..HEAD` was empty). If push state matters to the point being
+made, check `git log @{u}..HEAD` first; otherwise say nothing — the
+Push button already carries the true count and the queued-close banner
+already says what a push will do.
+
 ### Commit-then-push: the post-commit grace
 
 `worklist-commit` prunes its items, so an emptied board would deny the very

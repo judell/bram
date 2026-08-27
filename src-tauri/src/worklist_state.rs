@@ -59,6 +59,12 @@ pub fn open(path: &str) -> Result<Connection> {
     // WAL lets a future reader (e.g. a diagnostic route) run alongside the
     // mirror's writes. No-op on :memory:, so the result is ignored.
     let _ = conn.pragma_update(None, "journal_mode", "WAL");
+    // mirror-busy-timeout-and-vocab: without a busy_timeout, a reader
+    // (Status route, the checker) overlapping a write fails the write
+    // instantly with `database is locked` (wave 3's one mirror error,
+    // judell/bram#291). 250ms of patience retires that class; the
+    // layered re-syncs behind it remain the correctness backstop.
+    let _ = conn.pragma_update(None, "busy_timeout", 250);
     ensure_schema(&conn)?;
     Ok(conn)
 }

@@ -2453,7 +2453,13 @@ window.__bramWorklist2Strip = function (item, claim, items) {
     // reverse.
     var csDone = item.changeSummary;
     if (csDone && csDone.total > 0 && csDone.changed === csDone.total) {
-      return withCloses("Changes complete, not yet advanced");
+      // strip-changes-in-progress-honesty: was "Changes complete, not yet
+      // advanced" — wave 3 falsified the wording (both entangled items
+      // showed it while their subagents' chips were visibly still running).
+      // files_changed == files_total measures COVERAGE, not completion; a
+      // subagent touches every planned file early and keeps editing. Say
+      // only what is observable; true mid-edit AND mid-verification.
+      return withCloses("Changes in progress");
     }
     // header-inflight-verbs, corrected (2026-08-20 sighting: the strip
     // flipped Approving… → Committing… mid-apply as the first edits

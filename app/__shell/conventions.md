@@ -1135,6 +1135,23 @@ marker string, behavioral probe), and when you report results, label
 which of your instruments are authoritative and which are only
 corroborating.
 
+### Render what the reader will see
+
+The rule above has a second half for changes whose deliverable is
+something a human reads or sees — a docs page, a pane surface, a
+rendered table: the artifact-you-run is the **rendered output**, and
+the commit gate includes looking at it. A passing spec verifies
+behavior, not communication. Receipt (xmlui wave 3, 2026-08-27,
+judell/bram#291): five real defects surfaced only when the committed
+how-to pages were opened in a docs server — clipped playgrounds, a
+bold run that swallowed its lead clause, a demo whose central claim
+was invisible because the spec drove the selection itself — every one
+invisible to green tests and to reading the markdown. When the work
+is delegated, this must be an explicit instruction in the subagent's
+prompt, not an assumed judgment: a delegated agent that cannot verify
+its own work will report success (wave 1's lesson), and "verify"
+for a rendered artifact means render it.
+
 ### Close every hard stretch with two questions
 
 This is the engine that turns local pain into shared improvement.

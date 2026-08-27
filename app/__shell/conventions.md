@@ -440,10 +440,23 @@ serves an empty default; the Worklist tab creates the file (and
    for content yourself; `/__worklist/resolve` returns the recorded
    item bodies.
 
-   - *Talk to agent* (with a comment typed above) → `talk: <text>`.
-     No items approved or dropped. Respond; do not edit files.
+   Button names below are the labels the 0.5.3 gate bar renders —
+   **Start N / Start & commit N / Commit N / Iterate N / Drop N**. The
+   wire payload kinds (`approved:` / `drop:` / `iterate:`) are a
+   separate, stable vocabulary: buttons may rename (they did, in the
+   start-verb renaming — Mary's day-one report, #293, caught this doc
+   still saying "Approve & commit"), payloads don't. When telling the
+   user what to click, use the rendered label.
 
-   - *Approve selected (N)* → `approved: {...}`. Call
+   - *A plain message* typed in the box with no gate button clicked
+     arrives as ordinary chat — respond; no items are approved or
+     dropped, and do not edit files. (The legacy *Talk to agent*
+     button and its `talk:` prefix retired with the Workspace tab.)
+
+   - *Start (N)*, *Start & commit (N)*, and *Commit (N)* all emit
+     `approved: {...}` — with `gate` `"to apply"`,
+     `"apply-and-commit"`, and `"to commit"` respectively. For the
+     apply gate, call
      `/__worklist/resolve` via the transport for your agent (see
      *Transports*). Response is one of:
      - `{"kind":"approved", "items":[<recorded content>], ...}` —
@@ -461,7 +474,7 @@ serves an empty default; the Worklist tab creates the file (and
 
      Respond to any per-item feedback regardless of kind.
 
-   - *Drop selected (N)* → `drop: {...}`. Same flow:
+   - *Drop (N)* → `drop: {...}`. Same flow:
      `{"kind":"drop"}` → prune the ids via `POST /__worklist/mutate`.
      Respond to per-item feedback (often the user's reason for the drop).
 
@@ -579,7 +592,7 @@ working but we are still spinning" with no visible way to respond.)
 
 **Apply-and-commit gate: skip `advance` — edit if needed, then
 `worklist-commit`.** `gate: "apply-and-commit"` is no longer only the
-pre-approval one-click **Approve & commit** button's payload. As of
+pre-approval one-click **Start & commit** button's payload. As of
 0.5.1 the pane also puts a plain **Commit** on a `proposed` item that
 has already begun and whose changes are EXCLUSIVE — every changed path
 free of any other begun item's claim (`window.__bramSelectionAllCommittable`
@@ -594,7 +607,7 @@ still-`proposed` item's files (authorized by the `commitToo` auth record
 the click wrote, the `allow_proposed` path) and prunes, exactly as the
 commit gate does. `closesIssues` / close-on-push behave identically to a
 normal commit. The host sets the sentinel at approval time and
-`worklist-commit` clears it. Both triggers — the one-click Approve &
+`worklist-commit` clears it. Both triggers — the one-click Start &
 commit button and the widened plain-Commit offer — are always available.
 (A `worklist.oneClickApproveCommit` setting once gated them; it was
 retired in the 0.5.3 run after its config-off path produced a dead-end
@@ -908,8 +921,8 @@ mechanics.
 ### Name UI affordances, not protocols
 
 When the user needs to take an action that has a UI control, name the
-control. Say "Click the **Approve** button" (Drop, Iterate, Push, Trust
-this hook, Setup). Never say "send `approved: {...}`", "paste the
+control. Say "Click the **Start** button" (Start & commit, Commit,
+Iterate, Drop, Push, Trust this hook, Setup). Never say "send `approved: {...}`", "paste the
 structured approval payload", or describe the wire format — the button
 generates the verified payload for them. This is what reopened #62:
 Codex told the user to paste raw JSON instead of pointing at the
@@ -1207,7 +1220,7 @@ reference: `docs/apis.md` §11. Agent-side conventions:
   user's next Push. There is no `issue-close` route to call.
 - **`approved:` (apply-and-commit gate)** → `worklist-commit` with
   `{ ids, message }` after editing, with **no** `mutate op:"advance"` step.
-  Set by either the one-click **Approve & commit** button or, as of
+  Set by either the one-click **Start & commit** button or, as of
   0.5.1, a plain **Commit** on a `proposed` item that has begun with
   exclusive changes; the host's `commitToo` auth lets `worklist-commit`
   stage and commit the still-`proposed` files, then prune either way.
@@ -1321,7 +1334,7 @@ A committable item — `applied`, or a begun `proposed` item with
 exclusive changes — sits indefinitely until an `approved:` payload
 covers it. Describe the state factually ("relay has changes ready to
 commit — confidence high on happy path, untested edges noted above")
-and stop. The user clicks Approve (or Commit) when ready, or doesn't.
+and stop. The user clicks Start & commit (or Commit) when ready, or doesn't.
 The exception is a *minor* change the user explicitly asks you to
 commit directly.
 

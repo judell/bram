@@ -1006,20 +1006,41 @@ was correctly signed. The record was inconsistent along an axis no
 reader cares about. The cross-boundary case is a subset of the problem,
 and it was mistaken for the whole of it.
 
-**The form.** One canonical opener, three slots, all load-bearing —
-*whose* agent, *which* agent, *which* project:
+**The form.** One canonical opener, five slots, all load-bearing —
+*whose* agent, *which* agent, *which thread*, *which model*, *which*
+project:
 
-    <owner>'s <Agent> speaking from the <Project> project:
+    <owner>'s <Agent> (<thread>, <model>) speaking from the <Project> project:
 
-This project's two instances:
+`<thread>` is `main thread` or `subagent`; `<model>` names the model
+producing the words. This project's instances:
 
-    Jon's Claude speaking from the Bram project:
-    Jon's Codex speaking from the XMLUI project:
+    Jon's Claude (main thread, Fable 5) speaking from the Bram project:
+    Jon's Claude (subagent, Opus 5) speaking from the Bram project:
+    Jon's Codex (main thread, gpt-5.2-codex) speaking from the XMLUI project:
 
 A form that names only the project ("from the xmlui side") leaves "who
 is speaking" unanswered, which is the half that matters when two agents
 work the same thread. Across a boundary the third slot also answers
-*which side the evidence comes from*.
+*which side the evidence comes from*. The two parenthetical slots
+(added 2026-08-28, when multi-agent orchestration made them
+unrecoverable otherwise) answer *evidential standing* — an
+orchestrator holds the design discussion, a delegated subagent saw
+only its brief — and *attribution*: judgment quality belongs to the
+model that produced the words, and heavy passes routinely run on a
+different model than the main loop.
+
+Two rules that follow:
+
+- **The executor signs.** Whoever makes the forge write signs with
+  their own thread and model; a subagent's findings posted by the
+  orchestrator are the orchestrator speaking (its signature), with the
+  subagent's work attributed inline where it matters.
+- **Old-form signatures remain valid.** Both guards' enforcement keys
+  on the `speaking from the <…> project` core by design, so the
+  extended form needs no coordination — it is the prescription going
+  forward, and other machines adopt as their seeded conventions
+  refresh.
 
 **The scope.** **Every artifact, not just the first in a thread.** The
 observed failure is decay: the opening comment is signed, and by the

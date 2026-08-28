@@ -1,3 +1,12 @@
+# Force LF in every checkout, including Windows CI runners, whose
+# default autocrlf=true converted the embedded provider hooks to CRLF
+# and made the shipped Windows binary's bundled guard fail the byte
+# comparison against mainline (#302 — semantically benign, provably
+# line-endings-only, but executable policy should embed byte-identical
+# everywhere). Later rules win per attribute, so the fixture `binary`
+# overrides below stay effective.
+* text=auto eol=lf
+
 *.xmlui linguist-language=XML
 *.xmlui linguist-detectable=true
 

@@ -28,6 +28,20 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      # #302 tripwire: a Windows checkout once converted the provider hooks
+      # to CRLF and the release binary embedded them that way, so the
+      # shipped guard failed byte comparison against mainline. The
+      # .gitattributes `eol=lf` rule is the fix; this asserts it holds on
+      # the runner where it broke. Provenance: the incident itself.
+      - name: Provider hooks check out LF on Windows (embedded bytes match mainline)
+        shell: powershell
+        run: |
+          foreach ($Path in Get-ChildItem app/provider-hooks/*.py) {
+            $Bytes = [System.IO.File]::ReadAllBytes($Path.FullName)
+            if ($Bytes -contains 13) {
+              throw "$($Path.Name) contains CR bytes at checkout; the release binary would embed a guard that differs from mainline (#302)."
+            }
+          }
       - name: Windows install examples use validated shell entry paths
         shell: powershell
         run: |

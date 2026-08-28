@@ -7,6 +7,7 @@ use std::thread;
 // issue-230-sqlite-fts-foundation: embedded SQLite + FTS5 search index.
 // Foundation only (schema + smoke test); not yet wired into the app.
 pub mod guard;
+pub mod guard_policy;
 mod search_index;
 
 // state-mirror-store-and-ledger: phase-A SQLite shadow of worklist
@@ -14451,8 +14452,22 @@ fn pty_spawn(
             // extractor. Baselining falls out of the session-change path, so a
             // resumed transcript's historical interrupt records never replay.
             let mut interrupt_observer = JsonlTailObserver::new();
+            // #297 (Windows soak finding): cargo build replaces the binary's
+            // inode, so a hardlinked/copied ~/.bram/bram-guard goes stale
+            // between rebuild and relaunch — hook events then run the
+            // previous build's shadow and pollute the divergence join.
+            // Re-ensure periodically, not only at launch; idempotent and
+            // cheap (read_link / metadata compare) when already current.
+            let mut guard_link_last_ensure_ms: i64 = 0;
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(TICK_MS));
+                {
+                    let now = unix_now_ms();
+                    if now.saturating_sub(guard_link_last_ensure_ms) >= 60_000 {
+                        guard_link_last_ensure_ms = now;
+                        let _ = guard::ensure_bram_guard_link();
+                    }
+                }
                 let bytes = pty_throughput_bytes().swap(0, Ordering::Relaxed);
                 let bps = bytes as f64 * (1000.0 / TICK_MS as f64);
                 let intensity = if bps <= 0.0 {
@@ -33568,7 +33583,11 @@ fn merge_guard_shadow_menu_hook_into_settings(
             settings_path.display()
         ));
     };
-    let marker = "bram-guard";
+    // Marker is the subcommand, not the binary name: two bram-guard hooks
+    // can share an event array (menu shadow on PreToolUse/AskUserQuestion,
+    // worklist shadow on the guard matchers), and a binary-name marker
+    // would make each merge evict the other.
+    let marker = "guard claude-permission-menu";
     let mut changed = false;
     for (event, matcher) in [
         ("PermissionRequest", ".*"),
@@ -33591,6 +33610,184 @@ fn merge_guard_shadow_menu_hook_into_settings(
     std::fs::write(settings_path, format!("{}\n", serialized))
         .map_err(|e| format!("write {}: {}", settings_path.display(), e))?;
     Ok(true)
+}
+
+// Worklist-guard shadow registration (bram-guard-worklist-policy-shadow):
+// the Rust shadow observes every decision the Python worklist guard makes,
+// so it registers under the same PreToolUse matchers. Same shadow
+// discipline as the menu-hook shadow above: observe-only, outside the
+// needs-setup calculus, marker = the subcommand.
+fn merge_guard_shadow_worklist_into_settings(
+    settings_path: &Path,
+    shadow_command: &str,
+) -> Result<bool, String> {
+    let existing = std::fs::read_to_string(settings_path).unwrap_or_default();
+    let mut value: serde_json::Value = if existing.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(&existing)
+            .map_err(|e| format!("parse {}: {}", settings_path.display(), e))?
+    };
+    let Some(root) = value.as_object_mut() else {
+        return Err(format!(
+            "{} root is not a JSON object",
+            settings_path.display()
+        ));
+    };
+    let hooks = root
+        .entry("hooks".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(hooks_obj) = hooks.as_object_mut() else {
+        return Err(format!(
+            "{}: hooks is not a JSON object",
+            settings_path.display()
+        ));
+    };
+    let marker = "guard claude-worklist";
+    let mut changed = false;
+    let arr_val = hooks_obj
+        .entry("PreToolUse".to_string())
+        .or_insert_with(|| serde_json::json!([]));
+    let Some(arr) = arr_val.as_array_mut() else {
+        return Err(format!(
+            "{}: hooks.PreToolUse is not a JSON array",
+            settings_path.display()
+        ));
+    };
+    // Migrate: drop any marker-carrying hook whose command is stale.
+    arr.retain_mut(|entry| {
+        let Some(hs) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
+            return true;
+        };
+        let before = hs.len();
+        hs.retain(|h| {
+            let Some(cmd) = h.get("command").and_then(|c| c.as_str()) else {
+                return true;
+            };
+            !(cmd.contains(marker) && cmd != shadow_command)
+        });
+        if hs.len() != before {
+            changed = true;
+        }
+        !hs.is_empty()
+    });
+    // Presence is per (matcher, command): the same command must register
+    // under EVERY guard matcher. A command-only presence check (the
+    // merge_command_hook_into_event shape) stops after the first matcher —
+    // the live defect the 2026-08-28 xmlui relaunch-verify caught: the
+    // shadow registered under Write alone, and a guarded Bash call
+    // produced no worklist breadcrumb.
+    for matcher in CLAUDE_GUARD_MATCHERS {
+        let present = arr.iter().any(|entry| {
+            entry.get("matcher").and_then(|m| m.as_str()) == Some(matcher)
+                && entry
+                    .get("hooks")
+                    .and_then(|h| h.as_array())
+                    .map(|hs| {
+                        hs.iter().any(|h| {
+                            h.get("command").and_then(|c| c.as_str()) == Some(shadow_command)
+                        })
+                    })
+                    .unwrap_or(false)
+        });
+        if !present {
+            arr.push(serde_json::json!({
+                "matcher": matcher,
+                "hooks": [{ "type": "command", "command": shadow_command }]
+            }));
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(false);
+    }
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create {}: {}", parent.display(), e))?;
+    }
+    let serialized = serde_json::to_string_pretty(&value)
+        .map_err(|e| format!("serialize settings.json: {}", e))?;
+    std::fs::write(settings_path, format!("{}\n", serialized))
+        .map_err(|e| format!("write {}: {}", settings_path.display(), e))?;
+    Ok(true)
+}
+
+#[cfg(test)]
+mod guard_shadow_registration_tests {
+    use super::*;
+
+    const SHADOW: &str = "\"/Users/x/.bram/bram-guard\" guard claude-worklist";
+
+    fn temp_settings(name: &str, body: Option<&str>) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "bram-guard-shadow-reg-{}-{}",
+            name,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.local.json");
+        if let Some(b) = body {
+            std::fs::write(&path, b).unwrap();
+        }
+        path
+    }
+
+    fn matchers_with_shadow(path: &Path) -> Vec<String> {
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        v["hooks"]["PreToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| {
+                e["hooks"]
+                    .as_array()
+                    .map(|hs| hs.iter().any(|h| h["command"] == SHADOW))
+                    .unwrap_or(false)
+            })
+            .map(|e| e["matcher"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn worklist_shadow_registers_under_every_guard_matcher() {
+        let path = temp_settings("fresh", None);
+        assert!(merge_guard_shadow_worklist_into_settings(&path, SHADOW).unwrap());
+        let mut got = matchers_with_shadow(&path);
+        got.sort();
+        let mut want: Vec<String> = CLAUDE_GUARD_MATCHERS.iter().map(|s| s.to_string()).collect();
+        want.sort();
+        assert_eq!(got, want);
+        // Idempotent second run.
+        assert!(!merge_guard_shadow_worklist_into_settings(&path, SHADOW).unwrap());
+    }
+
+    #[test]
+    fn worklist_shadow_backfills_missing_matchers() {
+        // The 2026-08-28 live defect: a command-only presence check left the
+        // shadow registered under Write alone; the merge must backfill the
+        // other three without duplicating Write.
+        let seeded = serde_json::json!({
+            "hooks": { "PreToolUse": [
+                { "matcher": "Write", "hooks": [{ "type": "command", "command": SHADOW }] }
+            ]}
+        });
+        let path = temp_settings("backfill", Some(&seeded.to_string()));
+        assert!(merge_guard_shadow_worklist_into_settings(&path, SHADOW).unwrap());
+        let mut got = matchers_with_shadow(&path);
+        got.sort();
+        let mut want: Vec<String> = CLAUDE_GUARD_MATCHERS.iter().map(|s| s.to_string()).collect();
+        want.sort();
+        assert_eq!(got, want);
+        assert_eq!(
+            matchers_with_shadow(&path)
+                .iter()
+                .filter(|m| *m == "Write")
+                .count(),
+            1
+        );
+    }
 }
 
 // Provider-aware Context tab. Claude shows the project-local import chain
@@ -34149,6 +34346,7 @@ fn codex_hook_toml_block(
     script_path: &Path,
     menu_script_path: &Path,
     hook_python: Option<&str>,
+    guard_link: Option<&Path>,
 ) -> Option<String> {
     let script_str = script_path.display().to_string();
     let menu_script_str = menu_script_path.display().to_string();
@@ -34167,6 +34365,45 @@ fn codex_hook_toml_block(
         let _ = hook_python;
         (script_str.clone(), menu_script_str.clone())
     };
+    // bram-guard shadow (bram-guard-worklist-policy-shadow): observe-only
+    // Rust twins ride beside the Python hooks — no interpreter wrapper,
+    // the link is an exe. Present only when the link exists on disk, so
+    // the block never references a path the guard hasn't created.
+    let shadow_cmds = guard_link.map(|link| {
+        let l = link.display().to_string();
+        #[cfg(windows)]
+        {
+            let q = l.replace('"', "\\\"");
+            (
+                format!("& \"{}\" guard codex-worklist", q),
+                format!("& \"{}\" guard codex-permission-menu", q),
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            (
+                format!("\"{}\" guard codex-worklist", l),
+                format!("\"{}\" guard codex-permission-menu", l),
+            )
+        }
+    });
+    let shadow_entry = |cmd: &str, timeout: u32, label: &str| {
+        format!(
+            "\n[[hooks.{ev}.hooks]]\ntype = \"command\"\ncommand = {c}\ntimeout = {t}\nstatusMessage = \"{l}\"\n",
+            ev = label.split(':').next().unwrap_or(""),
+            c = toml_basic_string(cmd),
+            t = timeout,
+            l = label.split(':').nth(1).unwrap_or(""),
+        )
+    };
+    let (shadow_worklist, shadow_menu_pr, shadow_menu_post) = match &shadow_cmds {
+        Some((w, m)) => (
+            shadow_entry(w, 10, "PreToolUse:Bram guard shadow (worklist)"),
+            shadow_entry(m, 2, "PermissionRequest:Bram guard shadow (menu)"),
+            shadow_entry(m, 2, "PostToolUse:Bram guard shadow (menu clear)"),
+        ),
+        None => (String::new(), String::new(), String::new()),
+    };
     Some(format!(
         "{start}\n\
          [[hooks.PreToolUse]]\n\
@@ -34177,6 +34414,7 @@ fn codex_hook_toml_block(
          command = {command_quoted}\n\
          timeout = 10\n\
          statusMessage = \"Bram worklist guard\"\n\
+         {shadow_worklist}\
          \n\
          [[hooks.PermissionRequest]]\n\
          matcher = \"^(Bash|apply_patch|Write|Edit|mcp__.*)$\"\n\
@@ -34186,6 +34424,7 @@ fn codex_hook_toml_block(
          command = {menu_command_quoted}\n\
          timeout = 2\n\
          statusMessage = \"Bram permission menu\"\n\
+         {shadow_menu_pr}\
          \n\
          [[hooks.PostToolUse]]\n\
          matcher = \"^(Bash|apply_patch|Write|Edit|mcp__.*)$\"\n\
@@ -34195,12 +34434,28 @@ fn codex_hook_toml_block(
          command = {menu_command_quoted}\n\
          timeout = 2\n\
          statusMessage = \"Bram permission menu clear\"\n\
+         {shadow_menu_post}\
          {end}",
         start = ENHANCE_CODEX_TOML_MARKER_START,
         end = ENHANCE_CODEX_TOML_MARKER_END,
         command_quoted = toml_basic_string(&command_line),
         menu_command_quoted = toml_basic_string(&menu_command_line),
+        shadow_worklist = shadow_worklist,
+        shadow_menu_pr = shadow_menu_pr,
+        shadow_menu_post = shadow_menu_post,
     ))
+}
+
+// The registered shadow path, only when it already exists on disk —
+// status checks must not reference (or create) a link the guard's own
+// startup/Setup path hasn't installed yet.
+fn guard_link_if_installed() -> Option<PathBuf> {
+    let link = home_dir()?.join(".bram").join(if cfg!(windows) {
+        "bram-guard.exe"
+    } else {
+        "bram-guard"
+    });
+    link.exists().then_some(link)
 }
 
 fn normalize_codex_hook_block_for_currentness(block: &str) -> String {
@@ -34236,10 +34491,13 @@ fn codex_hook_block_current(
     script_path: &Path,
     menu_script_path: &Path,
     hook_python: Option<&str>,
+    guard_link: Option<&Path>,
 ) -> bool {
     // issue-247: no resolvable Python means no valid expected block, so an
     // installed block (necessarily broken) reads as stale/unregistered.
-    let Some(expected) = codex_hook_toml_block(script_path, menu_script_path, hook_python) else {
+    let Some(expected) =
+        codex_hook_toml_block(script_path, menu_script_path, hook_python, guard_link)
+    else {
         return false;
     };
     let Ok(disk) = std::fs::read_to_string(config_path) else {
@@ -34286,7 +34544,7 @@ mod codex_hook_currentness_tests {
         let script = PathBuf::from("/Users/example/.bram/codex-worklist-guard.py");
         let menu_script = PathBuf::from("/Users/example/.bram/codex-permission-menu-hook.py");
         let hook_python = test_hook_python();
-        let block = codex_hook_toml_block(&script, &menu_script, hook_python)
+        let block = codex_hook_toml_block(&script, &menu_script, hook_python, None)
             .expect("test platform should produce a block");
         let with_state = block.replace(
             ENHANCE_CODEX_TOML_MARKER_END,
@@ -34298,8 +34556,35 @@ mod codex_hook_currentness_tests {
             &config_path,
             &script,
             &menu_script,
-            hook_python
+            hook_python,
+            None
         ));
+    }
+
+    #[test]
+    fn codex_hook_block_includes_shadow_entries_when_link_present() {
+        let script = PathBuf::from("/Users/example/.bram/codex-worklist-guard.py");
+        let menu_script = PathBuf::from("/Users/example/.bram/codex-permission-menu-hook.py");
+        let link = PathBuf::from("/Users/example/.bram/bram-guard");
+        let block = codex_hook_toml_block(&script, &menu_script, test_hook_python(), Some(&link))
+            .expect("test platform should produce a block");
+        assert!(
+            block.contains("guard codex-worklist"),
+            "worklist shadow missing: {block}"
+        );
+        assert!(
+            block.contains("guard codex-permission-menu"),
+            "menu shadow missing: {block}"
+        );
+        // Shadow entries ride the same event tables, after the Python hooks.
+        let pre = block.find("Bram worklist guard").unwrap();
+        let shadow = block.find("Bram guard shadow (worklist)").unwrap();
+        let next_table = block.find("[[hooks.PermissionRequest]]").unwrap();
+        assert!(pre < shadow && shadow < next_table, "{block}");
+        // And without a link the block is byte-identical to the legacy shape.
+        let without = codex_hook_toml_block(&script, &menu_script, test_hook_python(), None)
+            .expect("block");
+        assert!(!without.contains("bram-guard"), "{without}");
     }
 
     #[test]
@@ -34307,7 +34592,7 @@ mod codex_hook_currentness_tests {
         let script = PathBuf::from("/Users/example/.bram/codex-worklist-guard.py");
         let menu_script = PathBuf::from("/Users/example/.bram/codex-permission-menu-hook.py");
         let hook_python = test_hook_python();
-        let block = codex_hook_toml_block(&script, &menu_script, hook_python)
+        let block = codex_hook_toml_block(&script, &menu_script, hook_python, None)
             .expect("test platform should produce a block")
             .replace(
             ENHANCE_CODEX_TOML_MARKER_END,
@@ -34319,7 +34604,8 @@ mod codex_hook_currentness_tests {
             &config_path,
             &script,
             &menu_script,
-            hook_python
+            hook_python,
+            None
         ));
     }
 
@@ -34332,6 +34618,7 @@ mod codex_hook_currentness_tests {
             &script,
             &menu_script,
             Some("C:\\Users\\jon\\AppData\\Local\\Programs\\Python\\Python313\\python.exe"),
+            None,
         )
         .expect("windows block needs resolved python");
 
@@ -34530,7 +34817,13 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         codex_menu_hook_script.as_ref(),
     ) {
         (Some(config), Some(hook), Some(menu_hook)) => {
-            codex_hook_block_current(config, hook, menu_hook, hook_python.as_deref())
+            codex_hook_block_current(
+                config,
+                hook,
+                menu_hook,
+                hook_python.as_deref(),
+                guard_link_if_installed().as_deref(),
+            )
         }
         _ => false,
     };
@@ -35200,6 +35493,11 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
         Some(link) => {
             let shadow_command = guard::guard_hook_command(&link, "claude-permission-menu");
             merge_guard_shadow_menu_hook_into_settings(&hook_settings_path, &shadow_command)?;
+            // Worklist-guard shadow (bram-guard-worklist-policy-shadow):
+            // observes every decision the Python guard makes, including
+            // the deny path an allow-only shadow cannot see (#297).
+            let worklist_shadow = guard::guard_hook_command(&link, "claude-worklist");
+            merge_guard_shadow_worklist_into_settings(&hook_settings_path, &worklist_shadow)?;
         }
         None => skipped.push(
             "bram-guard link not installed (no home dir or exe path); Rust shadow hook skipped"
@@ -35388,7 +35686,12 @@ fn install_codex_worklist_guard<R: tauri::Runtime>(
     // be rendered in the developer-role context part, higher priority than
     // AGENTS.md (which is user-role). install_codex_developer_instructions
     // writes that field; this function only installs the runtime backstop.
-    let toml_block = codex_hook_toml_block(&script_path, &menu_script_path, hook_python);
+    let toml_block = codex_hook_toml_block(
+        &script_path,
+        &menu_script_path,
+        hook_python,
+        guard_link_if_installed().as_deref(),
+    );
 
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)
@@ -38619,6 +38922,7 @@ fn agent_coordination_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_j
                                 hook,
                                 menu_hook,
                                 resolve_hook_python().as_deref(),
+                                guard_link_if_installed().as_deref(),
                             ),
                             _ => false,
                         };
@@ -38868,7 +39172,13 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
         .zip(codex_hook.as_ref())
         .zip(codex_menu_hook.as_ref())
         .map(|((config, hook), menu_hook)| {
-            codex_hook_block_current(config, hook, menu_hook, python_found.as_deref())
+            codex_hook_block_current(
+                config,
+                hook,
+                menu_hook,
+                python_found.as_deref(),
+                guard_link_if_installed().as_deref(),
+            )
         })
         .unwrap_or(false);
     let hooks_rows = vec![

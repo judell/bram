@@ -29,6 +29,8 @@ pub fn run_guard_mode(args: &[String]) -> i32 {
     match hook {
         "claude-permission-menu" => shadow_menu_hook("claude-rs", &payload, started),
         "codex-permission-menu" => shadow_menu_hook("codex-rs", &payload, started),
+        "claude-worklist" => shadow_worklist_hook("claude-rs", &payload, started),
+        "codex-worklist" => shadow_worklist_hook("codex-rs", &payload, started),
         other => {
             // Misregistration surfaces in stderr, never in the exit code: a
             // nonzero exit from a PreToolUse-shaped hook can block the tool
@@ -112,6 +114,31 @@ fn shadow_menu_hook(provider: &str, payload: &serde_json::Value, started: std::t
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| "none".to_string()),
             started.elapsed().as_millis()
+        ),
+        None => format!("action=none ms={}", started.elapsed().as_millis()),
+    };
+    append_breadcrumb(&root, provider, &event, &tool, &tail);
+}
+
+// The worklist guard's shadow: compute the would-decision, write one
+// breadcrumb, decide nothing. `shadow_worklist_decision` returning None means
+// this provider has no ported policy yet, which records as `action=none` — the
+// same shape the menu shadow uses for an event it would not act on.
+fn shadow_worklist_hook(provider: &str, payload: &serde_json::Value, started: std::time::Instant) {
+    let event = str_field(payload, "hook_event_name");
+    let tool = str_field(payload, "tool_name");
+    let root = resolve_project_root(provider, payload);
+    // `reason=` is deliberately LAST and runs to end-of-line: Codex reasons
+    // are prose derived from the Python guard's deny message (spaces and
+    // all, byte-for-byte parity), so every fixed-width field must precede
+    // it for the line to stay whitespace-splittable.
+    let tail = match crate::guard_policy::shadow_worklist_decision(provider, payload) {
+        Some(v) => format!(
+            "would={} target={} ms={} reason={}",
+            v.decision,
+            if v.target.is_empty() { "-" } else { &v.target },
+            started.elapsed().as_millis(),
+            v.reason,
         ),
         None => format!("action=none ms={}", started.elapsed().as_millis()),
     };

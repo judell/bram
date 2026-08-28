@@ -6,6 +6,7 @@ use std::thread;
 
 // issue-230-sqlite-fts-foundation: embedded SQLite + FTS5 search index.
 // Foundation only (schema + smoke test); not yet wired into the app.
+pub mod guard;
 mod search_index;
 
 // state-mirror-store-and-ledger: phase-A SQLite shadow of worklist
@@ -33535,6 +33536,63 @@ fn merge_permission_menu_hook_into_settings(
     Ok(true)
 }
 
+// bram-guard shadow registration (bram-guard-reentrant-menu-hooks phase 1):
+// the reentrant Rust menu hook rides the same four event arrays as the
+// Python menu hook it shadows, under its own marker so migration/currency
+// logic treats the two registrations independently. Observe-only — the
+// shadow never POSTs or decides — so it stays deliberately OUTSIDE the
+// needs-setup calculus; a missing shadow is a soak gap, not install drift.
+fn merge_guard_shadow_menu_hook_into_settings(
+    settings_path: &Path,
+    shadow_command: &str,
+) -> Result<bool, String> {
+    let existing = std::fs::read_to_string(settings_path).unwrap_or_default();
+    let mut value: serde_json::Value = if existing.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(&existing)
+            .map_err(|e| format!("parse {}: {}", settings_path.display(), e))?
+    };
+    let Some(root) = value.as_object_mut() else {
+        return Err(format!(
+            "{} root is not a JSON object",
+            settings_path.display()
+        ));
+    };
+    let hooks = root
+        .entry("hooks".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(hooks_obj) = hooks.as_object_mut() else {
+        return Err(format!(
+            "{}: hooks is not a JSON object",
+            settings_path.display()
+        ));
+    };
+    let marker = "bram-guard";
+    let mut changed = false;
+    for (event, matcher) in [
+        ("PermissionRequest", ".*"),
+        ("PostToolUse", ".*"),
+        ("PermissionDenied", ".*"),
+        ("PreToolUse", "AskUserQuestion"),
+    ] {
+        changed |=
+            merge_command_hook_into_event(hooks_obj, event, matcher, shadow_command, marker);
+    }
+    if !changed {
+        return Ok(false);
+    }
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create {}: {}", parent.display(), e))?;
+    }
+    let serialized = serde_json::to_string_pretty(&value)
+        .map_err(|e| format!("serialize settings.json: {}", e))?;
+    std::fs::write(settings_path, format!("{}\n", serialized))
+        .map_err(|e| format!("write {}: {}", settings_path.display(), e))?;
+    Ok(true)
+}
+
 // Provider-aware Context tab. Claude shows the project-local import chain
 // plus Claude-managed memory/hooks/settings. Codex shows the durable local
 // Codex-side sources that shape behavior on this machine: config, project
@@ -35133,6 +35191,20 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
         None => {
             skipped.push(HOOK_PYTHON_MISSING_WARNING.to_string());
         }
+    }
+    // bram-guard shadow (phase 1): register the reentrant Rust menu hook
+    // beside the Python one. Best-effort by design — see the merge fn's
+    // header. Codex-side registration deliberately waits for the
+    // worklist-policy item so the config.toml re-trust prompt fires once.
+    match guard::ensure_bram_guard_link() {
+        Some(link) => {
+            let shadow_command = guard::guard_hook_command(&link, "claude-permission-menu");
+            merge_guard_shadow_menu_hook_into_settings(&hook_settings_path, &shadow_command)?;
+        }
+        None => skipped.push(
+            "bram-guard link not installed (no home dir or exe path); Rust shadow hook skipped"
+                .to_string(),
+        ),
     }
     wrote.push(settings_path.display().to_string());
     wrote.push(hook_settings_path.display().to_string());
@@ -51316,6 +51388,9 @@ pub fn run() {
     raise_open_files_limit();
     parse_cli_flags();
     init_bram_trace_from_env();
+    // Refresh the ~/.bram/bram-guard link so hook registrations survive app
+    // moves and updates (bram-guard-reentrant-menu-hooks). Best-effort.
+    let _ = guard::ensure_bram_guard_link();
     let initial_proj = determine_project_root();
     eprintln!("[bram] project root: {}", initial_proj.display());
     // Apply project config at boot. The menu-setting defaults MUST apply

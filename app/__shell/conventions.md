@@ -372,7 +372,9 @@ when metadata (`files`, `closesIssues`, etc.) shifts.
 **Field notes:**
 
 - `files: ["path/a", "path/b"]` for multi-file items; `file` (singular)
-  is the older single-file form. Once an item is committable, its
+  is the older single-file form. A directory entry is allowed and covers
+  everything under it at the commit gate — staging and verification both
+  expand it (#295). Once an item is committable, its
   inline diff concatenates all listed files.
 - `closesIssues` declares which GitHub issues the commit resolves
   (drives the close-on-commit dialog — see *Commit & git etiquette*).

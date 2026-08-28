@@ -47796,13 +47796,34 @@ mod closing_keyword_tests {
     }
 }
 
+// `git add -A -- <files>` expands a directory entry to its contents, so
+// the verification must accept a staged path that lies UNDER a declared
+// entry, not only one that equals it — otherwise the gate refuses the
+// very files it staged (#295). Prefix matching is unconditional (no
+// filesystem stat): a path cannot be both a file and a directory in the
+// same index, so a declared file entry never spuriously prefix-matches
+// a real staged path, and the separator requirement keeps `foo` from
+// matching `foobar`.
+fn staged_path_covered_by(approved: &str, staged: &str) -> bool {
+    let entry = approved.trim_end_matches('/');
+    !entry.is_empty()
+        && (staged == entry
+            || staged
+                .strip_prefix(entry)
+                .map_or(false, |rest| rest.starts_with('/')))
+}
+
 fn ensure_no_unrelated_staged_files(
     staged: &[String],
     approved_files: &[String],
 ) -> Result<(), String> {
     let unrelated: Vec<String> = staged
         .iter()
-        .filter(|path| !approved_files.iter().any(|approved| approved == *path))
+        .filter(|path| {
+            !approved_files
+                .iter()
+                .any(|approved| staged_path_covered_by(approved, path))
+        })
         .cloned()
         .collect();
     if unrelated.is_empty() {
@@ -49024,6 +49045,45 @@ mod worklist_authorization_tests {
         assert_eq!(
             err,
             "refusing worklist commit because unrelated files are staged: src/other.rs"
+        );
+    }
+
+    #[test]
+    fn worklist_commit_accepts_files_under_declared_directory() {
+        // #295: `git add` expands a declared directory to its contents;
+        // the verification must agree instead of refusing what it staged.
+        let approved = ids(&["docs/a.md", "resources/worklist-drafts"]);
+        ensure_no_unrelated_staged_files(
+            &ids(&[
+                "docs/a.md",
+                "resources/worklist-drafts/item-one.md",
+                "resources/worklist-drafts/nested/deep.md",
+            ]),
+            &approved,
+        )
+        .expect("files under a declared directory are related");
+
+        // A trailing slash on the declared entry behaves the same.
+        ensure_no_unrelated_staged_files(
+            &ids(&["resources/worklist-drafts/item-one.md"]),
+            &ids(&["resources/worklist-drafts/"]),
+        )
+        .expect("trailing slash on the declared entry is normalized");
+
+        // Prefix match requires a path separator: `foo` is not `foobar`,
+        // and a genuinely foreign staged file is still refused.
+        let err = ensure_no_unrelated_staged_files(
+            &ids(&[
+                "resources/worklist-drafts-archive/old.md",
+                "src/other.rs",
+            ]),
+            &ids(&["resources/worklist-drafts"]),
+        )
+        .expect_err("sibling-prefix and foreign staged files are refused");
+        assert_eq!(
+            err,
+            "refusing worklist commit because unrelated files are staged: \
+             resources/worklist-drafts-archive/old.md, src/other.rs"
         );
     }
 

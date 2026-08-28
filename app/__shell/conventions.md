@@ -1699,6 +1699,37 @@ note <n> -m "…"` for comments). The worklist contract around issues
 (`closesIssues`, `issue-<N>-` ids, close-on-push-automatic) is
 forge-agnostic and identical on both.
 
+### Windows: Smart App Control blocks on unsigned binaries
+
+Bram ships unsigned binaries, and on some Windows 11 machines Smart
+App Control (SAC) blocks them. Most users see no problem; when a block
+does hit, this is the advice protocol (user-facing twin: the Bram
+README's *Smart App Control* section — keep the two in sync):
+
+- **Recognize both symptom shapes.** (1) Bram itself refused at
+  launch — a Windows Security dialog naming Smart App Control. (2)
+  Since the reentrant `bram-guard` hook binary (`~/.bram`, spawned on
+  every hook event): hook invocations failing while the app runs
+  fine — the signature is missing `claude-rs` / `codex-rs` breadcrumbs
+  in `resources/bram-traces/hook-events.log`, or hook timeouts/errors,
+  with no visible launch failure.
+- **Verify before advising.** Confirm the block dialog actually names
+  Smart App Control — Defender and SmartScreen blocks read
+  differently, and their remedies differ.
+- **State the trade-off honestly, then let the user decide.**
+  Disabling SAC is currently the only workaround short of a signed
+  executable (signing is not currently planned). Windows Defender
+  remains fully active with SAC off — if the user deems Defender
+  sufficient protection, disabling is the supported path. Name the UI
+  path: **Windows Security → App & browser control → Smart App Control
+  settings**, and point at Microsoft's Smart App Control FAQ
+  (https://support.microsoft.com/en-us/windows/smart-app-control-frequently-asked-questions-285ea03d-fa88-4d56-882e-6698afdb7003) —
+  including that the switch is effectively one-way on current Windows
+  builds (re-enabling has required a Windows reset).
+- **Never flip the setting on the user's behalf.** It is a
+  machine-level security decision; the agent names the control and the
+  consequences, the user clicks.
+
 
 ## Log-first development
 

@@ -30207,6 +30207,91 @@ fn send_ledger_auto_resend_enabled<R: tauri::Runtime>(app: &AppHandle<R>) -> boo
 
 // Recovery actions decided under the ledger lock, executed after it is
 // released (they touch the PTY / emit events / read envelope files).
+// #306: the per-batch restore plan. One composer emit carrying every
+// restored entry's text (oldest first, blank-line separated — the same
+// merge shape the iframe applies against an existing draft), one
+// clear-decision covering the batch. `aborted` is true only when every
+// entry is aborted, so a mixed batch keeps the always-apply strand
+// semantics; `clear_input` is true when any entry left stale text in the
+// terminal input.
+struct RestoreBatchPlan {
+    ids: String,
+    text: String,
+    aborted: bool,
+    clear_input: bool,
+}
+
+fn restore_batch_plan(restores: &[(String, String, bool, bool)]) -> Option<RestoreBatchPlan> {
+    if restores.is_empty() {
+        return None;
+    }
+    let texts: Vec<&str> = restores
+        .iter()
+        .map(|(_, text, _, _)| text.as_str())
+        .filter(|t| !t.is_empty())
+        .collect();
+    Some(RestoreBatchPlan {
+        ids: restores
+            .iter()
+            .map(|(id, _, _, _)| id.as_str())
+            .collect::<Vec<_>>()
+            .join("+"),
+        text: texts.join("\n\n"),
+        aborted: restores.iter().all(|(_, _, aborted, _)| *aborted),
+        clear_input: restores.iter().any(|(_, _, _, stale)| *stale),
+    })
+}
+
+#[cfg(test)]
+mod restore_batch_tests {
+    use super::restore_batch_plan;
+
+    fn r(id: &str, text: &str, aborted: bool, stale: bool) -> (String, String, bool, bool) {
+        (id.to_string(), text.to_string(), aborted, stale)
+    }
+
+    #[test]
+    fn two_swallowed_strands_restore_both_texts_and_clear_nothing() {
+        // The #306 live case: N=2, payload_in_tail=false on both — the
+        // old code wrote two Ctrl-C (Claude Code's exit gesture) and the
+        // iframe coalesced the two emits, dropping the first entry's text.
+        let plan =
+            restore_batch_plan(&[r("a", "first message", false, false), r("b", "/artifacts", false, false)])
+                .expect("plan");
+        assert_eq!(plan.text, "first message\n\n/artifacts");
+        assert!(!plan.clear_input, "swallowed strands have nothing to clear");
+        assert!(!plan.aborted);
+        assert_eq!(plan.ids, "a+b");
+    }
+
+    #[test]
+    fn any_stale_entry_yields_exactly_one_clear() {
+        let plan = restore_batch_plan(&[
+            r("a", "x", false, true),
+            r("b", "y", false, true),
+            r("c", "z", false, false),
+        ])
+        .expect("plan");
+        assert!(plan.clear_input, "stale text clears once for the batch");
+    }
+
+    #[test]
+    fn aborted_only_when_every_entry_is_aborted() {
+        assert!(restore_batch_plan(&[r("a", "x", true, true)]).unwrap().aborted);
+        assert!(
+            !restore_batch_plan(&[r("a", "x", true, true), r("b", "y", false, false)])
+                .unwrap()
+                .aborted,
+            "a mixed batch keeps strand always-apply semantics"
+        );
+    }
+
+    #[test]
+    fn empty_batch_plans_nothing() {
+        assert!(restore_batch_plan(&[]).is_none());
+    }
+}
+
 enum SendLedgerAction {
     // Restore the user's words to the composer and clear whatever was
     // left in the terminal input. `aborted: false` = user-caused strand
@@ -30218,6 +30303,13 @@ enum SendLedgerAction {
         id: String,
         text: String,
         aborted: bool,
+        // #306: does the terminal input actually hold stale text this
+        // restore should clear? true for landed-then-aborted (CC re-stages
+        // the message into its input) and for strands whose payload is
+        // visible in the PTY tail; false for swallowed strands, where a
+        // clear byte has nothing to clear and — on Claude, where the clear
+        // is Ctrl-C — half-arms the CLI's exit prompt for free.
+        input_stale: bool,
     },
     // Re-inject a mechanically-stranded send's exact payload (trust-gated).
     AutoResend {
@@ -30396,8 +30488,10 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                 // decisive bit is payload_in_tail — true means the text is
                 // sitting in the CLI composer with the submitting CR never
                 // taken (the observed live stranding shape); false means
-                // the injection was swallowed entirely.
-                {
+                // the injection was swallowed entirely. Hoisted out of the
+                // forensics block because the restore's clear decision
+                // keys on it too (#306).
+                let payload_in_tail = {
                     let tail = pty_tail_snippet(400);
                     let frag: String = entry
                         .preview
@@ -30408,7 +30502,10 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                         .chars()
                         .take(24)
                         .collect();
-                    let payload_in_tail = !frag.trim().is_empty() && tail.contains(frag.trim());
+                    !frag.trim().is_empty() && tail.contains(frag.trim())
+                };
+                {
+                    let tail = pty_tail_snippet(400);
                     let last_out =
                         LAST_PTY_OUTPUT_MS.load(std::sync::atomic::Ordering::Relaxed);
                     let silence_ms = if last_out > 0 { now - last_out } else { -1 };
@@ -30450,6 +30547,7 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                         id: entry.id.clone(),
                         text: send_ledger_restore_text(app, entry),
                         aborted: false,
+                        input_stale: payload_in_tail,
                     });
                 } else if auto_resend && !entry.retried {
                     // One bounded retry: back to injected against the
@@ -30547,6 +30645,9 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                                 id: entry.id.clone(),
                                 text: send_ledger_restore_text(app, entry),
                                 aborted: false,
+                                // CC re-staged the retracted text into its
+                                // input; the clear is what relocates it.
+                                input_stale: true,
                             });
                         } else {
                             // esc-aborted-no-composer-restore: the send
@@ -30583,36 +30684,37 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                 append_bram_trace_line(app, "send-ledger", t);
             }
         }
+        // #306: restores are executed as a BATCH — one composer emit, at
+        // most one input clear — never per entry. Two entries stranded
+        // together used to write two Ctrl-C bytes (Claude Code's exit
+        // gesture: the CLI dropped to a shell, live, twice on 2026-08-28),
+        // and the two rapid `send-restore` emits coalesced in the iframe's
+        // ChangeListener transport, silently dropping all but the last
+        // entry's text from the composer while the banner claimed
+        // otherwise (the trace shows one stage:enter for two emits).
+        let mut restores: Vec<(String, String, bool, bool)> = Vec::new();
         for action in actions {
             match action {
-                SendLedgerAction::Restore { id, text, aborted } => {
+                SendLedgerAction::Restore {
+                    id,
+                    text,
+                    aborted,
+                    input_stale,
+                } => {
                     if bram_trace_enabled() {
                         append_bram_trace_line(
                             app,
                             "send-ledger",
                             &format!(
-                                "op=restore id={} aborted={} chars={}",
+                                "op=restore id={} aborted={} chars={} input_stale={}",
                                 id,
                                 aborted,
-                                text.chars().count()
+                                text.chars().count(),
+                                input_stale
                             ),
                         );
                     }
-                    let _ = app.emit(
-                        "send-restore",
-                        serde_json::json!({ "id": id, "text": text, "aborted": aborted }),
-                    );
-                    // Provider-aware input clear: Ctrl-C empties Claude
-                    // Code's Ink input (verified live 2026-07-03) but not
-                    // Codex's readline-style composer, which honors
-                    // Ctrl-U (Codex round left the restored text in its
-                    // input). Both are harmless on an empty input.
-                    let clear = match current_provider(app) {
-                        Some(SessionProvider::Codex) => "\x15",
-                        _ => "\x03",
-                    };
-                    let state = app.state::<AppState>();
-                    let _ = pty_write_internal(app, &state, clear, "send-ledger-restore-clear");
+                    restores.push((id, text, aborted, input_stale));
                 }
                 SendLedgerAction::AutoResend { id, payload } => {
                     if bram_trace_enabled() {
@@ -30625,6 +30727,38 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                     let state = app.state::<AppState>();
                     let _ = inject_turn_payload(app, &state, &payload);
                 }
+            }
+        }
+        if let Some(plan) = restore_batch_plan(&restores) {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "send-ledger",
+                    &format!(
+                        "op=restore-batch entries={} clear={} chars={}",
+                        restores.len(),
+                        plan.clear_input,
+                        plan.text.chars().count()
+                    ),
+                );
+            }
+            let _ = app.emit(
+                "send-restore",
+                serde_json::json!({ "id": plan.ids, "text": plan.text, "aborted": plan.aborted }),
+            );
+            if plan.clear_input {
+                // Provider-aware input clear: Ctrl-C empties Claude Code's
+                // Ink input (verified live 2026-07-03) but not Codex's
+                // readline-style composer, which honors Ctrl-U. On Claude
+                // the byte is only ever written when stale text is known to
+                // sit in the input — into an EMPTY input a lone Ctrl-C
+                // half-arms the CLI's exit prompt (#306).
+                let clear = match current_provider(app) {
+                    Some(SessionProvider::Codex) => "\x15",
+                    _ => "\x03",
+                };
+                let state = app.state::<AppState>();
+                let _ = pty_write_internal(app, &state, clear, "send-ledger-restore-clear");
             }
         }
         emit_replayable_signal(app, "send-ledger-changed");

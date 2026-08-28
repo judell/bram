@@ -141,7 +141,15 @@ _PUSH_CMD_RX = re.compile(r"(^|[\s;&|`(])git\s+(-C\s+\S+\s+)?push\b")
 
 # The redirect entry needs extra logic (see _pattern_is_write /
 # bash-write-nonrepo-target below), so it's named rather than inlined below.
+# #299: this regex is now only the identity sentinel for the redirect entry in
+# _BASH_WRITE_PATTERNS -- the actual scanning is done by the quote-aware
+# _redirect_targets() below, never by this pattern's .search().
 _REDIRECT_WRITE_RX = re.compile(r"(^|[\s;&|`(])>+\s*[^\s>&]")  # > file or >> file
+
+# #299: named so _pattern_is_write can dispatch it to the content test in
+# python_dash_c_writes() instead of treating the mere presence of `python -c`
+# as a write.
+_PYTHON_DASH_C_RX = re.compile(r"(^|[\s;&|`(])python[0-9.]*\s+-c\b")
 
 # Bash commands we deny without worklist coverage. This intentionally matches
 # the Codex guard's H3-level classifier: broad enough to stop common write and
@@ -156,7 +164,7 @@ _BASH_WRITE_PATTERNS = [
     re.compile(r"(^|[\s;&|`(])git\s+(add|commit|push|rm|mv|reset|checkout|restore|stash|am|apply|cherry-pick|rebase|revert|tag|branch)\b"),
     _GH_ISSUE_WRITE_RX,
     re.compile(r"open\s*\(\s*['\"][^'\"]+['\"]\s*,\s*['\"][wax]"),
-    re.compile(r"(^|[\s;&|`(])python[0-9.]*\s+-c\b"),  # python -c can write
+    _PYTHON_DASH_C_RX,  # #299: dispatched to python_dash_c_writes()
     re.compile(r"(^|[\s;&|`(])node\s+-e\b"),
     re.compile(r"(^|[\s;&|`(])bash\s+-c\b"),
     re.compile(r"(^|[\s;&|`(])sh\s+-c\b"),
@@ -166,22 +174,105 @@ _BASH_WRITE_PATTERNS = [
 # scratch space, not the repo (guard-write-detection-false-positives). Other
 # /dev/* targets (stdout, fd/*) are genuine writes and stay covered -- only
 # these two exact sinks and the two temp prefixes are excluded.
-_REDIRECT_TARGET_RX = re.compile(r"(^|[\s;&|`(])>+\s*([^\s>&]+)")
 _NONREPO_REDIRECT_EXACT = {"/dev/null", "/dev/zero", "/tmp", "/private/tmp"}
 _NONREPO_REDIRECT_PREFIXES = ("/tmp/", "/private/tmp/")
 
+# #299: `(^|[\s;&|`(])` -- the command-position boundary the old
+# _REDIRECT_TARGET_RX opened with, as a character test the scanner can use.
+_BOUNDARY_CHARS = " \t\n\r\x0b\x0c;&|`("
+
+
+def _at_boundary(command, i):
+    return i == 0 or command[i - 1] in _BOUNDARY_CHARS
+
+
+def _strip_matching_quotes(s):
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        return s[1:-1]
+    return s
+
 
 def _redirect_targets(command):
-    """Every `> x` / `>> x` redirect target in command, quotes stripped."""
+    """Every `> x` / `>> x` redirect target in command, quotes stripped.
+
+    #299 (case 3): the former regex (`_REDIRECT_TARGET_RX`) was quote-blind, so
+    `awk '$1 >= "2026-08-28"'` and `--jq '.[]|select(.number > 200)'` read as
+    shell redirects and were denied `bash-write-no-coverage`. This scanner
+    tracks single- and double-quote state (and backslash escapes) and only
+    reports redirects that are actually unquoted. A `>` inside quotes is a
+    comparison operator, JSON, or jq syntax -- never a redirect. A quoted
+    target (`> "my file.txt"`) is consumed to the matching quote so quote state
+    stays coherent for the remainder of the command. Ported from the
+    differential-verified Rust shadow (`redirect_targets`, guard_policy.rs)."""
     if not isinstance(command, str):
         return []
+    n = len(command)
     out = []
-    for m in _REDIRECT_TARGET_RX.finditer(command):
-        target = m.group(2)
-        if len(target) >= 2 and target[0] == target[-1] and target[0] in ("'", '"'):
-            target = target[1:-1]
-        out.append(target)
+    i = 0
+    in_single = False
+    in_double = False
+    while i < n:
+        ch = command[i]
+        if in_single:
+            if ch == "'":
+                in_single = False
+            i += 1
+            continue
+        if in_double:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == '"':
+                in_double = False
+            i += 1
+            continue
+        if ch == "'":
+            in_single = True
+            i += 1
+            continue
+        if ch == '"':
+            in_double = True
+            i += 1
+            continue
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == ">":
+            boundary_ok = _at_boundary(command, i)
+            j = i
+            while j < n and command[j] == ">":
+                j += 1
+            if boundary_ok:
+                k = j
+                while k < n and command[k].isspace():
+                    k += 1
+                if k < n and command[k] != ">" and command[k] != "&":
+                    if command[k] in ("'", '"'):
+                        q = command[k]
+                        e = k + 1
+                        buf = []
+                        while e < n and command[e] != q:
+                            buf.append(command[e])
+                            e += 1
+                        out.append("".join(buf))
+                        i = e + 1 if e < n else e
+                        continue
+                    e = k
+                    while e < n and not command[e].isspace() and command[e] not in (">", "&"):
+                        e += 1
+                    out.append(_strip_matching_quotes(command[k:e]))
+                    i = e
+                    continue
+            i = j
+            continue
+        i += 1
     return out
+
+
+def has_redirect(command):
+    """#299: quote-aware replacement for `_REDIRECT_WRITE_RX.search(command)`
+    at the two sites that asked "is there a redirect at all?"."""
+    return bool(_redirect_targets(command))
 
 
 def _is_nonrepo_redirect_target(target):
@@ -201,12 +292,123 @@ def redirect_is_write(command):
     return any(not _is_nonrepo_redirect_target(t) for t in targets)
 
 
+# #299 (case 2): write indicators inside an inline `python -c` script.
+# Deliberately conservative: `.write` catches `sys.stdout.write` too, and any
+# `open(` counts, so the divergence from the old presence-only match only
+# covers scripts that plainly touch nothing. Copied from PY_WRITE_HINTS in the
+# Rust shadow (guard_policy.rs); keep in step.
+_PY_WRITE_HINTS = (
+    "open(",
+    ".write",
+    "os.remove",
+    "os.unlink",
+    "os.rename",
+    "os.replace",
+    "os.rmdir",
+    "os.mkdir",
+    "os.makedirs",
+    "os.system",
+    "os.chmod",
+    "os.chown",
+    "os.truncate",
+    "os.link",
+    "os.symlink",
+    "shutil",
+    "subprocess",
+    "json.dump(",
+    "pickle.dump",
+    "csv.writer",
+    ".unlink(",
+    ".mkdir(",
+    ".touch(",
+    ".rmdir(",
+    ".rename(",
+    "urllib",
+    "requests.",
+    "socket.",
+)
+
+
+def _shell_arg_after(command, i):
+    """#299: the argument following `-c` at index i, honouring shell quoting.
+    None means "could not read it" -- the conservative branch."""
+    n = len(command)
+    j = i
+    while j < n and command[j].isspace():
+        j += 1
+    if j >= n:
+        return None
+    if command[j] in ("'", '"'):
+        q = command[j]
+        e = j + 1
+        buf = []
+        while e < n:
+            if q == '"' and command[e] == "\\" and e + 1 < n:
+                buf.append(command[e + 1])
+                e += 2
+                continue
+            if command[e] == q:
+                return "".join(buf)
+            buf.append(command[e])
+            e += 1
+        return None  # unterminated quote: unreadable
+    e = j
+    while e < n and not command[e].isspace():
+        e += 1
+    return command[j:e] or None
+
+
+def python_dash_c_writes(command):
+    """#299 (case 2): the bare `python -c` pattern treated mere presence as a
+    write, so `python3 -c "print(1)"` was denied `bash-write-no-coverage`.
+    Read the inline script instead: if it can be extracted and carries no
+    write indicator, the command is not a write via this pattern. When the
+    script cannot be extracted (unquoted, unterminated) or is built by shell
+    expansion (`$`, backtick -- the text read is not the text run), stay
+    conservative and keep the old classification."""
+    if not isinstance(command, str):
+        return False
+    positions = [m.end() for m in _PYTHON_DASH_C_RX.finditer(command)]
+    if not positions:
+        return False
+    for p in positions:
+        script = _shell_arg_after(command, p)
+        if script is None:
+            return True
+        if "$" in script or "`" in script:
+            return True
+        if any(hint in script for hint in _PY_WRITE_HINTS):
+            return True
+    return False
+
+
+# #299 (case 1): `(gh|glab) (issue|pr|mr) (list|view|status|diff|checks)` --
+# pure forge reads. `gh issue list --state all --json ...` was denied while
+# `gh issue view N --json ...` passed; both are reads. Neither verb is in
+# _GH_ISSUE_WRITE_RX or _FORGE_WRITE_RX, so the observed denial came from the
+# quote-blind redirect scan firing on a `--jq '... > ...'` filter (case 3).
+# This predicate makes the read classification explicit and testable so a
+# future widening of the forge verb lists cannot silently recapture it.
+_FORGE_READ_RX = re.compile(
+    r"(^|[\s;&|`(])(gh|glab)\s+(issue|pr|mr)\s+(list|view|status|diff|checks)\b"
+)
+
+
+def forge_read_command(command):
+    if not isinstance(command, str):
+        return False
+    return bool(_FORGE_READ_RX.search(command))
+
+
 def _pattern_is_write(rx, command):
     """Evaluate one _BASH_WRITE_PATTERNS entry against command. Every entry
     is a plain regex search except the redirect entry, which additionally
-    requires at least one non-excluded target."""
+    requires at least one non-excluded target, and the `python -c` entry,
+    which reads the inline script (#299)."""
     if rx is _REDIRECT_WRITE_RX:
         return redirect_is_write(command)
+    if rx is _PYTHON_DASH_C_RX:  # #299
+        return python_dash_c_writes(command)
     return bool(rx.search(command))
 
 
@@ -245,7 +447,7 @@ def forge_issue_only_write(command):
     # artifact it exists to verify. Narrowing the redirect pattern would have
     # silently restored the combined form, so the refusal is now deliberate
     # rather than incidental.
-    if _REDIRECT_WRITE_RX.search(command):
+    if has_redirect(command):  # #299: quote-aware
         return False
     for rx in _BASH_WRITE_PATTERNS:
         if rx is _GH_ISSUE_WRITE_RX:
@@ -1227,6 +1429,15 @@ def self_test():
         # A no-op-sink redirect compounded with a genuine write is still
         # caught -- by the git pattern, not the redirect one.
         "cat > /tmp/b.md && git commit -m x",
+        # #299: the quote-aware scanner must not lose real redirects.
+        "echo hi > out.txt",
+        'echo hi > "my file.txt"',
+        # #299 (case 2): an inline script that plainly writes is still a write,
+        # and one built by shell expansion stays conservative.
+        "python3 -c \"open('x','w').write('x')\"",
+        "python3 -c 'import shutil; shutil.rmtree(\"x\")'",
+        'python3 -c "$SCRIPT"',
+        "python3 -c",
     ]
     read_commands = [
         "ls -la",
@@ -1242,11 +1453,45 @@ def self_test():
         "echo hi >> /dev/zero",
         "cat > /tmp/body.md",
         "cat > /private/tmp/x/body.md",
+        # #299 (case 3): a `>` inside quotes is a comparison / jq operator,
+        # never a shell redirect.
+        "gh issue list --state all --json number --jq '.[]|select(.number > 200)'",
+        "awk '$1 >= \"2026-08-28T06:16\"' file.txt",
+        "jq '.[] | select(.n > 5)' data.json",
+        # #299 (case 2): an inline script with no write indicator is a read.
+        'python3 -c "print(1)"',
+        "python3 -c 'import sys; print(sys.version)'",
+        # #299 (case 1): pure forge reads.
+        "gh issue view 5 --json title",
+        "gh issue list",
     ]
     for command in write_commands:
         assert bash_writes(command), command
     for command in read_commands:
         assert not bash_writes(command), command
+
+    # #299 (case 1): the forge-read predicate, pinned as a regression guard so
+    # a future widening of the write verb lists cannot silently recapture it.
+    for command in (
+        "gh issue list --state all --json number",
+        "gh issue view 5 --json title",
+        "gh pr list",
+        "gh pr diff 12",
+        "gh pr checks",
+        "glab mr view 3",
+        "glab issue list",
+    ):
+        assert forge_read_command(command), command
+    for command in ("gh issue close 5", "gh issue comment 5 --body x", "ls -la"):
+        assert not forge_read_command(command), command
+
+    # #299 (case 3): the redirect scanner reports real targets and ignores
+    # quoted `>` characters entirely.
+    assert _redirect_targets("echo hi > out.txt") == ["out.txt"]
+    assert _redirect_targets('echo hi > "my file.txt"') == ["my file.txt"]
+    assert _redirect_targets("awk '$1 >= \"x\"' f.txt") == []
+    assert _redirect_targets("jq '.n > 5' d.json > out.txt") == ["out.txt"]
+    assert not has_redirect("jq '.[] | select(.n > 5)' data.json")
 
     # Issue-only forge work with no repo diff (conventions.md) is exempt from
     # worklist coverage entirely.
@@ -1731,12 +1976,18 @@ def main():
         if forge_issue_only_write(command):
             _trace_hook("PreToolUse", "Bash", preview, "allow", "forge-issue-only", cwd)
             sys.exit(0)
+        # #299 (case 1): a pure forge read is a read. Asserted explicitly here
+        # so the classification is a tested property, not an accident of which
+        # verbs the write regexes happen to list.
+        if forge_read_command(command) and not bash_writes(command):
+            _trace_hook("PreToolUse", "Bash", preview, "allow", "bash-read-only", cwd)
+            sys.exit(0)
         if not bash_writes(command):
             # Distinguish "no write pattern matched at all" from "the only
             # redirect target was a no-op sink / temp path" so the new
             # allowance (guard-write-detection-false-positives) is
             # greppable rather than blending into bash-read-only.
-            if _REDIRECT_WRITE_RX.search(command) and not redirect_is_write(command):
+            if has_redirect(command) and not redirect_is_write(command):  # #299
                 reason = "bash-write-nonrepo-target"
             else:
                 reason = "bash-read-only"

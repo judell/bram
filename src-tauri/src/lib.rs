@@ -10070,6 +10070,8 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
     // new-session-handoff-race: while pane sends are held awaiting a fresh
     // agent CLI, watch each chunk for TUI boot bytes (no-op when unarmed).
     agent_boot_evidence_scan(app, chunk);
+    // issue-305 (observe-only): track terminal-modal mode bytes.
+    term_modal_scan(app, chunk);
     let tail_cell = pty_tail_cell();
     let mut tail = match tail_cell.lock() {
         Ok(g) => g,
@@ -29689,6 +29691,210 @@ fn agent_boot_evidence_scan<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8])
     }
 }
 
+// issue-305, phase 1 (OBSERVE-ONLY): terminal-modal-state tracker. A
+// full-screen TUI overlay (Claude Code's /artifacts picker was the live
+// specimen) announces itself in-band by enabling mouse tracking
+// (?1000/?1002/?1003, with ?1006 as encoding) and/or pushing the kitty
+// keyboard protocol (CSI > flags u) — modes the ordinary composer has no
+// need for, per Mary's #305 capture. This tracker only OBSERVES: it
+// traces enter/exit transitions and stamps a companion line beside any
+// pane send injected while modal state is live, so the soak can show
+// whether the signal separates overlays from composer traffic. Per the
+// design intent set on #305, the graduation target is a
+// terminal-attention-style reveal notice, never a send hold or any
+// keystroke interception. Combined enables (?1000;1002h) are not parsed
+// — the specimen re-asserts modes individually; noted, not covered.
+const TERM_MODAL_MOUSE_BITS: [(u32, &[u8], &[u8]); 4] = [
+    (1 << 0, b"\x1b[?1000h", b"\x1b[?1000l"),
+    (1 << 1, b"\x1b[?1002h", b"\x1b[?1002l"),
+    (1 << 2, b"\x1b[?1003h", b"\x1b[?1003l"),
+    (1 << 3, b"\x1b[?1006h", b"\x1b[?1006l"),
+];
+const TERM_MODAL_KITTY_BIT: u32 = 1 << 4;
+// ?1006 is encoding-only and the kitty bit alone can be composer-normal;
+// "modal" needs a reporting mouse mode or the kitty push.
+const TERM_MODAL_ACTIVE_MASK: u32 = (1 << 0) | (1 << 1) | (1 << 2) | TERM_MODAL_KITTY_BIT;
+
+static TERM_MODAL_BITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn term_modal_carry_cell() -> &'static Mutex<Vec<u8>> {
+    static CELL: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+// Pure transition core so tests need no statics: apply one chunk's mode
+// bytes to the current bits. Returns (new_bits, alt_screen_exited).
+fn term_modal_apply(bits: u32, buf: &[u8]) -> (u32, bool) {
+    let mut bits = bits;
+    let contains = |needle: &[u8]| buf.windows(needle.len()).any(|w| w == needle);
+    for (bit, enable, disable) in TERM_MODAL_MOUSE_BITS {
+        // Last occurrence wins when a chunk carries both (redraw churn).
+        let e = buf
+            .windows(enable.len())
+            .rposition(|w| w == enable)
+            .map(|p| p as i64)
+            .unwrap_or(-1);
+        let d = buf
+            .windows(disable.len())
+            .rposition(|w| w == disable)
+            .map(|p| p as i64)
+            .unwrap_or(-1);
+        if e > d {
+            bits |= bit;
+        } else if d > e {
+            bits &= !bit;
+        }
+    }
+    // Kitty push: CSI > digits u. Pop: CSI < u. Depth is not modeled —
+    // any push arms, the pop clears (the specimen emits "\x1b[<u\x1b[>5u"
+    // as a pop-then-push re-assert, which lands armed, correctly).
+    let mut kitty_last: i64 = -1;
+    let mut kitty_on = bits & TERM_MODAL_KITTY_BIT != 0;
+    let mut i = 0;
+    while i + 3 <= buf.len() {
+        if &buf[i..i + 2] == b"\x1b[" {
+            let rest = &buf[i + 2..];
+            if rest.first() == Some(&b'>') {
+                let digits: usize = rest[1..]
+                    .iter()
+                    .take_while(|c| c.is_ascii_digit())
+                    .count();
+                if digits > 0 && rest.get(1 + digits) == Some(&b'u') {
+                    kitty_last = i as i64;
+                    kitty_on = true;
+                }
+            } else if rest.starts_with(b"<u") {
+                if i as i64 > kitty_last {
+                    kitty_on = false;
+                }
+                kitty_last = i as i64;
+            }
+        }
+        i += 1;
+    }
+    if kitty_on {
+        bits |= TERM_MODAL_KITTY_BIT;
+    } else {
+        bits &= !TERM_MODAL_KITTY_BIT;
+    }
+    // Leaving the alternate screen means the whole TUI surface is gone —
+    // clear everything (CLI exit, session rotation's interrupt path).
+    let alt_exit = contains(b"\x1b[?1049l");
+    if alt_exit {
+        bits = 0;
+    }
+    (bits, alt_exit)
+}
+
+fn term_modal_active() -> bool {
+    TERM_MODAL_BITS.load(std::sync::atomic::Ordering::Relaxed) & TERM_MODAL_ACTIVE_MASK != 0
+}
+
+fn term_modal_scan<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
+    let mut buf: Vec<u8> = Vec::with_capacity(chunk.len() + 16);
+    if let Ok(mut carry) = term_modal_carry_cell().lock() {
+        buf.extend_from_slice(&carry);
+        buf.extend_from_slice(chunk);
+        let keep = buf.len().min(15);
+        *carry = buf[buf.len() - keep..].to_vec();
+    } else {
+        buf.extend_from_slice(chunk);
+    }
+    let old = TERM_MODAL_BITS.load(std::sync::atomic::Ordering::Relaxed);
+    let (new, alt_exit) = term_modal_apply(old, &buf);
+    if new == old {
+        return;
+    }
+    TERM_MODAL_BITS.store(new, std::sync::atomic::Ordering::Relaxed);
+    let was = old & TERM_MODAL_ACTIVE_MASK != 0;
+    let is = new & TERM_MODAL_ACTIVE_MASK != 0;
+    if was == is {
+        return;
+    }
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "term-modal",
+            &format!(
+                "op={} bits={:#07b} reason={}",
+                if is { "enter" } else { "exit" },
+                new,
+                if alt_exit { "alt-screen-exit" } else { "mode-bytes" }
+            ),
+        );
+    }
+}
+
+// The observe-only correlation: one companion line per pane send injected
+// while modal state is live, joinable to the send-forensics inject line by
+// id — no ledger-schema change. Mirrored to the always-on forensics file
+// so default-settings installs contribute to the soak.
+fn term_modal_trace_at_inject<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) {
+    let bits = TERM_MODAL_BITS.load(std::sync::atomic::Ordering::Relaxed);
+    let line = format!("op=term-modal-at-inject id={} bits={:#07b}", id, bits);
+    append_strand_forensics_line(app, &line);
+    if bram_trace_enabled() {
+        append_bram_trace_line(app, "term-modal", &format!("op=at-inject id={} bits={:#07b}", id, bits));
+    }
+}
+
+#[cfg(test)]
+mod term_modal_tests {
+    use super::{term_modal_apply, TERM_MODAL_ACTIVE_MASK, TERM_MODAL_KITTY_BIT};
+
+    fn active(bits: u32) -> bool {
+        bits & TERM_MODAL_ACTIVE_MASK != 0
+    }
+
+    #[test]
+    fn mouse_enables_arm_and_disables_clear() {
+        // The #305 specimen's exact re-assert burst.
+        let (bits, _) = term_modal_apply(0, b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h");
+        assert!(active(bits));
+        let (bits, _) = term_modal_apply(bits, b"\x1b[?1000l\x1b[?1002l\x1b[?1003l");
+        // 1006 is encoding-only; it never counts as modal by itself.
+        assert!(!active(bits));
+    }
+
+    #[test]
+    fn last_occurrence_wins_within_a_chunk() {
+        let (bits, _) = term_modal_apply(0, b"\x1b[?1000h redraw \x1b[?1000l");
+        assert!(!active(bits));
+        let (bits, _) = term_modal_apply(0, b"\x1b[?1000l redraw \x1b[?1000h");
+        assert!(active(bits));
+    }
+
+    #[test]
+    fn kitty_push_arms_and_pop_clears() {
+        // Specimen order: pop then push ("\x1b[<u\x1b[>5u") lands armed.
+        let (bits, _) = term_modal_apply(0, b"\x1b[<u\x1b[>5u");
+        assert!(bits & TERM_MODAL_KITTY_BIT != 0 && active(bits));
+        let (bits, _) = term_modal_apply(bits, b"\x1b[<u");
+        assert!(!active(bits));
+    }
+
+    #[test]
+    fn alt_screen_exit_clears_everything() {
+        let (bits, _) = term_modal_apply(0, b"\x1b[?1003h\x1b[>5u");
+        assert!(active(bits));
+        let (bits, alt) = term_modal_apply(bits, b"tail\x1b[?1049lprompt$ ");
+        assert!(alt && bits == 0);
+    }
+
+    #[test]
+    fn split_sequences_join_via_caller_carry() {
+        // The scan wrapper carries 15 bytes between chunks; apply itself
+        // sees the joined buffer, so a mid-sequence split must simply not
+        // false-arm on either fragment alone.
+        let (bits, _) = term_modal_apply(0, b"\x1b[?10");
+        assert!(!active(bits));
+        let (bits, _) = term_modal_apply(bits, b"03h");
+        assert!(!active(bits), "fragments alone must not arm");
+        let (bits, _) = term_modal_apply(0, b"\x1b[?1003h");
+        assert!(active(bits), "joined buffer arms");
+    }
+}
+
 // The last non-empty line of ANSI-stripped terminal text, trailing
 // whitespace trimmed.
 fn last_nonempty_trimmed_line(text: &str) -> &str {
@@ -29927,6 +30133,11 @@ fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
             turn_open_at_inject,
         },
     };
+    // issue-305 (observe-only): a send racing a live terminal modal gets a
+    // companion line, joinable to the inject breadcrumb by id.
+    if term_modal_active() {
+        term_modal_trace_at_inject(app, &entry.id);
+    }
     if bram_trace_enabled() {
         append_bram_trace_line(
             app,

@@ -41,6 +41,8 @@ https://gist.github.com/judell/663ac00adf36a01096f2bdcdd08642ae
 
 ### Elsewhere
 
+<a href="https://www.infoworld.com/article/4211198/when-an-ai-agent-goes-off-the-rails-file-a-bug-to-fix-the-documentation-then-test-the-fix.html">When an AI agent goes off the rails, file a bug to fix the documentation – then test the fix</a>
+
 <a href="https://waltzweb.wordpress.com/2026/07/02/github-for-todays-hybrid-teams/">Technical or not, human or AI – could Bram be the missing link?</a>
 
 <a href="https://arxiv.org/abs/2607.25975">Who is scientific code for? Maintaining human-readable landmarks in agent-written code</a>

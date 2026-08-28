@@ -1429,6 +1429,38 @@ Parallelize the *work*; serialize the *gates*.
   *shape* of a path supplied by someone else's payload asserts something
   that payload never promised.
 
+### Serializing entangled items approved together
+
+One gate click can approve multiple items whose `files` intersect. The
+parallel-delegation rule above already forbids working those
+concurrently; this is the sequencing discipline for completing them
+serially, learned from the 2026-08-28 two-item run (judell/bram#269,
+the finding comment and its same-day correction):
+
+- **Complete them strictly in sequence, committing the first before
+  applying the second**, so the shared file never carries two items'
+  hunks. Each commit then stages a clean per-item diff with no hunk
+  surgery, and the second item's changes become exclusive the moment
+  the first commit lands.
+- **End the remaining ids' claim before handing the user a commit
+  decision.** A live claim locks row selection, and the locked
+  selection is where the Commit button lives — the user sees a gate bar
+  with nothing actionable ("no button to commit with!"). Call
+  `POST /__worklist/end` with the still-claimed ids; this is the
+  multi-id generalization of the third-outcome rule above ("a turn that
+  ends by asking the user a decision must not leave a claim live").
+- **Do not plan to resume the later item on the claim or the
+  authorization record.** Both are single-slot and displaceable: the
+  user's next gate click — typically the very commit being waited
+  for — writes a fresh authorization that silently displaces the
+  surviving one, and a later `mutate op:"advance"` is denied
+  `id not in auth`. The durable resume state is `begunAtMs` plus the
+  on-disk diff (exactly the `begunAtMs` field note's inventory). After
+  the first commit cleans the shared file, the later item's changes are
+  exclusive and the pane's widened plain-**Commit** offer on a begun
+  `proposed` item is the legitimate resume channel; a fresh **Start**
+  click is the fallback when the later item's edits don't exist yet.
+
 ### Suggest a branch when isolation helps
 
 Bram should guide users toward good git practice, not force ceremony.

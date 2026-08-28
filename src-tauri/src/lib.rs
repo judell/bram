@@ -3477,6 +3477,10 @@ fn emit_talk_session_changed_for_provider<R: tauri::Runtime>(
             );
         }
         if rotated_from.is_some() || pending_handoff {
+            // new-session-handoff-race: a surfaced session file proves an
+            // agent CLI is running — release any awaiting-boot send hold
+            // even if its boot bytes were missed (no-op when unarmed).
+            clear_agent_boot_hold(app, "session-surfaced");
             // sessions-new-named-session: bind a queued title to the new
             // session. A deliberate Codex bootstrap reaches this path before
             // its first real user turn; later writes retry any failed rename.
@@ -10061,6 +10065,9 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
     // rotation can report how long the terminal was silent beforehand (a long
     // gap points at an idle/limit wait before a fresh relaunch).
     LAST_PTY_OUTPUT_MS.store(unix_now_ms(), std::sync::atomic::Ordering::Relaxed);
+    // new-session-handoff-race: while pane sends are held awaiting a fresh
+    // agent CLI, watch each chunk for TUI boot bytes (no-op when unarmed).
+    agent_boot_evidence_scan(app, chunk);
     let tail_cell = pty_tail_cell();
     let mut tail = match tail_cell.lock() {
         Ok(g) => g,
@@ -15362,6 +15369,11 @@ fn drain_pty_intents<R: tauri::Runtime>(
     // only menu-clear evidence releases the sends.
     let held_since = SEND_GATE_HELD_SINCE_MS.load(std::sync::atomic::Ordering::Relaxed);
     let blocking_tool = send_gate_blocking_menu_tool();
+    // new-session-handoff-race: same hold while a fresh agent CLI is still
+    // booting after New Session — the foreground is a shell, and a paste
+    // there lands as literal text (and can execute). Boot evidence in the
+    // PTY stream clears the flag; the ticker's next drain then flushes.
+    let awaiting_boot = agent_boot_hold_active();
     let mut held: usize = 0;
 
     for line in content.lines() {
@@ -15382,7 +15394,7 @@ fn drain_pty_intents<R: tauri::Runtime>(
             .get("promptId")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        if blocking_tool.is_some() && matches!(kind, "toShell" | "toTurn") {
+        if (blocking_tool.is_some() || awaiting_boot) && matches!(kind, "toShell" | "toTurn") {
             held += 1;
             remaining.push(line.to_string());
             continue;
@@ -15454,12 +15466,18 @@ fn drain_pty_intents<R: tauri::Runtime>(
             std::sync::atomic::Ordering::Relaxed,
         );
         if bram_trace_enabled() {
+            let reason = if blocking_tool.is_some() {
+                "menu-present"
+            } else {
+                "awaiting-agent-boot"
+            };
             append_bram_trace_line(
                 app,
                 "send-gate",
                 &format!(
-                    "op=hold count={} reason=menu-present tool={}",
+                    "op=hold count={} reason={} tool={}",
                     held,
+                    reason,
                     blocking_tool.as_deref().unwrap_or("")
                 ),
             );
@@ -15743,6 +15761,14 @@ fn inject_turn_payload<R: tauri::Runtime>(
 }
 
 const AGENT_INTERRUPT_GAP_MS: u64 = 150;
+// new-session-handoff-race: how long a New Session launch will wait for
+// shell-prompt evidence before giving up. Generous on purpose — the outgoing
+// CLI can take a long time to release the tty (2026-08-28: a 46 MB-session
+// Claude took ~21 s between printing its exit text and the bash prompt
+// returning, while the fixed 1.2 s settle typed the launch into type-ahead
+// where the send-gate paste's Ctrl-U prelude then killed it).
+const NEW_SESSION_PROMPT_TIMEOUT_MS: i64 = 45_000;
+const NEW_SESSION_PROMPT_POLL_MS: u64 = 100;
 const AGENT_RELAUNCH_SETTLE_MS: u64 = 1200;
 const AGENT_SESSION_REFRESH_MS: u64 = 3000;
 // Delay, measured from writing the launch command, before typing the
@@ -16276,7 +16302,42 @@ fn apply_pending_session_title<R: tauri::Runtime>(
     if rec.provider == want && !stale {
         if let Some(target) = rec.session_id.as_deref() {
             if target != new_sid {
-                return;
+                // new-session-handoff-race: the reserved sid never surfaced —
+                // the launch failed and a DIFFERENT session rotated in while
+                // the title was pending. If that session's file was created
+                // after the New Session click, it is the replacement
+                // (typically the user's manual recovery launch): re-bind the
+                // queued title instead of leaving it orphaned against a
+                // session that never existed. A resumed older session has a
+                // pre-click file birth time and is left alone; so is the
+                // outgoing session itself.
+                let old_target = target.to_string();
+                if !allow_claim || rec.previous_session_id.as_deref() == Some(new_sid) {
+                    return;
+                }
+                let fresh = session_path_for_id(app, provider, new_sid)
+                    .and_then(|p| std::fs::metadata(p).ok())
+                    .and_then(|m| m.created().ok())
+                    .and_then(system_time_ms)
+                    .map(|created_ms| created_ms + 2_000 >= rec.created_at_ms)
+                    .unwrap_or(false);
+                if !fresh {
+                    return;
+                }
+                rec.session_id = Some(new_sid.to_string());
+                if let Ok(bytes) = serde_json::to_vec(&rec) {
+                    let _ = std::fs::write(&path, bytes);
+                }
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        app,
+                        "session-new",
+                        &format!(
+                            "op=rebound provider={} from={} sid={}",
+                            want, old_target, new_sid
+                        ),
+                    );
+                }
             }
         } else if allow_claim {
             rec.session_id = Some(new_sid.to_string());
@@ -16471,21 +16532,64 @@ fn create_new_session(
             &format!("op=create provider={}", provider_key),
         );
     }
-    // Same kill sequence as reload_agent_session, then a FRESH launch.
+    // Same kill sequence as reload_agent_session. The FRESH launch is NOT
+    // typed blind after a fixed settle any more (new-session-handoff-race):
+    // hold pane sends until the new CLI shows boot bytes, and gate the launch
+    // command itself on shell-prompt evidence in a spawned waiter below.
+    arm_agent_boot_hold();
     clear_stale_terminal_input_for_switch(&app, &state, "agent-new-session");
     pty_write_internal(&app, &state, "\x1b", "agent-new-escape")?;
     std::thread::sleep(std::time::Duration::from_millis(AGENT_INTERRUPT_GAP_MS));
     pty_write_internal(&app, &state, "\x03", "agent-new-interrupt-1")?;
     std::thread::sleep(std::time::Duration::from_millis(AGENT_INTERRUPT_GAP_MS));
     pty_write_internal(&app, &state, "\x03", "agent-new-interrupt-2")?;
-    std::thread::sleep(std::time::Duration::from_millis(AGENT_RELAUNCH_SETTLE_MS));
-    let launch = new_session_launch_command(provider_key, &trimmed, session_id.as_deref());
-    pty_write_internal(&app, &state, &format!("{}\r", launch), "agent-new-launch")?;
     // Codex does not create a rollout file until the first real user turn.
     // Refresh now so /__sessions/list can expose the queued title as the
-    // provisional current row instead of leaving the previous session shown.
+    // provisional current row while the launch waits on the prompt.
     emit_replayable_signal(&app, "sessions-list-changed");
-    schedule_agent_switch_refresh(app.clone(), provider_key, "new-session");
+    let launch = new_session_launch_command(provider_key, &trimmed, session_id.as_deref());
+    let waiter_app = app.clone();
+    std::thread::spawn(move || {
+        let state = waiter_app.state::<AppState>();
+        // Keep the legacy settle as a floor so the launch can't race the
+        // interrupt echo when the shell was already sitting at its prompt.
+        std::thread::sleep(std::time::Duration::from_millis(AGENT_RELAUNCH_SETTLE_MS));
+        let started = unix_now_ms();
+        loop {
+            if pty_tail_shows_shell_prompt() {
+                break;
+            }
+            let waited = unix_now_ms().saturating_sub(started);
+            if waited >= NEW_SESSION_PROMPT_TIMEOUT_MS {
+                // No prompt: the shell never came back (or its prompt shape
+                // is one the gate can't recognize). Do NOT type blind — the
+                // command would land as tty type-ahead or into a wedged
+                // shell. The boot hold stays armed; a manual launch releases
+                // it, and the pending title expires on its own TTL.
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        &waiter_app,
+                        "session-new",
+                        &format!("op=launch-timeout waited_ms={}", waited),
+                    );
+                }
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(NEW_SESSION_PROMPT_POLL_MS));
+        }
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                &waiter_app,
+                "session-new",
+                &format!(
+                    "op=launch-gated waited_ms={}",
+                    unix_now_ms().saturating_sub(started)
+                ),
+            );
+        }
+        let _ = pty_write_internal(&waiter_app, &state, &format!("{}\r", launch), "agent-new-launch");
+        schedule_agent_switch_refresh(waiter_app.clone(), provider_key, "new-session");
+    });
     Ok(())
 }
 
@@ -29491,6 +29595,165 @@ fn send_gate_blocking_menu_tool() -> Option<String> {
     })
 }
 
+// new-session-handoff-race: from New Session click until the fresh agent CLI
+// shows boot evidence in PTY output, pane sends (toShell/toTurn intents) are
+// held — the foreground during that window is a shell, and a paste into bash
+// lands as literal bracketed-paste text and can execute as commands
+// (2026-08-28 04:16Z: the queued kickoff message wedged bash 3.2 at a PS2
+// continuation prompt and later fragments ran as `00~We: command not found`).
+// Like the menu hold, release is evidence-based with no operational timeout:
+// the only sane target for a held pane send is an agent CLI, and one booting
+// (Bram's own launch or the user's manual recovery) is what releases it.
+static AGENT_BOOT_HOLD_SINCE_MS: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+
+fn agent_boot_hold_active() -> bool {
+    AGENT_BOOT_HOLD_SINCE_MS.load(std::sync::atomic::Ordering::Relaxed) > 0
+}
+
+fn arm_agent_boot_hold() {
+    AGENT_BOOT_HOLD_SINCE_MS.store(unix_now_ms(), std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut carry) = agent_boot_evidence_carry_cell().lock() {
+        carry.clear();
+    }
+}
+
+fn clear_agent_boot_hold<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str) {
+    let since = AGENT_BOOT_HOLD_SINCE_MS.swap(0, std::sync::atomic::Ordering::Relaxed);
+    if since > 0 && bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "send-gate",
+            &format!(
+                "op=boot-evidence reason={} held_ms={}",
+                reason,
+                unix_now_ms().saturating_sub(since)
+            ),
+        );
+    }
+}
+
+// Carry the last few bytes of the previous PTY chunk so a boot-evidence
+// escape split across two reads still matches.
+fn agent_boot_evidence_carry_cell() -> &'static Mutex<Vec<u8>> {
+    static CELL: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+// Boot evidence must be TUI-specific, never something a shell prompt can
+// emit: zsh readline enables bracketed paste (?2004h), so that alone would
+// release the hold into a shell. Focus reporting (?1004h), theme-change
+// notify (?2031h), and the alternate screen (?1049h) are enabled by the
+// agent TUIs at boot and by no shell — the live trace shows ?1004h/?2031h
+// appearing only at CLI boot.
+const AGENT_BOOT_EVIDENCE: [(&[u8], &str); 3] = [
+    (b"\x1b[?1004h", "focus-reporting"),
+    (b"\x1b[?2031h", "theme-notify"),
+    (b"\x1b[?1049h", "alt-screen"),
+];
+
+fn agent_boot_evidence_scan<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
+    if !agent_boot_hold_active() {
+        return;
+    }
+    let mut buf: Vec<u8> = Vec::with_capacity(chunk.len() + 16);
+    if let Ok(mut carry) = agent_boot_evidence_carry_cell().lock() {
+        buf.extend_from_slice(&carry);
+        buf.extend_from_slice(chunk);
+        let keep = buf.len().min(15);
+        *carry = buf[buf.len() - keep..].to_vec();
+    } else {
+        buf.extend_from_slice(chunk);
+    }
+    for (pattern, name) in AGENT_BOOT_EVIDENCE {
+        if buf.windows(pattern.len()).any(|w| w == pattern) {
+            clear_agent_boot_hold(app, name);
+            return;
+        }
+    }
+}
+
+// The last non-empty line of ANSI-stripped terminal text, trailing
+// whitespace trimmed.
+fn last_nonempty_trimmed_line(text: &str) -> &str {
+    text.rsplit(['\n', '\r'])
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim_end()
+}
+
+// Does this line sit at a shell prompt? Generic prompt terminators only
+// ($ % #) — Bram's shellrc sets no PS1, so the user's own shell prompt shape
+// applies (the live case is `bash-3.2$ `). PS2 (`>`) is deliberately NOT a
+// launch target: typing into a quote-continuation is the failure this gate
+// exists to prevent. Fancy prompts ending in `❯`/`➜` are excluded too —
+// Claude's own composer renders `❯`, so matching it could fire while the
+// outgoing CLI is still alive; such shells fall to the launch timeout.
+fn line_is_shell_prompt(line: &str) -> bool {
+    line.ends_with('$') || line.ends_with('%') || line.ends_with('#')
+}
+
+// Wider shape for the submit-nudge guard: a CR into any shell prompt —
+// PS2 continuation included — can execute stranded payload text.
+fn line_is_shell_prompt_or_continuation(line: &str) -> bool {
+    line_is_shell_prompt(line) || line.ends_with('>')
+}
+
+fn pty_tail_last_line() -> String {
+    let raw = match pty_tail_cell().lock() {
+        Ok(g) => g.clone(),
+        Err(e) => e.into_inner().clone(),
+    };
+    let stripped = strip_ansi(&raw);
+    let text = String::from_utf8_lossy(&stripped);
+    last_nonempty_trimmed_line(&text).to_string()
+}
+
+fn pty_tail_shows_shell_prompt() -> bool {
+    line_is_shell_prompt(&pty_tail_last_line())
+}
+
+fn pty_tail_shows_shell_prompt_or_continuation() -> bool {
+    line_is_shell_prompt_or_continuation(&pty_tail_last_line())
+}
+
+#[cfg(test)]
+mod shell_prompt_shape_tests {
+    use super::{last_nonempty_trimmed_line, line_is_shell_prompt, line_is_shell_prompt_or_continuation};
+
+    #[test]
+    fn bash_and_zsh_prompts_match() {
+        assert!(line_is_shell_prompt("bash-3.2$"));
+        assert!(line_is_shell_prompt(
+            last_nonempty_trimmed_line("Resume this session with:\nclaude --resume \"prep 5.3\"\nbash-3.2$ ")
+        ));
+        assert!(line_is_shell_prompt("host%"));
+        assert!(line_is_shell_prompt("root#"));
+    }
+
+    #[test]
+    fn ps2_is_continuation_not_launch_target() {
+        assert!(!line_is_shell_prompt(">"));
+        assert!(line_is_shell_prompt_or_continuation(">"));
+    }
+
+    #[test]
+    fn agent_tui_lines_do_not_match() {
+        // Claude's status line and composer chevron must never read as a
+        // shell prompt — the gate polls while the outgoing CLI may still
+        // be repainting.
+        assert!(!line_is_shell_prompt("⏵⏵ auto mode on (shift+tab to cycle) · esc to interr…"));
+        assert!(!line_is_shell_prompt("❯"));
+        assert!(!line_is_shell_prompt_or_continuation("❯"));
+    }
+
+    #[test]
+    fn last_line_skips_trailing_blank_lines() {
+        assert_eq!(last_nonempty_trimmed_line("bash-3.2$ \r\n\r\n"), "bash-3.2$");
+        assert_eq!(last_nonempty_trimmed_line(""), "");
+    }
+}
+
 // split-paste-cr-and-submit-nudge: self-heal the composer-stuck send.
 // When a ledger entry sits unlanded past the dwell window AND its payload
 // is visible in the PTY tail (the confirmed stuck signature — text
@@ -29528,6 +29791,29 @@ fn maybe_submit_nudge<R: tauri::Runtime>(app: &AppHandle<R>) {
         .take(24)
         .collect();
     if frag.trim().is_empty() || !tail.contains(frag.trim()) {
+        return;
+    }
+    // new-session-handoff-race: never nudge a shell. A CR into a prompt (or
+    // a PS2 quote-continuation) executes whatever stranded payload text sits
+    // there — observed live 2026-08-28 as `bash: 00~We: command not found` /
+    // `syntax error near unexpected token '('`. Consume the entry's one
+    // nudge (a later CR would not help it either) and trace the suppression.
+    if agent_boot_hold_active() || pty_tail_shows_shell_prompt_or_continuation() {
+        let reason = if agent_boot_hold_active() {
+            "awaiting-agent-boot"
+        } else {
+            "shell-prompt"
+        };
+        if let Ok(mut l) = send_ledger_cell().lock() {
+            if let Some(e) = l.iter_mut().find(|e| e.id == id) {
+                e.nudged = true;
+            }
+        }
+        let line = format!("op=submit-nudge-suppressed id={} reason={}", id, reason);
+        if bram_trace_enabled() {
+            append_bram_trace_line(app, "send-ledger", &line);
+        }
+        append_strand_forensics_line(app, &line);
         return;
     }
     // Latch BEFORE writing so a failing write can't loop the nudge.

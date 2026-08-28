@@ -34558,10 +34558,19 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .filter(|t| !t.is_empty() && Path::new(t) != p.as_path())
     });
+    // issue-294: surface a stray home-directory scaffold at startup, not
+    // only when Setup runs. Same family as nestedUnder — a mis-launch
+    // artifact named at the cause rather than its downstream symptoms.
+    let stray_home_scaffold = root.as_ref().and_then(|p| {
+        home_dir()
+            .and_then(|home| stray_home_scaffold_marker(&home, p))
+            .map(|m| m.to_string_lossy().to_string())
+    });
     let body = serde_json::json!({
         "projectRoot": root.as_ref().map(|p| p.to_string_lossy().to_string()),
         "firstRun": first_run,
         "nestedUnder": nested_under,
+        "strayHomeScaffold": stray_home_scaffold,
         "gitToplevel": git_toplevel,
         "enhanced": core_installed && claude_installed && codex_installed,
         "activeProvider": active_provider_json,
@@ -34745,8 +34754,102 @@ fn write_hook_template_if_safe<R: tauri::Runtime>(
     Ok(did_write)
 }
 
+// issue-294: Setup pointed at the user's home directory scaffolds
+// resources/.worklist-authorization.json there, and the worklist guard's
+// upward walk then resolves every unmanaged path under home to that
+// marker — checked against a permanently-empty worklist that can never
+// cover anything. The refusal keys on root == home (canonicalized), not
+// on "no .git": Bram legitimately supports non-git projects.
+fn path_is_home_dir(root: &Path, home: &Path) -> bool {
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    canon(root) == canon(home)
+}
+
+// The safety net for scaffolds that already exist (issue-294 ask 3): a
+// home directory that is NOT the project root but carries the guard
+// marker captures every unmanaged home-subtree path. Deliberately not an
+// any-ancestor walk — a managed parent (the harness's `nested` scenario)
+// is a legitimate arrangement; only the home directory itself is the
+// known-bad scaffold site.
+fn stray_home_scaffold_marker(home: &Path, root: &Path) -> Option<PathBuf> {
+    if path_is_home_dir(root, home) {
+        return None;
+    }
+    let marker = home.join(WORKLIST_AUTH_REL);
+    marker.exists().then_some(marker)
+}
+
+#[cfg(test)]
+mod home_scaffold_tests {
+    use super::{path_is_home_dir, stray_home_scaffold_marker, WORKLIST_AUTH_REL};
+    use std::path::PathBuf;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "bram-home-scaffold-{}-{}",
+            name,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    #[test]
+    fn root_equal_to_home_is_refused_even_uncanonicalized() {
+        let home = scratch("eq");
+        assert!(path_is_home_dir(&home, &home));
+        // A trailing `.` component canonicalizes to the same directory.
+        assert!(path_is_home_dir(&home.join("."), &home));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn subdirectory_of_home_is_not_home() {
+        let home = scratch("sub");
+        let proj = home.join("projects").join("app");
+        std::fs::create_dir_all(&proj).expect("create project dir");
+        assert!(!path_is_home_dir(&proj, &home));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn stray_marker_detected_only_when_home_is_not_root() {
+        let home = scratch("stray");
+        let proj = home.join("proj");
+        std::fs::create_dir_all(&proj).expect("create project dir");
+
+        // No marker → nothing to report.
+        assert!(stray_home_scaffold_marker(&home, &proj).is_none());
+
+        let marker = home.join(WORKLIST_AUTH_REL);
+        std::fs::create_dir_all(marker.parent().unwrap()).expect("create resources");
+        std::fs::write(&marker, "{}").expect("write marker");
+
+        // Marker in a home that is not the root → named.
+        let found = stray_home_scaffold_marker(&home, &proj).expect("stray marker detected");
+        assert_eq!(found, marker);
+
+        // Same marker when home IS the root → the refusal's territory,
+        // not the stray-scaffold warning's.
+        assert!(stray_home_scaffold_marker(&home, &home).is_none());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+}
+
 fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec<u8>, String> {
     let proj = project_root(Some(app)).ok_or("no project root")?;
+    if let Some(home) = home_dir() {
+        if path_is_home_dir(&proj, &home) {
+            return Err(format!(
+                "Setup refused: project root {} is the home directory. A resources/ scaffold \
+                 here would make the worklist guard treat every unmanaged path under home as \
+                 this project, checked against a permanently-empty worklist (issue #294). \
+                 Launch Bram against a project directory instead.",
+                proj.display()
+            ));
+        }
+    }
     // When running on the source repo, skip writes that would
     // self-overwrite (recreating the deleted local sidecar, reverting
     // the @-import path in CLAUDE.md). Idempotent installs (hook
@@ -35079,6 +35182,18 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
     // These block the #217 shim prune; Setup cannot fix them, only name them.
     for warning in stale_legacy_hook_reference_warnings(&proj) {
         skipped.push(warning);
+    }
+
+    // issue-294 ask 3: a Setup scaffold in the home directory (from an
+    // earlier mis-launch) captures every unmanaged home-subtree path for
+    // the worklist guard. Setup cannot safely delete it, only name it.
+    if let Some(marker) = home_dir().and_then(|home| stray_home_scaffold_marker(&home, &proj)) {
+        skipped.push(format!(
+            "{} exists — a Setup scaffold in the home directory makes the worklist guard \
+             treat unmanaged paths under home as a project with an empty worklist \
+             (issue #294); remove or rename it",
+            marker.display()
+        ));
     }
 
     let body = serde_json::json!({

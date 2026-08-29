@@ -3343,6 +3343,42 @@ fn last_talk_session_sid_cell() -> &'static Mutex<std::collections::HashMap<Stri
 // whitespace-collapsed, with quotes neutralized for a single trace line. The
 // terminal contents at a rotation name its cause: a usage-limit banner, a
 // fresh-launch banner, a shell prompt (process exited), or a /clear.
+// What the #178 turn-start drain last discarded — consulted only when the
+// live tail is empty (see the stash site's comment for the race this
+// repairs). Deliberately NOT fed by the menu-dismissal drain, whose
+// discarded content is an answered prompt that must not resurrect.
+fn pty_tail_drained_stash_cell() -> &'static Mutex<Vec<u8>> {
+    static CELL: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+// pty_tail_snippet, falling back to the drained stash when the live tail
+// strips to nothing — the terminal-attention reader, whose subject (a
+// static boot prompt) is exactly what the drain race erases.
+fn pty_tail_snippet_or_drained(max_chars: usize) -> String {
+    let live = pty_tail_snippet(max_chars);
+    if !live.is_empty() {
+        return live;
+    }
+    let raw = match pty_tail_drained_stash_cell().lock() {
+        Ok(g) => g.clone(),
+        Err(e) => e.into_inner().clone(),
+    };
+    let stripped = strip_ansi(&raw);
+    let text = String::from_utf8_lossy(&stripped);
+    let collapsed = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('"', "'");
+    let n = collapsed.chars().count();
+    if n <= max_chars {
+        collapsed
+    } else {
+        collapsed.chars().skip(n - max_chars).collect()
+    }
+}
+
 fn pty_tail_snippet(max_chars: usize) -> String {
     let raw = match pty_tail_cell().lock() {
         Ok(g) => g.clone(),
@@ -8910,6 +8946,19 @@ fn pty_agent_status_update<R: tauri::Runtime>(app: &AppHandle<R>) {
         if stats.user_ts_ms > *last {
             *last = stats.user_ts_ms;
             if let Ok(mut tail) = pty_tail_cell().lock() {
+                // codex-trust-prompt-first-class-menu: stash what this drain
+                // discards. A boot prompt paints ONCE; this drain racing it
+                // left the terminal-attention evaluation reading an empty
+                // tail (op=candidate preview="", 2026-08-28 22:32Z) — the
+                // classified hooks-trust shape missed its own type case and
+                // no banner showed. The attention closure falls back to the
+                // stash only when the live tail is empty, so answered
+                // prompts (whose repaint refills the tail) never resurrect.
+                if !tail.is_empty() {
+                    if let Ok(mut stash) = pty_tail_drained_stash_cell().lock() {
+                        *stash = tail.clone();
+                    }
+                }
                 tail.clear();
             }
         }
@@ -10062,6 +10111,74 @@ fn menu_labels_match(armed: &[String], captured: &[String]) -> Option<&'static s
     }
 }
 
+// codex-trust-prompt-first-class-menu: classify the Codex hooks re-trust
+// prompt from a freshly-arrived chunk and surface it as a real pane menu,
+// bypassing the parseAndDisplay gate — it is hook-free (no provider hook
+// fires for the CLI's own trust dialog) and BLOCKS the session, including
+// on ordinary provider switches after a config.toml change (live specimen
+// 2026-08-28 22:32Z). Detection is per-chunk BY DESIGN: the prompt paints
+// once via cursor addressing and the #178 turn-start drain can wipe the
+// rolling tail before any later evaluation reads it (that race is what
+// left the terminal-attention classifier with an empty tail and no
+// banner). Labels and answer keys are pinned from the specimen: digits
+// move the selection and Enter confirms, so answer_keys carry "<n>\r".
+// Marker upkeep is specimen-driven, same rule as HOOKS_TRUST_MARKERS.
+fn codex_trust_prompt_menu_from_chunk(stripped_chunk: &str) -> Option<PtyMenu> {
+    let lower = stripped_chunk.to_lowercase();
+    let title = lower.contains("hooks need review") || lower.contains("hook needs review");
+    if !title || !lower.contains("trust all and continue") {
+        return None;
+    }
+    let opt = |key: &str, label: &str| MenuOption {
+        key: key.to_string(),
+        label: label.to_string(),
+        answer_keys: Some(format!("{}\r", key)),
+        description: None,
+    };
+    Some(PtyMenu {
+        tool: "Codex hooks trust".to_string(),
+        text: "Hooks need review — hooks can run outside the sandbox after you trust them. \
+               Approve when the listed paths are Bram-owned (~/.bram, ~/.codex/config.toml)."
+            .to_string(),
+        options: vec![
+            opt("1", "Review hooks"),
+            opt("2", "Trust all and continue"),
+            opt("3", "Continue without trusting (hooks won't run)"),
+        ],
+        tool_call_signature: None,
+        tool_call_diff: None,
+        tool_call_content: None,
+        cache_source: None,
+        at_host_ms: None,
+        signature_source: None,
+    })
+}
+
+#[cfg(test)]
+mod codex_trust_prompt_menu_tests {
+    use super::{codex_trust_prompt_menu_from_chunk, strip_ansi};
+
+    #[test]
+    fn live_specimen_yields_the_three_option_menu() {
+        // The captured 2026-08-28 22:32Z paint, cursor addressing and all.
+        let raw: &[u8] = b"\x1b[2;3H\x1b[1mHooks need review\x1b[3;3H\x1b[22m6 hooks are new or changed.\x1b[6;1H> \x1b[36m1. Review hooks\x1b[7;4H\x1b[39m2. Trust all and continue\x1b[8;4H3. Continue without trusting (hooks won't run)\x1b[10;3H\x1b[2mPress enter to confirm or esc to go back";
+        let stripped = strip_ansi(raw);
+        let text = String::from_utf8_lossy(&stripped);
+        let menu = codex_trust_prompt_menu_from_chunk(&text).expect("menu");
+        assert_eq!(menu.options.len(), 3);
+        assert_eq!(menu.options[1].label, "Trust all and continue");
+        assert_eq!(menu.options[1].answer_keys.as_deref(), Some("2\r"));
+    }
+
+    #[test]
+    fn one_marker_alone_is_not_the_prompt() {
+        // An agent discussing the prompt can quote a phrase; the classifier
+        // needs both the title and the trust option in one chunk.
+        assert!(codex_trust_prompt_menu_from_chunk("we saw hooks need review yesterday").is_none());
+        assert!(codex_trust_prompt_menu_from_chunk("click trust all and continue").is_none());
+    }
+}
+
 fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
     // session-rotation-self-diagnose: stamp the last PTY output time so a
     // rotation can report how long the terminal was silent beforehand (a long
@@ -10072,6 +10189,32 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
     agent_boot_evidence_scan(app, chunk);
     // issue-305 (observe-only): track terminal-modal mode bytes.
     term_modal_scan(app, chunk);
+    // codex-trust-prompt-first-class-menu: allowlisted boot-prompt
+    // classification, per-chunk (drain-immune) and gate-independent —
+    // see the classifier's header comment. Guards: only for a Codex
+    // session with no open working turn (an agent echoing the prompt's
+    // text mid-turn must not conjure a phantom menu and a send hold),
+    // and never while another menu is already displayed.
+    if current_provider(app) == Some(SessionProvider::Codex) && !turn_state_menu_present() {
+        let working = turn_state_cell()
+            .lock()
+            .map(|t| t.phase == "working")
+            .unwrap_or(false);
+        if !working {
+            let stripped = strip_ansi(chunk);
+            let text = String::from_utf8_lossy(&stripped);
+            if let Some(menu) = codex_trust_prompt_menu_from_chunk(&text) {
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        app,
+                        "pty-menu",
+                        "op=boot-prompt shape=codex-hooks-trust",
+                    );
+                }
+                turn_state_set_menu(app, Some(menu), "boot-prompt", "detected");
+            }
+        }
+    }
     let tail_cell = pty_tail_cell();
     let mut tail = match tail_cell.lock() {
         Ok(g) => g,
@@ -14593,7 +14736,7 @@ fn pty_spawn(
                 }
                 for transition in
                     terminal_attention.step(authoritative_open, bytes, || {
-                        pty_tail_snippet(TERMINAL_ATTENTION_TAIL_CHARS)
+                        pty_tail_snippet_or_drained(TERMINAL_ATTENTION_TAIL_CHARS)
                     })
                 {
                     trace_terminal_attention_transition(
@@ -40424,6 +40567,27 @@ mod pty_menu_tests {
         pty_menu_same_identity_for_option_carry, pty_output_clears_inflight, st_edit_tool_diff,
     };
     use serde_json::json;
+
+    #[test]
+    fn strip_ansi_preserves_cursor_addressed_trust_prompt_text() {
+        // codex-trust-prompt-first-class-menu: the live 2026-08-28 22:32Z
+        // specimen — the hooks re-trust prompt paints via cursor
+        // addressing (CSI row;col H), no newlines. The terminal-attention
+        // evaluation at the time produced op=candidate preview="" (empty
+        // stripped tail), so this pins where the text goes.
+        let raw: &[u8] = b"\x1b[3;30H\x1b[0m\x1b[49m\x1b[K\x1b[2;3H\x1b[1mHooks need review\x1b[3;3H\x1b[22m\x1b[38;5;3;49m6 hooks are new or changed.\x1b[4;3H\x1b[39mHooks can run outside the sandbox after you trust them.\x1b[6;1H> \x1b[36m1. Review hooks\x1b[7;4H\x1b[39m2. Trust all and continue\x1b[8;4H3. Continue without trusting (hooks won't run)\x1b[10;3H\x1b[2mPress enter to confirm or esc to go back\x1b[22m";
+        let stripped = super::strip_ansi(raw);
+        let text = String::from_utf8_lossy(&stripped);
+        let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            collapsed.contains("Hooks need review"),
+            "stripped: [{collapsed}]"
+        );
+        assert!(
+            collapsed.contains("Trust all and continue"),
+            "stripped: [{collapsed}]"
+        );
+    }
 
     #[test]
     fn strip_ansi_macos_raw_does_not_inject_spurious_newlines() {

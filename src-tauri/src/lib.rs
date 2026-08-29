@@ -14809,6 +14809,10 @@ fn pty_spawn(
                 // split-paste-cr-and-submit-nudge: composer-stuck self-heal
                 // rides the same ticker as the send-gate flush.
                 maybe_submit_nudge(&app_for_throughput);
+                // issue-305 phase 2a: the response-absence observer rides it
+                // too — same ~300ms cadence, and it reads the PTY tail only
+                // when a send is actually inside its 2-4s window.
+                maybe_would_notice(&app_for_throughput);
                 for transition in reveal_floor.step(&input) {
                     trace_reveal_floor_transition(
                         &app_for_throughput,
@@ -29277,6 +29281,13 @@ struct SendLedgerEntry {
     // split-paste-cr-and-submit-nudge: one CR nudge per entry when the
     // composer-stuck signature is seen (unlanded + payload in tail).
     nudged: bool,
+    // issue-305 phase 2a (response-absence observer): when this entry's
+    // would-notice fired (unix ms; 0 = never fired). Doubles as the
+    // once-per-send latch and as the anchor a later landing measures
+    // `settled_after_ms` against — a timestamp rather than a bool for the
+    // same reason stale_terminal_input_cell holds one: the retraction has
+    // to know WHEN, not merely whether.
+    would_notice_at_ms: i64,
     // strand-forensics-queue-wait-accounting: was a turn open at inject?
     // True means the CLI will queue this send until the turn ends — its
     // landed line then reports queue_wait_ms so honest queue-wait latency
@@ -29511,6 +29522,24 @@ fn send_ledger_needle(entry: &SendLedgerEntry) -> String {
     }
     let escaped = serde_json::Value::String(entry.match_text.clone()).to_string();
     escaped[1..escaped.len() - 1].to_string()
+}
+
+// The fragment whose appearance in the PTY tail proves the payload is
+// sitting in the CLI composer (text rendered, submitting CR not taken).
+// Whitespace-collapsed and quote-flattened because the CLI re-wraps and
+// re-quotes what it renders; 24 chars is long enough to be specific and
+// short enough to survive the composer's own wrapping. Shared by the three
+// readers of this signal: the strand scene capture, the submit nudge, and
+// the issue-305 response-absence observer.
+fn send_ledger_tail_fragment(preview: &str) -> String {
+    preview
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('"', "'")
+        .chars()
+        .take(24)
+        .collect()
 }
 
 // Extract the plain text of a user-shaped record for the synthetic
@@ -30374,14 +30403,7 @@ fn maybe_submit_nudge<R: tauri::Runtime>(app: &AppHandle<R>) {
     };
     // Same composer-stuck fragment check the strand scene capture uses.
     let tail = pty_tail_snippet(400);
-    let frag: String = preview
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .replace('"', "'")
-        .chars()
-        .take(24)
-        .collect();
+    let frag = send_ledger_tail_fragment(&preview);
     if frag.trim().is_empty() || !tail.contains(frag.trim()) {
         return;
     }
@@ -30434,6 +30456,170 @@ fn maybe_submit_nudge<R: tauri::Runtime>(app: &AppHandle<R>) {
     }
 }
 
+// issue-305 phase 2a: the response-absence observer. A pane send typed
+// into a full-screen terminal overlay is consumed silently — no composer
+// echo, no user turn — and today the user learns of it only when the
+// strand machinery reports a loss a minute later, framed as loss. Phase 1's
+// `term-modal` tracker established that the overlay's OWN tell is
+// platform-specific (Claude Code's `/artifacts` picker emits neither
+// mouse-tracking nor kitty-keyboard bytes on macOS), so this observer keys
+// on ABSENCE instead — platform-neutral by construction: shortly after a
+// send, neither the payload's echo in the PTY tail nor a landed user turn
+// means the terminal is somewhere else right now.
+//
+// OBSERVE-ONLY: one trace line per send. No notice, no hold, no change to
+// any send path. `term_modal` rides along so the soak can report how often
+// the phase-1 signal and this one agree — the phase-2b reveal notice is
+// only worth building on the signal that fires where the other cannot.
+const WOULD_NOTICE_MIN_MS: i64 = 2_000;
+const WOULD_NOTICE_MAX_MS: i64 = 4_000;
+
+// The decision, pure. `resolved` = the ledger has already settled this
+// entry (landed, or stranded by an Esc sweep) — either way there is
+// nothing to notice. `fragment_in_tail` = the payload is visibly sitting
+// in the composer, which proves the send REACHED the CLI: that is the
+// composer-stuck case, owned by the submit nudge, not an absence.
+//
+// The window is bounded on both sides. Before ~2s an ordinary send has not
+// had time to echo or land, so absence carries no information; after ~4s
+// absence stops being fresh evidence and the later instruments own the
+// case (the submit nudge at 5s, then the strand grace). The ticker samples
+// this window ~7 times at TICK_MS, and the entry latches on the first
+// qualifying sample — so the two nominal observations at ~2s and ~4s are
+// covered by one bounded window that fires at the earliest evidence
+// instead of at two discrete instants a 300ms ticker cannot hit exactly.
+fn would_notice_decision(
+    elapsed_ms: i64,
+    resolved: bool,
+    fragment_in_tail: bool,
+    already_latched: bool,
+) -> bool {
+    !already_latched
+        && !resolved
+        && !fragment_in_tail
+        && elapsed_ms >= WOULD_NOTICE_MIN_MS
+        && elapsed_ms <= WOULD_NOTICE_MAX_MS
+}
+
+#[cfg(test)]
+mod would_notice_decision_tests {
+    use super::{would_notice_decision, WOULD_NOTICE_MAX_MS, WOULD_NOTICE_MIN_MS};
+
+    #[test]
+    fn would_notice_fires_when_neither_echo_nor_landing_is_present() {
+        assert!(would_notice_decision(WOULD_NOTICE_MIN_MS, false, false, false));
+        assert!(would_notice_decision(3_000, false, false, false));
+        assert!(would_notice_decision(WOULD_NOTICE_MAX_MS, false, false, false));
+    }
+
+    #[test]
+    fn would_notice_never_fires_twice_for_one_send() {
+        assert!(!would_notice_decision(3_000, false, false, true));
+    }
+
+    #[test]
+    fn would_notice_skips_a_resolved_send() {
+        assert!(!would_notice_decision(3_000, true, false, false));
+    }
+
+    #[test]
+    fn would_notice_skips_a_payload_visible_in_the_tail() {
+        // Composer-stuck, not terminal-elsewhere: the send reached the CLI
+        // and the submit nudge owns the case.
+        assert!(!would_notice_decision(3_000, false, true, false));
+    }
+
+    #[test]
+    fn would_notice_does_not_fire_before_the_window() {
+        assert!(!would_notice_decision(0, false, false, false));
+        assert!(!would_notice_decision(
+            WOULD_NOTICE_MIN_MS - 1,
+            false,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn would_notice_does_not_fire_after_the_window() {
+        assert!(!would_notice_decision(
+            WOULD_NOTICE_MAX_MS + 1,
+            false,
+            false,
+            false
+        ));
+    }
+}
+
+fn maybe_would_notice<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let now = unix_now_ms();
+    // Bound the work before touching the PTY tail: only entries whose age
+    // is inside the window can decide anything, and the ledger is capped at
+    // SEND_LEDGER_CAP. Everything the decision needs is copied out here so
+    // the tail read and the trace happen outside the ledger lock.
+    // Tuple fields: (id, injected_at_ms, preview, menu_at_inject, resolved,
+    // latched) — destructured under the same names in the loop below.
+    let candidates: Vec<(String, i64, String, bool, bool, bool)> =
+        match send_ledger_cell().lock() {
+            Ok(ledger) => ledger
+                .iter()
+                .filter(|e| {
+                    let elapsed = now - e.injected_at_ms;
+                    elapsed >= WOULD_NOTICE_MIN_MS && elapsed <= WOULD_NOTICE_MAX_MS
+                })
+                .map(|e| {
+                    (
+                        e.id.clone(),
+                        e.injected_at_ms,
+                        e.preview.clone(),
+                        e.menu_at_inject,
+                        e.state != "injected",
+                        e.would_notice_at_ms != 0,
+                    )
+                })
+                .collect(),
+            Err(_) => return,
+        };
+    if candidates.is_empty() {
+        return;
+    }
+    let tail = pty_tail_snippet(400);
+    let term_modal = term_modal_active();
+    for (id, injected_at_ms, preview, menu_at_inject, resolved, latched) in candidates {
+        let frag = send_ledger_tail_fragment(&preview);
+        let fragment_in_tail = !frag.trim().is_empty() && tail.contains(frag.trim());
+        let elapsed = now - injected_at_ms;
+        if !would_notice_decision(elapsed, resolved, fragment_in_tail, latched) {
+            continue;
+        }
+        // Latch BEFORE tracing so a failing trace cannot loop the line, and
+        // re-check under the lock so a concurrent latch wins exactly once.
+        let took_latch = match send_ledger_cell().lock() {
+            Ok(mut ledger) => match ledger.iter_mut().find(|e| e.id == id) {
+                Some(e) if e.would_notice_at_ms == 0 => {
+                    e.would_notice_at_ms = now;
+                    true
+                }
+                _ => false,
+            },
+            Err(_) => false,
+        };
+        if !took_latch {
+            continue;
+        }
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "send-ledger",
+                &format!(
+                    "op=would-notice id={} at_ms_after_inject={} term_modal={} menu_at_inject={}",
+                    id, elapsed, term_modal, menu_at_inject
+                ),
+            );
+        }
+    }
+}
+
 // Record a send at injection time (called from write_pty_turn_intent with
 // the exact PTY payload).
 fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
@@ -30480,6 +30666,7 @@ fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
             menu_at_inject,
             ms_since_pty_out_at_inject: ms_since_pty_out,
             nudged: false,
+            would_notice_at_ms: 0,
             turn_open_at_inject,
         },
         None => SendLedgerEntry {
@@ -30500,6 +30687,7 @@ fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
             menu_at_inject,
             ms_since_pty_out_at_inject: ms_since_pty_out,
             nudged: false,
+            would_notice_at_ms: 0,
             turn_open_at_inject,
         },
     };
@@ -30799,6 +30987,19 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                     entry.via_queue,
                     now - entry.injected_at_ms,
                 ));
+                // issue-305 phase 2a: this send's absence was transient — it
+                // landed after all, so the would-notice is withdrawn. These
+                // ARE the observer's false-positive rate: frequent or long
+                // retractions mean the window opens too early, and phase 2b
+                // must not surface a notice the transcript disproves seconds
+                // later.
+                if entry.would_notice_at_ms > 0 {
+                    transitions.push(format!(
+                        "op=would-notice-retracted id={} settled_after_ms={}",
+                        entry.id,
+                        now - entry.would_notice_at_ms,
+                    ));
+                }
                 // strand-forensics-queue-wait-accounting: how much of
                 // elapsed_ms was spent queued behind the prior open turn
                 // (inject time to that turn's detected completion). -1 =
@@ -30875,15 +31076,7 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                 // keys on it too (#306).
                 let payload_in_tail = {
                     let tail = pty_tail_snippet(400);
-                    let frag: String = entry
-                        .preview
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                        .replace('"', "'")
-                        .chars()
-                        .take(24)
-                        .collect();
+                    let frag = send_ledger_tail_fragment(&entry.preview);
                     !frag.trim().is_empty() && tail.contains(frag.trim())
                 };
                 {
@@ -30942,6 +31135,14 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                     entry.state = "injected";
                     entry.resolved_at_ms = 0;
                     entry.injected_at_ms = now;
+                    // issue-305 phase 2a: the retry is a fresh send for the
+                    // response-absence observer. Leaving the latch set would
+                    // both suppress the retry's own would-notice and make any
+                    // later retraction measure `settled_after_ms` from the
+                    // ORIGINAL notice — across the whole strand grace, which
+                    // would poison the false-positive rate the retraction
+                    // metric exists to report.
+                    entry.would_notice_at_ms = 0;
                     entry.jsonl_offset_at_inject = session_text.len() as u64;
                     forensics.push(format!("op=auto-resend id={}", entry.id));
                     actions.push(SendLedgerAction::AutoResend {
@@ -42324,6 +42525,7 @@ mod session_turn_tests {
             menu_at_inject: false,
             ms_since_pty_out_at_inject: -1,
             nudged: false,
+            would_notice_at_ms: 0,
             turn_open_at_inject: false,
         };
         assert_eq!(

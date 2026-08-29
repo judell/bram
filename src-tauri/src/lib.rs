@@ -29323,6 +29323,130 @@ fn send_ledger_record_text(r: &serde_json::Value) -> String {
 // st_is_synthetic_codex_message, Claude "[Request interrupted" markers)
 // never counts as delivery — 2026-07-03 Codex acid test: the steer record
 // shadowed the real last user turn and blocked the aborted-latch.
+// Walk every needle occurrence in `text` from `rel_offset`, accepting only
+// a line whose record SEMANTICS constitute delivery (text presence alone is
+// not delivery — queue records carry the text at enqueue time, and
+// assistant records can quote it back). Extracted pure for #307's
+// two-session search; the entry loop calls it once per candidate session.
+fn send_ledger_find_delivery(text: &str, rel_offset: usize, needle: &str) -> Option<bool> {
+    let start = char_floor(text, rel_offset);
+    let suffix = &text[start..];
+    let mut search_from = 0usize;
+    while let Some(rel) = suffix[search_from..].find(needle) {
+        let pos = search_from + rel;
+        let line_start = suffix[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let line_end = suffix[pos..]
+            .find('\n')
+            .map(|i| pos + i)
+            .unwrap_or(suffix.len());
+        if let Some(via_queue) = send_ledger_line_delivers(&suffix[line_start..line_end]) {
+            return Some(via_queue);
+        }
+        search_from = line_end.min(suffix.len());
+        if search_from >= suffix.len() {
+            break;
+        }
+    }
+    None
+}
+
+// #307's per-entry delivery decision, pure: search the current-session
+// candidate first, then (when a switch put the entry's inject session out
+// of scope) the inject-session candidate. Returns (delivered_via_queue,
+// landed_in_inject_session) — the second drives the audit-line choice
+// (`inject-session-land` vs `cross-session-land`) and never both.
+fn send_ledger_resolve_delivery(
+    needle: &str,
+    current: (&str, usize),
+    inject: Option<(&str, usize)>,
+) -> (Option<bool>, bool) {
+    if let Some(v) = send_ledger_find_delivery(current.0, current.1, needle) {
+        return (Some(v), false);
+    }
+    if let Some((text, rel)) = inject {
+        if let Some(v) = send_ledger_find_delivery(text, rel, needle) {
+            return (Some(v), true);
+        }
+    }
+    (None, false)
+}
+
+#[cfg(test)]
+mod send_ledger_resolve_delivery_tests {
+    use super::send_ledger_resolve_delivery;
+
+    const DELIVERING: &str = "{\"type\":\"user\",\"text\":\"probe for 307\"}\n";
+    const UNRELATED: &str = "{\"type\":\"other\",\"text\":\"nothing here\"}\n";
+
+    #[test]
+    fn landed_in_inject_session_resolves_landed_not_stranded() {
+        // The #307 harmful variant: current (post-switch) session shows no
+        // delivery, inject session does — must resolve landed, flagged as
+        // an inject-session land, never fall through to the strand path.
+        let (delivered, in_inject) = send_ledger_resolve_delivery(
+            "probe for 307",
+            (UNRELATED, 0),
+            Some((DELIVERING, 0)),
+        );
+        assert_eq!(delivered, Some(false));
+        assert!(in_inject);
+    }
+
+    #[test]
+    fn current_session_wins_and_is_not_flagged_as_inject_land() {
+        let (delivered, in_inject) = send_ledger_resolve_delivery(
+            "probe for 307",
+            (DELIVERING, 0),
+            Some((DELIVERING, 0)),
+        );
+        assert_eq!(delivered, Some(false));
+        assert!(!in_inject, "a current-session land keeps cross-session-land semantics");
+    }
+
+    #[test]
+    fn found_in_neither_session_strands() {
+        let (delivered, in_inject) =
+            send_ledger_resolve_delivery("probe for 307", (UNRELATED, 0), Some((UNRELATED, 0)));
+        assert_eq!(delivered, None);
+        assert!(!in_inject);
+    }
+
+    #[test]
+    fn no_switch_means_no_second_candidate() {
+        let (delivered, _) =
+            send_ledger_resolve_delivery("probe for 307", (UNRELATED, 0), None);
+        assert_eq!(delivered, None);
+    }
+}
+
+#[cfg(test)]
+mod send_ledger_find_delivery_tests {
+    use super::send_ledger_find_delivery;
+
+    #[test]
+    fn delivering_user_line_is_found_and_quoting_lines_are_not() {
+        let text = concat!(
+            "{\"type\":\"assistant\",\"text\":\"echo of hello world probe\"}\n",
+            "{\"type\":\"user\",\"text\":\"hello world probe\"}\n",
+        );
+        // The assistant quote alone does not deliver; the user line does.
+        assert_eq!(send_ledger_find_delivery(text, 0, "hello world probe"), Some(false));
+        let quotes_only = "{\"type\":\"assistant\",\"text\":\"hello world probe\"}\n";
+        assert_eq!(send_ledger_find_delivery(quotes_only, 0, "hello world probe"), None);
+    }
+
+    #[test]
+    fn offset_excludes_earlier_occurrences() {
+        let first = "{\"type\":\"user\",\"text\":\"hello world probe\"}\n";
+        let text = format!("{}{}", first, "{\"type\":\"other\"}\n");
+        assert_eq!(
+            send_ledger_find_delivery(&text, first.len(), "hello world probe"),
+            None,
+            "occurrences before the offset are out of scope"
+        );
+    }
+}
+
 fn send_ledger_line_delivers(line: &str) -> Option<bool> {
     let Ok(r) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
         return None;
@@ -30358,6 +30482,10 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
     // file, flushed outside the traces.enabled gate.
     let mut forensics: Vec<String> = Vec::new();
     let mut user_strand_hit = false;
+    // #307: inject-session texts read at most once per distinct path per
+    // sweep, for the second-candidate search below.
+    let mut inject_session_texts: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     if let Ok(mut ledger) = send_ledger_cell().lock() {
         for entry in ledger.iter_mut() {
             if entry.state != "injected" {
@@ -30388,32 +30516,30 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                     entry.jsonl_offset_at_inject.saturating_sub(base_offset) as usize,
                 )
             };
-            let start = char_floor(search_text, rel_offset);
-            let suffix = &search_text[start..];
             let needle = send_ledger_needle(entry);
-            // Walk every needle occurrence and accept only a line whose
-            // record SEMANTICS constitute delivery. Text presence alone is
-            // not delivery: queue-operation records carry the text at
-            // enqueue time (before — or without — delivery), and assistant
-            // records can quote it back.
-            let mut delivered: Option<bool> = None;
-            let mut search_from = 0usize;
-            while let Some(rel) = suffix[search_from..].find(&needle) {
-                let pos = search_from + rel;
-                let line_start = suffix[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
-                let line_end = suffix[pos..]
-                    .find('\n')
-                    .map(|i| pos + i)
-                    .unwrap_or(suffix.len());
-                if let Some(via_queue) = send_ledger_line_delivers(&suffix[line_start..line_end]) {
-                    delivered = Some(via_queue);
-                    break;
-                }
-                search_from = line_end.min(suffix.len());
-                if search_from >= suffix.len() {
-                    break;
-                }
-            }
+            // #307: the re-anchor above REPLACES the inject-session search
+            // with the current session, so a send that landed in its INJECT
+            // session during a provider switch read as lost and was
+            // "restored" — the delivered-vs-lost conflation, reached via a
+            // first-class button (the switch's own escape step classifies
+            // any in-flight send as a user strand). When the session
+            // changed and the current session shows no delivery, search the
+            // inject session too before any strand verdict.
+            let inject_candidate: Option<(&str, usize)> = if sid_changed {
+                let inject_path = entry.session_path_at_inject.clone();
+                let inject_rel = entry.jsonl_offset_at_inject.max(0) as usize;
+                let text = inject_session_texts
+                    .entry(inject_path)
+                    .or_insert_with_key(|p| std::fs::read_to_string(p).unwrap_or_default());
+                Some((text.as_str(), inject_rel))
+            } else {
+                None
+            };
+            let (delivered, landed_in_inject_session) = send_ledger_resolve_delivery(
+                &needle,
+                (search_text, rel_offset),
+                inject_candidate,
+            );
             if let Some(via_queue) = delivered {
                 entry.state = "landed";
                 entry.resolved_at_ms = now;
@@ -30455,17 +30581,27 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                     entry.turn_open_at_inject,
                     queue_wait_ms,
                 ));
-                // The send landed in a DIFFERENT session than it was injected
-                // against — the false-strand case (send-ledger-observe-sid-
-                // switch-strand's pa11 specimen) now resolves correctly instead
-                // of stranding. Record it so cross-session lands stay auditable.
+                // The send landed while the active session differs from its
+                // inject session. Two distinct auditable shapes (#307):
+                // found in the CURRENT session = a true cross-session land
+                // (the pa11 false-strand, resolving correctly); found in the
+                // INJECT session = landed where injected despite the switch,
+                // the delivery a current-only search used to misread as lost.
                 if sid_changed {
-                    transitions.push(format!(
-                        "op=cross-session-land id={} old={} new={}",
-                        entry.id,
-                        entry.session_path_at_inject.rsplit('/').next().unwrap_or(""),
-                        current_session_path.rsplit('/').next().unwrap_or(""),
-                    ));
+                    if landed_in_inject_session {
+                        transitions.push(format!(
+                            "op=inject-session-land id={} session={}",
+                            entry.id,
+                            entry.session_path_at_inject.rsplit('/').next().unwrap_or(""),
+                        ));
+                    } else {
+                        transitions.push(format!(
+                            "op=cross-session-land id={} old={} new={}",
+                            entry.id,
+                            entry.session_path_at_inject.rsplit('/').next().unwrap_or(""),
+                            current_session_path.rsplit('/').next().unwrap_or(""),
+                        ));
+                    }
                 }
             } else if now - entry.injected_at_ms > SEND_LEDGER_STRAND_GRACE_MS
                 || matches!(force_user_strand_before_ms, Some(esc_ms) if entry.injected_at_ms <= esc_ms)
@@ -30527,13 +30663,16 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                         tail,
                     ));
                 }
-                // A mechanical strand that survives DESPITE the cross-session
-                // re-anchor above (sid changed, yet the send was found in
-                // neither the inject session nor the current one) is a genuine
-                // suspect — a real loss across a switch, not the benign
-                // false-strand the re-anchor already fixes. Flag it; the strand
-                // stands and the user is still warned.
-                if !user_caused && sid_changed {
+                // A strand that survives DESPITE the two-session search
+                // above (sid changed, yet the send was found in neither the
+                // inject session nor the current one) is a genuine suspect —
+                // a real loss across a switch. #307 q2: user-caused strands
+                // trace this too — the gate previously excluded exactly the
+                // resolution shape a provider switch produces by
+                // construction (its escape step classifies in-flight sends
+                // as user strands), leaving the instrument blind to its
+                // strongest case.
+                if sid_changed {
                     transitions.push(format!(
                         "op=cross-session-strand id={} reason=not-found old={} new={}",
                         entry.id,

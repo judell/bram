@@ -145,13 +145,13 @@
             gap="$space-2"
             verticalAlignment="center"
             width="100%"
-            var.answerKeys="{$item.answerKeys || ($item.key + '\r')}">
+            var.answerKeys="{$item.answerKeys || ($item.key + '\r')}"
+            onClick="window.__bramSendMenuAnswer(answerKeys, promptId)">
             <Button
               label="{($item.key || '')}"
               variant="outlined"
               size="sm"
-              enabled="{!!promptId}"
-              onClick="window.__bramSendMenuAnswer(answerKeys, promptId)" />
+              enabled="{!!promptId}" />
             <VStack width="*" gap="$space-0_5">
               <Text
                 value="{($item.label || '')}"

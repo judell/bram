@@ -1838,6 +1838,7 @@ mod grid_rescue_candidate_tests {
                 tool: tool.to_string(),
                 text: String::new(),
                 options: Vec::new(),
+                prompt_id: None,
                 tool_call_signature: None,
                 tool_call_diff: None,
                 tool_call_content: None,
@@ -4672,6 +4673,12 @@ struct PtyMenu {
     tool: String,
     text: String,
     options: Vec<MenuOption>,
+    // Identity of the live host prompt this rendered menu answers. Store it
+    // on the menu so `turn-state-changed`, `pty-menu-changed`, and
+    // `/__turn-state` all carry the same capability. Attaching it only at one
+    // emit site let a newer identity-less copy disable every answer button.
+    #[serde(rename = "promptId", skip_serializing_if = "Option::is_none")]
+    prompt_id: Option<String>,
     #[serde(rename = "toolCallSignature", skip_serializing_if = "Option::is_none")]
     tool_call_signature: Option<String>,
     #[serde(rename = "toolCallDiff", skip_serializing_if = "Option::is_none")]
@@ -4837,6 +4844,7 @@ fn grid_rescue_menu(
             }
         },
         options: options.to_vec(),
+        prompt_id: None,
         tool_call_signature: None,
         tool_call_diff: None,
         tool_call_content: None,
@@ -7320,6 +7328,7 @@ fn turn_state_set_menu<R: tauri::Runtime>(
         }
         return;
     }
+    bind_open_prompt_id(&mut menu);
     if let Some(m) = menu.as_mut() {
         m.cache_source = Some(
             match reason {
@@ -7357,6 +7366,20 @@ fn stamp_pty_menu_payload(
     menu
 }
 
+fn bind_menu_prompt_id(menu: &mut Option<PtyMenu>, prompt_id: Option<&str>) {
+    if let Some(menu) = menu.as_mut() {
+        menu.prompt_id = prompt_id.map(str::to_string);
+    }
+}
+
+fn bind_open_prompt_id(menu: &mut Option<PtyMenu>) {
+    let prompt_id = prompt_open_cell()
+        .lock()
+        .ok()
+        .and_then(|open| open.as_ref().map(|prompt| prompt.prompt_id.clone()));
+    bind_menu_prompt_id(menu, prompt_id.as_deref());
+}
+
 // menu-stack-pty-inflight-prose: emit `pty-menu-changed` with the grid-sourced
 // in-flight prose injected into the payload object. Done at the emit chokepoint
 // (rather than a PtyMenu struct field) to avoid churning every construction and
@@ -7372,20 +7395,10 @@ static PANE_MENU_DISPLAYED: std::sync::atomic::AtomicBool =
 
 fn emit_pty_menu_with_prose<R: tauri::Runtime>(app: &AppHandle<R>, payload: &Option<PtyMenu>) {
     PANE_MENU_DISPLAYED.store(payload.is_some(), std::sync::atomic::Ordering::Relaxed);
+    let mut payload = payload.clone();
+    bind_open_prompt_id(&mut payload);
     let mut value = serde_json::to_value(payload).unwrap_or(serde_json::Value::Null);
     if let Some(obj) = value.as_object_mut() {
-        // identity-checked-menu-answer: carry the host's exact lifecycle id
-        // with the rendered prompt; it is transport metadata, not menu content.
-        if let Some(prompt_id) = prompt_open_cell()
-            .lock()
-            .ok()
-            .and_then(|open| open.as_ref().map(|p| p.prompt_id.clone()))
-        {
-            obj.insert(
-                "promptId".to_string(),
-                serde_json::Value::String(prompt_id),
-            );
-        }
         if let Some(prose) = latest_grid_menu_cell()
             .lock()
             .ok()
@@ -7489,6 +7502,7 @@ fn askuserquestion_to_menu(value: &serde_json::Value, tool: &str) -> Option<PtyM
         tool: tool.to_string(),
         text,
         options,
+        prompt_id: None,
         tool_call_signature: None,
         tool_call_diff: None,
         tool_call_content: None,
@@ -7824,6 +7838,7 @@ fn codex_permission_request_to_menu(value: &serde_json::Value) -> Option<PtyMenu
         tool: visible_tool.to_string(),
         text,
         options,
+        prompt_id: None,
         tool_call_signature: if detail.is_empty() {
             None
         } else {
@@ -7965,6 +7980,7 @@ fn permission_request_to_menu(value: &serde_json::Value) -> Option<PtyMenu> {
         tool,
         text,
         options,
+        prompt_id: None,
         tool_call_signature: None,
         tool_call_diff: None,
         tool_call_content: None,
@@ -10145,6 +10161,7 @@ fn codex_trust_prompt_menu_from_chunk(stripped_chunk: &str) -> Option<PtyMenu> {
             opt("2", "Trust all and continue"),
             opt("3", "Continue without trusting (hooks won't run)"),
         ],
+        prompt_id: None,
         tool_call_signature: None,
         tool_call_diff: None,
         tool_call_content: None,
@@ -10459,6 +10476,7 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                                 tool,
                                 text: command,
                                 options: grid_opts,
+                                prompt_id: None,
                                 tool_call_signature: Some(signature),
                                 tool_call_diff: None,
                                 tool_call_content: None,
@@ -10505,6 +10523,7 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                             tool: "Picker".to_string(),
                             text: grid_header.trim().to_string(),
                             options: grid_opts,
+                            prompt_id: None,
                             tool_call_signature: None,
                             tool_call_diff: None,
                             tool_call_content: None,
@@ -10548,6 +10567,7 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                                 tool,
                                 text: sig.clone(),
                                 options: grid_opts,
+                                prompt_id: None,
                                 tool_call_signature: Some(sig),
                                 tool_call_diff: lookup.diff,
                                 tool_call_content: lookup.content,
@@ -10586,6 +10606,7 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                                 tool: "Bash".to_string(),
                                 text: command,
                                 options: grid_opts,
+                                prompt_id: None,
                                 tool_call_signature: None,
                                 tool_call_diff: None,
                                 tool_call_content: None,
@@ -10621,6 +10642,7 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                                 tool: ew_tool.to_string(),
                                 text: grid_header.trim().to_string(),
                                 options: grid_opts,
+                                prompt_id: None,
                                 tool_call_signature: None,
                                 tool_call_diff: None,
                                 tool_call_content: None,
@@ -11216,7 +11238,6 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
 
     if let Some(payload) = emit_payload {
         let payload = stamp_pty_menu_payload(payload, "setAgentMenuFromEvent");
-        turn_state_set_menu(app, payload.clone(), "pty-menu", "detected");
         // Mirror turn_state_set_menu's hook-primary deferral for the pane
         // emit too: while a hook menu is DISPLAYED, a grid emit of the
         // same prompt OVERWRITES the pane with a diff-less copy — the
@@ -11239,6 +11260,18 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                 .ok()
                 .map(|s| s.pending_menu.is_some())
                 .unwrap_or(false);
+        if !hook_menu_pending {
+            if let Some(nm) = payload.as_ref() {
+                prompt_shown(
+                    app,
+                    &nm.tool,
+                    None,
+                    nm.options.iter().map(|o| o.label.clone()).collect(),
+                    "grid",
+                );
+            }
+        }
+        turn_state_set_menu(app, payload.clone(), "pty-menu", "detected");
         if hook_menu_pending {
             if bram_trace_enabled() {
                 append_bram_trace_line(
@@ -11253,15 +11286,6 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                     app,
                     "hook-menu",
                     "op=grid-emit-allowed source=pty-menu reason=owner-no-pending-menu",
-                );
-            }
-            if let Some(nm) = payload.as_ref() {
-                prompt_shown(
-                    app,
-                    &nm.tool,
-                    None,
-                    nm.options.iter().map(|o| o.label.clone()).collect(),
-                    "grid",
                 );
             }
             emit_pty_menu_with_prose(app, &payload);
@@ -14691,6 +14715,16 @@ fn pty_spawn(
                                             "op=boot-prompt shape=codex-hooks-trust",
                                         );
                                     }
+                                    prompt_shown(
+                                        &app_for_throughput,
+                                        &menu.tool,
+                                        None,
+                                        menu.options
+                                            .iter()
+                                            .map(|option| option.label.clone())
+                                            .collect(),
+                                        "boot",
+                                    );
                                     turn_state_set_menu(
                                         &app_for_throughput,
                                         Some(menu),
@@ -41131,6 +41165,7 @@ mod pty_menu_tests {
                 answer_keys: None,
                 description: None,
             }],
+            prompt_id: None,
             tool_call_signature: None,
             tool_call_diff: None,
             tool_call_content: None,
@@ -41379,6 +41414,7 @@ mod pty_menu_tests {
                 answer_keys: answer_keys.map(str::to_string),
                 description: None,
             }],
+            prompt_id: None,
             tool_call_signature: Some("Shell(test)".to_string()),
             tool_call_diff: None,
             tool_call_content: None,
@@ -41408,6 +41444,7 @@ mod pty_menu_tests {
             tool: "Shell".to_string(),
             text: String::new(),
             options: Vec::new(),
+            prompt_id: None,
             tool_call_signature: None,
             tool_call_diff: None,
             tool_call_content: None,
@@ -41614,6 +41651,7 @@ mod pty_menu_tests {
                 answer_keys: None,
                 description: None,
             }],
+            prompt_id: None,
             tool_call_signature: None,
             tool_call_diff: None,
             tool_call_content: None,
@@ -41635,6 +41673,7 @@ mod pty_menu_tests {
             tool: "Bash".to_string(),
             text: "Action Required".to_string(),
             options: Vec::new(),
+            prompt_id: None,
             tool_call_signature: Some("Bash(pwd)".to_string()),
             tool_call_diff: None,
             tool_call_content: None,
@@ -41676,6 +41715,7 @@ mod pty_menu_tests {
                 answer_keys: None,
                 description: None,
             }],
+            prompt_id: None,
             tool_call_signature: Some("Bash(New-Item foo.bar)".to_string()),
             tool_call_diff: None,
             tool_call_content: None,
@@ -41723,6 +41763,7 @@ mod pty_menu_tests {
                     description: None,
                 },
             ],
+            prompt_id: None,
             tool_call_signature: Some("Bash(gh issue create --title test)".to_string()),
             tool_call_diff: None,
             tool_call_content: None,
@@ -51932,6 +51973,33 @@ mod menu_answer_identity_tests {
             menu_answer_identity_verdict(Some("p-current"), ""),
             MenuAnswerIdentityVerdict::MissingSubmittedId
         );
+    }
+}
+
+#[cfg(test)]
+mod menu_prompt_identity_transport_tests {
+    use super::{bind_menu_prompt_id, PtyMenu, TurnState};
+
+    #[test]
+    fn one_bound_menu_serializes_identity_on_both_pane_transports() {
+        let mut menu = Some(PtyMenu {
+            tool: "Bash".to_string(),
+            text: "Apply proposed file edits".to_string(),
+            ..PtyMenu::default()
+        });
+        bind_menu_prompt_id(&mut menu, Some("p-live"));
+
+        // `pty-menu-changed` serializes the menu directly.
+        let direct = serde_json::to_value(&menu).expect("direct menu payload");
+        assert_eq!(direct["promptId"], "p-live");
+
+        // `turn-state-changed` and `/__turn-state` serialize the same menu
+        // nested under pendingMenu. The identity must not depend on which
+        // event wins the iframe's millisecond stale-event arbitration.
+        let mut turn_state = TurnState::idle();
+        turn_state.pending_menu = menu;
+        let nested = serde_json::to_value(&turn_state).expect("turn-state payload");
+        assert_eq!(nested["pendingMenu"]["promptId"], "p-live");
     }
 }
 

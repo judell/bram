@@ -344,6 +344,20 @@ struct ProjectConfig {
     ai: Option<AiConfig>,
     #[serde(default)]
     search: Option<SearchConfig>,
+    #[serde(default)]
+    guards: Option<GuardsConfig>,
+}
+
+// Optional guards block (bram-guard-authority-flip). `rustAuthority` is the
+// reversible pre-release toggle: when true, Setup registers the Rust
+// bram-guard as the DECIDING worklist hook and deregisters the Python
+// guards; when absent/false (the default, and every non-test machine),
+// Setup's output is byte-identical to before the flag existed. Flipping
+// back is: clear the flag, run Setup.
+#[derive(Default, Clone, serde::Deserialize)]
+struct GuardsConfig {
+    #[serde(default, rename = "rustAuthority")]
+    rust_authority: Option<bool>,
 }
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
@@ -705,6 +719,19 @@ fn apply_bram_trace_from_config(enabled: bool) {
 
 fn bram_menus_parse_enabled() -> bool {
     BRAM_MENUS_PARSE_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+// bram-guard-authority-flip: the guards.rustAuthority toggle, applied at
+// startup and on settings POSTs like its siblings.
+static BRAM_GUARDS_RUST_AUTHORITY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn bram_guards_rust_authority() -> bool {
+    BRAM_GUARDS_RUST_AUTHORITY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn apply_bram_guards_rust_authority_from_config(enabled: bool) {
+    BRAM_GUARDS_RUST_AUTHORITY.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
 // Apply the `menus.parseAndDisplay` setting from .bram.json. Called at
@@ -19008,6 +19035,13 @@ fn handle_settings_post<R: tauri::Runtime>(
             .and_then(|m| m.hook_driven)
             .unwrap_or(true),
     );
+    apply_bram_guards_rust_authority_from_config(
+        config
+            .as_ref()
+            .and_then(|c| c.guards.as_ref())
+            .and_then(|g| g.rust_authority)
+            .unwrap_or(false),
+    );
     let settings = settings_view_from_config(config);
     emit_settings_changed(app, &settings);
     let body = settings.to_string().into_bytes();
@@ -34577,6 +34611,57 @@ fn merge_guard_shadow_menu_hook_into_settings(
     Ok(true)
 }
 
+// bram-guard-authority-flip: remove PreToolUse hook commands whose command
+// contains `needle` (and, when `unless` is set, does NOT contain that) —
+// the toggle's two prune directions: shadow entries when authority is on,
+// authority entries when it is off. Ok(true) if anything was removed.
+fn prune_pretooluse_hooks_containing(
+    settings_path: &Path,
+    needle: &str,
+    unless: Option<&str>,
+) -> Result<bool, String> {
+    let existing = std::fs::read_to_string(settings_path).unwrap_or_default();
+    if existing.trim().is_empty() {
+        return Ok(false);
+    }
+    let mut value: serde_json::Value = serde_json::from_str(&existing)
+        .map_err(|e| format!("parse {}: {}", settings_path.display(), e))?;
+    let Some(arr) = value
+        .get_mut("hooks")
+        .and_then(|h| h.get_mut("PreToolUse"))
+        .and_then(|a| a.as_array_mut())
+    else {
+        return Ok(false);
+    };
+    let mut changed = false;
+    arr.retain_mut(|entry| {
+        let Some(hs) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
+            return true;
+        };
+        let before = hs.len();
+        hs.retain(|h| {
+            let Some(cmd) = h.get("command").and_then(|c| c.as_str()) else {
+                return true;
+            };
+            let matches = cmd.contains(needle)
+                && unless.map_or(true, |keep| !cmd.contains(keep));
+            !matches
+        });
+        if hs.len() != before {
+            changed = true;
+        }
+        !hs.is_empty()
+    });
+    if !changed {
+        return Ok(false);
+    }
+    let serialized = serde_json::to_string_pretty(&value)
+        .map_err(|e| format!("serialize settings.json: {}", e))?;
+    std::fs::write(settings_path, format!("{}\n", serialized))
+        .map_err(|e| format!("write {}: {}", settings_path.display(), e))?;
+    Ok(true)
+}
+
 // Worklist-guard shadow registration (bram-guard-worklist-policy-shadow):
 // the Rust shadow observes every decision the Python worklist guard makes,
 // so it registers under the same PreToolUse matchers. Same shadow
@@ -35330,6 +35415,28 @@ fn codex_hook_toml_block(
         let _ = hook_python;
         (script_str.clone(), menu_script_str.clone())
     };
+    // bram-guard-authority-flip: with guards.rustAuthority on (read from
+    // the config static rather than threaded through every caller — the
+    // writer and both currency checkers must agree by construction), the
+    // worklist command IS the Rust authority command, replacing the Python
+    // guard; the worklist shadow entry is then omitted (deciding and
+    // shadowing with the same binary would double-spawn per call). Menu
+    // hooks stay Python + shadow either way.
+    let rust_authority = bram_guards_rust_authority();
+    let command_line = match (guard_link, rust_authority) {
+        (Some(link), true) => {
+            let l = link.display().to_string();
+            #[cfg(windows)]
+            {
+                format!("& \"{}\" guard codex-worklist --authority", l.replace('"', "\\\""))
+            }
+            #[cfg(not(windows))]
+            {
+                format!("\"{}\" guard codex-worklist --authority", l)
+            }
+        }
+        _ => command_line,
+    };
     // bram-guard shadow (bram-guard-worklist-policy-shadow): observe-only
     // Rust twins ride beside the Python hooks — no interpreter wrapper,
     // the link is an exe. Present only when the link exists on disk, so
@@ -35363,7 +35470,12 @@ fn codex_hook_toml_block(
     };
     let (shadow_worklist, shadow_menu_pr, shadow_menu_post) = match &shadow_cmds {
         Some((w, m)) => (
-            shadow_entry(w, 10, "PreToolUse:Bram guard shadow (worklist)"),
+            if rust_authority {
+                // Authority replaces the worklist shadow (see above).
+                String::new()
+            } else {
+                shadow_entry(w, 10, "PreToolUse:Bram guard shadow (worklist)")
+            },
             shadow_entry(m, 2, "PermissionRequest:Bram guard shadow (menu)"),
             shadow_entry(m, 2, "PostToolUse:Bram guard shadow (menu clear)"),
         ),
@@ -35740,7 +35852,19 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         || (sidecar.exists() && hook_matches_bundle(app, &sidecar, "__shell/conventions.md"));
     let hook_python = resolve_hook_python();
     let claude_commands = claude_hook_commands(hook_python.as_deref());
-    let expected_guard_command = claude_commands.as_ref().map(|(guard, _)| guard.as_str());
+    // bram-guard-authority-flip: with guards.rustAuthority on, the DECIDING
+    // registration the status checks look for is the Rust authority
+    // command, so the flip does not read as missing-registration drift.
+    let rust_authority_command = if bram_guards_rust_authority() {
+        guard_link_if_installed().map(|link| {
+            format!("{} --authority", guard::guard_hook_command(&link, "claude-worklist"))
+        })
+    } else {
+        None
+    };
+    let expected_guard_command = rust_authority_command
+        .as_deref()
+        .or_else(|| claude_commands.as_ref().map(|(guard, _)| guard.as_str()));
     let expected_menu_command = claude_commands.as_ref().map(|(_, menu)| menu.as_str());
     let hook_script_exists = hook_script.exists();
     // The source repo edits the hook in `app/provider-hooks/claude-worklist-guard.py`;
@@ -36441,33 +36565,66 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
     // registration entirely and surface one named warning instead of
     // installing commands that fail on every hook invocation.
     let hook_python = resolve_hook_python();
+    let rust_authority = bram_guards_rust_authority();
     match claude_hook_commands(hook_python.as_deref()) {
         Some((guard_command, menu_command)) => {
-            merge_worklist_guard_into_settings(&hook_settings_path, &guard_command)?;
+            // bram-guard-authority-flip: with the toggle on, the Python
+            // worklist guard is NOT registered — the Rust authority command
+            // takes its slots below. Menu hooks stay Python either way
+            // (their flip is deferred behind PermissionDenied provenance).
+            if !rust_authority {
+                merge_worklist_guard_into_settings(&hook_settings_path, &guard_command)?;
+            }
             merge_permission_menu_hook_into_settings(&hook_settings_path, &menu_command)?;
         }
         None => {
             skipped.push(HOOK_PYTHON_MISSING_WARNING.to_string());
         }
     }
-    // bram-guard shadow (phase 1): register the reentrant Rust menu hook
-    // beside the Python one. Best-effort by design — see the merge fn's
-    // header. Codex-side registration deliberately waits for the
-    // worklist-policy item so the config.toml re-trust prompt fires once.
+    // bram-guard registrations: menu shadow always; worklist shadow or
+    // authority per the guards.rustAuthority toggle.
     match guard::ensure_bram_guard_link() {
         Some(link) => {
             let shadow_command = guard::guard_hook_command(&link, "claude-permission-menu");
             merge_guard_shadow_menu_hook_into_settings(&hook_settings_path, &shadow_command)?;
-            // Worklist-guard shadow (bram-guard-worklist-policy-shadow):
-            // observes every decision the Python guard makes, including
-            // the deny path an allow-only shadow cannot see (#297).
             let worklist_shadow = guard::guard_hook_command(&link, "claude-worklist");
-            merge_guard_shadow_worklist_into_settings(&hook_settings_path, &worklist_shadow)?;
+            if rust_authority {
+                // Authority mode: register the deciding command (the merge's
+                // marker migration also removes the Python guard entries),
+                // and prune the worklist SHADOW registration — the same
+                // binary deciding AND shadowing would double-spawn per call.
+                let worklist_authority = format!("{} --authority", worklist_shadow);
+                merge_worklist_guard_into_settings(&hook_settings_path, &worklist_authority)?;
+                prune_pretooluse_hooks_containing(
+                    &hook_settings_path,
+                    "guard claude-worklist",
+                    Some("--authority"),
+                )?;
+            } else {
+                // Shadow mode (the default): observe-only worklist shadow
+                // beside the Python guard, and any authority registration
+                // from a previous toggle-on state is pruned so flipping
+                // back is one Setup run.
+                merge_guard_shadow_worklist_into_settings(&hook_settings_path, &worklist_shadow)?;
+                prune_pretooluse_hooks_containing(
+                    &hook_settings_path,
+                    "guard claude-worklist --authority",
+                    None,
+                )?;
+            }
         }
-        None => skipped.push(
-            "bram-guard link not installed (no home dir or exe path); Rust shadow hook skipped"
-                .to_string(),
-        ),
+        None => {
+            if rust_authority {
+                return Err(
+                    "guards.rustAuthority is set but the bram-guard link could not be installed — refusing to leave the project with no deciding worklist guard"
+                        .to_string(),
+                );
+            }
+            skipped.push(
+                "bram-guard link not installed (no home dir or exe path); Rust shadow hook skipped"
+                    .to_string(),
+            );
+        }
     }
     wrote.push(settings_path.display().to_string());
     wrote.push(hook_settings_path.display().to_string());
@@ -52993,6 +53150,12 @@ pub fn run() {
             .and_then(|c| c.menus.as_ref())
             .and_then(|m| m.hook_driven)
             .unwrap_or(true),
+    );
+    apply_bram_guards_rust_authority_from_config(
+        cfg.as_ref()
+            .and_then(|c| c.guards.as_ref())
+            .and_then(|g| g.rust_authority)
+            .unwrap_or(false),
     );
     // Only warn when the target pane is actually enabled (#275). The pane is
     // off by default -- most users preview their app in their own browser --

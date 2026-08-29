@@ -36,3 +36,11 @@ flate2 = { version = "=1.1.9", default-features = false, features = ["miniz_oxid
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 time = { version = "0.3.54", features = ["parsing"] }
 uuid = { version = "1", features = ["v4"] }
+
+# bram-guard-authority-flip: serde_json parses transcript lines on the
+# guard's deny path, and debug is the shipping format — at opt-level 0 the
+# scan ran ~3x slower than the Python guard's C json on the same payload.
+# Optimize just this dependency in dev builds; the reverse tail scan in
+# guard_policy fixes the algorithmic half.
+[profile.dev.package.serde_json]
+opt-level = 3

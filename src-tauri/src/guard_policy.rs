@@ -43,6 +43,45 @@ pub struct ShadowVerdict {
     pub decision: String,
     pub reason: String,
     pub target: String,
+    // Authority mode (bram-guard-authority-flip): the user-facing deny
+    // message the Python guard would print to stderr, verbatim. Empty for
+    // allows and for deny sites whose message transcription is pending —
+    // authority mode then falls back to the no-coverage template, the
+    // dominant deny class. Shadow mode ignores this field entirely.
+    pub message: String,
+    // Set only on a prose-opt-out allow: a stable hash of the matched last
+    // user message, for the /__audit/direct-edit breadcrumb authority mode
+    // POSTs (the shadow never POSTs). Host dedup keys on the value being
+    // stable per turn, not on its algorithm.
+    pub audit_turn_key: Option<String>,
+}
+
+// Authority-mode fallback deny text, used while a deny site's verbatim
+// message transcription is pending. The no-coverage template is transcribed
+// from the Python guard's dominant deny (live specimens 2026-08-28/29);
+// other reasons get an honest generic that names the reason rather than
+// borrowing the wrong template.
+pub fn fallback_deny_message(tool: &str, target: &str, root: &Path, reason: &str) -> String {
+    let header = format!(
+        "[worklist-guard] tool={} target={} cwd={} decision=deny reason={}",
+        tool,
+        target,
+        root.display(),
+        reason
+    );
+    if reason.starts_with("no-coverage") || reason.starts_with("bash-write-no-coverage") {
+        return format!(
+            "{}\nBlocked: writing to {} requires either a proposed/applied item in resources/worklist.json covering this path, or an explicit opt-out phrase in your last message.\n  - Propose the change in resources/worklist.json first (item with file=\"{}\", non-empty before and after, status proposed). Wait for the user's approved: payload, then retry.\n  - The user can authorize a direct edit by ending their message with \"just do it\", or by clicking the Skip worklist button.\nresolved_project_root={} (marker: resources/.worklist-authorization.json; if this is not the repo root, a stray marker file captured this subtree — remove that resources/.worklist-authorization.json)",
+            header,
+            target,
+            target,
+            root.display()
+        );
+    }
+    format!(
+        "{}\nBlocked by the Bram worklist guard ({}). See .claude/bram-conventions.md for the governing convention; address the named reason and retry.",
+        header, reason
+    )
 }
 
 fn allow(reason: impl Into<String>, target: impl Into<String>) -> ShadowVerdict {
@@ -50,6 +89,8 @@ fn allow(reason: impl Into<String>, target: impl Into<String>) -> ShadowVerdict 
         decision: "allow".into(),
         reason: reason.into(),
         target: target.into(),
+        message: String::new(),
+        audit_turn_key: None,
     }
 }
 
@@ -58,6 +99,127 @@ fn deny(reason: impl Into<String>, target: impl Into<String>) -> ShadowVerdict {
         decision: "deny".into(),
         reason: reason.into(),
         target: target.into(),
+        message: String::new(),
+        audit_turn_key: None,
+    }
+}
+
+// --- authority-mode deny messages -------------------------------------------
+//
+// The Python guard's stderr on a deny is TWO parts: `_trace_hook` writes the
+// `[worklist-guard] …` diagnostic line first (always, tracing on or off), then
+// the site's own `print(msg, file=sys.stderr)`. `authority_worklist_hook`
+// eprintln!s `ShadowVerdict::message` and nothing else, so the transcribed
+// message carries both halves, joined by a newline.
+//
+// Three header fields vary per site and are NOT the verdict's own fields:
+//
+// - `tool` — "Bash" on the Bash branch, the mcp__ tool name on the MCP branch,
+//   and the Write/Edit tool name elsewhere (Python stashes it in
+//   `__BRAM_TRACE_TOOL` for the deny_* helpers).
+// - `target` — the Python trace target, which on Bash is the 200-char command
+//   preview and on `mcp-unrecognized-input` is the empty string. The verdict's
+//   own `target` stays whitespace-free for the breadcrumb, so the two differ.
+// - `cwd` — the payload cwd on the Bash and MCP branches (passed explicitly),
+//   and the process cwd everywhere else, where Python lets `_trace_hook`
+//   default to `os.getcwd()`.
+fn hook_stderr_header(tool: &str, target: &str, cwd: &str, decision: &str, reason: &str) -> String {
+    format!(
+        "[worklist-guard] tool={} target={} cwd={} decision={} reason={}",
+        tool, target, cwd, decision, reason
+    )
+}
+
+/// Python `os.getcwd()`, with its `except` branch's empty string.
+fn process_cwd() -> String {
+    std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default()
+}
+
+/// A deny carrying the Python guard's verbatim stderr text.
+/// `verdict_target` is the breadcrumb's target; `header_*` are the trace
+/// line's fields (see above); `body` is the site's `print(...)` text.
+fn deny_msg(
+    reason: impl Into<String>,
+    verdict_target: impl Into<String>,
+    header_tool: &str,
+    header_target: &str,
+    header_cwd: &str,
+    body: &str,
+) -> ShadowVerdict {
+    let reason = reason.into();
+    let header = hook_stderr_header(header_tool, header_target, header_cwd, "deny", &reason);
+    let mut v = deny(reason, verdict_target);
+    v.message = format!("{}\n{}", header, body);
+    v
+}
+
+/// `deny_coverage` (python claude-worklist-guard.py:1183-1245). Returns the
+/// (reason, message-body) pair; the caller owns the trace header fields.
+fn deny_coverage_parts(
+    target_rel: &str,
+    opt_out_attempted: bool,
+    project_root: Option<&Path>,
+    session_root: Option<&Path>,
+    session_bypass_detail: Option<&str>,
+) -> (String, String) {
+    let mut msg = format!(
+        "Blocked: writing to {target} requires either a proposed/applied item in resources/worklist.json covering this path, or an explicit opt-out phrase in your last message.\n  - Propose the change in resources/worklist.json first (item with file=\"{target}\", non-empty before and after, status proposed). Wait for the user's approved: payload, then retry.\n  - The user can authorize a direct edit by ending their message with \"just do it\", or by clicking the Skip worklist button.",
+        target = target_rel
+    );
+    if opt_out_attempted {
+        msg.push_str("\n  - (Detected what looked like opt-out language, but it didn't match the expected phrasing. The verbal opt-out is exactly \"just do it\"; otherwise use the Skip worklist button.)");
+    }
+    let mut reason = "no-coverage-no-opt-out".to_string();
+    let (_, worktree) = worktree_coverage_target(target_rel);
+    if let Some(worktree) = worktree {
+        msg.push_str(&format!(
+            "\nworktree={} (coverage checked against the corresponding real-tree path; this denial is still authoritative)",
+            worktree
+        ));
+        reason.push_str(&format!(":worktree={}", worktree));
+    }
+    if let Some(root) = project_root {
+        msg.push_str(&claude_coverage_root_line(root));
+        reason.push_str(&format!(":root={}", root.display()));
+    }
+    if let (Some(sr), Some(detail)) = (session_root, session_bypass_detail) {
+        msg.push_str(&format!(
+            "\nAlso checked the session project's direct-edit bypass (cwd-derived root: {}): {}.",
+            sr.display(),
+            bypass_detail_label(detail)
+        ));
+        reason.push_str(&format!(":session_root={}:{}", sr.display(), detail));
+    }
+    (reason, msg)
+}
+
+/// The `resolved_project_root=` line shared by `deny_coverage` and
+/// `deny_bash_coverage` (issue-280).
+fn claude_coverage_root_line(project_root: &Path) -> String {
+    format!(
+        "\nresolved_project_root={} (marker: {}; if this is not the repo root, a stray marker file captured this subtree — remove that {})",
+        project_root.display(),
+        AUTH_REL,
+        AUTH_REL
+    )
+}
+
+/// judell/bram#287's deny text as the Bash-redirect (python:2087-2096) and MCP
+/// (python:2179-2187) surfaces print it. The Write/Edit surface's copy carries
+/// an extra clause and is spelled out at that site instead.
+const SUBAGENT_WORKLIST_WRITE_BODY: &str = "Worklist proposals and claim edits (resources/worklist.json, resources/worklist-drafts/*) stay in the orchestrator's own turn. A delegated subagent cannot write them directly. See 'Delegating worklist items to subagents' in conventions.md and judell/bram#287.";
+
+/// `_BYPASS_DETAIL_LABELS` (python:1175-1180), with its `.get(detail, detail)`
+/// fallback to the raw detail token.
+fn bypass_detail_label(detail: &str) -> &str {
+    match detail {
+        "absent" => "no resources/.worklist-authorization.json there",
+        "wrong-kind" => "a record exists there but isn't a direct-edit bypass",
+        "stale" => "a direct-edit record there has expired (>1h old)",
+        "path-not-covered" => "a fresh direct-edit record there doesn't cover this path",
+        other => other,
     }
 }
 
@@ -494,7 +656,8 @@ fn has_redirect(command: &str) -> bool {
 }
 
 fn is_nonrepo_redirect_target(t: &str) -> bool {
-    NONREPO_REDIRECT_EXACT.contains(&t) || NONREPO_REDIRECT_PREFIXES.iter().any(|p| t.starts_with(p))
+    NONREPO_REDIRECT_EXACT.contains(&t)
+        || NONREPO_REDIRECT_PREFIXES.iter().any(|p| t.starts_with(p))
 }
 
 /// True iff a redirect targets somewhere other than a no-op sink or temp
@@ -727,6 +890,16 @@ fn forge_issue_only_write(command: &str) -> bool {
 /// Issue #176: `gh … --body @…`. `(?:^|\s|;|&&|\|\||\|)gh\s.*?--body\s+@\S`,
 /// MULTILINE — ported per line because `.` never crosses a newline.
 fn is_gh_body_at_antipattern(command: &str) -> bool {
+    gh_body_at_match(command).is_some()
+}
+
+/// The Python deny prints `Detected: {m.group(0).strip()}`, so authority mode
+/// needs the matched span, not just the boolean. `group(0)` opens at the
+/// boundary token the alternation consumed — `^` (zero-width), one whitespace
+/// / `;` / `|` character, or the two-character `&&` / `||` — and closes one
+/// character past the `@`. `.strip()` then removes a whitespace opener but
+/// leaves `;` / `|` / `&&` in place.
+fn gh_body_at_match(command: &str) -> Option<String> {
     for line in command.split('\n') {
         let c = chars(line);
         for i in 0..c.len() {
@@ -746,12 +919,24 @@ fn is_gh_body_at_antipattern(command: &str) -> bool {
                 };
                 let Some(m) = ws1(&c, m) else { continue };
                 if m < c.len() && c[m] == '@' && m + 1 < c.len() && !c[m + 1].is_whitespace() {
-                    return true;
+                    // Leftmost start: the two-character alternatives (`&&`,
+                    // `||`) begin one position earlier than the single-char
+                    // ones, and re.search takes the earliest start that
+                    // matches at all.
+                    let start = if i == 0 {
+                        0
+                    } else if i >= 2 && c[i - 1] == c[i - 2] && matches!(c[i - 1], '&' | '|') {
+                        i - 2
+                    } else {
+                        i - 1
+                    };
+                    let matched: String = c[start..m + 2].iter().collect();
+                    return Some(matched.trim().to_string());
                 }
             }
         }
     }
-    false
+    None
 }
 
 // --- cross-boundary signature + SHA verification ----------------------------
@@ -1021,7 +1206,10 @@ fn subagent_lifecycle_verdict(
     command: &str,
     agent_id: &str,
 ) -> (&'static str, Option<&'static str>) {
-    if !WORKLIST_LIFECYCLE_ROUTES.iter().any(|r| command.contains(r)) {
+    if !WORKLIST_LIFECYCLE_ROUTES
+        .iter()
+        .any(|r| command.contains(r))
+    {
         return ("skip", None);
     }
     if !agent_id.trim().is_empty() {
@@ -1179,10 +1367,7 @@ fn coverage_verdict<'a>(covered: &HashSet<String>, rel: &'a str) -> (bool, Optio
     (is_covered, worktree)
 }
 
-fn with_worktree_marker(
-    mut verdict: ShadowVerdict,
-    worktree: Option<&str>,
-) -> ShadowVerdict {
+fn with_worktree_marker(mut verdict: ShadowVerdict, worktree: Option<&str>) -> ShadowVerdict {
     if let Some(name) = worktree {
         verdict.reason.push_str(":worktree=");
         verdict.reason.push_str(name);
@@ -1194,7 +1379,8 @@ fn is_lifecycle_path(rel: &str) -> bool {
     if rel.is_empty() {
         return false;
     }
-    LIFECYCLE_PATHS_EXACT.contains(&rel) || LIFECYCLE_PATHS_PREFIXES.iter().any(|p| rel.starts_with(p))
+    LIFECYCLE_PATHS_EXACT.contains(&rel)
+        || LIFECYCLE_PATHS_PREFIXES.iter().any(|p| rel.starts_with(p))
 }
 
 fn is_worklist_draft(rel: &str) -> bool {
@@ -1241,7 +1427,10 @@ fn item_status(item: &Value) -> String {
 
 type StateChanges = (Vec<(String, String)>, Vec<(String, String, String)>);
 
-fn worklist_state_changes(old_items: &[(String, Value)], new_items: &[(String, Value)]) -> StateChanges {
+fn worklist_state_changes(
+    old_items: &[(String, Value)],
+    new_items: &[(String, Value)],
+) -> StateChanges {
     let mut removed = Vec::new();
     let mut status_changed = Vec::new();
     for (id, old_item) in old_items {
@@ -1268,7 +1457,11 @@ fn worklist_items_with_inline_prose(content: &str) -> Vec<String> {
     let mut bad = Vec::new();
     for it in items {
         let Some(o) = it.as_object() else { continue };
-        if o.get("status").and_then(|v| v.as_str()).unwrap_or("proposed") != "proposed" {
+        if o.get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("proposed")
+            != "proposed"
+        {
             continue;
         }
         let nonempty = |k: &str| {
@@ -1315,7 +1508,10 @@ fn worklist_covered_files(project_root: &Path) -> HashSet<String> {
     };
     for it in items {
         let Some(o) = it.as_object() else { continue };
-        let st = o.get("status").and_then(|v| v.as_str()).unwrap_or("proposed");
+        let st = o
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("proposed");
         if st != "proposed" && st != "applied" {
             continue;
         }
@@ -1451,8 +1647,15 @@ fn last_user_text(transcript_path: &str) -> String {
     let Ok(text) = std::fs::read_to_string(transcript_path) else {
         return String::new();
     };
-    let mut last = String::new();
-    for line in text.lines() {
+    // The Python guard scans forward, parsing EVERY line to keep only the
+    // last non-empty user text; on a 30 MB session that is ~10k JSON parses
+    // per guard invocation, and at debug opt-level (the shipping profile)
+    // the authority-mode deny measured ~3x slower than the Python guard on
+    // the identical payload (1.16 s vs 0.40 s, 2026-08-29). Scanning in
+    // REVERSE parses a handful of tail lines instead: the first qualifying
+    // record from the end is the forward scan's last, by construction —
+    // semantics unchanged, shape fixed.
+    for line in text.lines().rev() {
         let Ok(m) = serde_json::from_str::<Value>(line) else {
             continue;
         };
@@ -1470,12 +1673,13 @@ fn last_user_text(transcript_path: &str) -> String {
                 .join(""),
             _ => continue,
         };
-        // A trailing tool_result-only record must not clobber a real message.
+        // A trailing tool_result-only record must not clobber a real
+        // message — in reverse, that means skip empties and keep looking.
         if !c.trim().is_empty() {
-            last = c;
+            return c;
         }
     }
-    last
+    String::new()
 }
 
 /// `\bjust do it\b`, case-insensitive — the single documented opt-out phrase.
@@ -1487,7 +1691,9 @@ fn has_opt_out(msg: &str) -> bool {
         return false;
     }
     for i in 0..=(c.len() - needle.len()) {
-        if c[i..i + needle.len()] == needle[..] && word_start(&c, i) && word_end(&c, i + needle.len())
+        if c[i..i + needle.len()] == needle[..]
+            && word_start(&c, i)
+            && word_end(&c, i + needle.len())
         {
             return true;
         }
@@ -1527,16 +1733,38 @@ fn iterate_feedback_text(project_root: &Path, last_msg: &str) -> String {
 }
 
 /// Last-chance authorization shared by every write surface (judell/bram#263).
-/// The Python original also POSTs the direct-edit audit breadcrumb; the shadow
-/// makes no network call, so this is read-only.
-fn opt_out_clears(project_root: &Path, payload: &Value) -> bool {
+/// Returns the last user message on a match so authority mode can compute
+/// the audit-breadcrumb turn key; the shadow makes no network call, so for
+/// it this remains read-only (Some = would-allow).
+fn opt_out_clears(project_root: &Path, payload: &Value) -> Option<String> {
     let transcript = str_field(payload, "transcript_path");
     let last_msg = last_user_text(&transcript);
     if has_opt_out(&last_msg) {
-        return true;
+        return Some(last_msg);
     }
     let draft = iterate_feedback_text(project_root, &last_msg);
-    !draft.is_empty() && has_opt_out(&draft)
+    if !draft.is_empty() && has_opt_out(&draft) {
+        return Some(last_msg);
+    }
+    None
+}
+
+// Stable per-turn key for the direct-edit audit breadcrumb (FNV-1a over the
+// matched message; see the ShadowVerdict field for why sha256 parity with
+// the Python guard is not required).
+fn opt_out_turn_key(msg: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in msg.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{:016x}", hash)
+}
+
+fn opt_out_allow(reason: &str, target: impl Into<String>, matched_msg: &str) -> ShadowVerdict {
+    let mut v = allow(reason, target);
+    v.audit_turn_key = Some(opt_out_turn_key(matched_msg));
+    v
 }
 
 // --- payload accessors --------------------------------------------------------
@@ -1607,22 +1835,64 @@ fn bash_branch(payload: &Value) -> ShadowVerdict {
         .unwrap_or("")
         .to_string();
     let cwd = payload_cwd(payload);
+    // Python's `preview = command[:200]` — the trace target on every Bash-branch
+    // decision, and so the `target=` field of the transcribed header.
+    let preview: String = command.chars().take(200).collect();
+    let cwd_s = cwd.to_string_lossy().to_string();
 
-    if is_gh_body_at_antipattern(&command) {
-        return deny("gh-body-at-antipattern", "-");
+    if let Some(matched) = gh_body_at_match(&command) {
+        // python:1892-1909
+        return deny_msg(
+            "gh-body-at-antipattern",
+            "-",
+            "Bash",
+            &preview,
+            &cwd_s,
+            &format!(
+                "gh --body takes a literal string, not stdin or a file reference.\nUse --body-file - (stdin) or --body-file <path> instead.\nDetected: {}",
+                matched
+            ),
+        );
     }
     let (cb_verdict, _cb_detail) = crossboundary_signature_verdict(&command, &cwd);
     if cb_verdict == "unsigned" {
-        return deny("crossboundary-unsigned", "-");
+        // python:1916-1934
+        return deny_msg(
+            "crossboundary-unsigned",
+            "-",
+            "Bash",
+            &preview,
+            &cwd_s,
+            "This posts to a repo other than this project's origin, and the body does not open with the cross-boundary signature.\nOpen the first line with:\n    <owner>'s <Agent> speaking from the <Project> project:\nSee conventions.md, 'Name the boundary and sign your side' — every artifact, every comment, not just the first in a thread.",
+        );
     }
     let (sha_verdict, sha_detail) = forge_sha_verdict(&command, &cwd);
     if sha_verdict == "bad" {
-        return deny(format!("forge-sha-unresolved:{}", sha_detail), "-");
+        // python:1947-1965
+        return deny_msg(
+            format!("forge-sha-unresolved:{}", sha_detail),
+            "-",
+            "Bash",
+            &preview,
+            &cwd_s,
+            &format!(
+                "The body contains a full commit SHA that does not resolve in this repository:\n    {}\nA fabricated or rebase-orphaned SHA renders as an ordinary link and 404s silently. Resolve the real hash with `git rev-parse <short-sha>` (or `git log --oneline`) and retry. See judell/bram#277.",
+                sha_detail
+            ),
+        );
     }
     let agent_id = str_field(payload, "agent_id");
     let (sl_verdict, _) = subagent_lifecycle_verdict(&command, &agent_id);
     if sl_verdict == "deny" {
-        return deny("subagent-lifecycle-call", "-");
+        // python:2007-2025
+        return deny_msg(
+            "subagent-lifecycle-call",
+            "-",
+            "Bash",
+            &preview,
+            &cwd_s,
+            "Worklist lifecycle calls (/__worklist/resolve, /__worklist/mutate, worklist-commit) stay in the orchestrator's own turn, after delegated subagents return. A subagent transcript cannot make them directly. See 'Delegating worklist items to subagents' in conventions.md.",
+        );
     }
     if forge_issue_only_write(&command) {
         return allow("forge-issue-only", "-");
@@ -1654,7 +1924,16 @@ fn bash_branch(payload: &Value) -> ShadowVerdict {
             let rel = normalize_target(&project_root, &candidate.to_string_lossy());
             let (sw, _) = subagent_worklist_write_verdict(rel.as_deref(), &agent_id);
             if sw == "deny" {
-                return deny("subagent-worklist-write", rel.unwrap_or_else(|| "-".into()));
+                // python:2082-2097. Note the Bash-branch trace target is the
+                // command preview, not the redirect target.
+                return deny_msg(
+                    "subagent-worklist-write",
+                    rel.unwrap_or_else(|| "-".into()),
+                    "Bash",
+                    &preview,
+                    &cwd_s,
+                    SUBAGENT_WORKLIST_WRITE_BODY,
+                );
             }
         }
     }
@@ -1665,15 +1944,26 @@ fn bash_branch(payload: &Value) -> ShadowVerdict {
     if !covered.is_empty() || fresh_bypass(&project_root, "*") {
         return allow("covered-by-worklist-item", "-");
     }
-    if opt_out_clears(&project_root, payload) {
-        return allow("opt-out-phrase", "-");
+    if let Some(msg) = opt_out_clears(&project_root, payload) {
+        return opt_out_allow("opt-out-phrase", "-", &msg);
     }
     if push_cmd(&command) && post_commit_push_grace(&project_root) {
         return allow("post-commit-push-grace", "-");
     }
-    deny(
+    // `deny_bash_coverage` (python:1284-1323). The root line is unconditional
+    // here because this call site always passes a project_root.
+    let mut body = "Bash blocked: this command writes to the filesystem or performs a sensitive side effect, and resources/worklist.json has no proposed or applied items covering active work.\n  - Propose the work in the worklist first, wait for the user's approved: payload, then retry.\n  - The user can authorize a direct edit by ending their message with \"just do it\", or by clicking the Skip worklist button.".to_string();
+    body.push_str(&claude_coverage_root_line(&project_root));
+    if push_cmd(&command) {
+        body.push_str("\n  - This looks like a push. The user can click Push in the Commits tab; an agent push is allowed only in the 10-minute window after a gate commit (see judell/bram#283).");
+    }
+    deny_msg(
         format!("bash-write-no-coverage:root={}", project_root.display()),
         "-",
+        "Bash",
+        &preview,
+        &cwd_s,
+        &body,
     )
 }
 
@@ -1686,9 +1976,21 @@ fn mcp_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
     let Some(project_root) = find_project_root(&cwd.to_string_lossy()) else {
         return allow("unmanaged-repo", "-");
     };
+    let cwd_s = cwd.to_string_lossy().to_string();
     let candidates = mcp_paths(&ti);
     if candidates.is_empty() {
-        return deny("mcp-unrecognized-input", "-");
+        // python:2131-2144. Python's trace target here is the empty string.
+        return deny_msg(
+            "mcp-unrecognized-input",
+            "-",
+            tool_name,
+            "",
+            &cwd_s,
+            &format!(
+                "{tool} blocked: this looks like a mutation, but the guard could not extract any file path from tool_input.\nPropose the change in resources/worklist.json first, or extend claude-worklist-guard.py to recognize this tool's input shape.",
+                tool = tool_name
+            ),
+        );
     }
     let agent_id = str_field(payload, "agent_id");
     let covered = worklist_covered_files(&project_root);
@@ -1698,11 +2000,25 @@ fn mcp_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
             continue;
         };
         if rel == WORKLIST_REL {
-            return deny("mcp-worklist-write", rel);
+            // python:2151-2165
+            let body = format!(
+                "{tool} blocked: edits to {worklist} must use Write/Edit (so the guard can validate prunes, the version bump, and inline prose) or /__worklist/mutate for mechanical transitions.",
+                tool = tool_name,
+                worklist = WORKLIST_REL
+            );
+            return deny_msg("mcp-worklist-write", rel.clone(), tool_name, &rel, &cwd_s, &body);
         }
         let (sw, _) = subagent_worklist_write_verdict(Some(&rel), &agent_id);
         if sw == "deny" {
-            return deny("subagent-worklist-write", rel);
+            // python:2174-2188
+            return deny_msg(
+                "subagent-worklist-write",
+                rel.clone(),
+                tool_name,
+                &rel,
+                &cwd_s,
+                SUBAGENT_WORKLIST_WRITE_BODY,
+            );
         }
         let (is_covered, _) = coverage_verdict(&covered, &rel);
         if is_lifecycle_path(&rel) || is_covered || fresh_bypass(&project_root, &rel) {
@@ -1711,17 +2027,23 @@ fn mcp_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
         violations.push(rel);
     }
     if let Some(first) = violations.first() {
-        if opt_out_clears(&project_root, payload) {
-            return allow("opt-out-phrase", first.clone());
+        if let Some(msg) = opt_out_clears(&project_root, payload) {
+            return opt_out_allow("opt-out-phrase", first.clone(), &msg);
         }
-        let mut reason = "no-coverage-no-opt-out".to_string();
-        let (_, worktree) = worktree_coverage_target(first);
-        if let Some(worktree) = worktree {
-            reason.push_str(":worktree=");
-            reason.push_str(worktree);
-        }
-        reason.push_str(&format!(":root={}", project_root.display()));
-        return deny(reason, first.clone());
+        // `deny_coverage(violations[0], opt_out_attempted=False, project_root=…)`
+        // (python:2200). No session-root leg on this surface, and
+        // `deny_coverage`'s own `_trace_hook` passes no cwd, so the header
+        // carries the process cwd rather than the payload's.
+        let (reason, body) =
+            deny_coverage_parts(first, false, Some(&project_root), None, None);
+        return deny_msg(
+            reason.clone(),
+            first.clone(),
+            tool_name,
+            first,
+            &process_cwd(),
+            &body,
+        );
     }
     // Python traces the comma-joined candidate list here; the breadcrumb's
     // target field must stay whitespace-free, so the shadow writes `-`.
@@ -1746,10 +2068,24 @@ fn write_edit_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
         return allow("no-trace:outside-project", "-");
     };
 
+    // Every deny below is reached through Python's `deny_*` helpers or an
+    // inline `print`, none of which pass a cwd to `_trace_hook` — so the
+    // header's `cwd=` is the guard process's own, not the payload's.
+    let hook_cwd = process_cwd();
+
     let agent_id = str_field(payload, "agent_id");
     let (sw, _) = subagent_worklist_write_verdict(Some(&rel), &agent_id);
     if sw == "deny" {
-        return deny("subagent-worklist-write", rel);
+        // python:2239-2256. This surface's wording carries an extra clause the
+        // Bash / MCP twins do not ("-- it can widen its own item's coverage…").
+        return deny_msg(
+            "subagent-worklist-write",
+            rel.clone(),
+            tool_name,
+            &rel,
+            &hook_cwd,
+            "Worklist proposals and claim edits (resources/worklist.json, resources/worklist-drafts/*) stay in the orchestrator's own turn. A delegated subagent cannot write them directly -- it can widen its own item's coverage, author new items, or edit claim state with no denial. See 'Delegating worklist items to subagents' in conventions.md and judell/bram#287.",
+        );
     }
 
     if rel != WORKLIST_REL && is_lifecycle_path(&rel) {
@@ -1760,9 +2096,29 @@ fn write_edit_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
         if !Path::new(fp).exists() {
             return allow("worklist-bootstrap", rel);
         }
-        let Ok(old) = std::fs::read_to_string(fp) else {
-            // Python raises here and the top-level handler denies by default.
-            return deny("guard-error:worklist-unreadable", rel);
+        let old = match std::fs::read_to_string(fp) {
+            Ok(old) => old,
+            Err(err) => {
+                // Python raises here; the top-level `except BaseException`
+                // (python:2350-2382) traces `decision=error reason=<summary>`
+                // and prints the guard-bug text. The summary is a Python
+                // exception repr — its Rust twin below is the closest reading,
+                // never byte-identical.
+                let summary: String = format!("OSError: {}", err).chars().take(500).collect();
+                let header = hook_stderr_header(
+                    tool_name,
+                    "",
+                    &hook_cwd,
+                    "error",
+                    &summary.chars().take(200).collect::<String>(),
+                );
+                let mut v = deny("guard-error:worklist-unreadable", rel);
+                v.message = format!(
+                    "{}\nBlocked: the Bram worklist guard failed and denied by default.\n  - {}\n  - This is a guard bug, not a policy decision. Please report it.",
+                    header, summary
+                );
+                return v;
+            }
         };
         let new = if tool_name == "Write" {
             ti.get("content")
@@ -1786,17 +2142,92 @@ fn write_edit_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
         let new_items = items_map(&new);
         let (removed, status_changed) = worklist_state_changes(&old_items, &new_items);
         if removed.is_empty() && status_changed.is_empty() {
-            if !worklist_items_with_inline_prose(&new).is_empty() {
-                return deny("worklist-inline-prose", rel);
+            let inline_bad = worklist_items_with_inline_prose(&new);
+            if !inline_bad.is_empty() {
+                // `deny_inline_prose` (python:1388-1409)
+                let mut lines = vec!["Blocked: inline `before` / `after` on proposed worklist item(s) — prose must live in resources/worklist-drafts/<id>.md.".to_string()];
+                for label in &inline_bad {
+                    lines.push(format!(
+                        "  - item {label}: remove inline before/after; write prose to resources/worklist-drafts/{label}.md instead",
+                        label = label
+                    ));
+                }
+                lines.push("Draft file format: `# Before` section then `# After` section, both in Markdown. The server merge surfaces the draft prose alongside the metadata in worklist.json.".to_string());
+                return deny_msg(
+                    "worklist-inline-prose",
+                    rel,
+                    tool_name,
+                    WORKLIST_REL,
+                    &hook_cwd,
+                    &lines.join("\n"),
+                );
             }
             let (old_has, old_version) = worklist_version_from_text(&old);
             let (new_has, new_version) = worklist_version_from_text(&new);
             if old_has && (!new_has || new_version != old_version + 1) {
-                return deny("stale-worklist-version", rel);
+                // `deny_stale_worklist_version` (python:1342-1371)
+                let detail = if new_has {
+                    format!(
+                        "You set version={}, but on-disk version is {}. Expected version={}.",
+                        new_version,
+                        old_version,
+                        old_version + 1
+                    )
+                } else {
+                    format!(
+                        "Your write is missing the `version` field. On-disk version is {}; the new content must set version={}.",
+                        old_version,
+                        old_version + 1
+                    )
+                };
+                let body = format!(
+                    "Blocked: stale base on resources/worklist.json. {}\n  - Re-read resources/worklist.json, base your edit on the current contents, and include the bumped version field on the write. This guards against concurrent-writer races between your propose / Edit and other agents or the /__worklist/mutate route.",
+                    detail
+                );
+                return deny_msg(
+                    "stale-worklist-version",
+                    rel,
+                    tool_name,
+                    WORKLIST_REL,
+                    &hook_cwd,
+                    &body,
+                );
             }
             return allow("worklist-author", rel);
         }
-        return deny("mechanical-worklist-change", rel);
+        // `deny_mechanical_worklist_change` (python:1412-1444)
+        let mut lines = vec![
+            "Blocked: mechanical worklist state changes must go through `POST /__worklist/mutate`, not a direct edit to `resources/worklist.json`.".to_string(),
+            "  - Direct worklist edits are for proposing items or refining their prose during iterate.".to_string(),
+            "  - Use mutate for `prune` and `advance` after a verified `drop:` / `approved:` turn.".to_string(),
+        ];
+        if !removed.is_empty() {
+            let detail = removed
+                .iter()
+                .map(|(id, status)| format!("\"{}\" (status={})", id, status))
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!("  - Removed item ids: {}", detail));
+        }
+        if !status_changed.is_empty() {
+            let detail = status_changed
+                .iter()
+                .map(|(id, old_status, new_status)| {
+                    format!("\"{}\" ({}->{})", id, old_status, new_status)
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!("  - Status changes: {}", detail));
+        }
+        lines.push("  - Example: curl -4 -sS -X POST -d '{\"op\":\"prune\",\"ids\":[\"item-id\"]}' http://127.0.0.1:$(cat resources/.bram-port)/__worklist/mutate".to_string());
+        return deny_msg(
+            "mechanical-worklist-change",
+            rel,
+            tool_name,
+            WORKLIST_REL,
+            &hook_cwd,
+            &lines.join("\n"),
+        );
     }
 
     if is_worklist_draft(&rel) {
@@ -1804,7 +2235,9 @@ fn write_edit_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
     }
 
     let covered = worklist_covered_files(&project_root);
-    let (is_covered, worktree) = coverage_verdict(&covered, &rel);
+    // Python's `deny_coverage` recomputes the worktree from the target, so the
+    // coverage verdict's own copy is only consulted for the allow leg.
+    let (is_covered, _worktree) = coverage_verdict(&covered, &rel);
     if is_covered {
         return allow("covered-by-worklist-item", rel);
     }
@@ -1825,19 +2258,21 @@ fn write_edit_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
         };
         return allow(reason, rel);
     }
-    if opt_out_clears(&project_root, payload) {
-        return allow("opt-out-phrase", rel);
+    if let Some(msg) = opt_out_clears(&project_root, payload) {
+        return opt_out_allow("opt-out-phrase", rel, &msg);
     }
-    let mut reason = "no-coverage-no-opt-out".to_string();
-    if let Some(worktree) = worktree {
-        reason.push_str(":worktree=");
-        reason.push_str(worktree);
-    }
-    reason.push_str(&format!(":root={}", project_root.display()));
-    if let (Some(sr), Some(detail)) = (session_root.as_ref(), session_detail) {
-        reason.push_str(&format!(":session_root={}:{}", sr.display(), detail));
-    }
-    deny(reason, rel)
+    // `deny_coverage` (python:2330-2337). `opt_out_attempted` is the near-miss
+    // heuristic computed at the call site from the last user message.
+    let last_msg = last_user_text(&str_field(payload, "transcript_path")).to_lowercase();
+    let opt_out_attempted = last_msg.contains("worklist") && last_msg.contains("no");
+    let (reason, body) = deny_coverage_parts(
+        &rel,
+        opt_out_attempted,
+        Some(&project_root),
+        session_root.as_deref(),
+        session_detail,
+    );
+    deny_msg(reason, rel.clone(), tool_name, &rel, &hook_cwd, &body)
 }
 
 // =============================================================================
@@ -1850,7 +2285,7 @@ fn write_edit_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
 // push-grace, draft-path shapes); everything below is where Codex genuinely
 // differs. The differences, verified against the Python rather than assumed:
 //
-// - **No project-root walk.** `cwd` IS the root (`coverage_root_line`'s
+// - **No project-root walk.** `cwd` IS the root (`claude_coverage_root_line`'s
 //   "anchored at cwd"), so there is no `find_project_root`, no `resolve_
 //   session_root`, and no issue-262 cross-root bypass. A cwd with no
 //   `resources/.worklist-authorization.json` allows unconditionally.
@@ -1899,14 +2334,23 @@ fn codex_deny_reason(message: &str) -> String {
     // Python `.splitlines()[0]` — our messages only ever carry `\n`, but the
     // other Python line terminators are cheap to honour.
     let first = message
-        .split(|c| matches!(c, '\n' | '\r' | '\u{b}' | '\u{c}' | '\u{85}' | '\u{2028}' | '\u{2029}'))
+        .split(|c| {
+            matches!(
+                c,
+                '\n' | '\r' | '\u{b}' | '\u{c}' | '\u{85}' | '\u{2028}' | '\u{2029}'
+            )
+        })
         .next()
         .unwrap_or("");
     first.chars().take(120).collect()
 }
 
 fn codex_deny(message: &str, target: &str) -> ShadowVerdict {
-    deny(codex_deny_reason(message), target)
+    let mut v = deny(codex_deny_reason(message), target);
+    // The full Python-verbatim message was always constructed here and then
+    // truncated into the reason; authority mode prints it, so keep it.
+    v.message = message.to_string();
+    v
 }
 
 fn codex_allow(reason: &str, target: &str) -> ShadowVerdict {
@@ -1928,7 +2372,11 @@ fn py_splitlines(s: &str) -> Vec<&str> {
             }
             b'\r' => {
                 out.push(&s[start..i]);
-                i += if i + 1 < bytes.len() && bytes[i + 1] == b'\n' { 2 } else { 1 };
+                i += if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+                    2
+                } else {
+                    1
+                };
                 start = i;
             }
             _ => i += 1,
@@ -2380,7 +2828,11 @@ fn worklist_items_violating_draft_only(content: &str) -> Option<DraftViolations>
     let mut bad: DraftViolations = Vec::new();
     for it in items {
         let Some(o) = it.as_object() else { continue };
-        if o.get("status").and_then(|v| v.as_str()).unwrap_or("proposed") != "proposed" {
+        if o.get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("proposed")
+            != "proposed"
+        {
             continue;
         }
         let mut violations: Vec<String> = Vec::new();
@@ -2463,7 +2915,10 @@ fn patch_adds_violating_draft_only(patch: &str) -> DraftViolations {
     if violations.is_empty() {
         return Vec::new();
     }
-    let label = ids.first().cloned().unwrap_or_else(|| "<missing-id>".into());
+    let label = ids
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "<missing-id>".into());
     vec![(label, violations)]
 }
 
@@ -2630,37 +3085,115 @@ and other agents or the /__worklist/mutate route.",
 /// `_CHANGE_KEYWORDS`, expanded. The Python regex is one `\b(a|b|...)\b`
 /// alternation, so a per-alternative `\b<literal>\b` scan is equivalent.
 const CHANGE_KEYWORDS: &[&str] = &[
-    "fix", "fixes", "fixed", "fixing",
-    "add", "adds", "added", "adding",
-    "change", "changes", "changed", "changing",
-    "update", "updates", "updated", "updating",
-    "modify", "modifies", "modified", "modifying",
-    "implement", "implements", "implemented", "implementing",
-    "create", "creates", "created", "creating",
-    "build", "builds", "building", "buildt",
-    "rewrite", "rewrites", "rewriting",
-    "refactor", "refactors", "refactored", "refactoring",
-    "edit", "edits", "edited", "editing",
-    "delete", "deletes", "deleted", "deleting",
-    "remove", "removes", "removed", "removing",
-    "rename", "renames", "renamed", "renaming",
-    "patch", "patches", "patched", "patching",
-    "improve", "improves", "improved", "improving",
-    "convert", "converts", "converted", "converting",
-    "migrate", "migrates", "migrated", "migrating",
-    "extend", "extends", "extended", "extending",
-    "integrate", "integrates", "integrated", "integrating",
-    "replace", "replaces", "replaced", "replacing",
-    "tweak", "tweaks", "tweaked", "tweaking",
-    "adjust", "adjusts", "adjusted", "adjusting",
-    "broken", "missing", "wrong",
-    "lets", "let's",
+    "fix",
+    "fixes",
+    "fixed",
+    "fixing",
+    "add",
+    "adds",
+    "added",
+    "adding",
+    "change",
+    "changes",
+    "changed",
+    "changing",
+    "update",
+    "updates",
+    "updated",
+    "updating",
+    "modify",
+    "modifies",
+    "modified",
+    "modifying",
+    "implement",
+    "implements",
+    "implemented",
+    "implementing",
+    "create",
+    "creates",
+    "created",
+    "creating",
+    "build",
+    "builds",
+    "building",
+    "buildt",
+    "rewrite",
+    "rewrites",
+    "rewriting",
+    "refactor",
+    "refactors",
+    "refactored",
+    "refactoring",
+    "edit",
+    "edits",
+    "edited",
+    "editing",
+    "delete",
+    "deletes",
+    "deleted",
+    "deleting",
+    "remove",
+    "removes",
+    "removed",
+    "removing",
+    "rename",
+    "renames",
+    "renamed",
+    "renaming",
+    "patch",
+    "patches",
+    "patched",
+    "patching",
+    "improve",
+    "improves",
+    "improved",
+    "improving",
+    "convert",
+    "converts",
+    "converted",
+    "converting",
+    "migrate",
+    "migrates",
+    "migrated",
+    "migrating",
+    "extend",
+    "extends",
+    "extended",
+    "extending",
+    "integrate",
+    "integrates",
+    "integrated",
+    "integrating",
+    "replace",
+    "replaces",
+    "replaced",
+    "replacing",
+    "tweak",
+    "tweaks",
+    "tweaked",
+    "tweaking",
+    "adjust",
+    "adjusts",
+    "adjusted",
+    "adjusting",
+    "broken",
+    "missing",
+    "wrong",
+    "lets",
+    "let's",
     "please",
     "i want",
-    "id like", "i'd like",
-    "can you", "could you",
-    "make it", "make the", "make a", "make an",
-    "should be", "should have", "should use",
+    "id like",
+    "i'd like",
+    "can you",
+    "could you",
+    "make it",
+    "make the",
+    "make a",
+    "make an",
+    "should be",
+    "should have",
+    "should use",
 ];
 
 fn looks_like_change_request(prompt: &str) -> bool {
@@ -3063,10 +3596,7 @@ payload, then retry.{}",
             violations.join(", "),
             coverage_root_line(cwd)
         );
-        return with_worktree_marker(
-            codex_deny(&message, "-"),
-            denied_worktree.as_deref(),
-        );
+        return with_worktree_marker(codex_deny(&message, "-"), denied_worktree.as_deref());
     }
     codex_allow("passed-checks", "-")
 }
@@ -3082,11 +3612,8 @@ mod guard_policy_tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "bram-guard-policy-{}-{}",
-            name,
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("bram-guard-policy-{}-{}", name, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create scratch dir");
         dir
@@ -3201,7 +3728,10 @@ mod guard_policy_tests {
         // Unquoted redirects still register.
         assert!(has_redirect("echo x > out.txt"));
         assert_eq!(redirect_targets("echo x > out.txt"), vec!["out.txt"]);
-        assert_eq!(redirect_targets("cat > \"my file.txt\""), vec!["my file.txt"]);
+        assert_eq!(
+            redirect_targets("cat > \"my file.txt\""),
+            vec!["my file.txt"]
+        );
     }
 
     // --- forge_issue_only_write (python lines 1251-1272) --------------------
@@ -3211,7 +3741,9 @@ mod guard_policy_tests {
         assert!(forge_issue_only_write("gh issue comment 5 --body-file f"));
         assert!(forge_issue_only_write("gh issue close 5"));
         assert!(forge_issue_only_write("gh issue reopen 5"));
-        assert!(forge_issue_only_write("gh issue edit 5 --title \"new title\""));
+        assert!(forge_issue_only_write(
+            "gh issue edit 5 --title \"new title\""
+        ));
         assert!(forge_issue_only_write("gh issue create --title x --body y"));
         assert!(!forge_issue_only_write(
             "gh issue comment 5 --body-file f && git commit -m x"
@@ -3282,13 +3814,15 @@ mod guard_policy_tests {
         assert!(opt_out_clears(
             &td,
             &serde_json::json!({"transcript_path": t3})
-        ));
+        )
+        .is_some());
         let t4 = transcript(&td, "d", "please do the build");
-        assert!(!opt_out_clears(
+        assert!(opt_out_clears(
             &td,
             &serde_json::json!({"transcript_path": t4})
-        ));
-        assert!(!opt_out_clears(&td, &serde_json::json!({})));
+        )
+        .is_none());
+        assert!(opt_out_clears(&td, &serde_json::json!({})).is_none());
         let _ = std::fs::remove_dir_all(&td);
     }
 
@@ -3369,7 +3903,9 @@ mod guard_policy_tests {
         assert!(body_is_signed(
             "> **Jon's Claude speaking from the Bram project:**"
         ));
-        assert!(!body_is_signed("Bram side — a correction to my green light."));
+        assert!(!body_is_signed(
+            "Bram side — a correction to my green light."
+        ));
         assert!(!body_is_signed(""));
     }
 
@@ -3442,10 +3978,7 @@ mod guard_policy_tests {
             subagent_worklist_write_verdict(Some(WORKLIST_REL), ""),
             ("skip", Some("no-agent-id"))
         );
-        assert_eq!(
-            subagent_worklist_write_verdict(None, ""),
-            ("skip", None)
-        );
+        assert_eq!(subagent_worklist_write_verdict(None, ""), ("skip", None));
         assert_eq!(
             subagent_worklist_write_verdict(Some(WORKLIST_REL), "   "),
             ("skip", Some("no-agent-id"))
@@ -3489,10 +4022,7 @@ mod guard_policy_tests {
             (true, None)
         );
         assert_eq!(
-            coverage_verdict(
-                &covered,
-                "scratch/.claude/worktrees/agent-a/app/x.txt"
-            ),
+            coverage_verdict(&covered, "scratch/.claude/worktrees/agent-a/app/x.txt"),
             (false, None)
         );
     }
@@ -3635,8 +4165,13 @@ mod guard_policy_tests {
             }),
         )
         .unwrap();
-        assert_eq!((v.decision.as_str(), v.reason.as_str()), ("deny", "gh-body-at-antipattern"));
-        assert!(!is_gh_body_at_antipattern("gh issue comment 5 --body \"x\""));
+        assert_eq!(
+            (v.decision.as_str(), v.reason.as_str()),
+            ("deny", "gh-body-at-antipattern")
+        );
+        assert!(!is_gh_body_at_antipattern(
+            "gh issue comment 5 --body \"x\""
+        ));
     }
 
     #[test]
@@ -3832,9 +4367,7 @@ mod guard_policy_tests {
         );
         assert_eq!(v.target, ".claude/worktrees/agent-a/app/x.txt");
 
-        let covered_dir = root.join(
-            ".claude/worktrees/agent-a/components/nested/y.xmlui"
-        );
+        let covered_dir = root.join(".claude/worktrees/agent-a/components/nested/y.xmlui");
         let v = shadow_worklist_decision(
             "claude-rs",
             &serde_json::json!({
@@ -3861,7 +4394,8 @@ mod guard_policy_tests {
         .unwrap();
         assert_eq!(v.decision, "deny");
         assert!(
-            v.reason.starts_with("no-coverage-no-opt-out:worktree=agent-a:root="),
+            v.reason
+                .starts_with("no-coverage-no-opt-out:worktree=agent-a:root="),
             "reason: {}",
             v.reason
         );
@@ -3885,7 +4419,10 @@ mod guard_policy_tests {
             }),
         )
         .unwrap();
-        assert_eq!((v.decision.as_str(), v.reason.as_str()), ("allow", "mcp-read-only"));
+        assert_eq!(
+            (v.decision.as_str(), v.reason.as_str()),
+            ("allow", "mcp-read-only")
+        );
 
         let v = shadow_worklist_decision(
             "claude-rs",
@@ -3939,6 +4476,361 @@ mod guard_policy_tests {
         );
         assert!(full_shas("deadbeef").is_empty());
     }
+
+    // --- authority-mode deny-message parity (bram-guard-authority-flip) -----
+    //
+    // Shadow mode ignores ShadowVerdict::message; authority mode prints it as
+    // the whole of stderr, so these assert the transcribed text against the
+    // Python guard's `print(msg, file=sys.stderr)` bodies, verbatim, with the
+    // authoritative line numbers cited beside each. The `[worklist-guard] …`
+    // header `_trace_hook` writes first is line 1 of every message; `body_of`
+    // strips it so each assertion reads as the Python source does.
+
+    fn claude_decide(payload: Value) -> ShadowVerdict {
+        shadow_worklist_decision("claude-rs", &payload).unwrap()
+    }
+
+    fn body_of(v: &ShadowVerdict) -> &str {
+        v.message
+            .split_once('\n')
+            .map(|(_, body)| body)
+            .unwrap_or("")
+    }
+
+    fn header_of(v: &ShadowVerdict) -> &str {
+        v.message.split('\n').next().unwrap_or("")
+    }
+
+    fn managed_claude(name: &str) -> PathBuf {
+        let root = scratch(name);
+        std::fs::create_dir_all(root.join("resources")).unwrap();
+        std::fs::create_dir_all(root.join("app")).unwrap();
+        std::fs::write(root.join(AUTH_REL), "{}").unwrap();
+        root
+    }
+
+    #[test]
+    fn message_parity_no_coverage_write() {
+        // python claude-worklist-guard.py:1183-1245 (deny_coverage), reached
+        // from :2330. opt_out_attempted is false (no transcript), and the
+        // session-root leg is skipped because cwd resolves to the same root.
+        let root = managed_claude("msg-no-coverage");
+        std::fs::write(root.join("app/x.txt"), "hello").unwrap();
+        let v = claude_decide(serde_json::json!({
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": root.join("app/x.txt").to_string_lossy(),
+                "content": "new",
+            },
+            "cwd": root.to_string_lossy(),
+        }));
+        assert_eq!(v.decision, "deny");
+        let expected = format!(
+            "Blocked: writing to app/x.txt requires either a proposed/applied item in resources/worklist.json covering this path, or an explicit opt-out phrase in your last message.\n  - Propose the change in resources/worklist.json first (item with file=\"app/x.txt\", non-empty before and after, status proposed). Wait for the user's approved: payload, then retry.\n  - The user can authorize a direct edit by ending their message with \"just do it\", or by clicking the Skip worklist button.\nresolved_project_root={root} (marker: resources/.worklist-authorization.json; if this is not the repo root, a stray marker file captured this subtree — remove that resources/.worklist-authorization.json)",
+            root = root.display()
+        );
+        assert_eq!(body_of(&v), expected);
+        // The header is `_trace_hook`'s stderr diagnostic: Write/Edit denials
+        // pass no cwd, so it carries the guard process's own.
+        assert_eq!(
+            header_of(&v),
+            format!(
+                "[worklist-guard] tool=Write target=app/x.txt cwd={} decision=deny reason=no-coverage-no-opt-out:root={}",
+                process_cwd(),
+                root.display()
+            )
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn message_parity_no_coverage_worktree_line() {
+        // python:1211-1217 — the worktree marker paragraph, appended before
+        // the resolved_project_root line (#309).
+        let root = managed_claude("msg-worktree");
+        let target = root.join(".claude/worktrees/agent-a/app/x.txt");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "hello").unwrap();
+        let v = claude_decide(serde_json::json!({
+            "tool_name": "Write",
+            "tool_input": {"file_path": target.to_string_lossy(), "content": "new"},
+            "cwd": root.to_string_lossy(),
+        }));
+        assert!(body_of(&v).contains(
+            "\nworktree=agent-a (coverage checked against the corresponding real-tree path; this denial is still authoritative)\nresolved_project_root="
+        ), "body: {}", body_of(&v));
+        assert!(v.reason.contains(":worktree=agent-a:root="), "{}", v.reason);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn message_parity_bash_write_no_coverage() {
+        // python:1284-1323 (deny_bash_coverage), reached from :2117. The push
+        // bullet (judell/bram#283) rides on _PUSH_CMD_RX only.
+        let root = managed_claude("msg-bash-coverage");
+        let base = "Bash blocked: this command writes to the filesystem or performs a sensitive side effect, and resources/worklist.json has no proposed or applied items covering active work.\n  - Propose the work in the worklist first, wait for the user's approved: payload, then retry.\n  - The user can authorize a direct edit by ending their message with \"just do it\", or by clicking the Skip worklist button.";
+        let root_line = format!(
+            "\nresolved_project_root={} (marker: resources/.worklist-authorization.json; if this is not the repo root, a stray marker file captured this subtree — remove that resources/.worklist-authorization.json)",
+            root.display()
+        );
+
+        let v = claude_decide(serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "rm stale.txt"},
+            "cwd": root.to_string_lossy(),
+        }));
+        assert_eq!(v.decision, "deny");
+        assert_eq!(body_of(&v), format!("{}{}", base, root_line));
+        // Bash denials DO pass cwd to _trace_hook, and the trace target is the
+        // 200-char command preview rather than the breadcrumb's `-`.
+        assert_eq!(
+            header_of(&v),
+            format!(
+                "[worklist-guard] tool=Bash target=rm stale.txt cwd={root} decision=deny reason=bash-write-no-coverage:root={root}",
+                root = root.display()
+            )
+        );
+
+        let v = claude_decide(serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "git push origin main"},
+            "cwd": root.to_string_lossy(),
+        }));
+        assert_eq!(
+            body_of(&v),
+            format!(
+                "{}{}\n  - This looks like a push. The user can click Push in the Commits tab; an agent push is allowed only in the 10-minute window after a gate commit (see judell/bram#283).",
+                base, root_line
+            )
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn message_parity_stale_worklist_version() {
+        // python:1342-1371 (deny_stale_worklist_version), both `detail` arms.
+        let root = managed_claude("msg-stale-version");
+        let wl = root.join(WORKLIST_REL);
+        std::fs::write(&wl, r#"{"version":1,"items":[]}"#).unwrap();
+
+        let v = claude_decide(serde_json::json!({
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": wl.to_string_lossy(),
+                "content": r#"{"version":1,"items":[]}"#,
+            },
+            "cwd": root.to_string_lossy(),
+        }));
+        assert_eq!(v.reason, "stale-worklist-version");
+        assert_eq!(
+            body_of(&v),
+            "Blocked: stale base on resources/worklist.json. You set version=1, but on-disk version is 1. Expected version=2.\n  - Re-read resources/worklist.json, base your edit on the current contents, and include the bumped version field on the write. This guards against concurrent-writer races between your propose / Edit and other agents or the /__worklist/mutate route."
+        );
+
+        let v = claude_decide(serde_json::json!({
+            "tool_name": "Write",
+            "tool_input": {"file_path": wl.to_string_lossy(), "content": r#"{"items":[]}"#},
+            "cwd": root.to_string_lossy(),
+        }));
+        assert_eq!(
+            body_of(&v),
+            "Blocked: stale base on resources/worklist.json. Your write is missing the `version` field. On-disk version is 1; the new content must set version=2.\n  - Re-read resources/worklist.json, base your edit on the current contents, and include the bumped version field on the write. This guards against concurrent-writer races between your propose / Edit and other agents or the /__worklist/mutate route."
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn message_parity_inline_prose() {
+        // python:1388-1409 (deny_inline_prose), including the `<no-id>` label
+        // for an item with no usable id.
+        let root = managed_claude("msg-inline-prose");
+        let wl = root.join(WORKLIST_REL);
+        std::fs::write(&wl, r#"{"version":1,"items":[]}"#).unwrap();
+        let v = claude_decide(serde_json::json!({
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": wl.to_string_lossy(),
+                "content": r#"{"version":2,"items":[{"id":"a","status":"proposed","before":"x"},{"status":"proposed","after":"y"}]}"#,
+            },
+            "cwd": root.to_string_lossy(),
+        }));
+        assert_eq!(v.reason, "worklist-inline-prose");
+        assert_eq!(
+            body_of(&v),
+            "Blocked: inline `before` / `after` on proposed worklist item(s) — prose must live in resources/worklist-drafts/<id>.md.\n  - item a: remove inline before/after; write prose to resources/worklist-drafts/a.md instead\n  - item <no-id>: remove inline before/after; write prose to resources/worklist-drafts/<no-id>.md instead\nDraft file format: `# Before` section then `# After` section, both in Markdown. The server merge surfaces the draft prose alongside the metadata in worklist.json."
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn message_parity_mechanical_worklist_change() {
+        // python:1412-1444 (deny_mechanical_worklist_change), with both the
+        // Removed and Status-changes detail lines present.
+        let root = managed_claude("msg-mechanical");
+        let wl = root.join(WORKLIST_REL);
+        std::fs::write(
+            &wl,
+            r#"{"version":1,"items":[{"id":"a","status":"proposed"},{"id":"b","status":"proposed"}]}"#,
+        )
+        .unwrap();
+        let v = claude_decide(serde_json::json!({
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": wl.to_string_lossy(),
+                "content": r#"{"version":2,"items":[{"id":"b","status":"applied"}]}"#,
+            },
+            "cwd": root.to_string_lossy(),
+        }));
+        assert_eq!(v.reason, "mechanical-worklist-change");
+        assert_eq!(
+            body_of(&v),
+            "Blocked: mechanical worklist state changes must go through `POST /__worklist/mutate`, not a direct edit to `resources/worklist.json`.\n  - Direct worklist edits are for proposing items or refining their prose during iterate.\n  - Use mutate for `prune` and `advance` after a verified `drop:` / `approved:` turn.\n  - Removed item ids: \"a\" (status=proposed)\n  - Status changes: \"b\" (proposed->applied)\n  - Example: curl -4 -sS -X POST -d '{\"op\":\"prune\",\"ids\":[\"item-id\"]}' http://127.0.0.1:$(cat resources/.bram-port)/__worklist/mutate"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn message_parity_crossboundary_unsigned() {
+        // python:1916-1934 — the signature deny, and python:1892-1909 for the
+        // #176 antipattern, whose `Detected:` tail is `m.group(0).strip()`:
+        // a whitespace opener is stripped, a `;` / `&&` / `||` opener is not.
+        let v = claude_decide(serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh issue comment 5 --body 'plain unsigned text'"},
+            "cwd": "/",
+        }));
+        assert_eq!(v.reason, "crossboundary-unsigned");
+        assert_eq!(
+            body_of(&v),
+            "This posts to a repo other than this project's origin, and the body does not open with the cross-boundary signature.\nOpen the first line with:\n    <owner>'s <Agent> speaking from the <Project> project:\nSee conventions.md, 'Name the boundary and sign your side' — every artifact, every comment, not just the first in a thread."
+        );
+
+        let at = '@';
+        let v = claude_decide(serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": format!("echo hi && gh issue comment 5 --body {at}-")},
+            "cwd": "/",
+        }));
+        assert_eq!(v.reason, "gh-body-at-antipattern");
+        assert_eq!(
+            body_of(&v),
+            format!(
+                "gh --body takes a literal string, not stdin or a file reference.\nUse --body-file - (stdin) or --body-file <path> instead.\nDetected: gh issue comment 5 --body {at}-"
+            )
+        );
+        let v = claude_decide(serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": format!("echo hi;gh issue comment 5 --body {at}x.md")},
+            "cwd": "/",
+        }));
+        // `@\S` consumes exactly one character, so the reported span stops at
+        // `@x` — and the `;` opener survives `.strip()`.
+        assert_eq!(
+            body_of(&v).lines().last().unwrap(),
+            format!("Detected: ;gh issue comment 5 --body {at}x")
+        );
+    }
+
+    #[test]
+    fn message_parity_subagent_and_mcp_denials() {
+        // python:2247-2255 (Write/Edit wording, with the extra clause),
+        // python:2087-2096 + 2179-2187 (the shorter Bash / MCP wording),
+        // python:2137-2143 and python:2158-2164 (the two MCP-only denials).
+        let root = managed_claude("msg-subagent");
+        let wl = root.join(WORKLIST_REL);
+        std::fs::write(&wl, r#"{"version":1,"items":[]}"#).unwrap();
+
+        let v = claude_decide(serde_json::json!({
+            "tool_name": "Write",
+            "agent_id": "agent-7",
+            "tool_input": {"file_path": wl.to_string_lossy(), "content": "{}"},
+            "cwd": root.to_string_lossy(),
+        }));
+        assert_eq!(v.reason, "subagent-worklist-write");
+        assert_eq!(
+            body_of(&v),
+            "Worklist proposals and claim edits (resources/worklist.json, resources/worklist-drafts/*) stay in the orchestrator's own turn. A delegated subagent cannot write them directly -- it can widen its own item's coverage, author new items, or edit claim state with no denial. See 'Delegating worklist items to subagents' in conventions.md and judell/bram#287."
+        );
+
+        let v = claude_decide(serde_json::json!({
+            "tool_name": "Bash",
+            "agent_id": "agent-7",
+            "tool_input": {"command": "echo x > resources/worklist.json"},
+            "cwd": root.to_string_lossy(),
+        }));
+        assert_eq!(v.reason, "subagent-worklist-write");
+        assert_eq!(body_of(&v), SUBAGENT_WORKLIST_WRITE_BODY);
+
+        let v = claude_decide(serde_json::json!({
+            "tool_name": "mcp__fs__write_file",
+            "tool_input": {"blob": "x"},
+            "cwd": root.to_string_lossy(),
+        }));
+        assert_eq!(v.reason, "mcp-unrecognized-input");
+        assert_eq!(
+            body_of(&v),
+            "mcp__fs__write_file blocked: this looks like a mutation, but the guard could not extract any file path from tool_input.\nPropose the change in resources/worklist.json first, or extend claude-worklist-guard.py to recognize this tool's input shape."
+        );
+        // Python's trace target on this one branch is the empty string.
+        assert!(
+            header_of(&v).contains(" target= cwd="),
+            "header: {}",
+            header_of(&v)
+        );
+
+        let v = claude_decide(serde_json::json!({
+            "tool_name": "mcp__fs__write_file",
+            "tool_input": {"path": wl.to_string_lossy()},
+            "cwd": root.to_string_lossy(),
+        }));
+        assert_eq!(v.reason, "mcp-worklist-write");
+        assert_eq!(
+            body_of(&v),
+            "mcp__fs__write_file blocked: edits to resources/worklist.json must use Write/Edit (so the guard can validate prunes, the version bump, and inline prose) or /__worklist/mutate for mechanical transitions."
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn message_parity_subagent_lifecycle_call() {
+        // python:2016-2024
+        let root = managed_claude("msg-lifecycle");
+        let v = claude_decide(serde_json::json!({
+            "tool_name": "Bash",
+            "agent_id": "agent-7",
+            "tool_input": {"command": "curl -sS http://127.0.0.1:1/__worklist/mutate"},
+            "cwd": root.to_string_lossy(),
+        }));
+        assert_eq!(v.reason, "subagent-lifecycle-call");
+        assert_eq!(
+            body_of(&v),
+            "Worklist lifecycle calls (/__worklist/resolve, /__worklist/mutate, worklist-commit) stay in the orchestrator's own turn, after delegated subagents return. A subagent transcript cannot make them directly. See 'Delegating worklist items to subagents' in conventions.md."
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn message_parity_forge_sha_unresolved() {
+        // python:1956-1964. cwd is a non-repo scratch dir, so `git cat-file`
+        // exits nonzero and the verdict is `bad` with the SHA as its detail.
+        let root = managed_claude("msg-forge-sha");
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let v = claude_decide(serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": format!(
+                    "gh issue comment 5 --body \"Jon's Claude speaking from the Bram project: see {sha}\""
+                ),
+            },
+            "cwd": root.to_string_lossy(),
+        }));
+        assert_eq!(v.reason, format!("forge-sha-unresolved:{sha}"));
+        assert_eq!(
+            body_of(&v),
+            format!("The body contains a full commit SHA that does not resolve in this repository:\n    {sha}\nA fabricated or rebase-orphaned SHA renders as an ordinary link and 404s silently. Resolve the real hash with `git rev-parse <short-sha>` (or `git log --oneline`) and retry. See judell/bram#277.")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 // --- codex parity suite -------------------------------------------------------
@@ -3955,11 +4847,8 @@ mod codex_guard_policy_tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "bram-codex-policy-{}-{}",
-            name,
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("bram-codex-policy-{}-{}", name, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create scratch dir");
         dir
@@ -4013,7 +4902,9 @@ mod codex_guard_policy_tests {
         .starts_with("apply_patch blocked: mechanical worklist state changes must go through"));
         assert!(
             codex_deny_reason(&stale_worklist_version_error(1, 1, true, "apply_patch"))
-                .starts_with("apply_patch blocked: stale base on resources/worklist.json. You set version=1,")
+                .starts_with(
+                "apply_patch blocked: stale base on resources/worklist.json. You set version=1,"
+            )
         );
         // coverage_root_line opens with a newline, so it never reaches a reason.
         assert!(coverage_root_line(Path::new("/tmp")).starts_with('\n'));
@@ -4129,7 +5020,8 @@ mod codex_guard_policy_tests {
         assert!(inline_patch_bad[0].1.join(" ").contains("inline"));
 
         // A status transition is a mechanical change.
-        let transitioned = old_content.replace("\"status\": \"proposed\"", "\"status\": \"applied\"");
+        let transitioned =
+            old_content.replace("\"status\": \"proposed\"", "\"status\": \"applied\"");
         assert_eq!(
             worklist_state_changes(
                 &codex_items_by_id(&old_content),
@@ -4176,7 +5068,7 @@ mod codex_guard_policy_tests {
     fn patch_targets_reads_both_patch_dialects() {
         let ti = serde_json::json!({
             "input": "*** Begin Patch\n*** Update File: app/a.txt\n*** Add File: app/b.txt\n\
-*** Delete File: app/c.txt   \n*** End Patch\n"
+        *** Delete File: app/c.txt   \n*** End Patch\n"
         });
         assert_eq!(
             patch_targets(&ti),
@@ -4221,7 +5113,10 @@ mod codex_guard_policy_tests {
             }),
         )
         .unwrap();
-        assert_eq!((v.decision.as_str(), v.reason.as_str()), ("allow", "passed-checks"));
+        assert_eq!(
+            (v.decision.as_str(), v.reason.as_str()),
+            ("allow", "passed-checks")
+        );
         assert_eq!(
             std::fs::read_to_string(root.join(AUTH_REL)).unwrap(),
             "{}",
@@ -4254,7 +5149,10 @@ mod codex_guard_policy_tests {
             }),
         )
         .unwrap();
-        assert_eq!((v.decision.as_str(), v.reason.as_str()), ("allow", "passed-checks"));
+        assert_eq!(
+            (v.decision.as_str(), v.reason.as_str()),
+            ("allow", "passed-checks")
+        );
 
         // Unmanaged cwd: never inspected.
         let bare = scratch("prompt-bare");
@@ -4267,7 +5165,10 @@ mod codex_guard_policy_tests {
             }),
         )
         .unwrap();
-        assert_eq!((v.decision.as_str(), v.reason.as_str()), ("allow", "passed-checks"));
+        assert_eq!(
+            (v.decision.as_str(), v.reason.as_str()),
+            ("allow", "passed-checks")
+        );
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&bare);
@@ -4275,7 +5176,7 @@ mod codex_guard_policy_tests {
 
     #[test]
     fn change_request_heuristic_mirrors_the_keyword_regex() {
-        assert!(!looks_like_change_request("fix it"));            // < 30 chars
+        assert!(!looks_like_change_request("fix it")); // < 30 chars
         assert!(looks_like_change_request(
             "could you take a look at the footer alignment there"
         ));
@@ -4367,7 +5268,9 @@ mod codex_guard_policy_tests {
         assert!(body_is_signed(
             "> **Jon's Claude speaking from the Bram project:**"
         ));
-        assert!(!body_is_signed("Bram side — a correction to my green light."));
+        assert!(!body_is_signed(
+            "Bram side — a correction to my green light."
+        ));
         assert!(!body_is_signed(""));
         let _ = std::fs::remove_dir_all(&td);
     }
@@ -4493,7 +5396,9 @@ request (route=None, nonce=None, age=0s)"
     #[test]
     fn codex_helpers_match_the_python_predicates() {
         assert!(is_worklist_citation("resources/worklist-citations/x.json"));
-        assert!(!is_worklist_citation("resources/worklist-citations/sub/x.json"));
+        assert!(!is_worklist_citation(
+            "resources/worklist-citations/sub/x.json"
+        ));
         assert!(!is_worklist_citation("resources/worklist-citations/x.md"));
         assert!(is_coordination_file(WORKLIST_INTENT_REL));
         assert!(is_coordination_file(WORKLIST_RESULT_REL));
@@ -4509,7 +5414,10 @@ request (route=None, nonce=None, age=0s)"
             Some("app/x.txt")
         );
         assert_eq!(codex_normalize_target(root, "/etc/hosts"), None);
-        assert_eq!(codex_normalize_target(root, "/tmp/proj").as_deref(), Some(""));
+        assert_eq!(
+            codex_normalize_target(root, "/tmp/proj").as_deref(),
+            Some("")
+        );
         assert_eq!(codex_normalize_target(root, ""), None);
         // Python `.splitlines()` parity for the patch reader.
         assert_eq!(py_splitlines("a\nb\r\nc\rd"), vec!["a", "b", "c", "d"]);
@@ -4599,7 +5507,10 @@ request (route=None, nonce=None, age=0s)"
     fn unmanaged_cwd_allows_everything() {
         let root = scratch("unmanaged");
         let v = decide(&root, "Bash", serde_json::json!({"command": "rm -rf x"}));
-        assert_eq!((v.decision.as_str(), v.reason.as_str()), ("allow", "passed-checks"));
+        assert_eq!(
+            (v.decision.as_str(), v.reason.as_str()),
+            ("allow", "passed-checks")
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -4608,7 +5519,10 @@ request (route=None, nonce=None, age=0s)"
         let root = managed("codex-bash");
 
         let v = decide(&root, "Bash", serde_json::json!({"command": "ls -la"}));
-        assert_eq!((v.decision.as_str(), v.reason.as_str()), ("allow", "passed-checks"));
+        assert_eq!(
+            (v.decision.as_str(), v.reason.as_str()),
+            ("allow", "passed-checks")
+        );
 
         let v = decide(
             &root,
@@ -4620,7 +5534,11 @@ request (route=None, nonce=None, age=0s)"
             ("allow", "bash-write-nonrepo-target")
         );
 
-        let v = decide(&root, "Bash", serde_json::json!({"command": "rm stale.txt"}));
+        let v = decide(
+            &root,
+            "Bash",
+            serde_json::json!({"command": "rm stale.txt"}),
+        );
         assert_eq!(v.decision, "deny");
         assert!(
             v.reason.starts_with(
@@ -4642,8 +5560,15 @@ resources/worklist.json has no proposed"
             .to_string(),
         )
         .unwrap();
-        let v = decide(&root, "Bash", serde_json::json!({"command": "rm stale.txt"}));
-        assert_eq!((v.decision.as_str(), v.reason.as_str()), ("allow", "passed-checks"));
+        let v = decide(
+            &root,
+            "Bash",
+            serde_json::json!({"command": "rm stale.txt"}),
+        );
+        assert_eq!(
+            (v.decision.as_str(), v.reason.as_str()),
+            ("allow", "passed-checks")
+        );
         std::fs::remove_file(root.join(WORKLIST_REL)).unwrap();
 
         // The drafts substring and the intent channel are lifecycle writes.
@@ -4652,14 +5577,20 @@ resources/worklist.json has no proposed"
             "Bash",
             serde_json::json!({"command": "echo x > resources/worklist-drafts/a.md"}),
         );
-        assert_eq!((v.decision.as_str(), v.reason.as_str()), ("allow", "passed-checks"));
+        assert_eq!(
+            (v.decision.as_str(), v.reason.as_str()),
+            ("allow", "passed-checks")
+        );
 
         let v = decide(
             &root,
             "Bash",
             serde_json::json!({"command": "echo '{}' > resources/.worklist-intent.json"}),
         );
-        assert_eq!((v.decision.as_str(), v.reason.as_str()), ("allow", "passed-checks"));
+        assert_eq!(
+            (v.decision.as_str(), v.reason.as_str()),
+            ("allow", "passed-checks")
+        );
 
         std::fs::write(root.join(WORKLIST_INTENT_REL), "{\"nonce\":\"n9\"}").unwrap();
         let v = decide(
@@ -4669,8 +5600,9 @@ resources/worklist.json has no proposed"
         );
         assert_eq!(v.decision, "deny");
         assert!(
-            v.reason
-                .starts_with("Bash blocked: resources/.worklist-intent.json already holds a pending"),
+            v.reason.starts_with(
+                "Bash blocked: resources/.worklist-intent.json already holds a pending"
+            ),
             "reason: {}",
             v.reason
         );
@@ -4697,7 +5629,9 @@ resources/worklist.json has no proposed"
             serde_json::json!({"command": "gh issue comment 5 --body \"no signature here\""}),
         );
         assert_eq!(v.decision, "deny");
-        assert!(v.reason.starts_with("This posts to a repo other than this project's origin"));
+        assert!(v
+            .reason
+            .starts_with("This posts to a repo other than this project's origin"));
 
         // A push with a fresh consumed approval rides the grace.
         std::fs::write(
@@ -4720,7 +5654,11 @@ resources/worklist.json has no proposed"
         let root = managed("codex-patch-pipe");
 
         // Unparseable patch payload.
-        let v = decide(&root, "apply_patch", serde_json::json!({"input": "nothing"}));
+        let v = decide(
+            &root,
+            "apply_patch",
+            serde_json::json!({"input": "nothing"}),
+        );
         assert_eq!(v.decision, "deny");
         assert!(
             v.reason
@@ -4735,7 +5673,8 @@ resources/worklist.json has no proposed"
         assert_eq!(v.decision, "deny");
         assert_eq!(v.target, "app/x.txt");
         assert!(
-            v.reason.starts_with("apply_patch blocked: app/x.txt is not covered by any proposed"),
+            v.reason
+                .starts_with("apply_patch blocked: app/x.txt is not covered by any proposed"),
             "reason: {}",
             v.reason
         );
@@ -4754,7 +5693,10 @@ resources/worklist.json has no proposed"
         )
         .unwrap();
         let v = decide(&root, "apply_patch", serde_json::json!({"input": patch}));
-        assert_eq!((v.decision.as_str(), v.reason.as_str()), ("allow", "passed-checks"));
+        assert_eq!(
+            (v.decision.as_str(), v.reason.as_str()),
+            ("allow", "passed-checks")
+        );
 
         // Drafts, citations, and the result file are exempt without coverage.
         for (rel, label) in [
@@ -4825,7 +5767,10 @@ resources/worklist.json has no proposed"
                 + "\n"),
         );
         let v = decide(&root, "apply_patch", serde_json::json!({"input": good}));
-        assert_eq!((v.decision.as_str(), v.reason.as_str()), ("allow", "passed-checks"));
+        assert_eq!(
+            (v.decision.as_str(), v.reason.as_str()),
+            ("allow", "passed-checks")
+        );
 
         // Inline prose on a proposed item.
         let prose = replacement_patch(
@@ -4928,7 +5873,10 @@ resources/worklist.json has no proposed"
             "mcp__filesystem__read_text_file",
             serde_json::json!({"path": "app/x.txt"}),
         );
-        assert_eq!((v.decision.as_str(), v.reason.as_str()), ("allow", "passed-checks"));
+        assert_eq!(
+            (v.decision.as_str(), v.reason.as_str()),
+            ("allow", "passed-checks")
+        );
 
         let v = decide(
             &root,
@@ -4969,7 +5917,10 @@ resources/worklist.json has no proposed"
                 }).to_string(),
             }),
         );
-        assert_eq!((v.decision.as_str(), v.reason.as_str()), ("allow", "passed-checks"));
+        assert_eq!(
+            (v.decision.as_str(), v.reason.as_str()),
+            ("allow", "passed-checks")
+        );
 
         // No inspectable content -> the mutate-route denial.
         let v = decide(
@@ -4979,8 +5930,9 @@ resources/worklist.json has no proposed"
         );
         assert_eq!(v.decision, "deny");
         assert!(
-            v.reason
-                .starts_with("mcp__filesystem__write_file blocked: worklist edits that advance status"),
+            v.reason.starts_with(
+                "mcp__filesystem__write_file blocked: worklist edits that advance status"
+            ),
             "reason: {}",
             v.reason
         );
@@ -4992,7 +5944,10 @@ resources/worklist.json has no proposed"
     fn unknown_tool_names_pass_through() {
         let root = managed("codex-other");
         let v = decide(&root, "Read", serde_json::json!({"file_path": "x"}));
-        assert_eq!((v.decision.as_str(), v.reason.as_str()), ("allow", "passed-checks"));
+        assert_eq!(
+            (v.decision.as_str(), v.reason.as_str()),
+            ("allow", "passed-checks")
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

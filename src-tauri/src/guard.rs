@@ -21,6 +21,12 @@ const EVENTS_LOG_CAP_BYTES: u64 = 5 * 1024 * 1024;
 
 pub fn run_guard_mode(args: &[String]) -> i32 {
     let hook = args.first().map(String::as_str).unwrap_or("");
+    // Authority mode (bram-guard-authority-flip): `--authority` makes this
+    // invocation the DECIDER — real exit codes, real deny output, the
+    // Python guards deregistered by Setup while the guards.rustAuthority
+    // flag is on. Without the flag, shadow semantics are byte-identical to
+    // before: observe, breadcrumb, always exit 0.
+    let authority = args.iter().any(|a| a == "--authority");
     let started = std::time::Instant::now();
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
@@ -29,6 +35,12 @@ pub fn run_guard_mode(args: &[String]) -> i32 {
     match hook {
         "claude-permission-menu" => shadow_menu_hook("claude-rs", &payload, started),
         "codex-permission-menu" => shadow_menu_hook("codex-rs", &payload, started),
+        "claude-worklist" if authority => {
+            return authority_worklist_hook("claude-rs", &payload, started);
+        }
+        "codex-worklist" if authority => {
+            return authority_worklist_hook("codex-rs", &payload, started);
+        }
         "claude-worklist" => shadow_worklist_hook("claude-rs", &payload, started),
         "codex-worklist" => shadow_worklist_hook("codex-rs", &payload, started),
         other => {
@@ -39,6 +51,147 @@ pub fn run_guard_mode(args: &[String]) -> i32 {
         }
     }
     0
+}
+
+// --- Authority mode (bram-guard-authority-flip) ---------------------------
+
+// Walk up from `start` to the nearest resources/.bram-port, mirroring the
+// Python guard's port discovery so the [hook] trace lands the same way.
+fn find_port_upward(start: &Path) -> Option<u16> {
+    let mut cur = start.to_path_buf();
+    loop {
+        let candidate = cur.join("resources").join(".bram-port");
+        if let Ok(text) = std::fs::read_to_string(&candidate) {
+            return text.trim().parse().ok();
+        }
+        if !cur.pop() {
+            return None;
+        }
+    }
+}
+
+// Minimal fail-silent HTTP POST over std TcpStream — the guard must never
+// block or fail a tool call because Bram is down (the Python guards use a
+// 400ms urllib timeout for the same reason).
+fn post_json_fail_silent(port: u16, path: &str, body: &str) {
+    use std::io::Write as _;
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let timeout = std::time::Duration::from_millis(400);
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, timeout) else {
+        return;
+    };
+    let _ = stream.set_write_timeout(Some(timeout));
+    let _ = stream.set_read_timeout(Some(timeout));
+    let req = format!(
+        "POST {} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        path,
+        port,
+        body.len(),
+        body
+    );
+    let _ = stream.write_all(req.as_bytes());
+    let mut buf = [0u8; 256];
+    let _ = std::io::Read::read(&mut stream, &mut buf);
+}
+
+// The [hook] decision line, shipped exactly the way the Python guards ship
+// theirs (POST /__hook-trace; the host writes it through the standard
+// bram-trace path, gated on the LIVE Traces setting).
+fn post_hook_trace(root: &Path, tool: &str, target: &str, decision: &str, reason: &str) {
+    let Some(port) = find_port_upward(root) else {
+        return;
+    };
+    let body = serde_json::json!({
+        "script": "bram-guard",
+        "event": "PreToolUse",
+        "tool": tool,
+        "target": target.chars().take(300).collect::<String>(),
+        "cwd": root.to_string_lossy(),
+        "decision": decision,
+        "reason": reason,
+    });
+    post_json_fail_silent(port, "/__hook-trace", &body.to_string());
+}
+
+fn authority_worklist_hook(
+    provider: &str,
+    payload: &serde_json::Value,
+    started: std::time::Instant,
+) -> i32 {
+    let tool = str_field(payload, "tool_name");
+    let root = resolve_project_root(provider, payload);
+    let Some(v) = crate::guard_policy::shadow_worklist_decision(provider, payload) else {
+        return 0;
+    };
+    post_hook_trace(&root, &tool, &v.target, &v.decision, &v.reason);
+    append_breadcrumb(
+        &root,
+        provider,
+        "PreToolUse",
+        &tool,
+        &format!(
+            "decided={} target={} ms={} reason={}",
+            v.decision,
+            if v.target.is_empty() { "-" } else { &v.target },
+            started.elapsed().as_millis(),
+            v.reason
+        ),
+    );
+    if v.decision == "allow" {
+        // Lifecycle bookkeeping writes: emit Claude's PreToolUse allow
+        // decision so the user is not prompted (transcribed from
+        // emit_allow_for_lifecycle in the Python guard).
+        if provider == "claude-rs" && v.reason == "bram-lifecycle-channel" {
+            let out = serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "permissionDecisionReason": format!(
+                        "Bram lifecycle channel ({}): implicitly authorized by the worklist flow, no per-write confirmation needed.",
+                        v.target
+                    ),
+                }
+            });
+            println!("{}", out);
+        }
+        // Prose opt-out: land the direct-edit breadcrumb in the audit
+        // ledger, as the Python guard does (opt-out-single-phrase-and-audit;
+        // host-side dedup keys on turnKey, so any stable per-turn hash
+        // works — the Python guard never runs concurrently with authority
+        // mode, so sha256 compatibility is not required).
+        if let Some(turn_key) = &v.audit_turn_key {
+            if let Some(port) = find_port_upward(&root) {
+                let body = serde_json::json!({
+                    "provider": if provider == "codex-rs" { "codex" } else { "claude" },
+                    "source": "bram-guard-opt-out",
+                    "turnKey": turn_key,
+                });
+                post_json_fail_silent(port, "/__audit/direct-edit", &body.to_string());
+            }
+        }
+        return 0;
+    }
+    // Deny. Codex answers by stdout JSON (permissionDecision deny, exit 0);
+    // Claude by stderr message and exit 2 — each transcribed from its
+    // Python guard's protocol.
+    let message = if !v.message.is_empty() {
+        v.message.clone()
+    } else {
+        crate::guard_policy::fallback_deny_message(&tool, &v.target, &root, &v.reason)
+    };
+    if provider == "codex-rs" {
+        let out = serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": if message.is_empty() { "blocked".to_string() } else { message },
+            }
+        });
+        println!("{}", out);
+        return 0;
+    }
+    eprintln!("{}", message);
+    2
 }
 
 fn str_field(payload: &serde_json::Value, key: &str) -> String {
@@ -172,7 +325,11 @@ fn append_breadcrumb(root: &Path, provider: &str, event: &str, tool: &str, tail:
         tail
     );
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = f.write_all(line.as_bytes());
     }
 }
@@ -275,11 +432,8 @@ mod guard_mode_tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "bram-guard-test-{}-{}",
-            name,
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("bram-guard-test-{}-{}", name, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create scratch dir");
         dir
@@ -318,7 +472,10 @@ mod guard_mode_tests {
             menu_would_action("codex-rs", "PostToolUse", "apply_patch"),
             Some("/__menu/permission/clear")
         );
-        assert_eq!(menu_would_action("codex-rs", "PermissionDenied", "Bash"), None);
+        assert_eq!(
+            menu_would_action("codex-rs", "PermissionDenied", "Bash"),
+            None
+        );
     }
 
     #[test]
@@ -347,7 +504,10 @@ mod guard_mode_tests {
         shadow_menu_hook("codex-rs", &payload, std::time::Instant::now());
         let log = std::fs::read_to_string(root.join("resources/bram-traces/hook-events.log"))
             .expect("breadcrumb written");
-        assert!(log.contains("codex-rs PermissionRequest Bash"), "log: {log}");
+        assert!(
+            log.contains("codex-rs PermissionRequest Bash"),
+            "log: {log}"
+        );
         assert!(
             log.contains("would-post=/__menu/permission port=none ms="),
             "log: {log}"

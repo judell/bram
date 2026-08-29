@@ -1613,7 +1613,7 @@ def self_test():
 
         # --body-file must not be swallowed by the --body arm.
         body_path = os.path.join(td, "comment.md")
-        with open(body_path, "w") as f:
+        with open(body_path, "w", encoding="utf-8") as f:
             f.write(signed)
         assert crossboundary_signature_verdict(
             "gh issue comment 5 --body-file %s" % body_path, td

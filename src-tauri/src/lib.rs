@@ -38586,6 +38586,28 @@ fn worklist_mutate_cell() -> &'static Mutex<()> {
     CELL.get_or_init(|| Mutex::new(()))
 }
 
+// issue-308: serialize the commit route against itself. Each loopback
+// request is served on its own thread (the `incoming_requests` accept
+// loop spawns per request), and the mutate lock above covers only the
+// post-commit prune — so before this, a re-POST arriving while a long
+// commit was still staging ran the whole route concurrently and the two
+// `git` invocations fought over `.git/index.lock`. A large commit (85
+// files, >2 min in the field report behind this issue) outruns ordinary
+// caller timeouts, which makes that re-POST the natural reaction: the
+// race was reachable by following a timeout, not by exotic concurrency.
+//
+// A DEDICATED lock, never worklist_mutate_cell: this guard is held across
+// the whole route body, whose tail delegates the prune to
+// handle_worklist_mutate — reusing that lock would self-deadlock. With
+// this, a retry WAITS for the first request to finish and then reads the
+// state it left behind (authorization consumed, ids pruned), landing on
+// worklist_commit_consumed_retry_message's explicit "already ran" text
+// instead of a git-level error.
+fn worklist_commit_cell() -> &'static Mutex<()> {
+    static CELL: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(()))
+}
+
 // Per-item content hash exposed via /__worklist. The UI reads it and
 // propagates it verbatim into the `approved:` / `drop:` payload, so the
 // PTY watcher can recompute the same fingerprint from the on-disk file
@@ -48923,6 +48945,59 @@ fn worklist_commit_files_for_ids(
     Ok(files)
 }
 
+// issue-308: worklist-commit is SINGLE-SHOT PER APPROVAL, and until this
+// helper the failure a second request landed on could not say so. The
+// route consumes the `approved` authorization (its post-commit prune
+// delegates to handle_worklist_mutate -> consume_worklist_authorization)
+// and removes the ids from worklist.json, so a retry falls through
+// ensure_worklist_commit_authorized — which deliberately does NOT gate on
+// consumedAtMs, because same-turn resolve -> commit must keep working —
+// and dies later in worklist_commit_files_for_ids with
+// "worklist item not found: <id>". That reads as a broken or empty
+// worklist, i.e. exactly like a commit that did NOT happen, which is the
+// worst possible message for a caller whose HTTP client timed out on a
+// long commit (85 files, >2 min in the field report) and is deciding
+// whether to re-POST a state-changing route.
+//
+// Recognise that retry shape — a consumed record covering every requested
+// id, and none of those ids still on the board — and say what actually
+// happened. No authorization decision changes here: this only rewrites the
+// text of a refusal the retry already receives.
+//
+// Deliberately conservative. It requires ALL requested ids to be both
+// covered by the consumed record and absent from the board, so a genuinely
+// mixed or unrelated failure keeps its original, accurate message rather
+// than being explained away as a duplicate.
+fn worklist_commit_consumed_retry_message(
+    err: &str,
+    ids: &[String],
+    items: &[serde_json::Value],
+    auth: &serde_json::Value,
+) -> Option<String> {
+    let consumed_at = auth.get("consumedAtMs").and_then(|v| v.as_i64())?;
+    let auth_ids = worklist_json_ids(auth, "ids");
+    if !ids
+        .iter()
+        .all(|id| auth_ids.iter().any(|auth_id| auth_id == id))
+    {
+        return None;
+    }
+    let any_still_on_board = ids.iter().any(|id| {
+        items
+            .iter()
+            .any(|it| it.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
+    });
+    if any_still_on_board {
+        return None;
+    }
+    Some(format!(
+        "this commit ALREADY RAN — the approval authorizing {} was already consumed (consumedAtMs {}) and those ids were pruned from the worklist. worklist-commit is single-shot per approval, so a timeout is not a failure and must never be re-POSTed: verify with git log before doing anything else. Re-approve in the Worklist tab only if the commit is genuinely absent. (underlying: {})",
+        ids.join(", "),
+        consumed_at,
+        err
+    ))
+}
+
 // Canonical → installed sync pairs, mirroring build.rs's installed-hook
 // sync list. The installed copies under .claude/hooks/ are build
 // artifacts refreshed from their canonical on every cargo build and
@@ -49586,6 +49661,10 @@ fn handle_worklist_commit<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
 ) -> (u16, &'static str, Vec<u8>) {
+    // issue-308: held for the whole route body so a timed-out caller's
+    // re-POST queues behind the in-flight commit instead of racing it.
+    // See worklist_commit_cell for why this is not worklist_mutate_cell.
+    let _commit_guard = worklist_commit_cell().lock();
     let req_json: serde_json::Value = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(e) => return worklist_json_error(400, format!("invalid JSON: {}", e)),
@@ -49696,7 +49775,14 @@ fn handle_worklist_commit<R: tauri::Runtime>(
     }
     let mut files = match worklist_commit_files_for_ids(items, &ids, true) {
         Ok(files) => files,
-        Err(e) => return worklist_json_error(400, e),
+        // issue-308: this is where a re-POST of an already-completed commit
+        // lands. Name that case explicitly instead of returning
+        // "worklist item not found", which reads as a failed commit.
+        Err(e) => {
+            let msg = worklist_commit_consumed_retry_message(&e, &ids, items, &auth)
+                .unwrap_or(e);
+            return worklist_json_error(400, msg);
+        }
     };
     // Auto-stage installed twins of listed canonicals (see
     // INSTALLED_TWIN_PAIRS). Extending `files` here covers the scoped
@@ -49712,6 +49798,21 @@ fn handle_worklist_commit<R: tauri::Runtime>(
             );
         }
         files.push(twin);
+    }
+
+    // issue-308: phase progress. A large commit (85 files, >2 min in the
+    // field report) is indistinguishable from a wedged one to a caller
+    // watching a blocked HTTP request, and the route was previously silent
+    // between entry and completion. These three lines — staging,
+    // committing, committed — put the phase edges in the trace so "still
+    // working" and "stuck" can be told apart without touching git state.
+    // Counts and the short sha only; never file contents.
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "worklist-commit",
+            &format!("op=staging files={}", files.len()),
+        );
     }
 
     let staged_before = match git_staged_files(app) {
@@ -49783,6 +49884,9 @@ fn handle_worklist_commit<R: tauri::Runtime>(
             .filter(|f| staged_after.contains(f))
             .cloned(),
     );
+    if bram_trace_enabled() {
+        append_bram_trace_line(app, "worklist-commit", "op=committing");
+    }
     if let Err(e) = git_run_owned(app, &commit_args) {
         return worklist_json_error(500, format!("git commit failed: {}", e.trim()));
     }
@@ -49795,6 +49899,13 @@ fn handle_worklist_commit<R: tauri::Runtime>(
             )
         }
     };
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "worklist-commit",
+            &format!("op=committed sha={}", &sha[..sha.len().min(7)]),
+        );
+    }
 
     let branch = git_run(app, &["rev-parse", "--abbrev-ref", "HEAD"])
         .map(|s| s.trim().to_string())
@@ -49874,7 +49985,8 @@ mod worklist_authorization_tests {
         resource_relative_path, retire_worklist_authorization_record,
         turn_text_has_direct_edit_opt_out, validate_post_commit_prune_status,
         validate_worklist_advance_status, validate_worklist_mutate_authorization,
-        worklist_auth_feedback_for_ids, worklist_commit_add_args, worklist_commit_files_for_ids,
+        worklist_auth_feedback_for_ids, worklist_commit_add_args,
+        worklist_commit_consumed_retry_message, worklist_commit_files_for_ids,
         worklist_draft_path, worklist_feedback_ref_item_id, worklist_iteration_comment_body,
         worklist_lifecycle_comment_body, worklist_lifecycle_item_issue_numbers,
         worklist_pushed_lifecycle_comment_body, ParsedWorklistAuthorization,
@@ -50148,6 +50260,133 @@ mod worklist_authorization_tests {
         let err = ensure_worklist_commit_authorized(&ids(&["b"]), &auth, 1000)
             .expect_err("commit ids must be covered");
         assert_eq!(err, "id not in auth: b");
+    }
+
+    // issue-308: worklist-commit is single-shot per approval. The route
+    // consumes the authorization exactly once, so a caller whose HTTP client
+    // timed out on a long commit must never re-POST — and if it does, the
+    // refusal has to say the commit already ran rather than looking like a
+    // commit that failed.
+    #[test]
+    fn issue308_authorization_consumes_exactly_once() {
+        let parsed = ParsedWorklistAuthorization {
+            kind: "approved".to_string(),
+            requests: vec![("a".to_string(), None)],
+            commit_too: false,
+        };
+        let on_disk = vec![json!({"id":"a"})];
+        let mut record = build_worklist_authorization_record(parsed, &on_disk, None, 100, "test");
+
+        // The commit's post-commit prune consumes the whole record.
+        assert_eq!(
+            retire_worklist_authorization_record(&mut record, None, 200),
+            WorklistAuthRetirement::Consumed
+        );
+        assert_eq!(record.consumed_at_ms, Some(200));
+
+        // A retry's consume is a no-op that reports the prior consumption
+        // rather than re-arming or re-stamping it. This is what makes a
+        // blind re-POST unable to authorize a second commit.
+        assert_eq!(
+            retire_worklist_authorization_record(&mut record, None, 300),
+            WorklistAuthRetirement::AlreadyConsumed
+        );
+        assert_eq!(record.consumed_at_ms, Some(200));
+    }
+
+    #[test]
+    fn issue308_commit_retry_after_consumption_names_the_completed_commit() {
+        // State the first (successful) commit leaves behind: the item is
+        // pruned off the board and the approval is consumed.
+        let items_before = vec![json!({"id": "a", "status": "applied", "files": ["src/a.rs"]})];
+        let items_after: Vec<serde_json::Value> = vec![];
+        let consumed_auth = json!({
+            "kind": "approved", "ids": ["a"], "issuedAtMs": 1000, "consumedAtMs": 1500
+        });
+
+        // Sanity: before the commit the same call succeeds, so the error
+        // below is genuinely caused by the completed commit and not by a
+        // malformed item.
+        worklist_commit_files_for_ids(&items_before, &ids(&["a"]), true)
+            .expect("the first commit finds its files");
+
+        // The raw failure a re-POST lands on today. Pinned verbatim because
+        // its misreadability is the whole point: nothing in it says the
+        // commit succeeded.
+        let raw = worklist_commit_files_for_ids(&items_after, &ids(&["a"]), true)
+            .expect_err("a pruned id has no files");
+        assert_eq!(raw, "worklist item not found: a");
+
+        let sharpened =
+            worklist_commit_consumed_retry_message(&raw, &ids(&["a"]), &items_after, &consumed_auth)
+                .expect("the retry shape is recognised");
+        assert!(sharpened.contains("ALREADY RAN"), "got: {sharpened}");
+        assert!(
+            sharpened.contains("single-shot per approval"),
+            "got: {sharpened}"
+        );
+        assert!(
+            sharpened.contains("must never be re-POSTed"),
+            "got: {sharpened}"
+        );
+        // The actionable instruction, and the consumption timestamp that
+        // dates the commit for whoever runs it.
+        assert!(sharpened.contains("git log"), "got: {sharpened}");
+        assert!(sharpened.contains("1500"), "got: {sharpened}");
+        // The original error survives for anyone debugging the route.
+        assert!(sharpened.contains(&raw), "got: {sharpened}");
+    }
+
+    #[test]
+    fn issue308_consumed_retry_message_only_fires_on_the_retry_shape() {
+        let empty: Vec<serde_json::Value> = vec![];
+        let raw = "worklist item not found: a".to_string();
+        let consumed = json!({
+            "kind": "approved", "ids": ["a"], "issuedAtMs": 1000, "consumedAtMs": 1500
+        });
+
+        // Unconsumed approval: the id is missing for some other reason (a
+        // typo, an unauthorized prune) and must keep its accurate message.
+        let live = json!({"kind": "approved", "ids": ["a"], "issuedAtMs": 1000});
+        assert_eq!(
+            worklist_commit_consumed_retry_message(&raw, &ids(&["a"]), &empty, &live),
+            None
+        );
+
+        // Consumed, but this id was never part of that approval.
+        assert_eq!(
+            worklist_commit_consumed_retry_message(&raw, &ids(&["b"]), &empty, &consumed),
+            None
+        );
+
+        // Consumed and covered, but the item is still on the board — so the
+        // failure is something other than "already committed and pruned".
+        let still_there = vec![json!({"id": "a", "status": "applied", "files": ["src/a.rs"]})];
+        assert_eq!(
+            worklist_commit_consumed_retry_message(&raw, &ids(&["a"]), &still_there, &consumed),
+            None
+        );
+
+        // Mixed plural: one id pruned, one still present. Conservative — the
+        // original message stands rather than claiming the whole request
+        // already ran.
+        let partial = vec![json!({"id": "b", "status": "applied", "files": ["src/b.rs"]})];
+        let plural_auth = json!({
+            "kind": "approved", "ids": ["a", "b"], "issuedAtMs": 1000, "consumedAtMs": 1500
+        });
+        assert_eq!(
+            worklist_commit_consumed_retry_message(&raw, &ids(&["a", "b"]), &partial, &plural_auth),
+            None
+        );
+
+        // Both pruned under one consumed plural approval: recognised.
+        assert!(worklist_commit_consumed_retry_message(
+            &raw,
+            &ids(&["a", "b"]),
+            &empty,
+            &plural_auth
+        )
+        .is_some());
     }
 
     // security-h4 as narrowed by issue-255: an interrupted authorization can no

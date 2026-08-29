@@ -10154,6 +10154,51 @@ fn codex_trust_prompt_menu_from_chunk(stripped_chunk: &str) -> Option<PtyMenu> {
     })
 }
 
+// Armed boot-prompt menu awaiting settled-state commit (see the arm site's
+// comment for the race this replaces). Single-slot: the prompt class is
+// one-at-a-time by nature, and re-paints while armed are no-ops.
+fn boot_prompt_pending_cell() -> &'static Mutex<Option<(PtyMenu, i64)>> {
+    static CELL: OnceLock<Mutex<Option<(PtyMenu, i64)>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+// The commit-time guards, pure. Err names the first failing guard for the
+// expiry trace — anti-echo lives here now: a genuine agent echo keeps
+// `working` true through the whole arm window and expires as
+// reason=working instead of conjuring a phantom menu.
+fn boot_prompt_commit_decision(
+    provider_is_codex: bool,
+    working: bool,
+    menu_present: bool,
+) -> Result<(), &'static str> {
+    if !provider_is_codex {
+        return Err("provider");
+    }
+    if menu_present {
+        return Err("menu-present");
+    }
+    if working {
+        return Err("working");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod boot_prompt_commit_tests {
+    use super::boot_prompt_commit_decision;
+
+    #[test]
+    fn commits_only_when_all_guards_settle_and_names_the_blocker() {
+        assert_eq!(boot_prompt_commit_decision(true, false, false), Ok(()));
+        assert_eq!(boot_prompt_commit_decision(false, false, false), Err("provider"));
+        assert_eq!(boot_prompt_commit_decision(true, true, false), Err("working"));
+        assert_eq!(boot_prompt_commit_decision(true, false, true), Err("menu-present"));
+        // Ordering: a displayed menu outranks the working read — its
+        // expiry reason points at the more actionable state.
+        assert_eq!(boot_prompt_commit_decision(true, true, true), Err("menu-present"));
+    }
+}
+
 #[cfg(test)]
 mod codex_trust_prompt_menu_tests {
     use super::{codex_trust_prompt_menu_from_chunk, strip_ansi};
@@ -10189,29 +10234,31 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
     agent_boot_evidence_scan(app, chunk);
     // issue-305 (observe-only): track terminal-modal mode bytes.
     term_modal_scan(app, chunk);
-    // codex-trust-prompt-first-class-menu: allowlisted boot-prompt
-    // classification, per-chunk (drain-immune) and gate-independent —
-    // see the classifier's header comment. Guards: only for a Codex
-    // session with no open working turn (an agent echoing the prompt's
-    // text mid-turn must not conjure a phantom menu and a send hold),
-    // and never while another menu is already displayed.
-    if current_provider(app) == Some(SessionProvider::Codex) && !turn_state_menu_present() {
-        let working = turn_state_cell()
-            .lock()
-            .map(|t| t.phase == "working")
-            .unwrap_or(false);
-        if !working {
-            let stripped = strip_ansi(chunk);
-            let text = String::from_utf8_lossy(&stripped);
-            if let Some(menu) = codex_trust_prompt_menu_from_chunk(&text) {
-                if bram_trace_enabled() {
-                    append_bram_trace_line(
-                        app,
-                        "pty-menu",
-                        "op=boot-prompt shape=codex-hooks-trust",
-                    );
+    // codex-trust-menu-arm-until-settled: boot-prompt classification arms
+    // on the chunk's own content ALONE. The first field test showed the
+    // working-phase guard reading boot-transient state at chunk time and
+    // silently skipping the once-painted prompt (the phase settled to
+    // idle 800 ms AFTER the paint) — the chunk is reliable, the ambient
+    // state around it is not. The pty-throughput ticker commits against
+    // settled state and expires with the failing guard named. The raw
+    // prefilter keeps the per-chunk strip off the hot path; "need review"
+    // is contiguous in both captured specimens (marker-adjacent ANSI
+    // splits would defeat it — specimen-driven, revisit on a miss).
+    if chunk.windows(11).any(|w| w == b"need review") {
+        let stripped = strip_ansi(chunk);
+        let text = String::from_utf8_lossy(&stripped);
+        if let Some(menu) = codex_trust_prompt_menu_from_chunk(&text) {
+            if let Ok(mut pending) = boot_prompt_pending_cell().lock() {
+                if pending.is_none() {
+                    if bram_trace_enabled() {
+                        append_bram_trace_line(
+                            app,
+                            "pty-menu",
+                            "op=boot-prompt-armed shape=codex-hooks-trust",
+                        );
+                    }
+                    *pending = Some((menu, unix_now_ms()));
                 }
-                turn_state_set_menu(app, Some(menu), "boot-prompt", "detected");
             }
         }
     }
@@ -14611,6 +14658,62 @@ fn pty_spawn(
                     if now.saturating_sub(guard_link_last_ensure_ms) >= 60_000 {
                         guard_link_last_ensure_ms = now;
                         let _ = guard::ensure_bram_guard_link();
+                    }
+                }
+                // codex-trust-menu-arm-until-settled: commit an armed
+                // boot-prompt menu once ambient state settles; expire with
+                // the failing guard named so no miss is ever silent again.
+                {
+                    let armed_at = boot_prompt_pending_cell()
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|(_, at)| *at));
+                    if let Some(armed_at) = armed_at {
+                        let provider_is_codex = current_provider(&app_for_throughput)
+                            == Some(SessionProvider::Codex);
+                        let (working, menu_present) = turn_state_cell()
+                            .lock()
+                            .map(|t| (t.phase == "working", t.pending_menu.is_some()))
+                            .unwrap_or((false, false));
+                        match boot_prompt_commit_decision(provider_is_codex, working, menu_present)
+                        {
+                            Ok(()) => {
+                                let menu = boot_prompt_pending_cell()
+                                    .lock()
+                                    .ok()
+                                    .and_then(|mut g| g.take())
+                                    .map(|(m, _)| m);
+                                if let Some(menu) = menu {
+                                    if bram_trace_enabled() {
+                                        append_bram_trace_line(
+                                            &app_for_throughput,
+                                            "pty-menu",
+                                            "op=boot-prompt shape=codex-hooks-trust",
+                                        );
+                                    }
+                                    turn_state_set_menu(
+                                        &app_for_throughput,
+                                        Some(menu),
+                                        "boot-prompt",
+                                        "detected",
+                                    );
+                                }
+                            }
+                            Err(reason) => {
+                                if unix_now_ms().saturating_sub(armed_at) > 5_000 {
+                                    if let Ok(mut g) = boot_prompt_pending_cell().lock() {
+                                        *g = None;
+                                    }
+                                    if bram_trace_enabled() {
+                                        append_bram_trace_line(
+                                            &app_for_throughput,
+                                            "pty-menu",
+                                            &format!("op=boot-prompt-expired reason={}", reason),
+                                        );
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 let bytes = pty_throughput_bytes().swap(0, Ordering::Relaxed);

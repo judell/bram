@@ -1451,6 +1451,17 @@ Parallelize the *work*; serialize the *gates*.
 - Before delegating in parallel, intersect the `files` lists of the
   candidate items. **Non-empty intersection → do not parallelize
   those two**; run them in sequence.
+- Worktrees under `.claude/worktrees/<name>/` inherit the corresponding
+  real-tree coverage: for example, an item covering `app/x.js` also covers
+  `.claude/worktrees/agent-a/app/x.js`. Do not add worktree-prefixed twins to
+  an item's `files`; the guards strip that one prefix for coverage matching,
+  including declared-directory coverage, while retaining the original path
+  in traces and diagnostics (judell/bram#309).
+- A worktree denial is still a denial. Report it to the orchestrator; never
+  route around it through another tool or scripted write. The bypass observed
+  in #309 is why this rule is explicit. A blocked worktree with zero changes
+  is eligible for harness cleanup, so report promptly rather than waiting in
+  place.
 - Attribution: `worklist.json` has no agent field, so a committable
   item's diff produced by several subagents carries no record of
   which one made which edit. If that matters for a batch, commit the

@@ -49,6 +49,7 @@ from datetime import datetime, timezone
 
 WORKLIST_REL = "resources/worklist.json"
 WORKLIST_DRAFTS_PREFIX = "resources/worklist-drafts/"
+WORKTREE_PREFIX = ".claude/worktrees/"
 AUTH_REL = "resources/.worklist-authorization.json"
 BYPASS_TTL_SECONDS = 60 * 60  # direct-edit auth records are fresh for 1h
 
@@ -961,6 +962,39 @@ def normalize_target(project_root, target):
     return None
 
 
+def worktree_coverage_target(rel):
+    """Map a managed Claude worktree path to its real-tree coverage path.
+
+    Only `.claude/worktrees/<one-segment>/...` is special. The original
+    normalized path remains the enforcement/trace target; this mapped form is
+    used only when matching a worklist item's file coverage (#309).
+    """
+    if not isinstance(rel, str) or not rel.startswith(WORKTREE_PREFIX):
+        return rel, None
+    tail = rel[len(WORKTREE_PREFIX):]
+    worktree, sep, mapped = tail.partition("/")
+    if not sep or not worktree or not mapped:
+        return rel, None
+    return mapped, worktree
+
+
+def coverage_verdict(covered, rel):
+    """Return (`allow`|`deny`, worktree name or None) for item coverage.
+
+    A declared entry covers itself and descendants beneath a slash boundary,
+    matching the commit gate's directory-entry expansion from #295. For a
+    managed worktree target, the comparison uses its real-tree path (#309).
+    """
+    mapped, worktree = worktree_coverage_target(rel)
+    for declared in covered:
+        if not isinstance(declared, str):
+            continue
+        entry = declared.rstrip("/")
+        if entry and (mapped == entry or mapped.startswith(entry + "/")):
+            return "allow", worktree
+    return "deny", worktree
+
+
 def is_worklist_draft(rel):
     return (
         isinstance(rel, str)
@@ -1174,6 +1208,13 @@ def deny_coverage(
     # `cwd` in the trace is a red herring for Edit/Write, whose root comes
     # from the TARGET's directory).
     reason = "no-coverage-no-opt-out"
+    _, worktree = worktree_coverage_target(target_rel)
+    if worktree:
+        msg += (
+            f"\nworktree={worktree} (coverage checked against the corresponding "
+            f"real-tree path; this denial is still authoritative)"
+        )
+        reason += f":worktree={worktree}"
     if project_root:
         msg += (
             f"\nresolved_project_root={project_root} "
@@ -1492,6 +1533,26 @@ def self_test():
     assert _redirect_targets("awk '$1 >= \"x\"' f.txt") == []
     assert _redirect_targets("jq '.n > 5' d.json > out.txt") == ["out.txt"]
     assert not has_redirect("jq '.[] | select(.n > 5)' data.json")
+
+    # #309: worktree paths inherit real-tree coverage, and #295 directory
+    # entries apply after mapping. Uncovered/non-worktree lookalikes stay
+    # denied and only genuine worktree paths carry a worktree marker.
+    coverage = {"app/x.txt", "components"}
+    assert coverage_verdict(
+        coverage, ".claude/worktrees/agent-a/app/x.txt"
+    ) == ("allow", "agent-a")
+    assert coverage_verdict(
+        coverage, ".claude/worktrees/agent-a/components/nested/y.xmlui"
+    ) == ("allow", "agent-a")
+    assert coverage_verdict(
+        coverage, ".claude/worktrees/agent-a/app/y.txt"
+    ) == ("deny", "agent-a")
+    assert coverage_verdict(
+        {".claude/hooks/guard.py"}, ".claude/hooks/guard.py"
+    ) == ("allow", None)
+    assert coverage_verdict(
+        coverage, "scratch/.claude/worktrees/agent-a/app/x.txt"
+    ) == ("deny", None)
 
     # Issue-only forge work with no repo diff (conventions.md) is exempt from
     # worklist coverage entirely.
@@ -2127,7 +2188,8 @@ def main():
                 sys.exit(2)
             if is_lifecycle_path(rel):
                 continue
-            if rel in covered:
+            coverage_decision, _ = coverage_verdict(covered, rel)
+            if coverage_decision == "allow":
                 continue
             if fresh_bypass(project_root, rel):
                 continue
@@ -2243,7 +2305,8 @@ def main():
     # Branch 2: writes to any other project file — require worklist coverage,
     # fresh bypass, or explicit opt-out language in the last user message.
     covered = worklist_covered_files(project_root)
-    if rel in covered:
+    coverage_decision, _ = coverage_verdict(covered, rel)
+    if coverage_decision == "allow":
         _trace_hook("PreToolUse", tool_name, rel, "allow", "covered-by-worklist-item")
         sys.exit(0)
     # issue-262: consult both the target project's own bypass record and,

@@ -51,6 +51,7 @@ from pathlib import Path
 WORKLIST_REL = "resources/worklist.json"
 WORKLIST_DRAFTS_PREFIX = "resources/worklist-drafts/"
 WORKLIST_CITATIONS_PREFIX = "resources/worklist-citations/"
+WORKTREE_PREFIX = ".claude/worktrees/"
 AUTH_REL = "resources/.worklist-authorization.json"
 # Codex filesystem lifecycle channel (#130). Writing the intent file is how
 # Codex drives the worklist lifecycle (the loopback-curl equivalent), so it is
@@ -133,7 +134,7 @@ def _trace_hook(event, tool, target, decision, reason, cwd=None):
 
 # Module-level context for [hook] trace records. main() populates these
 # once the inbound payload is parsed; allow() / deny() read them on exit.
-_HOOK_CTX = {"event": "", "tool": "", "target": "", "cwd": ""}
+_HOOK_CTX = {"event": "", "tool": "", "target": "", "cwd": "", "worktree": ""}
 
 
 def allow(reason="passed-checks"):
@@ -170,6 +171,11 @@ def coverage_root_line(cwd):
 
 
 def deny(reason):
+    trace_reason = (
+        (reason or "").splitlines()[0][:120] if reason else "blocked"
+    )
+    if _HOOK_CTX.get("worktree"):
+        trace_reason += ":worktree=" + _HOOK_CTX["worktree"]
     _trace_hook(
         _HOOK_CTX["event"] or "PreToolUse",
         _HOOK_CTX["tool"] or "",
@@ -177,7 +183,7 @@ def deny(reason):
         "deny",
         # Trim the deny message to a short reason for the trace; the
         # full message goes to stderr below for codex to surface.
-        (reason or "").splitlines()[0][:120] if reason else "blocked",
+        trace_reason,
     )
     message = reason or "blocked"
     # Codex's structured PreToolUse contract is the reliable denial path for
@@ -355,6 +361,33 @@ def normalize_target(cwd, target):
     if abs_target.startswith(prefix):
         return abs_target[len(prefix):].replace(os.sep, "/")
     return None
+
+
+def worktree_coverage_target(rel):
+    """Map `.claude/worktrees/<one-segment>/...` for coverage only (#309)."""
+    if not isinstance(rel, str) or not rel.startswith(WORKTREE_PREFIX):
+        return rel, None
+    tail = rel[len(WORKTREE_PREFIX):]
+    worktree, sep, mapped = tail.partition("/")
+    if not sep or not worktree or not mapped:
+        return rel, None
+    return mapped, worktree
+
+
+def coverage_verdict(covered, rel):
+    """Return (`allow`|`deny`, worktree name or None) for item coverage.
+
+    Declared directory entries cover descendants at a slash boundary (#295),
+    after a managed worktree target is mapped to its real-tree path (#309).
+    """
+    mapped, worktree = worktree_coverage_target(rel)
+    for declared in covered:
+        if not isinstance(declared, str):
+            continue
+        entry = declared.rstrip("/")
+        if entry and (mapped == entry or mapped.startswith(entry + "/")):
+            return "allow", worktree
+    return "deny", worktree
 
 
 def is_worklist_draft(rel):
@@ -1256,6 +1289,26 @@ def self_test():
     assert _redirect_targets("jq '.n > 5' d.json > out.txt") == ["out.txt"]
     assert not has_redirect("jq '.[] | select(.n > 5)' data.json")
 
+    # #309: genuine worktree prefixes map to real-tree item coverage; an
+    # uncovered worktree target stays denied and carries the worktree name.
+    # #295 directory entries are evaluated after the mapping.
+    coverage = {"app/x.txt", "components"}
+    assert coverage_verdict(
+        coverage, ".claude/worktrees/agent-a/app/x.txt"
+    ) == ("allow", "agent-a")
+    assert coverage_verdict(
+        coverage, ".claude/worktrees/agent-a/components/nested/y.xmlui"
+    ) == ("allow", "agent-a")
+    assert coverage_verdict(
+        coverage, ".claude/worktrees/agent-a/app/y.txt"
+    ) == ("deny", "agent-a")
+    assert coverage_verdict(
+        {".claude/hooks/guard.py"}, ".claude/hooks/guard.py"
+    ) == ("allow", None)
+    assert coverage_verdict(
+        coverage, "scratch/.claude/worktrees/agent-a/app/x.txt"
+    ) == ("deny", None)
+
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         (root / "resources").mkdir()
@@ -1728,6 +1781,7 @@ def main():
                 if bad_ids:
                     deny(_worklist_validation_error(bad_ids, "apply_patch"))
         violations = []
+        denied_worktree = None
         for t in raw_targets:
             rel = normalize_target(cwd, t)
             if rel is None:
@@ -1781,12 +1835,15 @@ def main():
                         cwd,
                     )
                 continue  # Codex lifecycle channel (#130)
-            if rel in covered:
+            coverage_decision, worktree = coverage_verdict(covered, rel)
+            if coverage_decision == "allow":
                 continue
             if fresh_bypass(cwd, rel):
                 continue
             violations.append(rel)
+            denied_worktree = denied_worktree or worktree
         if violations:
+            _HOOK_CTX["worktree"] = denied_worktree or ""
             bad = ", ".join(violations)
             deny(
                 f"apply_patch blocked: {bad} is not covered by any proposed "
@@ -1989,6 +2046,7 @@ def main():
                         old_version, new_version, new_has_version, tool_name
                     ))
         violations = []
+        denied_worktree = None
         for t in candidate_paths:
             rel = normalize_target(cwd, t)
             if rel is None:
@@ -2001,12 +2059,15 @@ def main():
                 continue  # citation objects (issue-232)
             if is_coordination_file(rel):
                 continue  # Codex lifecycle channel (#130)
-            if rel in covered:
+            coverage_decision, worktree = coverage_verdict(covered, rel)
+            if coverage_decision == "allow":
                 continue
             if fresh_bypass(cwd, rel):
                 continue
             violations.append(rel)
+            denied_worktree = denied_worktree or worktree
         if violations:
+            _HOOK_CTX["worktree"] = denied_worktree or ""
             bad = ", ".join(violations)
             deny(
                 f"{tool_name} blocked: {bad} is not covered by any proposed "

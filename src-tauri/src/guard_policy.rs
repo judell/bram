@@ -65,6 +65,7 @@ fn deny(reason: impl Into<String>, target: impl Into<String>) -> ShadowVerdict {
 
 const WORKLIST_REL: &str = "resources/worklist.json";
 const WORKLIST_DRAFTS_PREFIX: &str = "resources/worklist-drafts/";
+const WORKTREE_PREFIX: &str = ".claude/worktrees/";
 const AUTH_REL: &str = "resources/.worklist-authorization.json";
 const BYPASS_TTL_MS: f64 = 60.0 * 60.0 * 1000.0;
 const POST_COMMIT_PUSH_GRACE_MS: f64 = 10.0 * 60.0 * 1000.0;
@@ -1145,6 +1146,50 @@ fn normalize_target(project_root: &Path, target: &str) -> Option<String> {
     None
 }
 
+/// Map a managed Claude worktree target to its real-tree path for item
+/// coverage only (#309). Lifecycle classification, bypass lookup, traces, and
+/// deny targets continue to use the original normalized path.
+fn worktree_coverage_target(rel: &str) -> (&str, Option<&str>) {
+    let Some(tail) = rel.strip_prefix(WORKTREE_PREFIX) else {
+        return (rel, None);
+    };
+    let Some((worktree, mapped)) = tail.split_once('/') else {
+        return (rel, None);
+    };
+    if worktree.is_empty() || mapped.is_empty() {
+        return (rel, None);
+    }
+    (mapped, Some(worktree))
+}
+
+/// Whether `rel` is covered by a declared file/directory entry, plus the
+/// managed worktree name when one was mapped. Directory matching mirrors the
+/// commit gate's separator-anchored expansion from #295 and happens after the
+/// #309 worktree mapping.
+fn coverage_verdict<'a>(covered: &HashSet<String>, rel: &'a str) -> (bool, Option<&'a str>) {
+    let (mapped, worktree) = worktree_coverage_target(rel);
+    let is_covered = covered.iter().any(|declared| {
+        let entry = declared.trim_end_matches('/');
+        !entry.is_empty()
+            && (mapped == entry
+                || mapped
+                    .strip_prefix(entry)
+                    .map_or(false, |rest| rest.starts_with('/')))
+    });
+    (is_covered, worktree)
+}
+
+fn with_worktree_marker(
+    mut verdict: ShadowVerdict,
+    worktree: Option<&str>,
+) -> ShadowVerdict {
+    if let Some(name) = worktree {
+        verdict.reason.push_str(":worktree=");
+        verdict.reason.push_str(name);
+    }
+    verdict
+}
+
 fn is_lifecycle_path(rel: &str) -> bool {
     if rel.is_empty() {
         return false;
@@ -1659,7 +1704,8 @@ fn mcp_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
         if sw == "deny" {
             return deny("subagent-worklist-write", rel);
         }
-        if is_lifecycle_path(&rel) || covered.contains(&rel) || fresh_bypass(&project_root, &rel) {
+        let (is_covered, _) = coverage_verdict(&covered, &rel);
+        if is_lifecycle_path(&rel) || is_covered || fresh_bypass(&project_root, &rel) {
             continue;
         }
         violations.push(rel);
@@ -1668,10 +1714,14 @@ fn mcp_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
         if opt_out_clears(&project_root, payload) {
             return allow("opt-out-phrase", first.clone());
         }
-        return deny(
-            format!("no-coverage-no-opt-out:root={}", project_root.display()),
-            first.clone(),
-        );
+        let mut reason = "no-coverage-no-opt-out".to_string();
+        let (_, worktree) = worktree_coverage_target(first);
+        if let Some(worktree) = worktree {
+            reason.push_str(":worktree=");
+            reason.push_str(worktree);
+        }
+        reason.push_str(&format!(":root={}", project_root.display()));
+        return deny(reason, first.clone());
     }
     // Python traces the comma-joined candidate list here; the breadcrumb's
     // target field must stay whitespace-free, so the shadow writes `-`.
@@ -1754,7 +1804,8 @@ fn write_edit_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
     }
 
     let covered = worklist_covered_files(&project_root);
-    if covered.contains(&rel) {
+    let (is_covered, worktree) = coverage_verdict(&covered, &rel);
+    if is_covered {
         return allow("covered-by-worklist-item", rel);
     }
     let session_root = resolve_session_root(payload);
@@ -1777,7 +1828,12 @@ fn write_edit_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
     if opt_out_clears(&project_root, payload) {
         return allow("opt-out-phrase", rel);
     }
-    let mut reason = format!("no-coverage-no-opt-out:root={}", project_root.display());
+    let mut reason = "no-coverage-no-opt-out".to_string();
+    if let Some(worktree) = worktree {
+        reason.push_str(":worktree=");
+        reason.push_str(worktree);
+    }
+    reason.push_str(&format!(":root={}", project_root.display()));
     if let (Some(sr), Some(detail)) = (session_root.as_ref(), session_detail) {
         reason.push_str(&format!(":session_root={}:{}", sr.display(), detail));
     }
@@ -2771,6 +2827,7 @@ verify coverage.",
     }
 
     let mut violations: Vec<String> = Vec::new();
+    let mut denied_worktree: Option<String> = None;
     for t in &raw_targets {
         let Some(rel) = codex_normalize_target(cwd, t) else {
             continue; // outside the project tree
@@ -2793,8 +2850,12 @@ verify coverage.",
             // non-terminal, so it is not the breadcrumb's decision.
             continue;
         }
-        if covered.contains(&rel) || codex_fresh_bypass(cwd, &rel) {
+        let (is_covered, worktree) = coverage_verdict(covered, &rel);
+        if is_covered || codex_fresh_bypass(cwd, &rel) {
             continue;
+        }
+        if denied_worktree.is_none() {
+            denied_worktree = worktree.map(str::to_string);
         }
         violations.push(rel);
     }
@@ -2808,7 +2869,10 @@ user's approved: payload, then retry.{}",
             bad,
             coverage_root_line(cwd)
         );
-        return codex_deny(&message, &trace_target);
+        return with_worktree_marker(
+            codex_deny(&message, &trace_target),
+            denied_worktree.as_deref(),
+        );
     }
     codex_allow("passed-checks", &trace_target)
 }
@@ -2968,6 +3032,7 @@ shape whose resulting content the guard can inspect.",
         }
     }
     let mut violations: Vec<String> = Vec::new();
+    let mut denied_worktree: Option<String> = None;
     for t in &candidates {
         let Some(rel) = codex_normalize_target(cwd, t) else {
             continue;
@@ -2979,8 +3044,12 @@ shape whose resulting content the guard can inspect.",
         {
             continue;
         }
-        if covered.contains(&rel) || codex_fresh_bypass(cwd, &rel) {
+        let (is_covered, worktree) = coverage_verdict(covered, &rel);
+        if is_covered || codex_fresh_bypass(cwd, &rel) {
             continue;
+        }
+        if denied_worktree.is_none() {
+            denied_worktree = worktree.map(str::to_string);
         }
         violations.push(rel);
     }
@@ -2994,7 +3063,10 @@ payload, then retry.{}",
             violations.join(", "),
             coverage_root_line(cwd)
         );
-        return codex_deny(&message, "-");
+        return with_worktree_marker(
+            codex_deny(&message, "-"),
+            denied_worktree.as_deref(),
+        );
     }
     codex_allow("passed-checks", "-")
 }
@@ -3384,6 +3456,47 @@ mod guard_policy_tests {
         );
     }
 
+    #[test]
+    fn issue_309_worktree_coverage_mapping() {
+        let covered: HashSet<String> = ["app/x.txt", "components"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+
+        assert_eq!(
+            coverage_verdict(&covered, ".claude/worktrees/agent-a/app/x.txt"),
+            (true, Some("agent-a"))
+        );
+        // #295 directory-entry coverage is evaluated after #309 mapping.
+        assert_eq!(
+            coverage_verdict(
+                &covered,
+                ".claude/worktrees/agent-a/components/nested/y.xmlui"
+            ),
+            (true, Some("agent-a"))
+        );
+        assert_eq!(
+            coverage_verdict(&covered, ".claude/worktrees/agent-a/app/y.txt"),
+            (false, Some("agent-a"))
+        );
+
+        let claude_hook: HashSet<String> = [".claude/hooks/guard.py"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            coverage_verdict(&claude_hook, ".claude/hooks/guard.py"),
+            (true, None)
+        );
+        assert_eq!(
+            coverage_verdict(
+                &covered,
+                "scratch/.claude/worktrees/agent-a/app/x.txt"
+            ),
+            (false, None)
+        );
+    }
+
     // --- cross-root direct-edit bypass (python lines 1466-1574) -------------
 
     fn write_auth(root: &Path, kind: &str, paths: &[&str], age_ms: f64) {
@@ -3681,6 +3794,79 @@ mod guard_policy_tests {
             (v.decision.as_str(), v.reason.as_str()),
             ("deny", "worklist-inline-prose")
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn issue_309_claude_worktree_pipeline_maps_only_coverage() {
+        let root = scratch("worktree-claude");
+        std::fs::create_dir_all(root.join("resources")).unwrap();
+        std::fs::write(root.join(AUTH_REL), "{}").unwrap();
+        std::fs::write(
+            root.join(WORKLIST_REL),
+            serde_json::json!({
+                "version": 1,
+                "items": [{
+                    "id": "i1",
+                    "status": "proposed",
+                    "files": ["app/x.txt", "components"]
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let covered = root.join(".claude/worktrees/agent-a/app/x.txt");
+        let v = shadow_worklist_decision(
+            "claude-rs",
+            &serde_json::json!({
+                "tool_name": "Write",
+                "tool_input": {"file_path": covered.to_string_lossy(), "content": "x"},
+                "cwd": root.to_string_lossy(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            (v.decision.as_str(), v.reason.as_str()),
+            ("allow", "covered-by-worklist-item")
+        );
+        assert_eq!(v.target, ".claude/worktrees/agent-a/app/x.txt");
+
+        let covered_dir = root.join(
+            ".claude/worktrees/agent-a/components/nested/y.xmlui"
+        );
+        let v = shadow_worklist_decision(
+            "claude-rs",
+            &serde_json::json!({
+                "tool_name": "Write",
+                "tool_input": {"file_path": covered_dir.to_string_lossy(), "content": "x"},
+                "cwd": root.to_string_lossy(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            (v.decision.as_str(), v.reason.as_str()),
+            ("allow", "covered-by-worklist-item")
+        );
+
+        let uncovered = root.join(".claude/worktrees/agent-a/app/y.txt");
+        let v = shadow_worklist_decision(
+            "claude-rs",
+            &serde_json::json!({
+                "tool_name": "Write",
+                "tool_input": {"file_path": uncovered.to_string_lossy(), "content": "x"},
+                "cwd": root.to_string_lossy(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(v.decision, "deny");
+        assert!(
+            v.reason.starts_with("no-coverage-no-opt-out:worktree=agent-a:root="),
+            "reason: {}",
+            v.reason
+        );
+        assert_eq!(v.target, ".claude/worktrees/agent-a/app/y.txt");
+
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -4659,6 +4845,76 @@ resources/worklist.json has no proposed"
                 "apply_patch blocked: proposed worklist item(s) violate draft-only rule."
             )
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn issue_309_codex_worktree_pipeline_maps_only_coverage() {
+        let root = managed("codex-worktree");
+        std::fs::write(
+            root.join(WORKLIST_REL),
+            serde_json::json!({
+                "version": 1,
+                "items": [{
+                    "id": "i1",
+                    "status": "proposed",
+                    "files": ["app/x.txt", "components"]
+                }]
+            })
+            .to_string()
+                + "\n",
+        )
+        .unwrap();
+
+        let patch = |rel: &str| {
+            format!(
+                "*** Begin Patch\n*** Update File: {}\n@@\n-a\n+b\n*** End Patch\n",
+                rel
+            )
+        };
+
+        let v = decide(
+            &root,
+            "apply_patch",
+            serde_json::json!({
+                "input": patch(".claude/worktrees/agent-a/app/x.txt")
+            }),
+        );
+        assert_eq!(
+            (v.decision.as_str(), v.reason.as_str()),
+            ("allow", "passed-checks")
+        );
+        assert_eq!(v.target, ".claude/worktrees/agent-a/app/x.txt");
+
+        let v = decide(
+            &root,
+            "apply_patch",
+            serde_json::json!({
+                "input": patch(
+                    ".claude/worktrees/agent-a/components/nested/y.xmlui"
+                )
+            }),
+        );
+        assert_eq!(
+            (v.decision.as_str(), v.reason.as_str()),
+            ("allow", "passed-checks")
+        );
+
+        let v = decide(
+            &root,
+            "apply_patch",
+            serde_json::json!({
+                "input": patch(".claude/worktrees/agent-a/app/y.txt")
+            }),
+        );
+        assert_eq!(v.decision, "deny");
+        assert!(
+            v.reason.ends_with(":worktree=agent-a"),
+            "reason: {}",
+            v.reason
+        );
+        assert_eq!(v.target, ".claude/worktrees/agent-a/app/y.txt");
 
         let _ = std::fs::remove_dir_all(&root);
     }

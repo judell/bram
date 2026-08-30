@@ -16068,6 +16068,32 @@ const AGENT_FIRST_COMMAND_SETTLE_MS: u64 = 2500;
 // pane (the same action the user did by hand) to re-derive everything cleanly.
 const AGENT_CROSS_PROVIDER_RELOAD_MS: u64 = 2500;
 
+// issue-314: the shared evidence gate for typing a launch command into the
+// PTY — a settle floor (so the launch can't race the interrupt echo when the
+// shell was already sitting at its prompt), then a poll for shell-prompt
+// evidence. Ok(waited_ms) = prompt seen, safe to type. Err(waited_ms) =
+// timeout — the caller must NOT type blind: the command would land as tty
+// type-ahead or into the dying TUI (the outgoing CLI's shutdown scales with
+// session size; a 46 MB Claude session took ~21 s to release the terminal,
+// and the switch path's fixed 1.2 s settle typed `codex resume …` into
+// Claude's farewell, #314). Extracted from the new-session waiter
+// (new-session-handoff-race) so the switch path stops being the one caller
+// that types on a timer.
+fn wait_for_shell_prompt_evidence() -> Result<i64, i64> {
+    std::thread::sleep(std::time::Duration::from_millis(AGENT_RELAUNCH_SETTLE_MS));
+    let started = unix_now_ms();
+    loop {
+        if pty_tail_shows_shell_prompt() {
+            return Ok(unix_now_ms().saturating_sub(started));
+        }
+        let waited = unix_now_ms().saturating_sub(started);
+        if waited >= NEW_SESSION_PROMPT_TIMEOUT_MS {
+            return Err(waited);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(NEW_SESSION_PROMPT_POLL_MS));
+    }
+}
+
 #[tauri::command]
 fn switch_agent(
     app: AppHandle,
@@ -16105,6 +16131,12 @@ fn switch_agent(
             &format!("op=start provider={} command={}", provider_key, command),
         );
     }
+    // issue-314: hold pane sends until the incoming CLI shows boot bytes —
+    // during the interrupt→launch window the foreground is (or becomes) a
+    // bare shell, and a pane send landing there EXECUTES as a command. The
+    // new-session path has armed this hold since new-session-handoff-race;
+    // the switch path had the identical exposure with no hold.
+    arm_agent_boot_hold();
     clear_stale_terminal_input_for_switch(&app, &state, "agent-switch");
     // Dismiss any open agent menu/picker first (e.g. a Claude `/resume` list
     // left open by a prior first-command). Claude exits only on two Ctrl+C at
@@ -16119,36 +16151,73 @@ fn switch_agent(
     std::thread::sleep(std::time::Duration::from_millis(AGENT_INTERRUPT_GAP_MS));
     pty_write_internal(&app, &state, "\x03", "agent-switch-interrupt-2")?;
     trace_agent_pty_step(&app, "switch", provider_key, "interrupt-2");
-    std::thread::sleep(std::time::Duration::from_millis(AGENT_RELAUNCH_SETTLE_MS));
-    pty_write_internal(
-        &app,
-        &state,
-        &format!("{}\r", command),
-        "agent-switch-launch",
-    )?;
-    trace_agent_pty_step(&app, "switch", provider_key, "launch");
-    // Switching providers must reset the transcript to the new provider's
-    // latest session, not diff against the old cursor. Without this, the
-    // scheduled refresh emits an empty incremental (reset:false, len:0)
-    // because the cursor still matches, and the transcript keeps showing the
-    // previous provider's conversation until a manual reload. Clearing the new
-    // provider's tail cursor makes schedule_agent_switch_refresh's emit a full
-    // reset, mirroring resync_transcript_to_session on the reload path.
+    // issue-314: the launch is no longer typed blind after a fixed settle —
+    // the outgoing CLI's shutdown scales with session size, and on Windows
+    // the 1.2 s timer typed `codex resume …` into Claude's farewell, which
+    // swallowed it and stranded the session at bare PowerShell. Gate on
+    // shell-prompt evidence in a spawned waiter (the new-session pattern);
+    // on timeout, type nothing — the boot hold stays armed and a manual
+    // launch releases it.
     let session_provider = if provider_key == "codex" {
         SessionProvider::Codex
     } else {
         SessionProvider::Claude
     };
-    let crossing = current_provider(&app) != Some(session_provider);
-    schedule_agent_switch_refresh(app.clone(), provider_key, "switch");
-    schedule_agent_first_command(app.clone(), "switch");
-    if crossing {
-        // Flip the active-provider hint now, then reload the agent pane once the
-        // new agent settles, so the sessions list, banner, agent name and verb
-        // all switch instead of staying stale on the prior provider.
-        set_current_provider(&app, session_provider, "switch");
-        schedule_cross_provider_pane_reload(app.clone());
-    }
+    let waiter_app = app.clone();
+    std::thread::spawn(move || {
+        let state = waiter_app.state::<AppState>();
+        match wait_for_shell_prompt_evidence() {
+            Err(waited) => {
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        &waiter_app,
+                        "agent-switch",
+                        &format!(
+                            "op=launch-timeout provider={} waited_ms={}",
+                            provider_key, waited
+                        ),
+                    );
+                }
+                return;
+            }
+            Ok(waited) => {
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        &waiter_app,
+                        "agent-switch",
+                        &format!(
+                            "op=launch-gated provider={} waited_ms={}",
+                            provider_key, waited
+                        ),
+                    );
+                }
+            }
+        }
+        let _ = pty_write_internal(
+            &waiter_app,
+            &state,
+            &format!("{}\r", command),
+            "agent-switch-launch",
+        );
+        trace_agent_pty_step(&waiter_app, "switch", provider_key, "launch");
+        // Switching providers must reset the transcript to the new provider's
+        // latest session, not diff against the old cursor. Without this, the
+        // scheduled refresh emits an empty incremental (reset:false, len:0)
+        // because the cursor still matches, and the transcript keeps showing the
+        // previous provider's conversation until a manual reload. Clearing the new
+        // provider's tail cursor makes schedule_agent_switch_refresh's emit a full
+        // reset, mirroring resync_transcript_to_session on the reload path.
+        let crossing = current_provider(&waiter_app) != Some(session_provider);
+        schedule_agent_switch_refresh(waiter_app.clone(), provider_key, "switch");
+        schedule_agent_first_command(waiter_app.clone(), "switch");
+        if crossing {
+            // Flip the active-provider hint now, then reload the agent pane once the
+            // new agent settles, so the sessions list, banner, agent name and verb
+            // all switch instead of staying stale on the prior provider.
+            set_current_provider(&waiter_app, session_provider, "switch");
+            schedule_cross_provider_pane_reload(waiter_app.clone());
+        }
+    });
     Ok(())
 }
 
@@ -16837,21 +16906,14 @@ fn create_new_session(
     let waiter_app = app.clone();
     std::thread::spawn(move || {
         let state = waiter_app.state::<AppState>();
-        // Keep the legacy settle as a floor so the launch can't race the
-        // interrupt echo when the shell was already sitting at its prompt.
-        std::thread::sleep(std::time::Duration::from_millis(AGENT_RELAUNCH_SETTLE_MS));
-        let started = unix_now_ms();
-        loop {
-            if pty_tail_shows_shell_prompt() {
-                break;
-            }
-            let waited = unix_now_ms().saturating_sub(started);
-            if waited >= NEW_SESSION_PROMPT_TIMEOUT_MS {
-                // No prompt: the shell never came back (or its prompt shape
-                // is one the gate can't recognize). Do NOT type blind — the
-                // command would land as tty type-ahead or into a wedged
-                // shell. The boot hold stays armed; a manual launch releases
-                // it, and the pending title expires on its own TTL.
+        // Shared evidence gate (issue-314 extracted it; behavior unchanged
+        // here). On timeout: no prompt — the shell never came back, or its
+        // prompt shape is one the gate can't recognize. Do NOT type blind —
+        // the command would land as tty type-ahead or into a wedged shell.
+        // The boot hold stays armed; a manual launch releases it, and the
+        // pending title expires on its own TTL.
+        match wait_for_shell_prompt_evidence() {
+            Err(waited) => {
                 if bram_trace_enabled() {
                     append_bram_trace_line(
                         &waiter_app,
@@ -16861,17 +16923,15 @@ fn create_new_session(
                 }
                 return;
             }
-            std::thread::sleep(std::time::Duration::from_millis(NEW_SESSION_PROMPT_POLL_MS));
-        }
-        if bram_trace_enabled() {
-            append_bram_trace_line(
-                &waiter_app,
-                "session-new",
-                &format!(
-                    "op=launch-gated waited_ms={}",
-                    unix_now_ms().saturating_sub(started)
-                ),
-            );
+            Ok(waited) => {
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        &waiter_app,
+                        "session-new",
+                        &format!("op=launch-gated waited_ms={}", waited),
+                    );
+                }
+            }
         }
         let _ = pty_write_internal(&waiter_app, &state, &format!("{}\r", launch), "agent-new-launch");
         schedule_agent_switch_refresh(waiter_app.clone(), provider_key, "new-session");
@@ -30385,7 +30445,16 @@ fn last_nonempty_trimmed_line(text: &str) -> &str {
 // Claude's own composer renders `❯`, so matching it could fire while the
 // outgoing CLI is still alive; such shells fall to the launch timeout.
 fn line_is_shell_prompt(line: &str) -> bool {
-    line.ends_with('$') || line.ends_with('%') || line.ends_with('#')
+    if line.ends_with('$') || line.ends_with('%') || line.ends_with('#') {
+        return true;
+    }
+    // issue-314: Windows PowerShell's ordinary prompt is `PS C:\…>` — it
+    // ends in `>`, the terminator deliberately excluded above as a bash PS2
+    // continuation, so on Windows this gate could only ever time out (and
+    // the switch path typed on a timer instead). Recognize the PowerShell
+    // shape by its `PS ` prefix, which a bare `>` continuation never has —
+    // the case the exclusion protects stays excluded.
+    line.starts_with("PS ") && line.ends_with('>')
 }
 
 // Wider shape for the submit-nudge guard: a CR into any shell prompt —
@@ -30414,7 +30483,10 @@ fn pty_tail_shows_shell_prompt_or_continuation() -> bool {
 
 #[cfg(test)]
 mod shell_prompt_shape_tests {
-    use super::{last_nonempty_trimmed_line, line_is_shell_prompt, line_is_shell_prompt_or_continuation};
+    use super::{
+        last_nonempty_trimmed_line, line_is_shell_prompt, line_is_shell_prompt_or_continuation,
+        pty_tail_cell, wait_for_shell_prompt_evidence,
+    };
 
     #[test]
     fn bash_and_zsh_prompts_match() {
@@ -30430,6 +30502,42 @@ mod shell_prompt_shape_tests {
     fn ps2_is_continuation_not_launch_target() {
         assert!(!line_is_shell_prompt(">"));
         assert!(line_is_shell_prompt_or_continuation(">"));
+    }
+
+    #[test]
+    fn shell_prompt_evidence_gate_fires_on_powershell_tail() {
+        // issue-314 deliberate fire: with a PowerShell prompt in the PTY
+        // tail, the shared launch gate must return Ok right after its settle
+        // floor — this is the exact tail shape that could only time out
+        // before the PS-prefix predicate.
+        let prev = pty_tail_cell().lock().unwrap().clone();
+        *pty_tail_cell().lock().unwrap() =
+            b"Resume this session with:\r\nclaude --resume 059b5495\r\nPS C:\\Users\\jon\\bram> "
+                .to_vec();
+        let res = wait_for_shell_prompt_evidence();
+        *pty_tail_cell().lock().unwrap() = prev;
+        assert!(
+            matches!(res, Ok(w) if w < 2000),
+            "gate should fire immediately on a PowerShell prompt tail: {res:?}"
+        );
+    }
+
+    #[test]
+    fn powershell_prompt_matches_but_bare_gt_still_does_not() {
+        // issue-314: the Windows PowerShell prompt ends in '>' — the PS2
+        // terminator — so before the PS-prefix shape the gate could only
+        // ever time out on Windows, and the switch path typed on a timer.
+        assert!(line_is_shell_prompt("PS C:\\Users\\jon\\bram>"));
+        assert!(line_is_shell_prompt(
+            last_nonempty_trimmed_line(
+                "Resume this session with:\nclaude --resume 059b5495\nPS C:\\Users\\jon\\bram> "
+            )
+        ));
+        // A quote-continuation is a bare '>' with no PS prefix — the case
+        // the exclusion protects — and stays excluded.
+        assert!(!line_is_shell_prompt(">"));
+        // Ordinary prose mentioning PS mid-line does not end in '>'.
+        assert!(!line_is_shell_prompt("PS C:\\Users\\jon\\bram> git status shows"));
     }
 
     #[test]

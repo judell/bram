@@ -272,16 +272,6 @@ fn codex_fault_message(fault: &GuardFault) -> String {
     }
 }
 
-// Trace decision per provider+fault, matching where each Python guard
-// classifies: Codex's stdin failure goes through deny() (decision=deny);
-// everything else is the catch-all's decision=error.
-fn fault_trace_decision(provider: &str, fault: &GuardFault) -> &'static str {
-    match (provider, fault) {
-        ("codex-rs", GuardFault::UnparseableStdin(_)) => "deny",
-        _ => "error",
-    }
-}
-
 fn panic_summary(p: &Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = p.downcast_ref::<&str>() {
         (*s).to_string()
@@ -305,21 +295,19 @@ fn authority_fail_closed(
     started: std::time::Instant,
 ) -> i32 {
     let summary = fault_summary(&fault);
-    let decision = fault_trace_decision(provider, &fault);
-    let (message, trace_reason) = if provider == "codex-rs" {
-        let m = codex_fault_message(&fault);
-        // deny() trims to the message's first line, 120 chars; the
-        // catch-all uses summary[:200].
-        let r = match fault {
-            GuardFault::UnparseableStdin(_) => {
-                truncate_chars(m.lines().next().unwrap_or("blocked"), 120)
-            }
-            GuardFault::Panic(_) => truncate_chars(&summary, 200),
-        };
-        (m, r)
+    // codex-stdin-fault-decided-error: every guard fault traces decided=error
+    // on both providers — the one greppable signature separating "the guard
+    // broke" from "the guard refused". (The port originally transcribed
+    // Codex-Python's deny() classification for the stdin case; that fidelity
+    // constraint retired with the Python guards. The PROVIDER protocol is
+    // untouched — Codex still answers with the structured deny below.)
+    let decision = "error";
+    let message = if provider == "codex-rs" {
+        codex_fault_message(&fault)
     } else {
-        (claude_fault_message(&summary), truncate_chars(&summary, 200))
+        claude_fault_message(&summary)
     };
+    let trace_reason = truncate_chars(&summary, 200);
     post_hook_trace(root, tool, "", decision, &trace_reason);
     append_breadcrumb(
         root,
@@ -832,7 +820,9 @@ mod guard_mode_tests {
     #[test]
     fn codex_authority_fails_closed_on_unparseable_stdin() {
         // Python twin: codex-guard-stdin-fail-closed — deny() protocol
-        // (stdout deny JSON, exit 0), decision=deny trace.
+        // (stdout deny JSON, exit 0). The trace label is decided=error on
+        // both providers (codex-stdin-fault-decided-error), so guard faults
+        // grep apart from ordinary policy denials.
         let root = scratch("fault-codex-stdin");
         std::fs::create_dir_all(root.join("resources")).unwrap();
         let code = authority_fail_closed(
@@ -845,7 +835,7 @@ mod guard_mode_tests {
         assert_eq!(code, 0, "Codex denies via stdout protocol, exit 0");
         let log = read_crumbs(&root);
         assert!(log.contains("codex-rs PreToolUse apply_patch"), "log: {log}");
-        assert!(log.contains("decided=deny target=- ms="), "log: {log}");
+        assert!(log.contains("decided=error target=- ms="), "log: {log}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -913,19 +903,6 @@ mod guard_mode_tests {
 
         let p = codex_fault_message(&GuardFault::Panic("y".into()));
         assert!(p.contains("failed and denied by default. guard panic: y."));
-
-        assert_eq!(
-            fault_trace_decision("codex-rs", &GuardFault::UnparseableStdin("x".into())),
-            "deny"
-        );
-        assert_eq!(
-            fault_trace_decision("codex-rs", &GuardFault::Panic("x".into())),
-            "error"
-        );
-        assert_eq!(
-            fault_trace_decision("claude-rs", &GuardFault::UnparseableStdin("x".into())),
-            "error"
-        );
     }
 
     #[test]

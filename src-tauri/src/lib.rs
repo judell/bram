@@ -22461,6 +22461,25 @@ fn has_project_settings(dir: &Path) -> bool {
         .any(|n| dir.join(n).exists())
 }
 
+// search-hold-release-on-setup: "has the user acknowledged this project?"
+// `has_project_settings` alone answers it wrongly, because those are SETTINGS
+// files — written when a setting is first saved, never by Setup. The first-run
+// banner carried the same false belief until scripts/setup-harness.sh caught
+// it on 2026-08-20 (#211 shape: a successful Setup left the banner up); that
+// site was fixed by also consulting core-installed state, and the indexer hold
+// was left behind still asserting, in its own comment, that Setup writes
+// .bram.json. It does not — verified on a scratch project, where Setup wrote 9
+// files including the authorization marker, no .bram.json, and the index
+// stayed held with zero hold-release (#311, Mary: an empty /__search she was
+// about to be told Setup would fix).
+//
+// The authorization marker IS written by Setup, as its first act, so it is the
+// artifact that actually means "acknowledged". Accepting either is stricter
+// about intent, not looser: running Setup is a deliberate act on this project.
+fn project_is_managed(dir: &Path) -> bool {
+    has_project_settings(dir) || dir.join(WORKLIST_AUTH_REL).exists()
+}
+
 fn start_search_indexer<R: tauri::Runtime>(app: AppHandle<R>) {
     let (tx, rx) = std::sync::mpsc::channel::<IndexBucket>();
     if let Ok(mut guard) = search_index_tx_cell().lock() {
@@ -22484,7 +22503,7 @@ fn start_search_indexer<R: tauri::Runtime>(app: AppHandle<R>) {
         // writing .bram.json — so one condition carries one meaning rather than
         // a banner and an indexer disagreeing about whether this repo is ours.
         if let Some(root) = project_root(Some(&app)) {
-            if !has_project_settings(&root) {
+            if !project_is_managed(&root) {
                 if bram_trace_enabled() {
                     append_bram_trace_line(
                         &app,
@@ -22492,14 +22511,22 @@ fn start_search_indexer<R: tauri::Runtime>(app: AppHandle<R>) {
                         "op=hold reason=unmanaged-project",
                     );
                 }
-                while !has_project_settings(&root) {
+                while !project_is_managed(&root) {
                     std::thread::sleep(std::time::Duration::from_secs(2));
                 }
                 if bram_trace_enabled() {
+                    let artifact = if has_project_settings(&root) {
+                        "settings"
+                    } else {
+                        "setup-marker"
+                    };
                     append_bram_trace_line(
                         &app,
                         "search-index",
-                        "op=hold-release reason=project-acknowledged",
+                        &format!(
+                            "op=hold-release reason=project-acknowledged artifact={}",
+                            artifact
+                        ),
                     );
                 }
             }
@@ -30494,6 +30521,43 @@ fn pty_tail_shows_shell_prompt() -> bool {
 
 fn pty_tail_shows_shell_prompt_or_continuation() -> bool {
     line_is_shell_prompt_or_continuation(&pty_tail_last_line())
+}
+
+#[cfg(test)]
+mod project_managed_tests {
+    use super::{has_project_settings, project_is_managed, WORKLIST_AUTH_REL};
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("bram-managed-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn setup_marker_alone_counts_as_managed() {
+        // search-hold-release-on-setup / #311: Setup writes the authorization
+        // marker and never .bram.json, so keying only on settings files left
+        // the search indexer held forever on a project the user had set up.
+        let d = scratch("marker");
+        assert!(!project_is_managed(&d), "bare dir must not read as managed");
+        let auth = d.join(WORKLIST_AUTH_REL);
+        std::fs::create_dir_all(auth.parent().unwrap()).unwrap();
+        std::fs::write(&auth, "{}\n").unwrap();
+        assert!(!has_project_settings(&d), "no settings file was written");
+        assert!(project_is_managed(&d), "Setup's marker must release the hold");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn settings_alone_still_counts_as_managed() {
+        // The original artifact keeps working: a user who saved a setting
+        // without running Setup is still acknowledged.
+        let d = scratch("settings");
+        std::fs::write(d.join(".bram.json"), "{}\n").unwrap();
+        assert!(project_is_managed(&d));
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }
 
 #[cfg(test)]

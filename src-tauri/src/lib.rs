@@ -48172,6 +48172,23 @@ fn validate_worklist_commit_paths(paths: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+// issue-312: the commit pathspec must use the SAME coverage rule as the
+// unrelated-staged-files check above — `staged_path_covered_by`, which #295
+// already taught to match a directory entry against paths under it. The filter
+// here used bare equality instead, so a declared directory (never literally in
+// git's staged FILE list) was dropped from `git commit -- <paths>` while
+// staging had expanded it correctly. Mary's run staged 59 files, committed 1,
+// left 58 in the index, and still returned ok with a sha. Sharing the helper
+// makes the two checks agree by construction: anything that passed
+// ensure_no_unrelated_staged_files is, by definition, covered here too.
+fn staged_paths_left_behind(committed: &[String], staged: &[String]) -> Vec<String> {
+    staged
+        .iter()
+        .filter(|path| !committed.iter().any(|c| staged_path_covered_by(c, path)))
+        .cloned()
+        .collect()
+}
+
 fn worklist_commit_files_for_ids(
     items: &[serde_json::Value],
     ids: &[String],
@@ -49136,9 +49153,43 @@ fn handle_worklist_commit<R: tauri::Runtime>(
     commit_args.extend(
         files
             .iter()
-            .filter(|f| staged_after.contains(f))
+            .filter(|f| staged_after.iter().any(|s| staged_path_covered_by(f, s)))
             .cloned(),
     );
+    // issue-312 belt-and-braces: the cost of that bug was its silence — ok
+    // plus a sha, the item pruned, and files left in the index for the next
+    // commit to refuse or absorb. Anything the item staged but the pathspec
+    // would not carry is a bug in the scoping above, so say so BEFORE
+    // committing rather than reporting success over it.
+    let committed_paths: Vec<String> = commit_args
+        .iter()
+        .skip_while(|a| a.as_str() != "--")
+        .skip(1)
+        .cloned()
+        .collect();
+    let left_behind = staged_paths_left_behind(&committed_paths, &staged_after);
+    if !left_behind.is_empty() {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "worklist-commit",
+                &format!("op=left-behind count={}", left_behind.len()),
+            );
+        }
+        return worklist_json_error(
+            500,
+            format!(
+                "refusing to commit: {} staged path(s) the approved items declared are not covered by the commit pathspec (e.g. {}). This is a Bram bug, not a policy decision; the index is unchanged.",
+                left_behind.len(),
+                left_behind
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        );
+    }
     if bram_trace_enabled() {
         append_bram_trace_line(app, "worklist-commit", "op=committing");
     }
@@ -49235,6 +49286,7 @@ mod worklist_authorization_tests {
         apply_worklist_mutation, build_worklist_authorization_record, classify_worklist_removals,
         draft_markdown_path, enqueue_pending_worklist_push_mirror_path,
         ensure_no_unrelated_staged_files, ensure_worklist_commit_authorized, feedback_draft_path,
+        staged_path_covered_by, staged_paths_left_behind,
         inflight_claim_fully_covered, installed_twins_for, parse_worklist_authorization_message,
         parse_worklist_authorization_payload, read_pending_worklist_push_mirrors,
         resource_relative_path, retire_worklist_authorization_record,
@@ -49740,6 +49792,62 @@ mod worklist_authorization_tests {
         // set maps to no twins.
         let files = vec!["src-tauri/src/lib.rs".to_string()];
         assert!(installed_twins_for(&files).is_empty());
+    }
+
+    // Test-local shim: the commit filter asks "is this declared entry covered
+    // by anything staged", which is staged_path_covered_by applied across the
+    // staged list.
+    fn staged_path_covered_by_any(entry: &str, staged: &[String]) -> bool {
+        staged.iter().any(|s| staged_path_covered_by(entry, s))
+    }
+
+    #[test]
+    fn declared_directory_is_carried_into_the_commit_pathspec() {
+        // issue-312 repro: an item declaring a directory staged 59 files and
+        // committed 1, because the directory is never literally in git's
+        // staged FILE list. Prefix matching carries it.
+        let staged = ids(&[
+            "resources/worklist.json",
+            "resources/worklist-drafts/a.md",
+            "resources/worklist-drafts/b.md",
+            "resources/worklist-history/2026.json",
+        ]);
+        assert!(staged_path_covered_by_any("resources/worklist.json", &staged));
+        assert!(staged_path_covered_by_any("resources/worklist-drafts", &staged));
+        assert!(staged_path_covered_by_any("resources/worklist-drafts/", &staged));
+        assert!(staged_path_covered_by_any("resources/worklist-history", &staged));
+        // A never-staged path stays excluded, so `git commit -- <path>` is
+        // never handed a pathspec matching nothing.
+        assert!(!staged_path_covered_by_any("resources/gone.md", &staged));
+        // A prefix that is not a path boundary must not match.
+        assert!(!staged_path_covered_by_any("resources/worklist", &staged));
+    }
+
+    #[test]
+    fn staged_deletion_still_matches_by_exact_path() {
+        // The exact-match arm is why this filter exists at all
+        // (worklist-commit-omits-staged-deletions): a deletion staged by the
+        // apply appears in staged_after by its exact path.
+        let staged = ids(&["app/tools/components/Feedback.xmlui"]);
+        assert!(staged_path_covered_by_any("app/tools/components/Feedback.xmlui", &staged));
+    }
+
+    #[test]
+    fn left_behind_detects_staged_paths_no_pathspec_covers() {
+        let staged = ids(&[
+            "resources/worklist.json",
+            "resources/worklist-drafts/a.md",
+            "resources/worklist-drafts/b.md",
+        ]);
+        // The pre-fix behavior: only the plain file in the pathspec.
+        let left = staged_paths_left_behind(&ids(&["resources/worklist.json"]), &staged);
+        assert_eq!(left.len(), 2, "both draft files should be reported: {left:?}");
+        // The fixed behavior: the directory covers its contents, nothing left.
+        let none = staged_paths_left_behind(
+            &ids(&["resources/worklist.json", "resources/worklist-drafts"]),
+            &staged,
+        );
+        assert!(none.is_empty(), "unexpected leftovers: {none:?}");
     }
 
     #[test]

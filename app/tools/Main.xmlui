@@ -669,7 +669,7 @@
         verticalAlignment="center"
         paddingHorizontal="$space-1"
         paddingBottom="$space-2"
-        gap="$space-0_5">
+        gap="$space-4">
         <!-- Agent-status labels isolated into their own component (own
              agent-status subscription) so the frequent status pushes no longer
              re-render this footer's message composer. The working-verb/spinner

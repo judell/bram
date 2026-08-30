@@ -342,7 +342,12 @@ pub fn mirror_claim_shrink(
 /// `ClaimShrink::Cleared` outcome of `shrink_inflight_claim_sentinel`) —
 /// stamps the live (uncleared) row's `cleared_at_ms`. `displaced` stays 0:
 /// this is an intentional clear, not an overwrite-by-a-newer-write.
-pub fn mirror_claim_clear(conn: &Connection, ids: &[String], at_ms: i64, source: &str) -> Result<()> {
+pub fn mirror_claim_clear(
+    conn: &Connection,
+    ids: &[String],
+    at_ms: i64,
+    source: &str,
+) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
     tx.execute(
         "UPDATE claims SET cleared_at_ms = ?1, updated_at_ms = ?1 WHERE cleared_at_ms IS NULL",
@@ -533,10 +538,7 @@ pub fn mirror_items_sync(
                             now_ms,
                             Some(item.id),
                             "item-begun",
-                            &format!(
-                                "{{\"beganAtMs\":{}}}",
-                                item.begun_at_ms.unwrap_or(now_ms)
-                            ),
+                            &format!("{{\"beganAtMs\":{}}}", item.begun_at_ms.unwrap_or(now_ms)),
                             source,
                         )?;
                         counts.transitions += 1;
@@ -671,17 +673,15 @@ pub fn compare_divergence(
     let mut out = Vec::new();
 
     // --- items ---
-    let mut stmt = conn.prepare(
-        "SELECT id, status, begun_at_ms, files FROM items WHERE pruned_at_ms IS NULL",
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT id, status, begun_at_ms, files FROM items WHERE pruned_at_ms IS NULL")?;
     let db_items: std::collections::HashMap<String, (Option<String>, Option<i64>, Option<String>)> =
-        stmt
-            .query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, (r.get(1)?, r.get(2)?, r.get(3)?)))
-            })?
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .collect();
+        stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, (r.get(1)?, r.get(2)?, r.get(3)?)))
+        })?
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .collect();
     drop(stmt);
 
     let mut file_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -743,11 +743,7 @@ pub fn compare_divergence(
         (Some(f), None) => out.push(Divergence {
             field: "claim",
             item: None,
-            detail: format!(
-                "file={{kind:{},ids:{}}} db=none",
-                f.kind,
-                ids_json(f.ids)
-            ),
+            detail: format!("file={{kind:{},ids:{}}} db=none", f.kind, ids_json(f.ids)),
         }),
         (None, Some((db_kind, db_ids))) => out.push(Divergence {
             field: "claim",
@@ -917,8 +913,16 @@ mod tests {
     fn mirror_auth_record_then_consume_updates_same_row() {
         let conn = open_in_memory().unwrap();
         let ids = vec!["item-a".to_string(), "item-b".to_string()];
-        mirror_auth_record(&conn, 1000, "approved", &ids, false, "worklist-action-command", 1000)
-            .unwrap();
+        mirror_auth_record(
+            &conn,
+            1000,
+            "approved",
+            &ids,
+            false,
+            "worklist-action-command",
+            1000,
+        )
+        .unwrap();
 
         let (kind, consumed): (String, Option<i64>) = conn
             .query_row(
@@ -938,7 +942,10 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!(row_count, 1, "consume must update the same row, not insert a new one");
+        assert_eq!(
+            row_count, 1,
+            "consume must update the same row, not insert a new one"
+        );
         assert_eq!(consumed, Some(2000));
 
         let transitions: i64 = conn
@@ -967,7 +974,11 @@ mod tests {
         assert_eq!(cleared, Some(200));
 
         let live_count: i64 = conn
-            .query_row("SELECT count(*) FROM claims WHERE cleared_at_ms IS NULL", [], |r| r.get(0))
+            .query_row(
+                "SELECT count(*) FROM claims WHERE cleared_at_ms IS NULL",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(live_count, 1, "exactly one live claim row after a displace");
     }
@@ -978,16 +989,28 @@ mod tests {
         let ids = vec!["a".to_string(), "b".to_string()];
         mirror_claim_write(&conn, 10, "approved", &ids, "toTurn").unwrap();
 
-        mirror_claim_shrink(&conn, &["a".to_string()], &["b".to_string()], 20, "mutate-advance")
-            .unwrap();
+        mirror_claim_shrink(
+            &conn,
+            &["a".to_string()],
+            &["b".to_string()],
+            20,
+            "mutate-advance",
+        )
+        .unwrap();
         let stored_ids: String = conn
-            .query_row("SELECT ids FROM claims WHERE written_at_ms = 10", [], |r| r.get(0))
+            .query_row("SELECT ids FROM claims WHERE written_at_ms = 10", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(stored_ids, "[\"b\"]");
 
         mirror_claim_clear(&conn, &["b".to_string()], 30, "mutate-advance").unwrap();
         let cleared: Option<i64> = conn
-            .query_row("SELECT cleared_at_ms FROM claims WHERE written_at_ms = 10", [], |r| r.get(0))
+            .query_row(
+                "SELECT cleared_at_ms FROM claims WHERE written_at_ms = 10",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(cleared, Some(30));
 
@@ -1038,11 +1061,9 @@ mod tests {
         assert_eq!(pruned, None);
 
         let (kind, item_id): (String, Option<String>) = conn
-            .query_row(
-                "SELECT kind, item_id FROM transitions",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
+            .query_row("SELECT kind, item_id FROM transitions", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
             .unwrap();
         assert_eq!(kind, "item-seen");
         assert_eq!(item_id.as_deref(), Some("item-a"));
@@ -1061,7 +1082,9 @@ mod tests {
         assert_eq!(counts.transitions, 1);
 
         let status: String = conn
-            .query_row("SELECT status FROM items WHERE id = 'item-a'", [], |r| r.get(0))
+            .query_row("SELECT status FROM items WHERE id = 'item-a'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(status, "applied");
 
@@ -1082,23 +1105,29 @@ mod tests {
         let first = vec![snap("item-a", "proposed", None, "[\"a.rs\"]", "[]")];
         mirror_items_sync(&conn, 1000, &first, "watcher").unwrap();
 
-        let second = vec![snap("item-a", "proposed", None, "[\"a.rs\",\"b.rs\"]", "[]")];
+        let second = vec![snap(
+            "item-a",
+            "proposed",
+            None,
+            "[\"a.rs\",\"b.rs\"]",
+            "[]",
+        )];
         let counts = mirror_items_sync(&conn, 2000, &second, "watcher").unwrap();
 
         assert_eq!(counts.upserts, 1);
         assert_eq!(counts.transitions, 1);
 
         let files: String = conn
-            .query_row("SELECT files FROM items WHERE id = 'item-a'", [], |r| r.get(0))
+            .query_row("SELECT files FROM items WHERE id = 'item-a'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(files, "[\"a.rs\",\"b.rs\"]");
 
         let kind: String = conn
-            .query_row(
-                "SELECT kind FROM transitions WHERE at_ms = 2000",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT kind FROM transitions WHERE at_ms = 2000", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(kind, "item-files");
     }
@@ -1116,11 +1145,17 @@ mod tests {
         assert_eq!(counts.transitions, 1);
 
         let pruned: Option<i64> = conn
-            .query_row("SELECT pruned_at_ms FROM items WHERE id = 'item-a'", [], |r| r.get(0))
+            .query_row(
+                "SELECT pruned_at_ms FROM items WHERE id = 'item-a'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(pruned, Some(2000));
         let kind: String = conn
-            .query_row("SELECT kind FROM transitions WHERE at_ms = 2000", [], |r| r.get(0))
+            .query_row("SELECT kind FROM transitions WHERE at_ms = 2000", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(kind, "item-pruned");
 
@@ -1128,7 +1163,11 @@ mod tests {
         let reappeared = vec![snap("item-a", "proposed", None, "[]", "[]")];
         mirror_items_sync(&conn, 3000, &reappeared, "watcher").unwrap();
         let pruned: Option<i64> = conn
-            .query_row("SELECT pruned_at_ms FROM items WHERE id = 'item-a'", [], |r| r.get(0))
+            .query_row(
+                "SELECT pruned_at_ms FROM items WHERE id = 'item-a'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(pruned, None, "reappearance must clear the tombstone");
     }
@@ -1138,7 +1177,13 @@ mod tests {
         let conn = open_in_memory().unwrap();
         let items = vec![
             snap("item-a", "proposed", None, "[\"a.rs\"]", "[]"),
-            snap("item-b", "applied", Some(500), "[\"b.rs\"]", "[{\"number\":42}]"),
+            snap(
+                "item-b",
+                "applied",
+                Some(500),
+                "[\"b.rs\"]",
+                "[{\"number\":42}]",
+            ),
         ];
         let first = mirror_items_sync(&conn, 1000, &items, "watcher").unwrap();
         assert_eq!(first.upserts, 2);
@@ -1153,11 +1198,18 @@ mod tests {
         let second = mirror_items_sync(&conn, 2000, &items, "watcher").unwrap();
         assert_eq!(second.upserts, 0);
         assert_eq!(second.tombstones, 0);
-        assert_eq!(second.transitions, 0, "second sync of unchanged items appends no transitions");
+        assert_eq!(
+            second.transitions, 0,
+            "second sync of unchanged items appends no transitions"
+        );
 
         // last_synced_ms still advances on the no-op pass.
         let last_synced: i64 = conn
-            .query_row("SELECT last_synced_ms FROM items WHERE id = 'item-a'", [], |r| r.get(0))
+            .query_row(
+                "SELECT last_synced_ms FROM items WHERE id = 'item-a'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(last_synced, 2000);
 
@@ -1196,7 +1248,10 @@ mod tests {
         let auth_ids = vec!["item-a".to_string()];
         let snapshot = FileStateSnapshot {
             items: &items,
-            claim: Some(FileClaimSnapshot { kind: "approved", ids: &claim_ids }),
+            claim: Some(FileClaimSnapshot {
+                kind: "approved",
+                ids: &claim_ids,
+            }),
             auth: Some(FileAuthSnapshot {
                 issued_at_ms: 1000,
                 kind: "approved",
@@ -1205,7 +1260,11 @@ mod tests {
             }),
         };
         let divergences = compare_divergence(&conn, &snapshot).unwrap();
-        assert_eq!(divergences, Vec::new(), "matching file/db state must report no divergence");
+        assert_eq!(
+            divergences,
+            Vec::new(),
+            "matching file/db state must report no divergence"
+        );
     }
 
     #[test]
@@ -1218,7 +1277,11 @@ mod tests {
         // ... but the file-derived snapshot (what /__worklist just read) says
         // "applied" -- a deliberate lie the mirror never saw.
         let lying = vec![snap("item-a", "applied", None, "[]", "[]")];
-        let snapshot = FileStateSnapshot { items: &lying, claim: None, auth: None };
+        let snapshot = FileStateSnapshot {
+            items: &lying,
+            claim: None,
+            auth: None,
+        };
         let divergences = compare_divergence(&conn, &snapshot).unwrap();
 
         assert_eq!(divergences.len(), 1);
@@ -1234,7 +1297,11 @@ mod tests {
         // Nothing ever mirrored -- an empty db lying by omission against a
         // file that has a real item.
         let file_items = vec![snap("item-a", "proposed", None, "[]", "[]")];
-        let snapshot = FileStateSnapshot { items: &file_items, claim: None, auth: None };
+        let snapshot = FileStateSnapshot {
+            items: &file_items,
+            claim: None,
+            auth: None,
+        };
         let divergences = compare_divergence(&conn, &snapshot).unwrap();
 
         assert_eq!(divergences.len(), 1);
@@ -1252,7 +1319,10 @@ mod tests {
         let ids = vec!["item-a".to_string()];
         let snapshot = FileStateSnapshot {
             items: &[],
-            claim: Some(FileClaimSnapshot { kind: "drop", ids: &ids }),
+            claim: Some(FileClaimSnapshot {
+                kind: "drop",
+                ids: &ids,
+            }),
             auth: None,
         };
         let divergences = compare_divergence(&conn, &snapshot).unwrap();
@@ -1271,7 +1341,11 @@ mod tests {
 
         // The file has no sentinel at all -- as if .inflight-claim.json were
         // deleted out from under a live db row.
-        let snapshot = FileStateSnapshot { items: &[], claim: None, auth: None };
+        let snapshot = FileStateSnapshot {
+            items: &[],
+            claim: None,
+            auth: None,
+        };
         let divergences = compare_divergence(&conn, &snapshot).unwrap();
 
         assert_eq!(divergences.len(), 1);
@@ -1283,8 +1357,16 @@ mod tests {
     fn compare_divergence_catches_auth_consumed_lie() {
         let conn = open_in_memory().unwrap();
         let ids = vec!["item-a".to_string()];
-        mirror_auth_record(&conn, 5000, "approved", &ids, false, "worklist-action-command", 5000)
-            .unwrap();
+        mirror_auth_record(
+            &conn,
+            5000,
+            "approved",
+            &ids,
+            false,
+            "worklist-action-command",
+            5000,
+        )
+        .unwrap();
 
         // The file says this record is still pending (not consumed), but
         // the mirror was told it was consumed -- a deliberate lie on the

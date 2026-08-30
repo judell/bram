@@ -329,9 +329,7 @@ pub fn query(conn: &Connection, q: &str, limit: usize, types: &[String]) -> Resu
         }
         sql.push(')');
     }
-    sql.push_str(
-        " ORDER BY bm25(search_index, 1.0, 1.0, 1.0, 1.0, 1.0, 0.35) LIMIT ?",
-    );
+    sql.push_str(" ORDER BY bm25(search_index, 1.0, 1.0, 1.0, 1.0, 1.0, 0.35) LIMIT ?");
     args.push(Value::Integer(limit as i64));
 
     let mut stmt = conn.prepare(&sql)?;
@@ -429,8 +427,9 @@ impl PatchSanitizer {
             self.elided += 1;
             self.out.push_str("[long line elided]\n");
         } else {
-            self.out
-                .push_str(&String::from_utf8_lossy(&self.line[..len.min(self.line.len())]));
+            self.out.push_str(&String::from_utf8_lossy(
+                &self.line[..len.min(self.line.len())],
+            ));
             self.out.push('\n');
         }
         self.line.clear();
@@ -586,9 +585,24 @@ mod tests {
 
     fn seed(conn: &Connection) {
         for (kind, file, source, content) in [
-            ("session", "/s/1.jsonl", "Fix drag reorder", "the queue items are now drag reorderable via dnd-list"),
-            ("commit", "/c/abc", "abc123", "Make queue items drag-reorderable via vendored xmlui-dnd-list"),
-            ("issue", "/i/230", "#230", "unified full text search across sessions commits issues"),
+            (
+                "session",
+                "/s/1.jsonl",
+                "Fix drag reorder",
+                "the queue items are now drag reorderable via dnd-list",
+            ),
+            (
+                "commit",
+                "/c/abc",
+                "abc123",
+                "Make queue items drag-reorderable via vendored xmlui-dnd-list",
+            ),
+            (
+                "issue",
+                "/i/230",
+                "#230",
+                "unified full text search across sessions commits issues",
+            ),
         ] {
             index_doc(conn, &row(kind, file, source, content), 1, 1).unwrap();
         }
@@ -603,7 +617,10 @@ mod tests {
 
         let hits = query(&conn, "drag", 10, &[]).unwrap();
         assert_eq!(hits.len(), 2, "two rows mention drag");
-        assert!(hits.iter().all(|h| h.snippet.contains('[')), "snippet() highlights");
+        assert!(
+            hits.iter().all(|h| h.snippet.contains('[')),
+            "snippet() highlights"
+        );
         let ranks: Vec<f64> = hits.iter().map(|h| h.rank).collect();
         assert!(ranks.windows(2).all(|w| w[0] <= w[1]), "bm25-ordered");
 
@@ -613,14 +630,23 @@ mod tests {
 
         // Facet filter restricts to the requested types.
         let only_commit = query(&conn, "queue", 10, &["commit".to_string()]).unwrap();
-        assert!(only_commit.iter().all(|h| h.kind == "commit"), "types filter applied");
+        assert!(
+            only_commit.iter().all(|h| h.kind == "commit"),
+            "types filter applied"
+        );
         assert!(!only_commit.is_empty(), "commit row matches 'queue'");
     }
 
     #[test]
     fn skip_unchanged_and_reindex_changed() {
         let conn = open_in_memory().unwrap();
-        index_doc(&conn, &row("session", "/s/1.jsonl", "t", "alpha content"), 100, 10).unwrap();
+        index_doc(
+            &conn,
+            &row("session", "/s/1.jsonl", "t", "alpha content"),
+            100,
+            10,
+        )
+        .unwrap();
         assert_eq!(row_count(&conn).unwrap(), 1);
 
         // Same mtime/size → skip (no duplicate).
@@ -628,10 +654,28 @@ mod tests {
 
         // Changed mtime → reindex replaces the row, not duplicates it.
         assert!(needs_index(&conn, "/s/1.jsonl", 200, 12).unwrap());
-        index_doc(&conn, &row("session", "/s/1.jsonl", "t", "beta content"), 200, 12).unwrap();
-        assert_eq!(row_count(&conn).unwrap(), 1, "reindex replaces, not appends");
-        assert_eq!(query(&conn, "alpha", 10, &[]).unwrap().len(), 0, "old content gone");
-        assert_eq!(query(&conn, "beta", 10, &[]).unwrap().len(), 1, "new content present");
+        index_doc(
+            &conn,
+            &row("session", "/s/1.jsonl", "t", "beta content"),
+            200,
+            12,
+        )
+        .unwrap();
+        assert_eq!(
+            row_count(&conn).unwrap(),
+            1,
+            "reindex replaces, not appends"
+        );
+        assert_eq!(
+            query(&conn, "alpha", 10, &[]).unwrap().len(),
+            0,
+            "old content gone"
+        );
+        assert_eq!(
+            query(&conn, "beta", 10, &[]).unwrap().len(),
+            1,
+            "new content present"
+        );
     }
 
     #[test]
@@ -718,7 +762,10 @@ mod tests {
         records.extend(tail);
 
         assert_eq!(
-            records.iter().map(|(sha, _)| sha.as_str()).collect::<Vec<_>>(),
+            records
+                .iter()
+                .map(|(sha, _)| sha.as_str())
+                .collect::<Vec<_>>(),
             vec!["aaa", "bbb", "ccc"]
         );
         // Streaming output is byte-identical to the historical batch sanitize.
@@ -752,9 +799,20 @@ mod tests {
         writeln!(std::fs::File::create(&present).unwrap(), "x").unwrap();
         let present_key = present.to_string_lossy().to_string();
 
-        index_doc(&conn, &row("session", &present_key, "present", "alpha"), 1, 1).unwrap();
-        index_doc(&conn, &row("session", "/no/such/gone-session.jsonl", "gone", "beta"), 1, 1)
-            .unwrap();
+        index_doc(
+            &conn,
+            &row("session", &present_key, "present", "alpha"),
+            1,
+            1,
+        )
+        .unwrap();
+        index_doc(
+            &conn,
+            &row("session", "/no/such/gone-session.jsonl", "gone", "beta"),
+            1,
+            1,
+        )
+        .unwrap();
         // Synthetic key (real commit-row format) — no leading '/', must be exempt.
         index_doc(&conn, &row("commit", "commit:abc123", "abc", "gamma"), 1, 1).unwrap();
         assert_eq!(row_count(&conn).unwrap(), 3);
@@ -762,9 +820,21 @@ mod tests {
         let removed = prune_missing_files(&conn).unwrap();
         assert_eq!(removed, 1, "only the missing-file row is pruned");
         assert_eq!(row_count(&conn).unwrap(), 2);
-        assert_eq!(query(&conn, "beta", 10, &[]).unwrap().len(), 0, "gone transcript pruned");
-        assert_eq!(query(&conn, "alpha", 10, &[]).unwrap().len(), 1, "present transcript kept");
-        assert_eq!(query(&conn, "gamma", 10, &[]).unwrap().len(), 1, "synthetic key exempt");
+        assert_eq!(
+            query(&conn, "beta", 10, &[]).unwrap().len(),
+            0,
+            "gone transcript pruned"
+        );
+        assert_eq!(
+            query(&conn, "alpha", 10, &[]).unwrap().len(),
+            1,
+            "present transcript kept"
+        );
+        assert_eq!(
+            query(&conn, "gamma", 10, &[]).unwrap().len(),
+            1,
+            "synthetic key exempt"
+        );
 
         let _ = std::fs::remove_file(&present);
     }

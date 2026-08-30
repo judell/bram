@@ -87,3 +87,10 @@ resources/codex-permission-hook-capture.jsonl
 # rename until restart; pruned by Bram startup once unregistered.
 .claude/hooks/worklist-guard.py
 .claude/hooks/permission-menu-hook.py
+
+# Runtime trace output (rolling log + archives); machine-local by nature.
+resources/bram-traces/
+
+# Subagent worktrees (isolation: "worktree" delegation); session scaffolding,
+# auto-collected when unchanged, never repo content.
+.claude/worktrees/

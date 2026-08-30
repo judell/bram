@@ -34083,6 +34083,7 @@ fn stale_legacy_hook_reference_warnings(proj: &Path) -> Vec<String> {
 
 fn settings_has_permission_menu_hook(
     settings_path: &Path,
+    marker: &str,
     expected_command: Option<&str>,
 ) -> bool {
     let content = match std::fs::read_to_string(settings_path) {
@@ -34093,14 +34094,8 @@ fn settings_has_permission_menu_hook(
         Ok(v) => v,
         Err(_) => return false,
     };
-    let event_has_menu_hook = |event: &str| -> bool {
-        settings_event_hook_current(
-            &value,
-            event,
-            "claude-permission-menu-hook.py",
-            expected_command,
-        )
-    };
+    let event_has_menu_hook =
+        |event: &str| -> bool { settings_event_hook_current(&value, event, marker, expected_command) };
     event_has_menu_hook("PermissionRequest")
         && event_has_menu_hook("PostToolUse")
         && event_has_menu_hook("PermissionDenied")
@@ -34550,13 +34545,18 @@ fn merge_permission_menu_hook_into_settings(
     Ok(true)
 }
 
-// bram-guard shadow registration (bram-guard-reentrant-menu-hooks phase 1):
-// the reentrant Rust menu hook rides the same four event arrays as the
-// Python menu hook it shadows, under its own marker so migration/currency
-// logic treats the two registrations independently. Observe-only — the
-// shadow never POSTs or decides — so it stays deliberately OUTSIDE the
-// needs-setup calculus; a missing shadow is a soak gap, not install drift.
-fn merge_guard_shadow_menu_hook_into_settings(
+// bram-guard menu registration: the reentrant Rust menu hook rides the same
+// four event arrays as the Python menu hook, under its own marker so
+// migration/currency logic treats the two registrations independently. Born
+// as the shadow merge (bram-guard-reentrant-menu-hooks phase 1); since
+// guards-rust-authority-covers-menu-hooks it registers whichever command
+// the toggle calls for — the observe-only shadow, or the POSTing
+// `--authority` form — and the marker migration converts either into the
+// other, which is what makes the toggle a one-Setup flip in both
+// directions. Shadow-mode registration stays deliberately OUTSIDE the
+// needs-setup calculus; authority-mode registration is load-bearing and the
+// status checks key on it (flag-aware expected command).
+fn merge_guard_menu_hook_into_settings(
     settings_path: &Path,
     shadow_command: &str,
 ) -> Result<bool, String> {
@@ -34652,6 +34652,60 @@ fn prune_pretooluse_hooks_containing(
         }
         !hs.is_empty()
     });
+    if !changed {
+        return Ok(false);
+    }
+    let serialized = serde_json::to_string_pretty(&value)
+        .map_err(|e| format!("serialize settings.json: {}", e))?;
+    std::fs::write(settings_path, format!("{}\n", serialized))
+        .map_err(|e| format!("write {}: {}", settings_path.display(), e))?;
+    Ok(true)
+}
+
+// guards-rust-authority-covers-menu-hooks: the cross-event generalization of
+// prune_pretooluse_hooks_containing — the Python menu hook is registered on
+// FOUR event arrays (PermissionRequest, PostToolUse, PermissionDenied,
+// PreToolUse), so pruning it under authority must sweep them all. Hooks
+// arrays emptied by the prune are dropped, entries with no remaining hooks
+// removed. Ok(true) if anything was removed.
+fn prune_hook_commands_containing(
+    settings_path: &Path,
+    needle: &str,
+    unless: Option<&str>,
+) -> Result<bool, String> {
+    let existing = std::fs::read_to_string(settings_path).unwrap_or_default();
+    if existing.trim().is_empty() {
+        return Ok(false);
+    }
+    let mut value: serde_json::Value = serde_json::from_str(&existing)
+        .map_err(|e| format!("parse {}: {}", settings_path.display(), e))?;
+    let Some(hooks_obj) = value.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
+        return Ok(false);
+    };
+    let mut changed = false;
+    for (_, event_value) in hooks_obj.iter_mut() {
+        let Some(arr) = event_value.as_array_mut() else {
+            continue;
+        };
+        arr.retain_mut(|entry| {
+            let Some(hs) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
+                return true;
+            };
+            let before = hs.len();
+            hs.retain(|h| {
+                let Some(cmd) = h.get("command").and_then(|c| c.as_str()) else {
+                    return true;
+                };
+                let matches =
+                    cmd.contains(needle) && unless.map_or(true, |keep| !cmd.contains(keep));
+                !matches
+            });
+            if hs.len() != before {
+                changed = true;
+            }
+            !hs.is_empty()
+        });
+    }
     if !changed {
         return Ok(false);
     }
@@ -34837,6 +34891,132 @@ mod guard_shadow_registration_tests {
                 .count(),
             1
         );
+    }
+
+    // --- guards-rust-authority-covers-menu-hooks ---------------------------
+
+    const MENU_SHADOW: &str = "\"/Users/x/.bram/bram-guard\" guard claude-permission-menu";
+    const MENU_AUTHORITY: &str =
+        "\"/Users/x/.bram/bram-guard\" guard claude-permission-menu --authority";
+    const MENU_PY: &str = "\"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-permission-menu-hook.py\"";
+    const MENU_EVENTS: [&str; 4] = [
+        "PermissionRequest",
+        "PostToolUse",
+        "PermissionDenied",
+        "PreToolUse",
+    ];
+
+    fn events_with_command(path: &Path, command: &str) -> Vec<String> {
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let Some(hooks) = v.get("hooks").and_then(|h| h.as_object()) else {
+            return vec![];
+        };
+        let mut out: Vec<String> = hooks
+            .iter()
+            .filter(|(_, arr)| {
+                arr.as_array()
+                    .map(|a| {
+                        a.iter().any(|e| {
+                            e["hooks"]
+                                .as_array()
+                                .map(|hs| hs.iter().any(|h| h["command"] == command))
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn menu_merge_migrates_shadow_to_authority_and_back() {
+        // The toggle's one-Setup flip in each direction: the marker match
+        // converts whichever registration is present into the other across
+        // all four menu events.
+        let path = temp_settings("menu-flip", None);
+        assert!(merge_guard_menu_hook_into_settings(&path, MENU_SHADOW).unwrap());
+        let mut want: Vec<String> = MENU_EVENTS.iter().map(|s| s.to_string()).collect();
+        want.sort();
+        assert_eq!(events_with_command(&path, MENU_SHADOW), want);
+        // Flip on: authority replaces shadow everywhere.
+        assert!(merge_guard_menu_hook_into_settings(&path, MENU_AUTHORITY).unwrap());
+        assert_eq!(events_with_command(&path, MENU_AUTHORITY), want);
+        assert!(events_with_command(&path, MENU_SHADOW).is_empty());
+        // Flip off: shadow restored, authority gone.
+        assert!(merge_guard_menu_hook_into_settings(&path, MENU_SHADOW).unwrap());
+        assert_eq!(events_with_command(&path, MENU_SHADOW), want);
+        assert!(events_with_command(&path, MENU_AUTHORITY).is_empty());
+    }
+
+    #[test]
+    fn python_menu_prune_sweeps_all_events_and_spares_the_guard() {
+        // The Python menu hook rides FOUR event arrays; the authority prune
+        // must sweep them all while leaving the worklist registration alone.
+        let mut hooks = serde_json::Map::new();
+        for ev in MENU_EVENTS {
+            hooks.insert(
+                ev.to_string(),
+                serde_json::json!([
+                    { "matcher": ".*", "hooks": [{ "type": "command", "command": MENU_PY }] }
+                ]),
+            );
+        }
+        hooks
+            .get_mut("PreToolUse")
+            .and_then(|a| a.as_array_mut())
+            .unwrap()
+            .push(serde_json::json!(
+                { "matcher": "Write", "hooks": [{ "type": "command", "command": SHADOW }] }
+            ));
+        let seeded = serde_json::json!({ "hooks": hooks });
+        let path = temp_settings("menu-prune", Some(&seeded.to_string()));
+        assert!(
+            prune_hook_commands_containing(&path, "permission-menu-hook.py", None).unwrap()
+        );
+        assert!(events_with_command(&path, MENU_PY).is_empty());
+        assert_eq!(events_with_command(&path, SHADOW), vec!["PreToolUse"]);
+        // Idempotent second run.
+        assert!(
+            !prune_hook_commands_containing(&path, "permission-menu-hook.py", None).unwrap()
+        );
+    }
+
+    #[test]
+    fn codex_toml_block_under_authority_is_rust_only_and_python_free() {
+        // #247's endgame: with the flag on, the block resolves WITHOUT any
+        // Python (hook_python None) and both commands are the Rust
+        // --authority forms, with no shadow entries (deciding and shadowing
+        // with the same binary would double-spawn per event).
+        let link = PathBuf::from("/Users/x/.bram/bram-guard");
+        let block = codex_hook_toml_block_with_authority(
+            Path::new("/Users/x/.bram/codex-worklist-guard.py"),
+            Path::new("/Users/x/.bram/codex-permission-menu-hook.py"),
+            None,
+            Some(&link),
+            true,
+        )
+        .expect("authority block must resolve without Python");
+        assert!(block.contains("guard codex-worklist --authority"), "{block}");
+        assert!(
+            block.contains("guard codex-permission-menu --authority"),
+            "{block}"
+        );
+        assert!(!block.contains(".py"), "{block}");
+        assert!(!block.contains("shadow"), "{block}");
+        // No link + authority: no block (fail closed; run_enhance errors
+        // before this point).
+        assert!(codex_hook_toml_block_with_authority(
+            Path::new("/x/w.py"),
+            Path::new("/x/m.py"),
+            None,
+            None,
+            true,
+        )
+        .is_none());
     }
 }
 
@@ -35398,44 +35578,66 @@ fn codex_hook_toml_block(
     hook_python: Option<&str>,
     guard_link: Option<&Path>,
 ) -> Option<String> {
+    codex_hook_toml_block_with_authority(
+        script_path,
+        menu_script_path,
+        hook_python,
+        guard_link,
+        bram_guards_rust_authority(),
+    )
+}
+
+// Split from the public fn so tests can drive the authority arm without
+// racing the process-global flag static.
+fn codex_hook_toml_block_with_authority(
+    script_path: &Path,
+    menu_script_path: &Path,
+    hook_python: Option<&str>,
+    guard_link: Option<&Path>,
+    rust_authority: bool,
+) -> Option<String> {
     let script_str = script_path.display().to_string();
     let menu_script_str = menu_script_path.display().to_string();
-    // issue-247: Windows embeds the resolved absolute interpreter instead
-    // of the `py -3` launcher; None = no usable Python, no block.
-    #[cfg(windows)]
-    let (command_line, menu_command_line) = {
-        let py = hook_python?.replace('"', "\\\"");
-        (
-            format!("& \"{}\" \"{}\"", py, script_str.replace('"', "\\\"")),
-            format!("& \"{}\" \"{}\"", py, menu_script_str.replace('"', "\\\"")),
-        )
-    };
-    #[cfg(not(windows))]
-    let (command_line, menu_command_line) = {
-        let _ = hook_python;
-        (script_str.clone(), menu_script_str.clone())
-    };
-    // bram-guard-authority-flip: with guards.rustAuthority on (read from
-    // the config static rather than threaded through every caller — the
-    // writer and both currency checkers must agree by construction), the
-    // worklist command IS the Rust authority command, replacing the Python
-    // guard; the worklist shadow entry is then omitted (deciding and
-    // shadowing with the same binary would double-spawn per call). Menu
-    // hooks stay Python + shadow either way.
-    let rust_authority = bram_guards_rust_authority();
-    let command_line = match (guard_link, rust_authority) {
-        (Some(link), true) => {
-            let l = link.display().to_string();
-            #[cfg(windows)]
-            {
-                format!("& \"{}\" guard codex-worklist --authority", l.replace('"', "\\\""))
-            }
-            #[cfg(not(windows))]
-            {
-                format!("\"{}\" guard codex-worklist --authority", l)
-            }
+    // bram-guard-authority-flip / guards-rust-authority-covers-menu-hooks:
+    // with guards.rustAuthority on (read from the config static rather than
+    // threaded through every caller — the writer and both currency checkers
+    // must agree by construction), BOTH commands are Rust `--authority`
+    // forms and Python is not consulted at all — the block resolves on a
+    // Python-less machine, which is the point (#247). Flag off restores the
+    // Python commands, which on Windows need the resolved interpreter
+    // (issue-247: None = no usable Python, no block).
+    let (command_line, menu_command_line) = if rust_authority {
+        let link = guard_link?;
+        let l = link.display().to_string();
+        #[cfg(windows)]
+        {
+            let q = l.replace('"', "\\\"");
+            (
+                format!("& \"{}\" guard codex-worklist --authority", q),
+                format!("& \"{}\" guard codex-permission-menu --authority", q),
+            )
         }
-        _ => command_line,
+        #[cfg(not(windows))]
+        {
+            (
+                format!("\"{}\" guard codex-worklist --authority", l),
+                format!("\"{}\" guard codex-permission-menu --authority", l),
+            )
+        }
+    } else {
+        #[cfg(windows)]
+        {
+            let py = hook_python?.replace('"', "\\\"");
+            (
+                format!("& \"{}\" \"{}\"", py, script_str.replace('"', "\\\"")),
+                format!("& \"{}\" \"{}\"", py, menu_script_str.replace('"', "\\\"")),
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = hook_python;
+            (script_str.clone(), menu_script_str.clone())
+        }
     };
     // bram-guard shadow (bram-guard-worklist-policy-shadow): observe-only
     // Rust twins ride beside the Python hooks — no interpreter wrapper,
@@ -35469,13 +35671,12 @@ fn codex_hook_toml_block(
         )
     };
     let (shadow_worklist, shadow_menu_pr, shadow_menu_post) = match &shadow_cmds {
+        // Authority replaces every shadow (see above): the deciding command
+        // holds the primary slot, and shadowing with the same binary would
+        // double-spawn per event.
+        Some(_) if rust_authority => (String::new(), String::new(), String::new()),
         Some((w, m)) => (
-            if rust_authority {
-                // Authority replaces the worklist shadow (see above).
-                String::new()
-            } else {
-                shadow_entry(w, 10, "PreToolUse:Bram guard shadow (worklist)")
-            },
+            shadow_entry(w, 10, "PreToolUse:Bram guard shadow (worklist)"),
             shadow_entry(m, 2, "PermissionRequest:Bram guard shadow (menu)"),
             shadow_entry(m, 2, "PostToolUse:Bram guard shadow (menu clear)"),
         ),
@@ -35533,6 +35734,44 @@ fn guard_link_if_installed() -> Option<PathBuf> {
         "bram-guard"
     });
     link.exists().then_some(link)
+}
+
+// Flag-aware expected commands, shared by every status surface so none of
+// them can disagree with what Setup registers (the flip item fixed only the
+// needs-setup site; the Status-tab hook rows stayed Python-expecting and
+// read "not-registered" under authority).
+fn expected_worklist_guard_command(claude_commands: &Option<(String, String)>) -> Option<String> {
+    if bram_guards_rust_authority() {
+        if let Some(link) = guard_link_if_installed() {
+            return Some(format!(
+                "{} --authority",
+                guard::guard_hook_command(&link, "claude-worklist")
+            ));
+        }
+    }
+    claude_commands.as_ref().map(|(guard, _)| guard.clone())
+}
+
+// The menu twin: (marker, expected command). The marker travels with the
+// command because the two registrations live under different markers.
+fn expected_menu_hook_check(
+    claude_commands: &Option<(String, String)>,
+) -> (&'static str, Option<String>) {
+    if bram_guards_rust_authority() {
+        if let Some(link) = guard_link_if_installed() {
+            return (
+                "guard claude-permission-menu",
+                Some(format!(
+                    "{} --authority",
+                    guard::guard_hook_command(&link, "claude-permission-menu")
+                )),
+            );
+        }
+    }
+    (
+        "claude-permission-menu-hook.py",
+        claude_commands.as_ref().map(|(_, menu)| menu.clone()),
+    )
 }
 
 fn normalize_codex_hook_block_for_currentness(block: &str) -> String {
@@ -35852,20 +36091,14 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         || (sidecar.exists() && hook_matches_bundle(app, &sidecar, "__shell/conventions.md"));
     let hook_python = resolve_hook_python();
     let claude_commands = claude_hook_commands(hook_python.as_deref());
-    // bram-guard-authority-flip: with guards.rustAuthority on, the DECIDING
-    // registration the status checks look for is the Rust authority
-    // command, so the flip does not read as missing-registration drift.
-    let rust_authority_command = if bram_guards_rust_authority() {
-        guard_link_if_installed().map(|link| {
-            format!("{} --authority", guard::guard_hook_command(&link, "claude-worklist"))
-        })
-    } else {
-        None
-    };
-    let expected_guard_command = rust_authority_command
-        .as_deref()
-        .or_else(|| claude_commands.as_ref().map(|(guard, _)| guard.as_str()));
-    let expected_menu_command = claude_commands.as_ref().map(|(_, menu)| menu.as_str());
+    // bram-guard-authority-flip / guards-rust-authority-covers-menu-hooks:
+    // with guards.rustAuthority on, the DECIDING registrations the status
+    // checks look for are the Rust authority commands (worklist AND menu),
+    // so the flip does not read as missing-registration drift.
+    let expected_guard_command_owned = expected_worklist_guard_command(&claude_commands);
+    let expected_guard_command = expected_guard_command_owned.as_deref();
+    let (menu_marker, expected_menu_command_owned) = expected_menu_hook_check(&claude_commands);
+    let expected_menu_command = expected_menu_command_owned.as_deref();
     let hook_script_exists = hook_script.exists();
     // The source repo edits the hook in `app/provider-hooks/claude-worklist-guard.py`;
     // `.claude/hooks/claude-worklist-guard.py` is only the installed runtime copy.
@@ -35880,7 +36113,8 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
     let menu_hook_script = proj.join(ENHANCE_MENU_HOOK_SCRIPT_REL);
     let menu_hook_script_current = menu_hook_script.exists()
         && hook_matches_bundle(app, &menu_hook_script, ENHANCE_MENU_HOOK_BUNDLE_REL);
-    let menu_hook_registered = settings_has_permission_menu_hook(&settings, expected_menu_command);
+    let menu_hook_registered =
+        settings_has_permission_menu_hook(&settings, menu_marker, expected_menu_command);
     let codex_agents_has_marker = std::fs::read_to_string(&codex_agents)
         .map(|s| {
             s.contains(ENHANCE_MARKER_START)
@@ -36566,33 +36800,33 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
     // installing commands that fail on every hook invocation.
     let hook_python = resolve_hook_python();
     let rust_authority = bram_guards_rust_authority();
-    match claude_hook_commands(hook_python.as_deref()) {
-        Some((guard_command, menu_command)) => {
-            // bram-guard-authority-flip: with the toggle on, the Python
-            // worklist guard is NOT registered — the Rust authority command
-            // takes its slots below. Menu hooks stay Python either way
-            // (their flip is deferred behind PermissionDenied provenance).
-            if !rust_authority {
+    // guards-rust-authority-covers-menu-hooks: with the toggle on, NO Python
+    // hook is registered — worklist and menu slots are both Rust — and a
+    // missing Python is no longer a warning, because Python-less operation
+    // is the point (#247/#248). Flag off restores Python + shadows exactly.
+    if !rust_authority {
+        match claude_hook_commands(hook_python.as_deref()) {
+            Some((guard_command, menu_command)) => {
                 merge_worklist_guard_into_settings(&hook_settings_path, &guard_command)?;
+                merge_permission_menu_hook_into_settings(&hook_settings_path, &menu_command)?;
             }
-            merge_permission_menu_hook_into_settings(&hook_settings_path, &menu_command)?;
-        }
-        None => {
-            skipped.push(HOOK_PYTHON_MISSING_WARNING.to_string());
+            None => {
+                skipped.push(HOOK_PYTHON_MISSING_WARNING.to_string());
+            }
         }
     }
-    // bram-guard registrations: menu shadow always; worklist shadow or
-    // authority per the guards.rustAuthority toggle.
+    // bram-guard registrations: shadows beside Python by default; deciding
+    // commands in place of Python per the guards.rustAuthority toggle.
     match guard::ensure_bram_guard_link() {
         Some(link) => {
-            let shadow_command = guard::guard_hook_command(&link, "claude-permission-menu");
-            merge_guard_shadow_menu_hook_into_settings(&hook_settings_path, &shadow_command)?;
+            let menu_shadow = guard::guard_hook_command(&link, "claude-permission-menu");
             let worklist_shadow = guard::guard_hook_command(&link, "claude-worklist");
             if rust_authority {
-                // Authority mode: register the deciding command (the merge's
-                // marker migration also removes the Python guard entries),
-                // and prune the worklist SHADOW registration — the same
-                // binary deciding AND shadowing would double-spawn per call.
+                // Authority mode: register the deciding commands (each
+                // merge's marker migration removes the shadow twin from the
+                // shared event arrays — deciding AND shadowing with the same
+                // binary would double-spawn per call), prune the Python
+                // registrations, and prune the worklist shadow.
                 let worklist_authority = format!("{} --authority", worklist_shadow);
                 merge_worklist_guard_into_settings(&hook_settings_path, &worklist_authority)?;
                 prune_pretooluse_hooks_containing(
@@ -36600,11 +36834,20 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
                     "guard claude-worklist",
                     Some("--authority"),
                 )?;
+                let menu_authority = format!("{} --authority", menu_shadow);
+                merge_guard_menu_hook_into_settings(&hook_settings_path, &menu_authority)?;
+                prune_hook_commands_containing(
+                    &hook_settings_path,
+                    "permission-menu-hook.py",
+                    None,
+                )?;
             } else {
-                // Shadow mode (the default): observe-only worklist shadow
-                // beside the Python guard, and any authority registration
-                // from a previous toggle-on state is pruned so flipping
-                // back is one Setup run.
+                // Shadow mode (the default): observe-only twins beside the
+                // Python hooks, and any authority registrations from a
+                // previous toggle-on state migrate back via each merge's
+                // marker match, so flipping back is one Setup run (after a
+                // relaunch — the flag is read at startup, #313 A6).
+                merge_guard_menu_hook_into_settings(&hook_settings_path, &menu_shadow)?;
                 merge_guard_shadow_worklist_into_settings(&hook_settings_path, &worklist_shadow)?;
                 prune_pretooluse_hooks_containing(
                     &hook_settings_path,
@@ -39855,8 +40098,8 @@ fn agent_coordination_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_j
         let exists = path.exists();
         let hook_python = resolve_hook_python();
         let claude_commands = claude_hook_commands(hook_python.as_deref());
-        let expected_guard_command = claude_commands.as_ref().map(|(guard, _)| guard.as_str());
-        let registered = settings_has_worklist_guard_hook(&path, expected_guard_command);
+        let expected_guard_command = expected_worklist_guard_command(&claude_commands);
+        let registered = settings_has_worklist_guard_hook(&path, expected_guard_command.as_deref());
         let marker_present = settings_has_worklist_guard_marker(&path);
         rows.push(json!({
             "signal": claude_hook_settings_rel(),
@@ -40299,10 +40542,10 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
         .map(|p| claude_hook_settings_path(p));
     let claude_hook_exists = claude_hook.as_ref().map_or(false, |p| p.exists());
     let claude_commands = claude_hook_commands(python_found.as_deref());
-    let expected_guard_command = claude_commands.as_ref().map(|(guard, _)| guard.as_str());
-    let claude_registered = claude_settings
-        .as_ref()
-        .map_or(false, |p| settings_has_worklist_guard_hook(p, expected_guard_command));
+    let expected_guard_command = expected_worklist_guard_command(&claude_commands);
+    let claude_registered = claude_settings.as_ref().map_or(false, |p| {
+        settings_has_worklist_guard_hook(p, expected_guard_command.as_deref())
+    });
     let claude_marker_present = claude_settings
         .as_ref()
         .map_or(false, |p| settings_has_worklist_guard_marker(p));
@@ -40328,9 +40571,16 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
     let hooks_rows = vec![
         serde_json::json!({
             "signal": "Python 3",
-            "level": if python_found.is_some() { "ok" } else { "warn" },
-            "state": if python_found.is_some() { "found" } else { "missing" },
-            "detail": python_found.clone().unwrap_or_else(|| "Hooks require Python 3 and none was found (on Windows: install from python.org, which includes the py launcher; the Microsoft Store PATH aliases are not Python). Re-run Setup after installing.".to_string()),
+            // guards-rust-authority-covers-menu-hooks: with the toggle on,
+            // every registered hook is the Rust bram-guard — a missing
+            // Python is informational, not a warning (#247).
+            "level": if python_found.is_some() || bram_guards_rust_authority() { "ok" } else { "warn" },
+            "state": if python_found.is_some() { "found" } else if bram_guards_rust_authority() { "not-required" } else { "missing" },
+            "detail": python_found.clone().unwrap_or_else(|| if bram_guards_rust_authority() {
+                "No Python found, and none is needed: guards.rustAuthority registers bram-guard for every hook.".to_string()
+            } else {
+                "Hooks require Python 3 and none was found (on Windows: install from python.org, which includes the py launcher; the Microsoft Store PATH aliases are not Python). Re-run Setup after installing.".to_string()
+            }),
             "seen": "",
         }),
         serde_json::json!({

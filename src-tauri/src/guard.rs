@@ -42,6 +42,12 @@ pub fn run_guard_mode(args: &[String]) -> i32 {
         Err(e) => (serde_json::json!({}), Some(e.to_string())),
     };
     match hook {
+        "claude-permission-menu" if authority => {
+            return authority_menu_hook("claude-rs", &payload, started);
+        }
+        "codex-permission-menu" if authority => {
+            return authority_menu_hook("codex-rs", &payload, started);
+        }
         "claude-permission-menu" => shadow_menu_hook("claude-rs", &payload, started),
         "codex-permission-menu" => shadow_menu_hook("codex-rs", &payload, started),
         "claude-worklist" if authority => {
@@ -99,11 +105,19 @@ fn find_port_upward(start: &Path) -> Option<u16> {
 // block or fail a tool call because Bram is down (the Python guards use a
 // 400ms urllib timeout for the same reason).
 fn post_json_fail_silent(port: u16, path: &str, body: &str) {
+    let _ = post_json_outcome(port, path, body);
+}
+
+// The same fire-and-forget POST, reporting an outcome token for the
+// breadcrumb (the Python menu hook's phase-1 attribution: fail-silent made
+// "lost in transit" and "host-side" indistinguishable, so the outcome rides
+// the breadcrumb).
+fn post_json_outcome(port: u16, path: &str, body: &str) -> &'static str {
     use std::io::Write as _;
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let timeout = std::time::Duration::from_millis(400);
     let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, timeout) else {
-        return;
+        return "err=connect";
     };
     let _ = stream.set_write_timeout(Some(timeout));
     let _ = stream.set_read_timeout(Some(timeout));
@@ -114,9 +128,12 @@ fn post_json_fail_silent(port: u16, path: &str, body: &str) {
         body.len(),
         body
     );
-    let _ = stream.write_all(req.as_bytes());
+    if stream.write_all(req.as_bytes()).is_err() {
+        return "err=io";
+    }
     let mut buf = [0u8; 256];
     let _ = std::io::Read::read(&mut stream, &mut buf);
+    "ok"
 }
 
 // The [hook] decision line, shipped exactly the way the Python guards ship
@@ -476,6 +493,119 @@ fn read_port(root: &Path) -> Option<u16> {
         .trim()
         .parse()
         .ok()
+}
+
+// --- Authority menu mode (guards-rust-authority-covers-menu-hooks) ---------
+//
+// The shadow's would-POSTs made real: the same routes, payloads, token echo,
+// and 400ms fail-silent discipline as the Python menu hooks. Deliberately
+// FAIL-OPEN and always exit 0, matching the Python hooks' observe-only
+// stance — a menu hook must never gate or delay a tool call (contrast with
+// the worklist guard's fail-closed authority mode). Unparseable stdin
+// arrives here as `{}`, which matches no event and breadcrumbs action=none —
+// the same end state as Python's `payload = {}` fallback.
+
+// The POST body per provider+event, transcribed from the Python hooks. Raw
+// payload values ride through (nulls included) so the host sees identical
+// JSON from either implementation.
+fn menu_post_body(
+    provider: &str,
+    event: &str,
+    payload: &serde_json::Value,
+) -> serde_json::Value {
+    let field = |k: &str| payload.get(k).cloned().unwrap_or(serde_json::Value::Null);
+    let tool_input = payload
+        .get("tool_input")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    if provider == "codex-rs" {
+        return serde_json::json!({
+            "provider": "codex",
+            "hook_event_name": event,
+            "tool_name": field("tool_name"),
+            "tool_input": tool_input,
+            "permission_mode": field("permission_mode"),
+            "session_id": field("session_id"),
+            "turn_id": field("turn_id"),
+            "transcript_path": field("transcript_path"),
+        });
+    }
+    match event {
+        "PermissionRequest" => serde_json::json!({
+            "tool_name": field("tool_name"),
+            "tool_input": tool_input,
+            "permission_suggestions": payload
+                .get("permission_suggestions")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([])),
+            "tool_use_id": field("tool_use_id"),
+        }),
+        // Family B: AskUserQuestion via PreToolUse — no suggestions; the
+        // host builds the menu from tool_input.questions.
+        "PreToolUse" => serde_json::json!({
+            "tool_name": field("tool_name"),
+            "tool_input": tool_input,
+            "permission_suggestions": [],
+            "tool_use_id": field("tool_use_id"),
+        }),
+        // PostToolUse / PermissionDenied: clear, keyed by signature —
+        // PermissionRequest claims carry no tool_use_id, so id-only clears
+        // matched nothing (parallel-menu-claim-queue soak, 2026-07-18).
+        _ => serde_json::json!({
+            "tool_use_id": field("tool_use_id"),
+            "tool_name": field("tool_name"),
+            "tool_input": tool_input,
+        }),
+    }
+}
+
+fn authority_menu_hook(
+    provider: &str,
+    payload: &serde_json::Value,
+    started: std::time::Instant,
+) -> i32 {
+    let event = str_field(payload, "hook_event_name");
+    let tool = str_field(payload, "tool_name");
+    let root = resolve_project_root(provider, payload);
+    let Some(path) = menu_would_action(provider, &event, &tool) else {
+        append_breadcrumb(
+            &root,
+            provider,
+            &event,
+            &tool,
+            &format!("action=none ms={}", started.elapsed().as_millis()),
+        );
+        return 0;
+    };
+    // Root-local port only (no walk-up), like the Python menu hooks' _port:
+    // a session outside the project must skip, not POST to a parent Bram.
+    let Some(port) = read_port(&root) else {
+        append_breadcrumb(&root, provider, &event, &tool, "post=skipped port=none");
+        return 0;
+    };
+    let mut body = menu_post_body(provider, &event, payload);
+    // Echo the per-session token Bram set in this agent's env so the route
+    // can tell our POSTs from a foreign agent's. Absent (agent not launched
+    // by Bram) -> route rejects, which is the intended behavior.
+    if let Ok(token) = std::env::var("BRAM_MENU_TOKEN") {
+        if !token.is_empty() {
+            body["bram_token"] = serde_json::Value::String(token);
+        }
+    }
+    let outcome = post_json_outcome(port, path, &body.to_string());
+    append_breadcrumb(
+        &root,
+        provider,
+        &event,
+        &tool,
+        &format!(
+            "post={} {} ms={}",
+            path,
+            outcome,
+            started.elapsed().as_millis()
+        ),
+    );
+    0
 }
 
 fn shadow_menu_hook(provider: &str, payload: &serde_json::Value, started: std::time::Instant) {
@@ -906,6 +1036,87 @@ mod guard_mode_tests {
             fault_trace_decision("claude-rs", &GuardFault::UnparseableStdin("x".into())),
             "error"
         );
+    }
+
+    #[test]
+    fn menu_post_bodies_match_the_python_hooks() {
+        // Claude PermissionRequest: the four-field claim body.
+        let payload = serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "tool_name": "Bash",
+            "tool_input": { "command": "ls" },
+            "permission_suggestions": [{ "mode": "acceptEdits" }],
+            "tool_use_id": "toolu_1",
+        });
+        let body = menu_post_body("claude-rs", "PermissionRequest", &payload);
+        assert_eq!(body["tool_name"], "Bash");
+        assert_eq!(body["tool_input"]["command"], "ls");
+        assert_eq!(body["permission_suggestions"][0]["mode"], "acceptEdits");
+        assert_eq!(body["tool_use_id"], "toolu_1");
+
+        // Family B: AskUserQuestion via PreToolUse — empty suggestions.
+        let body = menu_post_body("claude-rs", "PreToolUse", &payload);
+        assert_eq!(body["permission_suggestions"], serde_json::json!([]));
+
+        // Clear: signature-keyed (tool_use_id + tool_name + tool_input),
+        // no suggestions field.
+        let body = menu_post_body("claude-rs", "PostToolUse", &payload);
+        assert_eq!(body["tool_use_id"], "toolu_1");
+        assert_eq!(body["tool_name"], "Bash");
+        assert!(body.get("permission_suggestions").is_none());
+
+        // Codex: one shape for claim and clear, provider-tagged.
+        let payload = serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "tool_name": "apply_patch",
+            "tool_input": { "patch": "x" },
+            "permission_mode": "on-request",
+            "session_id": "s1",
+            "turn_id": "t1",
+            "transcript_path": "/p",
+        });
+        let body = menu_post_body("codex-rs", "PermissionRequest", &payload);
+        assert_eq!(body["provider"], "codex");
+        assert_eq!(body["hook_event_name"], "PermissionRequest");
+        assert_eq!(body["permission_mode"], "on-request");
+        assert_eq!(body["session_id"], "s1");
+        assert_eq!(body["turn_id"], "t1");
+        assert_eq!(body["transcript_path"], "/p");
+    }
+
+    #[test]
+    fn authority_menu_stays_exit_zero_and_breadcrumbs_outcomes() {
+        // No port file: skip, breadcrumb the skip, exit 0 — the menu hook is
+        // deliberately fail-open (observe-only), unlike the worklist guard.
+        let root = scratch("menu-auth");
+        std::fs::create_dir_all(root.join("resources")).unwrap();
+        let payload = serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "tool_name": "Bash",
+            "cwd": root.to_string_lossy(),
+        });
+        let code = authority_menu_hook("codex-rs", &payload, std::time::Instant::now());
+        assert_eq!(code, 0);
+        let log = read_crumbs(&root);
+        assert!(log.contains("post=skipped port=none"), "log: {log}");
+
+        // Unmatched event (unparseable stdin arrives as {}): action=none.
+        let empty = serde_json::json!({ "cwd": root.to_string_lossy() });
+        let code = authority_menu_hook("claude-rs", &empty, std::time::Instant::now());
+        assert_eq!(code, 0);
+        assert!(read_crumbs(&root).contains("action=none ms="), "no action=none crumb");
+
+        // With a (dead) port: the POST fails, the breadcrumb names the
+        // outcome, and the exit stays 0.
+        std::fs::write(root.join("resources/.bram-port"), "1").unwrap();
+        let code = authority_menu_hook("codex-rs", &payload, std::time::Instant::now());
+        assert_eq!(code, 0);
+        assert!(
+            read_crumbs(&root).contains("post=/__menu/permission err="),
+            "log: {}",
+            read_crumbs(&root)
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[cfg(unix)]

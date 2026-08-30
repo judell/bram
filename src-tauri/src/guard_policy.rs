@@ -1644,9 +1644,18 @@ fn last_user_text(transcript_path: &str) -> String {
     if transcript_path.is_empty() {
         return String::new();
     }
-    let Ok(text) = std::fs::read_to_string(transcript_path) else {
+    // ci-retire-python-hook-checks: read LOSSILY. `read_to_string` errors on
+    // invalid UTF-8, and this is untrusted input read only for opt-out phrase
+    // matching — so one undecodable byte anywhere in a transcript used to
+    // yield empty text, silently disabling "just do it" and denying the edit.
+    // The Python guard opened it with errors="replace" for exactly this, and
+    // its test_undecodable_transcript_bytes pinned it ("even a corrupt
+    // transcript must not take the guard down"). #249 in mirror image: Python
+    // crashed loudly, this failed quiet.
+    let Ok(bytes) = std::fs::read(transcript_path) else {
         return String::new();
     };
+    let text = String::from_utf8_lossy(&bytes);
     // The Python guard scans forward, parsing EVERY line to keep only the
     // last non-empty user text; on a 30 MB session that is ~10k JSON parses
     // per guard invocation, and at debug opt-level (the shipping profile)
@@ -2460,7 +2469,13 @@ fn is_coordination_file(rel: &str) -> bool {
 }
 
 fn current_worklist_text(cwd: &Path) -> String {
-    std::fs::read_to_string(cwd.join(WORKLIST_REL)).unwrap_or_default()
+    // Lossy for the same reason as last_user_text: an undecodable byte would
+    // otherwise read as an empty worklist, i.e. no coverage for any path, and
+    // deny every edit with a misleading reason. Our own file, so likelier to
+    // carry an em-dash than a corrupt byte — but the failure mode is the same.
+    std::fs::read(cwd.join(WORKLIST_REL))
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default()
 }
 
 /// Codex `worklist_items` — the raw item array, for `_patch_removes_worklist_items`.
@@ -3610,6 +3625,75 @@ payload, then retry.{}",
 #[cfg(test)]
 mod guard_policy_tests {
     use super::*;
+
+    // --- ported from the retired scripts/tests/test_provider_hook_encoding.py,
+    // whose subject (the Python guards) went away with them. The behaviours it
+    // pinned are still ours to keep. ---
+
+    #[test]
+    fn opt_out_survives_an_undecodable_transcript() {
+        // The Python guard read the transcript with errors="replace" because a
+        // corrupt byte must not take the guard down. Rust's read_to_string
+        // returns Err on invalid UTF-8, which silently yielded empty text and
+        // disabled opt-out matching entirely.
+        let dir = std::env::temp_dir().join(format!("bram-enc-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let tp = dir.join("corrupt.jsonl");
+        let mut bytes = serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": "please fix it just do it"}
+        })
+        .to_string()
+        .into_bytes();
+        bytes.push(b'\n');
+        // A lone 0xFF is valid in no UTF-8 sequence.
+        bytes.extend_from_slice(&[0xFF, 0xFE, b'\n']);
+        std::fs::write(&tp, &bytes).unwrap();
+
+        let text = last_user_text(tp.to_str().unwrap());
+        assert!(
+            has_opt_out(&text),
+            "opt-out must survive undecodable bytes; got {text:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn non_ascii_transcript_reads_like_its_ascii_equivalent() {
+        // Drafts are full of em-dashes; a non-ASCII transcript must behave
+        // exactly as an ASCII one does.
+        let dir = std::env::temp_dir().join(format!("bram-enc2-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let tp = dir.join("spicy.jsonl");
+        std::fs::write(
+            &tp,
+            serde_json::json!({
+                "type": "user",
+                "message": {"role": "user", "content": "café — naïve 日本語 just do it"}
+            })
+            .to_string()
+                + "\n",
+        )
+        .unwrap();
+        assert!(has_opt_out(&last_user_text(tp.to_str().unwrap())));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn worklist_text_survives_undecodable_bytes() {
+        // An unreadable worklist would otherwise present as "no items", i.e.
+        // no coverage for any path, denying every edit with a wrong reason.
+        let dir = std::env::temp_dir().join(format!("bram-enc3-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join("resources"));
+        let mut bytes = br#"{"items":[{"id":"a","status":"proposed","files":["src/x.rs"]}],"#.to_vec();
+        bytes.extend_from_slice(&[0xFF]);
+        bytes.extend_from_slice(br#""version":1}"#);
+        std::fs::write(dir.join(WORKLIST_REL), &bytes).unwrap();
+        let text = current_worklist_text(&dir);
+        assert!(!text.is_empty(), "must not read as an empty worklist");
+        assert!(text.contains("src/x.rs"), "content must survive: {text:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir =

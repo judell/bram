@@ -17,29 +17,56 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - name: Provider-hook installed copies in sync with canonical
+      # The canonical/installed sync check. Its original subject was the
+      # provider hooks, which retired with the Python guards; bundled skills
+      # are the surviving pair (build.rs syncs app/skills/<n>/SKILL.md into
+      # .claude/skills/<n>/SKILL.md on every build, so a commit that edits the
+      # canonical without its twin lands half-applied and the next build
+      # dirties the tree).
+      - name: Bundled skill installed copies in sync with canonical
         run: |
-          diff -q .claude/hooks/claude-worklist-guard.py \
-                  app/provider-hooks/claude-worklist-guard.py
-          diff -q .claude/hooks/claude-permission-menu-hook.py \
-                  app/provider-hooks/claude-permission-menu-hook.py
+          shopt -s nullglob
+          found=0
+          for canonical in app/skills/*/SKILL.md; do
+            name=$(basename "$(dirname "$canonical")")
+            installed=".claude/skills/$name/SKILL.md"
+            if [ ! -f "$installed" ]; then
+              echo "missing installed copy for $name: $installed" >&2
+              exit 1
+            fi
+            diff -q "$canonical" "$installed"
+            found=$((found + 1))
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "no bundled skills found; this check has lost its subject" >&2
+            exit 1
+          fi
+          echo "$found bundled skill(s) in sync"
 
   verify-windows-installer:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      # #302 tripwire: a Windows checkout once converted the provider hooks
-      # to CRLF and the release binary embedded them that way, so the
-      # shipped guard failed byte comparison against mainline. The
-      # .gitattributes `eol=lf` rule is the fix; this asserts it holds on
-      # the runner where it broke. Provenance: the incident itself.
-      - name: Provider hooks check out LF on Windows (embedded bytes match mainline)
+      # #302 tripwire: a Windows checkout once converted an embedded script to
+      # CRLF and the release binary shipped it that way, so the file differed
+      # from mainline. The .gitattributes `eol=lf` rule is the fix; this
+      # asserts it holds on the runner where it broke. Provenance: the
+      # incident itself. The original subject (app/provider-hooks/*.py) went
+      # away with the Python guards; the shell-launch scripts are the
+      # remaining embedded text where a stray CR fails silently — bash reports
+      # a CR in a sourced rc file as a confusing command-not-found, not as an
+      # encoding error.
+      - name: Embedded shell scripts check out LF on Windows
         shell: powershell
         run: |
-          foreach ($Path in Get-ChildItem app/provider-hooks/*.py) {
+          $Files = Get-ChildItem app/shell/* -File | Where-Object { $_.Extension -ne '.md' }
+          if ($Files.Count -eq 0) {
+            throw "no embedded shell scripts found to check; this tripwire has lost its subject (#302)."
+          }
+          foreach ($Path in $Files) {
             $Bytes = [System.IO.File]::ReadAllBytes($Path.FullName)
             if ($Bytes -contains 13) {
-              throw "$($Path.Name) contains CR bytes at checkout; the release binary would embed a guard that differs from mainline (#302)."
+              throw "$($Path.Name) contains CR bytes at checkout; the release binary would embed a script that differs from mainline (#302)."
             }
           }
       - name: Windows install examples use validated shell entry paths

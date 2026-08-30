@@ -36,49 +36,38 @@ is XMLUI.
 
 ### Guard source of truth
 
-Provider hook adapters live under `app/provider-hooks/` with
-provider-prefixed names (#217). When editing Bram's Claude worklist
-guard in this source repo, `app/provider-hooks/claude-worklist-guard.py`
-is canonical. The runtime copy at
-`.claude/hooks/claude-worklist-guard.py` is an installed artifact that
-Setup and `src-tauri/build.rs` refresh from that canonical source. Do
-not make functional edits in the installed copy; it will either be
-reported as setup drift or overwritten by the next sync. The Claude
-permission-menu hook follows the same split:
-`app/provider-hooks/claude-permission-menu-hook.py` canonical,
-`.claude/hooks/claude-permission-menu-hook.py` installed.
+The guards are Rust, compiled into Bram itself
+(retire-python-hooks-rust-only): the policy lives in
+`src-tauri/src/guard_policy.rs` and the hook plumbing (dispatch, menu
+POSTs, fail-closed fault handling, breadcrumbs) in
+`src-tauri/src/guard.rs`. Hook registrations invoke
+`~/.bram/bram-guard` (`bram-guard.exe` on Windows), a link Bram installs
+at startup and re-ensures on a ticker, pointing at the dedicated
+`bram-guard` binary built beside the app (GUI subsystem on Windows in
+every profile, so hook spawns never flash a conhost). There are no
+script files to edit or keep in sync — editing a guard is editing the
+Rust source, and validating it is `cargo build` + relaunch, which
+refreshes the link's target. Registration strings carry a bare
+`guard <hook>` subcommand; a `--authority` token from the transition era
+is still accepted and ignored.
 
-In **this source repo** the installed copies are tracked, and `build.rs`
-regenerates them on every build — so a worklist item that edits a
-canonical hook must list its installed twin in `files` as well
-(`app/provider-hooks/claude-worklist-guard.py` →
-`.claude/hooks/claude-worklist-guard.py`). Omit it and the commit lands
-canonical-only; the next build then regenerates the installed copy into
-a dirty working tree that belongs to no item, and a checkout of that
-commit carries a guard whose installed and canonical forms disagree.
-The `.gitignore` entries near `.claude/hooks/` cover only the retired
-generic names, not the provider-prefixed installed copies.
-
-The Codex guard has the same source/installed split:
-`app/provider-hooks/codex-worklist-guard.py` is canonical, while
-`~/.bram/codex-worklist-guard.py` is the installed runtime copy (the
-Codex permission-menu hook mirrors it:
-`app/provider-hooks/codex-permission-menu-hook.py` →
-`~/.bram/codex-permission-menu-hook.py`).
+The retired Python hook scripts (`.claude/hooks/claude-*.py` in managed
+projects, `~/.bram/codex-*.py` user-globally) are deleted by Setup once
+**no settings source** references them — project `settings.json`,
+project `settings.local.json`, or the user-global
+`~/.claude/settings.json` for the Claude pair, `~/.codex/config.toml`
+for the Codex pair (the same #173/#227 reference-gated prune that
+covers the older generic names). Bram never rewrites the global files:
+a stale reference there holds the deletion back and is named in the
+Setup result instead. A lingering script is surfaced by the Status
+tab's "Retired Python hooks" rows.
 
 `app/shell/` holds shell-launch support only (`claude-code-shellrc`,
 `claude-code-profile.ps1` configure the shell that launches the agent
 CLI; `codex-startup-instructions.md` is startup text injected into Codex
-sessions) — no hook adapters. Legacy generic installed names
-(`.claude/hooks/worklist-guard.py`, `.claude/hooks/permission-menu-hook.py`)
-survive transiently after upgrade so live sessions' hook snapshots keep
-working; Bram startup prunes them once **no settings source** references
-them — project `settings.json`, project `settings.local.json`, or the
-user-global `~/.claude/settings.json` (Claude Code merges hook config
-from all three; a stale reference in any of them keeps the shim
-load-bearing — #227). Bram never rewrites the global or local file: a
-stale reference there holds the prune back and surfaces as a named
-drift warning in the Setup result instead.
+sessions) — no hook adapters. `app/provider-hooks/` is gone with the
+Python guards it held; the history (including the shadow-soak and
+authority-flip receipts) is in git and on judell/bram#269 and #313.
 
 **Bram-bundled skills** follow the same canonical/installed split:
 `app/skills/<name>/SKILL.md` is canonical; Setup seeds it into each
@@ -2153,4 +2142,4 @@ grep for:
 | `search-date` | ChangeListeners and the date `Slider`'s `onDidChange` in `Search.xmlui` | `op=drag` (`lo`, `hi`), `op=filter-reset` (`settled`, `lo`, `hi`), `op=buckets` (`s`, `c`, `i`, `h`, `settled` — per-bucket `inProgress` flap), `op=displayed` (`count`, `filtered`, `lo`, `hi`), `op=pin-top` (`via=buckets` — bucket-toggle pin, `SearchResults.xmlui`; `via=filter-or-query` — debounced pin after a date-filter or query change, `Search.xmlui`; both via `window.scrollAllToTop`, not `List.scrollToTop`, whose outside-scroll `startMargin` goes stale and lands short). Epoch seconds and counts only — never query text. | search-date-filter-forensics (observe-only): built for the 2026-08-14 iterate on compact-search-header-and-hit-badges ("max thumb does not constrain"). The soak's verdict, same day: the drag → filter → displayed pipeline was correct (58→6 rows, zero resets); the visible falsehood was the endpoint labels, frozen at a transient first-settle domain by an inline `dateFilter ? … : dateRange[…]` ternary that defeated binding dependency tracking (fixed by extracting to `dateLoLabel`/`dateHiLabel` vars). A companion `search-expand op=auto` subkind existed for one soak cycle and convicted auto-expand of firing on every settle transition; auto-expand was then removed outright, and the subkind with it. The grep pattern stays useful: `drag` followed by `filter-reset` + a `buckets` flap = a refetch clearing the filter; `drag` with `displayed filtered=false` = the didChange path; `drag` with `filtered=true` but unchanged `count` = the comparison. Remove once the filter mechanics are trusted. |
 | `ai-describe` (host) | `handle_describe_command` in `lib.rs` | `op=call` (`ms`, `model`, `input_tokens`, `output_tokens`, `upgraded`, `ctx`, `result`, `redactions`, `id`); `op=hit` (`id`); `op=skip` (`reason=disabled\|no-key`); `op=error` (`status`, `ms`, `detail`) | One line per `/__describe-command` request — Haiku intent-header synthesis for tool expansions. Default off: requires explicit project `ai.describeCommands: true` plus `ANTHROPIC_API_KEY`. Command/diff/write/access material, context, result excerpts, and existing descriptions are redacted before request construction. `op=call` carries latency, token counts, and the count of masked spans, never prompt content. Explicit opt-in is the security boundary because heuristic redaction cannot guarantee arbitrary content is secret-free. |
 | `term-modal` (host; `op=term-modal-at-inject` mirrored to always-on `strand-forensics.log`) | `term_modal_scan` on the PTY output path in `lib.rs`; `term_modal_trace_at_inject` beside the send-ledger inject site | `op=enter\|exit` (`bits` — mouse modes ?1000/?1002/?1003/?1006 plus the kitty-keyboard bit; `reason=mode-bytes\|alt-screen-exit`); `op=at-inject` (`id` — joinable to the `[send-forensics] op=inject` breadcrumb with the same id, `bits`) | issue-305 phase 1, OBSERVE-ONLY: a full-screen TUI overlay (the `/artifacts` picker was the specimen) announces itself by enabling mouse tracking and/or pushing the kitty keyboard protocol — modes the ordinary composer doesn't use. This tracker arms on those enables, clears on their disables / alt-screen exit, and stamps a companion line beside any pane send injected while modal state is live, so the soak yields "how often do sends race an overlay, and is the arm/clear edge trustworthy". Design intent (Jon, #305): the graduation target is a terminal-attention-style reveal notice when modal state coincides with a hidden terminal — never a send hold, overlay modeling, or keystroke interception; the send-restore path remains the recovery mechanism for text that reaches an overlay. ?1006 alone never counts as modal (encoding-only); combined enables (`?1000;1002h`) are not parsed — the specimen re-asserts modes individually. First live result (2026-08-28, Mac): Claude Code's `/artifacts` picker on macOS emits NEITHER signal — zero mouse enables in a full session, kitty bytes only as teardown pops — so the tell is platform/capability-specific; the observer can fire only where the modes are emitted, and a Mac-side reveal notice needs a different signal. |
-| `guard-shadow` (breadcrumb, **`resources/bram-traces/hook-events.log`**, not `bram-trace.log`) | `bram guard <hook>` reentrant mode (`src-tauri/src/guard.rs` dispatch; worklist policy in `src-tauri/src/guard_policy.rs`), lines tagged `claude-rs` / `codex-rs` in the provider column | Menu hooks: `<ts> <provider> <event> <tool> would-post=<route> port=<n\|none> ms=<n>`. Worklist hooks: `… would=<allow\|deny> target=<rel\|-> ms=<n> reason=<reason to EOL>` — `reason` is deliberately last because Codex reasons are prose with spaces (byte-for-byte parity with the Python guard's derived deny messages; Claude reasons are single tokens). Either: `action=none ms=<n>` for events the hook would not act on. Under `guards.rustAuthority` (guards-rust-authority-covers-menu-hooks) the menu hooks run `--authority` and POST for real, so their lines carry outcomes instead of would-posts: `post=<route> ok\|err=connect\|err=io ms=<n>` / `post=skipped port=none` — the Python menu hooks' outcome-suffix shapes, now emitted by the Rust hook. Worklist authority lines keep their `decided=` grammar; on guard faults they read `decided=error\|deny target=- ms=<n> reason=unparseable stdin: …\|guard panic: …` (bram-guard-authority-fail-closed), and the shadow's twin is `would=deny … reason=unparseable-stdin`. | The Python-hook retirement's shadow phase (receipts on #269): Rust ports of the provider hooks run SHADOW — never POST, never decide, always exit 0 — appending one breadcrumb per invocation into the same `hook-events.log` the Python menu hooks write, so the divergence check is a grep-join of the two streams. Menu join: every Python `post=` line pairs with an `-rs` twin whose `would-post` names the same route. Worklist join: the `-rs` `would=`/`reason=` pair matches the Python guard's traced `decision=`/`reason=` byte-for-byte, EXCEPT (a) the three #299 misclassifications, fixed in the port — those diverge deliberately, allow-vs-deny, at commented sites; (b) `no-trace:*` reasons, which mark paths where the Python guard exits silently (outside-project, unmanaged repo, non-write tools) — expect NO Python twin; (c) Python's non-terminal `[hook]` lines — the shadow records only the terminal decision, so these are Python-only by design. The complete set, verified at the emit sites on 2026-08-28 after a spec-faithful join scored false divergences on the unlisted `forge-sha-unparsed:*` (#297 finding 2): families `crossboundary-*` and `forge-sha-*`, plus `subagent-gate-no-agent-id` and `payload-keys=*` (Claude — up to one of each per invocation), and on Codex the intent-file check lines `no-pending` / `stale-overwrite`. Any new non-terminal trace added to a Python guard must be added here in the same change (the register-new-subkinds rule, applied to this row); (d) a `PermissionRequest` surface with no closing twin after an interrupt — legitimate terminal state, not a divergence (#297 decline test). `ms` is in-process handling; spawn cost is measured separately. Registered by Setup beside the Python hooks (markers are the subcommand strings, e.g. `guard claude-worklist`, outside the needs-setup calculus); Codex entries ride the config.toml block only when `~/.bram/bram-guard` exists, and adding them fires the config re-trust prompt once. |
+| `guard-hooks` (breadcrumb, **`resources/bram-traces/hook-events.log`**, not `bram-trace.log`; formerly `guard-shadow`) | `bram-guard guard <hook>` (`src-tauri/src/guard.rs` dispatch; worklist policy in `src-tauri/src/guard_policy.rs`), lines tagged `claude-rs` / `codex-rs` in the provider column | Worklist hooks: `<ts> <provider> PreToolUse <tool> decided=<allow\|deny\|error> target=<rel\|-> ms=<n> reason=<reason to EOL>` — `reason` is deliberately last because Codex reasons are prose with spaces, so every fixed-width field precedes it. Guard faults read `decided=error\|deny target=- … reason=unparseable stdin: …\|guard panic: …` (bram-guard-authority-fail-closed). Menu hooks POST for real and breadcrumb outcomes: `post=<route> ok\|err=connect\|err=io ms=<n>` / `post=skipped port=none` / `action=none ms=<n>`. | The deciding Rust hooks' per-invocation audit line — the only hook stream since retire-python-hooks-rust-only deleted the Python guards (the shadow phase's would-post/would-deny grammar and its Python grep-join discipline retired with them; receipts on judell/bram#269 and #313). One line per hook spawn, written only when `<root>/resources` exists; a menu breadcrumb with no host-side `[hook-menu] op=claim-queue-add` means the POST was lost in transit (`err=` names the failure), while no breadcrumb at all means the provider fired no event and the grid path is the designed fallback. `ms` is in-process handling; spawn cost is measured separately. Registered by Setup; Codex entries ride the config.toml block only when `~/.bram/bram-guard` exists, and rewriting the block fires the config re-trust prompt once. |

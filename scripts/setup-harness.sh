@@ -119,11 +119,32 @@ assert_setup_landed() {
   # core_installed keys on this file (lib.rs:33509).
   assert_file "$dir" "resources/.worklist-authorization.json"
   assert_file "$dir" ".claude/bram-conventions.md"
-  assert_file "$dir" ".claude/hooks/claude-worklist-guard.py"
-  assert_file "$dir" ".claude/hooks/claude-permission-menu-hook.py"
   assert_file "$dir" ".claude/settings.json"
   assert_file "$dir" "AGENTS.md"
   assert_file "$dir" "CLAUDE.md"
+
+  # retire-python-hooks-rust-only: Setup installs NO Python hook scripts,
+  # and deletes previously installed ones once unreferenced. Presence after
+  # a fresh Setup is the failure.
+  for retired in ".claude/hooks/claude-worklist-guard.py" ".claude/hooks/claude-permission-menu-hook.py"; do
+    if [ -e "$dir/$retired" ]; then
+      bad "retired Python hook absent: $retired" "present after Setup"
+    else
+      ok "retired Python hook absent: $retired"
+    fi
+  done
+
+  # The deciding registration is the bram-guard link, not python.
+  if grep -q "bram-guard" "$dir/.claude/settings.local.json" 2>/dev/null; then
+    ok "bram-guard registered in settings.local.json"
+  else
+    bad "bram-guard registered in settings.local.json" "no bram-guard command found"
+  fi
+  if grep -qE "python|\.py" "$dir/.claude/settings.local.json" 2>/dev/null; then
+    bad "no python commands in settings.local.json" "$(grep -oE '"command":[^,]*' "$dir/.claude/settings.local.json" | head -3)"
+  else
+    ok "no python commands in settings.local.json"
+  fi
 
   # #247: claude_installed was lenient, so the button never surfaced.
   assert_field enhanced true

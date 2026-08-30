@@ -1,18 +1,16 @@
-// Reentrant guard mode (bram-guard-reentrant-menu-hooks): `bram guard
-// <hook-name>` runs the same binary the desktop shell ships, branched at the
-// top of main() before any Tauri, webview, PTY, port-file, or trace-rotation
-// side effect can execute. This is phase 1 of the Python-hook retirement
-// (judell/bram#269 carries the migration receipts): SHADOW-ONLY. The ported
-// hooks never POST, never decide, and always exit 0 — they compute what the
-// authoritative Python hook would do and append one breadcrumb per
-// invocation to the same resources/bram-traces/hook-events.log the Python
-// menu hooks write, tagged `claude-rs` / `codex-rs`, so the divergence check
-// is a grep-join of the two streams.
-//
-// Inertness is contractual, not incidental: outside the breadcrumb (written
-// only when <root>/resources already exists — the same guard the Python
-// hooks apply), guard mode creates nothing. `guard_mode_is_inert_without_
-// resources_dir` is the test holding that line.
+// Reentrant guard mode: `bram-guard guard <hook-name>` (via the dedicated
+// GUI-subsystem bin, or `bram guard …` on the main binary) runs the deciding
+// hooks — the sole implementation since retire-python-hooks-rust-only
+// (judell/bram#269 and #313 carry the port's migration and validation
+// receipts; the Python guards this replaced live in git history). Worklist
+// hooks decide with real exit codes and fail CLOSED on guard faults
+// (bram-guard-authority-fail-closed); menu hooks POST the pane's menu
+// claims/clears and stay deliberately fail-open, exit 0 always — a menu hook
+// must never gate or delay a tool call. Every invocation appends one
+// breadcrumb to resources/bram-traces/hook-events.log, tagged `claude-rs` /
+// `codex-rs`, written only when <root>/resources already exists — outside
+// that, guard mode creates nothing (`guard_mode_is_inert_without_
+// resources_dir` holds the line).
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -21,70 +19,50 @@ const EVENTS_LOG_CAP_BYTES: u64 = 5 * 1024 * 1024;
 
 pub fn run_guard_mode(args: &[String]) -> i32 {
     let hook = args.first().map(String::as_str).unwrap_or("");
-    // Authority mode (bram-guard-authority-flip): `--authority` makes this
-    // invocation the DECIDER — real exit codes, real deny output, the
-    // Python guards deregistered by Setup while the guards.rustAuthority
-    // flag is on. Without the flag, shadow semantics are byte-identical to
-    // before: observe, breadcrumb, always exit 0.
-    let authority = args.iter().any(|a| a == "--authority");
+    // `--authority` is accepted and ignored: it named the deciding mode
+    // during the shadow-and-flip transition, and sessions launched before a
+    // Setup rewrite still invoke the old registration strings. Deciding is
+    // the only mode now.
     let started = std::time::Instant::now();
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
     // bram-guard-authority-fail-closed: keep the parse failure instead of
     // silently substituting `{}` — an empty payload has no tool name, which
     // the policy ALLOWS, so the substitution made every unreadable payload
-    // fail open (the #249 class, reproduced in the new decider). Both
-    // Python guards fail closed here: Codex explicitly
-    // (codex-guard-stdin-fail-closed) and Claude via its top-level
-    // catch-all ("allowing on a bug is an invisible hole").
+    // fail open (the #249 class, reproduced in the new decider before both
+    // Python guards' deliberate fail-closed behavior was ported).
     let (payload, stdin_error) = match serde_json::from_str(input.trim()) {
         Ok(v) => (v, None),
         Err(e) => (serde_json::json!({}), Some(e.to_string())),
     };
     match hook {
-        "claude-permission-menu" if authority => {
-            return authority_menu_hook("claude-rs", &payload, started);
-        }
-        "codex-permission-menu" if authority => {
-            return authority_menu_hook("codex-rs", &payload, started);
-        }
-        "claude-permission-menu" => shadow_menu_hook("claude-rs", &payload, started),
-        "codex-permission-menu" => shadow_menu_hook("codex-rs", &payload, started),
-        "claude-worklist" if authority => {
-            return authority_guarded_dispatch(
-                "claude-rs",
-                &payload,
-                stdin_error,
-                started,
-                authority_worklist_hook,
-            );
-        }
-        "codex-worklist" if authority => {
-            return authority_guarded_dispatch(
-                "codex-rs",
-                &payload,
-                stdin_error,
-                started,
-                authority_worklist_hook,
-            );
-        }
-        "claude-worklist" => {
-            shadow_worklist_hook_checked("claude-rs", &payload, stdin_error.as_deref(), started)
-        }
-        "codex-worklist" => {
-            shadow_worklist_hook_checked("codex-rs", &payload, stdin_error.as_deref(), started)
-        }
+        "claude-permission-menu" => authority_menu_hook("claude-rs", &payload, started),
+        "codex-permission-menu" => authority_menu_hook("codex-rs", &payload, started),
+        "claude-worklist" => authority_guarded_dispatch(
+            "claude-rs",
+            &payload,
+            stdin_error,
+            started,
+            authority_worklist_hook,
+        ),
+        "codex-worklist" => authority_guarded_dispatch(
+            "codex-rs",
+            &payload,
+            stdin_error,
+            started,
+            authority_worklist_hook,
+        ),
         other => {
             // Misregistration surfaces in stderr, never in the exit code: a
-            // nonzero exit from a PreToolUse-shaped hook can block the tool
-            // call, and shadow mode must be incapable of affecting anything.
+            // nonzero exit from a PreToolUse-shaped hook could block a tool
+            // call over a typo in a registration string.
             eprintln!("bram guard: unknown hook '{}'", other);
+            0
         }
     }
-    0
 }
 
-// --- Authority mode (bram-guard-authority-flip) ---------------------------
+// --- Deciding worklist hooks ----------------------------------------------
 
 // Walk up from `start` to the nearest resources/.bram-port, mirroring the
 // Python guard's port discovery so the [hook] trace lands the same way.
@@ -409,31 +387,6 @@ fn authority_guarded_dispatch(
     }
 }
 
-// Shadow twin of the stdin fault path: no decision, no exit-code change —
-// one breadcrumb naming the would-deny so the parity join covers the path.
-fn shadow_worklist_hook_checked(
-    provider: &str,
-    payload: &serde_json::Value,
-    stdin_error: Option<&str>,
-    started: std::time::Instant,
-) {
-    if stdin_error.is_some() {
-        let root = resolve_project_root(provider, payload);
-        append_breadcrumb(
-            &root,
-            provider,
-            "PreToolUse",
-            "?",
-            &format!(
-                "would=deny target=- ms={} reason=unparseable-stdin",
-                started.elapsed().as_millis()
-            ),
-        );
-        return;
-    }
-    shadow_worklist_hook(provider, payload, started);
-}
-
 fn str_field(payload: &serde_json::Value, key: &str) -> String {
     payload
         .get(key)
@@ -608,52 +561,13 @@ fn authority_menu_hook(
     0
 }
 
-fn shadow_menu_hook(provider: &str, payload: &serde_json::Value, started: std::time::Instant) {
-    let event = str_field(payload, "hook_event_name");
-    let tool = str_field(payload, "tool_name");
-    let root = resolve_project_root(provider, payload);
-    let tail = match menu_would_action(provider, &event, &tool) {
-        Some(path) => format!(
-            "would-post={} port={} ms={}",
-            path,
-            read_port(&root)
-                .map(|p| p.to_string())
-                .unwrap_or_else(|| "none".to_string()),
-            started.elapsed().as_millis()
-        ),
-        None => format!("action=none ms={}", started.elapsed().as_millis()),
-    };
-    append_breadcrumb(&root, provider, &event, &tool, &tail);
-}
-
-// The worklist guard's shadow: compute the would-decision, write one
-// breadcrumb, decide nothing. `shadow_worklist_decision` returning None means
-// this provider has no ported policy yet, which records as `action=none` — the
-// same shape the menu shadow uses for an event it would not act on.
-fn shadow_worklist_hook(provider: &str, payload: &serde_json::Value, started: std::time::Instant) {
-    let event = str_field(payload, "hook_event_name");
-    let tool = str_field(payload, "tool_name");
-    let root = resolve_project_root(provider, payload);
-    // `reason=` is deliberately LAST and runs to end-of-line: Codex reasons
-    // are prose derived from the Python guard's deny message (spaces and
-    // all, byte-for-byte parity), so every fixed-width field must precede
-    // it for the line to stay whitespace-splittable.
-    let tail = match crate::guard_policy::shadow_worklist_decision(provider, payload) {
-        Some(v) => format!(
-            "would={} target={} ms={} reason={}",
-            v.decision,
-            if v.target.is_empty() { "-" } else { &v.target },
-            started.elapsed().as_millis(),
-            v.reason,
-        ),
-        None => format!("action=none ms={}", started.elapsed().as_millis()),
-    };
-    append_breadcrumb(&root, provider, &event, &tool, &tail);
-}
-
-// One line per invocation into the Python menu hooks' breadcrumb file, same
-// refusal-to-create discipline: no <root>/resources, no write anywhere; the
-// existing log over the cap stops growing rather than rotating.
+// One line per invocation into the hook breadcrumb file, same
+// refusal-to-create discipline the retired Python hooks applied: no
+// <root>/resources, no write anywhere; the existing log over the cap stops
+// growing rather than rotating. `reason=` fields are deliberately LAST and
+// run to end-of-line: Codex reasons are prose with spaces, so every
+// fixed-width field must precede them for lines to stay
+// whitespace-splittable.
 fn append_breadcrumb(root: &Path, provider: &str, event: &str, tool: &str, tail: &str) {
     let resources = root.join("resources");
     if !resources.is_dir() {
@@ -859,7 +773,8 @@ mod guard_mode_tests {
             "tool_name": "Bash",
             "cwd": root.to_string_lossy(),
         });
-        shadow_menu_hook("codex-rs", &payload, std::time::Instant::now());
+        let code = authority_menu_hook("codex-rs", &payload, std::time::Instant::now());
+        assert_eq!(code, 0);
         assert_eq!(count_entries(&root), 0, "guard mode created files");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -873,17 +788,14 @@ mod guard_mode_tests {
             "tool_name": "Bash",
             "cwd": root.to_string_lossy(),
         });
-        shadow_menu_hook("codex-rs", &payload, std::time::Instant::now());
+        authority_menu_hook("codex-rs", &payload, std::time::Instant::now());
         let log = std::fs::read_to_string(root.join("resources/bram-traces/hook-events.log"))
             .expect("breadcrumb written");
         assert!(
             log.contains("codex-rs PermissionRequest Bash"),
             "log: {log}"
         );
-        assert!(
-            log.contains("would-post=/__menu/permission port=none ms="),
-            "log: {log}"
-        );
+        assert!(log.contains("post=skipped port=none"), "log: {log}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -985,28 +897,6 @@ mod guard_mode_tests {
             must_not_run,
         );
         assert_eq!(code, 2);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn shadow_breadcrumbs_unparseable_stdin_and_stays_inert() {
-        // Shadow keeps its exit-0 observe-only contract but names the
-        // would-deny so the parity join covers the path.
-        let root = scratch("fault-shadow");
-        std::fs::create_dir_all(root.join("resources")).unwrap();
-        let payload = serde_json::json!({ "cwd": root.to_string_lossy() });
-        shadow_worklist_hook_checked(
-            "codex-rs",
-            &payload,
-            Some("bad json"),
-            std::time::Instant::now(),
-        );
-        let log = read_crumbs(&root);
-        assert!(
-            log.contains("would=deny target=- ms="),
-            "log: {log}"
-        );
-        assert!(log.contains("reason=unparseable-stdin"), "log: {log}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -79,24 +79,6 @@ fn extract_app_file<R: tauri::Runtime>(app: &AppHandle<R>, rel: &str) -> Result<
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     std::fs::write(&target, file.contents()).map_err(|e| e.to_string())?;
-    if rel == ENHANCE_HOOK_BUNDLE_REL
-        || rel == ENHANCE_CODEX_HOOK_BUNDLE_REL
-        || rel == ENHANCE_MENU_HOOK_BUNDLE_REL
-    {
-        let is_source_repo = project_root(Some(app))
-            .map(|p| p.join(ENHANCE_SOURCE_BUNDLE_REL).exists())
-            .unwrap_or(false);
-        trace_hook_install_write(
-            app,
-            "startup-extract",
-            rel,
-            &target,
-            file.contents(),
-            is_source_repo,
-            file!(),
-            line!(),
-        );
-    }
     Ok(target)
 }
 
@@ -344,21 +326,10 @@ struct ProjectConfig {
     ai: Option<AiConfig>,
     #[serde(default)]
     search: Option<SearchConfig>,
-    #[serde(default)]
-    guards: Option<GuardsConfig>,
 }
-
-// Optional guards block (bram-guard-authority-flip). `rustAuthority` is the
-// reversible pre-release toggle: when true, Setup registers the Rust
-// bram-guard as the DECIDING worklist hook and deregisters the Python
-// guards; when absent/false (the default, and every non-test machine),
-// Setup's output is byte-identical to before the flag existed. Flipping
-// back is: clear the flag, run Setup.
-#[derive(Default, Clone, serde::Deserialize)]
-struct GuardsConfig {
-    #[serde(default, rename = "rustAuthority")]
-    rust_authority: Option<bool>,
-}
+// (The transitional `guards.rustAuthority` toggle was retired by
+// retire-python-hooks-rust-only: the Rust bram-guard is the only
+// implementation, so a leftover `guards` block in .bram.json is ignored.)
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
 struct ServerConfig {
@@ -719,19 +690,6 @@ fn apply_bram_trace_from_config(enabled: bool) {
 
 fn bram_menus_parse_enabled() -> bool {
     BRAM_MENUS_PARSE_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-// bram-guard-authority-flip: the guards.rustAuthority toggle, applied at
-// startup and on settings POSTs like its siblings.
-static BRAM_GUARDS_RUST_AUTHORITY: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-fn bram_guards_rust_authority() -> bool {
-    BRAM_GUARDS_RUST_AUTHORITY.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-fn apply_bram_guards_rust_authority_from_config(enabled: bool) {
-    BRAM_GUARDS_RUST_AUTHORITY.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
 // Apply the `menus.parseAndDisplay` setting from .bram.json. Called at
@@ -14629,9 +14587,8 @@ fn pty_spawn(
     // it, so an agent running OUTSIDE Bram can't POST menus into this pane.
     command.env("BRAM_MENU_TOKEN", menu_session_token());
     // Propagate trace toggle + log path into the PTY child so hook
-    // scripts (claude-worklist-guard.py for Claude, codex-worklist-guard.py
-    // for Codex) can write [hook] records into the same trace file as
-    // the host. See trace-category-hook.
+    // processes (bram-guard) can write [hook] records into the same trace
+    // file as the host. See trace-category-hook.
     if bram_trace_enabled() {
         command.env("BRAM_TRACE", "1");
         if let Some(path) = bram_trace_log_file(&app) {
@@ -19034,13 +18991,6 @@ fn handle_settings_post<R: tauri::Runtime>(
             .and_then(|c| c.menus.as_ref())
             .and_then(|m| m.hook_driven)
             .unwrap_or(true),
-    );
-    apply_bram_guards_rust_authority_from_config(
-        config
-            .as_ref()
-            .and_then(|c| c.guards.as_ref())
-            .and_then(|g| g.rust_authority)
-            .unwrap_or(false),
     );
     let settings = settings_view_from_config(config);
     emit_settings_changed(app, &settings);
@@ -33143,17 +33093,7 @@ const ENHANCE_CODEX_BUNDLE_REL: &str = "shell/codex-startup-instructions.md";
 const ENHANCE_HOOK_SCRIPT_REL: &str = ".claude/hooks/claude-worklist-guard.py";
 const ENHANCE_SETTINGS_REL: &str = ".claude/settings.json";
 const ENHANCE_SETTINGS_LOCAL_REL: &str = ".claude/settings.local.json";
-const ENHANCE_HOOK_BUNDLE_REL: &str = "provider-hooks/claude-worklist-guard.py";
-// Codex's worklist guard runs as a PreToolUse hook in codex's user-global
-// config. The bundle ships with Bram and is copied to
-// ~/.bram/codex-worklist-guard.py the first time setup runs in any
-// project; the hook config registration in ~/.codex/config.toml is identical
-// across projects because the script self-detects whether the active cwd is
-// Bram-managed (presence of resources/.worklist-authorization.json).
-const ENHANCE_CODEX_HOOK_BUNDLE_REL: &str = "provider-hooks/codex-worklist-guard.py";
 const ENHANCE_CODEX_HOOK_INSTALL_REL: &str = ".bram/codex-worklist-guard.py";
-const ENHANCE_CODEX_MENU_HOOK_BUNDLE_REL: &str = "provider-hooks/codex-permission-menu-hook.py";
-const ENHANCE_CODEX_MENU_HOOK_INSTALL_REL: &str = ".bram/codex-permission-menu-hook.py";
 const ENHANCE_CODEX_CONFIG_REL: &str = ".codex/config.toml";
 const ENHANCE_CODEX_TRUST_ACK_LEGACY_REL: &str = ".bram/codex-trust-ack";
 // TOML-comment markers delimit the Bram block inside codex's
@@ -33223,121 +33163,12 @@ const INFLIGHT_CLAIM_REL: &str = "resources/.inflight-claim.json";
 // survive an iframe-reload-mid-click. Drained synchronously by queue_pty_intent;
 // startup cleanup deletes any stale queue from a prior session.
 const PTY_INTENT_REL: &str = "resources/.pty-intent.jsonl";
-// On Unix, the bare path runs via the script's `#!/usr/bin/env python3`
-// shebang (set executable by run_enhance under #[cfg(unix)]). On Windows
-// there's no shebang resolution and no chmod, so we invoke through the
-// `py` launcher — it ships with the python.org installer and resolves
-// Python via the registry, independent of PATH.
-#[cfg(not(windows))]
-const ENHANCE_HOOK_COMMAND: &str = "$CLAUDE_PROJECT_DIR/.claude/hooks/claude-worklist-guard.py";
 // Permission-menu surfacing hook (menus.hookDriven). Installed and registered
 // the same way as the worklist guard: bundle copied to
 // .claude/hooks/claude-permission-menu-hook.py, registered as PermissionRequest +
 // PostToolUse hooks. Observe-only (never blocks); canonical source is
 // app/provider-hooks/claude-permission-menu-hook.py.
 const ENHANCE_MENU_HOOK_SCRIPT_REL: &str = ".claude/hooks/claude-permission-menu-hook.py";
-const ENHANCE_MENU_HOOK_BUNDLE_REL: &str = "provider-hooks/claude-permission-menu-hook.py";
-#[cfg(not(windows))]
-const ENHANCE_MENU_HOOK_COMMAND: &str = "$CLAUDE_PROJECT_DIR/.claude/hooks/claude-permission-menu-hook.py";
-
-// issue-247: resolve a working Python 3 by EXECUTION, not presence. On
-// Windows, PATH presence lies — the Microsoft Store ships zero-byte
-// python.exe/python3.exe aliases that are not Python. Probing each
-// candidate with `-c "import sys; print(sys.executable)"` rejects the
-// stubs mechanically (they cannot execute the program) and returns the
-// real absolute interpreter path even when discovered via the `py -3`
-// launcher, so hook commands can embed a PATH-independent absolute path
-// that quotes identically under cmd, PowerShell, and the agent CLIs'
-// hook shells. One resolver feeds setup and status so they cannot
-// disagree (#247).
-fn probe_python_candidate(cmd: &str, pre_args: &[&str]) -> Option<String> {
-    let out = std::process::Command::new(cmd)
-        .args(pre_args)
-        .args(["-c", "import sys; print(sys.executable)"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if path.is_empty() || !std::path::Path::new(&path).exists() {
-        return None;
-    }
-    Some(path)
-}
-
-fn resolve_hook_python() -> Option<String> {
-    #[cfg(windows)]
-    {
-        probe_python_candidate("py", &["-3"])
-            .or_else(|| probe_python_candidate("python", &[]))
-            .or_else(|| probe_python_candidate("python3", &[]))
-            .or_else(|| {
-                // python.org's per-user default location, reachable when
-                // neither the launcher nor add-to-PATH was selected during
-                // install.
-                let root = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
-                    .join("Programs")
-                    .join("Python");
-                let mut exes: Vec<std::path::PathBuf> = std::fs::read_dir(&root)
-                    .ok()?
-                    .flatten()
-                    .filter(|e| {
-                        e.file_name()
-                            .to_string_lossy()
-                            .to_ascii_lowercase()
-                            .starts_with("python3")
-                    })
-                    .map(|e| e.path().join("python.exe"))
-                    .filter(|p| p.exists())
-                    .collect();
-                exes.sort();
-                let exe = exes.pop()?;
-                probe_python_candidate(&exe.to_string_lossy(), &[])
-            })
-    }
-    #[cfg(not(windows))]
-    {
-        probe_python_candidate("python3", &[]).or_else(|| probe_python_candidate("python", &[]))
-    }
-}
-
-// Setup-result warning for the missing-runtime gate; one string so the
-// Claude and Codex arms cannot drift apart.
-const HOOK_PYTHON_MISSING_WARNING: &str = "hooks not installed: no Python 3 runtime found \
-(checked the py launcher, python, python3, and %LOCALAPPDATA%\\Programs\\Python on Windows). \
-Install Python 3 from python.org, then re-run Setup.";
-
-// Claude hook command strings. POSIX runs the scripts via shebang, exactly
-// as before; Windows embeds the resolved absolute interpreter (issue-247).
-// None means no usable Python — callers skip installation and surface
-// HOOK_PYTHON_MISSING_WARNING instead of installing a command that fails
-// on every hook invocation.
-fn claude_hook_commands(hook_python: Option<&str>) -> Option<(String, String)> {
-    #[cfg(windows)]
-    {
-        let py = hook_python?;
-        Some((
-            format!(
-                "\"{}\" \"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-worklist-guard.py\"",
-                py
-            ),
-            format!(
-                "\"{}\" \"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-permission-menu-hook.py\"",
-                py
-            ),
-        ))
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = hook_python;
-        Some((
-            ENHANCE_HOOK_COMMAND.to_string(),
-            ENHANCE_MENU_HOOK_COMMAND.to_string(),
-        ))
-    }
-}
-
 fn claude_hook_settings_rel() -> &'static str {
     // Hook registration is installed state, even when the POSIX command is
     // portable. Keeping it in the ignored project-local settings layer means
@@ -33355,455 +33186,6 @@ fn claude_hook_settings_path(proj: &Path) -> PathBuf {
 // self-overwrite the source.
 const ENHANCE_SOURCE_BUNDLE_REL: &str = "app/__shell/conventions.md";
 
-
-#[cfg(test)]
-mod hook_python_resolver_tests {
-    use super::{
-        claude_hook_settings_path, claude_hook_settings_rel, probe_python_candidate,
-        prune_claude_hook_commands_from_settings, settings_event_hook_current,
-        settings_has_worklist_guard_hook, ENHANCE_SETTINGS_LOCAL_REL, ENHANCE_SETTINGS_REL,
-    };
-    use serde_json::json;
-    use std::fs;
-
-    #[test]
-    fn probe_rejects_missing_binary() {
-        assert_eq!(
-            probe_python_candidate("bram-definitely-not-a-real-command", &[]),
-            None
-        );
-    }
-
-    #[test]
-    fn probe_rejects_non_python_binary() {
-        // `true` exits 0 but prints nothing — empty output must not count.
-        assert_eq!(probe_python_candidate("true", &[]), None);
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn posix_commands_ignore_python_and_stay_shebang_based() {
-        let (guard, menu) =
-            super::claude_hook_commands(None).expect("posix always yields commands");
-        assert!(guard.contains("claude-worklist-guard.py"), "guard: {guard}");
-        assert!(menu.contains("claude-permission-menu-hook.py"), "menu: {menu}");
-    }
-
-    #[test]
-    fn claude_worklist_hook_rejects_stale_marker_command() {
-        let expected = "\"C:\\Users\\jon\\AppData\\Local\\Programs\\Python\\Python313\\python.exe\" \"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-worklist-guard.py\"";
-        let settings = json!({
-            "hooks": {
-                "PreToolUse": [{
-                    "matcher": "Write|Edit",
-                    "hooks": [{
-                        "type": "command",
-                        "command": "py -3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-worklist-guard.py\""
-                    }]
-                }]
-            }
-        });
-        assert!(!settings_event_hook_current(
-            &settings,
-            "PreToolUse",
-            "claude-worklist-guard.py",
-            Some(expected),
-        ));
-    }
-
-    #[test]
-    fn claude_worklist_hook_accepts_exact_expected_command() {
-        let expected = "\"C:\\Users\\jon\\AppData\\Local\\Programs\\Python\\Python313\\python.exe\" \"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-worklist-guard.py\"";
-        let settings = json!({
-            "hooks": {
-                "PreToolUse": [{
-                    "matcher": "Write|Edit",
-                    "hooks": [{
-                        "type": "command",
-                        "command": expected
-                    }]
-                }]
-            }
-        });
-        assert!(settings_event_hook_current(
-            &settings,
-            "PreToolUse",
-            "claude-worklist-guard.py",
-            Some(expected),
-        ));
-    }
-
-    #[test]
-    fn claude_hook_currency_requires_no_stale_marker_extras() {
-        let expected = "\"C:\\Users\\jon\\AppData\\Local\\Programs\\Python\\Python313\\python.exe\" \"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-worklist-guard.py\"";
-        let settings = json!({
-            "hooks": {
-                "PreToolUse": [{
-                    "matcher": "Write|Edit",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": expected
-                        },
-                        {
-                            "type": "command",
-                            "command": "py -3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-worklist-guard.py\""
-                        }
-                    ]
-                }]
-            }
-        });
-        assert!(!settings_event_hook_current(
-            &settings,
-            "PreToolUse",
-            "claude-worklist-guard.py",
-            Some(expected),
-        ));
-    }
-
-    #[test]
-    fn claude_hook_currency_none_expected_is_not_current() {
-        let settings = json!({
-            "hooks": {
-                "PreToolUse": [{
-                    "matcher": "Write|Edit",
-                    "hooks": [{
-                        "type": "command",
-                        "command": "py -3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-worklist-guard.py\""
-                    }]
-                }]
-            }
-        });
-        assert!(!settings_event_hook_current(
-            &settings,
-            "PreToolUse",
-            "claude-worklist-guard.py",
-            None,
-        ));
-    }
-
-    #[test]
-    fn claude_permission_menu_events_accept_exact_expected_command() {
-        let expected = "\"C:\\Users\\jon\\AppData\\Local\\Programs\\Python\\Python313\\python.exe\" \"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-permission-menu-hook.py\"";
-        let settings = json!({
-            "hooks": {
-                "PermissionRequest": [{
-                    "matcher": ".*",
-                    "hooks": [{ "type": "command", "command": expected }]
-                }],
-                "PostToolUse": [{
-                    "matcher": ".*",
-                    "hooks": [{ "type": "command", "command": expected }]
-                }],
-                "PermissionDenied": [{
-                    "matcher": ".*",
-                    "hooks": [{ "type": "command", "command": expected }]
-                }],
-                "PreToolUse": [{
-                    "matcher": "AskUserQuestion",
-                    "hooks": [{ "type": "command", "command": expected }]
-                }]
-            }
-        });
-        for event in [
-            "PermissionRequest",
-            "PostToolUse",
-            "PermissionDenied",
-            "PreToolUse",
-        ] {
-            assert!(settings_event_hook_current(
-                &settings,
-                event,
-                "claude-permission-menu-hook.py",
-                Some(expected),
-            ));
-        }
-    }
-
-    #[test]
-    fn claude_permission_menu_events_reject_stale_command() {
-        let expected = "\"C:\\Users\\jon\\AppData\\Local\\Programs\\Python\\Python313\\python.exe\" \"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-permission-menu-hook.py\"";
-        let settings = json!({
-            "hooks": {
-                "PermissionRequest": [{
-                    "matcher": ".*",
-                    "hooks": [{
-                        "type": "command",
-                        "command": "py -3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-permission-menu-hook.py\""
-                    }]
-                }]
-            }
-        });
-        assert!(!settings_event_hook_current(
-            &settings,
-            "PermissionRequest",
-            "claude-permission-menu-hook.py",
-            Some(expected),
-        ));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_claude_commands_do_not_use_powershell_call_operator() {
-        let (guard, menu) =
-            super::claude_hook_commands(Some("C:\\Python313\\python.exe")).unwrap();
-        assert!(guard.starts_with("\"C:\\Python313\\python.exe\""), "guard: {guard}");
-        assert!(menu.starts_with("\"C:\\Python313\\python.exe\""), "menu: {menu}");
-        assert!(!guard.starts_with("& "), "guard: {guard}");
-        assert!(!menu.starts_with("& "), "menu: {menu}");
-    }
-
-    #[test]
-    fn claude_hook_settings_are_machine_local_on_every_platform() {
-        assert_eq!(claude_hook_settings_rel(), ENHANCE_SETTINGS_LOCAL_REL);
-        let proj = std::env::temp_dir().join(format!(
-            "bram-hook-settings-path-{}",
-            std::process::id()
-        ));
-        assert_eq!(
-            claude_hook_settings_path(&proj),
-            proj.join(ENHANCE_SETTINGS_LOCAL_REL)
-        );
-    }
-
-    #[test]
-    fn prune_claude_hook_commands_removes_bram_hooks_only() {
-        let dir = std::env::temp_dir().join(format!(
-            "bram-prune-claude-hooks-{}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("settings.json");
-        fs::write(
-            &path,
-            r#"{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Write|Edit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/worklist-guard.py"
-          },
-          {
-            "type": "command",
-            "command": "echo keep"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": ".*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"C:\\Python313\\python.exe\" \"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-permission-menu-hook.py\""
-          }
-        ]
-      }
-    ],
-    "PermissionRequest": [],
-    "PermissionDenied": [
-      {
-        "matcher": ".*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "echo keep denied"
-          }
-        ]
-      }
-    ]
-  }
-}
-"#,
-        )
-        .unwrap();
-
-        assert!(prune_claude_hook_commands_from_settings(&path).unwrap());
-        let after = fs::read_to_string(&path).unwrap();
-        assert!(!after.contains("claude-worklist-guard.py"), "{after}");
-        assert!(!after.contains("claude-permission-menu-hook.py"), "{after}");
-        assert!(!after.contains("hooks/worklist-guard.py"), "{after}");
-        assert!(after.contains("echo keep"), "{after}");
-        assert!(after.contains("echo keep denied"), "{after}");
-        let value: serde_json::Value = serde_json::from_str(&after).unwrap();
-        let hooks = value["hooks"].as_object().unwrap();
-        assert!(!hooks.contains_key("PostToolUse"), "{after}");
-        assert!(!hooks.contains_key("PermissionRequest"), "{after}");
-        assert!(hooks.contains_key("PreToolUse"), "{after}");
-        assert!(hooks.contains_key("PermissionDenied"), "{after}");
-        assert!(!prune_claude_hook_commands_from_settings(&path).unwrap());
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn prune_claude_hook_commands_removes_empty_hooks_container() {
-        let dir = std::env::temp_dir().join(format!(
-            "bram-prune-only-claude-hooks-{}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("settings.json");
-        let settings = json!({
-            "hooks": {
-                "PreToolUse": [{
-                    "matcher": "Write|Edit",
-                    "hooks": [{
-                        "type": "command",
-                        "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/claude-worklist-guard.py"
-                    }]
-                }],
-                "PostToolUse": []
-            },
-            "permissions": { "allow": ["Bash(echo keep)"] }
-        });
-        fs::write(&path, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
-
-        assert!(prune_claude_hook_commands_from_settings(&path).unwrap());
-        let after = fs::read_to_string(&path).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&after).unwrap();
-        assert!(value.get("hooks").is_none(), "{after}");
-        assert_eq!(value["permissions"]["allow"][0], "Bash(echo keep)");
-        assert!(!prune_claude_hook_commands_from_settings(&path).unwrap());
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn tracked_settings_hook_command_does_not_make_hook_current() {
-        let dir = std::env::temp_dir().join(format!(
-            "bram-hook-currentness-{}",
-            std::process::id()
-        ));
-        let tracked = dir.join(ENHANCE_SETTINGS_REL);
-        fs::create_dir_all(tracked.parent().unwrap()).unwrap();
-        let expected = super::claude_hook_commands(Some("C:\\Python313\\python.exe"))
-            .unwrap()
-            .0;
-        // Derive the entries from CLAUDE_GUARD_MATCHERS rather than pinning a
-        // literal pair: this test is about settings LOCALITY, not about which
-        // surfaces are registered, and a hardcoded fixture fails for the wrong
-        // reason the next time coverage changes (it did, at #261).
-        let entries: Vec<serde_json::Value> = super::CLAUDE_GUARD_MATCHERS
-            .iter()
-            .map(|matcher| {
-                json!({
-                    "matcher": matcher,
-                    "hooks": [{
-                        "type": "command",
-                        "command": &expected
-                    }]
-                })
-            })
-            .collect();
-        let settings = json!({ "hooks": { "PreToolUse": entries } });
-        fs::write(&tracked, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
-
-        assert!(settings_has_worklist_guard_hook(&tracked, Some(&expected)));
-        assert!(!settings_has_worklist_guard_hook(
-            &claude_hook_settings_path(&dir),
-            Some(&expected)
-        ));
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    // #249: the list form carries the correct command, so a command-equality
-    // check alone calls it current and Setup never migrates it — while on
-    // 2.1.232/win32 it is never invoked.
-    #[test]
-    fn legacy_list_matcher_is_not_current() {
-        let dir = std::env::temp_dir().join(format!(
-            "bram-legacy-list-matcher-{}",
-            std::process::id()
-        ));
-        let path = dir.join("settings.json");
-        fs::create_dir_all(&dir).unwrap();
-        let expected = super::claude_hook_commands(Some("C:\\Python313\\python.exe"))
-            .unwrap()
-            .0;
-        let settings = json!({
-            "hooks": {
-                "PreToolUse": [{
-                    "matcher": "Write|Edit",
-                    "hooks": [{ "type": "command", "command": expected }]
-                }]
-            }
-        });
-        fs::write(&path, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
-        assert!(!settings_has_worklist_guard_hook(&path, Some(&expected)));
-
-        // Only one of the two required matchers is also stale.
-        let partial = json!({
-            "hooks": {
-                "PreToolUse": [{
-                    "matcher": "Write",
-                    "hooks": [{ "type": "command", "command": expected }]
-                }]
-            }
-        });
-        fs::write(&path, serde_json::to_string_pretty(&partial).unwrap()).unwrap();
-        assert!(!settings_has_worklist_guard_hook(&path, Some(&expected)));
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn merge_guard_registers_literal_matchers_and_migrates_list_form() {
-        let dir = std::env::temp_dir().join(format!(
-            "bram-guard-matcher-split-{}",
-            std::process::id()
-        ));
-        let path = dir.join("settings.json");
-        fs::create_dir_all(&dir).unwrap();
-        let expected = super::claude_hook_commands(Some("C:\\Python313\\python.exe"))
-            .unwrap()
-            .0;
-
-        // Legacy list-form entry carrying the guard alongside a user hook.
-        let legacy = json!({
-            "hooks": {
-                "PreToolUse": [{
-                    "matcher": "Write|Edit",
-                    "hooks": [
-                        { "type": "command", "command": expected },
-                        { "type": "command", "command": "echo keep" }
-                    ]
-                }]
-            }
-        });
-        fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
-
-        assert!(super::merge_worklist_guard_into_settings(&path, &expected).unwrap());
-        let after: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        let arr = after["hooks"]["PreToolUse"].as_array().unwrap();
-
-        // The user's co-registered hook survives under its original matcher.
-        let kept = arr.iter().find(|e| e["matcher"] == "Write|Edit").unwrap();
-        let kept_cmds: Vec<&str> = kept["hooks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|h| h["command"].as_str().unwrap())
-            .collect();
-        assert_eq!(kept_cmds, vec!["echo keep"]);
-
-        // The guard is now registered under each literal matcher.
-        for matcher in super::CLAUDE_GUARD_MATCHERS {
-            let entry = arr
-                .iter()
-                .find(|e| e["matcher"] == matcher)
-                .unwrap_or_else(|| panic!("missing matcher {matcher}"));
-            assert_eq!(entry["hooks"][0]["command"].as_str().unwrap(), expected);
-        }
-        assert!(settings_has_worklist_guard_hook(&path, Some(&expected)));
-
-        // Idempotent: a second merge over the split shape writes nothing.
-        assert!(!super::merge_worklist_guard_into_settings(&path, &expected).unwrap());
-        let _ = fs::remove_dir_all(&dir);
-    }
-}
 
 fn settings_event_has_marker(value: &serde_json::Value, event: &str, marker: &str) -> bool {
     value
@@ -34055,6 +33437,38 @@ fn prune_legacy_claude_hooks(proj: &Path) {
                 legacy_rel,
                 referencing.join(", ")
             );
+        }
+    }
+}
+
+// retire-python-hooks-rust-only: delete the previously installed Python
+// hook scripts once no Claude settings source references them (the
+// #173/#227 reference-gated precedent — never delete a file a live config
+// still points at; a kept file is named in the Setup result).
+fn prune_retired_python_hooks(proj: &Path, wrote: &mut Vec<String>, skipped: &mut Vec<String>) {
+    let sources: Vec<(String, String)> = claude_settings_sources(proj)
+        .into_iter()
+        .map(|(label, path)| (label, std::fs::read_to_string(&path).unwrap_or_default()))
+        .collect();
+    for rel in [ENHANCE_HOOK_SCRIPT_REL, ENHANCE_MENU_HOOK_SCRIPT_REL] {
+        let path = proj.join(rel);
+        if !path.exists() {
+            continue;
+        }
+        let needle = Path::new(rel)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(rel);
+        let referencing = legacy_hook_referencing_sources(&sources, needle);
+        if referencing.is_empty() {
+            let _ = std::fs::remove_file(&path);
+            wrote.push(format!("deleted retired Python hook {}", rel));
+        } else {
+            skipped.push(format!(
+                "kept {} — still referenced by {}; remove that hook entry, then Setup can delete it",
+                rel,
+                referencing.join(", ")
+            ));
         }
     }
 }
@@ -34462,89 +33876,6 @@ fn merge_command_hook_into_event(
     migrated
 }
 
-// Register the permission-menu surfacing hook in settings.json: a
-// PermissionRequest entry (surface the menu) and a PostToolUse entry (clear it
-// when the prompt is answered). Matcher ".*" on both — PermissionRequest only
-// fires when a dialog will show, and a live menu blocks the session so the next
-// PostToolUse is the answer; catching every tool (incl. dynamic mcp__* names)
-// beats missing one and stranding a menu. Idempotent + migration-tolerant,
-// mirroring merge_worklist_guard_into_settings. Ok(true) if anything changed.
-fn merge_permission_menu_hook_into_settings(
-    settings_path: &Path,
-    menu_command: &str,
-) -> Result<bool, String> {
-    let existing = std::fs::read_to_string(settings_path).unwrap_or_default();
-    let mut value: serde_json::Value = if existing.trim().is_empty() {
-        serde_json::json!({})
-    } else {
-        serde_json::from_str(&existing)
-            .map_err(|e| format!("parse {}: {}", settings_path.display(), e))?
-    };
-    if !value.is_object() {
-        return Err(format!(
-            "{} root is not a JSON object",
-            settings_path.display()
-        ));
-    }
-    let root = value.as_object_mut().unwrap();
-    let hooks = root
-        .entry("hooks".to_string())
-        .or_insert_with(|| serde_json::json!({}));
-    if !hooks.is_object() {
-        return Err(format!(
-            "{}: hooks is not a JSON object",
-            settings_path.display()
-        ));
-    }
-    let hooks_obj = hooks.as_object_mut().unwrap();
-    let marker = "permission-menu-hook.py";
-    let mut changed = false;
-    changed |= merge_command_hook_into_event(
-        hooks_obj,
-        "PermissionRequest",
-        ".*",
-        menu_command,
-        marker,
-    );
-    changed |= merge_command_hook_into_event(
-        hooks_obj,
-        "PostToolUse",
-        ".*",
-        menu_command,
-        marker,
-    );
-    // Claude Code emits PermissionDenied on No/Esc answers; Codex does not
-    // have this hook event and handles denial clears from PTY cancel output.
-    changed |= merge_command_hook_into_event(
-        hooks_obj,
-        "PermissionDenied",
-        ".*",
-        menu_command,
-        marker,
-    );
-    // Family B: AskUserQuestion arrives via PreToolUse (not PermissionRequest),
-    // matcher scoped to that tool so it doesn't fire on every tool call.
-    changed |= merge_command_hook_into_event(
-        hooks_obj,
-        "PreToolUse",
-        "AskUserQuestion",
-        menu_command,
-        marker,
-    );
-    if !changed {
-        return Ok(false);
-    }
-    if let Some(parent) = settings_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("create {}: {}", parent.display(), e))?;
-    }
-    let serialized = serde_json::to_string_pretty(&value)
-        .map_err(|e| format!("serialize settings.json: {}", e))?;
-    std::fs::write(settings_path, format!("{}\n", serialized))
-        .map_err(|e| format!("write {}: {}", settings_path.display(), e))?;
-    Ok(true)
-}
-
 // bram-guard menu registration: the reentrant Rust menu hook rides the same
 // four event arrays as the Python menu hook, under its own marker so
 // migration/currency logic treats the two registrations independently. Born
@@ -34716,106 +34047,6 @@ fn prune_hook_commands_containing(
     Ok(true)
 }
 
-// Worklist-guard shadow registration (bram-guard-worklist-policy-shadow):
-// the Rust shadow observes every decision the Python worklist guard makes,
-// so it registers under the same PreToolUse matchers. Same shadow
-// discipline as the menu-hook shadow above: observe-only, outside the
-// needs-setup calculus, marker = the subcommand.
-fn merge_guard_shadow_worklist_into_settings(
-    settings_path: &Path,
-    shadow_command: &str,
-) -> Result<bool, String> {
-    let existing = std::fs::read_to_string(settings_path).unwrap_or_default();
-    let mut value: serde_json::Value = if existing.trim().is_empty() {
-        serde_json::json!({})
-    } else {
-        serde_json::from_str(&existing)
-            .map_err(|e| format!("parse {}: {}", settings_path.display(), e))?
-    };
-    let Some(root) = value.as_object_mut() else {
-        return Err(format!(
-            "{} root is not a JSON object",
-            settings_path.display()
-        ));
-    };
-    let hooks = root
-        .entry("hooks".to_string())
-        .or_insert_with(|| serde_json::json!({}));
-    let Some(hooks_obj) = hooks.as_object_mut() else {
-        return Err(format!(
-            "{}: hooks is not a JSON object",
-            settings_path.display()
-        ));
-    };
-    let marker = "guard claude-worklist";
-    let mut changed = false;
-    let arr_val = hooks_obj
-        .entry("PreToolUse".to_string())
-        .or_insert_with(|| serde_json::json!([]));
-    let Some(arr) = arr_val.as_array_mut() else {
-        return Err(format!(
-            "{}: hooks.PreToolUse is not a JSON array",
-            settings_path.display()
-        ));
-    };
-    // Migrate: drop any marker-carrying hook whose command is stale.
-    arr.retain_mut(|entry| {
-        let Some(hs) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
-            return true;
-        };
-        let before = hs.len();
-        hs.retain(|h| {
-            let Some(cmd) = h.get("command").and_then(|c| c.as_str()) else {
-                return true;
-            };
-            !(cmd.contains(marker) && cmd != shadow_command)
-        });
-        if hs.len() != before {
-            changed = true;
-        }
-        !hs.is_empty()
-    });
-    // Presence is per (matcher, command): the same command must register
-    // under EVERY guard matcher. A command-only presence check (the
-    // merge_command_hook_into_event shape) stops after the first matcher —
-    // the live defect the 2026-08-28 xmlui relaunch-verify caught: the
-    // shadow registered under Write alone, and a guarded Bash call
-    // produced no worklist breadcrumb.
-    for matcher in CLAUDE_GUARD_MATCHERS {
-        let present = arr.iter().any(|entry| {
-            entry.get("matcher").and_then(|m| m.as_str()) == Some(matcher)
-                && entry
-                    .get("hooks")
-                    .and_then(|h| h.as_array())
-                    .map(|hs| {
-                        hs.iter().any(|h| {
-                            h.get("command").and_then(|c| c.as_str()) == Some(shadow_command)
-                        })
-                    })
-                    .unwrap_or(false)
-        });
-        if !present {
-            arr.push(serde_json::json!({
-                "matcher": matcher,
-                "hooks": [{ "type": "command", "command": shadow_command }]
-            }));
-            changed = true;
-        }
-    }
-    if !changed {
-        return Ok(false);
-    }
-    if let Some(parent) = settings_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("create {}: {}", parent.display(), e))?;
-    }
-    let serialized = serde_json::to_string_pretty(&value)
-        .map_err(|e| format!("serialize settings.json: {}", e))?;
-    std::fs::write(settings_path, format!("{}\n", serialized))
-        .map_err(|e| format!("write {}: {}", settings_path.display(), e))?;
-    Ok(true)
-}
-
 #[cfg(test)]
 mod guard_shadow_registration_tests {
     use super::*;
@@ -34835,62 +34066,6 @@ mod guard_shadow_registration_tests {
             std::fs::write(&path, b).unwrap();
         }
         path
-    }
-
-    fn matchers_with_shadow(path: &Path) -> Vec<String> {
-        let v: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-        v["hooks"]["PreToolUse"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|e| {
-                e["hooks"]
-                    .as_array()
-                    .map(|hs| hs.iter().any(|h| h["command"] == SHADOW))
-                    .unwrap_or(false)
-            })
-            .map(|e| e["matcher"].as_str().unwrap().to_string())
-            .collect()
-    }
-
-    #[test]
-    fn worklist_shadow_registers_under_every_guard_matcher() {
-        let path = temp_settings("fresh", None);
-        assert!(merge_guard_shadow_worklist_into_settings(&path, SHADOW).unwrap());
-        let mut got = matchers_with_shadow(&path);
-        got.sort();
-        let mut want: Vec<String> = CLAUDE_GUARD_MATCHERS.iter().map(|s| s.to_string()).collect();
-        want.sort();
-        assert_eq!(got, want);
-        // Idempotent second run.
-        assert!(!merge_guard_shadow_worklist_into_settings(&path, SHADOW).unwrap());
-    }
-
-    #[test]
-    fn worklist_shadow_backfills_missing_matchers() {
-        // The 2026-08-28 live defect: a command-only presence check left the
-        // shadow registered under Write alone; the merge must backfill the
-        // other three without duplicating Write.
-        let seeded = serde_json::json!({
-            "hooks": { "PreToolUse": [
-                { "matcher": "Write", "hooks": [{ "type": "command", "command": SHADOW }] }
-            ]}
-        });
-        let path = temp_settings("backfill", Some(&seeded.to_string()));
-        assert!(merge_guard_shadow_worklist_into_settings(&path, SHADOW).unwrap());
-        let mut got = matchers_with_shadow(&path);
-        got.sort();
-        let mut want: Vec<String> = CLAUDE_GUARD_MATCHERS.iter().map(|s| s.to_string()).collect();
-        want.sort();
-        assert_eq!(got, want);
-        assert_eq!(
-            matchers_with_shadow(&path)
-                .iter()
-                .filter(|m| *m == "Write")
-                .count(),
-            1
-        );
     }
 
     // --- guards-rust-authority-covers-menu-hooks ---------------------------
@@ -34983,40 +34158,6 @@ mod guard_shadow_registration_tests {
         assert!(
             !prune_hook_commands_containing(&path, "permission-menu-hook.py", None).unwrap()
         );
-    }
-
-    #[test]
-    fn codex_toml_block_under_authority_is_rust_only_and_python_free() {
-        // #247's endgame: with the flag on, the block resolves WITHOUT any
-        // Python (hook_python None) and both commands are the Rust
-        // --authority forms, with no shadow entries (deciding and shadowing
-        // with the same binary would double-spawn per event).
-        let link = PathBuf::from("/Users/x/.bram/bram-guard");
-        let block = codex_hook_toml_block_with_authority(
-            Path::new("/Users/x/.bram/codex-worklist-guard.py"),
-            Path::new("/Users/x/.bram/codex-permission-menu-hook.py"),
-            None,
-            Some(&link),
-            true,
-        )
-        .expect("authority block must resolve without Python");
-        assert!(block.contains("guard codex-worklist --authority"), "{block}");
-        assert!(
-            block.contains("guard codex-permission-menu --authority"),
-            "{block}"
-        );
-        assert!(!block.contains(".py"), "{block}");
-        assert!(!block.contains("shadow"), "{block}");
-        // No link + authority: no block (fail closed; run_enhance errors
-        // before this point).
-        assert!(codex_hook_toml_block_with_authority(
-            Path::new("/x/w.py"),
-            Path::new("/x/m.py"),
-            None,
-            None,
-            true,
-        )
-        .is_none());
     }
 }
 
@@ -35572,116 +34713,26 @@ fn codex_instr_block_current(config_path: &Path) -> bool {
     .unwrap_or(false)
 }
 
-fn codex_hook_toml_block(
-    script_path: &Path,
-    menu_script_path: &Path,
-    hook_python: Option<&str>,
-    guard_link: Option<&Path>,
-) -> Option<String> {
-    codex_hook_toml_block_with_authority(
-        script_path,
-        menu_script_path,
-        hook_python,
-        guard_link,
-        bram_guards_rust_authority(),
-    )
-}
-
-// Split from the public fn so tests can drive the authority arm without
-// racing the process-global flag static.
-fn codex_hook_toml_block_with_authority(
-    script_path: &Path,
-    menu_script_path: &Path,
-    hook_python: Option<&str>,
-    guard_link: Option<&Path>,
-    rust_authority: bool,
-) -> Option<String> {
-    let script_str = script_path.display().to_string();
-    let menu_script_str = menu_script_path.display().to_string();
-    // bram-guard-authority-flip / guards-rust-authority-covers-menu-hooks:
-    // with guards.rustAuthority on (read from the config static rather than
-    // threaded through every caller — the writer and both currency checkers
-    // must agree by construction), BOTH commands are Rust `--authority`
-    // forms and Python is not consulted at all — the block resolves on a
-    // Python-less machine, which is the point (#247). Flag off restores the
-    // Python commands, which on Windows need the resolved interpreter
-    // (issue-247: None = no usable Python, no block).
-    let (command_line, menu_command_line) = if rust_authority {
-        let link = guard_link?;
-        let l = link.display().to_string();
-        #[cfg(windows)]
-        {
-            let q = l.replace('"', "\\\"");
-            (
-                format!("& \"{}\" guard codex-worklist --authority", q),
-                format!("& \"{}\" guard codex-permission-menu --authority", q),
-            )
-        }
-        #[cfg(not(windows))]
-        {
-            (
-                format!("\"{}\" guard codex-worklist --authority", l),
-                format!("\"{}\" guard codex-permission-menu --authority", l),
-            )
-        }
-    } else {
-        #[cfg(windows)]
-        {
-            let py = hook_python?.replace('"', "\\\"");
-            (
-                format!("& \"{}\" \"{}\"", py, script_str.replace('"', "\\\"")),
-                format!("& \"{}\" \"{}\"", py, menu_script_str.replace('"', "\\\"")),
-            )
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = hook_python;
-            (script_str.clone(), menu_script_str.clone())
-        }
-    };
-    // bram-guard shadow (bram-guard-worklist-policy-shadow): observe-only
-    // Rust twins ride beside the Python hooks — no interpreter wrapper,
-    // the link is an exe. Present only when the link exists on disk, so
-    // the block never references a path the guard hasn't created.
-    let shadow_cmds = guard_link.map(|link| {
-        let l = link.display().to_string();
-        #[cfg(windows)]
-        {
-            let q = l.replace('"', "\\\"");
-            (
-                format!("& \"{}\" guard codex-worklist", q),
-                format!("& \"{}\" guard codex-permission-menu", q),
-            )
-        }
-        #[cfg(not(windows))]
-        {
-            (
-                format!("\"{}\" guard codex-worklist", l),
-                format!("\"{}\" guard codex-permission-menu", l),
-            )
-        }
-    });
-    let shadow_entry = |cmd: &str, timeout: u32, label: &str| {
-        format!(
-            "\n[[hooks.{ev}.hooks]]\ntype = \"command\"\ncommand = {c}\ntimeout = {t}\nstatusMessage = \"{l}\"\n",
-            ev = label.split(':').next().unwrap_or(""),
-            c = toml_basic_string(cmd),
-            t = timeout,
-            l = label.split(':').nth(1).unwrap_or(""),
+fn codex_hook_toml_block(guard_link: Option<&Path>) -> Option<String> {
+    // retire-python-hooks-rust-only: the block references only the
+    // bram-guard link — no interpreter, no scripts — so it resolves on a
+    // Python-less machine (#247). No link, no block (run_enhance errors out
+    // on the Claude side before this can strand a project guardless).
+    let link = guard_link?;
+    let l = link.display().to_string();
+    #[cfg(windows)]
+    let (command_line, menu_command_line) = {
+        let q = l.replace('"', "\\\"");
+        (
+            format!("& \"{}\" guard codex-worklist", q),
+            format!("& \"{}\" guard codex-permission-menu", q),
         )
     };
-    let (shadow_worklist, shadow_menu_pr, shadow_menu_post) = match &shadow_cmds {
-        // Authority replaces every shadow (see above): the deciding command
-        // holds the primary slot, and shadowing with the same binary would
-        // double-spawn per event.
-        Some(_) if rust_authority => (String::new(), String::new(), String::new()),
-        Some((w, m)) => (
-            shadow_entry(w, 10, "PreToolUse:Bram guard shadow (worklist)"),
-            shadow_entry(m, 2, "PermissionRequest:Bram guard shadow (menu)"),
-            shadow_entry(m, 2, "PostToolUse:Bram guard shadow (menu clear)"),
-        ),
-        None => (String::new(), String::new(), String::new()),
-    };
+    #[cfg(not(windows))]
+    let (command_line, menu_command_line) = (
+        format!("\"{}\" guard codex-worklist", l),
+        format!("\"{}\" guard codex-permission-menu", l),
+    );
     Some(format!(
         "{start}\n\
          [[hooks.PreToolUse]]\n\
@@ -35692,7 +34743,6 @@ fn codex_hook_toml_block_with_authority(
          command = {command_quoted}\n\
          timeout = 10\n\
          statusMessage = \"Bram worklist guard\"\n\
-         {shadow_worklist}\
          \n\
          [[hooks.PermissionRequest]]\n\
          matcher = \"^(Bash|apply_patch|Write|Edit|mcp__.*)$\"\n\
@@ -35702,7 +34752,6 @@ fn codex_hook_toml_block_with_authority(
          command = {menu_command_quoted}\n\
          timeout = 2\n\
          statusMessage = \"Bram permission menu\"\n\
-         {shadow_menu_pr}\
          \n\
          [[hooks.PostToolUse]]\n\
          matcher = \"^(Bash|apply_patch|Write|Edit|mcp__.*)$\"\n\
@@ -35712,15 +34761,11 @@ fn codex_hook_toml_block_with_authority(
          command = {menu_command_quoted}\n\
          timeout = 2\n\
          statusMessage = \"Bram permission menu clear\"\n\
-         {shadow_menu_post}\
          {end}",
         start = ENHANCE_CODEX_TOML_MARKER_START,
         end = ENHANCE_CODEX_TOML_MARKER_END,
         command_quoted = toml_basic_string(&command_line),
         menu_command_quoted = toml_basic_string(&menu_command_line),
-        shadow_worklist = shadow_worklist,
-        shadow_menu_pr = shadow_menu_pr,
-        shadow_menu_post = shadow_menu_post,
     ))
 }
 
@@ -35736,42 +34781,17 @@ fn guard_link_if_installed() -> Option<PathBuf> {
     link.exists().then_some(link)
 }
 
-// Flag-aware expected commands, shared by every status surface so none of
-// them can disagree with what Setup registers (the flip item fixed only the
-// needs-setup site; the Status-tab hook rows stayed Python-expecting and
-// read "not-registered" under authority).
-fn expected_worklist_guard_command(claude_commands: &Option<(String, String)>) -> Option<String> {
-    if bram_guards_rust_authority() {
-        if let Some(link) = guard_link_if_installed() {
-            return Some(format!(
-                "{} --authority",
-                guard::guard_hook_command(&link, "claude-worklist")
-            ));
-        }
-    }
-    claude_commands.as_ref().map(|(guard, _)| guard.clone())
+// Expected commands, shared by every status surface so none of them can
+// disagree with what Setup registers. Rust-only since
+// retire-python-hooks-rust-only: both derive from the installed link; no
+// link means nothing can be registered, which correctly reads as
+// needs-setup.
+fn expected_worklist_guard_command() -> Option<String> {
+    guard_link_if_installed().map(|link| guard::guard_hook_command(&link, "claude-worklist"))
 }
 
-// The menu twin: (marker, expected command). The marker travels with the
-// command because the two registrations live under different markers.
-fn expected_menu_hook_check(
-    claude_commands: &Option<(String, String)>,
-) -> (&'static str, Option<String>) {
-    if bram_guards_rust_authority() {
-        if let Some(link) = guard_link_if_installed() {
-            return (
-                "guard claude-permission-menu",
-                Some(format!(
-                    "{} --authority",
-                    guard::guard_hook_command(&link, "claude-permission-menu")
-                )),
-            );
-        }
-    }
-    (
-        "claude-permission-menu-hook.py",
-        claude_commands.as_ref().map(|(_, menu)| menu.clone()),
-    )
+fn expected_menu_hook_command() -> Option<String> {
+    guard_link_if_installed().map(|link| guard::guard_hook_command(&link, "claude-permission-menu"))
 }
 
 fn normalize_codex_hook_block_for_currentness(block: &str) -> String {
@@ -35802,18 +34822,10 @@ fn normalize_codex_hook_block_for_currentness(block: &str) -> String {
     kept.join("\n")
 }
 
-fn codex_hook_block_current(
-    config_path: &Path,
-    script_path: &Path,
-    menu_script_path: &Path,
-    hook_python: Option<&str>,
-    guard_link: Option<&Path>,
-) -> bool {
-    // issue-247: no resolvable Python means no valid expected block, so an
-    // installed block (necessarily broken) reads as stale/unregistered.
-    let Some(expected) =
-        codex_hook_toml_block(script_path, menu_script_path, hook_python, guard_link)
-    else {
+fn codex_hook_block_current(config_path: &Path, guard_link: Option<&Path>) -> bool {
+    // No installable link means no valid expected block, so an installed
+    // block (necessarily broken) reads as stale/unregistered.
+    let Some(expected) = codex_hook_toml_block(guard_link) else {
         return false;
     };
     let Ok(disk) = std::fs::read_to_string(config_path) else {
@@ -35832,17 +34844,6 @@ fn codex_hook_block_current(
 mod codex_hook_currentness_tests {
     use super::*;
 
-    fn test_hook_python() -> Option<&'static str> {
-        #[cfg(windows)]
-        {
-            Some("C:\\Users\\jon\\AppData\\Local\\Programs\\Python\\Python313\\python.exe")
-        }
-        #[cfg(not(windows))]
-        {
-            None
-        }
-    }
-
     fn write_temp_config(name: &str, body: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "bram-codex-hook-currentness-{}-{}",
@@ -35856,205 +34857,56 @@ mod codex_hook_currentness_tests {
     }
 
     #[test]
+    fn codex_hook_block_is_rust_only_and_link_gated() {
+        // retire-python-hooks-rust-only: the block references only the
+        // bram-guard link (no interpreter, no scripts, no shadow entries)
+        // and does not exist without the link.
+        let link = PathBuf::from("/Users/example/.bram/bram-guard");
+        let block = codex_hook_toml_block(Some(&link)).expect("block with link");
+        assert!(block.contains("guard codex-worklist"), "{block}");
+        assert!(block.contains("guard codex-permission-menu"), "{block}");
+        assert!(!block.contains(".py"), "{block}");
+        assert!(!block.contains("shadow"), "{block}");
+        assert!(!block.contains("--authority"), "{block}");
+        assert!(codex_hook_toml_block(None).is_none());
+    }
+
+    #[test]
     fn codex_hook_currentness_allows_trusted_hook_state_inside_marker_block() {
-        let script = PathBuf::from("/Users/example/.bram/codex-worklist-guard.py");
-        let menu_script = PathBuf::from("/Users/example/.bram/codex-permission-menu-hook.py");
-        let hook_python = test_hook_python();
-        let block = codex_hook_toml_block(&script, &menu_script, hook_python, None)
-            .expect("test platform should produce a block");
+        let link = PathBuf::from("/Users/example/.bram/bram-guard");
+        let block = codex_hook_toml_block(Some(&link)).expect("block");
         let with_state = block.replace(
             ENHANCE_CODEX_TOML_MARKER_END,
             "[hooks.state]\n\n[hooks.state.\"/Users/example/.codex/config.toml:pre_tool_use:0:0\"]\ntrusted_hash = \"sha256:pre\"\n\n[hooks.state.\"/Users/example/.codex/config.toml:permission_request:0:0\"]\ntrusted_hash = \"sha256:permission\"\n# bram:end",
         );
         let config_path = write_temp_config("trusted-state", &with_state);
-
-        assert!(codex_hook_block_current(
-            &config_path,
-            &script,
-            &menu_script,
-            hook_python,
-            None
-        ));
+        assert!(codex_hook_block_current(&config_path, Some(&link)));
     }
 
     #[test]
-    fn codex_hook_block_includes_shadow_entries_when_link_present() {
-        let script = PathBuf::from("/Users/example/.bram/codex-worklist-guard.py");
-        let menu_script = PathBuf::from("/Users/example/.bram/codex-permission-menu-hook.py");
+    fn codex_hook_currentness_rejects_stale_extra_hook_table() {
         let link = PathBuf::from("/Users/example/.bram/bram-guard");
-        let block = codex_hook_toml_block(&script, &menu_script, test_hook_python(), Some(&link))
-            .expect("test platform should produce a block");
-        assert!(
-            block.contains("guard codex-worklist"),
-            "worklist shadow missing: {block}"
-        );
-        assert!(
-            block.contains("guard codex-permission-menu"),
-            "menu shadow missing: {block}"
-        );
-        // Shadow entries ride the same event tables, after the Python hooks.
-        let pre = block.find("Bram worklist guard").unwrap();
-        let shadow = block.find("Bram guard shadow (worklist)").unwrap();
-        let next_table = block.find("[[hooks.PermissionRequest]]").unwrap();
-        assert!(pre < shadow && shadow < next_table, "{block}");
-        // And without a link the block is byte-identical to the legacy shape.
-        let without = codex_hook_toml_block(&script, &menu_script, test_hook_python(), None)
-            .expect("block");
-        assert!(!without.contains("bram-guard"), "{without}");
-    }
-
-    #[test]
-    fn codex_hook_currentness_rejects_stale_permission_denied_hook() {
-        let script = PathBuf::from("/Users/example/.bram/codex-worklist-guard.py");
-        let menu_script = PathBuf::from("/Users/example/.bram/codex-permission-menu-hook.py");
-        let hook_python = test_hook_python();
-        let block = codex_hook_toml_block(&script, &menu_script, hook_python, None)
-            .expect("test platform should produce a block")
+        let block = codex_hook_toml_block(Some(&link))
+            .expect("block")
             .replace(
-            ENHANCE_CODEX_TOML_MARKER_END,
-            "[[hooks.PermissionDenied]]\nmatcher = \"^(Bash|apply_patch|Write|Edit|mcp__.*)$\"\n\n[[hooks.PermissionDenied.hooks]]\ntype = \"command\"\ncommand = \"/Users/example/.bram/codex-permission-menu-hook.py\"\ntimeout = 2\nstatusMessage = \"Bram permission menu clear\"\n# bram:end",
-        );
-        let config_path = write_temp_config("permission-denied", &block);
-
-        assert!(!codex_hook_block_current(
-            &config_path,
-            &script,
-            &menu_script,
-            hook_python,
-            None
-        ));
+                ENHANCE_CODEX_TOML_MARKER_END,
+                "[[hooks.PermissionDenied]]\nmatcher = \"^(Bash|apply_patch|Write|Edit|mcp__.*)$\"\n\n[[hooks.PermissionDenied.hooks]]\ntype = \"command\"\ncommand = \"/Users/example/.bram/codex-permission-menu-hook.py\"\ntimeout = 2\nstatusMessage = \"Bram permission menu clear\"\n# bram:end",
+            );
+        let config_path = write_temp_config("stale-extra", &block);
+        assert!(!codex_hook_block_current(&config_path, Some(&link)));
     }
 
     #[cfg(windows)]
     #[test]
     fn windows_codex_hook_block_uses_powershell_call_operator() {
-        let script = PathBuf::from("C:\\Users\\jon\\.bram\\codex-worklist-guard.py");
-        let menu_script = PathBuf::from("C:\\Users\\jon\\.bram\\codex-permission-menu-hook.py");
-        let block = codex_hook_toml_block(
-            &script,
-            &menu_script,
-            Some("C:\\Users\\jon\\AppData\\Local\\Programs\\Python\\Python313\\python.exe"),
-            None,
-        )
-        .expect("windows block needs resolved python");
-
+        let link = PathBuf::from("C:\\Users\\jon\\.bram\\bram-guard.exe");
+        let block = codex_hook_toml_block(Some(&link)).expect("block");
         assert!(
             block.contains(
-                "command = \"& \\\"C:\\\\Users\\\\jon\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python313\\\\python.exe\\\" \\\"C:\\\\Users\\\\jon\\\\.bram\\\\codex-worklist-guard.py\\\"\""
+                "command = \"& \\\"C:\\\\Users\\\\jon\\\\.bram\\\\bram-guard.exe\\\" guard codex-worklist\""
             ),
             "{block}"
         );
-        assert!(
-            block.contains(
-                "command = \"& \\\"C:\\\\Users\\\\jon\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python313\\\\python.exe\\\" \\\"C:\\\\Users\\\\jon\\\\.bram\\\\codex-permission-menu-hook.py\\\"\""
-            ),
-            "{block}"
-        );
-    }
-}
-
-#[cfg(test)]
-mod codex_hook_response_contract_tests {
-    use super::{resolve_hook_python, ENHANCE_CODEX_HOOK_BUNDLE_REL};
-    use serde_json::json;
-    use std::fs;
-    use std::io::Write;
-    use std::path::{Path, PathBuf};
-    use std::process::{Command, Output, Stdio};
-
-    fn fixture_root(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "bram-codex-hook-contract-{}-{}",
-            std::process::id(),
-            name
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("resources")).expect("create guard fixture");
-        fs::write(
-            root.join("resources/.worklist-authorization.json"),
-            "{}\n",
-        )
-        .expect("write managed-repo marker");
-        fs::write(
-            root.join("resources/worklist.json"),
-            "{\"items\":[],\"version\":0}\n",
-        )
-        .expect("write empty worklist");
-        root
-    }
-
-    fn run_guard(root: &Path, payload: &serde_json::Value) -> Output {
-        let python = resolve_hook_python().expect("hook contract test requires Python 3");
-        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("app")
-            .join(ENHANCE_CODEX_HOOK_BUNDLE_REL);
-        let mut child = Command::new(python)
-            .arg(script)
-            .current_dir(root)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("launch canonical Codex guard");
-        child
-            .stdin
-            .take()
-            .expect("guard stdin")
-            .write_all(payload.to_string().as_bytes())
-            .expect("write guard payload");
-        child.wait_with_output().expect("wait for Codex guard")
-    }
-
-    #[test]
-    fn deny_emits_nested_pretooluse_contract() {
-        let root = fixture_root("deny");
-        let payload = json!({
-            "cwd": root,
-            "hook_event_name": "PreToolUse",
-            "tool_name": "apply_patch",
-            "tool_input": {
-                "input": "*** Begin Patch\n*** Add File: unauthorized.txt\n+blocked\n*** End Patch"
-            }
-        });
-        let output = run_guard(&root, &payload);
-        assert!(output.status.success(), "status: {}", output.status);
-        let response: serde_json::Value =
-            serde_json::from_slice(&output.stdout).expect("deny stdout is JSON");
-        assert!(response.get("permissionDecision").is_none(), "{response}");
-        assert_eq!(
-            response["hookSpecificOutput"]["hookEventName"],
-            "PreToolUse"
-        );
-        assert_eq!(
-            response["hookSpecificOutput"]["permissionDecision"],
-            "deny"
-        );
-        let reason = response["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .unwrap_or("");
-        assert!(reason.contains("unauthorized.txt"), "{reason}");
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("decision=deny"), "{stderr}");
-        assert!(stderr.contains(reason), "{stderr}");
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn allow_remains_success_with_empty_stdout() {
-        let root = fixture_root("allow");
-        let payload = json!({
-            "cwd": root,
-            "hook_event_name": "PreToolUse",
-            "tool_name": "Bash",
-            "tool_input": { "command": "git status --short" }
-        });
-        let output = run_guard(&root, &payload);
-        assert!(output.status.success(), "status: {}", output.status);
-        assert!(output.stdout.is_empty(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("decision=allow"), "{stderr}");
-        let _ = fs::remove_dir_all(root);
     }
 }
 
@@ -36064,11 +34916,8 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
     let claude_md = proj.join("CLAUDE.md");
     let codex_agents = proj.join(ENHANCE_CODEX_AGENTS_REL);
     let sidecar = proj.join(ENHANCE_SIDECAR_REL);
-    let hook_script = proj.join(ENHANCE_HOOK_SCRIPT_REL);
     let settings = claude_hook_settings_path(&proj);
     let worklist_auth = proj.join(WORKLIST_AUTH_REL);
-    let codex_hook_script = home_dir().map(|h| h.join(ENHANCE_CODEX_HOOK_INSTALL_REL));
-    let codex_menu_hook_script = home_dir().map(|h| h.join(ENHANCE_CODEX_MENU_HOOK_INSTALL_REL));
     let active_provider = current_provider(app);
     let is_source_repo = proj.join(ENHANCE_SOURCE_BUNDLE_REL).exists();
     let claude_md_has_marker = std::fs::read_to_string(&claude_md)
@@ -36089,32 +34938,20 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
     // even though Agent Coordination correctly flags the row as stale.
     let claude_sidecar_current = is_source_repo
         || (sidecar.exists() && hook_matches_bundle(app, &sidecar, "__shell/conventions.md"));
-    let hook_python = resolve_hook_python();
-    let claude_commands = claude_hook_commands(hook_python.as_deref());
-    // bram-guard-authority-flip / guards-rust-authority-covers-menu-hooks:
-    // with guards.rustAuthority on, the DECIDING registrations the status
-    // checks look for are the Rust authority commands (worklist AND menu),
-    // so the flip does not read as missing-registration drift.
-    let expected_guard_command_owned = expected_worklist_guard_command(&claude_commands);
+    // retire-python-hooks-rust-only: registration currency is the whole
+    // Claude hook story — there are no installed scripts to compare, only
+    // the bram-guard link (whose absence makes the expected commands None,
+    // which correctly reads as needs-setup).
+    let expected_guard_command_owned = expected_worklist_guard_command();
     let expected_guard_command = expected_guard_command_owned.as_deref();
-    let (menu_marker, expected_menu_command_owned) = expected_menu_hook_check(&claude_commands);
+    let expected_menu_command_owned = expected_menu_hook_command();
     let expected_menu_command = expected_menu_command_owned.as_deref();
-    let hook_script_exists = hook_script.exists();
-    // The source repo edits the hook in `app/provider-hooks/claude-worklist-guard.py`;
-    // `.claude/hooks/claude-worklist-guard.py` is only the installed runtime copy.
-    // Keep comparing it against the bundle even in the source repo so setup
-    // status flags drift instead of hiding stale installed hooks.
-    let hook_script_current =
-        hook_script_exists && hook_matches_bundle(app, &hook_script, ENHANCE_HOOK_BUNDLE_REL);
     let hook_registered = settings_has_worklist_guard_hook(&settings, expected_guard_command);
-    // Permission-menu surfacing hook — same currency/registration discipline as
-    // the worklist guard, so Setup prompts (and the Status tab flags drift) when
-    // the menu hook is missing or stale. Compared even in the source repo.
-    let menu_hook_script = proj.join(ENHANCE_MENU_HOOK_SCRIPT_REL);
-    let menu_hook_script_current = menu_hook_script.exists()
-        && hook_matches_bundle(app, &menu_hook_script, ENHANCE_MENU_HOOK_BUNDLE_REL);
-    let menu_hook_registered =
-        settings_has_permission_menu_hook(&settings, menu_marker, expected_menu_command);
+    let menu_hook_registered = settings_has_permission_menu_hook(
+        &settings,
+        "guard claude-permission-menu",
+        expected_menu_command,
+    );
     let codex_agents_has_marker = std::fs::read_to_string(&codex_agents)
         .map(|s| {
             s.contains(ENHANCE_MARKER_START)
@@ -36124,32 +34961,12 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
                     && s.contains("resources/worklist.json"))
         })
         .unwrap_or(false);
-    let codex_hook_current = codex_hook_script
-        .as_ref()
-        .map(|p| hook_matches_bundle(app, p, ENHANCE_CODEX_HOOK_BUNDLE_REL))
-        .unwrap_or(false);
-    let codex_menu_hook_current = codex_menu_hook_script
-        .as_ref()
-        .map(|p| hook_matches_bundle(app, p, ENHANCE_CODEX_MENU_HOOK_BUNDLE_REL))
-        .unwrap_or(false);
     let codex_agents_current = codex_agents_block_current(app, &codex_agents, is_source_repo);
     let codex_config_path = home_dir().map(|h| h.join(ENHANCE_CODEX_CONFIG_REL));
-    let codex_hook_block_current = match (
-        codex_config_path.as_ref(),
-        codex_hook_script.as_ref(),
-        codex_menu_hook_script.as_ref(),
-    ) {
-        (Some(config), Some(hook), Some(menu_hook)) => {
-            codex_hook_block_current(
-                config,
-                hook,
-                menu_hook,
-                hook_python.as_deref(),
-                guard_link_if_installed().as_deref(),
-            )
-        }
-        _ => false,
-    };
+    let codex_hook_block_current = codex_config_path
+        .as_ref()
+        .map(|config| codex_hook_block_current(config, guard_link_if_installed().as_deref()))
+        .unwrap_or(false);
     let codex_instr_current = codex_config_path
         .as_ref()
         .map(|p| codex_instr_block_current(p))
@@ -36158,24 +34975,16 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
     let claude_installed = claude_md_has_marker
         && sidecar_exists
         && claude_sidecar_current
-        && hook_script_current
         && hook_registered
-        && menu_hook_script_current
         && menu_hook_registered;
     let codex_installed = core_installed
         && codex_agents_has_marker
         && codex_agents_current
-        && codex_hook_current
-        && codex_menu_hook_current
         && codex_hook_block_current
         && codex_instr_current;
     let codex_install_stale_only = core_installed
         && codex_agents_has_marker
-        && (!codex_hook_current
-            || !codex_menu_hook_current
-            || !codex_hook_block_current
-            || !codex_agents_current
-            || !codex_instr_current);
+        && (!codex_hook_block_current || !codex_agents_current || !codex_instr_current);
     let claude_needs_setup = !core_installed || !claude_installed;
     let codex_needs_setup = !core_installed || !codex_installed;
     let provider_needs_setup = match active_provider {
@@ -36263,10 +35072,6 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         "claudeMd": claude_md_has_marker,
         "codexAgents": codex_agents_has_marker,
         "sidecar": sidecar_exists,
-        "hookScript": hook_script_exists,
-        "hookScriptCurrent": hook_script_current,
-        "codexHookCurrent": codex_hook_current,
-        "codexMenuHookCurrent": codex_menu_hook_current,
         "codexHookBlockCurrent": codex_hook_block_current,
         "codexAgentsCurrent": codex_agents_current,
         "codexInstrCurrent": codex_instr_current,
@@ -36275,7 +35080,6 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         "claudeMdPath": claude_md.display().to_string(),
         "codexAgentsPath": codex_agents.display().to_string(),
         "sidecarPath": sidecar.display().to_string(),
-        "hookScriptPath": hook_script.display().to_string(),
         "settingsPath": settings.display().to_string(),
         "worklistAuthPath": worklist_auth.display().to_string(),
     });
@@ -36365,67 +35169,6 @@ fn write_template_if_safe(
         }
         Err(e) => Err(format!("read {}: {}", path.display(), e)),
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn trace_hook_install_write<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    reason: &str,
-    bundle_rel: &str,
-    path: &Path,
-    bytes: &[u8],
-    is_source_repo: bool,
-    source_file: &str,
-    source_line: u32,
-) {
-    if !bram_trace_enabled() {
-        return;
-    }
-    append_bram_trace_line(
-        app,
-        "hook-install",
-        &format!(
-            "reason={} source={} line={} bundle={} path={} bytes={} fingerprint={} is_source_repo={}",
-            reason,
-            source_file,
-            source_line,
-            bundle_rel,
-            path.display(),
-            bytes.len(),
-            bytes_fingerprint(bytes),
-            is_source_repo
-        ),
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
-fn write_hook_template_if_safe<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    path: &Path,
-    new_content: &[u8],
-    force: bool,
-    wrote: &mut Vec<String>,
-    skipped: &mut Vec<String>,
-    reason: &str,
-    bundle_rel: &str,
-    is_source_repo: bool,
-    source_file: &str,
-    source_line: u32,
-) -> Result<bool, String> {
-    let did_write = write_template_if_safe(path, new_content, force, wrote, skipped)?;
-    if did_write {
-        trace_hook_install_write(
-            app,
-            reason,
-            bundle_rel,
-            path,
-            new_content,
-            is_source_repo,
-            source_file,
-            source_line,
-        );
-    }
-    Ok(did_write)
 }
 
 // issue-294: Setup pointed at the user's home directory scaffolds
@@ -36684,107 +35427,17 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
         )?;
     }
 
-    // Proposal-guard hook script. In the source repo, content-comparison gates
-    // the write so a committed in-flight diagnostic-logging edit to the hook
-    // survives Setup (the case #99 was designed for). In non-source repos the
-    // hook has no documented user-extension point, so bundle bumps must always
-    // land — passing force=true here avoids stranding projects on a stale hook
-    // every release that touches the bundle. Issue #173. chmod still runs only
-    // after an actual write — preserves the user's mode if we skipped.
-    let (hook_bytes, _mime) = serve_app_file(Some(app), ENHANCE_HOOK_BUNDLE_REL)
-        .ok_or_else(|| "claude-worklist-guard.py bundle not found".to_string())?;
-    let hook_path = proj.join(ENHANCE_HOOK_SCRIPT_REL);
-    if let Some(parent) = hook_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("create {}: {}", parent.display(), e))?;
-    }
-    // Used only under `#[cfg(unix)]` below to gate a chmod after a
-    // fresh write. On Windows there's no Unix permission bit to set,
-    // so the binding is intentionally unused there.
-    #[cfg_attr(not(unix), allow(unused_variables))]
-    let hook_written = write_hook_template_if_safe(
-        app,
-        &hook_path,
-        &hook_bytes,
-        force || !is_source_repo,
-        &mut wrote,
-        &mut skipped,
-        "setup-install",
-        ENHANCE_HOOK_BUNDLE_REL,
-        is_source_repo,
-        file!(),
-        line!(),
-    )?;
-    #[cfg(unix)]
-    if hook_written {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&hook_path)
-            .map_err(|e| format!("stat hook: {}", e))?
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&hook_path, perms).map_err(|e| format!("chmod hook: {}", e))?;
-    }
-
-    // Permission-menu surfacing hook — same install discipline as the worklist
-    // guard above (copy bundle, chmod on unix). force||!is_source_repo so bundle
-    // bumps always land outside the source repo (#173).
-    let (menu_hook_bytes, _mime) = serve_app_file(Some(app), ENHANCE_MENU_HOOK_BUNDLE_REL)
-        .ok_or_else(|| "claude-permission-menu-hook.py bundle not found".to_string())?;
-    let menu_hook_path = proj.join(ENHANCE_MENU_HOOK_SCRIPT_REL);
-    if let Some(parent) = menu_hook_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("create {}: {}", parent.display(), e))?;
-    }
-    #[cfg_attr(not(unix), allow(unused_variables))]
-    let menu_hook_written = write_hook_template_if_safe(
-        app,
-        &menu_hook_path,
-        &menu_hook_bytes,
-        force || !is_source_repo,
-        &mut wrote,
-        &mut skipped,
-        "setup-install",
-        ENHANCE_MENU_HOOK_BUNDLE_REL,
-        is_source_repo,
-        file!(),
-        line!(),
-    )?;
-    #[cfg(unix)]
-    if menu_hook_written {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&menu_hook_path)
-            .map_err(|e| format!("stat menu hook: {}", e))?
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&menu_hook_path, perms)
-            .map_err(|e| format!("chmod menu hook: {}", e))?;
-    }
+    // retire-python-hooks-rust-only: Setup no longer installs any Python
+    // hook script — the Rust bram-guard is the only implementation. The
+    // previously installed copies are deleted below (prune_retired_python_
+    // hooks) once no settings source references them.
 
     // Pre-rename leftover script (bc3ee31). Idempotent: NotFound is fine.
     let old_hook_path = proj.join(".claude/hooks/proposal-guard.py");
     let _ = std::fs::remove_file(&old_hook_path);
 
-    // issue-217 transition: while legacy generic-name hook copies remain on
-    // disk, keep them content-identical to the new provider-named installs —
-    // live Claude sessions snapshot hook config at startup and keep invoking
-    // the legacy paths until restart. Bram startup prunes the legacy files
-    // once settings.json no longer references them
-    // (prune_legacy_claude_hooks).
-    for (legacy_rel, new_rel) in [
-        (".claude/hooks/worklist-guard.py", ENHANCE_HOOK_SCRIPT_REL),
-        (
-            ".claude/hooks/permission-menu-hook.py",
-            ENHANCE_MENU_HOOK_SCRIPT_REL,
-        ),
-    ] {
-        let legacy = proj.join(legacy_rel);
-        if legacy.exists() {
-            let _ = std::fs::copy(proj.join(new_rel), &legacy);
-        }
-    }
-
     // Register hooks in ignored project-local settings on every platform.
-    // Hook registration is installed state even when the POSIX command is
+    // Hook registration is installed state even when the command is
     // portable; tracked settings remain shared configuration only (#249).
     // Prune Bram's registrations from tracked settings, including legacy
     // names, before merging the current commands into the local file.
@@ -36794,81 +35447,36 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
     prune_proposal_guard_from_settings(&hook_settings_path)?;
     prune_claude_hook_commands_from_settings(&settings_path)?;
     merge_claude_curl_allowlist_into_settings(&settings_path)?;
-    // issue-247: resolve the hook runtime once; setup and status share the
-    // resolver so they cannot disagree. No usable Python -> skip hook
-    // registration entirely and surface one named warning instead of
-    // installing commands that fail on every hook invocation.
-    let hook_python = resolve_hook_python();
-    let rust_authority = bram_guards_rust_authority();
-    // guards-rust-authority-covers-menu-hooks: with the toggle on, NO Python
-    // hook is registered — worklist and menu slots are both Rust — and a
-    // missing Python is no longer a warning, because Python-less operation
-    // is the point (#247/#248). Flag off restores Python + shadows exactly.
-    if !rust_authority {
-        match claude_hook_commands(hook_python.as_deref()) {
-            Some((guard_command, menu_command)) => {
-                merge_worklist_guard_into_settings(&hook_settings_path, &guard_command)?;
-                merge_permission_menu_hook_into_settings(&hook_settings_path, &menu_command)?;
-            }
-            None => {
-                skipped.push(HOOK_PYTHON_MISSING_WARNING.to_string());
-            }
-        }
-    }
-    // bram-guard registrations: shadows beside Python by default; deciding
-    // commands in place of Python per the guards.rustAuthority toggle.
+    // The deciding registrations. Registration strings dropped the
+    // transitional `--authority` token (the guard accepts and ignores it, so
+    // pre-rewrite session snapshots keep working): the new worklist command
+    // is string-identical to the old shadow registration, the worklist
+    // merge's marker migration removes retired Python entries, and the
+    // explicit prunes sweep the old `--authority` forms and the Python menu
+    // entries from every event array.
     match guard::ensure_bram_guard_link() {
         Some(link) => {
-            let menu_shadow = guard::guard_hook_command(&link, "claude-permission-menu");
-            let worklist_shadow = guard::guard_hook_command(&link, "claude-worklist");
-            if rust_authority {
-                // Authority mode: register the deciding commands (each
-                // merge's marker migration removes the shadow twin from the
-                // shared event arrays — deciding AND shadowing with the same
-                // binary would double-spawn per call), prune the Python
-                // registrations, and prune the worklist shadow.
-                let worklist_authority = format!("{} --authority", worklist_shadow);
-                merge_worklist_guard_into_settings(&hook_settings_path, &worklist_authority)?;
-                prune_pretooluse_hooks_containing(
-                    &hook_settings_path,
-                    "guard claude-worklist",
-                    Some("--authority"),
-                )?;
-                let menu_authority = format!("{} --authority", menu_shadow);
-                merge_guard_menu_hook_into_settings(&hook_settings_path, &menu_authority)?;
-                prune_hook_commands_containing(
-                    &hook_settings_path,
-                    "permission-menu-hook.py",
-                    None,
-                )?;
-            } else {
-                // Shadow mode (the default): observe-only twins beside the
-                // Python hooks, and any authority registrations from a
-                // previous toggle-on state migrate back via each merge's
-                // marker match, so flipping back is one Setup run (after a
-                // relaunch — the flag is read at startup, #313 A6).
-                merge_guard_menu_hook_into_settings(&hook_settings_path, &menu_shadow)?;
-                merge_guard_shadow_worklist_into_settings(&hook_settings_path, &worklist_shadow)?;
-                prune_pretooluse_hooks_containing(
-                    &hook_settings_path,
-                    "guard claude-worklist --authority",
-                    None,
-                )?;
-            }
+            let worklist_command = guard::guard_hook_command(&link, "claude-worklist");
+            merge_worklist_guard_into_settings(&hook_settings_path, &worklist_command)?;
+            prune_pretooluse_hooks_containing(
+                &hook_settings_path,
+                "guard claude-worklist --authority",
+                None,
+            )?;
+            let menu_command = guard::guard_hook_command(&link, "claude-permission-menu");
+            merge_guard_menu_hook_into_settings(&hook_settings_path, &menu_command)?;
+            prune_hook_commands_containing(&hook_settings_path, "permission-menu-hook.py", None)?;
         }
         None => {
-            if rust_authority {
-                return Err(
-                    "guards.rustAuthority is set but the bram-guard link could not be installed — refusing to leave the project with no deciding worklist guard"
-                        .to_string(),
-                );
-            }
-            skipped.push(
-                "bram-guard link not installed (no home dir or exe path); Rust shadow hook skipped"
+            return Err(
+                "the bram-guard link could not be installed (no home dir or exe path) — refusing to leave the project with no worklist guard"
                     .to_string(),
             );
         }
     }
+    // Delete the retired installed Python hooks now that nothing Bram
+    // manages references them.
+    prune_retired_python_hooks(&proj, &mut wrote, &mut skipped);
     wrote.push(settings_path.display().to_string());
     wrote.push(hook_settings_path.display().to_string());
 
@@ -36901,7 +35509,7 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
 
     // Codex user-global hook install. Runs unconditionally (incl. source repo)
     // because the install is keyed to $HOME, not the project.
-    let codex_hook_install = install_codex_worklist_guard(app, hook_python.as_deref())?;
+    let codex_hook_install = install_codex_worklist_guard(app)?;
     for path in &codex_hook_install.wrote {
         wrote.push(path.clone());
     }
@@ -36965,84 +35573,24 @@ struct CodexHookInstall {
 
 fn install_codex_worklist_guard<R: tauri::Runtime>(
     app: &AppHandle<R>,
-    hook_python: Option<&str>,
 ) -> Result<CodexHookInstall, String> {
     let home = home_dir().ok_or("no HOME or USERPROFILE")?;
-    let is_source_repo = project_root(Some(app))
-        .map(|p| p.join(ENHANCE_SOURCE_BUNDLE_REL).exists())
-        .unwrap_or(false);
+    let _ = app; // signature kept generic with its callers
     let script_path = home.join(ENHANCE_CODEX_HOOK_INSTALL_REL);
-    let menu_script_path = home.join(ENHANCE_CODEX_MENU_HOOK_INSTALL_REL);
     let config_path = home.join(ENHANCE_CODEX_CONFIG_REL);
     let mut wrote: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
 
-    let (script_bytes, _mime) = serve_app_file(Some(app), ENHANCE_CODEX_HOOK_BUNDLE_REL)
-        .ok_or_else(|| "worklist-guard-codex.py bundle not found".to_string())?;
-    let (menu_script_bytes, _mime) = serve_app_file(Some(app), ENHANCE_CODEX_MENU_HOOK_BUNDLE_REL)
-        .ok_or_else(|| "codex-permission-menu-hook.py bundle not found".to_string())?;
-    if let Some(parent) = script_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("create {}: {}", parent.display(), e))?;
-    }
-    // Whole-file Setup-managed bundle; force-write so bundle bumps land on
-    // existing installs. No source-repo carve-out — this hook installs to
-    // $HOME/.bram/ on every machine. Issue #174.
-    // Same Unix-only chmod gate as the Claude hook above.
-    #[cfg_attr(not(unix), allow(unused_variables))]
-    let codex_hook_written = write_hook_template_if_safe(
-        app,
-        &script_path,
-        &script_bytes,
-        true,
-        &mut wrote,
-        &mut skipped,
-        "setup-install",
-        ENHANCE_CODEX_HOOK_BUNDLE_REL,
-        is_source_repo,
-        file!(),
-        line!(),
-    )?;
-    #[cfg(unix)]
-    if codex_hook_written {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&script_path)
-            .map_err(|e| format!("stat codex hook: {}", e))?
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&script_path, perms)
-            .map_err(|e| format!("chmod codex hook: {}", e))?;
-    }
-    #[cfg_attr(not(unix), allow(unused_variables))]
-    let codex_menu_hook_written = write_hook_template_if_safe(
-        app,
-        &menu_script_path,
-        &menu_script_bytes,
-        true,
-        &mut wrote,
-        &mut skipped,
-        "setup-install",
-        ENHANCE_CODEX_MENU_HOOK_BUNDLE_REL,
-        is_source_repo,
-        file!(),
-        line!(),
-    )?;
-    #[cfg(unix)]
-    if codex_menu_hook_written {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&menu_script_path)
-            .map_err(|e| format!("stat codex permission-menu hook: {}", e))?
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&menu_script_path, perms)
-            .map_err(|e| format!("chmod codex permission-menu hook: {}", e))?;
-    }
+    // retire-python-hooks-rust-only: no Python scripts are installed to
+    // ~/.bram; the config block references only the bram-guard link. The
+    // previously installed scripts are deleted below once the rewritten
+    // config no longer mentions them.
 
     // Matcher covers codex's canonical apply_patch + Bash, the Claude-style
     // Write/Edit aliases codex accepts, and any MCP tool (mcp__<server>__<tool>).
     // The MCP surface matters: a user with [mcp_servers.filesystem] configured
     // can route file edits through mcp__filesystem__write_text_file / edit_file
-    // and bypass apply_patch entirely. The guard script branches by tool_name
+    // and bypass apply_patch entirely. The guard branches by tool_name
     // and only blocks MCP calls whose names signal mutation (write/edit/create/
     // delete/move/...).
     //
@@ -37051,12 +35599,7 @@ fn install_codex_worklist_guard<R: tauri::Runtime>(
     // be rendered in the developer-role context part, higher priority than
     // AGENTS.md (which is user-role). install_codex_developer_instructions
     // writes that field; this function only installs the runtime backstop.
-    let toml_block = codex_hook_toml_block(
-        &script_path,
-        &menu_script_path,
-        hook_python,
-        guard_link_if_installed().as_deref(),
-    );
+    let toml_block = codex_hook_toml_block(guard_link_if_installed().as_deref());
 
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)
@@ -37069,11 +35612,14 @@ fn install_codex_worklist_guard<R: tauri::Runtime>(
         ENHANCE_CODEX_LEGACY_TOML_MARKER_END,
     );
     let new_content = match &toml_block {
-        // issue-247: no usable Python. Remove any previously installed Bram
-        // hook block (its command fails on every invocation) instead of
-        // leaving noisy per-tool-call failures, and surface the warning.
+        // No bram-guard link: no valid hook commands exist, so remove any
+        // previously installed block (its commands would fail per call)
+        // and surface the condition. run_enhance errors out on the Claude
+        // side before reaching here, so this arm is defensive.
         None => {
-            skipped.push(HOOK_PYTHON_MISSING_WARNING.to_string());
+            skipped.push(
+                "bram-guard link not installed; Codex hook block removed".to_string(),
+            );
             strip_marker_block(
                 &cleaned,
                 ENHANCE_CODEX_TOML_MARKER_START,
@@ -37108,6 +35654,25 @@ fn install_codex_worklist_guard<R: tauri::Runtime>(
         &mut wrote,
         &mut skipped,
     )?;
+
+    // Delete the retired ~/.bram Python hook scripts once the rewritten
+    // config no longer references them (the #173/#227 reference-gated
+    // precedent: never delete a file a live config still points at).
+    for name in ["codex-worklist-guard.py", "codex-permission-menu-hook.py"] {
+        let path = home.join(".bram").join(name);
+        if !path.exists() {
+            continue;
+        }
+        if new_content.contains(name) {
+            skipped.push(format!(
+                "kept {} — still referenced by config.toml; remove that hook entry, then Setup can delete it",
+                path.display()
+            ));
+        } else {
+            let _ = std::fs::remove_file(&path);
+            wrote.push(format!("deleted retired Python hook {}", path.display()));
+        }
+    }
 
     Ok(CodexHookInstall {
         installed: true,
@@ -40048,47 +38613,27 @@ fn agent_coordination_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_j
         }
     }
 
-    // --- Claude project hook script ---
+    // --- Retired Python hooks (project) ---
+    // retire-python-hooks-rust-only: presence is the anomaly now. Setup
+    // deletes these once no settings source references them; a lingering
+    // file means Setup has not run since the cutover, or a settings source
+    // still references it.
     {
-        let path = proj.join(ENHANCE_HOOK_SCRIPT_REL);
-        let seen = file_modified_iso(&path);
-        if !path.exists() {
-            rows.push(json!({
-                "signal": ENHANCE_HOOK_SCRIPT_REL,
-                "level": "warn",
-                "state": "missing",
-                "detail": "Project hook not installed. Run Setup.",
-                "seen": seen,
-            }));
-        } else {
-            let matches = hook_matches_bundle(app, &path, ENHANCE_HOOK_BUNDLE_REL);
-            let disk_len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            let bundle_len = serve_app_file(Some(app), ENHANCE_HOOK_BUNDLE_REL)
-                .map(|(b, _)| b.len() as u64)
-                .unwrap_or(0);
-            let detail_when_stale = if is_source_repo {
-                format!(
-                    "Disk {} B, bundle {} B (source repo: divergence may reflect an in-flight diagnostic edit, not stale Setup)",
-                    disk_len, bundle_len
-                )
+        let retired: Vec<&str> = [ENHANCE_HOOK_SCRIPT_REL, ENHANCE_MENU_HOOK_SCRIPT_REL]
+            .into_iter()
+            .filter(|rel| proj.join(rel).exists())
+            .collect();
+        rows.push(json!({
+            "signal": "Retired Python hooks",
+            "level": if retired.is_empty() { "ok" } else { "warn" },
+            "state": if retired.is_empty() { "absent" } else { "present" },
+            "detail": if retired.is_empty() {
+                "No retired Python hook scripts on disk".to_string()
             } else {
-                format!(
-                    "Disk {} B, bundle {} B — run Setup to refresh",
-                    disk_len, bundle_len
-                )
-            };
-            rows.push(json!({
-                "signal": ENHANCE_HOOK_SCRIPT_REL,
-                "level": if matches { "ok" } else if is_source_repo { "none" } else { "warn" },
-                "state": if matches { "current" } else { "stale" },
-                "detail": if matches {
-                    format!("Byte-matches bundle ({} B)", bundle_len)
-                } else {
-                    detail_when_stale
-                },
-                "seen": seen,
-            }));
-        }
+                format!("Still on disk: {} — run Setup to delete (kept only while a settings source references them)", retired.join(", "))
+            },
+            "seen": "",
+        }));
     }
 
     // --- settings.json hook registration ---
@@ -40096,21 +38641,19 @@ fn agent_coordination_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_j
         let path = claude_hook_settings_path(&proj);
         let seen = file_modified_iso(&path);
         let exists = path.exists();
-        let hook_python = resolve_hook_python();
-        let claude_commands = claude_hook_commands(hook_python.as_deref());
-        let expected_guard_command = expected_worklist_guard_command(&claude_commands);
+        let expected_guard_command = expected_worklist_guard_command();
         let registered = settings_has_worklist_guard_hook(&path, expected_guard_command.as_deref());
-        let marker_present = settings_has_worklist_guard_marker(&path);
+        let stale_python = settings_has_worklist_guard_marker(&path);
         rows.push(json!({
             "signal": claude_hook_settings_rel(),
             "level": if registered { "ok" } else { "warn" },
-            "state": if registered { "registered" } else if marker_present { "stale" } else if exists { "not-registered" } else { "missing" },
+            "state": if registered { "registered" } else if stale_python { "stale" } else if exists { "not-registered" } else { "missing" },
             "detail": if registered {
-                "claude-worklist-guard.py registered with the expected PreToolUse command for Write|Edit"
-            } else if marker_present {
-                "claude-worklist-guard.py is registered but its command is stale. Re-run Setup."
+                "bram-guard registered with the expected PreToolUse command for the guard matchers"
+            } else if stale_python {
+                "A retired Python worklist guard is still registered. Re-run Setup."
             } else if exists {
-                "Claude hook settings file present but claude-worklist-guard.py (Claude worklist guard) is not registered"
+                "Claude hook settings file present but the bram-guard worklist hook is not registered"
             } else {
                 "Claude hook settings file not present"
             },
@@ -40175,90 +38718,29 @@ fn agent_coordination_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_j
         }
     }
 
-    // --- User-global codex hook script ---
+    // --- Retired ~/.bram Python hooks ---
     {
-        let path_opt = home_dir().map(|h| h.join(ENHANCE_CODEX_HOOK_INSTALL_REL));
-        let signal = "~/.bram/codex-worklist-guard.py";
-        match path_opt {
-            None => rows.push(json!({
-                "signal": signal, "level": "warn", "state": "missing",
-                "detail": "HOME unset; cannot locate codex hook install path.",
-                "seen": "",
-            })),
-            Some(path) => {
-                let seen = file_modified_iso(&path);
-                if !path.exists() {
-                    rows.push(json!({
-                        "signal": signal,
-                        "level": "warn",
-                        "state": "missing",
-                        "detail": "User-global codex hook not installed. Run Setup.",
-                        "seen": seen,
-                    }));
-                } else {
-                    let matches = hook_matches_bundle(app, &path, ENHANCE_CODEX_HOOK_BUNDLE_REL);
-                    let disk_len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                    let bundle_len = serve_app_file(Some(app), ENHANCE_CODEX_HOOK_BUNDLE_REL)
-                        .map(|(b, _)| b.len() as u64)
-                        .unwrap_or(0);
-                    rows.push(json!({
-                        "signal": signal,
-                        "level": if matches { "ok" } else { "warn" },
-                        "state": if matches { "current" } else { "stale" },
-                        "detail": if matches {
-                            format!("Byte-matches bundle ({} B)", bundle_len)
-                        } else {
-                            format!("Disk {} B, bundle {} B — run Setup to refresh", disk_len, bundle_len)
-                        },
-                        "seen": seen,
-                    }));
-                }
-            }
-        }
+        let retired: Vec<String> = ["codex-worklist-guard.py", "codex-permission-menu-hook.py"]
+            .into_iter()
+            .filter(|name| {
+                home_dir()
+                    .map(|h| h.join(".bram").join(name).exists())
+                    .unwrap_or(false)
+            })
+            .map(|name| format!("~/.bram/{}", name))
+            .collect();
+        rows.push(json!({
+            "signal": "Retired Python hooks (~/.bram)",
+            "level": if retired.is_empty() { "ok" } else { "warn" },
+            "state": if retired.is_empty() { "absent" } else { "present" },
+            "detail": if retired.is_empty() {
+                "No retired Python hook scripts in ~/.bram".to_string()
+            } else {
+                format!("Still on disk: {} — run Setup to delete (kept only while config.toml references them)", retired.join(", "))
+            },
+            "seen": "",
+        }));
     }
-    // --- User-global codex permission-menu hook script ---
-    {
-        let path_opt = home_dir().map(|h| h.join(ENHANCE_CODEX_MENU_HOOK_INSTALL_REL));
-        let signal = "~/.bram/codex-permission-menu-hook.py";
-        match path_opt {
-            None => rows.push(json!({
-                "signal": signal, "level": "warn", "state": "missing",
-                "detail": "HOME unset; cannot locate codex permission-menu hook install path.",
-                "seen": "",
-            })),
-            Some(path) => {
-                let seen = file_modified_iso(&path);
-                if !path.exists() {
-                    rows.push(json!({
-                        "signal": signal,
-                        "level": "warn",
-                        "state": "missing",
-                        "detail": "User-global codex permission-menu hook not installed. Run Setup.",
-                        "seen": seen,
-                    }));
-                } else {
-                    let matches =
-                        hook_matches_bundle(app, &path, ENHANCE_CODEX_MENU_HOOK_BUNDLE_REL);
-                    let disk_len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                    let bundle_len = serve_app_file(Some(app), ENHANCE_CODEX_MENU_HOOK_BUNDLE_REL)
-                        .map(|(b, _)| b.len() as u64)
-                        .unwrap_or(0);
-                    rows.push(json!({
-                        "signal": signal,
-                        "level": if matches { "ok" } else { "warn" },
-                        "state": if matches { "current" } else { "stale" },
-                        "detail": if matches {
-                            format!("Byte-matches bundle ({} B)", bundle_len)
-                        } else {
-                            format!("Disk {} B, bundle {} B — run Setup to refresh", disk_len, bundle_len)
-                        },
-                        "seen": seen,
-                    }));
-                }
-            }
-        }
-    }
-
     // --- ~/.codex/config.toml hook block ---
     {
         let path_opt = home_dir().map(|h| h.join(ENHANCE_CODEX_CONFIG_REL));
@@ -40300,19 +38782,10 @@ fn agent_coordination_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_j
                             "seen": seen,
                         }));
                     } else {
-                        let hook_path = home_dir().map(|h| h.join(ENHANCE_CODEX_HOOK_INSTALL_REL));
-                        let menu_hook_path =
-                            home_dir().map(|h| h.join(ENHANCE_CODEX_MENU_HOOK_INSTALL_REL));
-                        let current = match (hook_path.as_ref(), menu_hook_path.as_ref()) {
-                            (Some(hook), Some(menu_hook)) => codex_hook_block_current(
-                                &path,
-                                hook,
-                                menu_hook,
-                                resolve_hook_python().as_deref(),
-                                guard_link_if_installed().as_deref(),
-                            ),
-                            _ => false,
-                        };
+                        let current = codex_hook_block_current(
+                            &path,
+                            guard_link_if_installed().as_deref(),
+                        );
                         rows.push(json!({
                             "signal": signal,
                             "level": if current { "ok" } else { "warn" },
@@ -40531,71 +39004,46 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
         .and_then(|v| v.get("modifiedIso").and_then(|p| p.as_str()))
         .unwrap_or("");
     let project_root_path = project_root(Some(app));
-    // issue-247: same probe-by-execution resolver setup uses, so status and
-    // setup cannot disagree. Presence checks lie on Windows (Store stubs).
-    let python_found = resolve_hook_python();
-    let claude_hook = project_root_path
-        .as_ref()
-        .map(|p| p.join(ENHANCE_HOOK_SCRIPT_REL));
+    // retire-python-hooks-rust-only: hook health is the bram-guard link plus
+    // the two registrations. No interpreter row — hooks have no runtime
+    // dependency beyond the link itself.
+    let guard_link = guard_link_if_installed();
     let claude_settings = project_root_path
         .as_ref()
         .map(|p| claude_hook_settings_path(p));
-    let claude_hook_exists = claude_hook.as_ref().map_or(false, |p| p.exists());
-    let claude_commands = claude_hook_commands(python_found.as_deref());
-    let expected_guard_command = expected_worklist_guard_command(&claude_commands);
+    let expected_guard_command = expected_worklist_guard_command();
     let claude_registered = claude_settings.as_ref().map_or(false, |p| {
         settings_has_worklist_guard_hook(p, expected_guard_command.as_deref())
     });
-    let claude_marker_present = claude_settings
+    let claude_stale_python = claude_settings
         .as_ref()
         .map_or(false, |p| settings_has_worklist_guard_marker(p));
-    let codex_hook = home_dir().map(|p| p.join(ENHANCE_CODEX_HOOK_INSTALL_REL));
-    let codex_menu_hook = home_dir().map(|p| p.join(ENHANCE_CODEX_MENU_HOOK_INSTALL_REL));
     let codex_config = home_dir().map(|p| p.join(".codex/config.toml"));
-    let codex_hook_exists = codex_hook.as_ref().map_or(false, |p| p.exists());
-    let codex_menu_hook_exists = codex_menu_hook.as_ref().map_or(false, |p| p.exists());
     let codex_registered = codex_config
         .as_ref()
-        .zip(codex_hook.as_ref())
-        .zip(codex_menu_hook.as_ref())
-        .map(|((config, hook), menu_hook)| {
-            codex_hook_block_current(
-                config,
-                hook,
-                menu_hook,
-                python_found.as_deref(),
-                guard_link_if_installed().as_deref(),
-            )
-        })
+        .map(|config| codex_hook_block_current(config, guard_link.as_deref()))
         .unwrap_or(false);
     let hooks_rows = vec![
         serde_json::json!({
-            "signal": "Python 3",
-            // guards-rust-authority-covers-menu-hooks: with the toggle on,
-            // every registered hook is the Rust bram-guard — a missing
-            // Python is informational, not a warning (#247).
-            "level": if python_found.is_some() || bram_guards_rust_authority() { "ok" } else { "warn" },
-            "state": if python_found.is_some() { "found" } else if bram_guards_rust_authority() { "not-required" } else { "missing" },
-            "detail": python_found.clone().unwrap_or_else(|| if bram_guards_rust_authority() {
-                "No Python found, and none is needed: guards.rustAuthority registers bram-guard for every hook.".to_string()
-            } else {
-                "Hooks require Python 3 and none was found (on Windows: install from python.org, which includes the py launcher; the Microsoft Store PATH aliases are not Python). Re-run Setup after installing.".to_string()
-            }),
-            "seen": "",
+            "signal": "bram-guard link",
+            "level": if guard_link.is_some() { "ok" } else { "warn" },
+            "state": if guard_link.is_some() { "installed" } else { "missing" },
+            "detail": guard_link.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "~/.bram/bram-guard not installed — hooks cannot run. Relaunch Bram or run Setup.".to_string()),
+            "seen": guard_link.as_ref().map(|p| file_modified_iso(p)).unwrap_or_default(),
         }),
         serde_json::json!({
-            "signal": "Claude hook",
-            "level": if claude_hook_exists && claude_registered { "ok" } else { "warn" },
-            "state": if claude_hook_exists && claude_registered { "registered" } else if claude_hook_exists && claude_marker_present { "stale" } else if claude_hook_exists { "unregistered" } else { "missing" },
-            "detail": if !claude_hook_exists { "Hook file missing" } else if claude_marker_present && !claude_registered { "Hook file present and registered, but Claude hook settings command is stale. Re-run Setup." } else if !claude_registered { "Hook file present but not registered in Claude hook settings" } else { "Hook file installed and registered" },
-            "seen": claude_hook.as_ref().map(|p| file_modified_iso(p)).unwrap_or_default(),
+            "signal": "Claude hooks",
+            "level": if claude_registered { "ok" } else { "warn" },
+            "state": if claude_registered { "registered" } else if claude_stale_python { "stale" } else { "not-registered" },
+            "detail": if claude_registered { "bram-guard worklist + menu hooks registered" } else if claude_stale_python { "A retired Python worklist guard is still registered. Re-run Setup." } else { "bram-guard hooks not registered in Claude hook settings. Run Setup." },
+            "seen": claude_settings.as_ref().map(|p| file_modified_iso(p)).unwrap_or_default(),
         }),
         serde_json::json!({
             "signal": "Codex hooks",
-            "level": if codex_hook_exists && codex_menu_hook_exists && codex_registered { "ok" } else { "warn" },
-            "state": if codex_hook_exists && codex_menu_hook_exists && codex_registered { "registered" } else if codex_hook_exists || codex_menu_hook_exists { "partial" } else { "missing" },
-            "detail": if !codex_hook_exists || !codex_menu_hook_exists { "One or more hook files missing" } else if !codex_registered { "Hook files present but config.toml block is stale" } else { "Hook files installed and registered" },
-            "seen": codex_hook.as_ref().map(|p| file_modified_iso(p)).unwrap_or_default(),
+            "level": if codex_registered { "ok" } else { "warn" },
+            "state": if codex_registered { "registered" } else { "stale" },
+            "detail": if codex_registered { "config.toml hook block matches the current bram-guard commands" } else { "config.toml hook block missing or stale. Run Setup." },
+            "seen": codex_config.as_ref().map(|p| file_modified_iso(p)).unwrap_or_default(),
         }),
     ];
     let applied_items: Vec<&serde_json::Value> = items
@@ -49658,16 +48106,9 @@ fn worklist_commit_consumed_retry_message(
 // dirty, CI red until 2c9648d) is the failure this prevents. A dirty
 // twin WITHOUT its canonical in the item is still refused as unrelated:
 // the artifact only travels with its source.
-const INSTALLED_TWIN_PAIRS: &[(&str, &str)] = &[
-    (
-        "app/provider-hooks/claude-worklist-guard.py",
-        ".claude/hooks/claude-worklist-guard.py",
-    ),
-    (
-        "app/provider-hooks/claude-permission-menu-hook.py",
-        ".claude/hooks/claude-permission-menu-hook.py",
-    ),
-];
+// Empty since retire-python-hooks-rust-only deleted the Python hook pair —
+// the mechanism stays for the next canonical/installed split that needs it.
+const INSTALLED_TWIN_PAIRS: &[(&str, &str)] = &[];
 
 // Installed twins implied by an approved file set: for each canonical
 // present, its installed twin, unless the item already lists it.
@@ -51129,25 +49570,11 @@ mod worklist_authorization_tests {
     }
 
     #[test]
-    fn installed_twin_follows_its_canonical() {
-        let files = vec!["app/provider-hooks/claude-worklist-guard.py".to_string()];
-        assert_eq!(
-            installed_twins_for(&files),
-            vec![".claude/hooks/claude-worklist-guard.py".to_string()]
-        );
-    }
-
-    #[test]
-    fn installed_twin_not_added_without_canonical_or_when_listed() {
-        // No canonical in the set → no twin (a dirty twin alone stays
-        // refusable as unrelated).
+    fn installed_twin_pairs_is_empty_since_python_retirement() {
+        // The pair list emptied with retire-python-hooks-rust-only; the
+        // mechanism stays for the next canonical/installed split. Any file
+        // set maps to no twins.
         let files = vec!["src-tauri/src/lib.rs".to_string()];
-        assert!(installed_twins_for(&files).is_empty());
-        // Twin already listed explicitly → not duplicated.
-        let files = vec![
-            "app/provider-hooks/claude-worklist-guard.py".to_string(),
-            ".claude/hooks/claude-worklist-guard.py".to_string(),
-        ];
         assert!(installed_twins_for(&files).is_empty());
     }
 
@@ -53400,12 +51827,6 @@ pub fn run() {
             .and_then(|c| c.menus.as_ref())
             .and_then(|m| m.hook_driven)
             .unwrap_or(true),
-    );
-    apply_bram_guards_rust_authority_from_config(
-        cfg.as_ref()
-            .and_then(|c| c.guards.as_ref())
-            .and_then(|g| g.rust_authority)
-            .unwrap_or(false),
     );
     // Only warn when the target pane is actually enabled (#275). The pane is
     // off by default -- most users preview their app in their own browser --

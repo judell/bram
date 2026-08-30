@@ -121,9 +121,24 @@ echo "Installing to ${TARGET}…"
 cp "${BIN}" "${TARGET}"
 chmod +x "${TARGET}"
 
+# The dedicated hook binary rides beside the app: ~/.bram/bram-guard links to
+# the sibling of the running executable, so it must land in the same dir.
+# Older archives don't carry it; the app then falls back to itself as the
+# hook target, so its absence is not fatal.
+GUARD_BIN="$(find "${TMP}" -type f -name bram-guard | head -n 1)"
+if [[ -n "${GUARD_BIN}" ]]; then
+  GUARD_TARGET="${INSTALL_DIR}/bram-guard"
+  cp "${GUARD_BIN}" "${GUARD_TARGET}"
+  chmod +x "${GUARD_TARGET}"
+  echo "Installed: ${GUARD_TARGET}"
+fi
+
 # macOS: clear quarantine so Gatekeeper doesn't block first launch.
 if [[ "${OS}" == "Darwin" ]]; then
   xattr -d com.apple.quarantine "${TARGET}" 2>/dev/null || true
+  if [[ -n "${GUARD_BIN:-}" ]]; then
+    xattr -d com.apple.quarantine "${INSTALL_DIR}/bram-guard" 2>/dev/null || true
+  fi
 fi
 
 echo "Installed: ${TARGET}"

@@ -241,18 +241,25 @@ jobs:
         working-directory: src-tauri
         run: cargo build --target ${{ matrix.target }}
 
+      # Both packages carry the dedicated bram-guard binary beside the app: hook
+      # registrations point at ~/.bram/bram-guard, which ensure_bram_guard_link
+      # retargets to the sibling artifact — without it, installed users fall
+      # back to the console-subsystem main binary (conhost flash per hook
+      # spawn on Windows). retire-python-hooks-rust-only.
       - name: Package (Unix)
         if: matrix.os != 'windows-latest'
         run: |
           cp src-tauri/target/${{ matrix.target }}/debug/bram${{ matrix.ext }} ./bram${{ matrix.ext }}
-          tar -czf bram-${{ matrix.label }}.${{ matrix.archive }} bram${{ matrix.ext }}
+          cp src-tauri/target/${{ matrix.target }}/debug/bram-guard${{ matrix.ext }} ./bram-guard${{ matrix.ext }}
+          tar -czf bram-${{ matrix.label }}.${{ matrix.archive }} bram${{ matrix.ext }} bram-guard${{ matrix.ext }}
 
       - name: Package (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
           Copy-Item src-tauri/target/${{ matrix.target }}/debug/bram${{ matrix.ext }} -Destination ./bram${{ matrix.ext }}
-          Compress-Archive -Path bram${{ matrix.ext }} -DestinationPath bram-${{ matrix.label }}.${{ matrix.archive }}
+          Copy-Item src-tauri/target/${{ matrix.target }}/debug/bram-guard${{ matrix.ext }} -Destination ./bram-guard${{ matrix.ext }}
+          Compress-Archive -Path bram${{ matrix.ext }}, bram-guard${{ matrix.ext }} -DestinationPath bram-${{ matrix.label }}.${{ matrix.archive }}
 
       - name: Upload to GitHub release
         uses: softprops/action-gh-release@v2

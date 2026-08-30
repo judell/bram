@@ -129,6 +129,18 @@ try {
   Write-Host "Installing to $Target..."
   Copy-Item -LiteralPath $Binary.FullName -Destination $Target -Force
 
+  # The dedicated hook binary rides beside the app: ~/.bram/bram-guard.exe
+  # links to the sibling of the running executable (GUI subsystem, so hook
+  # spawns never flash a conhost), so it must land in the same dir. Older
+  # archives don't carry it; the app then falls back to itself as the hook
+  # target, so its absence is not fatal.
+  $GuardBinary = Get-ChildItem -Path $TempDir -Include "bram-guard.exe" -File -Recurse | Select-Object -First 1
+  if ($GuardBinary) {
+    $GuardTarget = Join-Path $InstallDir "bram-guard.exe"
+    Copy-Item -LiteralPath $GuardBinary.FullName -Destination $GuardTarget -Force
+    Write-Host "Installed: $GuardTarget"
+  }
+
   # Ensure InstallDir is on the user PATH.
   $UserPath = [System.Environment]::GetEnvironmentVariable("Path", [System.EnvironmentVariableTarget]::User)
   $PathParts = if ($UserPath) { $UserPath.Split(";") } else { @() }

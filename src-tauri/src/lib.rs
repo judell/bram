@@ -3831,6 +3831,21 @@ fn git_run<R: tauri::Runtime>(app: &AppHandle<R>, args: &[&str]) -> Result<Strin
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+// issue-317: `git diff --no-index` exits 1 when it finds differences, which
+// `git_run` reports as failure and discards stdout — so that call used to
+// bypass `git_run` with a raw Command, making those spawns invisible to
+// anything instrumented here. This variant keeps the routing and tolerates a
+// non-zero exit, returning stdout regardless.
+fn git_run_allow_exit<R: tauri::Runtime>(app: &AppHandle<R>, args: &[&str]) -> Option<String> {
+    let root = project_root(Some(app))?;
+    let out = std::process::Command::new("git")
+        .current_dir(&root)
+        .args(args)
+        .output()
+        .ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 // Update-availability check. Fetched once from GitHub at first request and
 // cached for the process lifetime — repeat hits are cheap and we don't
 // want to thrash the API's 60/hr anonymous limit. `XMLUI_DESKTOP_FAKE_CURRENT`
@@ -45757,6 +45772,47 @@ mod c2_file_containment_tests {
     }
 }
 
+// issue-317: `git diff --no-index` is inherently one spawn per file, so an
+// item's untracked-diff work is bounded rather than proportional to its size.
+// Beyond this many untracked files the pane states the elision instead of
+// paying for it (no-silent-caps).
+const WORKLIST_UNTRACKED_DIFF_LIMIT: usize = 20;
+
+// issue-317: split one batched `git diff` into per-file bodies, so batching
+// does not cost the per-file `cap_patch` treatment. Keys on the b-side path of
+// each `diff --git a/<p> b/<p>` header, which is what the caller declared;
+// quoted paths (git quotes when a path needs escaping) are unquoted so the
+// lookup matches the declared string.
+fn split_diff_by_file(batched: &str) -> Vec<(&str, String)> {
+    let mut out: Vec<(&str, String)> = Vec::new();
+    let mut current: Option<&str> = None;
+    let mut body = String::new();
+    for line in batched.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            if let Some(path) = current.take() {
+                out.push((path, std::mem::take(&mut body)));
+            }
+            // Unquoted: `a/<p> b/<p>`. Quoted (git escapes paths needing it):
+            // `"a/<p>" "b/<p>"` — the b-side marker is then ` "b/`, so try
+            // that first or the quote is mistaken for part of the path.
+            current = rest
+                .split(" \"b/")
+                .nth(1)
+                .map(|p| p.trim().trim_end_matches('"'))
+                .or_else(|| rest.split(" b/").nth(1).map(|p| p.trim()));
+        }
+        if current.is_some() {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    if let Some(path) = current {
+        out.push((path, body));
+    }
+    out
+}
+
+
 fn route_request<R: tauri::Runtime>(
     app: &AppHandle<R>,
     path: &str,
@@ -47133,30 +47189,91 @@ fn route_request<R: tauri::Runtime>(
                 if !has_changes {
                     continue;
                 }
+                // issue-317: ONE `git diff` for every tracked path, not one
+                // per file. The per-file loop spawned `git diff` for each
+                // declared path plus a second `--no-index` probe for each
+                // untracked one — 332 spawns for a 166-file item, which
+                // starved `worklist-commit` of index.lock on Windows and hung
+                // the board. `worklist_change_activity` above already batches
+                // its three git calls the same way; this was the outlier.
+                // Measured on a 200-file scratch item: linear at ~9.6 ms per
+                // declared file before, flat after.
+                let build_started = std::time::Instant::now();
+                // Untracked-ness is already known from the status pass above —
+                // no need to discover it by running a diff that returns empty.
+                let untracked: std::collections::HashSet<&str> = item
+                    .get("changedFiles")
+                    .and_then(|v| v.as_array())
+                    .map(|rows| {
+                        rows.iter()
+                            .filter(|r| r.get("status").and_then(|s| s.as_str()) == Some("new"))
+                            .filter_map(|r| r.get("path").and_then(|p| p.as_str()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let tracked_paths: Vec<&String> = file_paths
+                    .iter()
+                    .filter(|fp| !untracked.contains(fp.as_str()))
+                    .collect();
+                let mut per_file: std::collections::HashMap<String, String> =
+                    std::collections::HashMap::new();
+                if !tracked_paths.is_empty() {
+                    let mut args: Vec<&str> = vec!["diff", "--"];
+                    args.extend(tracked_paths.iter().map(|p| p.as_str()));
+                    let batched = git_run(app, &args).unwrap_or_default();
+                    for (path, body) in split_diff_by_file(&batched) {
+                        per_file.insert(path.to_string(), body);
+                    }
+                }
+                let mut materialized = 0usize;
+                let mut elided = 0usize;
                 let mut combined = String::new();
                 for fp in &file_paths {
-                    let mut diff = git_run(app, &["diff", "--", fp]).unwrap_or_default();
-                    if diff.is_empty() {
-                        // git diff returns nothing for untracked files. Fall back
-                        // to --no-index against /dev/null, which always produces
-                        // an "add the whole file" diff. That command exits 1 when
-                        // it finds differences, so git_run would treat it as an
-                        // error and discard stdout — shell out directly here.
-                        if let Some(root) = project_root(Some(app)) {
-                            if let Ok(out) = std::process::Command::new("git")
-                                .current_dir(&root)
-                                .args(&["diff", "--no-index", "--", "/dev/null", fp])
-                                .output()
-                            {
-                                diff = String::from_utf8_lossy(&out.stdout).into_owned();
-                            }
+                    let diff = if let Some(body) = per_file.get(fp.as_str()) {
+                        cap_patch(fp, body.clone())
+                    } else if untracked.contains(fp.as_str()) {
+                        if materialized < WORKLIST_UNTRACKED_DIFF_LIMIT {
+                            materialized += 1;
+                            cap_patch(
+                                fp,
+                                git_run_allow_exit(
+                                    app,
+                                    &["diff", "--no-index", "--", "/dev/null", fp],
+                                )
+                                .unwrap_or_default(),
+                            )
+                        } else {
+                            elided += 1;
+                            let bytes = project_root(Some(app))
+                                .and_then(|root| std::fs::metadata(root.join(fp)).ok())
+                                .map(|m| m.len())
+                                .unwrap_or(0);
+                            format!(
+                                "diff --git a/{fp} b/{fp}\nnew file, {bytes} bytes (content elided: more than {} untracked files in this item)\n",
+                                WORKLIST_UNTRACKED_DIFF_LIMIT
+                            )
                         }
-                    }
-                    let diff = cap_patch(fp, diff);
+                    } else {
+                        String::new()
+                    };
                     if !combined.is_empty() && !diff.is_empty() {
                         combined.push('\n');
                     }
                     combined.push_str(&diff);
+                }
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        app,
+                        "worklist-diff",
+                        &format!(
+                            "op=build files={} batched={} untracked_materialized={} untracked_elided={} ms={}",
+                            file_paths.len(),
+                            tracked_paths.len(),
+                            materialized,
+                            elided,
+                            build_started.elapsed().as_millis()
+                        ),
+                    );
                 }
                 if let Some(obj) = item.as_object_mut() {
                     obj.insert("diff".to_string(), serde_json::Value::String(combined));
@@ -49284,7 +49401,7 @@ fn handle_worklist_commit<R: tauri::Runtime>(
 mod worklist_authorization_tests {
     use super::{
         apply_worklist_mutation, build_worklist_authorization_record, classify_worklist_removals,
-        draft_markdown_path, enqueue_pending_worklist_push_mirror_path,
+        draft_markdown_path, enqueue_pending_worklist_push_mirror_path, split_diff_by_file,
         ensure_no_unrelated_staged_files, ensure_worklist_commit_authorized, feedback_draft_path,
         staged_path_covered_by, staged_paths_left_behind,
         inflight_claim_fully_covered, installed_twins_for, parse_worklist_authorization_message,
@@ -49799,6 +49916,31 @@ mod worklist_authorization_tests {
     // staged list.
     fn staged_path_covered_by_any(entry: &str, staged: &[String]) -> bool {
         staged.iter().any(|s| staged_path_covered_by(entry, s))
+    }
+
+    #[test]
+    fn batched_diff_splits_into_per_file_bodies() {
+        // issue-317: batching must not cost the per-file cap_patch treatment,
+        // so one `git diff` over many paths is split back apart by header.
+        let batched = "diff --git a/src/a.rs b/src/a.rs\nindex 111..222 100644\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/docs/b.md b/docs/b.md\nindex 333..444 100644\n--- a/docs/b.md\n+++ b/docs/b.md\n@@ -1 +1 @@\n-x\n+y\n";
+        let parts = split_diff_by_file(batched);
+        assert_eq!(parts.len(), 2, "{parts:?}");
+        assert_eq!(parts[0].0, "src/a.rs");
+        assert_eq!(parts[1].0, "docs/b.md");
+        assert!(parts[0].1.contains("+new"), "{}", parts[0].1);
+        assert!(!parts[0].1.contains("docs/b.md"), "bodies must not bleed");
+        assert!(parts[1].1.contains("+y"), "{}", parts[1].1);
+    }
+
+    #[test]
+    fn batched_diff_split_handles_quoted_paths_and_empty_input() {
+        // git quotes paths that need escaping; the key must match what the
+        // item declared.
+        let batched = "diff --git \"a/we ird.txt\" \"b/we ird.txt\"\n@@ -1 +1 @@\n+z\n";
+        let parts = split_diff_by_file(batched);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].0, "we ird.txt");
+        assert!(split_diff_by_file("").is_empty());
     }
 
     #[test]

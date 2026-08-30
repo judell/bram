@@ -30,19 +30,44 @@ pub fn run_guard_mode(args: &[String]) -> i32 {
     let started = std::time::Instant::now();
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
-    let payload: serde_json::Value =
-        serde_json::from_str(input.trim()).unwrap_or_else(|_| serde_json::json!({}));
+    // bram-guard-authority-fail-closed: keep the parse failure instead of
+    // silently substituting `{}` — an empty payload has no tool name, which
+    // the policy ALLOWS, so the substitution made every unreadable payload
+    // fail open (the #249 class, reproduced in the new decider). Both
+    // Python guards fail closed here: Codex explicitly
+    // (codex-guard-stdin-fail-closed) and Claude via its top-level
+    // catch-all ("allowing on a bug is an invisible hole").
+    let (payload, stdin_error) = match serde_json::from_str(input.trim()) {
+        Ok(v) => (v, None),
+        Err(e) => (serde_json::json!({}), Some(e.to_string())),
+    };
     match hook {
         "claude-permission-menu" => shadow_menu_hook("claude-rs", &payload, started),
         "codex-permission-menu" => shadow_menu_hook("codex-rs", &payload, started),
         "claude-worklist" if authority => {
-            return authority_worklist_hook("claude-rs", &payload, started);
+            return authority_guarded_dispatch(
+                "claude-rs",
+                &payload,
+                stdin_error,
+                started,
+                authority_worklist_hook,
+            );
         }
         "codex-worklist" if authority => {
-            return authority_worklist_hook("codex-rs", &payload, started);
+            return authority_guarded_dispatch(
+                "codex-rs",
+                &payload,
+                stdin_error,
+                started,
+                authority_worklist_hook,
+            );
         }
-        "claude-worklist" => shadow_worklist_hook("claude-rs", &payload, started),
-        "codex-worklist" => shadow_worklist_hook("codex-rs", &payload, started),
+        "claude-worklist" => {
+            shadow_worklist_hook_checked("claude-rs", &payload, stdin_error.as_deref(), started)
+        }
+        "codex-worklist" => {
+            shadow_worklist_hook_checked("codex-rs", &payload, stdin_error.as_deref(), started)
+        }
         other => {
             // Misregistration surfaces in stderr, never in the exit code: a
             // nonzero exit from a PreToolUse-shaped hook can block the tool
@@ -192,6 +217,204 @@ fn authority_worklist_hook(
     }
     eprintln!("{}", message);
     2
+}
+
+// --- Fail-closed on guard faults (bram-guard-authority-fail-closed) --------
+//
+// Two fault classes, each ported from the Python guard that handles it:
+//
+// - Unparseable stdin. Codex-Python denies explicitly
+//   (codex-guard-stdin-fail-closed, a #249 follow-up); Claude-Python reaches
+//   the same end through its catch-all. The Rust guard previously substituted
+//   `{}` and allowed — silently, with exit 0 and no receipt.
+// - Panics — the Rust spelling of Python's top-level catch-all. Uncontained,
+//   a panic exits 101, which Claude Code treats as a NON-blocking hook error:
+//   the tool call proceeds. So without containment every crash path in the
+//   authority decider failed open.
+//
+// Shadow mode is deliberately untouched: its inert exit-0 contract matches
+// the Python menu hooks' fail-open stance for observe-only surfaces.
+
+enum GuardFault {
+    UnparseableStdin(String),
+    Panic(String),
+}
+
+fn fault_summary(fault: &GuardFault) -> String {
+    match fault {
+        GuardFault::UnparseableStdin(detail) => format!("unparseable stdin: {}", detail),
+        GuardFault::Panic(detail) => format!("guard panic: {}", detail),
+    }
+}
+
+fn truncate_chars(s: &str, n: usize) -> String {
+    s.chars().take(n).collect()
+}
+
+// Claude's message: the Python catch-all's three-line block verbatim
+// (claude-worklist-guard.py tail), summary substituted.
+fn claude_fault_message(summary: &str) -> String {
+    format!(
+        "Blocked: the Bram worklist guard failed and denied by default.\n  - {}\n  - This is a guard bug, not a policy decision. Please report it.",
+        truncate_chars(summary, 500)
+    )
+}
+
+// Codex's message: the stdin case uses codex-guard-stdin-fail-closed's
+// sentence (codex-worklist-guard.py:1696ff); the panic case uses its
+// catch-all's sentence. Same skeletons, Rust detail in the slot where
+// Python names the exception.
+fn codex_fault_message(fault: &GuardFault) -> String {
+    match fault {
+        GuardFault::UnparseableStdin(detail) => format!(
+            "Blocked: the Bram worklist guard could not parse its hook payload (unparseable stdin: {}). This is a guard/runtime issue, not a policy decision; please report it.",
+            truncate_chars(detail, 200)
+        ),
+        GuardFault::Panic(_) => format!(
+            "Blocked: the Bram worklist guard failed and denied by default. {}. This is a guard bug, not a policy decision; please report it.",
+            truncate_chars(&fault_summary(fault), 500)
+        ),
+    }
+}
+
+// Trace decision per provider+fault, matching where each Python guard
+// classifies: Codex's stdin failure goes through deny() (decision=deny);
+// everything else is the catch-all's decision=error.
+fn fault_trace_decision(provider: &str, fault: &GuardFault) -> &'static str {
+    match (provider, fault) {
+        ("codex-rs", GuardFault::UnparseableStdin(_)) => "deny",
+        _ => "error",
+    }
+}
+
+fn panic_summary(p: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = p.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = p.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
+// The fail-closed exit itself: trace + breadcrumb + per-provider protocol.
+// Codex answers by stdout deny JSON (exit 0) with the message mirrored to
+// stderr, exactly like its deny(); Claude by stderr + exit 2, exactly like
+// its catch-all. Root is passed in so tests can point the side effects at a
+// scratch tree.
+fn authority_fail_closed(
+    root: &Path,
+    provider: &str,
+    tool: &str,
+    fault: GuardFault,
+    started: std::time::Instant,
+) -> i32 {
+    let summary = fault_summary(&fault);
+    let decision = fault_trace_decision(provider, &fault);
+    let (message, trace_reason) = if provider == "codex-rs" {
+        let m = codex_fault_message(&fault);
+        // deny() trims to the message's first line, 120 chars; the
+        // catch-all uses summary[:200].
+        let r = match fault {
+            GuardFault::UnparseableStdin(_) => {
+                truncate_chars(m.lines().next().unwrap_or("blocked"), 120)
+            }
+            GuardFault::Panic(_) => truncate_chars(&summary, 200),
+        };
+        (m, r)
+    } else {
+        (claude_fault_message(&summary), truncate_chars(&summary, 200))
+    };
+    post_hook_trace(root, tool, "", decision, &trace_reason);
+    append_breadcrumb(
+        root,
+        provider,
+        "PreToolUse",
+        tool,
+        &format!(
+            "decided={} target=- ms={} reason={}",
+            decision,
+            started.elapsed().as_millis(),
+            summary
+        ),
+    );
+    if provider == "codex-rs" {
+        let out = serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": message,
+            }
+        });
+        println!("{}", out);
+        eprintln!("{}", message);
+        return 0;
+    }
+    eprintln!("{}", message);
+    2
+}
+
+// Authority dispatch with both fault paths in front of the policy: stdin
+// that never parsed fails closed before the hook runs, and a panic inside
+// the hook is contained to the same fail-closed exit instead of escaping as
+// exit 101. The hook is a parameter so a test can drive containment with a
+// deliberately panicking hook (tripwire provenance: deliberate fire, never
+// a wait).
+fn authority_guarded_dispatch(
+    provider: &str,
+    payload: &serde_json::Value,
+    stdin_error: Option<String>,
+    started: std::time::Instant,
+    hook: fn(&str, &serde_json::Value, std::time::Instant) -> i32,
+) -> i32 {
+    let root = resolve_project_root(provider, payload);
+    let tool = str_field(payload, "tool_name");
+    if let Some(detail) = stdin_error {
+        return authority_fail_closed(
+            &root,
+            provider,
+            &tool,
+            GuardFault::UnparseableStdin(detail),
+            started,
+        );
+    }
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        hook(provider, payload, started)
+    })) {
+        Ok(code) => code,
+        Err(p) => authority_fail_closed(
+            &root,
+            provider,
+            &tool,
+            GuardFault::Panic(panic_summary(&p)),
+            started,
+        ),
+    }
+}
+
+// Shadow twin of the stdin fault path: no decision, no exit-code change —
+// one breadcrumb naming the would-deny so the parity join covers the path.
+fn shadow_worklist_hook_checked(
+    provider: &str,
+    payload: &serde_json::Value,
+    stdin_error: Option<&str>,
+    started: std::time::Instant,
+) {
+    if stdin_error.is_some() {
+        let root = resolve_project_root(provider, payload);
+        append_breadcrumb(
+            &root,
+            provider,
+            "PreToolUse",
+            "?",
+            &format!(
+                "would=deny target=- ms={} reason=unparseable-stdin",
+                started.elapsed().as_millis()
+            ),
+        );
+        return;
+    }
+    shadow_worklist_hook(provider, payload, started);
 }
 
 fn str_field(payload: &serde_json::Value, key: &str) -> String {
@@ -532,6 +755,157 @@ mod guard_mode_tests {
             "log: {log}"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn read_crumbs(root: &Path) -> String {
+        std::fs::read_to_string(root.join("resources/bram-traces/hook-events.log"))
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn claude_authority_fails_closed_on_unparseable_stdin() {
+        // Python twin: the catch-all — decision=error trace, "denied by
+        // default" stderr, exit 2. The pre-fix Rust behavior was allow/exit 0
+        // with no receipt.
+        let root = scratch("fault-claude-stdin");
+        std::fs::create_dir_all(root.join("resources")).unwrap();
+        let code = authority_fail_closed(
+            &root,
+            "claude-rs",
+            "Write",
+            GuardFault::UnparseableStdin("expected value at line 1 column 1".into()),
+            std::time::Instant::now(),
+        );
+        assert_eq!(code, 2, "Claude fail-closed must exit 2 (blocking)");
+        let log = read_crumbs(&root);
+        assert!(log.contains("claude-rs PreToolUse Write"), "log: {log}");
+        assert!(
+            log.contains("decided=error target=- ms="),
+            "log: {log}"
+        );
+        assert!(log.contains("reason=unparseable stdin:"), "log: {log}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn codex_authority_fails_closed_on_unparseable_stdin() {
+        // Python twin: codex-guard-stdin-fail-closed — deny() protocol
+        // (stdout deny JSON, exit 0), decision=deny trace.
+        let root = scratch("fault-codex-stdin");
+        std::fs::create_dir_all(root.join("resources")).unwrap();
+        let code = authority_fail_closed(
+            &root,
+            "codex-rs",
+            "apply_patch",
+            GuardFault::UnparseableStdin("EOF while parsing".into()),
+            std::time::Instant::now(),
+        );
+        assert_eq!(code, 0, "Codex denies via stdout protocol, exit 0");
+        let log = read_crumbs(&root);
+        assert!(log.contains("codex-rs PreToolUse apply_patch"), "log: {log}");
+        assert!(log.contains("decided=deny target=- ms="), "log: {log}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn authority_dispatch_contains_panics_to_fail_closed() {
+        // Deliberate fire: a panicking hook must convert to the fail-closed
+        // exit, never escape as 101 (which Claude Code reads as a
+        // NON-blocking error — the tool call would proceed).
+        let root = scratch("fault-panic");
+        std::fs::create_dir_all(root.join("resources")).unwrap();
+        let payload = serde_json::json!({
+            "tool_name": "Bash",
+            "cwd": root.to_string_lossy(),
+        });
+        fn boom(_: &str, _: &serde_json::Value, _: std::time::Instant) -> i32 {
+            panic!("deliberate test panic");
+        }
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let code =
+            authority_guarded_dispatch("claude-rs", &payload, None, std::time::Instant::now(), boom);
+        std::panic::set_hook(prev);
+        assert_eq!(code, 2, "panic must fail closed, not exit 101");
+        let log = read_crumbs(&root);
+        assert!(log.contains("decided=error"), "log: {log}");
+        assert!(
+            log.contains("reason=guard panic: deliberate test panic"),
+            "log: {log}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn authority_dispatch_prefers_stdin_fault_over_hook() {
+        // With a parse failure recorded, the hook must never run at all —
+        // the empty substitute payload is exactly what the policy would
+        // wrongly allow.
+        let root = scratch("fault-stdin-first");
+        std::fs::create_dir_all(root.join("resources")).unwrap();
+        let payload = serde_json::json!({ "cwd": root.to_string_lossy() });
+        fn must_not_run(_: &str, _: &serde_json::Value, _: std::time::Instant) -> i32 {
+            panic!("hook ran despite stdin fault");
+        }
+        let code = authority_guarded_dispatch(
+            "claude-rs",
+            &payload,
+            Some("bad json".into()),
+            std::time::Instant::now(),
+            must_not_run,
+        );
+        assert_eq!(code, 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn shadow_breadcrumbs_unparseable_stdin_and_stays_inert() {
+        // Shadow keeps its exit-0 observe-only contract but names the
+        // would-deny so the parity join covers the path.
+        let root = scratch("fault-shadow");
+        std::fs::create_dir_all(root.join("resources")).unwrap();
+        let payload = serde_json::json!({ "cwd": root.to_string_lossy() });
+        shadow_worklist_hook_checked(
+            "codex-rs",
+            &payload,
+            Some("bad json"),
+            std::time::Instant::now(),
+        );
+        let log = read_crumbs(&root);
+        assert!(
+            log.contains("would=deny target=- ms="),
+            "log: {log}"
+        );
+        assert!(log.contains("reason=unparseable-stdin"), "log: {log}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fault_messages_match_the_python_shapes() {
+        let m = claude_fault_message("unparseable stdin: x");
+        assert!(m.starts_with("Blocked: the Bram worklist guard failed and denied by default."));
+        assert!(m.contains("  - unparseable stdin: x"));
+        assert!(m.contains("This is a guard bug, not a policy decision. Please report it."));
+
+        let s = codex_fault_message(&GuardFault::UnparseableStdin("x".into()));
+        assert!(s.contains("could not parse its hook payload (unparseable stdin: x)"));
+        assert!(s.contains("guard/runtime issue, not a policy decision"));
+
+        let p = codex_fault_message(&GuardFault::Panic("y".into()));
+        assert!(p.contains("failed and denied by default. guard panic: y."));
+
+        assert_eq!(
+            fault_trace_decision("codex-rs", &GuardFault::UnparseableStdin("x".into())),
+            "deny"
+        );
+        assert_eq!(
+            fault_trace_decision("codex-rs", &GuardFault::Panic("x".into())),
+            "error"
+        );
+        assert_eq!(
+            fault_trace_decision("claude-rs", &GuardFault::UnparseableStdin("x".into())),
+            "error"
+        );
     }
 
     #[cfg(unix)]

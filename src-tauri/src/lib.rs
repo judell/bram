@@ -16146,12 +16146,19 @@ fn switch_agent(
             &format!("op=start provider={} command={}", provider_key, command),
         );
     }
-    // issue-314: hold pane sends until the incoming CLI shows boot bytes —
-    // during the interrupt→launch window the foreground is (or becomes) a
-    // bare shell, and a pane send landing there EXECUTES as a command. The
-    // new-session path has armed this hold since new-session-handoff-race;
-    // the switch path had the identical exposure with no hold.
-    arm_agent_boot_hold();
+    // NOT armed here, deliberately (#305, reverting the arm added by 597935b).
+    // The exposure is real — during the interrupt→launch window the foreground
+    // is (or becomes) a bare shell, and a pane send landing there EXECUTES —
+    // but the hold's release condition is unsatisfiable for Codex: it emits
+    // none of AGENT_BOOT_EVIDENCE's byte patterns, and the `session-surfaced`
+    // escape hatch waits for a rollout file Codex does not write until its
+    // first user turn, which is the very message being held. Holding here made
+    // every Codex switch swallow pane sends and flush them into the NEXT
+    // agent, silently — strictly worse than the shell exposure it prevents.
+    // `new_session` still arms it (that gap predates this release and its
+    // kickoff-into-PS2 failure is worse); both are fixed properly by
+    // issue-305-boot-hold-unsatisfiable, which releases on the prompt going
+    // away rather than on bytes one provider never sends.
     clear_stale_terminal_input_for_switch(&app, &state, "agent-switch");
     // Dismiss any open agent menu/picker first (e.g. a Claude `/resume` list
     // left open by a prior first-command). Claude exits only on two Ctrl+C at

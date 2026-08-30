@@ -705,15 +705,16 @@
         </HStack>
         <!-- footer-indexing-status: names the bucket being indexed, or the
              idle doc count + last cycle's per-bucket additions.
-             footer-status-no-half-width-clip: fit-content, not star — a
-             second star zone split the footer 50/50 regardless of content,
-             so the working status ellipsized at half width even when this
-             label was empty and the chip hidden. Children without an
-             explicit width size to content
-             (xmlui.org/docs/howto/auto-size-column-widths-with-star), so
-             the status's star zone now absorbs whatever this zone doesn't
-             need. -->
-        <HStack verticalAlignment="center" horizontalAlignment="end">
+             footer-status-clip-fit-content: EXPLICIT fit-content, not
+             merely widthless — a second star zone split the footer 50/50,
+             and dropping the star still clipped, because a widthless
+             container beside a width="*" sibling is the documented
+             unstable case (stacks are block-level; every child in the row
+             needs a definite width, fit-content, or star —
+             xmlui.org/docs/howto/keep-a-star-sized-element-from-collapsing).
+             fit-content hugs the label, so the status's star zone absorbs
+             the rest of the line. -->
+        <HStack width="fit-content" verticalAlignment="center" horizontalAlignment="end">
           <Text
             when="{footerIndexStatus.value &amp;&amp; window.__bramFooterIndexLabel(footerIndexStatus.value)}"
             fontSize="$fontSize-sm"

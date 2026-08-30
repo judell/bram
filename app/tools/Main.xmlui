@@ -704,8 +704,16 @@
             onClick="window.__bramUnseenJump(); navigate('/transcript')" />
         </HStack>
         <!-- footer-indexing-status: names the bucket being indexed, or the
-             idle doc count + last cycle's per-bucket additions. -->
-        <HStack width="*" verticalAlignment="center" horizontalAlignment="end">
+             idle doc count + last cycle's per-bucket additions.
+             footer-status-no-half-width-clip: fit-content, not star — a
+             second star zone split the footer 50/50 regardless of content,
+             so the working status ellipsized at half width even when this
+             label was empty and the chip hidden. Children without an
+             explicit width size to content
+             (xmlui.org/docs/howto/auto-size-column-widths-with-star), so
+             the status's star zone now absorbs whatever this zone doesn't
+             need. -->
+        <HStack verticalAlignment="center" horizontalAlignment="end">
           <Text
             when="{footerIndexStatus.value &amp;&amp; window.__bramFooterIndexLabel(footerIndexStatus.value)}"
             fontSize="$fontSize-sm"

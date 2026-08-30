@@ -420,7 +420,26 @@ pub fn install_guard_link(home: &Path, exe: &Path) -> std::io::Result<PathBuf> {
 pub fn ensure_bram_guard_link() -> Option<PathBuf> {
     let home = crate::home_dir()?;
     let exe = std::env::current_exe().ok()?;
-    install_guard_link(&home, &exe).ok()
+    // windows-guard-bin-no-console: prefer the dedicated guard entrypoint
+    // sitting beside the main binary — GUI subsystem on Windows in every
+    // profile, so hook spawns never allocate a conhost. Resolve through
+    // symlinks first (the documented ./bram launch reports the symlink
+    // path, whose parent is the repo root, not the target dir). Fall back
+    // to the main binary when the artifact is absent (older build), which
+    // preserves exactly the previous behavior.
+    let real = exe.canonicalize().unwrap_or_else(|_| exe.clone());
+    let sibling = real.parent().map(|d| {
+        d.join(if cfg!(windows) {
+            "bram-guard.exe"
+        } else {
+            "bram-guard"
+        })
+    });
+    let target = match sibling {
+        Some(s) if s.exists() => s,
+        _ => exe,
+    };
+    install_guard_link(&home, &target).ok()
 }
 
 pub fn guard_hook_command(link: &Path, hook: &str) -> String {

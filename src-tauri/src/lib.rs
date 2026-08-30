@@ -26427,6 +26427,40 @@ mod tool_command_markdown_tests {
     use serde_json::json;
 
     #[test]
+    fn control_chars_are_stripped_from_projected_turn_text() {
+        // strip-control-glyphs-from-projected-turns: the Windows injection
+        // prelude (ESC, formerly 0x15) recorded into a user turn renders as
+        // a missing-glyph box. The projection strips Cc characters (keeping
+        // newline/tab/CR); a text that was ONLY controls projects no entry.
+        let rec = json!({
+            "type": "user",
+            "message": { "content": "\u{1b}first line\nsecond\tcol\u{15}" }
+        });
+        let turns = st_parse_lines_to_turns(&rec.to_string());
+        assert_eq!(turns.len(), 1);
+        let text = turns[0]["entries"][0]["text"].as_str().unwrap();
+        assert_eq!(text, "first line\nsecond\tcol");
+
+        // Block-shaped content (the other Claude shape) sanitizes too.
+        let rec = json!({
+            "type": "user",
+            "message": { "content": [ { "type": "text", "text": "\u{1b}hello" } ] }
+        });
+        let turns = st_parse_lines_to_turns(&rec.to_string());
+        assert_eq!(
+            turns[0]["entries"][0]["text"].as_str().unwrap(),
+            "hello"
+        );
+
+        // Only-controls text yields no text entry (and thus no turn).
+        let rec = json!({
+            "type": "user",
+            "message": { "content": "\u{1b}" }
+        });
+        assert!(st_parse_lines_to_turns(&rec.to_string()).is_empty());
+    }
+
+    #[test]
     fn markdown_heredoc_is_split_from_shell_envelope() {
         let input = json!({
             "command": "cd /tmp && cat >> issue4-body.md <<'EOF'\n\n## ETL hardening\n\n- **pytest** fixtures\nEOF\ngh issue edit 4 --body-file issue4-body.md"
@@ -27843,6 +27877,23 @@ mod bash_command_words_tests {
 // client-side parser is long gone; parsing is host-only and the
 // Transcript is a pure consumer. The comment cost real time in the
 // 2026-07-22 field-stripping hunt; don't resurrect it.)
+// strip-control-glyphs-from-projected-turns: control characters recorded
+// into turn text render as missing-glyph boxes — the Windows turn-injection
+// clear-prelude captured into the message (#300's stray byte; `c3bd588`
+// swapped 0x15 for ESC, and the ESC now draws as a vertical rectangle on
+// Windows fonts, while Mac fonts happen to render it as nothing). The glyph
+// lives in the RECORDED JSONL, so even #300's bracketed-paste unification
+// leaves historical turns wearing it; sanitizing at this projection seam
+// cleans new and historical turns on every platform. Raw JSONL is untouched
+// (the projection is a view), and the send-ledger / interrupt detectors are
+// unaffected — they read raw records, not this projection. `is_control`
+// covers Unicode Cc (C0 + DEL + C1); newline/tab/CR survive.
+fn st_strip_control_chars(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t' | '\r'))
+        .collect()
+}
+
 fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
     let mut turns: Vec<serde_json::Value> = Vec::new();
     // tool_entry_locations maps tool_use_id → (turn_idx, entry_idx) so
@@ -27881,6 +27932,7 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
             };
             role = Some(typ);
             if let Some(s) = content.as_str() {
+                let s = st_strip_control_chars(s);
                 if !s.is_empty() {
                     entries.push(serde_json::json!({ "kind": "text", "text": s }));
                 }
@@ -27890,6 +27942,7 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
                     let c_typ = c_obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
                     if c_typ == "text" {
                         if let Some(t) = c_obj.get("text").and_then(|v| v.as_str()) {
+                            let t = st_strip_control_chars(t);
                             if !t.is_empty() {
                                 entries.push(serde_json::json!({ "kind": "text", "text": t }));
                             }
@@ -28033,6 +28086,7 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
             if let Some(att) = r.get("attachment") {
                 if att.get("type").and_then(|v| v.as_str()) == Some("queued_command") {
                     if let Some(prompt) = att.get("prompt").and_then(|v| v.as_str()) {
+                        let prompt = st_strip_control_chars(prompt);
                         if !prompt.trim().is_empty() {
                             role = Some("user");
                             entries.push(serde_json::json!({ "kind": "text", "text": prompt }));
@@ -28049,7 +28103,8 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
                     role = Some("assistant");
                 }
                 if let Some(msg) = p.get("message").and_then(|v| v.as_str()) {
-                    if !msg.is_empty() && !st_is_synthetic_codex_message(msg) {
+                    let msg = st_strip_control_chars(msg);
+                    if !msg.is_empty() && !st_is_synthetic_codex_message(&msg) {
                         entries.push(serde_json::json!({ "kind": "text", "text": msg }));
                     }
                 }
@@ -28074,7 +28129,8 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
                             let c_typ = c.get("type").and_then(|v| v.as_str()).unwrap_or("");
                             if c_typ == "input_text" || c_typ == "output_text" || c_typ == "text" {
                                 if let Some(t) = c.get("text").and_then(|v| v.as_str()) {
-                                    if !t.is_empty() && !st_is_synthetic_codex_message(t) {
+                                    let t = st_strip_control_chars(t);
+                                    if !t.is_empty() && !st_is_synthetic_codex_message(&t) {
                                         entries
                                             .push(serde_json::json!({ "kind": "text", "text": t }));
                                     }

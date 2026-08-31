@@ -15716,7 +15716,7 @@ fn queue_pty_intent(
     }
     let seq = PTY_INTENT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let id = format!("intent-{}-{}", unix_now_ms(), seq);
-    let line = if kind == "menuAnswer" {
+    let mut line = if kind == "menuAnswer" {
         serde_json::json!({
             "id": id,
             "kind": kind,
@@ -15732,6 +15732,20 @@ fn queue_pty_intent(
             "at": unix_now_ms(),
         })
     };
+    if matches!(kind.as_str(), "toShell" | "toTurn") && agent_boot_hold_active() {
+        if let Some(obj) = line.as_object_mut() {
+            obj.insert(
+                "bootHoldGeneration".to_string(),
+                serde_json::json!(
+                    AGENT_BOOT_HOLD_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
+                ),
+            );
+            obj.insert(
+                "bootHoldProvider".to_string(),
+                serde_json::json!(agent_boot_hold_provider()),
+            );
+        }
+    }
     let line_str = serde_json::to_string(&line).map_err(|e| e.to_string())?;
 
     let _drain_guard = pty_intent_lock().lock().map_err(|e| e.to_string())?;
@@ -15803,7 +15817,19 @@ fn drain_pty_intents<R: tauri::Runtime>(
     // there lands as literal text (and can execute). Boot evidence in the
     // PTY stream clears the flag; the ticker's next drain then flushes.
     let awaiting_boot = agent_boot_hold_active();
+    let boot_since = AGENT_BOOT_HOLD_SINCE_MS.load(std::sync::atomic::Ordering::Relaxed);
+    let active_boot_generation =
+        AGENT_BOOT_HOLD_GENERATION.load(std::sync::atomic::Ordering::Relaxed);
+    let released_boot_generation =
+        AGENT_BOOT_RELEASED_GENERATION.load(std::sync::atomic::Ordering::Relaxed);
+    let active_boot_provider = agent_boot_hold_provider();
+    let current_provider_label = current_provider(app)
+        .map(session_provider_label)
+        .unwrap_or("")
+        .to_string();
     let mut held: usize = 0;
+    let mut boot_restores: Vec<(String, String)> = Vec::new();
+    let mut expire_boot_hold = false;
 
     for line in content.lines() {
         if line.is_empty() {
@@ -15823,10 +15849,63 @@ fn drain_pty_intents<R: tauri::Runtime>(
             .get("promptId")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        if (blocking_tool.is_some() || awaiting_boot) && matches!(kind, "toShell" | "toTurn") {
-            held += 1;
-            remaining.push(line.to_string());
-            continue;
+        if matches!(kind, "toShell" | "toTurn") {
+            if blocking_tool.is_some() {
+                held += 1;
+                remaining.push(line.to_string());
+                continue;
+            }
+            let intent_generation = intent.get("bootHoldGeneration").and_then(|v| v.as_u64());
+            let intent_provider = intent
+                .get("bootHoldProvider")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if let Some(generation) = intent_generation {
+                let decision = boot_held_intent_decision(
+                    awaiting_boot,
+                    boot_since,
+                    unix_now_ms(),
+                    active_boot_generation,
+                    released_boot_generation,
+                    &active_boot_provider,
+                    &current_provider_label,
+                    generation,
+                    intent_provider,
+                );
+                if decision == BootHeldIntentDecision::Hold {
+                    held += 1;
+                    remaining.push(line.to_string());
+                    continue;
+                }
+                if decision != BootHeldIntentDecision::Deliver {
+                    let expired = decision == BootHeldIntentDecision::RestoreExpired;
+                    expire_boot_hold |= expired;
+                    let id = intent
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("intent")
+                        .to_string();
+                    boot_restores.push((id.clone(), data.to_string()));
+                    if bram_trace_enabled() {
+                        append_bram_trace_line(
+                            app,
+                            "send-gate",
+                            &format!(
+                                "op=boot-held-restore id={} generation={} provider={} reason={}",
+                                id,
+                                generation,
+                                intent_provider,
+                                if expired { "expired" } else { "target-changed" }
+                            ),
+                        );
+                    }
+                    continue;
+                }
+            } else if awaiting_boot {
+                held += 1;
+                remaining.push(line.to_string());
+                continue;
+            }
         }
         let write_result = match kind {
             "toShell" => {
@@ -15885,6 +15964,34 @@ fn drain_pty_intents<R: tauri::Runtime>(
         }
     }
 
+    if expire_boot_hold {
+        cancel_agent_boot_hold(app, "expired");
+    }
+    if !boot_restores.is_empty() {
+        let ids = boot_restores
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>()
+            .join("+");
+        let text = boot_restores
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let _ = app.emit(
+            "send-restore",
+            serde_json::json!({"id":ids,"text":text,"aborted":false}),
+        );
+        append_strand_forensics_line(
+            app,
+            &format!(
+                "op=boot-held-restore entries={} chars={}",
+                boot_restores.len(),
+                text.chars().count()
+            ),
+        );
+    }
     if held > 0 {
         // Keep the original hold start across repeated drains so the
         // bounded hold measures from the first held intent.
@@ -16248,6 +16355,7 @@ fn switch_agent(
         "claude" | "claud" => "claude",
         other => return Err(format!("unknown agent provider: {}", other)),
     };
+    cancel_agent_boot_hold(&app, "provider-switch");
     // Header switching is always "return to that agent", independent of the
     // On Bram launch policy. A pinned codex session outranks `resume --last`:
     // after a cross-provider round-trip, codex must reopen the session Bram is
@@ -16625,6 +16733,7 @@ fn reload_agent_session(
         "claude" | "claud" => "claude",
         other => return Err(format!("unknown agent provider: {}", other)),
     };
+    cancel_agent_boot_hold(&app, "session-reload");
     let command = agent_resume_command(provider_key, &session).ok_or("unknown agent provider")?;
     if bram_trace_enabled() {
         append_bram_trace_line(
@@ -17041,7 +17150,7 @@ fn create_new_session(
     // typed blind after a fixed settle any more (new-session-handoff-race):
     // hold pane sends until the new CLI shows boot bytes, and gate the launch
     // command itself on shell-prompt evidence in a spawned waiter below.
-    arm_agent_boot_hold();
+    arm_agent_boot_hold(&app, provider_key);
     clear_stale_terminal_input_for_switch(&app, &state, "agent-new-session");
     pty_write_internal(&app, &state, "\x1b", "agent-new-escape")?;
     std::thread::sleep(std::time::Duration::from_millis(AGENT_INTERRUPT_GAP_MS));
@@ -30347,26 +30456,145 @@ fn send_gate_blocking_menu_tool() -> Option<String> {
 // (Bram's own launch or the user's manual recovery) is what releases it.
 static AGENT_BOOT_HOLD_SINCE_MS: std::sync::atomic::AtomicI64 =
     std::sync::atomic::AtomicI64::new(0);
+static AGENT_BOOT_HOLD_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static AGENT_BOOT_RELEASED_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+const AGENT_BOOT_HOLD_EXPIRE_MS: i64 = 30_000;
+
+fn agent_boot_hold_provider_cell() -> &'static Mutex<String> {
+    static CELL: OnceLock<Mutex<String>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(String::new()))
+}
+fn agent_boot_hold_provider() -> String {
+    agent_boot_hold_provider_cell()
+        .lock()
+        .map(|v| v.clone())
+        .unwrap_or_default()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BootHeldIntentDecision {
+    Hold,
+    Deliver,
+    RestoreExpired,
+    RestoreTargetChanged,
+}
+fn boot_held_intent_decision(
+    awaiting: bool,
+    since: i64,
+    now: i64,
+    active_gen: u64,
+    released_gen: u64,
+    active_provider: &str,
+    current_provider: &str,
+    intent_gen: u64,
+    intent_provider: &str,
+) -> BootHeldIntentDecision {
+    let active = awaiting && intent_gen == active_gen && intent_provider == active_provider;
+    if active && since > 0 && now.saturating_sub(since) >= AGENT_BOOT_HOLD_EXPIRE_MS {
+        BootHeldIntentDecision::RestoreExpired
+    } else if active {
+        BootHeldIntentDecision::Hold
+    } else if !awaiting
+        && intent_gen == released_gen
+        && !intent_provider.is_empty()
+        && intent_provider == current_provider
+    {
+        BootHeldIntentDecision::Deliver
+    } else {
+        BootHeldIntentDecision::RestoreTargetChanged
+    }
+}
+
+#[cfg(test)]
+mod boot_held_intent_tests {
+    use super::{boot_held_intent_decision as d, BootHeldIntentDecision::*};
+    #[test]
+    fn matching_generation_holds_then_delivers_only_to_target_provider() {
+        assert_eq!(
+            d(true, 1000, 2000, 7, 0, "codex", "codex", 7, "codex"),
+            Hold
+        );
+        assert_eq!(
+            d(false, 0, 2000, 7, 7, "codex", "codex", 7, "codex"),
+            Deliver
+        );
+        assert_eq!(
+            d(false, 0, 2000, 7, 7, "codex", "claude", 7, "codex"),
+            RestoreTargetChanged
+        );
+    }
+    #[test]
+    fn stale_generation_and_expired_hold_restore_without_delivery() {
+        assert_eq!(
+            d(true, 1000, 2000, 8, 7, "codex", "codex", 7, "codex"),
+            RestoreTargetChanged
+        );
+        assert_eq!(
+            d(true, 1000, 31000, 8, 7, "codex", "codex", 8, "codex"),
+            RestoreExpired
+        );
+    }
+}
 
 fn agent_boot_hold_active() -> bool {
     AGENT_BOOT_HOLD_SINCE_MS.load(std::sync::atomic::Ordering::Relaxed) > 0
 }
 
-fn arm_agent_boot_hold() {
+fn arm_agent_boot_hold<R: tauri::Runtime>(app: &AppHandle<R>, provider: &str) {
+    let generation =
+        AGENT_BOOT_HOLD_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     AGENT_BOOT_HOLD_SINCE_MS.store(unix_now_ms(), std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut target) = agent_boot_hold_provider_cell().lock() {
+        *target = provider.to_string();
+    }
     if let Ok(mut carry) = agent_boot_evidence_carry_cell().lock() {
         carry.clear();
+    }
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "send-gate",
+            &format!(
+                "op=boot-arm generation={} provider={}",
+                generation, provider
+            ),
+        );
     }
 }
 
 fn clear_agent_boot_hold<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str) {
     let since = AGENT_BOOT_HOLD_SINCE_MS.swap(0, std::sync::atomic::Ordering::Relaxed);
+    if since > 0 {
+        AGENT_BOOT_RELEASED_GENERATION.store(
+            AGENT_BOOT_HOLD_GENERATION.load(std::sync::atomic::Ordering::Relaxed),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
     if since > 0 && bram_trace_enabled() {
         append_bram_trace_line(
             app,
             "send-gate",
             &format!(
                 "op=boot-evidence reason={} held_ms={}",
+                reason,
+                unix_now_ms().saturating_sub(since)
+            ),
+        );
+    }
+}
+
+fn cancel_agent_boot_hold<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str) {
+    let since = AGENT_BOOT_HOLD_SINCE_MS.swap(0, std::sync::atomic::Ordering::Relaxed);
+    if since > 0 && bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "send-gate",
+            &format!(
+                "op=boot-cancel generation={} provider={} reason={} held_ms={}",
+                AGENT_BOOT_HOLD_GENERATION.load(std::sync::atomic::Ordering::Relaxed),
+                agent_boot_hold_provider(),
                 reason,
                 unix_now_ms().saturating_sub(since)
             ),
@@ -30387,11 +30615,17 @@ fn agent_boot_evidence_carry_cell() -> &'static Mutex<Vec<u8>> {
 // notify (?2031h), and the alternate screen (?1049h) are enabled by the
 // agent TUIs at boot and by no shell — the live trace shows ?1004h/?2031h
 // appearing only at CLI boot.
-const AGENT_BOOT_EVIDENCE: [(&[u8], &str); 3] = [
+const AGENT_BOOT_EVIDENCE: [(&[u8], &str); 4] = [
     (b"\x1b[?1004h", "focus-reporting"),
     (b"\x1b[?2031h", "theme-notify"),
     (b"\x1b[?1049h", "alt-screen"),
+    (b"\x1b[?2026h", "synchronized-output"),
 ];
+fn agent_boot_evidence_match(buf: &[u8]) -> Option<&'static str> {
+    AGENT_BOOT_EVIDENCE
+        .iter()
+        .find_map(|(p, n)| buf.windows(p.len()).any(|w| w == *p).then_some(*n))
+}
 
 fn agent_boot_evidence_scan<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
     if !agent_boot_hold_active() {
@@ -30406,11 +30640,27 @@ fn agent_boot_evidence_scan<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8])
     } else {
         buf.extend_from_slice(chunk);
     }
-    for (pattern, name) in AGENT_BOOT_EVIDENCE {
-        if buf.windows(pattern.len()).any(|w| w == pattern) {
-            clear_agent_boot_hold(app, name);
-            return;
-        }
+    if let Some(name) = agent_boot_evidence_match(&buf) {
+        clear_agent_boot_hold(app, name);
+    }
+}
+
+#[cfg(test)]
+mod agent_boot_evidence_tests {
+    use super::agent_boot_evidence_match as m;
+    #[test]
+    fn windows_codex_synchronized_output_is_boot_evidence() {
+        assert_eq!(m(b"x\x1b[?2026h"), Some("synchronized-output"));
+    }
+    #[test]
+    fn split_synchronized_output_matches_when_carry_is_joined() {
+        let mut b = b"\x1b[?20".to_vec();
+        b.extend_from_slice(b"26h");
+        assert_eq!(m(&b), Some("synchronized-output"));
+    }
+    #[test]
+    fn shell_bracketed_paste_and_prompt_are_not_boot_evidence() {
+        assert_eq!(m(b"PS> \x1b[?2004h"), None);
     }
 }
 

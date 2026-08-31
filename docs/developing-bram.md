@@ -285,6 +285,27 @@ either. And always launch the `./bram` symlink at the repo root, not
 an installed/older app — both for fresh code and because the symlink
 is what makes disk serving resolve at all.
 
+### Never run `cargo fmt`
+
+`src-tauri/` has no `rustfmt.toml` and no CI fmt check, and its
+formatting has never been normalized. On a clean tree at `8a08f4c`,
+`cargo fmt --check` wanted **247 regions across 4 files — 237 in
+`lib.rs` alone, spanning `lib.rs:783` to `lib.rs:52080`, replacing 657
+lines with 915.** None of it is yours. All of it will land in your
+commit, because the commit gate stages whole declared files rather than
+the hunks you authored — so a 12-line fix ships as a 900-line diff under
+your item's id, and the user's one veto surface stops working.
+
+So: **match the surrounding style by hand for the lines you write, and
+never run `cargo fmt`, `rustfmt`, or an editor's format-on-save over
+these files.** If one runs anyway, `git checkout -p` the unrelated hunks
+before the commit gate sees them — `cargo fmt --check` names every
+region it would touch, which makes the sweep easy to spot and easy to
+revert.
+
+Normalizing the tree is a legitimate change, but it is its own worklist
+item and its own commit, never a passenger on someone else's.
+
 ## Hand-testing the Worklist gate
 
 The gate's selection matrix — which buttons light for which combination of

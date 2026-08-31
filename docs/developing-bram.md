@@ -157,6 +157,10 @@ grep `console-error|console-unhandledrejection` in
 Zero matches is the pass condition; any match is triaged before
 reading anything else from the trace.
 
+For the registered trace categories, subkinds, fields, and their diagnostic
+purpose, consult the on-demand
+[trace vocabulary](trace-vocabulary.md) while reading the log.
+
 Why this is non-negotiable: the xs engine **silently rejects
 assignments to member expressions** from inside function bodies it
 evaluates — `window.X = value` in a Globals.xs function fails with a

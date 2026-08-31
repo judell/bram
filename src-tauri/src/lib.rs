@@ -783,9 +783,7 @@ fn displayed_menu_for_input<'a>(
     hook_displayed: Option<&'a HookMenuDisplayed>,
     raw_menu: Option<&'a PtyMenu>,
 ) -> Option<&'a PtyMenu> {
-    hook_displayed
-        .map(|displayed| &displayed.menu)
-        .or(raw_menu)
+    hook_displayed.map(|displayed| &displayed.menu).or(raw_menu)
 }
 
 fn hook_display_matches_id(displayed: Option<&HookMenuDisplayed>, id_key: &str) -> bool {
@@ -858,8 +856,7 @@ fn claim_signature_scene_score(claim: &HookMenuClaim, grid_scene: &str) -> usize
     // the length floor below for unanchored containment so a stray `ls` in
     // explanatory text still cannot claim a prompt.
     let prompt_command = format!("$ {}", normalized);
-    if grid_scene == prompt_command
-        || grid_scene.ends_with(format!(" {}", prompt_command).as_str())
+    if grid_scene == prompt_command || grid_scene.ends_with(format!(" {}", prompt_command).as_str())
     {
         return normalized.chars().count() + 20_000;
     }
@@ -942,9 +939,9 @@ fn select_grid_joined_claim<'a>(
         }
     }
 
-    let mut label_matches = claims.iter().filter_map(|claim| {
-        claim_label_join(claim, grid_labels).map(|how| (claim, how))
-    });
+    let mut label_matches = claims
+        .iter()
+        .filter_map(|claim| claim_label_join(claim, grid_labels).map(|how| (claim, how)));
     match (label_matches.next(), label_matches.next()) {
         (Some(one), None) => Some(one),
         _ => None,
@@ -971,11 +968,7 @@ fn claim_remained_sole(claims: &[HookMenuClaim], id_key: &str, at_ms: i64) -> bo
     )
 }
 
-fn schedule_hook_claim_optimism<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    id_key: String,
-    at_ms: i64,
-) {
+fn schedule_hook_claim_optimism<R: tauri::Runtime>(app: &AppHandle<R>, id_key: String, at_ms: i64) {
     let app_handle = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(
@@ -1348,7 +1341,12 @@ fn janitor_resolved_claims<R: tauri::Runtime>(app: &AppHandle<R>) {
     let mut resolved_calls: Vec<(String, String)> = Vec::new();
     let mut unresolved_sigs: Vec<String> = Vec::new();
     if let Some(text) = st_read_tail(&path, 4 * 1024 * 1024) {
-        st_tool_resolution_state(&text, &mut resolved_ids, &mut resolved_calls, &mut unresolved_sigs);
+        st_tool_resolution_state(
+            &text,
+            &mut resolved_ids,
+            &mut resolved_calls,
+            &mut unresolved_sigs,
+        );
     }
     for sf in st_subagent_files(&path) {
         if st_subagent_finished(&sf.jsonl_path) {
@@ -1390,7 +1388,9 @@ fn janitor_resolved_claims<R: tauri::Runtime>(app: &AppHandle<R>) {
             resolved_calls
                 .iter()
                 .any(|(_, resolved_sig)| resolved_sig == sig)
-                && !unresolved_sigs.iter().any(|unresolved_sig| unresolved_sig == sig)
+                && !unresolved_sigs
+                    .iter()
+                    .any(|unresolved_sig| unresolved_sig == sig)
         })
     };
     let (removed_keys, answered_records, depth) = {
@@ -1465,9 +1465,8 @@ fn grid_menu_recently_dismissed(grid_labels: Option<&Vec<String>>) -> bool {
         .lock()
         .ok()
         .and_then(|s| {
-            s.as_ref().map(|d| {
-                grid_menu_dismissed_label_match(&d.option_labels, gl).is_some()
-            })
+            s.as_ref()
+                .map(|d| grid_menu_dismissed_label_match(&d.option_labels, gl).is_some())
         })
         .unwrap_or(false)
 }
@@ -1571,8 +1570,10 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
     // grid-report reselection re-displayed the orphan, which the no-grid
     // hold branch then pinned across turns. Reselection requires grid
     // corroboration; orphans stay inert until the TTL sweeps them.
-    let displayed: Option<HookMenuDisplayed> =
-        menu_hook_displayed_cell().lock().ok().and_then(|d| d.clone());
+    let displayed: Option<HookMenuDisplayed> = menu_hook_displayed_cell()
+        .lock()
+        .ok()
+        .and_then(|d| d.clone());
 
     // Keep a still-correct display: if the pane already shows the terminal's
     // current menu (same normalized labels), there's nothing to do. Prevents
@@ -1689,7 +1690,13 @@ fn select_hook_claim_display<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str)
                 .iter()
                 .map(|o| normalized_menu_label(&o.label))
                 .collect();
-            Some((menu, labels, claim.id_key.clone(), how, claim.tool_use_id.clone()))
+            Some((
+                menu,
+                labels,
+                claim.id_key.clone(),
+                how,
+                claim.tool_use_id.clone(),
+            ))
         }
         Show::Grid => {
             let (_, _, raw, is_picker, above, header) = grid_view.as_ref().unwrap();
@@ -1912,16 +1919,8 @@ fn clear_hook_permission_menu<R: tauri::Runtime>(
                 .filter(|c| matches(c))
                 .map(|c| c.id_key.clone())
                 .collect();
-            let removed_ident: Option<(
-                String,
-                Option<String>,
-                bool,
-                Option<String>,
-                Option<i64>,
-            )> = q
-                .iter()
-                .find(|c| matches(c))
-                .map(|c| {
+            let removed_ident: Option<(String, Option<String>, bool, Option<String>, Option<i64>)> =
+                q.iter().find(|c| matches(c)).map(|c| {
                     (
                         c.menu.tool.clone(),
                         c.signature.clone(),
@@ -1950,13 +1949,7 @@ fn clear_hook_permission_menu<R: tauri::Runtime>(
             // The stash bind remains the fallback for claims answered before
             // this field existed and for edge flows that never marked one.
             if let Some(label) = ral.as_deref() {
-                record_deferred_claim_menu_answer(
-                    app,
-                    id,
-                    label,
-                    "claim-clear",
-                    *answered_at_ms,
-                );
+                record_deferred_claim_menu_answer(app, id, label, "claim-clear", *answered_at_ms);
             } else if !answered {
                 bind_pending_menu_answer(app, rt, id, rs.as_deref());
             }
@@ -2363,8 +2356,7 @@ fn archive_one_bram_trace(raw_path: &Path) -> std::io::Result<(u64, u64, usize)>
     let input = std::fs::File::open(raw_path)?;
     let (temp_path, temp_file) = create_bram_trace_temp(&final_path)?;
     let result = (|| -> std::io::Result<(u64, u64, usize)> {
-        let mut encoder =
-            flate2::write::GzEncoder::new(temp_file, flate2::Compression::fast());
+        let mut encoder = flate2::write::GzEncoder::new(temp_file, flate2::Compression::fast());
         let (raw_bytes, redactions) =
             sanitize_bram_trace_stream(BufReader::with_capacity(64 * 1024, input), &mut encoder)?;
         let output = encoder.finish()?;
@@ -2413,19 +2405,11 @@ fn archive_bram_trace_logs(
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0);
-            archives.push(BramTraceArchiveMeta {
-                path,
-                modified_ms,
-            });
+            archives.push(BramTraceArchiveMeta { path, modified_ms });
         }
     }
-    let archive_after_ms = i64::from(archive_after_days)
-        .saturating_mul(24 * 60 * 60 * 1000);
-    let plan = bram_trace_archival_plan(
-        archives,
-        now_ms,
-        archive_after_ms,
-    );
+    let archive_after_ms = i64::from(archive_after_days).saturating_mul(24 * 60 * 60 * 1000);
+    let plan = bram_trace_archival_plan(archives, now_ms, archive_after_ms);
     let mut summary = BramTraceArchivalSummary {
         candidate_files: plan.len(),
         ..BramTraceArchivalSummary::default()
@@ -2910,15 +2894,20 @@ mod secret_observability_tests {
         let anthropic = format!("sk-ant-{}", "a".repeat(90));
         let openai = format!("sk-proj-{}", "b".repeat(24));
         let github = format!("ghp_{}", "c".repeat(36));
-        let input = format!(concat!(
-            "anthropic={anthropic} ",
-            "openai={openai} ",
-            "github={github} ",
-            "aws=AKIA1234567890ABCDEF ",
-            "Authorization: Bearer abc.def-123 ",
-            "\"api_key\": \"top-secret-value\"\n",
-            "-----BEGIN PRIVATE KEY-----\nabc123\n-----END PRIVATE KEY-----\n",
-        ), anthropic = anthropic, openai = openai, github = github);
+        let input = format!(
+            concat!(
+                "anthropic={anthropic} ",
+                "openai={openai} ",
+                "github={github} ",
+                "aws=AKIA1234567890ABCDEF ",
+                "Authorization: Bearer abc.def-123 ",
+                "\"api_key\": \"top-secret-value\"\n",
+                "-----BEGIN PRIVATE KEY-----\nabc123\n-----END PRIVATE KEY-----\n",
+            ),
+            anthropic = anthropic,
+            openai = openai,
+            github = github
+        );
         let (safe, count) = redact_sensitive_text(&input);
         assert!(count >= 7);
         assert!(!safe.contains(&anthropic));
@@ -2959,8 +2948,7 @@ mod secret_observability_tests {
             DEFAULT_TRACE_ARCHIVE_AFTER_DAYS
         );
         let configured =
-            serde_json::from_str::<ProjectConfig>(r#"{"traces":{"archiveAfterDays":30}}"#)
-                .unwrap();
+            serde_json::from_str::<ProjectConfig>(r#"{"traces":{"archiveAfterDays":30}}"#).unwrap();
         assert_eq!(
             project_config_trace_archive_after_days(Some(&configured)),
             30
@@ -2969,10 +2957,9 @@ mod secret_observability_tests {
             settings_view_from_config(Some(configured))["traces"]["archiveAfterDays"],
             30
         );
-        let too_large = serde_json::from_str::<ProjectConfig>(
-            r#"{"traces":{"archiveAfterDays":4294967295}}"#,
-        )
-        .unwrap();
+        let too_large =
+            serde_json::from_str::<ProjectConfig>(r#"{"traces":{"archiveAfterDays":4294967295}}"#)
+                .unwrap();
         assert_eq!(
             project_config_trace_archive_after_days(Some(&too_large)),
             MAX_TRACE_ARCHIVE_AFTER_DAYS
@@ -3025,10 +3012,7 @@ mod secret_observability_tests {
             },
         ];
         let plan = bram_trace_archival_plan(archives, 20_000, 10_000);
-        assert_eq!(
-            plan,
-            vec![PathBuf::from("a.log"), PathBuf::from("b.log")]
-        );
+        assert_eq!(plan, vec![PathBuf::from("a.log"), PathBuf::from("b.log")]);
     }
 
     #[test]
@@ -3372,7 +3356,11 @@ fn pty_tail_snippet(max_chars: usize) -> String {
     };
     let stripped = strip_ansi(&raw);
     let text = String::from_utf8_lossy(&stripped);
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ").replace('"', "'");
+    let collapsed = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('"', "'");
     let n = collapsed.chars().count();
     if n <= max_chars {
         collapsed
@@ -4118,8 +4106,8 @@ fn fence_decision(
 #[cfg(test)]
 mod claim_label_join_tests {
     use super::{
-        claim_label_join, claim_remained_sole, mark_hook_claim_answered,
-        normalized_menu_label, select_grid_joined_claim, selectable_hook_claims, HookMenuClaim,
+        claim_label_join, claim_remained_sole, mark_hook_claim_answered, normalized_menu_label,
+        select_grid_joined_claim, selectable_hook_claims, HookMenuClaim,
     };
 
     fn claim_with_labels(labels: &[&str]) -> HookMenuClaim {
@@ -4201,14 +4189,32 @@ mod claim_label_join_tests {
         identity.signature = Some("Bash(id -un)".to_string());
         let mut claims = vec![sw_vers, date, identity];
 
-        assert!(mark_hook_claim_answered(&mut claims, "sw-vers", Some("Yes")));
-        assert!(mark_hook_claim_answered(&mut claims, "date", Some("Yes, and don't ask again")));
+        assert!(mark_hook_claim_answered(
+            &mut claims,
+            "sw-vers",
+            Some("Yes")
+        ));
+        assert!(mark_hook_claim_answered(
+            &mut claims,
+            "date",
+            Some("Yes, and don't ask again")
+        ));
         assert_eq!(
-            claims.iter().find(|c| c.id_key == "sw-vers").unwrap().answered_label.as_deref(),
+            claims
+                .iter()
+                .find(|c| c.id_key == "sw-vers")
+                .unwrap()
+                .answered_label
+                .as_deref(),
             Some("Yes")
         );
         assert_eq!(
-            claims.iter().find(|c| c.id_key == "date").unwrap().answered_label.as_deref(),
+            claims
+                .iter()
+                .find(|c| c.id_key == "date")
+                .unwrap()
+                .answered_label
+                .as_deref(),
             Some("Yes, and don't ask again")
         );
         assert!(claims
@@ -4332,8 +4338,7 @@ mod claim_label_join_tests {
         let visible = normalized_menu_label(
             "Running curl -sS http://127.0.0.1:59727/__search?q=navpanel%20footer&mode=and",
         );
-        let (selected, how) =
-            select_grid_joined_claim(&claims, &grid_labels, &visible).unwrap();
+        let (selected, how) = select_grid_joined_claim(&claims, &grid_labels, &visible).unwrap();
         assert_eq!(selected.id_key, "navpanel");
         assert_eq!(how, "signature");
 
@@ -4355,11 +4360,7 @@ mod claim_label_join_tests {
         let mut second = claim_with_labels(&["Yes", "No"]);
         second.id_key = "second".to_string();
         second.at_ms = 101;
-        assert!(!claim_remained_sole(
-            &[first.clone(), second],
-            "first",
-            100
-        ));
+        assert!(!claim_remained_sole(&[first.clone(), second], "first", 100));
 
         first.at_ms = 102;
         assert!(!claim_remained_sole(&[first], "first", 100));
@@ -4381,7 +4382,12 @@ mod claim_label_join_tests {
             "No",
         ]);
         assert_eq!(claim_label_join(&claim, &wrapped), Some("labels"));
-        let truncated = grid(&["Yes", "Yes, and don't ask again for: cargo build in", "No", "Extra"]);
+        let truncated = grid(&[
+            "Yes",
+            "Yes, and don't ask again for: cargo build in",
+            "No",
+            "Extra",
+        ]);
         assert_eq!(claim_label_join(&claim, &truncated), Some("fallback"));
     }
 }
@@ -5613,9 +5619,7 @@ mod terminal_attention_tests {
     #[test]
     fn hooks_trust_markers_classify() {
         assert_eq!(
-            terminal_attention_prompt_shape(
-                "Hooks need review before this session can continue."
-            ),
+            terminal_attention_prompt_shape("Hooks need review before this session can continue."),
             Some("hooks-trust")
         );
         // The live 2026-08-08 18:15:45 candidate capture — current Codex
@@ -5673,7 +5677,10 @@ mod terminal_attention_tests {
     #[test]
     fn plain_shell_tails_do_not_classify() {
         assert_eq!(terminal_attention_prompt_shape("~/bram$ "), None);
-        assert_eq!(terminal_attention_prompt_shape("jonudell@mac bram % "), None);
+        assert_eq!(
+            terminal_attention_prompt_shape("jonudell@mac bram % "),
+            None
+        );
         assert_eq!(
             terminal_attention_prompt_shape(
                 "I've read the file and will now make the requested edit to lib.rs."
@@ -6381,7 +6388,12 @@ fn trace_compaction_transition<R: tauri::Runtime>(
 // ticker's turn-state snapshot currently reports (same source
 // terminal_attention's caller uses), not tracked inside CompactionTracker
 // itself.
-fn emit_compaction<R: tauri::Runtime>(app: &AppHandle<R>, active: bool, provider: &str, now_ms: i64) {
+fn emit_compaction<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    active: bool,
+    provider: &str,
+    now_ms: i64,
+) {
     emit_replayable_payload(
         app,
         "compaction-changed",
@@ -6396,14 +6408,19 @@ fn emit_compaction<R: tauri::Runtime>(app: &AppHandle<R>, active: bool, provider
 #[cfg(test)]
 mod compaction_shape_tests {
     use super::{
-        compaction_progress_shape, parse_codex_compaction_line, pty_output_clears_inflight,
-        observe_codex_compaction, CodexCompactionRecord, CompactionReadReset,
-        CompactionTracker, CompactionTransition, JsonlTailObserver, COMPACTION_PENDING_MS,
+        compaction_progress_shape, observe_codex_compaction, parse_codex_compaction_line,
+        pty_output_clears_inflight, CodexCompactionRecord, CompactionReadReset, CompactionTracker,
+        CompactionTransition, JsonlTailObserver, COMPACTION_PENDING_MS,
     };
 
     const NO_RECORDS: &[CodexCompactionRecord] = &[];
 
-    fn record(window: &str, previous: Option<&str>, ordinal: u64, ts_ms: i64) -> CodexCompactionRecord {
+    fn record(
+        window: &str,
+        previous: Option<&str>,
+        ordinal: u64,
+        ts_ms: i64,
+    ) -> CodexCompactionRecord {
         CodexCompactionRecord {
             window_id: window.to_string(),
             previous_window_id: previous.map(|s| s.to_string()),
@@ -6421,7 +6438,11 @@ mod compaction_shape_tests {
 
     fn temp_rollout(name: &str, body: &str) -> std::path::PathBuf {
         let mut path = std::env::temp_dir();
-        path.push(format!("bram-compaction-{}-{}.jsonl", name, std::process::id()));
+        path.push(format!(
+            "bram-compaction-{}-{}.jsonl",
+            name,
+            std::process::id()
+        ));
         std::fs::write(&path, body).expect("write rollout fixture");
         path
     }
@@ -6488,16 +6509,31 @@ mod compaction_shape_tests {
     fn progress_fires_then_clears_the_banner_but_keeps_the_hold() {
         let mut tracker = CompactionTracker::new();
         assert_eq!(
-            tracker.step(64, || "Compacting conversation… 500 tokens".to_string(), NO_RECORDS, 1_000),
+            tracker.step(
+                64,
+                || "Compacting conversation… 500 tokens".to_string(),
+                NO_RECORDS,
+                1_000
+            ),
             vec![CompactionTransition::Fire]
         );
         // Still compacting on the next tick with output -- no repeat fire.
         assert!(tracker
-            .step(64, || "Compacting conversation… 900 tokens".to_string(), NO_RECORDS, 1_500)
+            .step(
+                64,
+                || "Compacting conversation… 900 tokens".to_string(),
+                NO_RECORDS,
+                1_500
+            )
             .is_empty());
         // Silence mid-compaction: nothing to evaluate, stays active.
         assert!(tracker
-            .step(0, || unreachable!("tail_fn must not run on silence"), NO_RECORDS, 2_000)
+            .step(
+                0,
+                || unreachable!("tail_fn must not run on silence"),
+                NO_RECORDS,
+                2_000
+            )
             .is_empty());
         // Progress shape gone: the banner clears, but the episode is NOT over
         // -- banner lifetime and hold lifetime are deliberately decoupled.
@@ -6513,10 +6549,20 @@ mod compaction_shape_tests {
     #[test]
     fn structured_record_completes_an_observed_episode_exactly_once() {
         let mut tracker = CompactionTracker::new();
-        tracker.step(64, || "Compacting conversation…".to_string(), NO_RECORDS, 1_000);
+        tracker.step(
+            64,
+            || "Compacting conversation…".to_string(),
+            NO_RECORDS,
+            1_000,
+        );
         tracker.step(32, || "done".to_string(), NO_RECORDS, 2_000);
 
-        let out = tracker.step(16, || "…".to_string(), &[record("w1", None, 10, 2_100)], 2_200);
+        let out = tracker.step(
+            16,
+            || "…".to_string(),
+            &[record("w1", None, 10, 2_100)],
+            2_200,
+        );
         assert_eq!(
             completions(&out),
             vec![&CompactionTransition::Complete {
@@ -6531,7 +6577,12 @@ mod compaction_shape_tests {
 
         // Re-delivery of the same record (a full re-read after offset
         // invalidation) is inert: at most one completion per episode key.
-        let replay = tracker.step(16, || "…".to_string(), &[record("w1", None, 10, 2_100)], 2_300);
+        let replay = tracker.step(
+            16,
+            || "…".to_string(),
+            &[record("w1", None, 10, 2_100)],
+            2_300,
+        );
         assert!(completions(&replay).is_empty());
     }
 
@@ -6540,7 +6591,12 @@ mod compaction_shape_tests {
         // The fast-compaction case the 500 ms ticker never sampled. It must
         // NOT manufacture a Fire -- `Fire` means Bram saw the progress shape.
         let mut tracker = CompactionTracker::new();
-        let out = tracker.step(16, || "ordinary output".to_string(), &[record("w1", None, 10, 5_000)], 5_050);
+        let out = tracker.step(
+            16,
+            || "ordinary output".to_string(),
+            &[record("w1", None, 10, 5_000)],
+            5_050,
+        );
         assert_eq!(
             out,
             vec![CompactionTransition::Complete {
@@ -6560,16 +6616,29 @@ mod compaction_shape_tests {
         // is "unseen", so unseen-ness cannot be freshness evidence. A record
         // predating the episode in flight is history, not its completion.
         let mut tracker = CompactionTracker::new();
-        tracker.step(64, || "Compacting conversation…".to_string(), NO_RECORDS, 10_000);
+        tracker.step(
+            64,
+            || "Compacting conversation…".to_string(),
+            NO_RECORDS,
+            10_000,
+        );
 
-        let out = tracker.step(64, || "Compacting conversation…".to_string(), &[record("old", None, 5, 1_000)], 10_500);
+        let out = tracker.step(
+            64,
+            || "Compacting conversation…".to_string(),
+            &[record("old", None, 5, 1_000)],
+            10_500,
+        );
         assert_eq!(
             out,
             vec![CompactionTransition::Stale {
                 window_id: "old".to_string()
             }]
         );
-        assert!(tracker.is_holding(), "the live episode must survive a stale record");
+        assert!(
+            tracker.is_holding(),
+            "the live episode must survive a stale record"
+        );
     }
 
     #[test]
@@ -6579,11 +6648,21 @@ mod compaction_shape_tests {
         tracker.step(32, || "done".to_string(), NO_RECORDS, 500);
         // Inside the bound: still held, nothing published.
         assert!(tracker
-            .step(0, || unreachable!(), NO_RECORDS, 500 + COMPACTION_PENDING_MS - 1)
+            .step(
+                0,
+                || unreachable!(),
+                NO_RECORDS,
+                500 + COMPACTION_PENDING_MS - 1
+            )
             .is_empty());
         assert!(tracker.is_holding());
 
-        let out = tracker.step(0, || unreachable!(), NO_RECORDS, 500 + COMPACTION_PENDING_MS);
+        let out = tracker.step(
+            0,
+            || unreachable!(),
+            NO_RECORDS,
+            500 + COMPACTION_PENDING_MS,
+        );
         assert_eq!(completions(&out).len(), 1);
         assert!(matches!(
             out[0],
@@ -6601,7 +6680,12 @@ mod compaction_shape_tests {
         let mut tracker = CompactionTracker::new();
         tracker.step(64, || "Compacting conversation…".to_string(), NO_RECORDS, 0);
         tracker.step(32, || "done".to_string(), NO_RECORDS, 500);
-        let fallback = tracker.step(0, || unreachable!(), NO_RECORDS, 500 + COMPACTION_PENDING_MS);
+        let fallback = tracker.step(
+            0,
+            || unreachable!(),
+            NO_RECORDS,
+            500 + COMPACTION_PENDING_MS,
+        );
         assert_eq!(completions(&fallback).len(), 1);
 
         let late = tracker.step(
@@ -6625,7 +6709,12 @@ mod compaction_shape_tests {
     #[test]
     fn broken_window_chain_traces_a_gap_and_still_completes_once() {
         let mut tracker = CompactionTracker::new();
-        tracker.step(16, || "…".to_string(), &[record("w1", None, 10, 1_000)], 1_050);
+        tracker.step(
+            16,
+            || "…".to_string(),
+            &[record("w1", None, 10, 1_000)],
+            1_050,
+        );
         // w3 claims to follow w2, but Bram last saw w1: an episode was missed.
         let out = tracker.step(
             16,
@@ -6655,7 +6744,10 @@ mod compaction_shape_tests {
         assert_eq!(reset, CompactionReadReset::None);
 
         // A genuinely new record appended after attach IS live.
-        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         use std::io::Write;
         f.write_all(compacted_line("w2", "w1", 20, "2026-08-21T04:44:03.213Z").as_bytes())
             .unwrap();
@@ -6673,7 +6765,11 @@ mod compaction_shape_tests {
         let mut observer = JsonlTailObserver::new();
         observer.attach("sess-new".to_string(), 0);
 
-        std::fs::write(&path, compacted_line("w1", "w0", 10, "2026-08-21T04:14:24.077Z")).unwrap();
+        std::fs::write(
+            &path,
+            compacted_line("w1", "w0", 10, "2026-08-21T04:14:24.077Z"),
+        )
+        .unwrap();
         let (records, _) = observer.poll(&path, "sess-new", observe_codex_compaction);
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].window_id, "w1");
@@ -6773,7 +6869,11 @@ mod compaction_shape_tests {
                 now,
             ));
         }
-        assert!(all.is_empty(), "repaints must mutate nothing, got {:?}", all);
+        assert!(
+            all.is_empty(),
+            "repaints must mutate nothing, got {:?}",
+            all
+        );
     }
 
     #[test]
@@ -6802,7 +6902,11 @@ mod structured_interrupt_tests {
 
     fn temp_jsonl(name: &str, body: &str) -> std::path::PathBuf {
         let mut path = std::env::temp_dir();
-        path.push(format!("bram-interrupt-{}-{}.jsonl", name, std::process::id()));
+        path.push(format!(
+            "bram-interrupt-{}-{}.jsonl",
+            name,
+            std::process::id()
+        ));
         std::fs::write(&path, body).expect("write jsonl fixture");
         path
     }
@@ -9433,7 +9537,10 @@ fn agent_status_set_claude_jsonl_working<R: tauri::Runtime>(
             append_bram_trace_line(
                 app,
                 "agent-status",
-                &format!("op=skip-jsonl-working-verb reason=fresh-grid-verb grid_verb={:?}", gv),
+                &format!(
+                    "op=skip-jsonl-working-verb reason=fresh-grid-verb grid_verb={:?}",
+                    gv
+                ),
             );
         }
     } else {
@@ -10207,12 +10314,24 @@ mod boot_prompt_commit_tests {
     #[test]
     fn commits_only_when_all_guards_settle_and_names_the_blocker() {
         assert_eq!(boot_prompt_commit_decision(true, false, false), Ok(()));
-        assert_eq!(boot_prompt_commit_decision(false, false, false), Err("provider"));
-        assert_eq!(boot_prompt_commit_decision(true, true, false), Err("working"));
-        assert_eq!(boot_prompt_commit_decision(true, false, true), Err("menu-present"));
+        assert_eq!(
+            boot_prompt_commit_decision(false, false, false),
+            Err("provider")
+        );
+        assert_eq!(
+            boot_prompt_commit_decision(true, true, false),
+            Err("working")
+        );
+        assert_eq!(
+            boot_prompt_commit_decision(true, false, true),
+            Err("menu-present")
+        );
         // Ordering: a displayed menu outranks the working read — its
         // expiry reason points at the more actionable state.
-        assert_eq!(boot_prompt_commit_decision(true, true, true), Err("menu-present"));
+        assert_eq!(
+            boot_prompt_commit_decision(true, true, true),
+            Err("menu-present")
+        );
     }
 }
 
@@ -10754,13 +10873,9 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                         (&d.signature, &new_menu.tool_call_signature),
                         (Some(a), Some(b)) if a == b
                     );
-                    let captured_labels: Vec<String> = new_menu
-                        .options
-                        .iter()
-                        .map(|o| o.label.clone())
-                        .collect();
-                    let label_match_kind =
-                        menu_labels_match(&d.option_labels, &captured_labels);
+                    let captured_labels: Vec<String> =
+                        new_menu.options.iter().map(|o| o.label.clone()).collect();
+                    let label_match_kind = menu_labels_match(&d.option_labels, &captured_labels);
                     let label_match = label_match_kind.unwrap_or("none");
                     // suppressor-label-normalization-divergence-observe: the
                     // suppressor matches RAW labels; the grid-rescue wrapper
@@ -10778,11 +10893,9 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                                 .map(|s| normalized_menu_label(s))
                                 .collect::<Vec<_>>()
                         };
-                        let norm_kind = menu_labels_match(
-                            &norm(&d.option_labels),
-                            &norm(&captured_labels),
-                        )
-                        .unwrap_or("none");
+                        let norm_kind =
+                            menu_labels_match(&norm(&d.option_labels), &norm(&captured_labels))
+                                .unwrap_or("none");
                         if norm_kind != label_match {
                             append_bram_trace_line(
                                 app,
@@ -11113,15 +11226,16 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
             // "menu on terminal but not pane" blindness window.
             if let Some(nm) = detected.as_ref() {
                 let fp = menu_labels_fingerprint(nm.options.iter().map(|o| o.label.as_str()));
-                let gap_ms = menu_first_sighting_cell()
-                    .lock()
-                    .ok()
-                    .and_then(|mut cell| {
-                        let matched = cell.as_ref().map(|(f, _)| *f == fp).unwrap_or(false);
-                        let g = cell.as_ref().map(|(_, t)| t.elapsed().as_millis());
-                        cell.take(); // one surface consumes the sighting
-                        if matched { g } else { None }
-                    });
+                let gap_ms = menu_first_sighting_cell().lock().ok().and_then(|mut cell| {
+                    let matched = cell.as_ref().map(|(f, _)| *f == fp).unwrap_or(false);
+                    let g = cell.as_ref().map(|(_, t)| t.elapsed().as_millis());
+                    cell.take(); // one surface consumes the sighting
+                    if matched {
+                        g
+                    } else {
+                        None
+                    }
+                });
                 let (supp_armed, supp_age_ms, supp_tool) = pty_menu_suppressed_cell()
                     .lock()
                     .ok()
@@ -11804,8 +11918,7 @@ fn menu_option_matches_input(option: &MenuOption, input: &str) -> bool {
     if let Some(answer_keys) = option.answer_keys.as_deref() {
         !answer_keys.is_empty() && input == answer_keys
     } else {
-        !option.key.is_empty()
-            && input.trim_matches(|c| c == '\r' || c == '\n') == option.key
+        !option.key.is_empty() && input.trim_matches(|c| c == '\r' || c == '\n') == option.key
     }
 }
 
@@ -11879,11 +11992,7 @@ fn pty_menu_clear<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
                     m.options
                         .iter()
                         .find(|o| o.label.trim_start().starts_with("No"))
-                        .map(|o| {
-                            o.answer_keys
-                                .clone()
-                                .unwrap_or_else(|| o.key.clone())
-                        }),
+                        .map(|o| o.answer_keys.clone().unwrap_or_else(|| o.key.clone())),
                     // transcript-render-menu-answers: the option this input
                     // selects, matched while the menu is still in hand.
                     // Provider adapters can supply direct answer keys (Codex
@@ -12565,12 +12674,13 @@ fn git_log_recent<R: tauri::Runtime>(app: &AppHandle<R>, count: usize) -> Result
     // push would publish. Unlike `@{u}..HEAD`, this works on a branch with no
     // upstream (that fatals -> empty -> everything wrongly "pushed", hiding the
     // Push button) and still excludes commits already on origin/main.
-    let unpushed: HashSet<String> = git_run(app, &["rev-list", "HEAD", "--not", "--remotes=origin"])
-        .unwrap_or_default()
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
+    let unpushed: HashSet<String> =
+        git_run(app, &["rev-list", "HEAD", "--not", "--remotes=origin"])
+            .unwrap_or_default()
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
     // Resolve the GitHub URL for the html_url field, if any.
     let remote_url = git_run(app, &["remote", "get-url", "origin"])
         .unwrap_or_default()
@@ -12788,7 +12898,9 @@ fn rebuild_commits_list_cache<R: tauri::Runtime>(app: &AppHandle<R>, conn: &rusq
 // rebase's SHA rewrite doesn't detach the attribution — the same identity
 // flush_pending_issue_closes uses to re-anchor.
 fn attach_pending_closes<R: tauri::Runtime>(app: &AppHandle<R>, arr: &mut Vec<serde_json::Value>) {
-    let Some(path) = issue_close_queue_file(app) else { return };
+    let Some(path) = issue_close_queue_file(app) else {
+        return;
+    };
     let records = read_pending_issue_closes(&path);
     if records.is_empty() {
         return;
@@ -12925,7 +13037,10 @@ fn commits_list_cached<R: tauri::Runtime>(
 // #104). Bump if the repo ever approaches this many issues.
 const GH_ISSUE_LIST_LIMIT: usize = 500;
 
-fn build_issues_list<R: tauri::Runtime>(app: &AppHandle<R>, limit: usize) -> Result<Vec<u8>, String> {
+fn build_issues_list<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    limit: usize,
+) -> Result<Vec<u8>, String> {
     let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
     let repo_slug = repo_owner_name(app);
     // issues-list-error-envelope-poisons-cache: adapter failure propagates
@@ -13232,7 +13347,11 @@ fn set_issues_list_stale(conn: &rusqlite::Connection, stale: bool) {
         intent: String::new(),
         file: "issues:list:stale".to_string(),
         tool_ids: None,
-        extra: if stale { "1".to_string() } else { String::new() },
+        extra: if stale {
+            "1".to_string()
+        } else {
+            String::new()
+        },
     };
     let _ = search_index::index_doc(conn, &row, 0, 0);
 }
@@ -13325,7 +13444,10 @@ fn gh_issues_list<R: tauri::Runtime>(
 // never cached (build_issues_list dropped its matching envelope in
 // issues-list-error-envelope-poisons-cache precisely because its output IS
 // cached).
-fn build_enriched_issue<R: tauri::Runtime>(app: &AppHandle<R>, number: u64) -> Result<Vec<u8>, String> {
+fn build_enriched_issue<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    number: u64,
+) -> Result<Vec<u8>, String> {
     let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
     let adapter = forge_adapter(app);
     let mut issue = match adapter.issue_view(&root, number) {
@@ -13509,7 +13631,10 @@ mod issue_close_tests {
             return;
         };
         // Deterministic across invocations…
-        assert_eq!(git_commit_patch_id(&root, &sha).as_deref(), Some(pid.as_str()));
+        assert_eq!(
+            git_commit_patch_id(&root, &sha).as_deref(),
+            Some(pid.as_str())
+        );
         // …and the origin scan re-anchors that patch-id to the same commit.
         assert_eq!(
             find_origin_commit_by_patch_id(&root, "main", &pid, 50).as_deref(),
@@ -13704,7 +13829,15 @@ fn glab_run(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
 // (single page of 100, comments not expanded) are documented in
 // docs/forge-adapter.md.
 fn glab_issues_list_bytes(root: &Path, search: Option<&str>) -> Result<Vec<u8>, String> {
-    let mut args = vec!["issue", "list", "--all", "--output", "json", "--per-page", "100"];
+    let mut args = vec![
+        "issue",
+        "list",
+        "--all",
+        "--output",
+        "json",
+        "--per-page",
+        "100",
+    ];
     if let Some(q) = search {
         args.push("--search");
         args.push(q);
@@ -13816,12 +13949,23 @@ mod forge_url_tests {
         // URL has to be rebuilt from it. Parse must invert construction.
         let sha = "9d3bee23f8eec12477cd410aa3d8960c0297a23a";
         for (adapter, base) in [
-            (&GitHubForge as &dyn ForgeAdapter, "https://github.com/judell/bram"),
-            (&GitLabForge as &dyn ForgeAdapter, "https://gitlab.com/someone/proj"),
+            (
+                &GitHubForge as &dyn ForgeAdapter,
+                "https://github.com/judell/bram",
+            ),
+            (
+                &GitLabForge as &dyn ForgeAdapter,
+                "https://gitlab.com/someone/proj",
+            ),
         ] {
             let url = adapter.commit_url(base, sha);
             let parsed = adapter.parse_commit_url(&url).expect("round trip");
-            assert_eq!(parsed, (base.to_string(), sha.to_string()), "url was {}", url);
+            assert_eq!(
+                parsed,
+                (base.to_string(), sha.to_string()),
+                "url was {}",
+                url
+            );
         }
     }
 
@@ -13904,7 +14048,9 @@ impl ForgeAdapter for GitHubForge {
     }
 
     fn issues_list(&self, root: &Path, limit: usize) -> Result<Vec<serde_json::Value>, String> {
-        let limit = limit.clamp(1, search_issue_limit_for_root(root)).to_string();
+        let limit = limit
+            .clamp(1, search_issue_limit_for_root(root))
+            .to_string();
         let stdout = gh_json_out(
             root,
             &[
@@ -13941,8 +14087,8 @@ impl ForgeAdapter for GitHubForge {
             ],
             "gh issue list",
         )?;
-        let rows: Vec<serde_json::Value> = serde_json::from_slice(&stdout)
-            .map_err(|e| format!("[gh issue list] parse: {}", e))?;
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_slice(&stdout).map_err(|e| format!("[gh issue list] parse: {}", e))?;
         let probe = rows
             .iter()
             .filter_map(|v| {
@@ -13976,8 +14122,12 @@ impl ForgeAdapter for GitHubForge {
 
     fn issue_comment(&self, root: &Path, number: u64, body: &str) -> Result<(), String> {
         let n = number.to_string();
-        gh_json_out(root, &["issue", "comment", &n, "--body", body], "gh issue comment")
-            .map(|_| ())
+        gh_json_out(
+            root,
+            &["issue", "comment", &n, "--body", body],
+            "gh issue comment",
+        )
+        .map(|_| ())
     }
 
     fn issue_close(&self, root: &Path, number: u64, comment: &str) -> Result<(), String> {
@@ -14692,8 +14842,8 @@ fn pty_spawn(
                         .ok()
                         .and_then(|g| g.as_ref().map(|(_, at)| *at));
                     if let Some(armed_at) = armed_at {
-                        let provider_is_codex = current_provider(&app_for_throughput)
-                            == Some(SessionProvider::Codex);
+                        let provider_is_codex =
+                            current_provider(&app_for_throughput) == Some(SessionProvider::Codex);
                         let (working, menu_present) = turn_state_cell()
                             .lock()
                             .map(|t| (t.phase == "working", t.pending_menu.is_some()))
@@ -14818,7 +14968,8 @@ fn pty_spawn(
                         Some(tool) => {
                             let held_ms = now_ms.saturating_sub(gate_held_since);
                             if held_ms >= SEND_GATE_STALE_WARN_MS
-                                && SEND_GATE_STALE_WARNED_MS.swap(gate_held_since, Ordering::Relaxed)
+                                && SEND_GATE_STALE_WARNED_MS
+                                    .swap(gate_held_since, Ordering::Relaxed)
                                     != gate_held_since
                             {
                                 if bram_trace_enabled() {
@@ -14874,29 +15025,21 @@ fn pty_spawn(
                         _ => {}
                     }
                 }
-                for transition in
-                    terminal_attention.step(authoritative_open, bytes, || {
-                        pty_tail_snippet_or_drained(TERMINAL_ATTENTION_TAIL_CHARS)
-                    })
-                {
+                for transition in terminal_attention.step(authoritative_open, bytes, || {
+                    pty_tail_snippet_or_drained(TERMINAL_ATTENTION_TAIL_CHARS)
+                }) {
                     trace_terminal_attention_transition(
                         &app_for_throughput,
                         &transition,
                         &terminal_attention,
                     );
                     match transition {
-                        TerminalAttentionTransition::Fire { shape } => emit_terminal_attention(
-                            &app_for_throughput,
-                            true,
-                            Some(shape),
-                            now_ms,
-                        ),
-                        TerminalAttentionTransition::Clear { .. } => emit_terminal_attention(
-                            &app_for_throughput,
-                            false,
-                            None,
-                            now_ms,
-                        ),
+                        TerminalAttentionTransition::Fire { shape } => {
+                            emit_terminal_attention(&app_for_throughput, true, Some(shape), now_ms)
+                        }
+                        TerminalAttentionTransition::Clear { .. } => {
+                            emit_terminal_attention(&app_for_throughput, false, None, now_ms)
+                        }
                         TerminalAttentionTransition::Candidate { .. } => {}
                     }
                 }
@@ -14908,9 +15051,7 @@ fn pty_spawn(
                 // path and a session identity once. Codex identity comes from
                 // the rollout's session_meta; Claude sessions are named by the
                 // file stem, which is the session uuid.
-                let session_path = active_session_path(&app_for_throughput)
-                    .ok()
-                    .flatten();
+                let session_path = active_session_path(&app_for_throughput).ok().flatten();
                 let session_key = session_path.as_ref().and_then(|path| {
                     if provider == "codex" {
                         codex_session_meta(path)
@@ -14930,11 +15071,8 @@ fn pty_spawn(
                     (session_path.as_ref(), session_key.as_ref())
                 {
                     if provider == "codex" {
-                        let (records, reset) = compaction_observer.poll(
-                            path,
-                            session_key,
-                            observe_codex_compaction,
-                        );
+                        let (records, reset) =
+                            compaction_observer.poll(path, session_key, observe_codex_compaction);
                         if reset != CompactionReadReset::None && bram_trace_enabled() {
                             append_bram_trace_line(
                                 &app_for_throughput,
@@ -14954,10 +15092,7 @@ fn pty_spawn(
 
                 // structured-interrupt-edge-both-providers: a declarative
                 // record decides; the PTY marker is the traced fallback.
-                let pending_cancel = pending_cancel_cell()
-                    .lock()
-                    .ok()
-                    .and_then(|slot| *slot);
+                let pending_cancel = pending_cancel_cell().lock().ok().and_then(|slot| *slot);
                 match resolve_cancel(pending_cancel, &interrupt_records, now_ms) {
                     CancelResolution::Wait => {}
                     CancelResolution::Structured {
@@ -14979,11 +15114,7 @@ fn pty_spawn(
                                 ),
                             );
                         }
-                        apply_user_cancel(
-                            &app_for_throughput,
-                            reason,
-                            provider == "codex",
-                        );
+                        apply_user_cancel(&app_for_throughput, reason, provider == "codex");
                     }
                     CancelResolution::PtyFallback {
                         deferred_ms,
@@ -15002,11 +15133,7 @@ fn pty_spawn(
                                 ),
                             );
                         }
-                        apply_user_cancel(
-                            &app_for_throughput,
-                            "pty-output-user-cancel",
-                            is_codex,
-                        );
+                        apply_user_cancel(&app_for_throughput, "pty-output-user-cancel", is_codex);
                     }
                 }
                 for transition in compaction.step(
@@ -15152,10 +15279,8 @@ fn pty_spawn(
                         Some(SessionProvider::Codex)
                     );
                     let cancel_is_current = if has_cancel_marker && is_codex {
-                        let last_escape_ms = last_pty_escape_ms_cell()
-                            .lock()
-                            .map(|g| *g)
-                            .unwrap_or(0);
+                        let last_escape_ms =
+                            last_pty_escape_ms_cell().lock().map(|g| *g).unwrap_or(0);
                         let turn_started_ms = turn_state_cell()
                             .lock()
                             .ok()
@@ -15574,7 +15699,10 @@ fn queue_pty_intent(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    if !matches!(kind.as_str(), "toShell" | "toTurn" | "sendKeys" | "menuAnswer") {
+    if !matches!(
+        kind.as_str(),
+        "toShell" | "toTurn" | "sendKeys" | "menuAnswer"
+    ) {
         return Err(format!("unknown kind: {}", kind));
     }
     if kind == "menuAnswer" && prompt_id.is_empty() {
@@ -16955,7 +17083,12 @@ fn create_new_session(
                 }
             }
         }
-        let _ = pty_write_internal(&waiter_app, &state, &format!("{}\r", launch), "agent-new-launch");
+        let _ = pty_write_internal(
+            &waiter_app,
+            &state,
+            &format!("{}\r", launch),
+            "agent-new-launch",
+        );
         schedule_agent_switch_refresh(waiter_app.clone(), provider_key, "new-session");
     });
     Ok(())
@@ -17007,9 +17140,10 @@ fn load_project_config(root: &Path) -> Option<ProjectConfig> {
                 // parse still happen every call -- deliberately, because that
                 // is what keeps a hand-edit of .bram.json live -- so this is a
                 // logging fix, not a cache.
-                let digest = bytes.len() as u64 ^ bytes.iter().fold(1469598103934665603u64, |h, b| {
-                    (h ^ (*b as u64)).wrapping_mul(1099511628211)
-                });
+                let digest = bytes.len() as u64
+                    ^ bytes.iter().fold(1469598103934665603u64, |h, b| {
+                        (h ^ (*b as u64)).wrapping_mul(1099511628211)
+                    });
                 let key = (path.display().to_string(), digest);
                 let mut last = LAST_PROJECT_CONFIG_LOGGED.lock().unwrap();
                 if last.as_ref() != Some(&key) {
@@ -17533,7 +17667,9 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
                     .as_ref()
                     .and_then(|s| s.first_command.clone())
                     .unwrap_or_default(),
-                startup_policy_from_shell(shell.as_ref()).as_str().to_string(),
+                startup_policy_from_shell(shell.as_ref())
+                    .as_str()
+                    .to_string(),
                 c.worklist
                     .and_then(|w| w.batch_commit_actions)
                     .unwrap_or(false),
@@ -17605,10 +17741,7 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
 // treating the event as an invalidation tick followed by another GET. The
 // POST path publishes immediately; the config watcher sees the same atomic
 // write shortly afterward, so suppress that identical echo here.
-fn emit_settings_changed<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    settings: &serde_json::Value,
-) {
+fn emit_settings_changed<R: tauri::Runtime>(app: &AppHandle<R>, settings: &serde_json::Value) {
     let unchanged = last_tauri_events_cell()
         .lock()
         .ok()
@@ -18346,8 +18479,7 @@ fn describe_stranded_closes<R: tauri::Runtime>(app: &AppHandle<R>) -> String {
 
 #[tauri::command]
 fn git_push(app: AppHandle, branch: Option<String>) -> Result<(), String> {
-    git_push_inner(&app, branch)
-        .map_err(|e| format!("{}{}", e, describe_stranded_closes(&app)))
+    git_push_inner(&app, branch).map_err(|e| format!("{}{}", e, describe_stranded_closes(&app)))
 }
 
 fn git_push_inner(app: &AppHandle, branch: Option<String>) -> Result<(), String> {
@@ -19284,9 +19416,10 @@ fn remember_last_active_session<R: tauri::Runtime>(
     if cached.is_none() {
         *cached = read_last_active_session(app);
     }
-    if cached.as_ref().is_some_and(|record| {
-        record.provider == provider_label && record.session_id == session_id
-    }) {
+    if cached
+        .as_ref()
+        .is_some_and(|record| record.provider == provider_label && record.session_id == session_id)
+    {
         return;
     }
     let record = LastActiveSessionRecord {
@@ -19347,10 +19480,7 @@ fn session_id_for_path(provider: SessionProvider, path: &Path) -> Option<String>
             .file_stem()
             .and_then(|stem| stem.to_str())
             .map(str::to_string),
-        SessionProvider::Codex => codex_session_meta(path)
-            .ok()
-            .flatten()
-            .map(|(id, _)| id),
+        SessionProvider::Codex => codex_session_meta(path).ok().flatten().map(|(id, _)| id),
     }
 }
 
@@ -19819,14 +19949,13 @@ fn codex_cached_read<T: Clone>(
     Ok(v)
 }
 
-type CodexMetaCache<T> = std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashMap<String, (u128, u64, T)>>,
->;
+type CodexMetaCache<T> =
+    std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, (u128, u64, T)>>>;
 
 static CODEX_META_CACHE: CodexMetaCache<Option<(String, String)>> = std::sync::OnceLock::new();
-fn codex_meta_cache(
-) -> &'static std::sync::Mutex<std::collections::HashMap<String, (u128, u64, Option<(String, String)>)>>
-{
+fn codex_meta_cache() -> &'static std::sync::Mutex<
+    std::collections::HashMap<String, (u128, u64, Option<(String, String)>)>,
+> {
     CODEX_META_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -20576,7 +20705,12 @@ fn observe_state_mirror_divergence<R: tauri::Runtime>(app: &AppHandle<R>, doc: &
             let begun_at_ms = item.get("begunAtMs").and_then(|v| v.as_i64());
             let files_json = serde_json::to_string(&worklist_item_files(item))
                 .unwrap_or_else(|_| "[]".to_string());
-            Some(Extracted { id, status, begun_at_ms, files_json })
+            Some(Extracted {
+                id,
+                status,
+                begun_at_ms,
+                files_json,
+            })
         })
         .collect();
     let item_snapshots: Vec<worklist_state::WorklistItemSnapshot> = extracted
@@ -20603,11 +20737,18 @@ fn observe_state_mirror_divergence<R: tauri::Runtime>(app: &AppHandle<R>, doc: &
         .as_ref()
         .and_then(|v| v.get("ids"))
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     let claim_snapshot = claim_kind
         .as_ref()
-        .map(|k| worklist_state::FileClaimSnapshot { kind: k.as_str(), ids: &claim_ids });
+        .map(|k| worklist_state::FileClaimSnapshot {
+            kind: k.as_str(),
+            ids: &claim_ids,
+        });
 
     // Auth snapshot: .worklist-authorization.json absent = skip the auth
     // comparison entirely (nothing to key a db row lookup on).
@@ -20618,13 +20759,22 @@ fn observe_state_mirror_divergence<R: tauri::Runtime>(app: &AppHandle<R>, doc: &
         .as_ref()
         .and_then(|v| v.get("ids"))
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     let auth_snapshot = auth_raw.as_ref().and_then(|v| {
         let issued_at_ms = v.get("issuedAtMs").and_then(|v| v.as_i64())?;
         let kind = v.get("kind").and_then(|v| v.as_str())?;
         let consumed = v.get("consumedAtMs").and_then(|v| v.as_i64()).is_some();
-        Some(worklist_state::FileAuthSnapshot { issued_at_ms, kind, ids: &auth_ids, consumed })
+        Some(worklist_state::FileAuthSnapshot {
+            issued_at_ms,
+            kind,
+            ids: &auth_ids,
+            consumed,
+        })
     });
 
     let snapshot = worklist_state::FileStateSnapshot {
@@ -20662,7 +20812,10 @@ fn observe_state_mirror_divergence<R: tauri::Runtime>(app: &AppHandle<R>, doc: &
         append_bram_trace_line(
             app,
             "state-mirror",
-            &format!("op=divergence field={} item={} {}", d.field, item_key, d.detail),
+            &format!(
+                "op=divergence field={} item={} {}",
+                d.field, item_key, d.detail
+            ),
         );
     }
 }
@@ -20691,7 +20844,10 @@ fn extract_claude_search_from(content: &str) -> SessionSearchExtraction {
             out.content.push_str(&text);
             out.content.push('\n');
         }
-        if let Some(parts) = record.pointer("/message/content").and_then(|v| v.as_array()) {
+        if let Some(parts) = record
+            .pointer("/message/content")
+            .and_then(|v| v.as_array())
+        {
             for part in parts {
                 if part.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
                     if let Some(id) = part.get("id").and_then(|v| v.as_str()) {
@@ -20745,9 +20901,8 @@ static CLAUDE_EXTRACT_CACHE: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<String, (usize, SessionSearchExtraction)>>,
 > = std::sync::OnceLock::new();
 fn claude_extract_cache(
-) -> &'static std::sync::Mutex<
-    std::collections::HashMap<String, (usize, SessionSearchExtraction)>,
-> {
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, (usize, SessionSearchExtraction)>>
+{
     CLAUDE_EXTRACT_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -20816,12 +20971,16 @@ fn codex_message_search_text(record: &serde_json::Value) -> String {
             .and_then(|v| v.as_str())
             .map(|s| cap_search_part(s, SEARCH_TOOL_PART_CAP))
             .unwrap_or_default(),
-        "custom_tool_call_output" => {
-            cap_search_part(&codex_content_text(payload.get("output")), SEARCH_TOOL_PART_CAP)
-        }
+        "custom_tool_call_output" => cap_search_part(
+            &codex_content_text(payload.get("output")),
+            SEARCH_TOOL_PART_CAP,
+        ),
         "function_call" => {
             let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let args = payload.get("arguments").and_then(|v| v.as_str()).unwrap_or("");
+            let args = payload
+                .get("arguments")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let joined = format!("{name} {args}");
             let trimmed = joined.trim();
             if trimmed.is_empty() {
@@ -20902,7 +21061,10 @@ mod session_intent_text_tests {
     fn cached_descriptions_are_deduped_by_tool_id_and_missing_ids_are_free() {
         let descriptions = HashMap::from([
             ("tool-a".to_string(), "Search source files".to_string()),
-            ("tool-b".to_string(), "Inspect the durable cache".to_string()),
+            (
+                "tool-b".to_string(),
+                "Inspect the durable cache".to_string(),
+            ),
         ]);
         let ids = vec![
             "tool-a".to_string(),
@@ -21046,7 +21208,12 @@ mod claude_extract_incremental_tests {
         assert_eq!(t1.content, "alpha\nbeta\n");
         assert_eq!(o1, f1.len());
 
-        let f2 = format!("{}{}\n{}\n", f1, rec("user", "gamma"), tool("tool-1", "rg needle"));
+        let f2 = format!(
+            "{}{}\n{}\n",
+            f1,
+            rec("user", "gamma"),
+            tool("tool-1", "rg needle")
+        );
         let (o2, t2) = claude_incremental_extract(Some((o1, &t1)), &f2);
         let (_, cold) = claude_incremental_extract(None, &f2);
         assert_eq!(t2, cold, "warm append must byte-match cold parse");
@@ -21169,11 +21336,7 @@ struct SessionIndexPassStats {
     count_ms: u128,
 }
 
-fn format_session_index_scan(
-    bucket: &str,
-    stats: SessionIndexPassStats,
-    total_ms: u128,
-) -> String {
+fn format_session_index_scan(bucket: &str, stats: SessionIndexPassStats, total_ms: u128) -> String {
     format!(
         "op=scan bucket={} files={} indexed={} skipped={} rows={} indexed_bytes={} \
          intent_descriptions={} intent_bytes={} forced={} open_ms={} discover_ms={} \
@@ -21227,15 +21390,7 @@ fn format_search_index_query(
     format!(
         "op=query chars={} facets={} hits={} open_ms={} query_ms={} enrich_ms={} \
          serialize_ms={} body_bytes={} ms={}",
-        chars,
-        facets,
-        hits,
-        open_ms,
-        query_ms,
-        enrich_ms,
-        serialize_ms,
-        body_bytes,
-        total_ms
+        chars, facets, hits, open_ms, query_ms, enrich_ms, serialize_ms, body_bytes, total_ms
     )
 }
 
@@ -21380,8 +21535,8 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
             continue;
         }
         let gate_started = std::time::Instant::now();
-        let needs_index = forced
-            || search_index::needs_index(&conn, &path_str, mtime, size).unwrap_or(true);
+        let needs_index =
+            forced || search_index::needs_index(&conn, &path_str, mtime, size).unwrap_or(true);
         gate_elapsed += gate_started.elapsed();
         if !needs_index {
             stats.skipped += 1;
@@ -21486,8 +21641,8 @@ fn run_codex_search_index_pass_filtered<R: tauri::Runtime>(
             continue;
         }
         let gate_started = std::time::Instant::now();
-        let needs_index = forced
-            || search_index::needs_index(&conn, &path_str, mtime, size).unwrap_or(true);
+        let needs_index =
+            forced || search_index::needs_index(&conn, &path_str, mtime, size).unwrap_or(true);
         gate_elapsed += gate_started.elapsed();
         if !needs_index {
             stats.skipped += 1;
@@ -21673,10 +21828,7 @@ fn run_commit_index_pass<R: tauri::Runtime>(
             let subject = body.lines().next().unwrap_or("").to_string();
             let key = format!("commit:{}", sha);
             let short: String = sha.chars().take(9).collect();
-            let (patch, elided, dropped) = patches
-                .get(sha.as_str())
-                .cloned()
-                .unwrap_or_default();
+            let (patch, elided, dropped) = patches.get(sha.as_str()).cloned().unwrap_or_default();
             if elided > 0 || dropped > 0 {
                 append_bram_trace_line(
                     app,
@@ -21911,7 +22063,10 @@ fn run_issue_index_pass<R: tauri::Runtime>(
                 append_bram_trace_line(
                     app,
                     "search-index",
-                    &format!("op=issues-list-rebuild-error detail={}", e.replace('\n', " ")),
+                    &format!(
+                        "op=issues-list-rebuild-error detail={}",
+                        e.replace('\n', " ")
+                    ),
                 );
                 set_issues_list_stale(&conn, true);
             }
@@ -21928,8 +22083,7 @@ fn run_issue_index_pass<R: tauri::Runtime>(
 // process. recent_worklist_history_groups() reads every history file, so we
 // skip the whole rebuild when nothing changed (history only moves on worklist
 // commits/drops). -1 = never indexed this process (forces the first pass).
-static HISTORY_LAST_MAXMTIME: std::sync::atomic::AtomicI64 =
-    std::sync::atomic::AtomicI64::new(-1);
+static HISTORY_LAST_MAXMTIME: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
 
 /// Shape stamp for the serialized group carried in each history row's `extra`.
 ///
@@ -22019,7 +22173,8 @@ fn run_history_index_pass<R: tauri::Runtime>(
             // Search expander renders it directly (no recency-limited re-fetch).
             extra: serde_json::to_string(&g).unwrap_or_default(),
         };
-        search_index::index_doc(&conn, &row, token, HISTORY_GROUP_SCHEMA).map_err(|e| e.to_string())?;
+        search_index::index_doc(&conn, &row, token, HISTORY_GROUP_SCHEMA)
+            .map_err(|e| e.to_string())?;
         indexed += 1;
     }
     HISTORY_LAST_MAXMTIME.store(newest, std::sync::atomic::Ordering::Relaxed);
@@ -22229,15 +22384,15 @@ enum IndexRunDisplay {
     QuietUnlessAdded,
 }
 
-fn live_index_bucket_names(
-    buckets: &[IndexBucket],
-    display: IndexRunDisplay,
-) -> Vec<String> {
+fn live_index_bucket_names(buckets: &[IndexBucket], display: IndexRunDisplay) -> Vec<String> {
     if display != IndexRunDisplay::LiveLocal {
         return Vec::new();
     }
     let mut names = Vec::new();
-    for bucket in buckets.iter().filter(|bucket| **bucket != IndexBucket::Issues) {
+    for bucket in buckets
+        .iter()
+        .filter(|bucket| **bucket != IndexBucket::Issues)
+    {
         let name = bucket.status_name().to_string();
         if !names.contains(&name) {
             names.push(name);
@@ -22258,11 +22413,7 @@ fn pending_search_intent_refresh() -> &'static Mutex<PendingSearchIntentRefresh>
     CELL.get_or_init(|| Mutex::new(PendingSearchIntentRefresh::default()))
 }
 
-fn queue_search_intent_refresh(
-    tool_ids: &[String],
-    path_hint: Option<String>,
-    all_sessions: bool,
-) {
+fn queue_search_intent_refresh(tool_ids: &[String], path_hint: Option<String>, all_sessions: bool) {
     if let Ok(mut pending) = pending_search_intent_refresh().lock() {
         pending.tool_ids.extend(tool_ids.iter().cloned());
         if let Some(path) = path_hint.filter(|path| !path.is_empty()) {
@@ -22618,20 +22769,17 @@ mod index_run_display_tests {
 
     #[test]
     fn startup_and_periodic_runs_do_not_start_a_live_indicator() {
-        assert!(live_index_bucket_names(
-            &[IndexBucket::Issues],
-            IndexRunDisplay::QuietUnlessAdded,
-        )
-        .is_empty());
+        assert!(
+            live_index_bucket_names(&[IndexBucket::Issues], IndexRunDisplay::QuietUnlessAdded,)
+                .is_empty()
+        );
     }
 
     #[test]
     fn remote_issues_are_not_presented_as_event_triggered_local_work() {
-        assert!(live_index_bucket_names(
-            &[IndexBucket::Issues],
-            IndexRunDisplay::LiveLocal,
-        )
-        .is_empty());
+        assert!(
+            live_index_bucket_names(&[IndexBucket::Issues], IndexRunDisplay::LiveLocal,).is_empty()
+        );
     }
 }
 
@@ -25518,7 +25666,14 @@ fn st_tool_summary(name: &str, input: &serde_json::Value) -> String {
         // name (→ undescribed, the safe outcome).
         _ => {
             for k in &[
-                "query", "url", "prompt", "input", "text", "path", "file_path", "pattern",
+                "query",
+                "url",
+                "prompt",
+                "input",
+                "text",
+                "path",
+                "file_path",
+                "pattern",
                 "component",
             ] {
                 let v = get_str(k);
@@ -25748,8 +25903,7 @@ fn st_codex_js_object_end(script: &str, start: usize) -> Option<usize> {
             }
             b'/' if bytes.get(index + 1) == Some(&b'*') => {
                 index += 2;
-                while index + 1 < bytes.len()
-                    && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
+                while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
                 {
                     index += 1;
                 }
@@ -25795,17 +25949,13 @@ fn st_codex_js_object_string_field(object: &str, key: &str) -> Option<String> {
                     }
                     if bytes.get(colon) == Some(&b':') && candidate == key {
                         let mut value_start = colon + 1;
-                        while bytes
-                            .get(value_start)
-                            .is_some_and(u8::is_ascii_whitespace)
-                        {
+                        while bytes.get(value_start).is_some_and(u8::is_ascii_whitespace) {
                             value_start += 1;
                         }
                         if bytes.get(value_start) == Some(&b'`') {
                             return None;
                         }
-                        return st_codex_js_string_at(object, value_start)
-                            .map(|(value, _)| value);
+                        return st_codex_js_string_at(object, value_start).map(|(value, _)| value);
                     }
                 }
                 index = end;
@@ -25820,8 +25970,7 @@ fn st_codex_js_object_string_field(object: &str, key: &str) -> Option<String> {
             }
             b'/' if bytes.get(index + 1) == Some(&b'*') => {
                 index += 2;
-                while index + 1 < bytes.len()
-                    && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
+                while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
                 {
                     index += 1;
                 }
@@ -25849,17 +25998,13 @@ fn st_codex_js_object_string_field(object: &str, key: &str) -> Option<String> {
                 }
                 if bytes.get(colon) == Some(&b':') && candidate == key {
                     let mut value_start = colon + 1;
-                    while bytes
-                        .get(value_start)
-                        .is_some_and(u8::is_ascii_whitespace)
-                    {
+                    while bytes.get(value_start).is_some_and(u8::is_ascii_whitespace) {
                         value_start += 1;
                     }
                     if bytes.get(value_start) == Some(&b'`') {
                         return None;
                     }
-                    return st_codex_js_string_at(object, value_start)
-                        .map(|(value, _)| value);
+                    return st_codex_js_string_at(object, value_start).map(|(value, _)| value);
                 }
                 continue;
             }
@@ -25901,8 +26046,7 @@ fn st_codex_exec_cmds(input: &str) -> Vec<String> {
             }
             b'/' if bytes.get(index + 1) == Some(&b'*') => {
                 index += 2;
-                while index + 1 < bytes.len()
-                    && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
+                while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
                 {
                     index += 1;
                 }
@@ -25927,10 +26071,7 @@ fn st_codex_exec_cmds(input: &str) -> Vec<String> {
             continue;
         };
         let mut object_start = index + marker.len();
-        while bytes
-            .get(object_start)
-            .is_some_and(u8::is_ascii_whitespace)
-        {
+        while bytes.get(object_start).is_some_and(u8::is_ascii_whitespace) {
             object_start += 1;
         }
         if bytes.get(object_start) != Some(&b'(') {
@@ -25938,10 +26079,7 @@ fn st_codex_exec_cmds(input: &str) -> Vec<String> {
             continue;
         }
         object_start += 1;
-        while bytes
-            .get(object_start)
-            .is_some_and(u8::is_ascii_whitespace)
-        {
+        while bytes.get(object_start).is_some_and(u8::is_ascii_whitespace) {
             object_start += 1;
         }
         let Some(object_end) = st_codex_js_object_end(input, object_start) else {
@@ -26510,9 +26648,9 @@ fn st_tool_command_display(name: &str, input: &serde_json::Value) -> String {
                 }
                 let head = q.trim_start().to_ascii_uppercase();
                 let looks_sql = [
-                    "SELECT", "WITH", "CREATE", "INSERT", "UPDATE", "DELETE", "ALTER",
-                    "DROP", "TRUNCATE", "GRANT", "REVOKE", "EXPLAIN", "VACUUM",
-                    "ANALYZE", "BEGIN", "COMMENT", "DO ", "SET ",
+                    "SELECT", "WITH", "CREATE", "INSERT", "UPDATE", "DELETE", "ALTER", "DROP",
+                    "TRUNCATE", "GRANT", "REVOKE", "EXPLAIN", "VACUUM", "ANALYZE", "BEGIN",
+                    "COMMENT", "DO ", "SET ",
                 ]
                 .iter()
                 .any(|k| head.starts_with(k));
@@ -26556,10 +26694,7 @@ mod tool_command_markdown_tests {
             "message": { "content": [ { "type": "text", "text": "\u{1b}hello" } ] }
         });
         let turns = st_parse_lines_to_turns(&rec.to_string());
-        assert_eq!(
-            turns[0]["entries"][0]["text"].as_str().unwrap(),
-            "hello"
-        );
+        assert_eq!(turns[0]["entries"][0]["text"].as_str().unwrap(), "hello");
 
         // Only-controls text yields no text entry (and thus no turn).
         let rec = json!({
@@ -26873,7 +27008,10 @@ mod codex_unified_exec_tests {
             Some("7".to_string())
         );
         assert_eq!(st_codex_running_cell_id("cell ID 7"), None);
-        assert_eq!(st_codex_running_cell_id("Script running with cell ID "), None);
+        assert_eq!(
+            st_codex_running_cell_id("Script running with cell ID "),
+            None
+        );
     }
 
     #[test]
@@ -26904,9 +27042,7 @@ mod codex_unified_exec_tests {
                 "arguments": "{\"cell_id\":\"7\",\"yield_time_ms\":10000}"
             }
         });
-        let turns = st_parse_lines_to_turns(&format!(
-            "{exec_call}\n{exec_output}\n{wait_call}"
-        ));
+        let turns = st_parse_lines_to_turns(&format!("{exec_call}\n{exec_output}\n{wait_call}"));
         let entry = turns
             .iter()
             .flat_map(|turn| {
@@ -26952,7 +27088,10 @@ mod codex_unified_exec_tests {
         assert_eq!(st_codex_tool_summary(&call), "app/Main.xmlui patch");
         let display = st_codex_tool_command_display(&call);
         assert!(display.contains("app/Main.xmlui"), "display: {display}");
-        assert!(display.contains("-old") && display.contains("+new"), "display: {display}");
+        assert!(
+            display.contains("-old") && display.contains("+new"),
+            "display: {display}"
+        );
     }
 
     #[test]
@@ -27794,12 +27933,13 @@ fn st_notification_turn(text_joined: &str) -> Option<serde_json::Value> {
 // heredoc's prose lines are not commands).
 fn st_bash_command_words(cmd: &str) -> String {
     // Prefixes skipped to reach the real command word.
-    const WRAPPERS: [&str; 8] = ["sudo", "env", "nohup", "time", "command", "do", "then", "else"];
+    const WRAPPERS: [&str; 8] = [
+        "sudo", "env", "nohup", "time", "command", "do", "then", "else",
+    ];
     // Segment openers whose following tokens are variables/conditions,
     // not commands — the whole segment is dropped.
     const DROPPERS: [&str; 12] = [
-        "cd", "export", "set", "exit", "for", "while", "until", "if", "fi", "done", "esac",
-        "case",
+        "cd", "export", "set", "exit", "for", "while", "until", "if", "fi", "done", "esac", "case",
     ];
     // Quote-aware segmentation: split on | ; && || and newlines only
     // OUTSIDE single/double quotes, so a pipe inside a grep pattern
@@ -27862,7 +28002,11 @@ fn st_bash_command_words(cmd: &str) -> String {
                 .unwrap_or("")
                 .trim_matches(['\'', '"'])
                 .to_string();
-            if !marker.is_empty() && marker.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            if !marker.is_empty()
+                && marker
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
                 heredoc_end = Some(marker);
             }
         }
@@ -27884,8 +28028,7 @@ fn st_bash_command_words(cmd: &str) -> String {
                 || WRAPPERS.contains(&t)
                 || (t.contains('=')
                     && t.split('=').next().is_some_and(|k| {
-                        !k.is_empty()
-                            && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                        !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
                     }))
             {
                 tokens.next();
@@ -28266,10 +28409,8 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
                             cell_id.and_then(|cell| codex_background_commands.get(cell))
                         {
                             command_display = command.clone();
-                            description = format!(
-                                "This check is {}; original command shown below.",
-                                summary
-                            );
+                            description =
+                                format!("This check is {}; original command shown below.", summary);
                         } else {
                             // Incremental projection can begin after the exec
                             // that created the cell. Keep the row informative
@@ -28285,9 +28426,7 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
                     // exec_command(input.cmd) or unified exec(input=JS).
                     let search_queries = st_codex_search_queries(p);
                     let (proj_name, name_detail) = match search_queries {
-                        Some(queries) => {
-                            ("Search".to_string(), st_search_name_detail(&queries))
-                        }
+                        Some(queries) => ("Search".to_string(), st_search_name_detail(&queries)),
                         None => (name.clone(), st_codex_name_detail(p)),
                     };
                     let entry = serde_json::json!({
@@ -28333,8 +28472,7 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
                                                 .get("name")
                                                 .and_then(|v| v.as_str())
                                                 .unwrap_or("");
-                                            if entry_name == "exec"
-                                                || entry_name == "exec_command"
+                                            if entry_name == "exec" || entry_name == "exec_command"
                                             {
                                                 let command = entry_obj
                                                     .get("commandDisplay")
@@ -28562,7 +28700,9 @@ fn st_subagent_files(session_path: &Path) -> Vec<SubagentFile> {
         if depth > 3 {
             return;
         }
-        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
         for entry in rd.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             let p = entry.path();
@@ -29841,24 +29981,21 @@ mod send_ledger_resolve_delivery_tests {
         // The #307 harmful variant: current (post-switch) session shows no
         // delivery, inject session does — must resolve landed, flagged as
         // an inject-session land, never fall through to the strand path.
-        let (delivered, in_inject) = send_ledger_resolve_delivery(
-            "probe for 307",
-            (UNRELATED, 0),
-            Some((DELIVERING, 0)),
-        );
+        let (delivered, in_inject) =
+            send_ledger_resolve_delivery("probe for 307", (UNRELATED, 0), Some((DELIVERING, 0)));
         assert_eq!(delivered, Some(false));
         assert!(in_inject);
     }
 
     #[test]
     fn current_session_wins_and_is_not_flagged_as_inject_land() {
-        let (delivered, in_inject) = send_ledger_resolve_delivery(
-            "probe for 307",
-            (DELIVERING, 0),
-            Some((DELIVERING, 0)),
-        );
+        let (delivered, in_inject) =
+            send_ledger_resolve_delivery("probe for 307", (DELIVERING, 0), Some((DELIVERING, 0)));
         assert_eq!(delivered, Some(false));
-        assert!(!in_inject, "a current-session land keeps cross-session-land semantics");
+        assert!(
+            !in_inject,
+            "a current-session land keeps cross-session-land semantics"
+        );
     }
 
     #[test]
@@ -29871,8 +30008,7 @@ mod send_ledger_resolve_delivery_tests {
 
     #[test]
     fn no_switch_means_no_second_candidate() {
-        let (delivered, _) =
-            send_ledger_resolve_delivery("probe for 307", (UNRELATED, 0), None);
+        let (delivered, _) = send_ledger_resolve_delivery("probe for 307", (UNRELATED, 0), None);
         assert_eq!(delivered, None);
     }
 }
@@ -29888,9 +30024,15 @@ mod send_ledger_find_delivery_tests {
             "{\"type\":\"user\",\"text\":\"hello world probe\"}\n",
         );
         // The assistant quote alone does not deliver; the user line does.
-        assert_eq!(send_ledger_find_delivery(text, 0, "hello world probe"), Some(false));
+        assert_eq!(
+            send_ledger_find_delivery(text, 0, "hello world probe"),
+            Some(false)
+        );
         let quotes_only = "{\"type\":\"assistant\",\"text\":\"hello world probe\"}\n";
-        assert_eq!(send_ledger_find_delivery(quotes_only, 0, "hello world probe"), None);
+        assert_eq!(
+            send_ledger_find_delivery(quotes_only, 0, "hello world probe"),
+            None
+        );
     }
 
     #[test]
@@ -30147,8 +30289,7 @@ fn turn_state_menu_present() -> bool {
 // stranded with `menu_at_inject=true`). Held intents stay in the
 // pty-intent queue file; the pty-throughput ticker flushes them when the
 // menu clears or the bounded hold expires.
-static SEND_GATE_HELD_SINCE_MS: std::sync::atomic::AtomicI64 =
-    std::sync::atomic::AtomicI64::new(0);
+static SEND_GATE_HELD_SINCE_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 // Diagnostic only — never operational. Release is evidence-based (the
 // menu clears / the user answers it); a hold this old emits a one-shot
 // `op=hold-stale` warning (trace + strand-forensics) but keeps holding.
@@ -30337,10 +30478,7 @@ fn term_modal_apply(bits: u32, buf: &[u8]) -> (u32, bool) {
         if &buf[i..i + 2] == b"\x1b[" {
             let rest = &buf[i + 2..];
             if rest.first() == Some(&b'>') {
-                let digits: usize = rest[1..]
-                    .iter()
-                    .take_while(|c| c.is_ascii_digit())
-                    .count();
+                let digits: usize = rest[1..].iter().take_while(|c| c.is_ascii_digit()).count();
                 if digits > 0 && rest.get(1 + digits) == Some(&b'u') {
                     kitty_last = i as i64;
                     kitty_on = true;
@@ -30401,7 +30539,11 @@ fn term_modal_scan<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
                 "op={} bits={:#07b} reason={}",
                 if is { "enter" } else { "exit" },
                 new,
-                if alt_exit { "alt-screen-exit" } else { "mode-bytes" }
+                if alt_exit {
+                    "alt-screen-exit"
+                } else {
+                    "mode-bytes"
+                }
             ),
         );
     }
@@ -30416,7 +30558,11 @@ fn term_modal_trace_at_inject<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) {
     let line = format!("op=term-modal-at-inject id={} bits={:#07b}", id, bits);
     append_strand_forensics_line(app, &line);
     if bram_trace_enabled() {
-        append_bram_trace_line(app, "term-modal", &format!("op=at-inject id={} bits={:#07b}", id, bits));
+        append_bram_trace_line(
+            app,
+            "term-modal",
+            &format!("op=at-inject id={} bits={:#07b}", id, bits),
+        );
     }
 }
 
@@ -30552,7 +30698,10 @@ mod project_managed_tests {
         std::fs::create_dir_all(auth.parent().unwrap()).unwrap();
         std::fs::write(&auth, "{}\n").unwrap();
         assert!(!has_project_settings(&d), "no settings file was written");
-        assert!(project_is_managed(&d), "Setup's marker must release the hold");
+        assert!(
+            project_is_managed(&d),
+            "Setup's marker must release the hold"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -30577,9 +30726,9 @@ mod shell_prompt_shape_tests {
     #[test]
     fn bash_and_zsh_prompts_match() {
         assert!(line_is_shell_prompt("bash-3.2$"));
-        assert!(line_is_shell_prompt(
-            last_nonempty_trimmed_line("Resume this session with:\nclaude --resume \"prep 5.3\"\nbash-3.2$ ")
-        ));
+        assert!(line_is_shell_prompt(last_nonempty_trimmed_line(
+            "Resume this session with:\nclaude --resume \"prep 5.3\"\nbash-3.2$ "
+        )));
         assert!(line_is_shell_prompt("host%"));
         assert!(line_is_shell_prompt("root#"));
     }
@@ -30614,16 +30763,16 @@ mod shell_prompt_shape_tests {
         // terminator — so before the PS-prefix shape the gate could only
         // ever time out on Windows, and the switch path typed on a timer.
         assert!(line_is_shell_prompt("PS C:\\Users\\jon\\bram>"));
-        assert!(line_is_shell_prompt(
-            last_nonempty_trimmed_line(
-                "Resume this session with:\nclaude --resume 059b5495\nPS C:\\Users\\jon\\bram> "
-            )
-        ));
+        assert!(line_is_shell_prompt(last_nonempty_trimmed_line(
+            "Resume this session with:\nclaude --resume 059b5495\nPS C:\\Users\\jon\\bram> "
+        )));
         // A quote-continuation is a bare '>' with no PS prefix — the case
         // the exclusion protects — and stays excluded.
         assert!(!line_is_shell_prompt(">"));
         // Ordinary prose mentioning PS mid-line does not end in '>'.
-        assert!(!line_is_shell_prompt("PS C:\\Users\\jon\\bram> git status shows"));
+        assert!(!line_is_shell_prompt(
+            "PS C:\\Users\\jon\\bram> git status shows"
+        ));
     }
 
     #[test]
@@ -30631,14 +30780,19 @@ mod shell_prompt_shape_tests {
         // Claude's status line and composer chevron must never read as a
         // shell prompt — the gate polls while the outgoing CLI may still
         // be repainting.
-        assert!(!line_is_shell_prompt("⏵⏵ auto mode on (shift+tab to cycle) · esc to interr…"));
+        assert!(!line_is_shell_prompt(
+            "⏵⏵ auto mode on (shift+tab to cycle) · esc to interr…"
+        ));
         assert!(!line_is_shell_prompt("❯"));
         assert!(!line_is_shell_prompt_or_continuation("❯"));
     }
 
     #[test]
     fn last_line_skips_trailing_blank_lines() {
-        assert_eq!(last_nonempty_trimmed_line("bash-3.2$ \r\n\r\n"), "bash-3.2$");
+        assert_eq!(
+            last_nonempty_trimmed_line("bash-3.2$ \r\n\r\n"),
+            "bash-3.2$"
+        );
         assert_eq!(last_nonempty_trimmed_line(""), "");
     }
 }
@@ -30662,7 +30816,9 @@ fn maybe_submit_nudge<R: tauri::Runtime>(app: &AppHandle<R>) {
     let candidate: Option<(String, i64, String)> = send_ledger_cell().lock().ok().and_then(|l| {
         l.iter()
             .find(|e| {
-                e.state == "injected" && !e.nudged && now - e.injected_at_ms >= SUBMIT_NUDGE_AFTER_MS
+                e.state == "injected"
+                    && !e.nudged
+                    && now - e.injected_at_ms >= SUBMIT_NUDGE_AFTER_MS
             })
             .map(|e| (e.id.clone(), e.injected_at_ms, e.preview.clone()))
     });
@@ -30775,9 +30931,19 @@ mod would_notice_decision_tests {
 
     #[test]
     fn would_notice_fires_when_neither_echo_nor_landing_is_present() {
-        assert!(would_notice_decision(WOULD_NOTICE_MIN_MS, false, false, false));
+        assert!(would_notice_decision(
+            WOULD_NOTICE_MIN_MS,
+            false,
+            false,
+            false
+        ));
         assert!(would_notice_decision(3_000, false, false, false));
-        assert!(would_notice_decision(WOULD_NOTICE_MAX_MS, false, false, false));
+        assert!(would_notice_decision(
+            WOULD_NOTICE_MAX_MS,
+            false,
+            false,
+            false
+        ));
     }
 
     #[test]
@@ -30827,27 +30993,26 @@ fn maybe_would_notice<R: tauri::Runtime>(app: &AppHandle<R>) {
     // the tail read and the trace happen outside the ledger lock.
     // Tuple fields: (id, injected_at_ms, preview, menu_at_inject, resolved,
     // latched) — destructured under the same names in the loop below.
-    let candidates: Vec<(String, i64, String, bool, bool, bool)> =
-        match send_ledger_cell().lock() {
-            Ok(ledger) => ledger
-                .iter()
-                .filter(|e| {
-                    let elapsed = now - e.injected_at_ms;
-                    elapsed >= WOULD_NOTICE_MIN_MS && elapsed <= WOULD_NOTICE_MAX_MS
-                })
-                .map(|e| {
-                    (
-                        e.id.clone(),
-                        e.injected_at_ms,
-                        e.preview.clone(),
-                        e.menu_at_inject,
-                        e.state != "injected",
-                        e.would_notice_at_ms != 0,
-                    )
-                })
-                .collect(),
-            Err(_) => return,
-        };
+    let candidates: Vec<(String, i64, String, bool, bool, bool)> = match send_ledger_cell().lock() {
+        Ok(ledger) => ledger
+            .iter()
+            .filter(|e| {
+                let elapsed = now - e.injected_at_ms;
+                elapsed >= WOULD_NOTICE_MIN_MS && elapsed <= WOULD_NOTICE_MAX_MS
+            })
+            .map(|e| {
+                (
+                    e.id.clone(),
+                    e.injected_at_ms,
+                    e.preview.clone(),
+                    e.menu_at_inject,
+                    e.state != "injected",
+                    e.would_notice_at_ms != 0,
+                )
+            })
+            .collect(),
+        Err(_) => return,
+    };
     if candidates.is_empty() {
         return;
     }
@@ -31081,9 +31246,11 @@ mod restore_batch_tests {
         // The #306 live case: N=2, payload_in_tail=false on both — the
         // old code wrote two Ctrl-C (Claude Code's exit gesture) and the
         // iframe coalesced the two emits, dropping the first entry's text.
-        let plan =
-            restore_batch_plan(&[r("a", "first message", false, false), r("b", "/artifacts", false, false)])
-                .expect("plan");
+        let plan = restore_batch_plan(&[
+            r("a", "first message", false, false),
+            r("b", "/artifacts", false, false),
+        ])
+        .expect("plan");
         assert_eq!(plan.text, "first message\n\n/artifacts");
         assert!(!plan.clear_input, "swallowed strands have nothing to clear");
         assert!(!plan.aborted);
@@ -31103,7 +31270,11 @@ mod restore_batch_tests {
 
     #[test]
     fn aborted_only_when_every_entry_is_aborted() {
-        assert!(restore_batch_plan(&[r("a", "x", true, true)]).unwrap().aborted);
+        assert!(
+            restore_batch_plan(&[r("a", "x", true, true)])
+                .unwrap()
+                .aborted
+        );
         assert!(
             !restore_batch_plan(&[r("a", "x", true, true), r("b", "y", false, false)])
                 .unwrap()
@@ -31237,11 +31408,8 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
             } else {
                 None
             };
-            let (delivered, landed_in_inject_session) = send_ledger_resolve_delivery(
-                &needle,
-                (search_text, rel_offset),
-                inject_candidate,
-            );
+            let (delivered, landed_in_inject_session) =
+                send_ledger_resolve_delivery(&needle, (search_text, rel_offset), inject_candidate);
             if let Some(via_queue) = delivered {
                 entry.state = "landed";
                 entry.resolved_at_ms = now;
@@ -31307,13 +31475,21 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                         transitions.push(format!(
                             "op=inject-session-land id={} session={}",
                             entry.id,
-                            entry.session_path_at_inject.rsplit('/').next().unwrap_or(""),
+                            entry
+                                .session_path_at_inject
+                                .rsplit('/')
+                                .next()
+                                .unwrap_or(""),
                         ));
                     } else {
                         transitions.push(format!(
                             "op=cross-session-land id={} old={} new={}",
                             entry.id,
-                            entry.session_path_at_inject.rsplit('/').next().unwrap_or(""),
+                            entry
+                                .session_path_at_inject
+                                .rsplit('/')
+                                .next()
+                                .unwrap_or(""),
                             current_session_path.rsplit('/').next().unwrap_or(""),
                         ));
                     }
@@ -31349,8 +31525,7 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                 };
                 {
                     let tail = pty_tail_snippet(400);
-                    let last_out =
-                        LAST_PTY_OUTPUT_MS.load(std::sync::atomic::Ordering::Relaxed);
+                    let last_out = LAST_PTY_OUTPUT_MS.load(std::sync::atomic::Ordering::Relaxed);
                     let silence_ms = if last_out > 0 { now - last_out } else { -1 };
                     forensics.push(format!(
                         "op=stranded id={} cause={} elapsed_ms={} payload_in_tail={} silence_ms={} menu_now={} menu_at_inject={} ms_since_pty_out_at_inject={} provider={} stale_input={} via_queue={} retried={} cross_session={} tail=\"{}\"",
@@ -31383,7 +31558,11 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                     transitions.push(format!(
                         "op=cross-session-strand id={} reason=not-found old={} new={}",
                         entry.id,
-                        entry.session_path_at_inject.rsplit('/').next().unwrap_or(""),
+                        entry
+                            .session_path_at_inject
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or(""),
                         current_session_path.rsplit('/').next().unwrap_or(""),
                     ));
                 }
@@ -32058,10 +32237,10 @@ impl DescribeCache {
         // for this project's dedicated cache instead of per past model.
         cache.invalidated_rows = conn
             .execute(
-            "DELETE FROM tool_descriptions WHERE model <> ?1 OR prompt_schema_version <> ?2",
-            rusqlite::params![model, i64::from(DESCRIBE_PROMPT_SCHEMA_VERSION)],
-        )
-        .map_err(|e| format!("prune describe cache namespaces: {}", e))?;
+                "DELETE FROM tool_descriptions WHERE model <> ?1 OR prompt_schema_version <> ?2",
+                rusqlite::params![model, i64::from(DESCRIBE_PROMPT_SCHEMA_VERSION)],
+            )
+            .map_err(|e| format!("prune describe cache namespaces: {}", e))?;
         let mut stmt = conn
             .prepare(
                 "SELECT id, request_key, description, touched_at_ms \
@@ -32447,7 +32626,10 @@ fn cached_session_intent_text<R: tauri::Runtime>(
         .and_then(|guard| {
             guard.as_ref().map(|cache| {
                 session_intent_text(tool_ids, |id| {
-                    cache.by_id.get(id).map(|(_, description)| description.clone())
+                    cache
+                        .by_id
+                        .get(id)
+                        .map(|(_, description)| description.clone())
                 })
             })
         })
@@ -32478,8 +32660,7 @@ fn choose_answer_binding_id(
         Some(id) => {
             let tool_matches = pending_call_signature
                 .map(|s| {
-                    s.starts_with(displayed_tool)
-                        && s[displayed_tool.len()..].starts_with('(')
+                    s.starts_with(displayed_tool) && s[displayed_tool.len()..].starts_with('(')
                 })
                 .unwrap_or(false);
             if tool_matches {
@@ -32659,9 +32840,19 @@ mod pending_menu_answer_tests {
             Some("Bash(x)"),
             1
         ));
-        assert!(!pending_answer_matches(&pending("Bash", None, 0), "Edit", None, 1));
+        assert!(!pending_answer_matches(
+            &pending("Bash", None, 0),
+            "Edit",
+            None,
+            1
+        ));
         // Empty tool and no shared signature never binds.
-        assert!(!pending_answer_matches(&pending("", None, 0), "Bash", None, 1));
+        assert!(!pending_answer_matches(
+            &pending("", None, 0),
+            "Bash",
+            None,
+            1
+        ));
         // TTL.
         assert!(!pending_answer_matches(
             &pending("Bash", None, 0),
@@ -32808,11 +32999,8 @@ fn record_hook_menu_answer<R: tauri::Runtime>(app: &AppHandle<R>, input: &str) {
         let (marked, depth, selectable_depth) = menu_hook_claims_cell()
             .lock()
             .map(|mut claims| {
-                let marked = mark_hook_claim_answered(
-                    &mut claims,
-                    &displayed_key,
-                    Some(label.as_str()),
-                );
+                let marked =
+                    mark_hook_claim_answered(&mut claims, &displayed_key, Some(label.as_str()));
                 let selectable_depth = claims.iter().filter(|claim| !claim.answered).count();
                 (marked, claims.len(), selectable_depth)
             })
@@ -32891,10 +33079,8 @@ mod menu_answer_overlay_tests {
                 {"kind": "text", "id": "toolu_yes", "text": "not a tool"},
             ]
         })];
-        let answers = std::collections::HashMap::from([(
-            "toolu_yes".to_string(),
-            "Yes".to_string(),
-        )]);
+        let answers =
+            std::collections::HashMap::from([("toolu_yes".to_string(), "Yes".to_string())]);
         apply_menu_answer_overlay(&mut turns, &answers);
         let entries = turns[0]["entries"].as_array().unwrap();
         assert_eq!(entries[0]["menuAnswer"], "Yes");
@@ -33436,7 +33622,6 @@ fn claude_hook_settings_path(proj: &Path) -> PathBuf {
 // self-overwrite the source.
 const ENHANCE_SOURCE_BUNDLE_REL: &str = "app/__shell/conventions.md";
 
-
 fn settings_event_has_marker(value: &serde_json::Value, event: &str, marker: &str) -> bool {
     value
         .get("hooks")
@@ -33562,10 +33747,7 @@ fn guard_matcher_shape_current(value: &serde_json::Value, expected_command: &str
     seen.len() == CLAUDE_GUARD_MATCHERS.len()
 }
 
-fn settings_has_worklist_guard_hook(
-    settings_path: &Path,
-    expected_command: Option<&str>,
-) -> bool {
+fn settings_has_worklist_guard_hook(settings_path: &Path, expected_command: Option<&str>) -> bool {
     let content = match std::fs::read_to_string(settings_path) {
         Ok(s) => s,
         Err(_) => return false,
@@ -33758,8 +33940,9 @@ fn settings_has_permission_menu_hook(
         Ok(v) => v,
         Err(_) => return false,
     };
-    let event_has_menu_hook =
-        |event: &str| -> bool { settings_event_hook_current(&value, event, marker, expected_command) };
+    let event_has_menu_hook = |event: &str| -> bool {
+        settings_event_hook_current(&value, event, marker, expected_command)
+    };
     event_has_menu_hook("PermissionRequest")
         && event_has_menu_hook("PostToolUse")
         && event_has_menu_hook("PermissionDenied")
@@ -34175,8 +34358,7 @@ fn merge_guard_menu_hook_into_settings(
         ("PermissionDenied", ".*"),
         ("PreToolUse", "AskUserQuestion"),
     ] {
-        changed |=
-            merge_command_hook_into_event(hooks_obj, event, matcher, shadow_command, marker);
+        changed |= merge_command_hook_into_event(hooks_obj, event, matcher, shadow_command, marker);
     }
     if !changed {
         return Ok(false);
@@ -34224,8 +34406,7 @@ fn prune_pretooluse_hooks_containing(
             let Some(cmd) = h.get("command").and_then(|c| c.as_str()) else {
                 return true;
             };
-            let matches = cmd.contains(needle)
-                && unless.map_or(true, |keep| !cmd.contains(keep));
+            let matches = cmd.contains(needle) && unless.map_or(true, |keep| !cmd.contains(keep));
             !matches
         });
         if hs.len() != before {
@@ -34399,15 +34580,11 @@ mod guard_shadow_registration_tests {
             ));
         let seeded = serde_json::json!({ "hooks": hooks });
         let path = temp_settings("menu-prune", Some(&seeded.to_string()));
-        assert!(
-            prune_hook_commands_containing(&path, "permission-menu-hook.py", None).unwrap()
-        );
+        assert!(prune_hook_commands_containing(&path, "permission-menu-hook.py", None).unwrap());
         assert!(events_with_command(&path, MENU_PY).is_empty());
         assert_eq!(events_with_command(&path, SHADOW), vec!["PreToolUse"]);
         // Idempotent second run.
-        assert!(
-            !prune_hook_commands_containing(&path, "permission-menu-hook.py", None).unwrap()
-        );
+        assert!(!prune_hook_commands_containing(&path, "permission-menu-hook.py", None).unwrap());
     }
 }
 
@@ -35867,9 +36044,7 @@ fn install_codex_worklist_guard<R: tauri::Runtime>(
         // and surface the condition. run_enhance errors out on the Claude
         // side before reaching here, so this arm is defensive.
         None => {
-            skipped.push(
-                "bram-guard link not installed; Codex hook block removed".to_string(),
-            );
+            skipped.push("bram-guard link not installed; Codex hook block removed".to_string());
             strip_marker_block(
                 &cleaned,
                 ENHANCE_CODEX_TOML_MARKER_START,
@@ -36398,7 +36573,13 @@ fn write_inflight_claim_sentinel<R: tauri::Runtime>(
         let ids = ids.to_vec();
         let kind = kind.to_string();
         worklist_state_apply(app, "claim-write", move |conn| {
-            worklist_state::mirror_claim_write(conn, written_at_ms, &kind, &ids, "inflight-claim-sentinel")
+            worklist_state::mirror_claim_write(
+                conn,
+                written_at_ms,
+                &kind,
+                &ids,
+                "inflight-claim-sentinel",
+            )
         });
     }
     if bram_trace_enabled() {
@@ -36640,7 +36821,12 @@ fn shrink_inflight_claim_sentinel<R: tauri::Runtime>(
             let ids = claimed_ids.clone();
             let at_ms = unix_now_ms();
             worklist_state_apply(app, "claim-clear", move |conn| {
-                worklist_state::mirror_claim_clear(conn, &ids, at_ms, "inflight-claim-sentinel-shrink")
+                worklist_state::mirror_claim_clear(
+                    conn,
+                    &ids,
+                    at_ms,
+                    "inflight-claim-sentinel-shrink",
+                )
             });
         }
         if bram_trace_enabled() {
@@ -36678,7 +36864,13 @@ fn shrink_inflight_claim_sentinel<R: tauri::Runtime>(
         let remaining_ids = remaining.clone();
         let at_ms = unix_now_ms();
         worklist_state_apply(app, "claim-shrink", move |conn| {
-            worklist_state::mirror_claim_shrink(conn, &resolved, &remaining_ids, at_ms, "inflight-claim-sentinel-shrink")
+            worklist_state::mirror_claim_shrink(
+                conn,
+                &resolved,
+                &remaining_ids,
+                at_ms,
+                "inflight-claim-sentinel-shrink",
+            )
         });
     }
     if bram_trace_enabled() {
@@ -37034,7 +37226,10 @@ fn claude_jsonl_is_genuine_user_message(entry: &serde_json::Value) -> bool {
         Some(serde_json::Value::String(_)) => true,
         Some(serde_json::Value::Array(blocks)) => {
             let block_type = |b: &serde_json::Value| {
-                b.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string()
+                b.get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
             };
             let has_tool_result = blocks.iter().any(|b| block_type(b) == "tool_result");
             let has_text = blocks.iter().any(|b| block_type(b) == "text");
@@ -37283,7 +37478,6 @@ mod claude_jsonl_freshness_tests {
             "a prior turn's end_turn must not close the turn that follows it"
         );
     }
-
 
     #[test]
     fn end_is_stale_only_when_record_predates_turn() {
@@ -37663,11 +37857,7 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
                         &format!(
                             "op=would-end reason=user-after-assistant path={} \
                              stop_reason={} user_shape={} user_records={} gap_lines={}",
-                            basename,
-                            ev.stop_reason,
-                            ev.user_shape,
-                            ev.user_records,
-                            ev.gap_lines
+                            basename, ev.stop_reason, ev.user_shape, ev.user_records, ev.gap_lines
                         ),
                     );
                 }
@@ -38201,7 +38391,10 @@ fn resolve_worklist_item_draft(
         obj.insert("citations".to_string(), serde_json::Value::Array(cites));
         obj.remove("_citationsMissing");
     } else {
-        obj.insert("citations".to_string(), serde_json::Value::Array(Vec::new()));
+        obj.insert(
+            "citations".to_string(),
+            serde_json::Value::Array(Vec::new()),
+        );
         obj.insert(
             "_citationsMissing".to_string(),
             serde_json::Value::Bool(true),
@@ -39032,10 +39225,8 @@ fn agent_coordination_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_j
                             "seen": seen,
                         }));
                     } else {
-                        let current = codex_hook_block_current(
-                            &path,
-                            guard_link_if_installed().as_deref(),
-                        );
+                        let current =
+                            codex_hook_block_current(&path, guard_link_if_installed().as_deref());
                         rows.push(json!({
                             "signal": signal,
                             "level": if current { "ok" } else { "warn" },
@@ -39585,8 +39776,16 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .map(|v| {
-            let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("?").to_string();
-            let n = v.get("ids").and_then(|i| i.as_array()).map(|a| a.len()).unwrap_or(0);
+            let kind = v
+                .get("kind")
+                .and_then(|k| k.as_str())
+                .unwrap_or("?")
+                .to_string();
+            let n = v
+                .get("ids")
+                .and_then(|i| i.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
             let consumed = v.get("consumedAtMs").map(|c| !c.is_null()).unwrap_or(false);
             format!(
                 "{} ({} ids, {})",
@@ -39659,7 +39858,10 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
     // soak's dashboard, per state-mirror-divergence-tripwire.
     let ws_db_path = worklist_state_db_path(app);
     let ws_db_meta = ws_db_path.as_ref().and_then(|p| std::fs::metadata(p).ok());
-    let ws_db_size_kb = ws_db_meta.as_ref().map(|m| (m.len() + 1023) / 1024).unwrap_or(0);
+    let ws_db_size_kb = ws_db_meta
+        .as_ref()
+        .map(|m| (m.len() + 1023) / 1024)
+        .unwrap_or(0);
     let ws_db_path_tail = ws_db_path
         .as_ref()
         .and_then(|p| p.file_name())
@@ -40340,13 +40542,8 @@ mod pty_menu_tests {
             "Do you want to proceed?".to_string(),
         ];
 
-        let rescue = super::grid_rescue_menu(
-            &options,
-            false,
-            &above,
-            "Do you want to proceed?",
-            123,
-        );
+        let rescue =
+            super::grid_rescue_menu(&options, false, &above, "Do you want to proceed?", 123);
         assert_eq!(rescue.tool, "Bash");
         assert_eq!(
             rescue.text,
@@ -40433,10 +40630,7 @@ mod pty_menu_tests {
         );
         assert_eq!(menu.options[2].answer_keys.as_deref(), Some("\u{1b}"));
         assert!(super::menu_option_matches_input(&menu.options[0], "y"));
-        assert!(!super::menu_option_matches_input(
-            &menu.options[0],
-            "1\r"
-        ));
+        assert!(!super::menu_option_matches_input(&menu.options[0], "1\r"));
     }
 
     #[test]
@@ -40947,9 +41141,7 @@ mod pty_menu_tests {
 
     #[test]
     fn codex_cancel_after_a_current_turn_escape_is_accepted() {
-        assert!(codex_cancel_output_is_current(
-            true, 49_950, 40_000, 50_000
-        ));
+        assert!(codex_cancel_output_is_current(true, 49_950, 40_000, 50_000));
         assert!(!codex_cancel_output_is_current(
             false, 49_950, 40_000, 50_000
         ));
@@ -40967,9 +41159,9 @@ mod pty_menu_tests {
 mod turn_completion_tests {
     use super::{
         claude_jsonl_completion_decision, claude_jsonl_user_after_nonfinal_assistant,
-        codex_jsonl_completion_decision,
-        codex_killed_turn_suppresses_jsonl_working, codex_latest_user_message_ts_ms,
-        codex_session_has_real_user_activity, jsonl_completion_provider_for_path,
+        codex_jsonl_completion_decision, codex_killed_turn_suppresses_jsonl_working,
+        codex_latest_user_message_ts_ms, codex_session_has_real_user_activity,
+        jsonl_completion_provider_for_path,
     };
     use std::path::Path;
 
@@ -41538,10 +41730,7 @@ mod session_turn_tests {
     fn sanitize_pty_turn_payload_removes_terminal_controls() {
         let text = "hello\x1b[201~\rmalicious\x07 done";
 
-        assert_eq!(
-            sanitize_pty_turn_payload(text),
-            "hello[201~malicious done"
-        );
+        assert_eq!(sanitize_pty_turn_payload(text), "hello[201~malicious done");
     }
 
     #[test]
@@ -42237,9 +42426,9 @@ fn parse_worklist_authorization_payload(
         return Err("no valid worklist authorization items".to_string());
     }
     let commit_too = kind == "approved"
-        && items.iter().any(|item| {
-            item.get("gate").and_then(|v| v.as_str()) == Some("apply-and-commit")
-        });
+        && items
+            .iter()
+            .any(|item| item.get("gate").and_then(|v| v.as_str()) == Some("apply-and-commit"));
     Ok(ParsedWorklistAuthorization {
         kind: kind.to_string(),
         requests,
@@ -42388,7 +42577,15 @@ fn write_worklist_authorization_record<R: tauri::Runtime>(
         let commit_too = record.commit_too;
         let src = record.source.clone();
         worklist_state_apply(app, "auth-record", move |conn| {
-            worklist_state::mirror_auth_record(conn, issued_at_ms, &kind, &ids, commit_too, &src, issued_at_ms)
+            worklist_state::mirror_auth_record(
+                conn,
+                issued_at_ms,
+                &kind,
+                &ids,
+                commit_too,
+                &src,
+                issued_at_ms,
+            )
         });
     }
     append_audit_record(
@@ -42459,8 +42656,8 @@ struct PendingAdvanceEntry {
     carried: bool,
 }
 
-fn pending_advance_state_cell() -> &'static Mutex<std::collections::HashMap<String, PendingAdvanceEntry>>
-{
+fn pending_advance_state_cell(
+) -> &'static Mutex<std::collections::HashMap<String, PendingAdvanceEntry>> {
     // id -> PendingAdvanceEntry
     static CELL: OnceLock<Mutex<std::collections::HashMap<String, PendingAdvanceEntry>>> =
         OnceLock::new();
@@ -42566,9 +42763,7 @@ fn local_file_preview_at_commit<R: tauri::Runtime>(
             "error": msg,
         })
     };
-    let sha_ok = sha.len() >= 7
-        && sha.len() <= 40
-        && sha.chars().all(|c| c.is_ascii_hexdigit());
+    let sha_ok = sha.len() >= 7 && sha.len() <= 40 && sha.chars().all(|c| c.is_ascii_hexdigit());
     if !sha_ok {
         return err("Not a commit id.");
     }
@@ -42583,7 +42778,11 @@ fn local_file_preview_at_commit<R: tauri::Runtime>(
     let content = match git_run(app, &["show", &format!("{}:{}", sha, clean)]) {
         Ok(text) => text,
         Err(e) => {
-            return err(&format!("Not in commit {}: {}", &sha[..7.min(sha.len())], e));
+            return err(&format!(
+                "Not in commit {}: {}",
+                &sha[..7.min(sha.len())],
+                e
+            ));
         }
     };
     let truncated = content.len() > MAX_PREVIEW_BYTES;
@@ -42642,7 +42841,12 @@ fn observe_pending_advances<R: tauri::Runtime>(app: &AppHandle<R>, doc: &serde_j
             let Some(id) = item.get("id").and_then(|v| v.as_str()) else {
                 continue;
             };
-            if item.get("status").and_then(|v| v.as_str()).unwrap_or("proposed") != "proposed" {
+            if item
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("proposed")
+                != "proposed"
+            {
                 continue;
             }
             // Durable begun (1b74dc3). Before that stamp this check would have
@@ -42879,10 +43083,7 @@ fn stamp_worklist_items_begun<R: tauri::Runtime>(app: &AppHandle<R>, ids: &[Stri
                 continue;
             }
             if let Some(obj) = item.as_object_mut() {
-                obj.insert(
-                    "begunAtMs".to_string(),
-                    serde_json::Value::from(now_ms),
-                );
+                obj.insert("begunAtMs".to_string(), serde_json::Value::from(now_ms));
                 changed = true;
             }
         }
@@ -43152,11 +43353,9 @@ fn retire_worklist_authorization_record(
     }
     record.ids = remaining.clone();
     record.items.retain(|item| {
-        item.get("id")
-            .and_then(|v| v.as_str())
-            .map_or(false, |id| {
-                remaining.iter().any(|remaining_id| remaining_id == id)
-            })
+        item.get("id").and_then(|v| v.as_str()).map_or(false, |id| {
+            remaining.iter().any(|remaining_id| remaining_id == id)
+        })
     });
     WorklistAuthRetirement::Shrunk(remaining)
 }
@@ -43196,7 +43395,10 @@ fn retire_worklist_authorization<R: tauri::Runtime>(
             WorklistAuthRetirement::Unchanged => append_bram_trace_line(
                 app,
                 "auth-record",
-                &format!("op=retire-no-match kind={} resolved={}", record.kind, resolved),
+                &format!(
+                    "op=retire-no-match kind={} resolved={}",
+                    record.kind, resolved
+                ),
             ),
             WorklistAuthRetirement::Shrunk(remaining) => append_bram_trace_line(
                 app,
@@ -44039,10 +44241,7 @@ fn visible_worklist_history_commit_url<R: tauri::Runtime>(
 // answers a different question: visibility says "is it on origin yet",
 // ancestry says "can it EVER be" — a rebase-orphaned SHA fails ancestry
 // forever while an unpushed one passes and heals on push.
-fn worklist_history_commit_status<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    raw_url: &str,
-) -> String {
+fn worklist_history_commit_status<R: tauri::Runtime>(app: &AppHandle<R>, raw_url: &str) -> String {
     let Some((_slug, sha)) = parse_github_commit_url(raw_url) else {
         return String::new();
     };
@@ -44417,10 +44616,7 @@ fn issue_close_queue_lock() -> &'static Mutex<()> {
 // Enqueue a close intent, deduped by (issue, commit_sha). A later record for
 // the same pair updates the comment (the dialog's last word wins) but never
 // duplicates.
-fn enqueue_pending_issue_close_path(
-    path: &Path,
-    record: PendingIssueClose,
-) -> Result<(), String> {
+fn enqueue_pending_issue_close_path(path: &Path, record: PendingIssueClose) -> Result<(), String> {
     let mut records = read_pending_issue_closes(path);
     if let Some(existing) = records
         .iter_mut()
@@ -44777,7 +44973,10 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>, trigger: &s
         // push): defer without re-anchoring noise; close fires once merged.
         let deferred_unmerged = !visible
             && default_check == Some(false)
-            && matches!(gh_commit_visible(app, &repo_slug, &record.commit_sha), Ok(true));
+            && matches!(
+                gh_commit_visible(app, &repo_slug, &record.commit_sha),
+                Ok(true)
+            );
         // issue-282: squash-merge repos never land this commit on the
         // default branch — the merge commit does — so deferred_unmerged
         // would hold the record open forever even after the fix shipped.
@@ -45018,7 +45217,10 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>, trigger: &s
     // remember the payload host-side, and the frontend's replayLatest would
     // re-toast on every iframe reload (toast-issue-closed-no-replay).
     if !closed.is_empty() {
-        let _ = app.emit("issues-closed-on-push", serde_json::json!({ "issues": closed }));
+        let _ = app.emit(
+            "issues-closed-on-push",
+            serde_json::json!({ "issues": closed }),
+        );
     }
 }
 
@@ -45576,7 +45778,7 @@ fn recent_worklist_history_groups<R: tauri::Runtime>(
                 commit_context_label: String::new(),
                 commit_sibling_ids: Vec::new(),
                 details_restored_label: String::new(),
-                            commit_sha: String::new(),
+                commit_sha: String::new(),
             });
         }
     }
@@ -45622,7 +45824,9 @@ fn recent_worklist_history_groups<R: tauri::Runtime>(
             .phases
             .iter()
             .rev()
-            .find(|p| p.summary.to_lowercase().contains("committed") && !p.commit_url.trim().is_empty())
+            .find(|p| {
+                p.summary.to_lowercase().contains("committed") && !p.commit_url.trim().is_empty()
+            })
             .map(|p| p.commit_url.trim().to_string())
             .unwrap_or_default();
         // history-file-links-local-at-commit: the client needs the SHA, not
@@ -45837,7 +46041,10 @@ mod c2_file_containment_tests {
 
         // A real file outside every allowed root is rejected.
         if let Ok(outside) = std::path::Path::new("/etc/hosts").canonicalize() {
-            assert!(!path_within_allowed_roots(&strip_unc_prefix(outside), &roots));
+            assert!(!path_within_allowed_roots(
+                &strip_unc_prefix(outside),
+                &roots
+            ));
         }
         let _ = std::fs::remove_file(&inside);
     }
@@ -45882,7 +46089,6 @@ fn split_diff_by_file(batched: &str) -> Vec<(&str, String)> {
     }
     out
 }
-
 
 fn route_request<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -46357,10 +46563,7 @@ fn route_request<R: tauri::Runtime>(
             if let Some(root) = project_root(Some(app)) {
                 obj.insert(
                     "project".to_string(),
-                    serde_json::Value::String(title_path_with_home(
-                        &root,
-                        home_dir().as_deref(),
-                    )),
+                    serde_json::Value::String(title_path_with_home(&root, home_dir().as_deref())),
                 );
                 // Hue is hashed from the absolute root, not the display form:
                 // two projects can share a basename, and "~/x" vs "/Users/j/x"
@@ -46614,7 +46817,11 @@ fn route_request<R: tauri::Runtime>(
     // POST /__queue/save route. Entry order is presentation order only.
     if path == "__queue" {
         let Some(qpath) = project_resource_path(app, ".bram-queue.json") else {
-            return (500, "text/plain; charset=utf-8", b"no project root".to_vec());
+            return (
+                500,
+                "text/plain; charset=utf-8",
+                b"no project root".to_vec(),
+            );
         };
         let bytes = std::fs::read(&qpath).unwrap_or_else(|_| b"{\"entries\":[]}\n".to_vec());
         return (200, "application/json; charset=utf-8", bytes);
@@ -46626,9 +46833,7 @@ fn route_request<R: tauri::Runtime>(
         let mut fresh = false;
         for pair in query.split('&') {
             if let Some(v) = pair.strip_prefix("limit=") {
-                let parsed = percent_decode(v)
-                    .parse::<usize>()
-                    .unwrap_or(issue_limit);
+                let parsed = percent_decode(v).parse::<usize>().unwrap_or(issue_limit);
                 limit = parsed.clamp(1, issue_limit);
             } else if pair == "fresh=1" {
                 fresh = true;
@@ -47126,7 +47331,9 @@ fn route_request<R: tauri::Runtime>(
             .iter()
             .map(|r| serde_json::json!({"issue": r.issue, "commitSha": r.commit_sha}))
             .collect();
-        let body = serde_json::json!({ "pending": pending }).to_string().into_bytes();
+        let body = serde_json::json!({ "pending": pending })
+            .to_string()
+            .into_bytes();
         return (200, "application/json; charset=utf-8", body);
     }
 
@@ -47192,7 +47399,10 @@ fn route_request<R: tauri::Runtime>(
                     if text.trim().is_empty() {
                         continue;
                     }
-                    feedback_by_item.entry(item_id).or_default().push((ms, text));
+                    feedback_by_item
+                        .entry(item_id)
+                        .or_default()
+                        .push((ms, text));
                 }
             }
         }
@@ -47223,9 +47433,7 @@ fn route_request<R: tauri::Runtime>(
                         list.sort_by(|a, b| b.0.cmp(&a.0));
                         let arr: Vec<serde_json::Value> = list
                             .iter()
-                            .map(|(ms, text)| {
-                                serde_json::json!({"atMs": ms, "text": text})
-                            })
+                            .map(|(ms, text)| serde_json::json!({"atMs": ms, "text": text}))
                             .collect();
                         if let Some(obj) = item.as_object_mut() {
                             obj.insert(
@@ -47239,14 +47447,8 @@ fn route_request<R: tauri::Runtime>(
                 // whatever its status — the evidence-first rows render disk
                 // truth, not bookkeeping state.
                 let mut has_changes = false;
-                if let Some((changed_files, summary)) =
-                    worklist_change_activity(app, &file_paths)
-                {
-                    has_changes = summary
-                        .get("changed")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0)
-                        > 0;
+                if let Some((changed_files, summary)) = worklist_change_activity(app, &file_paths) {
+                    has_changes = summary.get("changed").and_then(|v| v.as_u64()).unwrap_or(0) > 0;
                     if let Some(obj) = item.as_object_mut() {
                         obj.insert("changedFiles".to_string(), changed_files);
                         obj.insert("changeSummary".to_string(), summary);
@@ -47374,9 +47576,7 @@ fn route_request<R: tauri::Runtime>(
                 })
                 .collect();
             for (idx, item) in items.iter_mut().enumerate() {
-                let Some(records) = item
-                    .get_mut("changedFiles")
-                    .and_then(|v| v.as_array_mut())
+                let Some(records) = item.get_mut("changedFiles").and_then(|v| v.as_array_mut())
                 else {
                     continue;
                 };
@@ -47395,10 +47595,7 @@ fn route_request<R: tauri::Runtime>(
                         .collect();
                     if !shared.is_empty() {
                         if let Some(obj) = rec.as_object_mut() {
-                            obj.insert(
-                                "sharedWith".to_string(),
-                                serde_json::Value::Array(shared),
-                            );
+                            obj.insert("sharedWith".to_string(), serde_json::Value::Array(shared));
                         }
                     }
                 }
@@ -47445,8 +47642,8 @@ fn route_request<R: tauri::Runtime>(
             })
             .unwrap_or_default();
         let mut unclaimed: Vec<serde_json::Value> = Vec::new();
-        let porcelain = git_run(app, &["status", "--porcelain", "--no-renames"])
-            .unwrap_or_default();
+        let porcelain =
+            git_run(app, &["status", "--porcelain", "--no-renames"]).unwrap_or_default();
         for line in porcelain.lines() {
             if line.len() < 4 {
                 continue;
@@ -47523,8 +47720,8 @@ fn route_request<R: tauri::Runtime>(
     }
 
     if path == "__trace-archive-status" {
-        let body =
-            serde_json::to_vec(&bram_trace_archival_status_view()).unwrap_or_else(|_| b"{}".to_vec());
+        let body = serde_json::to_vec(&bram_trace_archival_status_view())
+            .unwrap_or_else(|_| b"{}".to_vec());
         return (200, "application/json; charset=utf-8", body);
     }
 
@@ -47652,7 +47849,10 @@ fn route_request<R: tauri::Runtime>(
                 break;
             }
         }
-        let diff = cap_patch(&file_path, git_run(app, &["diff", "--", &file_path]).unwrap_or_default());
+        let diff = cap_patch(
+            &file_path,
+            git_run(app, &["diff", "--", &file_path]).unwrap_or_default(),
+        );
         return (200, "text/plain; charset=utf-8", diff.into_bytes());
     }
 
@@ -48028,7 +48228,11 @@ fn handle_queue_save<R: tauri::Runtime>(
         );
     }
     let Some(qpath) = project_resource_path(app, ".bram-queue.json") else {
-        return (500, "text/plain; charset=utf-8", b"no project root".to_vec());
+        return (
+            500,
+            "text/plain; charset=utf-8",
+            b"no project root".to_vec(),
+        );
     };
     let pretty = serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".to_string());
     match std::fs::write(&qpath, format!("{}\n", pretty)) {
@@ -48686,7 +48890,10 @@ fn worklist_change_activity<R: tauri::Runtime>(
     let (mut add_sum, mut rem_sum, mut changed_n) = (0i64, 0i64, 0usize);
     let mut last_ms: i64 = 0;
     for p in file_paths {
-        let status = status_by_path.get(p.as_str()).copied().unwrap_or("unchanged");
+        let status = status_by_path
+            .get(p.as_str())
+            .copied()
+            .unwrap_or("unchanged");
         let (mut a, r) = counts.get(p.as_str()).copied().unwrap_or((0, 0));
         if status == "new" && a == 0 {
             // Untracked: numstat cannot see it — the whole file counts as
@@ -48762,7 +48969,14 @@ fn git_staged_files<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<String>
     // the new file, e331fc4 had to hand-commit the stranded deletion).
     let out = std::process::Command::new("git")
         .current_dir(&root)
-        .args(["diff", "--cached", "--name-only", "--no-renames", "-z", "--"])
+        .args([
+            "diff",
+            "--cached",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            "--",
+        ])
         .output()
         .map_err(|e| e.to_string())?;
     if !out.status.success() {
@@ -48894,7 +49108,10 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| serde_json::json!({}));
-    let commit_too = auth.get("commitToo").and_then(|v| v.as_bool()).unwrap_or(false);
+    let commit_too = auth
+        .get("commitToo")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let auth_kind = match validate_worklist_mutate_authorization(op, &ids, &auth, unix_now_ms()) {
         Ok(kind) => {
             // issue-255: this reconciliation was allowed on a record an
@@ -49165,7 +49382,10 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| serde_json::json!({}));
-    let commit_too = auth.get("commitToo").and_then(|v| v.as_bool()).unwrap_or(false);
+    let commit_too = auth
+        .get("commitToo")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     if let Err(e) = ensure_worklist_commit_authorized(&ids, &auth, unix_now_ms()) {
         // issue-255: a refusal used to leave nothing behind but a generic
         // `[route] status=400`, so an incident read as an op=invalidate line
@@ -49239,8 +49459,7 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         // lands. Name that case explicitly instead of returning
         // "worklist item not found", which reads as a failed commit.
         Err(e) => {
-            let msg = worklist_commit_consumed_retry_message(&e, &ids, items, &auth)
-                .unwrap_or(e);
+            let msg = worklist_commit_consumed_retry_message(&e, &ids, items, &auth).unwrap_or(e);
             return worklist_json_error(400, msg);
         }
     };
@@ -49416,7 +49635,11 @@ fn handle_worklist_commit<R: tauri::Runtime>(
             &branch,
             &ids,
             &committed_paths,
-            if commit_too { "apply-and-commit" } else { "approved" },
+            if commit_too {
+                "apply-and-commit"
+            } else {
+                "approved"
+            },
         ),
     );
 
@@ -49472,20 +49695,20 @@ fn handle_worklist_commit<R: tauri::Runtime>(
 mod worklist_authorization_tests {
     use super::{
         apply_worklist_mutation, build_worklist_authorization_record, classify_worklist_removals,
-        draft_markdown_path, enqueue_pending_worklist_push_mirror_path, split_diff_by_file,
+        draft_markdown_path, enqueue_pending_worklist_push_mirror_path,
         ensure_no_unrelated_staged_files, ensure_worklist_commit_authorized, feedback_draft_path,
-        staged_path_covered_by, staged_paths_left_behind,
         inflight_claim_fully_covered, installed_twins_for, parse_worklist_authorization_message,
         parse_worklist_authorization_payload, read_pending_worklist_push_mirrors,
-        resource_relative_path, retire_worklist_authorization_record,
-        turn_text_has_direct_edit_opt_out, validate_post_commit_prune_status,
-        validate_worklist_advance_status, validate_worklist_mutate_authorization,
-        worklist_auth_feedback_for_ids, worklist_commit_add_args,
-        worklist_commit_consumed_retry_message, worklist_commit_files_for_ids,
-        worklist_draft_path, worklist_feedback_ref_item_id, worklist_iteration_comment_body,
-        worklist_lifecycle_comment_body, worklist_lifecycle_item_issue_numbers,
-        worklist_pushed_lifecycle_comment_body, ParsedWorklistAuthorization,
-        PendingWorklistPushMirror, WorklistAuthRetirement, WORKLIST_AUTH_TTL_MS,
+        resource_relative_path, retire_worklist_authorization_record, split_diff_by_file,
+        staged_path_covered_by, staged_paths_left_behind, turn_text_has_direct_edit_opt_out,
+        validate_post_commit_prune_status, validate_worklist_advance_status,
+        validate_worklist_mutate_authorization, worklist_auth_feedback_for_ids,
+        worklist_commit_add_args, worklist_commit_consumed_retry_message,
+        worklist_commit_files_for_ids, worklist_draft_path, worklist_feedback_ref_item_id,
+        worklist_iteration_comment_body, worklist_lifecycle_comment_body,
+        worklist_lifecycle_item_issue_numbers, worklist_pushed_lifecycle_comment_body,
+        ParsedWorklistAuthorization, PendingWorklistPushMirror, WorklistAuthRetirement,
+        WORKLIST_AUTH_TTL_MS,
     };
     use serde_json::json;
     use std::path::Path;
@@ -49812,9 +50035,13 @@ mod worklist_authorization_tests {
             .expect_err("a pruned id has no files");
         assert_eq!(raw, "worklist item not found: a");
 
-        let sharpened =
-            worklist_commit_consumed_retry_message(&raw, &ids(&["a"]), &items_after, &consumed_auth)
-                .expect("the retry shape is recognised");
+        let sharpened = worklist_commit_consumed_retry_message(
+            &raw,
+            &ids(&["a"]),
+            &items_after,
+            &consumed_auth,
+        )
+        .expect("the retry shape is recognised");
         assert!(sharpened.contains("ALREADY RAN"), "got: {sharpened}");
         assert!(
             sharpened.contains("single-shot per approval"),
@@ -50025,10 +50252,22 @@ mod worklist_authorization_tests {
             "resources/worklist-drafts/b.md",
             "resources/worklist-history/2026.json",
         ]);
-        assert!(staged_path_covered_by_any("resources/worklist.json", &staged));
-        assert!(staged_path_covered_by_any("resources/worklist-drafts", &staged));
-        assert!(staged_path_covered_by_any("resources/worklist-drafts/", &staged));
-        assert!(staged_path_covered_by_any("resources/worklist-history", &staged));
+        assert!(staged_path_covered_by_any(
+            "resources/worklist.json",
+            &staged
+        ));
+        assert!(staged_path_covered_by_any(
+            "resources/worklist-drafts",
+            &staged
+        ));
+        assert!(staged_path_covered_by_any(
+            "resources/worklist-drafts/",
+            &staged
+        ));
+        assert!(staged_path_covered_by_any(
+            "resources/worklist-history",
+            &staged
+        ));
         // A never-staged path stays excluded, so `git commit -- <path>` is
         // never handed a pathspec matching nothing.
         assert!(!staged_path_covered_by_any("resources/gone.md", &staged));
@@ -50042,7 +50281,10 @@ mod worklist_authorization_tests {
         // (worklist-commit-omits-staged-deletions): a deletion staged by the
         // apply appears in staged_after by its exact path.
         let staged = ids(&["app/tools/components/Feedback.xmlui"]);
-        assert!(staged_path_covered_by_any("app/tools/components/Feedback.xmlui", &staged));
+        assert!(staged_path_covered_by_any(
+            "app/tools/components/Feedback.xmlui",
+            &staged
+        ));
     }
 
     #[test]
@@ -50054,7 +50296,11 @@ mod worklist_authorization_tests {
         ]);
         // The pre-fix behavior: only the plain file in the pathspec.
         let left = staged_paths_left_behind(&ids(&["resources/worklist.json"]), &staged);
-        assert_eq!(left.len(), 2, "both draft files should be reported: {left:?}");
+        assert_eq!(
+            left.len(),
+            2,
+            "both draft files should be reported: {left:?}"
+        );
         // The fixed behavior: the directory covers its contents, nothing left.
         let none = staged_paths_left_behind(
             &ids(&["resources/worklist.json", "resources/worklist-drafts"]),
@@ -50122,10 +50368,7 @@ mod worklist_authorization_tests {
         // Prefix match requires a path separator: `foo` is not `foobar`,
         // and a genuinely foreign staged file is still refused.
         let err = ensure_no_unrelated_staged_files(
-            &ids(&[
-                "resources/worklist-drafts-archive/old.md",
-                "src/other.rs",
-            ]),
+            &ids(&["resources/worklist-drafts-archive/old.md", "src/other.rs"]),
             &ids(&["resources/worklist-drafts"]),
         )
         .expect_err("sibling-prefix and foreign staged files are refused");
@@ -50477,9 +50720,7 @@ mod project_config_tests {
             ("project settings.json".to_string(), String::new()),
             ("settings.local.json".to_string(), String::new()),
         ];
-        assert!(
-            legacy_hook_referencing_sources(&sources, "hooks/worklist-guard.py").is_empty()
-        );
+        assert!(legacy_hook_referencing_sources(&sources, "hooks/worklist-guard.py").is_empty());
     }
 }
 
@@ -50523,7 +50764,10 @@ mod audit_ledger_tests {
         let got = super::issue_numbers_in_tail(tail, "https://github.com/judell/bram");
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].number, 260);
-        assert_eq!(got[0].comment_id, None, "a bare create URL is not a comment sighting");
+        assert_eq!(
+            got[0].comment_id, None,
+            "a bare create URL is not a comment sighting"
+        );
         assert_eq!(got[0].key(), "260");
     }
 
@@ -50535,7 +50779,11 @@ mod audit_ledger_tests {
                     https://github.com/judell/bram/issues/12x";
         let got = super::issue_numbers_in_tail(tail, "https://github.com/judell/bram");
         let nums: Vec<u64> = got.iter().map(|s| s.number).collect();
-        assert_eq!(nums, vec![7, 12], "dedupe; foreign repo ignored; digits stop at non-digit");
+        assert_eq!(
+            nums,
+            vec![7, 12],
+            "dedupe; foreign repo ignored; digits stop at non-digit"
+        );
     }
 
     // index-issue-comments-on-sighting: `gh issue comment` prints the issue URL
@@ -50565,8 +50813,14 @@ mod audit_ledger_tests {
     fn issue_sighting_key_separates_comment_from_bare_number() {
         // A creation sighting and a comment sighting on the same issue must not
         // collide, or the first would suppress the second for the process.
-        let bare = super::IssueSighting { number: 262, comment_id: None };
-        let commented = super::IssueSighting { number: 262, comment_id: Some(1) };
+        let bare = super::IssueSighting {
+            number: 262,
+            comment_id: None,
+        };
+        let commented = super::IssueSighting {
+            number: 262,
+            comment_id: Some(1),
+        };
         assert_ne!(bare.key(), commented.key());
     }
 
@@ -50586,7 +50840,10 @@ mod audit_ledger_tests {
         assert_eq!(rows.len(), 2, "replace, never append a duplicate");
         assert_eq!(rows[0]["number"], 9, "ordering is left alone");
         assert_eq!(rows[1]["state"], "CLOSED", "the row is refreshed in place");
-        assert!(rows[1].get("body").is_none(), "body must not enter the list shape");
+        assert!(
+            rows[1].get("body").is_none(),
+            "body must not enter the list shape"
+        );
     }
 
     #[test]
@@ -50736,8 +50993,7 @@ mod answer_binding_tests {
     // so it must not bind.
     #[test]
     fn claimless_prompt_rejects_unverifiable_pending_call() {
-        let (id, src) =
-            choose_answer_binding_id(None, Some("toolu_x".to_string()), None, "Bash");
+        let (id, src) = choose_answer_binding_id(None, Some("toolu_x".to_string()), None, "Bash");
         assert_eq!(id, None);
         assert_eq!(src, "pending-call-tool-mismatch");
     }
@@ -51137,11 +51393,7 @@ mod menu_labels_match_tests {
             "Yes, and don't ask again for: system_profiler SPHardwareDataType *",
             "No",
         ]);
-        let captured = labels(&[
-            "Yes",
-            "Yes, and don't ask again for: sysctl *",
-            "No",
-        ]);
+        let captured = labels(&["Yes", "Yes, and don't ask again for: sysctl *", "No"]);
         assert_eq!(menu_labels_match(&armed, &captured), None);
     }
 
@@ -51200,7 +51452,9 @@ mod issues_list_cache_tests {
         assert_eq!(cache_issues_list_row(&conn, "[3 real issues]"), "cached");
         assert_eq!(cache_issues_list_row(&conn, "[]"), "empty-contradiction");
         assert_eq!(
-            search_index::get_extra(&conn, "issues:list").unwrap().as_deref(),
+            search_index::get_extra(&conn, "issues:list")
+                .unwrap()
+                .as_deref(),
             Some("[3 real issues]"),
             "prior good row must keep serving"
         );
@@ -51213,7 +51467,9 @@ mod issues_list_cache_tests {
         let conn = mem_conn();
         assert_eq!(cache_issues_list_row(&conn, "[]"), "cached");
         assert_eq!(
-            search_index::get_extra(&conn, "issues:list").unwrap().as_deref(),
+            search_index::get_extra(&conn, "issues:list")
+                .unwrap()
+                .as_deref(),
             Some("[]")
         );
         assert!(!issues_list_stale(&conn));
@@ -51909,11 +52165,8 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
     // by not equalling SHELL_ORIGIN.
     if let Some(allowed) = cors_allowed_origin(request_origin.as_deref()) {
         response.add_header(
-            tiny_http::Header::from_bytes(
-                &b"Access-Control-Allow-Origin"[..],
-                allowed.as_bytes(),
-            )
-            .unwrap(),
+            tiny_http::Header::from_bytes(&b"Access-Control-Allow-Origin"[..], allowed.as_bytes())
+                .unwrap(),
         );
     }
     let _ = request.respond(response);
@@ -52080,7 +52333,10 @@ fn handle_target_scheme<R: tauri::Runtime>(
     let (right_pane_upstream, loopback_origin) = {
         let state = app.state::<PaneUrlsState>();
         let urls = state.0.lock().unwrap();
-        (urls.right_pane_upstream.clone(), urls.loopback_origin.clone())
+        (
+            urls.right_pane_upstream.clone(),
+            urls.loopback_origin.clone(),
+        )
     };
     // Self-diagnosing: one line per request so we can confirm the bramapp
     // scheme is actually routed to this handler (C1 build-gate probe).

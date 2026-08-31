@@ -449,11 +449,7 @@ fn read_port(root: &Path) -> Option<u16> {
 // The POST body per provider+event, transcribed from the Python hooks. Raw
 // payload values ride through (nulls included) so the host sees identical
 // JSON from either implementation.
-fn menu_post_body(
-    provider: &str,
-    event: &str,
-    payload: &serde_json::Value,
-) -> serde_json::Value {
+fn menu_post_body(provider: &str, event: &str, payload: &serde_json::Value) -> serde_json::Value {
     let field = |k: &str| payload.get(k).cloned().unwrap_or(serde_json::Value::Null);
     let tool_input = payload
         .get("tool_input")
@@ -809,10 +805,7 @@ mod guard_mode_tests {
         assert_eq!(code, 2, "Claude fail-closed must exit 2 (blocking)");
         let log = read_crumbs(&root);
         assert!(log.contains("claude-rs PreToolUse Write"), "log: {log}");
-        assert!(
-            log.contains("decided=error target=- ms="),
-            "log: {log}"
-        );
+        assert!(log.contains("decided=error target=- ms="), "log: {log}");
         assert!(log.contains("reason=unparseable stdin:"), "log: {log}");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -834,7 +827,10 @@ mod guard_mode_tests {
         );
         assert_eq!(code, 0, "Codex denies via stdout protocol, exit 0");
         let log = read_crumbs(&root);
-        assert!(log.contains("codex-rs PreToolUse apply_patch"), "log: {log}");
+        assert!(
+            log.contains("codex-rs PreToolUse apply_patch"),
+            "log: {log}"
+        );
         assert!(log.contains("decided=error target=- ms="), "log: {log}");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -855,8 +851,13 @@ mod guard_mode_tests {
         }
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
-        let code =
-            authority_guarded_dispatch("claude-rs", &payload, None, std::time::Instant::now(), boom);
+        let code = authority_guarded_dispatch(
+            "claude-rs",
+            &payload,
+            None,
+            std::time::Instant::now(),
+            boom,
+        );
         std::panic::set_hook(prev);
         assert_eq!(code, 2, "panic must fail closed, not exit 101");
         let log = read_crumbs(&root);
@@ -971,7 +972,10 @@ mod guard_mode_tests {
         let empty = serde_json::json!({ "cwd": root.to_string_lossy() });
         let code = authority_menu_hook("claude-rs", &empty, std::time::Instant::now());
         assert_eq!(code, 0);
-        assert!(read_crumbs(&root).contains("action=none ms="), "no action=none crumb");
+        assert!(
+            read_crumbs(&root).contains("action=none ms="),
+            "no action=none crumb"
+        );
 
         // With a (dead) port: the POST fails, the breadcrumb names the
         // outcome, and the exit stays 0.

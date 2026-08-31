@@ -18,9 +18,8 @@ fn sync_skill(manifest_dir: &str, name: &str) {
             canonical.display()
         );
     }
-    std::fs::create_dir_all(&installed_dir).unwrap_or_else(|e| {
-        panic!("failed to create {}: {}", installed_dir.display(), e)
-    });
+    std::fs::create_dir_all(&installed_dir)
+        .unwrap_or_else(|e| panic!("failed to create {}: {}", installed_dir.display(), e));
     let installed = installed_dir.join("SKILL.md");
     std::fs::copy(&canonical, &installed).unwrap_or_else(|e| {
         panic!(

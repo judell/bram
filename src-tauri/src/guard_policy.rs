@@ -2015,7 +2015,14 @@ fn mcp_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
                 tool = tool_name,
                 worklist = WORKLIST_REL
             );
-            return deny_msg("mcp-worklist-write", rel.clone(), tool_name, &rel, &cwd_s, &body);
+            return deny_msg(
+                "mcp-worklist-write",
+                rel.clone(),
+                tool_name,
+                &rel,
+                &cwd_s,
+                &body,
+            );
         }
         let (sw, _) = subagent_worklist_write_verdict(Some(&rel), &agent_id);
         if sw == "deny" {
@@ -2043,8 +2050,7 @@ fn mcp_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
         // (python:2200). No session-root leg on this surface, and
         // `deny_coverage`'s own `_trace_hook` passes no cwd, so the header
         // carries the process cwd rather than the payload's.
-        let (reason, body) =
-            deny_coverage_parts(first, false, Some(&project_root), None, None);
+        let (reason, body) = deny_coverage_parts(first, false, Some(&project_root), None, None);
         return deny_msg(
             reason.clone(),
             first.clone(),
@@ -3685,7 +3691,8 @@ mod guard_policy_tests {
         // no coverage for any path, denying every edit with a wrong reason.
         let dir = std::env::temp_dir().join(format!("bram-enc3-{}", std::process::id()));
         let _ = std::fs::create_dir_all(dir.join("resources"));
-        let mut bytes = br#"{"items":[{"id":"a","status":"proposed","files":["src/x.rs"]}],"#.to_vec();
+        let mut bytes =
+            br#"{"items":[{"id":"a","status":"proposed","files":["src/x.rs"]}],"#.to_vec();
         bytes.extend_from_slice(&[0xFF]);
         bytes.extend_from_slice(br#""version":1}"#);
         std::fs::write(dir.join(WORKLIST_REL), &bytes).unwrap();
@@ -3895,17 +3902,9 @@ mod guard_policy_tests {
         assert!(!has_opt_out(&last_user_text("")));
 
         let t3 = transcript(&td, "c", "do the build, just do it");
-        assert!(opt_out_clears(
-            &td,
-            &serde_json::json!({"transcript_path": t3})
-        )
-        .is_some());
+        assert!(opt_out_clears(&td, &serde_json::json!({"transcript_path": t3})).is_some());
         let t4 = transcript(&td, "d", "please do the build");
-        assert!(opt_out_clears(
-            &td,
-            &serde_json::json!({"transcript_path": t4})
-        )
-        .is_none());
+        assert!(opt_out_clears(&td, &serde_json::json!({"transcript_path": t4})).is_none());
         assert!(opt_out_clears(&td, &serde_json::json!({})).is_none());
         let _ = std::fs::remove_dir_all(&td);
     }

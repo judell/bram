@@ -964,6 +964,114 @@ function __escBeginCapture(kind, source) {
 // it states exactly which output its frame was painted from. Host and
 // parent ship in the same binary — no version skew on the framing.
 let __ptyParsedOffset = 0;
+// xterm.js 5.x does not implement DEC synchronized output (mode 2026).
+// Codex brackets full-screen paints with BSU/ESU, often spread across many
+// PTY frames. Feeding those frames straight to xterm parses and renders every
+// intermediate screen, which can saturate the parent thread and look like the
+// session is being replayed. Coalesce ordinary traffic to one write per frame;
+// while a sync block is open, wait for ESU and deliver the complete paint in
+// one write. The deadline is fail-open: a missing ESU may reduce atomicity but
+// can never wedge the terminal.
+const PTY_SYNC_BEGIN = new Uint8Array([27, 91, 63, 50, 48, 50, 54, 104]);
+const PTY_SYNC_END = new Uint8Array([27, 91, 63, 50, 48, 50, 54, 108]);
+const PTY_SYNC_MAX_HOLD_MS = 100;
+let __ptyWriteChunks = [];
+let __ptyWriteBytes = 0;
+let __ptyWriteOffset = 0;
+let __ptyWriteFrame = null;
+let __ptyWriteDeadline = null;
+let __ptySyncOpen = false;
+let __ptySyncScanTail = new Uint8Array(0);
+
+const __ptyBytesEndWithPrefix = (bytes, pattern) => {
+  const max = Math.min(bytes.length, pattern.length - 1);
+  for (let n = max; n > 0; n--) {
+    let match = true;
+    for (let i = 0; i < n; i++) {
+      if (bytes[bytes.length - n + i] !== pattern[i]) { match = false; break; }
+    }
+    if (match) return n;
+  }
+  return 0;
+};
+
+const __ptyScanSyncMode = (bytes) => {
+  const joined = new Uint8Array(__ptySyncScanTail.length + bytes.length);
+  joined.set(__ptySyncScanTail, 0);
+  joined.set(bytes, __ptySyncScanTail.length);
+  for (let i = 0; i <= joined.length - PTY_SYNC_BEGIN.length; i++) {
+    let begin = true;
+    let end = true;
+    for (let j = 0; j < PTY_SYNC_BEGIN.length; j++) {
+      begin = begin && joined[i + j] === PTY_SYNC_BEGIN[j];
+      end = end && joined[i + j] === PTY_SYNC_END[j];
+    }
+    if (begin) { __ptySyncOpen = true; i += PTY_SYNC_BEGIN.length - 1; }
+    else if (end) { __ptySyncOpen = false; i += PTY_SYNC_END.length - 1; }
+  }
+  const beginPrefix = __ptyBytesEndWithPrefix(joined, PTY_SYNC_BEGIN);
+  const endPrefix = __ptyBytesEndWithPrefix(joined, PTY_SYNC_END);
+  const keep = Math.max(beginPrefix, endPrefix);
+  __ptySyncScanTail = keep ? joined.slice(joined.length - keep) : new Uint8Array(0);
+};
+
+const __ptyFlushWrites = (reason) => {
+  if (!__ptyWriteChunks.length) return;
+  if (__ptyWriteFrame !== null) cancelAnimationFrame(__ptyWriteFrame);
+  clearTimeout(__ptyWriteDeadline);
+  __ptyWriteFrame = null;
+  __ptyWriteDeadline = null;
+  const chunks = __ptyWriteChunks;
+  const byteCount = __ptyWriteBytes;
+  const frameEndOffset = __ptyWriteOffset;
+  __ptyWriteChunks = [];
+  __ptyWriteBytes = 0;
+  __ptyWriteOffset = 0;
+  const combined = new Uint8Array(byteCount);
+  let at = 0;
+  for (const part of chunks) { combined.set(part, at); at += part.length; }
+  const startedAt = performance.now();
+  term.write(combined, () => {
+    if (frameEndOffset > __ptyParsedOffset) __ptyParsedOffset = frameEndOffset;
+    const elapsed = performance.now() - startedAt;
+    if (elapsed >= 100) {
+      logShellEvent({
+        kind: "iframe-trace",
+        subkind: "terminal-write-batch",
+        op: "slow",
+        reason,
+        chunks: chunks.length,
+        bytes: byteCount,
+        parseMs: Math.round(elapsed),
+        syncOpen: __ptySyncOpen,
+      });
+    }
+  });
+};
+
+const __ptyScheduleWrite = (bytes, frameEndOffset) => {
+  // Copy because Channel frame storage is not ours to retain across a frame.
+  const owned = bytes.slice();
+  __ptyWriteChunks.push(owned);
+  __ptyWriteBytes += owned.length;
+  __ptyWriteOffset = Math.max(__ptyWriteOffset, frameEndOffset || 0);
+  __ptyScanSyncMode(owned);
+  if (__ptySyncOpen) {
+    if (__ptyWriteDeadline === null) {
+      __ptyWriteDeadline = setTimeout(
+        () => __ptyFlushWrites("sync-timeout"),
+        PTY_SYNC_MAX_HOLD_MS,
+      );
+    }
+    return;
+  }
+  clearTimeout(__ptyWriteDeadline);
+  __ptyWriteDeadline = null;
+  if (__ptyWriteFrame === null) {
+    __ptyWriteFrame = requestAnimationFrame(() => __ptyFlushWrites("frame"));
+  }
+};
+
 ptyChannel.onmessage = (chunk) => {
   let bytes = new Uint8Array(chunk);
   let frameEndOffset = 0;
@@ -983,9 +1091,7 @@ ptyChannel.onmessage = (chunk) => {
       text: __escBytesPreview(bytes, 400),
     });
   }
-  term.write(bytes, () => {
-    if (frameEndOffset > __ptyParsedOffset) __ptyParsedOffset = frameEndOffset;
-  });
+  __ptyScheduleWrite(bytes, frameEndOffset);
   if (!startupFitDone) {
     startupFitDone = true;
     // First PTY output means the shell has started and the WebView2 window

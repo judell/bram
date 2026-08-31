@@ -198,6 +198,23 @@ freshness. Drive refetch from events or actions, by tier:
   piggybacks on work it already does (the search indexer fetches
   issues anyway).
 
+## Codex synchronized terminal redraws
+
+Codex brackets full-screen paints with DEC synchronized-output mode 2026
+(`CSI ? 2026 h` / `CSI ? 2026 l`). Bram's vendored xterm.js 5.x predates
+support for that mode, so `app/main.js` coalesces PTY frames and delivers a
+complete synchronized paint to xterm in one write. The hold is bounded at
+100 ms: a missing closing marker fails open instead of wedging the terminal.
+
+When changing the PTY write path, replay these three shapes against the
+coalescer before hand-testing a real Codex resume: begin/content/end in one
+frame, markers split across frames, and a begin with no end. The first two
+must flush atomically; the last must flush on the deadline. Then check
+`resources/bram-traces/bram-trace.log` for `terminal-write-batch` slow lines
+and `xterm-liveness` stalls. Do not replace this with xterm.js 6.0 solely for
+mode-2026 support: upstream's current implementation still has an open
+ED2-inside-sync viewport-yank bug affecting Codex and Claude.
+
 ## Perf diagnosis ordering
 
 **Timeline first, semantic probes second.** When the pane feels slow,

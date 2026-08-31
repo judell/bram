@@ -1,0 +1,31 @@
+# Formatting gate, deliberately separate from build.yml.
+#
+# build.yml is workflow_dispatch-only: it cuts releases across a Tauri matrix
+# and is far too expensive to run per push. A fmt check is the opposite shape —
+# no system dependencies, no webkit2gtk, no compilation, seconds per run — so it
+# can afford to run on every push, which is the only place it does any good.
+# Catching drift at release time would mean discovering it after it had already
+# landed, possibly from another machine.
+#
+# src-tauri/ was normalized in d94a3b9; src-tauri/rustfmt.toml pins
+# style_edition so a toolchain update cannot silently reopen the drift.
+# Context: judell/bram#322.
+name: Format
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  fmt:
+    name: cargo fmt --check
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check

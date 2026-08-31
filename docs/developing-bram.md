@@ -285,26 +285,47 @@ either. And always launch the `./bram` symlink at the repo root, not
 an installed/older app — both for fresh code and because the symlink
 is what makes disk serving resolve at all.
 
-### Never run `cargo fmt`
+### Formatting is enforced, so run `cargo fmt`
 
-`src-tauri/` has no `rustfmt.toml` and no CI fmt check, and its
-formatting has never been normalized. On a clean tree at `8a08f4c`,
-`cargo fmt --check` wanted **247 regions across 4 files — 237 in
-`lib.rs` alone, spanning `lib.rs:783` to `lib.rs:52080`, replacing 657
-lines with 915.** None of it is yours. All of it will land in your
-commit, because the commit gate stages whole declared files rather than
-the hunks you authored — so a 12-line fix ships as a 900-line diff under
-your item's id, and the user's one veto surface stops working.
+`src-tauri/` was normalized in `d94a3b9`, and `.github/workflows/fmt.yml`
+runs `cargo fmt --check` on every push and pull request. Formatting is
+no longer something to remember: run `cargo fmt` before you commit and
+the check passes. `src-tauri/rustfmt.toml` pins
+`style_edition = "2021"`, so your rustfmt and CI's agree even across
+toolchain updates.
 
-So: **match the surrounding style by hand for the lines you write, and
-never run `cargo fmt`, `rustfmt`, or an editor's format-on-save over
-these files.** If one runs anyway, `git checkout -p` the unrelated hunks
-before the commit gate sees them — `cargo fmt --check` names every
-region it would touch, which makes the sweep easy to spot and easy to
-revert.
+That check is deliberately its own workflow. `build.yml` is
+`workflow_dispatch`-only because the Tauri matrix builds are expensive;
+a fmt check needs no system dependencies and no compilation, so it can
+afford to run per push — which is the only place it prevents drift
+rather than discovering it during a release.
 
-Normalizing the tree is a legitimate change, but it is its own worklist
-item and its own commit, never a passenger on someone else's.
+The sweep is listed in `.git-blame-ignore-revs`, and you can register
+it locally:
+
+```sh
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+```
+
+GitHub's blame view honours the file already, with no configuration.
+
+Do not expect it to do much for `d94a3b9` specifically. Measured after
+the fact: of 53,930 lines in `lib.rs`, only **8** blame to the sweep at
+all — git's own diff pairing already carries reformatted lines back to
+the commit that wrote the code — and those 8 do not move even under an
+explicit `--ignore-rev`, because the sweep left them with no predecessor
+line to reassign to. The blame-churn objection to reformatting a large
+file turned out to be much smaller than it is usually assumed to be.
+The file is here as standing hygiene for the next sweep, not because
+this one needed rescuing.
+
+Before the sweep this section said the opposite — *never* run the
+formatter, because on an unnormalized tree it rewrote 247 regions of
+code nobody had touched, and the commit gate stages whole declared
+files, so a 12-line fix would ship as a 900-line diff under your item's
+id. That is what normalizing bought: the rule stopped depending on
+anyone remembering it. The cross-machine coordination that landing it
+required is on judell/bram#322.
 
 ## Hand-testing the Worklist gate
 

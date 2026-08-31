@@ -1,0 +1,13 @@
+# Revisions git blame should skip: whole-tree reformats that changed layout and
+# nothing else. Without this, a formatting sweep sits across the blame of every
+# line it touched and hides the commit that actually wrote the code.
+#
+# Enable locally:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# GitHub's blame view honours this file automatically, with no configuration.
+
+# Normalize src-tauri formatting with cargo fmt (2026-08-31).
+# 227 hunks across build.rs, guard.rs, guard_policy.rs and lib.rs. Layout only:
+# the identifier/literal multiset is unchanged in every hunk, zero comment lines
+# moved, and a second cargo fmt pass is a no-op. Coordinated in judell/bram#322.
+d94a3b9003e771d441963078ccd24f25fca0c4bb

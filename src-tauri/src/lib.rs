@@ -15381,6 +15381,16 @@ fn pty_spawn(
             format!("{} {}", base_command, args.trim())
         };
         let payload = format!("{}\r", command);
+        if launch.resume {
+            if let Some(session_id) = launch.session_id.as_deref() {
+                clear_pending_session_title_for_resume(
+                    &app,
+                    launch.provider,
+                    session_id,
+                    "autostart",
+                );
+            }
+        }
         if let Err(e) = pty_write_internal(&app, &state, &payload, "agent-autostart") {
             eprintln!("[pty_spawn] failed to write agent autostart: {}", e);
         } else {
@@ -16733,6 +16743,12 @@ fn reload_agent_session(
         "claude" | "claud" => "claude",
         other => return Err(format!("unknown agent provider: {}", other)),
     };
+    let session_provider = if provider_key == "codex" {
+        SessionProvider::Codex
+    } else {
+        SessionProvider::Claude
+    };
+    clear_pending_session_title_for_resume(&app, session_provider, &session, "session-reload");
     cancel_agent_boot_hold(&app, "session-reload");
     let command = agent_resume_command(provider_key, &session).ok_or("unknown agent provider")?;
     if bram_trace_enabled() {
@@ -16771,11 +16787,6 @@ fn reload_agent_session(
     // Point the transcript at the resumed session immediately rather than
     // waiting for the agent's first write to make it most-recent (see
     // resync_transcript_to_session).
-    let session_provider = if provider_key == "codex" {
-        SessionProvider::Codex
-    } else {
-        SessionProvider::Claude
-    };
     let crossing = current_provider(&app) != Some(session_provider);
     schedule_resync_transcript_to_session(app.clone(), session_provider, session.clone());
     schedule_agent_switch_refresh(app.clone(), provider_key, "reload");
@@ -16843,6 +16854,58 @@ fn read_pending_session_title<R: tauri::Runtime>(
         return None;
     }
     Some(rec)
+}
+
+fn pending_session_title_abandoned_by_resume(
+    rec: &PendingSessionTitle,
+    provider: SessionProvider,
+    resumed_session_id: &str,
+) -> bool {
+    rec.provider == session_provider_label(provider)
+        && rec.previous_session_id.as_deref() == Some(resumed_session_id)
+        && rec.session_id.as_deref() != Some(resumed_session_id)
+}
+
+// A fresh Codex session has no id until its first real turn. If Bram exits
+// before that turn, the next startup resumes the recorded previous session;
+// the queued title can no longer be claimed and its synthetic `pending-...`
+// row would otherwise remain current for ten minutes. An explicit Sessions
+// reload of that previous conversation abandons the pending launch in the
+// same way. Retire only that exact previous-id match so an unrelated resume
+// cannot consume a still-viable title.
+fn clear_pending_session_title_for_resume<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    provider: SessionProvider,
+    resumed_session_id: &str,
+    source: &str,
+) {
+    let Some(path) = pending_session_title_file(app) else {
+        return;
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return;
+    };
+    let Ok(rec) = serde_json::from_slice::<PendingSessionTitle>(&bytes) else {
+        return;
+    };
+    if !pending_session_title_abandoned_by_resume(&rec, provider, resumed_session_id) {
+        return;
+    }
+    if std::fs::remove_file(&path).is_ok() {
+        emit_replayable_signal(app, "sessions-list-changed");
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "session-new",
+                &format!(
+                    "op=cancel-pending provider={} sid={} source={}",
+                    session_provider_label(provider),
+                    resumed_session_id,
+                    source
+                ),
+            );
+        }
+    }
 }
 
 // Return the newest same-project Codex rollout created after Bram queued a
@@ -17006,9 +17069,54 @@ fn apply_pending_session_title<R: tauri::Runtime>(
 #[cfg(test)]
 mod pending_session_title_tests {
     use super::{
-        codex_session_is_visible, merge_pending_session_entry, session_change_snapshot,
+        codex_session_is_visible, merge_pending_session_entry,
+        pending_session_title_abandoned_by_resume, session_change_snapshot, PendingSessionTitle,
         SessionEntry, SessionProvider,
     };
+
+    #[test]
+    fn resuming_previous_session_retires_unclaimed_pending_title() {
+        let rec = PendingSessionTitle {
+            provider: "codex".to_string(),
+            title: "final 319 check".to_string(),
+            created_at_ms: 1,
+            session_id: None,
+            previous_session_id: Some("previous-codex-id".to_string()),
+        };
+
+        assert!(pending_session_title_abandoned_by_resume(
+            &rec,
+            SessionProvider::Codex,
+            "previous-codex-id"
+        ));
+        assert!(!pending_session_title_abandoned_by_resume(
+            &rec,
+            SessionProvider::Codex,
+            "different-codex-id"
+        ));
+        assert!(!pending_session_title_abandoned_by_resume(
+            &rec,
+            SessionProvider::Claude,
+            "previous-codex-id"
+        ));
+    }
+
+    #[test]
+    fn resuming_claimed_session_keeps_pending_rename_retry() {
+        let rec = PendingSessionTitle {
+            provider: "codex".to_string(),
+            title: "claimed title".to_string(),
+            created_at_ms: 1,
+            session_id: Some("claimed-id".to_string()),
+            previous_session_id: Some("claimed-id".to_string()),
+        };
+
+        assert!(!pending_session_title_abandoned_by_resume(
+            &rec,
+            SessionProvider::Codex,
+            "claimed-id"
+        ));
+    }
 
     #[test]
     fn codex_handoff_uses_session_meta_id_not_rollout_filename() {

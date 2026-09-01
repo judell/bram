@@ -7,7 +7,7 @@
        Self-contained DataSources so it needs nothing from App scope; the
        selection arrives by PushSource and the message text from the single
        Footer composer, which now serves both roles. -->
-  <DataSource id="gateWorklist" url="/__worklist" />
+  <DataSource id="gateWorklist" url="/__worklist" transformResult="{(d) => window.__bramWorklistAccept(d)}" />
   <DataSource id="gateConfig" url="/__worklist-config" />
   <DataSource id="gateClaim" url="/__inflight" />
   <PushSource id="gateSel" subscribe="{window.bramSubscribeW2Selection()}" />

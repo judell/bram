@@ -27,6 +27,7 @@
   <DataSource
     id="worklist"
     url="/__worklist"
+    transformResult="{(d) => window.__bramWorklistAccept(d)}"
     onLoaded="(d) => expandedKeys = window.__bramPruneWorklist2Expansion(d &amp;&amp; d.items ? d.items.map(i => i.id) : [])" />
   <!-- The component-local selection resets on a Worklist remount, but the
        Footer's shared selection bridge survives it. Reconcile on the

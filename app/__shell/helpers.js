@@ -10786,6 +10786,64 @@ function __bramQueueScheduleSave(entries) {
       });
   }, 400);
 }
+// issue-326: refuse a board older than one already rendered.
+//
+// /__worklist already serves worklist.json's `version` (the field the guards
+// enforce on writers); no consumer looked at it. Three DataSources read this
+// route -- the board, the gate bar and the Queue's target list -- so an
+// overtaken response could repaint an older board over a newer one, and the
+// gate bar is where that stops being cosmetic and becomes an offered action:
+// Mary's specimen was "Will commit" on an item the prune had already removed
+// (#323 -> #326).
+//
+// Wired through DataSource's `transformResult` so all three consumers share
+// one definition of "newer" without touching their 31 binding sites:
+// https://www.xmlui.org/docs/reference/components/DataSource
+//
+// RECOVERABILITY IS THE DESIGN CONSTRAINT, not an afterthought. #324 shipped a
+// monotonic guard with no escape and turned a rare race into permanent, total
+// failure. The version can legitimately go backwards -- worklist.json deleted
+// or absent (Bram serves an empty default, version 0), restored from a backup,
+// or a malformed write dropping the field -- so a naive high-water mark would
+// freeze the board forever. Two escapes, both local to this helper:
+//   1. a decrease larger than RESET_DELTA is a board RESET, not a stale
+//      response (an overtaken reply is off by one or two; a reset by hundreds);
+//   2. after MAX_REFUSALS consecutive refusals the mark re-arms and the payload
+//      is accepted. A frozen board is worse than a stale one.
+var __BRAM_WL_RESET_DELTA = 50;
+var __BRAM_WL_MAX_REFUSALS = 3;
+var __bramWlSeen = null;
+var __bramWlAccepted = null;
+var __bramWlRefusals = 0;
+window.__bramWorklistAccept = function (payload) {
+  if (!payload || typeof payload !== "object") return payload;
+  var v = typeof payload.version === "number" ? payload.version : null;
+  if (v === null) return payload; // nothing to reason with; never withhold
+  if (__bramWlSeen === null || v >= __bramWlSeen) {
+    __bramWlSeen = v;
+    __bramWlAccepted = payload;
+    __bramWlRefusals = 0;
+    return payload;
+  }
+  if (__bramWlSeen - v > __BRAM_WL_RESET_DELTA) {
+    window.__bramIframeTrace("worklist-accept", { op: "reset", seen: __bramWlSeen, got: v });
+    __bramWlSeen = v;
+    __bramWlAccepted = payload;
+    __bramWlRefusals = 0;
+    return payload;
+  }
+  if (__bramWlRefusals >= __BRAM_WL_MAX_REFUSALS) {
+    window.__bramIframeTrace("worklist-accept", { op: "refuse-cap", seen: __bramWlSeen, got: v });
+    __bramWlSeen = v;
+    __bramWlAccepted = payload;
+    __bramWlRefusals = 0;
+    return payload;
+  }
+  __bramWlRefusals += 1;
+  window.__bramIframeTrace("worklist-accept", { op: "stale", seen: __bramWlSeen, got: v, refusals: __bramWlRefusals });
+  // Keep the board already rendered -- discard, never blank.
+  return __bramWlAccepted || payload;
+};
 window.__bramQueueRestore = function (hostEntries) {
   var fallback = Array.isArray(hostEntries) ? hostEntries : [];
   var raw = "";

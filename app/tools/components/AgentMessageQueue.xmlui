@@ -15,7 +15,8 @@
     url="/__queue" />
   <DataSource
     id="queueWorklist"
-    url="/__worklist" />
+    url="/__worklist"
+    transformResult="{(d) => window.__bramWorklistAccept(d)}" />
   <PushSource
     id="queueWorklistChanged"
     initial="{null}"

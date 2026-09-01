@@ -15374,7 +15374,31 @@ fn pty_spawn(
     };
     let launch = resolve_agent_startup_launch(startup_policy, configured_provider, last_active);
     let provider = session_provider_label(launch.provider);
-    let base_command = if launch.resume {
+    // switch-agent-no-session-to-resume: the same precondition the switch path
+    // needs, and for the same reason. startup_policy_for_repo forces
+    // NewSession only on the FIRST unmanaged launch; the greeting marker is
+    // consumed there, so every later cold launch falls back to the configured
+    // policy (AgentRecent by default) and resumes. In a repo where that
+    // provider has still never run there is nothing to resume:
+    // `claude --continue` prints "No conversation found to continue", exits,
+    // and leaves the shell in the foreground with no agent and no error.
+    //
+    // An EXPLICIT session id is exempt: it names a session that exists, and
+    // validated_last_active_session has already checked it.
+    let resume_without_session = launch.resume
+        && launch.session_id.is_none()
+        && latest_session_path_for_provider(&app, launch.provider)
+            .ok()
+            .flatten()
+            .is_none();
+    if resume_without_session && bram_trace_enabled() {
+        append_bram_trace_line(
+            &app,
+            "agent-switch",
+            &format!("op=launch-fresh reason=no-session provider={}", provider),
+        );
+    }
+    let base_command = if launch.resume && !resume_without_session {
         agent_resume_command(provider, launch.session_id.as_deref().unwrap_or(""))
     } else {
         agent_launch_command(provider).map(str::to_string)
@@ -16462,15 +16486,44 @@ fn switch_agent(
     // On Bram launch policy. A pinned codex session outranks `resume --last`:
     // after a cross-provider round-trip, codex must reopen the session Bram is
     // displaying, not codex's own idea of most-recent.
+    // switch-agent-no-session-to-resume: resume only when there IS something to
+    // resume. The empty-id resume forms are `claude --continue` and
+    // `codex resume --last`; in a repo where that provider has never run, the
+    // CLI prints "No conversation found to continue", exits, and leaves the
+    // shell in the foreground — so the agent never starts and anything sent to
+    // it (the first-seen repo greeting, a queued pane message) has nothing to
+    // land in. The user sees no error, just a bash prompt where an agent should
+    // be. The STARTUP path already guards this via startup_policy_for_repo; the
+    // switch path did not, and both providers were exposed.
+    //
+    // This is a precondition, not a policy change: "return to that agent" stays
+    // the intent wherever there is an agent to return to.
+    let has_session = SessionProvider::from_str(provider_key)
+        .and_then(|p| latest_session_path_for_provider(&app, p).ok().flatten())
+        .is_some();
     let base_command = if provider_key == "codex" {
         match codex_reload_target(&app) {
+            // A pinned reload target implies its session exists.
             Some(target) => agent_resume_command("codex", &target.id),
-            None => agent_resume_command("codex", ""),
+            None if has_session => agent_resume_command("codex", ""),
+            None => agent_launch_command("codex").map(str::to_string),
         }
-    } else {
+    } else if has_session {
         agent_resume_command(provider_key, "")
+    } else {
+        agent_launch_command(provider_key).map(str::to_string)
     }
     .ok_or("unknown agent provider")?;
+    if !has_session && bram_trace_enabled() {
+        append_bram_trace_line(
+            &app,
+            "agent-switch",
+            &format!(
+                "op=launch-fresh reason=no-session provider={}",
+                provider_key
+            ),
+        );
+    }
     let args = configured_agent_args(&app);
     let command = if args.trim().is_empty() {
         base_command

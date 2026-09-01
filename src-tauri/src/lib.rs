@@ -37540,7 +37540,23 @@ fn claim_intervals_partition(
     };
     let mut keep = Vec::new();
     let mut retire = Vec::new();
+    let last = intervals.len() - 1;
     for (n, rec) in intervals.iter().enumerate() {
+        // The NEWEST record is never retirable: it is the base of the OPEN
+        // interval, the one that has not happened yet, so no ownership test
+        // applies to it. Found in live use, not by the tests below, which
+        // could not have caught it -- they all model completed intervals.
+        //
+        // Retiring it looks harmless right after a commit, where the tree is
+        // clean and a missing base degrades to HEAD. That is luck. Prune while
+        // a DIFFERENT item holds uncommitted work and the base is genuinely
+        // lost: the next interval then diffs against HEAD and absorbs that
+        // other item's pre-existing changes into whoever owns the next claim,
+        // which is the misattribution this whole mechanism exists to prevent.
+        if n == last {
+            keep.push(rec.clone());
+            continue;
+        }
         // The oldest record has no predecessor: it bounds the first interval
         // only, so its own owner alone decides its fate.
         if owned(rec) || (n > 0 && owned(&intervals[n - 1])) {
@@ -55192,12 +55208,43 @@ mod claim_interval_prune_tests {
         assert_eq!(retire, vec!["refs/a".to_string(), "refs/b".to_string()]);
     }
 
+    // Even with nothing live, the newest boundary survives: it is the base of
+    // the open interval, so retiring it would leave the next claim's work with
+    // nothing to diff against.
     #[test]
-    fn empty_board_retires_everything() {
+    fn empty_board_retires_everything_except_the_open_base() {
         let ivs = vec![rec("refs/a", &["A"]), rec("refs/b", &["B"])];
         let (keep, retire) = claim_intervals_partition(&ivs, &live(&[]));
-        assert!(keep.is_empty());
-        assert_eq!(retire.len(), 2);
+        assert_eq!(retire, vec!["refs/a".to_string()]);
+        assert_eq!(keep.len(), 1, "the open interval's base must survive");
+    }
+
+    // The live regression: a commit-gate click writes a boundary owned by the
+    // very item the commit then prunes. Both adjacency conditions are
+    // satisfied, and retiring it anyway emptied the store completely.
+    #[test]
+    fn committing_the_last_claimant_does_not_empty_the_store() {
+        let ivs = vec![
+            rec("refs/a", &["panel"]),
+            rec("refs/b", &["hygiene"]),
+            rec("refs/c", &["panel"]),
+        ];
+        let (keep, retire) = claim_intervals_partition(&ivs, &live(&[]));
+        assert_eq!(retire, vec!["refs/a".to_string(), "refs/b".to_string()]);
+        assert_eq!(keep.len(), 1);
+        assert_eq!(
+            keep[0].get("ref").and_then(|v| v.as_str()),
+            Some("refs/c"),
+            "the newest boundary is the open interval's base"
+        );
+    }
+
+    #[test]
+    fn a_single_record_is_always_kept() {
+        let ivs = vec![rec("refs/only", &["gone"])];
+        let (keep, retire) = claim_intervals_partition(&ivs, &live(&[]));
+        assert!(retire.is_empty());
+        assert_eq!(keep.len(), 1);
     }
 
     // A multi-id claim keeps its boundary while ANY of its items survives.

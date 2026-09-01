@@ -553,6 +553,95 @@ fn push_cmd(command: &str) -> bool {
 /// double-quote state (and backslash escapes) and only reports redirects that
 /// are actually unquoted. A `>` inside quotes is a comparison operator, JSON,
 /// or jq syntax — never a redirect.
+// issue-327 phase A, OBSERVE-ONLY. Resolve the two fields attribution needs
+// and that the guard does not currently compute: which item is being worked,
+// and which repo path a write targets on the Bash path (where `target=-`
+// today, across 1,435 PreToolUse Bash records against 110 Edit and 30 Write).
+//
+// Identity comes from the INFLIGHT CLAIM, not from coverage. Coverage is
+// ambiguous exactly where attribution matters -- a file three items declare is
+// "covered" by all three -- while the claim names the one item actually being
+// worked. No claim live (a skip-worklist: direct edit, a hand edit) yields
+// None, which is #273's "no item did this" signal rather than a gap.
+//
+// FAILS OPEN BY CONSTRUCTION. Nothing here returns a verdict, and every step
+// degrades to None/empty rather than erroring. An attribution feature must be
+// incapable of denying a write -- #324 shipped a guard change one day before
+// this that had no escape path and turned a rare race into deterministic data
+// loss.
+pub(crate) fn provenance_probe(
+    payload: &Value,
+    root: &Path,
+    verdict_target: &str,
+) -> (Option<String>, Vec<String>) {
+    let item = claimed_item_id(root);
+    let mut paths: Vec<String> = Vec::new();
+
+    // PROVIDER-NEUTRAL BY CONSTRUCTION: prefer the target the verdict already
+    // resolved. Each provider's branch has done that work in its own idiom --
+    // Claude's Edit/Write from `file_path`, Codex's apply_patch by parsing the
+    // patch body (codex_apply_patch_branch) -- and re-deriving it per tool name
+    // here would silently cover whichever provider the author had in mind.
+    // A first cut of this handled `Bash` and `file_path` only, which resolved
+    // nothing for Codex, whose writes arrive as apply_patch.
+    if !verdict_target.is_empty() && verdict_target != "-" {
+        paths.push(verdict_target.to_string());
+        return (item, paths);
+    }
+
+    // The one genuine gap the verdict leaves: shell writes report `target=-`
+    // on BOTH providers (1,435 Claude Bash records and Codex's own Bash use),
+    // so the redirect targets are extracted here — and then put through the
+    // SAME normalizer the security path uses, rather than reported raw.
+    //
+    // The first line this probe ever emitted was the argument for that:
+    //   path=/tmp/adv327.json;   ms=4
+    // Two defects in one field. `/tmp/...` is outside the repo, so provenance
+    // has no business recording it — the guard had already classified that
+    // write `bash-write-nonrepo-target`. And the trailing `;` is the redirect
+    // scanner returning a token up to the shell separator; harmless for the
+    // security check that consumes it, wrong as a path. normalize_target
+    // returns None for anything outside the project root, which drops the
+    // first class, and trimming shell punctuation first fixes the second.
+    let input = tool_input(payload);
+    let command = input
+        .get("command")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if !command.is_empty() {
+        let cwd = payload_cwd(payload);
+        for raw in redirect_targets(command) {
+            let trimmed = raw.trim_matches(|c: char| {
+                c == ';' || c == '&' || c == '|' || c == ')' || c == '"' || c == '\''
+            });
+            if trimmed.is_empty() {
+                continue;
+            }
+            let candidate = if Path::new(trimmed).is_absolute() {
+                PathBuf::from(trimmed)
+            } else {
+                cwd.join(trimmed)
+            };
+            if let Some(rel) = normalize_target(root, &candidate.to_string_lossy()) {
+                if !paths.contains(&rel) {
+                    paths.push(rel);
+                }
+            }
+        }
+    }
+    (item, paths)
+}
+
+// The single claimed id, or None. Multi-id claims report the first: phase A is
+// measuring whether identity resolves at all, and a plural claim is a separate
+// question from an absent one.
+fn claimed_item_id(root: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(root.join("resources/.inflight-claim.json")).ok()?;
+    let doc: Value = serde_json::from_str(&text).ok()?;
+    let ids = doc.get("ids")?.as_array()?;
+    ids.first()?.as_str().map(|s| s.to_string())
+}
+
 fn redirect_targets(command: &str) -> Vec<String> {
     let c = chars(command);
     let n = c.len();
@@ -6178,6 +6267,173 @@ resources/worklist.json has no proposed"
         assert_eq!(
             (v.decision.as_str(), v.reason.as_str()),
             ("allow", "passed-checks")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod provenance_probe_tests {
+    use super::provenance_probe;
+    use serde_json::json;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("bram-prov-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("resources")).unwrap();
+        d
+    }
+
+    fn with_claim(root: &std::path::Path, body: &str) {
+        std::fs::write(root.join("resources/.inflight-claim.json"), body).unwrap();
+    }
+
+    #[test]
+    fn resolves_the_claimed_item_and_a_bash_redirect_target() {
+        let root = scratch("bash");
+        with_claim(
+            &root,
+            r#"{"ids":["issue-327-provenance-capture-phase-a"],"kind":"approved"}"#,
+        );
+        std::fs::create_dir_all(root.join("src-tauri/src")).unwrap();
+        let payload = json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "cat > src-tauri/src/lib.rs <<'EOF'\nx\nEOF" },
+            "cwd": root.to_string_lossy(),
+        });
+        let (item, paths) = provenance_probe(&payload, &root, "-");
+        assert_eq!(
+            item.as_deref(),
+            Some("issue-327-provenance-capture-phase-a")
+        );
+        assert!(
+            paths.iter().any(|p| p.contains("lib.rs")),
+            "the Bash write path must resolve, not fall back to `-`: {:?}",
+            paths
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolves_file_path_for_edit_and_write_tools() {
+        let root = scratch("edit");
+        with_claim(&root, r#"{"ids":["some-item"]}"#);
+        let payload = json!({
+            "tool_name": "Edit",
+            "tool_input": { "file_path": "app/__shell/helpers.js" }
+        });
+        let (item, paths) = provenance_probe(&payload, &root, "app/__shell/helpers.js");
+        assert_eq!(item.as_deref(), Some("some-item"));
+        assert_eq!(paths, vec!["app/__shell/helpers.js".to_string()]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_missing_claim_file_yields_none_not_an_error() {
+        // The unclaimed case is real and expected -- a skip-worklist: direct
+        // edit, or a hand edit. It must read as "no item did this" (#273's
+        // signal), never as a failure that could reach a verdict.
+        let root = scratch("noclaim");
+        let payload = json!({"tool_name": "Edit", "tool_input": {"file_path": "a.rs"}});
+        let (item, paths) = provenance_probe(&payload, &root, "a.rs");
+        assert!(item.is_none());
+        assert_eq!(
+            paths,
+            vec!["a.rs".to_string()],
+            "paths still resolve without a claim"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_malformed_claim_file_yields_none_not_a_panic() {
+        let root = scratch("malformed");
+        with_claim(&root, "{not json at all");
+        let payload = json!({"tool_name": "Edit", "tool_input": {"file_path": "a.rs"}});
+        assert!(provenance_probe(&payload, &root, "a.rs").0.is_none());
+
+        with_claim(&root, r#"{"kind":"approved"}"#); // no ids key
+        assert!(provenance_probe(&payload, &root, "a.rs").0.is_none());
+
+        with_claim(&root, r#"{"ids":[]}"#); // empty ids
+        assert!(provenance_probe(&payload, &root, "a.rs").0.is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_non_repo_write_target_is_dropped_not_recorded() {
+        // The first line this probe emitted in the wild read
+        //   path=/tmp/adv327.json;   ms=4
+        // — outside the repo, and carrying the shell separator that ended the
+        // redirect token. Provenance records repo paths or nothing.
+        let root = scratch("nonrepo");
+        with_claim(&root, r#"{"ids":["x"]}"#);
+        let payload = json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "jq -n '{}' > /tmp/adv327.json; curl -sS localhost" },
+            "cwd": root.to_string_lossy(),
+        });
+        let (_, paths) = provenance_probe(&payload, &root, "-");
+        assert!(
+            paths.is_empty(),
+            "a /tmp write must not be recorded as provenance: {:?}",
+            paths
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_repo_write_is_normalized_and_stripped_of_shell_punctuation() {
+        let root = scratch("normalize");
+        with_claim(&root, r#"{"ids":["x"]}"#);
+        std::fs::create_dir_all(root.join("resources")).unwrap();
+        let payload = json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "jq -n '{}' > resources/thing.json; echo done" },
+            "cwd": root.to_string_lossy(),
+        });
+        let (_, paths) = provenance_probe(&payload, &root, "-");
+        assert_eq!(
+            paths,
+            vec!["resources/thing.json".to_string()],
+            "repo-relative, and no trailing separator"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_read_only_bash_command_resolves_no_paths() {
+        let root = scratch("readonly");
+        with_claim(&root, r#"{"ids":["x"]}"#);
+        let payload =
+            json!({"tool_name": "Bash", "tool_input": {"command": "git status --porcelain"}});
+        assert!(provenance_probe(&payload, &root, "-").1.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_codex_apply_patch_resolves_from_the_verdict_target() {
+        // The provider-neutrality test. Codex writes arrive as `apply_patch`
+        // with the target parsed out of the patch body by
+        // codex_apply_patch_branch, so there is no `file_path` and no shell
+        // redirect to find. Taking the verdict's already-resolved target is
+        // what makes this work for both providers; a first cut that keyed on
+        // tool names resolved nothing here.
+        let root = scratch("codex");
+        with_claim(&root, r#"{"ids":["issue-327-provenance-capture-phase-a"]}"#);
+        let payload = json!({
+            "tool_name": "apply_patch",
+            "tool_input": { "patch": "*** Begin Patch\n*** Update File: src-tauri/src/lib.rs\n" }
+        });
+        let (item, paths) = provenance_probe(&payload, &root, "src-tauri/src/lib.rs");
+        assert_eq!(
+            item.as_deref(),
+            Some("issue-327-provenance-capture-phase-a")
+        );
+        assert_eq!(
+            paths,
+            vec!["src-tauri/src/lib.rs".to_string()],
+            "Codex writes must resolve a path, not fall through to the shell branch"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

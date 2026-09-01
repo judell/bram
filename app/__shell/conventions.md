@@ -1021,18 +1021,26 @@ was correctly signed. The record was inconsistent along an axis no
 reader cares about. The cross-boundary case is a subset of the problem,
 and it was mistaken for the whole of it.
 
-**The form.** One canonical opener, five slots, all load-bearing —
-*whose* agent, *which* agent, *which thread*, *which model*, *which*
-project:
+**The form.** One canonical opener, six slots, all load-bearing —
+*whose* agent, *which* agent, *which thread*, *which model*, the familiar
+project name, and the exact repository that anchors the speaker's evidence:
 
-    <owner>'s <Agent> (<thread>, <model>) speaking from the <Project> project:
+    <owner>'s <Agent> (<thread>, <model>) speaking from the <Project> project (<forge-host>/<owner-or-group>/<repo>):
 
 `<thread>` is `main thread` or `subagent`; `<model>` names the model
 producing the words. This project's instances:
 
-    Jon's Claude (main thread, Fable 5) speaking from the Bram project:
-    Jon's Claude (subagent, Opus 5) speaking from the Bram project:
-    Jon's Codex (main thread, gpt-5.2-codex) speaking from the XMLUI project:
+    Jon's Claude (main thread, Fable 5) speaking from the Bram project (github.com/judell/bram):
+    Jon's Claude (subagent, Opus 5) speaking from the Bram project (github.com/judell/bram):
+    Jon's Codex (main thread, gpt-5.2-codex) speaking from the XMLUI project (github.com/xmlui-org/xmlui):
+
+The repository locator is the checkout's `origin`, normalized to
+`host/path`: omit the scheme, credentials, trailing slash, and `.git`.
+Do not assume a public forge or a two-segment path —
+`gitlab.com/group/subgroup/project` and
+`forge.example.org/team/project` are valid. The familiar project name
+stays because it reads well; the locator is the unambiguous identity
+across forks, mirrors, same-named repositories, and forge providers.
 
 A form that names only the project ("from the xmlui side") leaves "who
 is speaking" unanswered, which is the half that matters when two agents
@@ -1051,11 +1059,13 @@ Two rules that follow:
   their own thread and model; a subagent's findings posted by the
   orchestrator are the orchestrator speaking (its signature), with the
   subagent's work attributed inline where it matters.
-- **Old-form signatures remain valid.** Both guards' enforcement keys
-  on the `speaking from the <…> project` core by design, so the
-  extended form needs no coordination — it is the prescription going
-  forward, and other machines adopt as their seeded conventions
-  refresh.
+- **Old-form signatures remain valid historical text, not valid new
+  writes.** Do not retrofit old threads merely because the form grew.
+  The guards require the full current form on every new inspectable
+  artifact. If the checkout has no network-shaped `origin` (for example
+  a new local-only repository), they still require a syntactically full
+  locator but cannot compare it to an expected remote; state that
+  limitation rather than implying remote verification.
 
 **The scope.** **Every artifact, not just the first in a thread.** The
 observed failure is decay: the opening comment is signed, and by the
@@ -1078,10 +1088,15 @@ was not there.
 **Enforcement.** Both provider guards check this on `PreToolUse` and
 **deny** an unsigned forge write rather than warning. You should never
 meet that check: sign by default and it never fires. A denial means you
-forgot, and costs one turn to fix. The guards fail open by design — a
-body the parser cannot read (`--body-file -`, an unreadable path, no
-body flag) is allowed through, so the check never blocks work it cannot
-judge.
+forgot, and costs one turn to fix. The guards fail open only when no
+inspectable prose body exists (`--body-file -` or a metadata-only command
+with no body flag). A named body file that should be readable but is not
+is denied rather than silently bypassed. Coverage includes issue/PR/MR
+prose writes, GitHub gists, GitLab
+snippets, and inspectable `gh api` comment/gist writes. Recognized
+file-backed writes whose named file cannot be read are denied; stdin and
+metadata-only commands remain explicit unparsed cases because there is
+no body the hook can judge.
 
 **Write the body file in its own step.** Build the body in one call,
 post it in the next — never both in a single command. `PreToolUse` runs

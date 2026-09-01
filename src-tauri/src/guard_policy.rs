@@ -330,17 +330,6 @@ fn lit(c: &[char], i: usize, s: &str) -> Option<usize> {
     Some(j)
 }
 
-fn lit_ci(c: &[char], i: usize, s: &str) -> Option<usize> {
-    let mut j = i;
-    for ch in s.chars() {
-        if j >= c.len() || c[j].to_ascii_lowercase() != ch.to_ascii_lowercase() {
-            return None;
-        }
-        j += 1;
-    }
-    Some(j)
-}
-
 /// `\s+`
 fn ws1(c: &[char], i: usize) -> Option<usize> {
     let mut j = i;
@@ -945,12 +934,61 @@ const FORGE_WRITE_VERBS: &[&str] = &["create", "comment", "note", "edit", "updat
 
 fn is_forge_write(command: &str) -> bool {
     let c = chars(command);
-    cmd_verb(
+    if cmd_verb(
         &c,
         &["gh", "glab"],
         Some(&["issue", "pr", "mr"]),
         FORGE_WRITE_VERBS,
-    )
+    ) {
+        return true;
+    }
+    if cmd_verb(&c, &["gh"], Some(&["gist"]), &["create", "edit"])
+        || cmd_verb(&c, &["glab"], Some(&["snippet"]), &["create", "update"])
+    {
+        return true;
+    }
+    let lower = command.to_ascii_lowercase();
+    lower.contains("gh api")
+        && (lower.contains("--method post")
+            || lower.contains("--method patch")
+            || lower.contains("-x post")
+            || lower.contains("-x patch"))
+        && (lower.contains("/comments") || lower.contains("gists/"))
+}
+
+fn forge_positional_body_file(command: &str) -> Option<String> {
+    let lower = command.to_ascii_lowercase();
+    let file_backed = lower.contains("gh gist edit")
+        || lower.contains("gh gist create")
+        || lower.contains("glab snippet create")
+        || lower.contains("glab snippet update");
+    if !file_backed {
+        return None;
+    }
+    let token = command.split_whitespace().last()?.trim_matches(['\'', '"']);
+    (!token.is_empty() && !token.starts_with('-')).then(|| token.to_string())
+}
+
+fn forge_api_body(command: &str) -> Option<String> {
+    let lower = command.to_ascii_lowercase();
+    let body_pos = lower.find("body=")?;
+    let start = body_pos + "body=".len();
+    let bytes = command.as_bytes();
+    let quote = body_pos
+        .checked_sub(1)
+        .and_then(|i| bytes.get(i).copied())
+        .filter(|b| matches!(*b, b'\'' | b'"'));
+    let mut end = start;
+    while end < bytes.len() {
+        if quote
+            .map(|q| bytes[end] == q)
+            .unwrap_or(bytes[end].is_ascii_whitespace())
+        {
+            break;
+        }
+        end += 1;
+    }
+    Some(command[start..end].replace("\\n", "\n"))
 }
 
 /// `(?:--body-file|-F)(?:=|\s+)(\S+)`
@@ -1059,61 +1097,104 @@ fn crossboundary_body(command: &str, cwd: &Path) -> (Option<String>, &'static st
     if let Some(lit) = body_literal_arg(command) {
         return (Some(unquote_shell(&lit)), "body-literal");
     }
+    if let Some(body) = forge_api_body(command) {
+        return (Some(body), "api-body-field");
+    }
+    if let Some(path) = forge_positional_body_file(command) {
+        let candidate = if Path::new(&path).is_absolute() {
+            PathBuf::from(&path)
+        } else {
+            cwd.join(&path)
+        };
+        return match std::fs::read(&candidate) {
+            Ok(bytes) => (
+                Some(String::from_utf8_lossy(&bytes).into_owned()),
+                "positional-body-file",
+            ),
+            Err(_) => (None, "positional-body-file-unreadable"),
+        };
+    }
     (None, "no-body-flag")
 }
 
-/// `speaking\s+from\s+the\s+.{1,60}?\bproject\b`, case-insensitive.
-fn signature_shape(text: &str) -> bool {
-    let c = chars(text);
-    for i in 0..c.len() {
-        let Some(j) = lit_ci(&c, i, "speaking") else {
-            continue;
-        };
-        let Some(j) = ws1(&c, j) else { continue };
-        let Some(j) = lit_ci(&c, j, "from") else {
-            continue;
-        };
-        let Some(j) = ws1(&c, j) else { continue };
-        let Some(j) = lit_ci(&c, j, "the") else {
-            continue;
-        };
-        let Some(j) = ws1(&c, j) else { continue };
-        // `.{1,60}?` — lazy, and `.` never matches a newline.
-        for n in 1..=60usize {
-            let pos = j + n;
-            if pos > c.len() {
-                break;
-            }
-            if c[pos - 1] == '\n' {
-                break;
-            }
-            if pos >= c.len() {
-                break;
-            }
-            if !word_start(&c, pos) {
-                continue;
-            }
-            if let Some(e) = lit_ci(&c, pos, "project") {
-                if word_end(&c, e) {
-                    return true;
-                }
-            }
+fn normalize_repo_locator(remote: &str) -> Option<String> {
+    let mut value = remote.trim().trim_end_matches('/').to_string();
+    if let Some(rest) = value.strip_prefix("git@") {
+        let (host, path) = rest.split_once(':')?;
+        value = format!("{host}/{path}");
+    } else if let Some((_, rest)) = value.split_once("://") {
+        value = rest.to_string();
+        if let Some((_, tail)) = value.split_once('@') {
+            value = tail.to_string();
         }
+    } else {
+        return None;
     }
-    false
+    value = value
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .to_string();
+    let (host, path) = value.split_once('/')?;
+    if host.is_empty() || path.is_empty() || !host.contains('.') {
+        return None;
+    }
+    Some(format!("{}/{}", host.to_ascii_lowercase(), path))
 }
 
-/// True iff the first non-empty line carries the canonical shape.
-fn body_is_signed(body: &str) -> bool {
+fn expected_repo_locator(cwd: &Path) -> Option<String> {
+    let safe_directory = format!("safe.directory={}", cwd.display());
+    let output = std::process::Command::new("git")
+        .args(["-c", &safe_directory, "remote", "get-url", "origin"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    normalize_repo_locator(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn signature_line_locator(line: &str) -> Option<&str> {
+    let line = line
+        .trim()
+        .trim_start_matches(|ch| matches!(ch, '_' | '*' | '>' | '#' | '-' | ' '))
+        .trim_end_matches(|ch| matches!(ch, '_' | '*' | ' '));
+    let (owner, rest) = line.split_once("'s ")?;
+    if owner.trim().is_empty() {
+        return None;
+    }
+    let (agent, rest) = rest.split_once(" (")?;
+    if !matches!(agent, "Claude" | "Codex") {
+        return None;
+    }
+    let (standing, rest) = rest.split_once(") speaking from the ")?;
+    let (thread, model) = standing.split_once(", ")?;
+    if !matches!(thread, "main thread" | "subagent") || model.trim().is_empty() {
+        return None;
+    }
+    let rest = rest.strip_suffix("):")?;
+    let (project, locator) = rest.rsplit_once(" project (")?;
+    if project.trim().is_empty() || locator.trim().is_empty() {
+        return None;
+    }
+    Some(locator.trim())
+}
+
+/// True iff the first non-empty line carries the full canonical signature and
+/// names this checkout's normalized origin when one is discoverable.
+fn body_is_signed(body: &str, cwd: &Path) -> bool {
+    let expected = expected_repo_locator(cwd);
     for line in body.split('\n') {
-        let stripped = line
-            .trim()
-            .trim_start_matches(|ch| matches!(ch, '_' | '*' | '>' | '#' | '-' | ' '))
-            .trim();
-        if stripped.is_empty() {
+        if line.trim().is_empty() {
             continue;
         }
-        return signature_shape(stripped);
+        let Some(actual) = signature_line_locator(line) else {
+            return false;
+        };
+        return expected
+            .as_deref()
+            .map(|want| actual.eq_ignore_ascii_case(want))
+            .unwrap_or(true);
     }
     false
 }
@@ -1129,7 +1210,7 @@ fn crossboundary_signature_verdict(command: &str, cwd: &Path) -> (&'static str, 
     match body {
         None => ("unparsed", reason),
         Some(b) => {
-            if body_is_signed(&b) {
+            if body_is_signed(&b, cwd) {
                 ("signed", reason)
             } else {
                 ("unsigned", reason)
@@ -1864,7 +1945,9 @@ fn bash_branch(payload: &Value) -> ShadowVerdict {
         );
     }
     let (cb_verdict, _cb_detail) = crossboundary_signature_verdict(&command, &cwd);
-    if cb_verdict == "unsigned" {
+    if cb_verdict == "unsigned"
+        || (cb_verdict == "unparsed" && !matches!(_cb_detail, "body-file-stdin" | "no-body-flag"))
+    {
         // python:1916-1934
         return deny_msg(
             "crossboundary-unsigned",
@@ -1872,7 +1955,7 @@ fn bash_branch(payload: &Value) -> ShadowVerdict {
             "Bash",
             &preview,
             &cwd_s,
-            "This posts to a repo other than this project's origin, and the body does not open with the cross-boundary signature.\nOpen the first line with:\n    <owner>'s <Agent> speaking from the <Project> project:\nSee conventions.md, 'Name the boundary and sign your side' — every artifact, every comment, not just the first in a thread.",
+            "This agent-authored forge artifact lacks the full repository-qualified signature.\nOpen the first line with:\n    <owner>'s <Agent> (<thread>, <model>) speaking from the <Project> project (<origin-host>/<path>):\nSee conventions.md, 'Signing agent-authored forge artifacts' — every artifact, every comment, not just the first in a thread.",
         );
     }
     let (sha_verdict, sha_detail) = forge_sha_verdict(&command, &cwd);
@@ -3448,13 +3531,11 @@ Use --body-file - (stdin) or --body-file <path> instead.\nDetected: <match>",
         );
     }
     let (cb_verdict, _cb_detail) = crossboundary_signature_verdict(&command, cwd);
-    if cb_verdict == "unsigned" {
+    if cb_verdict == "unsigned"
+        || (cb_verdict == "unparsed" && !matches!(_cb_detail, "body-file-stdin" | "no-body-flag"))
+    {
         return codex_deny(
-            "This posts to a repo other than this project's origin, and the body \
-does not open with the cross-boundary signature.\nOpen the first line with:\n\
-    <owner>'s <Agent> speaking from the <Project> project:\nSee conventions.md, \
-'Name the boundary and sign your side' — every artifact, every comment, not \
-just the first in a thread.",
+            "This agent-authored forge artifact lacks the full repository-qualified signature.\nOpen the first line with:\n    <owner>'s <Agent> (<thread>, <model>) speaking from the <Project> project (<origin-host>/<path>):\nSee conventions.md, 'Signing agent-authored forge artifacts' — every artifact, every comment, not just the first in a thread.",
             "-",
         );
     }
@@ -3914,7 +3995,7 @@ mod guard_policy_tests {
     #[test]
     fn crossboundary_signature_gates() {
         let td = scratch("sig");
-        let signed = "Jon's Claude speaking from the Bram project:\n\nBody.";
+        let signed = "Jon's Claude (main thread, Opus 5) speaking from the Bram project (github.com/judell/bram):\n\nBody.";
         let unsigned = "Vendored the build; the tooltip renders.";
         let verdict = |cmd: &str| crossboundary_signature_verdict(cmd, &td).0;
 
@@ -3980,16 +4061,80 @@ mod guard_policy_tests {
 
     #[test]
     fn body_is_signed_tolerates_markdown_emphasis() {
+        let td = scratch("signature-markdown");
         assert!(body_is_signed(
-            "_Jon's Codex speaking from the XMLUI project:_"
+            "_Jon's Codex (main thread, GPT-5.6-sol) speaking from the XMLUI project (github.com/xmlui-org/xmlui):_",
+            &td
         ));
         assert!(body_is_signed(
-            "> **Jon's Claude speaking from the Bram project:**"
+            "> **Jon's Claude (subagent, Opus 5) speaking from the Bram project (github.com/judell/bram):**",
+            &td
         ));
         assert!(!body_is_signed(
-            "Bram side — a correction to my green light."
+            "Bram side — a correction to my green light.",
+            &td
         ));
-        assert!(!body_is_signed(""));
+        assert!(!body_is_signed("", &td));
+        let _ = std::fs::remove_dir_all(&td);
+    }
+
+    #[test]
+    fn repository_qualified_signatures_cover_gist_api_and_origin_match() {
+        let td = scratch("signature-origin");
+        std::fs::create_dir_all(td.join(".git").join("refs")).unwrap();
+        std::fs::create_dir_all(td.join(".git").join("objects")).unwrap();
+        std::fs::write(td.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(
+            td.join(".git").join("config"),
+            "[core]\n\trepositoryformatversion = 0\n\tbare = false\n[remote \"origin\"]\n\turl = git@gitlab.com:group/subgroup/project.git\n",
+        )
+        .unwrap();
+
+        let signed = "Jon's Codex (main thread, GPT-5.6-sol) speaking from the Bram project (gitlab.com/group/subgroup/project):\n\nBody.";
+        let wrong_repo = "Jon's Codex (main thread, GPT-5.6-sol) speaking from the Bram project (github.com/judell/bram):\n\nBody.";
+        let old_form = "Jon's Codex speaking from the Bram project:\n\nBody.";
+        assert_eq!(
+            expected_repo_locator(&td),
+            Some("gitlab.com/group/subgroup/project".to_string())
+        );
+        assert!(body_is_signed(signed, &td));
+        assert!(!body_is_signed(wrong_repo, &td));
+        assert!(!body_is_signed(old_form, &td));
+        assert_eq!(
+            normalize_repo_locator("https://GitLab.com/group/subgroup/project.git\n"),
+            Some("gitlab.com/group/subgroup/project".to_string())
+        );
+
+        let gist_body = td.join("gist.md");
+        std::fs::write(&gist_body, signed).unwrap();
+        assert_eq!(
+            crossboundary_signature_verdict(
+                &format!(
+                    "gh gist edit deadbeef --filename gist.md {}",
+                    gist_body.display()
+                ),
+                &td
+            ),
+            ("signed", "positional-body-file")
+        );
+        assert_eq!(
+            crossboundary_signature_verdict(
+                &format!(
+                    "gh api --method POST gists/deadbeef/comments -f \"body={}\"",
+                    signed.replace('\n', "\\n")
+                ),
+                &td
+            ),
+            ("signed", "api-body-field")
+        );
+        assert_eq!(
+            crossboundary_signature_verdict(
+                "gh gist edit deadbeef --filename gist.md missing.md",
+                &td
+            ),
+            ("unparsed", "positional-body-file-unreadable")
+        );
+        let _ = std::fs::remove_dir_all(&td);
     }
 
     // --- mcp_paths (python lines 1383-1387) ---------------------------------
@@ -4785,7 +4930,7 @@ mod guard_policy_tests {
         assert_eq!(v.reason, "crossboundary-unsigned");
         assert_eq!(
             body_of(&v),
-            "This posts to a repo other than this project's origin, and the body does not open with the cross-boundary signature.\nOpen the first line with:\n    <owner>'s <Agent> speaking from the <Project> project:\nSee conventions.md, 'Name the boundary and sign your side' — every artifact, every comment, not just the first in a thread."
+            "This agent-authored forge artifact lacks the full repository-qualified signature.\nOpen the first line with:\n    <owner>'s <Agent> (<thread>, <model>) speaking from the <Project> project (<origin-host>/<path>):\nSee conventions.md, 'Signing agent-authored forge artifacts' — every artifact, every comment, not just the first in a thread."
         );
 
         let at = '@';
@@ -4902,7 +5047,7 @@ mod guard_policy_tests {
             "tool_name": "Bash",
             "tool_input": {
                 "command": format!(
-                    "gh issue comment 5 --body \"Jon's Claude speaking from the Bram project: see {sha}\""
+                    "gh issue comment 5 --body \"Jon's Claude (main thread, Opus 5) speaking from the Bram project (github.com/judell/bram):\\n\\nSee {sha}\""
                 ),
             },
             "cwd": root.to_string_lossy(),
@@ -5283,7 +5428,7 @@ mod codex_guard_policy_tests {
     #[test]
     fn codex_crossboundary_signature_gates() {
         let td = scratch("codex-sig");
-        let signed = "Jon's Claude speaking from the Bram project:\n\nBody.";
+        let signed = "Jon's Claude (main thread, Opus 5) speaking from the Bram project (github.com/judell/bram):\n\nBody.";
         let unsigned = "Vendored the build; the tooltip renders.";
         let verdict = |cmd: &str| crossboundary_signature_verdict(cmd, &td).0;
 
@@ -5346,15 +5491,18 @@ mod codex_guard_policy_tests {
         );
 
         assert!(body_is_signed(
-            "_Jon's Codex speaking from the XMLUI project:_"
+            "_Jon's Codex (main thread, GPT-5.6-sol) speaking from the XMLUI project (github.com/xmlui-org/xmlui):_",
+            &td
         ));
         assert!(body_is_signed(
-            "> **Jon's Claude speaking from the Bram project:**"
+            "> **Jon's Claude (subagent, Opus 5) speaking from the Bram project (github.com/judell/bram):**",
+            &td
         ));
         assert!(!body_is_signed(
-            "Bram side — a correction to my green light."
+            "Bram side — a correction to my green light.",
+            &td
         ));
-        assert!(!body_is_signed(""));
+        assert!(!body_is_signed("", &td));
         let _ = std::fs::remove_dir_all(&td);
     }
 
@@ -5712,9 +5860,9 @@ resources/worklist.json has no proposed"
             serde_json::json!({"command": "gh issue comment 5 --body \"no signature here\""}),
         );
         assert_eq!(v.decision, "deny");
-        assert!(v
-            .reason
-            .starts_with("This posts to a repo other than this project's origin"));
+        assert!(v.reason.starts_with(
+            "This agent-authored forge artifact lacks the full repository-qualified signature"
+        ));
 
         // A push with a fresh consumed approval rides the grace.
         std::fs::write(

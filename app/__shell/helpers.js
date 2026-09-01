@@ -3030,7 +3030,9 @@ window.__bramOverlapChangedIndex = function (items, claim) {
   if (!declared.length) return [];
   var list = items || [];
   var dirty = {};
+  var byId = {};
   for (var i = 0; i < list.length; i++) {
+    if (list[i] && list[i].id) byId[list[i].id] = list[i];
     var files = (list[i] && list[i].changedFiles) || [];
     for (var j = 0; j < files.length; j++) {
       var f = files[j];
@@ -3045,9 +3047,30 @@ window.__bramOverlapChangedIndex = function (items, claim) {
   // has always required a BEGUN sharer for exactly this reason; begunCount is
   // already on every entry. An item that has not begun cannot have written
   // anything, which is the one authorship fact Bram does know for certain.
-  return declared.filter(function (e) {
-    return !!dirty[e.path] && (e.begunCount || 0) >= 2;
-  });
+  //
+  // Narrow the CLAIMANTS too, not only the row. Filtering which rows appear and
+  // then handing back __bramOverlapIndex's entry untouched left `claimants` and
+  // `total` on the DECLARED basis, so a proposed item with nothing on disk was
+  // still named in "claimed by", counted in "items", and counted in the board
+  // header. That is this same defect one level down, and it survived a rendered
+  // check because the board then held only two declarants per path -- the
+  // fixture could not fail.
+  var out = [];
+  for (var e = 0; e < declared.length; e++) {
+    var entry = declared[e];
+    if (!dirty[entry.path] || (entry.begunCount || 0) < 2) continue;
+    var begun = (entry.claimants || []).filter(function (id) {
+      var it = byId[id];
+      return !!it && window.__bramWorklist2Begun(it, claim);
+    });
+    out.push({
+      path: entry.path,
+      claimants: begun,
+      begunCount: begun.length,
+      total: begun.length,
+    });
+  }
+  return out;
 };
 
 window.__bramOverlapAny = function (items, claim) {

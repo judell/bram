@@ -15923,15 +15923,6 @@ fn drain_pty_intents<R: tauri::Runtime>(
             .get("promptId")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let source = intent.get("source").and_then(|v| v.as_str()).unwrap_or("");
-        let evidence = intent
-            .get("evidence")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let intent_id = intent
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("intent");
         if matches!(kind, "toShell" | "toTurn") {
             if blocking_tool.is_some() {
                 held += 1;
@@ -16037,53 +16028,8 @@ fn drain_pty_intents<R: tauri::Runtime>(
             _ => continue,
         };
         match write_result {
-            Ok(()) => {
-                wrote += 1;
-                if source == "repo-startup-greeting" {
-                    match mark_repo_startup_greeting_delivered(app) {
-                        Ok(marker) => {
-                            if bram_trace_enabled() {
-                                append_bram_trace_line(
-                                    app,
-                                    "startup-greeting",
-                                    &format!(
-                                        "op=sent id={} evidence={} bytes={} marker={}",
-                                        intent_id,
-                                        evidence,
-                                        data.len(),
-                                        marker.display()
-                                    ),
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            if bram_trace_enabled() {
-                                append_bram_trace_line(
-                                    app,
-                                    "startup-greeting",
-                                    &format!(
-                                        "op=error stage=mark-delivered id={} error={}",
-                                        intent_id,
-                                        bram_trace_preview(&e, 120)
-                                    ),
-                                );
-                            }
-                        }
-                    }
-                }
-            }
+            Ok(()) => wrote += 1,
             Err(e) => {
-                if source == "repo-startup-greeting" && bram_trace_enabled() {
-                    append_bram_trace_line(
-                        app,
-                        "startup-greeting",
-                        &format!(
-                            "op=error stage=send id={} error={}",
-                            intent_id,
-                            bram_trace_preview(&e, 120)
-                        ),
-                    );
-                }
                 drain_error = Some(e);
                 remaining.push(line.to_string());
             }
@@ -23032,24 +22978,46 @@ fn project_is_managed(dir: &Path) -> bool {
 }
 
 const REPO_STARTUP_GREETING: &str = "Hello, this is Bram. I just woke up in a repo that I haven't seen before. You can ask me to look around, assess what is here, and suggest what might need doing next.";
+// Schemas 1 and 2 meant "written to the PTY" and "landed as a provider user
+// turn" respectively. Neither represents the intended feature. Schema 3 is
+// written only after Bram has serialized the greeting into its own UI
+// projection, where it cannot become provider input or a session title.
+const REPO_STARTUP_GREETING_MARKER_SCHEMA: u64 = 3;
+static REPO_STARTUP_GREETING_VISIBLE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static REPO_STARTUP_GREETING_MARKED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static REPO_STARTUP_GREETING_ARMED_AT_MS: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+
+// A pristine unmanaged repo has no `resources/` directory yet, so its trace
+// destination cannot be relied on while diagnosing the greeting that runs
+// before Setup. Always mirror this one startup path to stderr; keep the normal
+// trace copy when the trace sink exists.
+fn report_startup_greeting<R: tauri::Runtime>(app: &AppHandle<R>, detail: &str) {
+    eprintln!("[startup-greeting] {}", detail);
+    if bram_trace_enabled() {
+        append_bram_trace_line(app, "startup-greeting", detail);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RepoStartupGreetingClaim {
-    SendUnseen,
-    SendRetry,
+    ProjectUnseen,
+    ProjectRetry,
     SuppressAlreadySeen,
     SuppressAlreadyManaged,
 }
 
 impl RepoStartupGreetingClaim {
-    fn should_send(self) -> bool {
-        matches!(self, Self::SendUnseen | Self::SendRetry)
+    fn should_project(self) -> bool {
+        matches!(self, Self::ProjectUnseen | Self::ProjectRetry)
     }
 
     fn reason(self) -> &'static str {
         match self {
-            Self::SendUnseen => "unseen-repo",
-            Self::SendRetry => "undelivered-retry",
+            Self::ProjectUnseen => "unseen-repo",
+            Self::ProjectRetry => "unprojected-retry",
             Self::SuppressAlreadySeen => "already-seen",
             Self::SuppressAlreadyManaged => "already-managed",
         }
@@ -23082,32 +23050,41 @@ fn claim_repo_startup_greeting(
     let text = match std::fs::read_to_string(marker) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(RepoStartupGreetingClaim::SendUnseen)
+            return Ok(RepoStartupGreetingClaim::ProjectUnseen)
         }
         Err(e) => return Err(e.to_string()),
     };
+    // PTY-era schemas 1 and 2 cannot prove that Bram itself presented the
+    // greeting. Retry them so the first build with UI-owned delivery repairs
+    // repos that were marked seen by the semantically-wrong provider turn.
     let delivered = serde_json::from_str::<serde_json::Value>(&text)
         .ok()
-        .and_then(|body| body.get("deliveredAtMs").and_then(|v| v.as_i64()))
-        .unwrap_or(0)
-        > 0;
+        .map(|body| {
+            body.get("schema").and_then(|v| v.as_u64()) == Some(REPO_STARTUP_GREETING_MARKER_SCHEMA)
+                && body
+                    .get("projectedAtMs")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0)
+                    > 0
+        })
+        .unwrap_or(false);
     Ok(if delivered {
         RepoStartupGreetingClaim::SuppressAlreadySeen
     } else {
-        RepoStartupGreetingClaim::SendRetry
+        RepoStartupGreetingClaim::ProjectRetry
     })
 }
 
-fn persist_repo_startup_greeting_delivered(
+fn persist_repo_startup_greeting_projected(
     marker: &Path,
-    delivered_at_ms: i64,
+    projected_at_ms: i64,
 ) -> Result<(), String> {
     if let Some(parent) = marker.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let body = serde_json::json!({
-        "schema": 1,
-        "deliveredAtMs": delivered_at_ms,
+        "schema": REPO_STARTUP_GREETING_MARKER_SCHEMA,
+        "projectedAtMs": projected_at_ms,
     });
     std::fs::write(marker, format!("{}\n", body)).map_err(|e| e.to_string())
 }
@@ -23122,16 +23099,56 @@ fn repo_startup_greeting_marker_for_app<R: tauri::Runtime>(
     Ok(repo_startup_greeting_marker_path(&cache, &root))
 }
 
-fn mark_repo_startup_greeting_delivered<R: tauri::Runtime>(
+fn mark_repo_startup_greeting_projected<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> Result<PathBuf, String> {
     let marker = repo_startup_greeting_marker_for_app(app)?;
-    persist_repo_startup_greeting_delivered(&marker, unix_now_ms())?;
+    persist_repo_startup_greeting_projected(&marker, unix_now_ms())?;
     Ok(marker)
 }
 
+fn repo_startup_greeting_turn() -> serde_json::Value {
+    serde_json::json!({
+        "role": "assistant",
+        "entries": [{
+            "kind": "text",
+            "text": REPO_STARTUP_GREETING,
+        }],
+        "bramOwned": true,
+    })
+}
+
+fn note_repo_startup_greeting_projected<R: tauri::Runtime>(app: &AppHandle<R>) {
+    if REPO_STARTUP_GREETING_MARKED
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .is_err()
+    {
+        return;
+    }
+    match mark_repo_startup_greeting_projected(app) {
+        Ok(marker) => {
+            report_startup_greeting(app, &format!("op=projected marker={}", marker.display()))
+        }
+        Err(e) => {
+            REPO_STARTUP_GREETING_MARKED.store(false, std::sync::atomic::Ordering::Release);
+            report_startup_greeting(
+                app,
+                &format!(
+                    "op=error stage=mark-projected error={}",
+                    bram_trace_preview(&e, 120)
+                ),
+            );
+        }
+    }
+}
+
 // Returns true when this is the first unmanaged launch (or a retry whose
-// greeting never reached the agent). The caller uses that same decision to
+// greeting never reached Bram's UI). The caller uses that same decision to
 // force a fresh provider session for this launch only.
 fn arm_repo_startup_greeting_if_needed<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
     let Some(root) = project_root(Some(app)) else {
@@ -23140,57 +23157,53 @@ fn arm_repo_startup_greeting_if_needed<R: tauri::Runtime>(app: &AppHandle<R>) ->
     let marker = match repo_startup_greeting_marker_for_app(app) {
         Ok(marker) => marker,
         Err(e) => {
-            if bram_trace_enabled() {
-                append_bram_trace_line(
-                    app,
-                    "startup-greeting",
-                    &format!(
-                        "op=error stage=cache-dir error={}",
-                        bram_trace_preview(&e.to_string(), 120)
-                    ),
-                );
-            }
+            report_startup_greeting(
+                app,
+                &format!(
+                    "op=error stage=cache-dir error={}",
+                    bram_trace_preview(&e.to_string(), 120)
+                ),
+            );
             return false;
         }
     };
     match claim_repo_startup_greeting(&marker, project_is_managed(&root)) {
-        Ok(claim) if claim.should_send() => {
-            REPO_STARTUP_GREETING_PENDING.store(true, std::sync::atomic::Ordering::Release);
-            if bram_trace_enabled() {
-                append_bram_trace_line(
-                    app,
-                    "startup-greeting",
-                    &format!(
-                        "op=armed reason={} marker={}",
-                        claim.reason(),
-                        marker.display()
-                    ),
-                );
-            }
+        Ok(claim) if claim.should_project() => {
+            REPO_STARTUP_GREETING_ARMED_AT_MS
+                .store(unix_now_ms(), std::sync::atomic::Ordering::Release);
+            REPO_STARTUP_GREETING_MARKED.store(false, std::sync::atomic::Ordering::Release);
+            REPO_STARTUP_GREETING_VISIBLE.store(true, std::sync::atomic::Ordering::Release);
+            report_startup_greeting(
+                app,
+                &format!(
+                    "op=armed reason={} marker={}",
+                    claim.reason(),
+                    marker.display()
+                ),
+            );
+            // The iframe may have performed its initial projection fetch
+            // before the PTY was spawned and this state was armed. A
+            // replayable projection tick closes that startup race.
+            emit_replayable_signal(app, "talk-session-changed");
             true
         }
         Ok(claim) => {
-            if bram_trace_enabled() {
-                append_bram_trace_line(
-                    app,
-                    "startup-greeting",
-                    &format!("op=suppressed reason={}", claim.reason()),
-                );
-            }
+            REPO_STARTUP_GREETING_VISIBLE.store(false, std::sync::atomic::Ordering::Release);
+            REPO_STARTUP_GREETING_ARMED_AT_MS.store(0, std::sync::atomic::Ordering::Release);
+            report_startup_greeting(app, &format!("op=suppressed reason={}", claim.reason()));
             false
         }
         Err(e) => {
-            if bram_trace_enabled() {
-                append_bram_trace_line(
-                    app,
-                    "startup-greeting",
-                    &format!(
-                        "op=error stage=claim marker={} error={}",
-                        marker.display(),
-                        bram_trace_preview(&e, 120)
-                    ),
-                );
-            }
+            REPO_STARTUP_GREETING_VISIBLE.store(false, std::sync::atomic::Ordering::Release);
+            REPO_STARTUP_GREETING_ARMED_AT_MS.store(0, std::sync::atomic::Ordering::Release);
+            report_startup_greeting(
+                app,
+                &format!(
+                    "op=error stage=claim marker={} error={}",
+                    marker.display(),
+                    bram_trace_preview(&e, 120)
+                ),
+            );
             false
         }
     }
@@ -30909,10 +30922,7 @@ static AGENT_BOOT_HOLD_GENERATION: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 static AGENT_BOOT_RELEASED_GENERATION: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
-static REPO_STARTUP_GREETING_PENDING: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 const AGENT_BOOT_HOLD_EXPIRE_MS: i64 = 30_000;
-const REPO_STARTUP_GREETING_SETTLE_MS: u64 = 250;
 
 fn agent_boot_hold_provider_cell() -> &'static Mutex<String> {
     static CELL: OnceLock<Mutex<String>> = OnceLock::new();
@@ -31079,60 +31089,8 @@ fn agent_boot_evidence_match(buf: &[u8]) -> Option<&'static str> {
         .find_map(|(p, n)| buf.windows(p.len()).any(|w| w == *p).then_some(*n))
 }
 
-fn schedule_repo_startup_greeting<R: tauri::Runtime>(app: AppHandle<R>, evidence: &'static str) {
-    if REPO_STARTUP_GREETING_PENDING
-        .compare_exchange(
-            true,
-            false,
-            std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Acquire,
-        )
-        .is_err()
-    {
-        return;
-    }
-    thread::spawn(move || {
-        thread::sleep(std::time::Duration::from_millis(
-            REPO_STARTUP_GREETING_SETTLE_MS,
-        ));
-        let state = app.state::<AppState>();
-        let payload = serde_json::json!({
-            "kind": "toTurn",
-            "data": REPO_STARTUP_GREETING,
-            "source": "repo-startup-greeting",
-            "evidence": evidence,
-        });
-        match queue_pty_intent_inner(&app, payload, &state) {
-            Ok(()) => {
-                if bram_trace_enabled() {
-                    append_bram_trace_line(
-                        &app,
-                        "startup-greeting",
-                        &format!("op=queued evidence={}", evidence),
-                    );
-                }
-            }
-            Err(e) => {
-                if bram_trace_enabled() {
-                    append_bram_trace_line(
-                        &app,
-                        "startup-greeting",
-                        &format!(
-                            "op=error stage=enqueue evidence={} error={}",
-                            evidence,
-                            bram_trace_preview(&e, 120)
-                        ),
-                    );
-                }
-            }
-        }
-    });
-}
-
 fn agent_boot_evidence_scan<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
-    let boot_hold_active = agent_boot_hold_active();
-    let greeting_pending = REPO_STARTUP_GREETING_PENDING.load(std::sync::atomic::Ordering::Acquire);
-    if !boot_hold_active && !greeting_pending {
+    if !agent_boot_hold_active() {
         return;
     }
     let mut buf: Vec<u8> = Vec::with_capacity(chunk.len() + 16);
@@ -31145,12 +31103,7 @@ fn agent_boot_evidence_scan<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8])
         buf.extend_from_slice(chunk);
     }
     if let Some(name) = agent_boot_evidence_match(&buf) {
-        if boot_hold_active {
-            clear_agent_boot_hold(app, name);
-        }
-        if greeting_pending {
-            schedule_repo_startup_greeting(app.clone(), name);
-        }
+        clear_agent_boot_hold(app, name);
     }
 }
 
@@ -31478,8 +31431,9 @@ mod project_managed_tests {
 #[cfg(test)]
 mod repo_startup_greeting_tests {
     use super::{
-        claim_repo_startup_greeting, persist_repo_startup_greeting_delivered,
-        repo_startup_greeting_marker_path, RepoStartupGreetingClaim, REPO_STARTUP_GREETING,
+        claim_repo_startup_greeting, persist_repo_startup_greeting_projected,
+        repo_startup_greeting_marker_path, repo_startup_greeting_turn, RepoStartupGreetingClaim,
+        REPO_STARTUP_GREETING, REPO_STARTUP_GREETING_MARKER_SCHEMA,
     };
 
     fn scratch(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -31496,14 +31450,14 @@ mod repo_startup_greeting_tests {
     }
 
     #[test]
-    fn unseen_repo_retries_until_delivery_then_suppresses() {
+    fn unseen_repo_retries_until_projection_then_suppresses() {
         let (base, cache) = scratch("unseen");
         let project = base.join("project");
         let marker = repo_startup_greeting_marker_path(&cache, &project);
 
         assert_eq!(
             claim_repo_startup_greeting(&marker, false).unwrap(),
-            RepoStartupGreetingClaim::SendUnseen
+            RepoStartupGreetingClaim::ProjectUnseen
         );
         assert!(
             !marker.exists(),
@@ -31513,9 +31467,28 @@ mod repo_startup_greeting_tests {
         std::fs::write(&marker, "{\"claimedAtMs\":100}\n").unwrap();
         assert_eq!(
             claim_repo_startup_greeting(&marker, false).unwrap(),
-            RepoStartupGreetingClaim::SendRetry
+            RepoStartupGreetingClaim::ProjectRetry
         );
-        persist_repo_startup_greeting_delivered(&marker, 200).unwrap();
+        std::fs::write(&marker, "{\"schema\":1,\"deliveredAtMs\":150}\n").unwrap();
+        assert_eq!(
+            claim_repo_startup_greeting(&marker, false).unwrap(),
+            RepoStartupGreetingClaim::ProjectRetry,
+            "legacy PTY-write markers do not prove UI projection"
+        );
+        std::fs::write(&marker, "{\"schema\":2,\"deliveredAtMs\":175}\n").unwrap();
+        assert_eq!(
+            claim_repo_startup_greeting(&marker, false).unwrap(),
+            RepoStartupGreetingClaim::ProjectRetry,
+            "provider-landed markers do not prove UI projection"
+        );
+        persist_repo_startup_greeting_projected(&marker, 200).unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&marker).unwrap()).unwrap();
+        assert_eq!(
+            body["schema"].as_u64(),
+            Some(REPO_STARTUP_GREETING_MARKER_SCHEMA)
+        );
+        assert_eq!(body["projectedAtMs"].as_i64(), Some(200));
         assert_eq!(
             claim_repo_startup_greeting(&marker, false).unwrap(),
             RepoStartupGreetingClaim::SuppressAlreadySeen
@@ -31543,6 +31516,18 @@ mod repo_startup_greeting_tests {
             REPO_STARTUP_GREETING,
             "Hello, this is Bram. I just woke up in a repo that I haven't seen before. You can ask me to look around, assess what is here, and suggest what might need doing next."
         );
+    }
+
+    #[test]
+    fn greeting_is_a_bram_owned_assistant_projection_not_a_user_turn() {
+        let turn = repo_startup_greeting_turn();
+        assert_eq!(turn["role"].as_str(), Some("assistant"));
+        assert_eq!(turn["bramOwned"].as_bool(), Some(true));
+        assert_eq!(
+            turn["entries"][0]["text"].as_str(),
+            Some(REPO_STARTUP_GREETING)
+        );
+        assert!(turn.get("user").is_none());
     }
 }
 
@@ -33987,6 +33972,7 @@ fn try_incremental_projected_turns<R: tauri::Runtime>(
     len: u64,
     latest: Option<usize>,
     update_ledger: bool,
+    include_startup_greeting: bool,
 ) -> Option<Result<Vec<u8>, String>> {
     latest?;
     let entry = PROJECTED_TURNS_CACHE.lock().ok()?.as_ref()?.clone();
@@ -34000,6 +33986,7 @@ fn try_incremental_projected_turns<R: tauri::Runtime>(
             entry.provider_label,
             &entry.turns,
             latest,
+            include_startup_greeting,
         ));
     }
     let inc_started = std::time::Instant::now();
@@ -34038,7 +34025,14 @@ fn try_incremental_projected_turns<R: tauri::Runtime>(
             ),
         );
     }
-    let body = projected_turns_body(app, &sid, provider_label, &merged, latest);
+    let body = projected_turns_body(
+        app,
+        &sid,
+        provider_label,
+        &merged,
+        latest,
+        include_startup_greeting,
+    );
     if body.is_ok() {
         if let Ok(mut guard) = PROJECTED_TURNS_CACHE.lock() {
             *guard = Some(ProjectedTurnsCacheEntry {
@@ -34064,8 +34058,9 @@ fn projected_turns_body<R: tauri::Runtime>(
     provider_label: &str,
     turns: &[serde_json::Value],
     latest: Option<usize>,
+    include_startup_greeting: bool,
 ) -> Result<Vec<u8>, String> {
-    let total = turns.len();
+    let total = turns.len() + usize::from(include_startup_greeting);
     let window_start = latest.map(|n| total.saturating_sub(n.max(1))).unwrap_or(0);
     // ai-describe + menu-answer overlays: served at body-build time (not
     // parse time) because a describe completion or a menu answer doesn't
@@ -34075,8 +34070,13 @@ fn projected_turns_body<R: tauri::Runtime>(
     // before.
     let overlay = describe_overlay_snapshot(app);
     let answers = menu_answer_overlay_snapshot();
-    if !overlay.is_empty() || !answers.is_empty() {
-        let mut window: Vec<serde_json::Value> = turns[window_start..].to_vec();
+    let serialized = if include_startup_greeting || !overlay.is_empty() || !answers.is_empty() {
+        let mut all_turns = Vec::with_capacity(total);
+        if include_startup_greeting {
+            all_turns.push(repo_startup_greeting_turn());
+        }
+        all_turns.extend_from_slice(turns);
+        let mut window: Vec<serde_json::Value> = all_turns[window_start..].to_vec();
         apply_describe_overlay(&mut window, &overlay);
         apply_menu_answer_overlay(&mut window, &answers);
         let body = serde_json::json!({
@@ -34086,16 +34086,21 @@ fn projected_turns_body<R: tauri::Runtime>(
             "windowStart": window_start,
             "turns": window,
         });
-        return serde_json::to_vec(&body).map_err(|e| e.to_string());
+        serde_json::to_vec(&body).map_err(|e| e.to_string())
+    } else {
+        let body = serde_json::json!({
+            "sid": sid,
+            "provider": provider_label,
+            "total": total,
+            "windowStart": window_start,
+            "turns": &turns[window_start..],
+        });
+        serde_json::to_vec(&body).map_err(|e| e.to_string())
+    };
+    if serialized.is_ok() && include_startup_greeting {
+        note_repo_startup_greeting_projected(app);
     }
-    let body = serde_json::json!({
-        "sid": sid,
-        "provider": provider_label,
-        "total": total,
-        "windowStart": window_start,
-        "turns": &turns[window_start..],
-    });
-    serde_json::to_vec(&body).map_err(|e| e.to_string())
+    serialized
 }
 
 // /__turns[?provider=claude|codex][&id=<session-id>][&latest=N] — the
@@ -34109,6 +34114,13 @@ fn read_projected_turns<R: tauri::Runtime>(
     provider: Option<SessionProvider>,
     latest: Option<usize>,
 ) -> Result<Vec<u8>, String> {
+    let include_startup_greeting =
+        id.is_empty() && REPO_STARTUP_GREETING_VISIBLE.load(std::sync::atomic::Ordering::Acquire);
+    let requested_provider_label = provider
+        .or_else(|| current_provider(app))
+        .or_else(|| SessionProvider::from_str(configured_agent_provider(app)))
+        .map(session_provider_label)
+        .unwrap_or("");
     let path_opt = if id.is_empty() {
         match provider {
             Some(p) => latest_session_path_for_provider(app, p)?,
@@ -34122,17 +34134,35 @@ fn read_projected_turns<R: tauri::Runtime>(
         sessions.into_iter().find(|s| s.id == id).map(|s| s.path)
     };
     let Some(path) = path_opt else {
+        if include_startup_greeting {
+            return projected_turns_body(app, "", requested_provider_label, &[], latest, true);
+        }
         return Ok(br#"{"sid":"","provider":"","total":0,"windowStart":0,"turns":[]}"#.to_vec());
     };
-    let mtime = std::fs::metadata(&path)
-        .and_then(|m| m.modified())
-        .map_err(|e| e.to_string())?;
-    let len = std::fs::metadata(&path)
-        .map(|m| m.len())
-        .map_err(|e| e.to_string())?;
-    if let Some(result) =
-        try_incremental_projected_turns(app, &path, mtime, len, latest, id.is_empty())
-    {
+    let metadata = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+    let mtime = metadata.modified().map_err(|e| e.to_string())?;
+    let len = metadata.len();
+    let mtime_ms = mtime
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0);
+    let armed_at_ms = REPO_STARTUP_GREETING_ARMED_AT_MS.load(std::sync::atomic::Ordering::Acquire);
+    if include_startup_greeting && armed_at_ms > 0 && mtime_ms < armed_at_ms {
+        // A first-seen launch deliberately starts a new provider session.
+        // Until that session creates its own file, do not let an older
+        // provider session displace Bram's empty-session welcome.
+        return projected_turns_body(app, "", requested_provider_label, &[], latest, true);
+    }
+    if let Some(result) = try_incremental_projected_turns(
+        app,
+        &path,
+        mtime,
+        len,
+        latest,
+        id.is_empty(),
+        include_startup_greeting,
+    ) {
         return result;
     }
     if let Ok(guard) = PROJECTED_TURNS_CACHE.lock() {
@@ -34144,6 +34174,7 @@ fn read_projected_turns<R: tauri::Runtime>(
                     entry.provider_label,
                     &entry.turns,
                     latest,
+                    include_startup_greeting,
                 );
             }
         }
@@ -34183,7 +34214,14 @@ fn read_projected_turns<R: tauri::Runtime>(
         "claude"
     };
     let serialize_started = std::time::Instant::now();
-    let bytes = projected_turns_body(app, &sid, provider_label, &turns, latest)?;
+    let bytes = projected_turns_body(
+        app,
+        &sid,
+        provider_label,
+        &turns,
+        latest,
+        include_startup_greeting,
+    )?;
     let serialize_ms = serialize_started.elapsed().as_millis();
     let summary = format!(
         "op=rebuild sid={} provider={} src_bytes={} read_ms={} parse_ms={} project_ms={} serialize_ms={} turns={} window={} body_bytes={} total_ms={}",

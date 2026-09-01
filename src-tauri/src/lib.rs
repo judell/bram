@@ -37389,14 +37389,170 @@ fn worklist_result_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf
 // Write the inflight sentinel (#84). Atomic via .tmp + rename so the
 // file is either absent or contains valid JSON. Caller has verified
 // `ids` is non-empty. `kind` is one of "approved", "drop", "iterate".
+const CLAIM_INTERVALS_REL: &str = "resources/.claim-intervals.json";
+
+// issue-327 claim-interval snapshots. Attribution needs BOUNDARIES, not writes.
+// Bram is single-claimant by construction (#269 -- a second claim write
+// overwrites the first), so the session timeline is already partitioned into
+// intervals each owned by one claim: every change appearing between two
+// boundaries belongs to whoever held it. Nothing to infer, nothing to match
+// against a tool payload, and no per-write cost in the guard path -- which is
+// what sank the earlier design (see #327's closing comment).
+//
+// The capture is a TEMP-INDEX tree write, NOT `git stash create`. Both record
+// the worktree without touching it, but `stash create` was measured to omit
+// untracked files entirely and to return empty on a clean tree. A newly
+// CREATED file is one of the commonest shapes of item work, so that omission
+// would make creation unattributable -- exactly the case #273 was filed
+// about. Reading HEAD into a scratch index, `add -A` against it, and
+// `write-tree` captures untracked content, honours .gitignore, and yields the
+// HEAD tree on a clean worktree so no null case is needed.
+//
+// FAILS OPEN. Every step degrades to "no boundary recorded" and never returns
+// an error into the claim path: a snapshot must be incapable of blocking a
+// worklist transition.
+fn capture_claim_tree(root: &Path) -> Option<String> {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let idx = std::env::temp_dir().join(format!(
+        "bram-claim-index-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_file(&idx);
+    let run = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git")
+            .current_dir(root)
+            .env("GIT_INDEX_FILE", &idx)
+            .args(args)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let tree = run(&["read-tree", "HEAD"])
+        .and_then(|_| run(&["add", "-A"]))
+        .and_then(|_| run(&["write-tree"]));
+    let _ = std::fs::remove_file(&idx);
+    tree.filter(|t| !t.is_empty())
+}
+
+// Record a boundary when this claim's id-set DIFFERS from the live one.
+//
+// An unchanged set is a re-write, not a new owner: `/__worklist/resolve`
+// re-writes ids the gate click already claimed, and splitting an interval
+// there would scatter one item's work across intervals that then have to be
+// unioned back. Called BEFORE the claim file is overwritten, so the read below
+// sees the PRIOR claim -- and so the tree is captured before the incoming
+// claim's work can exist.
+fn record_claim_interval<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    ids: &[String],
+    kind: &str,
+    at_ms: i64,
+) {
+    let Some(root) = project_root(Some(app)) else {
+        return;
+    };
+    // Same refusal-to-create discipline the hook breadcrumbs apply: never
+    // bring `resources/` into existence in a project Setup has not touched.
+    if !root.join("resources").is_dir() {
+        return;
+    }
+    let prior: Vec<String> = inflight_claim_ids_and_claimed_at(app)
+        .map(|(p, _)| p)
+        .unwrap_or_default();
+    let mut a: Vec<&str> = prior.iter().map(|s| s.as_str()).collect();
+    let mut b: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+    a.sort_unstable();
+    b.sort_unstable();
+    if a == b {
+        append_bram_trace_line(app, "claim-interval", "op=skip-unchanged-ids");
+        return;
+    }
+    let Some(tree) = capture_claim_tree(&root) else {
+        append_bram_trace_line(app, "claim-interval", "op=capture-failed");
+        return;
+    };
+    let refname = format!("refs/bram/claims/{}", at_ms);
+    let refd = std::process::Command::new("git")
+        .current_dir(&root)
+        .args(["update-ref", &refname, &tree])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !refd {
+        // Without a ref the tree is dangling and gc will reclaim it, so an
+        // unreferenced snapshot is worse than none: it would read as a
+        // recorded boundary and later resolve to nothing.
+        append_bram_trace_line(app, "claim-interval", "op=ref-failed");
+        return;
+    }
+    let sidecar = root.join(CLAIM_INTERVALS_REL);
+    let mut doc = std::fs::read_to_string(&sidecar)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({"version": 1, "intervals": []}));
+    if let Some(arr) = doc.get_mut("intervals").and_then(|v| v.as_array_mut()) {
+        arr.push(serde_json::json!({
+            "ref": refname,
+            "tree": tree,
+            "ids": ids,
+            "kind": kind,
+            "atMs": at_ms,
+        }));
+    }
+    if let Ok(body) = serde_json::to_string_pretty(&doc) {
+        let tmp = sidecar.with_extension("json.tmp");
+        if std::fs::write(&tmp, format!("{}\n", body)).is_ok() {
+            let _ = std::fs::rename(&tmp, &sidecar);
+        }
+    }
+    append_bram_trace_line(
+        app,
+        "claim-interval",
+        &format!(
+            "op=capture ref={} tree={} kind={} ids={}",
+            refname,
+            &tree[..tree.len().min(12)],
+            kind,
+            ids.len()
+        ),
+    );
+}
+
+// The synthetic write at the drop-policy validator writes and immediately
+// clears purely to drive a UI refresh; it owns no interval, so it must not
+// manufacture a zero-length boundary.
+fn write_inflight_claim_sentinel_no_snapshot<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    ids: &[String],
+    kind: &str,
+) {
+    write_inflight_claim_sentinel_inner(app, ids, kind, false)
+}
+
 fn write_inflight_claim_sentinel<R: tauri::Runtime>(
     app: &AppHandle<R>,
     ids: &[String],
     kind: &str,
 ) {
+    write_inflight_claim_sentinel_inner(app, ids, kind, true)
+}
+
+fn write_inflight_claim_sentinel_inner<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    ids: &[String],
+    kind: &str,
+    snapshot: bool,
+) {
     let Some(path) = inflight_claim_file(app) else {
         return;
     };
+    if snapshot {
+        record_claim_interval(app, ids, kind, unix_now_ms());
+    }
     // subagent-worklist-collision-observability: capture the prior claim
     // (if any) BEFORE it is overwritten, so a write that displaces a still-
     // live claim can be traced. Only read when tracing is enabled — this
@@ -44474,7 +44630,7 @@ fn maybe_enforce_worklist_policy<R: tauri::Runtime>(
             // sentinel has already been cleared, so write+clear here
             // is a small redundant pair of events. No state
             // divergence.
-            write_inflight_claim_sentinel(app, &dropped_via_auth, "drop");
+            write_inflight_claim_sentinel_no_snapshot(app, &dropped_via_auth, "drop");
             clear_inflight_claim_sentinel(app, &dropped_via_auth);
             retire_worklist_authorization_ids(app, &dropped_via_auth);
         }
@@ -54785,5 +54941,97 @@ mod worklist_change_projection_tests {
     fn an_empty_file_list_projects_to_none() {
         let i = idx(&[("x.rs", "modified", 1, 1, 1)]);
         assert!(worklist_change_activity_for(&i, &[]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod claim_interval_tests {
+    use super::capture_claim_tree;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    fn git(root: &PathBuf, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .expect("git");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let d =
+            std::env::temp_dir().join(format!("bram-claimtest-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        git(&d, &["init", "-q", "."]);
+        git(&d, &["config", "user.email", "t@t"]);
+        git(&d, &["config", "user.name", "t"]);
+        std::fs::write(d.join("tracked.txt"), "base\n").unwrap();
+        git(&d, &["add", "-A"]);
+        git(&d, &["commit", "-qm", "base"]);
+        d
+    }
+
+    // The one property whose violation would corrupt a user's uncommitted
+    // work, so it is asserted rather than assumed: capturing must leave the
+    // worktree and the index byte-identical.
+    #[test]
+    fn capture_does_not_disturb_worktree_or_index() {
+        let root = scratch("invariance");
+        std::fs::write(root.join("tracked.txt"), "base\nmodified\n").unwrap();
+        std::fs::write(root.join("untracked.txt"), "new\n").unwrap();
+        let before_status = git(&root, &["status", "--porcelain"]);
+        let before_body = std::fs::read_to_string(root.join("tracked.txt")).unwrap();
+
+        assert!(capture_claim_tree(&root).is_some(), "capture must succeed");
+
+        assert_eq!(before_status, git(&root, &["status", "--porcelain"]));
+        assert_eq!(
+            before_body,
+            std::fs::read_to_string(root.join("tracked.txt")).unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // `git stash create` omits untracked files, which would make file
+    // CREATION unattributable. The temp-index capture must not.
+    #[test]
+    fn capture_includes_untracked_and_survives_clean_tree() {
+        let root = scratch("untracked");
+        let clean = capture_claim_tree(&root).expect("clean tree still yields a tree");
+        assert_eq!(clean, git(&root, &["rev-parse", "HEAD^{tree}"]));
+
+        std::fs::write(root.join("created.txt"), "brand new\n").unwrap();
+        let tree = capture_claim_tree(&root).expect("capture");
+        let listed = git(&root, &["ls-tree", "-r", "--name-only", &tree]);
+        assert!(
+            listed.contains("created.txt"),
+            "untracked file must be captured, got: {listed}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // The whole point: the diff between two boundaries is exactly the work
+    // done in that interval, and none of the previous holder's.
+    #[test]
+    fn interval_between_two_boundaries_isolates_the_second_items_work() {
+        let root = scratch("interval");
+        std::fs::write(root.join("tracked.txt"), "base\nfrom A\n").unwrap();
+        let a = capture_claim_tree(&root).expect("A");
+
+        std::fs::write(root.join("tracked.txt"), "base\nfrom A\nfrom B\n").unwrap();
+        std::fs::write(root.join("b-only.txt"), "b\n").unwrap();
+        let b = capture_claim_tree(&root).expect("B");
+
+        let names = git(&root, &["diff", "--name-only", &a, &b]);
+        assert!(names.contains("b-only.txt"), "B's new file, got: {names}");
+        let patch = git(&root, &["diff", &a, &b, "--", "tracked.txt"]);
+        assert!(patch.contains("+from B"), "B's hunk missing: {patch}");
+        assert!(
+            !patch.contains("+from A"),
+            "A's work must NOT appear in the A..B interval: {patch}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

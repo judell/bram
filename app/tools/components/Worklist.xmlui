@@ -1,6 +1,7 @@
 <Component
   name="Worklist"
   var.expandedKeys="{window.__bramRestoreWorklist2Expansion()}"
+  var.diffKeys="{[]}"
   var.worklist2Feedback="{{}}"
   var.worklist2Close="{{}}"
   var.worklist2NewItemOpen="{false}"
@@ -469,7 +470,10 @@
           <VStack
             when="{($item.changedFiles || window.__bramWorklistItemFiles($item)).length > 0}"
             gap="$space-1"
-            var.rowBegun="{window.__bramWorklist2Begun($item, inflightClaim.value)}">
+            var.rowBegun="{window.__bramWorklist2Begun($item, inflightClaim.value)}"
+            var.rowId="{$item.id}"
+            var.rowItem="{$item}"
+            var.filesColCh="{window.__bramFilesColumnCh($item.changedFiles)}">
             <!-- Files touched as a Table (Status.xmlui idiom). Per-file
                  shared-files flags live here beside the file they concern,
                  not on the status line. Plain-path fallback covers payloads
@@ -488,42 +492,70 @@
                  work happens (it is the plan) and stays true after (it is what
                  changed), so one label covers the whole lifecycle and the
                  empty cells read as not-yet rather than missing. -->
-            <Table
+            <!-- worklist-diff-shared-file-provenance: an Items loop, not a
+                 Table, because each file row opens its own diff beneath it and
+                 Table has no row-expansion affordance (filed upstream as
+                 xmlui-org/xmlui#3857). Nothing Table gave us here is in use —
+                 no sorting, selection, pagination or inference — only header
+                 labels and proportional widths, and star sizing is the same
+                 vocabulary in HStack:
+                 https://www.xmlui.org/docs/howto/set-width-for-input-fields-in-a-horizontal-layout
+
+                 The diff belongs on the file row for the same reason the
+                 shared-with column does: it is a property of the file. Attaching
+                 it here is what stops a shared file's neighbouring hunks from
+                 reading as this item's work — they are never concatenated into
+                 one body — and turns a 2,000-line untracked file into a row you
+                 may decline to open rather than a wall. -->
+            <HStack
+              when="{$item.changedFiles}"
+              width="100%"
+              gap="$space-2"
+              verticalAlignment="center">
+              <Text width="{filesColCh}ch" minWidth="14rem" textAlign="start" variant="caption" value="files expected to change" />
+              <Text width="140px" textAlign="start" variant="caption" value="changes" />
+              <Text width="*" minWidth="8rem" textAlign="start" variant="caption" value="shared with" />
+            </HStack>
+            <Items
               when="{$item.changedFiles}"
               data="{$item.changedFiles}">
-              <Column header="files expected to change" width="2*">
-                <Text value="{$item.path}" variant="code" fontSize="$fontSize-sm" />
-              </Column>
-              <Column header="changes" width="140px">
-                <Text
-                  variant="code"
-                  fontSize="$fontSize-sm"
-                  value="{!rowBegun || $item.status === 'unchanged' ? '' : '+' + $item.added + ' −' + $item.removed + ($item.status === 'new' ? ' (new)' : ($item.status === 'deleted' ? ' (deleted)' : ''))}" />
-              </Column>
-              <!-- Plain text, not badges. This column started as coloured
-                   badges matching each claimant's row badge, then lost its
-                   colour (too many coloured chips in one plane), and now loses
-                   the chip too. Jon: "We don't want the shared with to be
-                   badges at all. Now, just normal primary text."
-
-                   The reasoning that survives from the badge era: a chip is a
-                   recognition affordance, and recognition is what the ONE
-                   surviving colour tie - row badge to CLAIMED BY in the
-                   overlap index - is for. Repeating the shape here, inside
-                   every expanded row, spent the affordance on a surface that
-                   only needs to be read. Short labels made that affordable:
-                   `#278 · SEMANTIC` is legible as prose in a way a 45-char id
-                   never was.
-
-                   Tooltip still carries the full id, because the label is a
-                   derived shortening and `tooltip` feeds aria-label. -->
-              <Column header="shared with" width="3*">
-<Text
-                  when="{$item.sharedWith &amp;&amp; $item.sharedWith.length > 0}"
-                  overflowMode="flow"
-                  value="{window.__bramJoinIds($item.sharedWith)}" />
-              </Column>
-            </Table>
+              <VStack gap="$space-0" width="100%">
+                <HStack
+                  width="100%"
+                  gap="$space-2"
+                  verticalAlignment="center"
+                  onClick="diffKeys = window.__bramFlipDiffExpansion(diffKeys, rowId, $item.path)">
+                  <Text
+                    width="{filesColCh}ch"
+                    minWidth="14rem"
+                    value="{(rowBegun &amp;&amp; window.__bramDiffForPath(rowItem, $item.path) ? (window.__bramDiffExpanded(diffKeys, rowId, $item.path) ? '\u25be ' : '\u25b8 ') : '') + $item.path}"
+                    variant="code"
+                    fontSize="$fontSize-sm" />
+                  <Text
+                    width="140px"
+                    textAlign="start"
+                    variant="code"
+                    fontSize="$fontSize-sm"
+                    value="{!rowBegun || $item.status === 'unchanged' ? '' : '+' + $item.added + ' −' + $item.removed + ($item.status === 'new' ? ' (new)' : ($item.status === 'deleted' ? ' (deleted)' : ''))}" />
+                  <Text
+                    width="*"
+                    minWidth="8rem"
+                    textAlign="start"
+                    overflowMode="flow"
+                    value="{$item.sharedWith &amp;&amp; $item.sharedWith.length > 0 ? window.__bramJoinIds($item.sharedWith) : ''}" />
+                </HStack>
+                <!-- Gated on rowBegun, carried down from the section that used
+                     to hold the single Diff view: a plan row that has begun
+                     nothing must offer no diffs, or it would display a
+                     neighbour's uncommitted work as its own. -->
+                <VStack
+                  when="{rowBegun &amp;&amp; window.__bramDiffExpanded(diffKeys, rowId, $item.path) &amp;&amp; window.__bramDiffForPath(rowItem, $item.path)}"
+                  paddingLeft="$space-4"
+                  paddingBottom="$space-2">
+                  <DiffView text="{cappedDiffText((window.__bramDiffForPath(rowItem, $item.path) || {}).patch || '')}" />
+                </VStack>
+              </VStack>
+            </Items>
             <!-- Fallback for payloads without the rung-1 enrichment, where
                  there is no changedFiles array to build a table from. -->
             <Items
@@ -556,28 +588,13 @@
             paddingLeft="$space-6">
             <Markdown content="{$item.after}" interpolateBindings="false" allowHtml="false" />
           </VStack>
-          <!-- worklist2-diff-section-plan-gate: $item.diff is computed from
-               disk state per DECLARED file with no per-hunk authorship, so
-               on a plan row (proposed, never begun) any diff it shows is a
-               NEIGHBOUR's uncommitted work on a shared path. The strip
-               already applies this principle (worklist2-plan-vs-activity:
-               plans show "No changes yet", activity counts suppressed);
-               gate the Diff surfaces on the same begun predicate so the
-               two never disagree. Begun rows on shared files still show
-               blended diffs - the Shared-with column carries that caveat. -->
-          <HStack
-            when="{$item.diff &amp;&amp; window.__bramWorklist2Begun($item, inflightClaim.value)}"
-            gap="$space-1"
-            verticalAlignment="center"
-            onClick="expandedKeys = window.__bramFlipExpansionKey(expandedKeys, $item.id + '::diff')">
-            <Text value="Diff" />
-          </HStack>
-          <VStack
-            when="{(expandedKeys || []).includes($item.id + '::diff') &amp;&amp; $item.diff &amp;&amp; window.__bramWorklist2Begun($item, inflightClaim.value)}"
-            gap="$space-1"
-            paddingLeft="$space-6">
-            <DiffView text="{cappedDiffText($item.diff || '')}" />
-          </VStack>
+          <!-- worklist-diff-shared-file-provenance: the item-level Diff
+               section is gone. Each file's diff now opens on its own row in the
+               table above, where the shared-with column that says whose work it
+               is sits beside it. Concatenating every declared file into one body
+               is what made a neighbour's hunks read as this item's, and what
+               rendered a single large untracked file as a wall. The begun-gate
+               that used to live on this section moved onto the rows. -->
           <!-- worklist2-commit-action: the close declaration as stated fact
                with tickbox override on begun rows (default ticked; untick
                to keep an issue open) — the old tab's inline pattern, at

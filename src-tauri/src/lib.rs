@@ -47904,6 +47904,13 @@ fn route_request<R: tauri::Runtime>(
                         }
                     }
                 }
+                // worklist-diff-shared-file-provenance: the pane attaches each
+                // file's diff to its own row in the files table, so the payload
+                // carries per-file sections rather than one concatenated body.
+                // Concatenation is what made a shared file's neighbouring hunks
+                // indistinguishable from this item's, and what turned one large
+                // untracked file into a wall nobody asked for.
+                let mut by_file: Vec<serde_json::Value> = Vec::new();
                 let mut materialized = 0usize;
                 let mut elided = 0usize;
                 let mut combined = String::new();
@@ -47935,6 +47942,22 @@ fn route_request<R: tauri::Runtime>(
                     } else {
                         String::new()
                     };
+                    if !diff.is_empty() {
+                        // No sharedWith here on purpose: the enrichment that
+                        // adds it to `changedFiles` runs in a LATER pass, so
+                        // reading it at this point yields an empty list every
+                        // time (caught 2026-09-01 by a begun fixture whose
+                        // diff rows showed no claimants while the column beside
+                        // them showed three). The pane reads claimants from the
+                        // changedFiles row it is already rendering.
+                        by_file.push(serde_json::json!({
+                            "path": fp,
+                            "patch": diff,
+                            "untracked": untracked.contains(fp.as_str()),
+                            "lines": diff.lines().count(),
+                            "bytes": diff.len(),
+                        }));
+                    }
                     if !combined.is_empty() && !diff.is_empty() {
                         combined.push('\n');
                     }
@@ -47955,7 +47978,10 @@ fn route_request<R: tauri::Runtime>(
                     );
                 }
                 if let Some(obj) = item.as_object_mut() {
+                    // `diff` is kept for one release so nothing reading it
+                    // breaks mid-change; `diffByFile` is what the pane renders.
                     obj.insert("diff".to_string(), serde_json::Value::String(combined));
+                    obj.insert("diffByFile".to_string(), serde_json::Value::Array(by_file));
                 }
             }
         }

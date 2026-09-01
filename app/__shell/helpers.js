@@ -10786,6 +10786,62 @@ function __bramQueueScheduleSave(entries) {
       });
   }, 400);
 }
+// worklist-diff-shared-file-provenance: per-file diff sections, attached to
+// their own row in the item's files table rather than concatenated into one
+// body below it. Concatenation is what let a shared file's neighbouring hunks
+// read as this item's work, and what turned a single large untracked file into
+// a wall (the live specimen: conventions.md as `@@ -0,0 +1,2144 @@`).
+//
+// Returns the section for one path, or null when there is nothing to open --
+// which is also how the row decides whether to offer a chevron at all.
+// The files column sizes to its LONGEST path, computed from the data rather
+// than measured from the DOM. Sibling HStacks in an Items loop cannot share a
+// content-derived width the way Table Columns can -- XMLUI has no grid-track
+// layout and no cross-row sizing outside Table (searched 2026-09-01; the how-to
+// corpus returns nothing for "longest"/"widest", and content auto-sizing is
+// documented only for Column inside Table). Since the column is monospace,
+// character count IS the width, so `ch` is exact and no measurement is needed.
+// Clamped so one pathological path cannot squeeze the other two columns out.
+window.__bramFilesColumnCh = function (rows) {
+  var longest = 0;
+  var list = rows || [];
+  for (var i = 0; i < list.length; i++) {
+    var p = (list[i] && list[i].path) || "";
+    if (p.length > longest) longest = p.length;
+  }
+  if (!longest) return 24;
+  var withChevron = longest + 3; // "▸ " prefix plus a trailing breath
+  return Math.max(24, Math.min(72, withChevron));
+};
+
+window.__bramDiffForPath = function (item, path) {
+  var rows = (item && item.diffByFile) || [];
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i] && rows[i].path === path) return rows[i];
+  }
+  return null;
+};
+
+// Expansion is keyed by "<itemId>::<path>", never by position. ExpandableItem's
+// own state is positional, so inside a loop whose membership changes -- and this
+// list changes as work proceeds -- an open row silently transfers to whatever
+// now occupies that index. Controlled, id-keyed expansion is the pattern the
+// item rows above already use, applied one level down.
+window.__bramDiffExpansionKey = function (itemId, path) {
+  return String(itemId) + "::" + String(path);
+};
+window.__bramFlipDiffExpansion = function (keys, itemId, path) {
+  var k = window.__bramDiffExpansionKey(itemId, path);
+  var list = (keys || []).slice();
+  var at = list.indexOf(k);
+  if (at === -1) list.push(k);
+  else list.splice(at, 1);
+  return list;
+};
+window.__bramDiffExpanded = function (keys, itemId, path) {
+  return (keys || []).indexOf(window.__bramDiffExpansionKey(itemId, path)) !== -1;
+};
+
 // issue-326: refuse a board older than one already rendered.
 //
 // /__worklist already serves worklist.json's `version` (the field the guards

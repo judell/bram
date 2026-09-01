@@ -37596,11 +37596,25 @@ fn prune_claim_intervals<R: tauri::Runtime>(app: &AppHandle<R>) {
         return;
     };
     let sidecar = root.join(CLAIM_INTERVALS_REL);
-    let Ok(text) = std::fs::read_to_string(&sidecar) else {
-        return;
+    // Three outcomes, deliberately traced differently. NO sidecar is the honest
+    // "nothing recorded yet" state: it fires on every prune in a project that
+    // has never captured a boundary, so a line there would be noise forever in
+    // exchange for an answer nobody is asking. A sidecar that EXISTS but cannot
+    // be read or parsed is a real fault, and used to vanish silently.
+    let text = match std::fs::read_to_string(&sidecar) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(_) => {
+            append_bram_trace_line(app, "claim-interval", "op=prune-unreadable reason=io");
+            return;
+        }
     };
-    let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return;
+    let mut doc = match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) => v,
+        Err(_) => {
+            append_bram_trace_line(app, "claim-interval", "op=prune-unreadable reason=parse");
+            return;
+        }
     };
     let intervals: Vec<serde_json::Value> = match doc.get("intervals").and_then(|v| v.as_array()) {
         Some(a) if !a.is_empty() => a.clone(),
@@ -37620,6 +37634,16 @@ fn prune_claim_intervals<R: tauri::Runtime>(app: &AppHandle<R>) {
         .unwrap_or_default();
     let (keep, retire) = claim_intervals_partition(&intervals, &live);
     if retire.is_empty() {
+        // The ORDINARY steady state, not a fault: every boundary still bounds a
+        // live interval. Emitted so that the presence of a prune line means "the
+        // sweep ran" -- silence here was indistinguishable from the sweep never
+        // executing, which during the 22aa2b5 validation could only be resolved
+        // by knowing what the previous build would have done.
+        append_bram_trace_line(
+            app,
+            "claim-interval",
+            &format!("op=prune-noop kept={}", keep.len()),
+        );
         return;
     }
     let removed = retire.len();

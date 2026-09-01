@@ -88,7 +88,7 @@
           tooltip="Send the Escape key"
           onClick="escToolbarClick()" />
         <Button
-          when="{$props.activeProvider === 'claude'}"
+          when="{false}"
           label="skills"
           variant="ghost"
           size="xs"

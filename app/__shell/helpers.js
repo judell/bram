@@ -1413,7 +1413,7 @@ window.__bramFlushMessageAgentPerf = function (reason) {
 
 // The Footer composer and WorklistGateBar are isolated sibling components.
 // A plain window mirror lets the gate read the text at click time, but it does
-// not give XMLUI a reactive dependency for the Iterate button's enabled state.
+// not give XMLUI a reactive dependency for the Refine button's enabled state.
 // Publish the mirror through the same External/PushSource factory shape as the
 // Worklist selection bridge below, so each keystroke invalidates only the gate
 // bar rather than widening the composer's hot render boundary.
@@ -2107,7 +2107,7 @@ window.__bramIsWorklistTextVoiceTarget = function (target) {
 // user reads does. The gate button is Start, so the verb is Starting.
 window.__bramInflightActionLabel = function (kind) {
   if (kind === "approved") return "Starting";
-  if (kind === "iterate") return "Iterating";
+  if (kind === "iterate") return "Refining";
   if (kind === "drop") return "Dropping";
   return "";
 };
@@ -2121,7 +2121,7 @@ window.__bramInflightActionLabel = function (kind) {
 // banner.
 window.__bramClaimVerb = function (kind, statusLabel) {
   if (kind === "drop") return "Dropping";
-  if (kind === "iterate") return "Iterating";
+  if (kind === "iterate") return "Refining";
   if (kind === "approved") {
     // The statusLabel test reads the LEGACY tab's badge string, which the host
     // still writes. Left as-is deliberately: it is a host fact rather than a
@@ -2624,7 +2624,7 @@ window.__bramWorklist2RowClaimed = function (claim, itemId) {
 // The board already serializes decisions while a claim is in flight -- every
 // gate button reads `__bramInflightBlocker`, "the single reason buttons ever
 // disable". The checkboxes did not: only the CLAIMED row was locked, so an
-// unrelated item could still be ticked while another said "Iterating…". That
+// unrelated item could still be ticked while another said "Refining…". That
 // builds a selection whose every action is disabled, and it obscures which
 // item owns the turn.
 //
@@ -3259,7 +3259,7 @@ window.__bramWorklistActionStatusLabel = function (item) {
 window.__bramWorklistActionDisplay = function (kind, items) {
   var action =
     kind === "approved" ? "Started" :
-    kind === "iterate" ? "Iterated" :
+    kind === "iterate" ? "Refined" :
     kind === "drop" ? "Dropped" :
     "Submitted";
   var ids = (items || []).map(function (i) {
@@ -11484,7 +11484,7 @@ window.__bramTipsRegistry = [
   { id: 'paste-screenshot', priority: 110,
     text: 'Tip: Paste a screenshot to show a UI glitch to the agent. It renders in the Worklist and Transcript so you can both see it.' },
   { id: 'iterate-before-approve', priority: 120,
-    text: 'Tip: Use Iterate to refine an in-progress item.' },
+    text: 'Tip: Use Refine to improve an in-progress item.' },
   { id: 'tips-dismiss-interval', priority: 130, route: '/settings?from=tip&highlight=tipsDismissInterval',
     text: "Tip: Use Settings → 'Dismissed tips return after' to control how long a dismissed tip stays hidden." },
 ];

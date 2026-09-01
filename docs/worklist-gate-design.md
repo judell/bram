@@ -50,7 +50,7 @@ one waiting on the agent.
 order:
 
 1. **A claim verb**, when an action is in flight for this item — `Approving…`,
-   `Committing…`, `Iterating…`, `Dropping…` (`__bramClaimVerb`). These verbs
+   `Committing…`, `Refining…`, `Dropping…` (`__bramClaimVerb`). These verbs
    predate the Start/Commit rename below and have not been resynced to it; the
    in-flight line for a Start action still reads `Approving…`. The verb reads
    the claim's `statusLabel`, the gate fixed at approval time, never the moving
@@ -140,7 +140,7 @@ Which verbs are *enabled* is derived from the selection, not from a mode:
 - **Commit N** — `__bramSelectionAllCommittable`: every ticked item is begun
   and has *exclusive* changes of its own (not every changed path shared with
   another begun item).
-- **Iterate N** — any non-empty message.
+- **Refine N** — any non-empty message.
 - **Drop N** — always enabled while no claim is in flight.
 
 A row's tickbox stays ticked and frozen while its action is in flight, because
@@ -183,7 +183,7 @@ claimed row shows its verb.
 
 Outside that global block, each action still has ordinary eligibility rules.
 The gate needs a valid selection; Start and Commit require compatible item
-stages, Start & commit requires exactly one item, and Iterate additionally
+stages, Start & commit requires exactly one item, and Refine additionally
 requires non-empty feedback. Those action-specific dimmed states mean “not
 applicable to this selection,” not “another action is in flight.”
 

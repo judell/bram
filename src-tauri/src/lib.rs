@@ -32349,7 +32349,7 @@ fn format_worklist_payload_text<R: tauri::Runtime>(
                         ("approved", "apply-and-commit") => "Committing",
                         ("approved", _) => "Approving",
                         ("drop", _) => "Dropping",
-                        ("iterate", _) => "Iterating",
+                        ("iterate", _) => "Refining",
                         _ => verb,
                     });
                 }

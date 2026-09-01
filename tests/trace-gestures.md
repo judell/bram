@@ -67,7 +67,7 @@ backticks.
 
 1. Select `harness-target`.
 2. Type the literal string `gesture-iterate-feedback` into the feedback box.
-3. Click **Iterate**.
+3. Click **Refine**.
 4. Wait until the spinner clears.
 
 **Expected outcome.** Item remains TO APPLY. Feedback is delivered to the agent.

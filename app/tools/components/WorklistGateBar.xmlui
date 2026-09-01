@@ -12,7 +12,7 @@
   <DataSource id="gateClaim" url="/__inflight" />
   <PushSource id="gateSel" subscribe="{window.bramSubscribeW2Selection()}" />
   <!-- The composer is an isolated sibling component. Reading its window
-       mirror through a helper is not reactive, so Iterate stayed dim after
+       mirror through a helper is not reactive, so Refine stayed dim after
        typing until some unrelated gate render happened. This push source is
        the explicit dependency: input and clear both publish synchronously. -->
   <PushSource id="gateText" subscribe="{window.bramSubscribeMessageAgentText()}" />
@@ -137,7 +137,7 @@
       enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
       onClick="window.__bramGateAct('commit', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode)" />
     <Button
-      label="{'Iterate ' + (gateSel.value || []).length}"
+      label="{'Refine ' + (gateSel.value || []).length}"
       size="sm"
       enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; (gateText.value || '').trim().length > 0}"
       tooltip="One message about the selected set"

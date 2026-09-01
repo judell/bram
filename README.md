@@ -91,7 +91,7 @@ To act, tick one or more items and use the buttons beside the message box. One a
 
 - *Start & commit* does both in one step. For now it only works on a single, freshly-proposed item (#272).
 
-- *Iterate* sends your message as feedback so the agent can refine a proposal or rework altered files.
+- *Refine* sends your message as feedback so the agent can revise a proposal or rework altered files.
 
 - *Drop* retires items you don't want. A dropped item isn't lost: you can resurrect it from the History tab, or ask the agent to file an issue first so the idea survives in GitHub.
 

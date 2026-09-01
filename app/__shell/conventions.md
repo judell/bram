@@ -154,7 +154,7 @@ change is "small":
   transition. The user-facing affordance is the **skip worklist**
   button beside the message input in Bram's footer — it prepends
   the prefix and submits. Same convention as for Approve / Drop /
-  Iterate: tell users to click the button, do not instruct them to
+  Refine: tell users to click the button, do not instruct them to
   type or paste the wire format. When the host's `toTurn` write path
   sees the prefix it writes the same one-turn `direct-edit` record to
   `resources/.worklist-authorization.json` that the prose opt-out
@@ -354,7 +354,7 @@ natural migration path and the hooks allow it.
 Prose lives only in the draft file. Inline `before` / `after` keys
 in `worklist.json` are rejected by both guards — the proposal
 authoring channel writes metadata to `worklist.json` and prose to
-the matching `worklist-drafts/<id>.md`, never both. Iterate-time
+the matching `worklist-drafts/<id>.md`, never both. Refine-time
 prose edits go to the draft file; `worklist.json` only changes
 when metadata (`files`, `closesIssues`, etc.) shifts.
 
@@ -432,7 +432,7 @@ serves an empty default; the Worklist tab creates the file (and
    item bodies.
 
    Button names below are the labels the 0.5.3 gate bar renders —
-   **Start N / Start & commit N / Commit N / Iterate N / Drop N**. The
+   **Start N / Start & commit N / Commit N / Refine N / Drop N**. The
    wire payload kinds (`approved:` / `drop:` / `iterate:`) are a
    separate, stable vocabulary: buttons may rename (they did, in the
    start-verb renaming — Mary's day-one report, #293, caught this doc
@@ -469,9 +469,12 @@ serves an empty default; the Worklist tab creates the file (and
      `{"kind":"drop"}` → prune the ids via `POST /__worklist/mutate`.
      Respond to per-item feedback (often the user's reason for the drop).
 
-   - *Iterate (N)* — enabled only when feedback is non-empty (no-
-     direction Iterate is meaningless). Payload: `iterate: {...}`.
-     **Iterate does NOT route through `/__worklist/resolve`** — no
+   - *Refine (N)* — enabled only when feedback is non-empty (no-
+     direction refinement is meaningless). Payload: `iterate: {...}` —
+     the button renamed in the refine-verb rename, the wire kind did not,
+     so **Refine emits `iterate:`** and every trace, audit record and
+     guard matcher still reads `iterate`.
+     **Refine does NOT route through `/__worklist/resolve`** — no
      state change is being authorized. Re-read items from
      `/__worklist` (for resolved draft prose) or
      `resources/worklist.json` (metadata alone), and act per each
@@ -494,7 +497,7 @@ serves an empty default; the Worklist tab creates the file (and
      `/__iterate/begin` and `/__iterate/end` routes were removed in
      the #214 delete phase.) See *Host-managed inflight sentinel*.
 
-     The Iterate payload's per-item shape is `{id, feedbackRef}`
+     The Refine payload's per-item shape is `{id, feedbackRef}`
      where `feedbackRef` names a file at
      `resources/feedback-drafts/<feedbackRef>.md` containing the user's
      full-fidelity feedback text. Read that file directly to get the
@@ -508,7 +511,7 @@ serves an empty default; the Worklist tab creates the file (and
      failed, so an iterate still lands rather than blocking the click
      (its text has ridden the paste channel and is subject to the
      collapse above). For a while after the worklist2 rewrite the gate's
-     Iterate emitted inline unconditionally while the Queue tab drafted —
+     Refine emitted inline unconditionally while the Queue tab drafted —
      an accidental fork, repaired under #285; both emitters draft first
      now, and both opt-out matchers (guard-side and host-side) read the
      drafts (#171, #284).
@@ -939,7 +942,7 @@ mechanics.
 
 When the user needs to take an action that has a UI control, name the
 control. Say "Click the **Start** button" (Start & commit, Commit,
-Iterate, Drop, Push, Trust this hook, Setup). Never say "send `approved: {...}`", "paste the
+Refine, Drop, Push, Trust this hook, Setup). Never say "send `approved: {...}`", "paste the
 structured approval payload", or describe the wire format — the button
 generates the verified payload for them. This is what reopened #62:
 Codex told the user to paste raw JSON instead of pointing at the
@@ -1340,12 +1343,12 @@ commonly:
   before the clear — or the turn ended in the third outcome above, where
   no `mutate` was ever *correct* to call. Recovery, in order:
   `POST /__worklist/end` with `{"ids": [...]}` naming the claimed ids (the
-  route is not iterate-specific, despite appearing only under *Iterate stuck*
+  route is not iterate-specific, despite appearing only under *Refine stuck*
   in earlier revisions of this file); or call `mutate` manually if the work
   really is on disk; or restart Bram (`cleanup_stale_inflight_claim` runs at
   startup), which is the heaviest option and ends any agent session running
   inside it.
-- **Iterate stuck:** rare now that the host auto-detects the
+- **Refine stuck:** rare now that the host auto-detects the
   `iterate:` prefix and the turn-finished clearer fires for all
   sentinel kinds. If it does stick, host-side completion detectors
   will clear it on the next normal turn end; `/__worklist/end` remains

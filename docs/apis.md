@@ -527,7 +527,7 @@ payload clears it.
 `sendMode:"message"` uses the footer-equivalent `toTurn` path.
 `sendMode:"iterate"` requires a current `targetItemId` and delegates to
 `sendIterateWithFeedbackDraft`, preserving the same feedback-draft and
-structured lifecycle path as a Worklist item's **Iterate** button.
+structured lifecycle path as a Worklist item's **Refine** button.
 
 ## 13. Prompt lifecycle
 

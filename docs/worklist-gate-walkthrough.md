@@ -69,7 +69,7 @@ clearing it first.
 
 ## The standing check
 
-**After every single action below — every Start, Commit, Drop, Iterate —
+**After every single action below — every Start, Commit, Drop, Refine —
 confirm before doing anything else:**
 
 - the spinner is gone
@@ -118,12 +118,12 @@ dropped after. The overlap index counts declared claims from unbegun items.
 - `Start 1` enabled
 - `Start & commit 1` enabled
 - `Commit` **not** offered
-- `Iterate` **disabled** (composer empty)
+- `Refine` **disabled** (composer empty)
 - `Drop 1` enabled
 - **No** radio group (needs 2+)
 - **No** explainer line (single unbegun item is an unsurprising combo)
 
-**Then:** type anything in the composer. `Iterate 1` should enable. Clear it
+**Then:** type anything in the composer. `Refine 1` should enable. Clear it
 again; it should disable.
 
 **Then:** expand `p1`'s row. **No Diff surface** — an unbegun item shows
@@ -175,7 +175,7 @@ the Start-available case, so the Start-tense wording):
 > proposed one to start it.
 
 (Not silence: the explainer fires on any begun+unbegun mix, and the buttons
-agree — only Iterate and Drop are joint actions there.)
+agree — only Refine and Drop are joint actions there.)
 
 *History:* the original line keyed on shared files alone and narrated
 unavailable actions twice over ("Started together…" and then "Commit p1
@@ -280,7 +280,7 @@ recovery), and recommends Drop. Spinner clears without you doing anything.
 *This is the exact case that wedged the UI three times in 0.5.2
 development.*
 
-**8b — iterate.** Tick any item, type feedback, click **Iterate**.
+**8b — refine.** Tick any item, type feedback, click **Refine**.
 
 **Expect:** spinner clears when the agent's turn ends. No manual unwind.
 

@@ -5,6 +5,24 @@ Inspector export; it catalogs the trace categories, subkinds, fields, and
 their diagnostic purpose without loading that Bram-internal detail into
 every managed-project session.
 
+### Grep host categories in bracketed form
+
+`bram-trace.log` ingests PTY content: `[iframe] subkind=send-capture` records
+carry the terminal's visible rows, which include the agent's own chat text. So a
+bare grep for a term currently under discussion matches the **conversation about**
+an instrument rather than the instrument's output.
+
+Always grep the bracketed form — `grep '\[claim-interval\]'`, not
+`grep 'claim-interval'`.
+
+The asymmetry is what makes it dangerous: the false positives appear exactly when
+you are actively discussing an instrument, which is exactly when you are most
+likely to grep for it, and an inflated count reads as *"it fired"* when the truth
+is *"it did not"*. It produced two wrong readings minutes apart on 2026-09-01 —
+`claim-interval` counted 2 against a true 0, then `op=prune-noop` counted 2
+against a true 0 — the second after the first was already understood, which is
+the argument for writing it down rather than remembering it.
+
 ### Trace subkind vocabulary
 
 `bram-trace.log` records iframe-side events as

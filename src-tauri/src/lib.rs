@@ -47764,6 +47764,49 @@ fn route_request<R: tauri::Runtime>(
                 }
             }
         }
+        // issue-323: one git pass for the whole board, before the per-item
+        // loop. Collect the union of every item's declared paths first; the
+        // loop below then projects out of the shared index instead of
+        // spawning its own git processes per item.
+        let mut union_paths: Vec<String> = Vec::new();
+        {
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            if let Some(items) = doc.get("items").and_then(|v| v.as_array()) {
+                for item in items {
+                    if let Some(arr) = item.get("files").and_then(|v| v.as_array()) {
+                        for v in arr {
+                            if let Some(f) = v.as_str().filter(|f| !f.is_empty()) {
+                                if seen.insert(f.to_string()) {
+                                    union_paths.push(f.to_string());
+                                }
+                            }
+                        }
+                    } else if let Some(f) = item.get("file").and_then(|v| v.as_str()) {
+                        if !f.is_empty() && seen.insert(f.to_string()) {
+                            union_paths.push(f.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        let board_started = std::time::Instant::now();
+        let change_index = worklist_change_index(app, &union_paths);
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "worklist-build",
+                &format!(
+                    "op=git-batch items={} paths={} spawns={} ms={}",
+                    doc.get("items")
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.len())
+                        .unwrap_or(0),
+                    union_paths.len(),
+                    change_index.as_ref().map(|i| i.spawns).unwrap_or(0),
+                    board_started.elapsed().as_millis()
+                ),
+            );
+        }
         if let Some(items) = doc.get_mut("items").and_then(|v| v.as_array_mut()) {
             for item in items {
                 // Item scope: prefer `files: [...]` array, fall back to the
@@ -47805,7 +47848,10 @@ fn route_request<R: tauri::Runtime>(
                 // whatever its status — the evidence-first rows render disk
                 // truth, not bookkeeping state.
                 let mut has_changes = false;
-                if let Some((changed_files, summary)) = worklist_change_activity(app, &file_paths) {
+                if let Some((changed_files, summary)) = change_index
+                    .as_ref()
+                    .and_then(|idx| worklist_change_activity_for(idx, &file_paths))
+                {
                     has_changes = summary.get("changed").and_then(|v| v.as_u64()).unwrap_or(0) > 0;
                     if let Some(obj) = item.as_object_mut() {
                         obj.insert("changedFiles".to_string(), changed_files);
@@ -47846,14 +47892,16 @@ fn route_request<R: tauri::Runtime>(
                     .iter()
                     .filter(|fp| !untracked.contains(fp.as_str()))
                     .collect();
+                // issue-323: the union diff was already taken above; select
+                // this item's tracked bodies out of it rather than spawning a
+                // git process per item.
                 let mut per_file: std::collections::HashMap<String, String> =
                     std::collections::HashMap::new();
-                if !tracked_paths.is_empty() {
-                    let mut args: Vec<&str> = vec!["diff", "--"];
-                    args.extend(tracked_paths.iter().map(|p| p.as_str()));
-                    let batched = git_run(app, &args).unwrap_or_default();
-                    for (path, body) in split_diff_by_file(&batched) {
-                        per_file.insert(path.to_string(), body);
+                if let Some(idx) = change_index.as_ref() {
+                    for p in &tracked_paths {
+                        if let Some(body) = idx.diff_by_path.get(p.as_str()) {
+                            per_file.insert((*p).clone(), body.clone());
+                        }
                     }
                 }
                 let mut materialized = 0usize;
@@ -49190,21 +49238,58 @@ fn ensure_no_unrelated_staged_files(
 // test file is complete. Quantifies ACTIVITY, never progress or
 // completion: the `files` list is the agent's prediction, and a partial
 // count can be done (a listed file that needed no change).
-fn worklist_change_activity<R: tauri::Runtime>(
+// issue-323: the git work is batched ACROSS items, not per item.
+//
+// It used to run three git invocations per item (`status --porcelain`,
+// `diff HEAD --numstat`, `diff HEAD` for hunks), batching within an item and
+// not across them, plus one more per item in the diff builder below. On a
+// board of N items that is 4N process spawns per request. Measured at 7.9 ms
+// per spawn on macOS, invisible; on Windows, where spawn cost is an order of
+// magnitude higher, Mary measured /__worklist at a 6.4 s floor and a 15.5 s
+// median on 19 items (#323), so the pane always rendered a board 6-62 s stale
+// and could offer "Will commit" on an item the commit had already pruned.
+// This is #317's disease in its surviving half: that fix batched the per-file
+// diff loop and left the per-item one.
+//
+// The split below is behaviour-preserving by construction: the per-item
+// projection only ever looked paths up by EXACT equality in these maps, never
+// by prefix, so scoping the maps to the union of every item's paths yields the
+// identical per-item answer. The one value read from raw diff text rather than
+// a map is the hunk count, and per-file counts summed over an item's paths
+// equal the old per-item total, because the old call already passed only that
+// item's paths.
+struct WorklistChangeIndex {
+    root: std::path::PathBuf,
+    status_by_path: std::collections::HashMap<String, &'static str>,
+    counts: std::collections::HashMap<String, (i64, i64)>,
+    hunks_by_path: std::collections::HashMap<String, i64>,
+    diff_by_path: std::collections::HashMap<String, String>,
+    spawns: usize,
+}
+
+fn worklist_change_index<R: tauri::Runtime>(
     app: &AppHandle<R>,
-    file_paths: &[String],
-) -> Option<(serde_json::Value, serde_json::Value)> {
-    if file_paths.is_empty() {
-        return None;
-    }
+    all_paths: &[String],
+) -> Option<WorklistChangeIndex> {
     let root = project_root(Some(app))?;
+    let mut idx = WorklistChangeIndex {
+        root,
+        status_by_path: std::collections::HashMap::new(),
+        counts: std::collections::HashMap::new(),
+        hunks_by_path: std::collections::HashMap::new(),
+        diff_by_path: std::collections::HashMap::new(),
+        spawns: 0,
+    };
+    if all_paths.is_empty() {
+        return Some(idx);
+    }
+
     let mut status_args: Vec<&str> = vec!["status", "--porcelain", "--no-renames", "--"];
-    for f in file_paths {
+    for f in all_paths {
         status_args.push(f.as_str());
     }
     let porcelain = git_run(app, &status_args).unwrap_or_default();
-    let mut status_by_path: std::collections::HashMap<String, &'static str> =
-        std::collections::HashMap::new();
+    idx.spawns += 1;
     for line in porcelain.lines() {
         if line.len() < 4 {
             continue;
@@ -49218,41 +49303,77 @@ fn worklist_change_activity<R: tauri::Runtime>(
         } else {
             "modified"
         };
-        status_by_path.insert(path, status);
+        idx.status_by_path.insert(path, status);
     }
+
     let mut num_args: Vec<&str> = vec!["diff", "HEAD", "--numstat", "--no-renames", "--"];
-    for f in file_paths {
+    for f in all_paths {
         num_args.push(f.as_str());
     }
     let numstat = git_run(app, &num_args).unwrap_or_default();
-    let mut counts: std::collections::HashMap<String, (i64, i64)> =
-        std::collections::HashMap::new();
+    idx.spawns += 1;
     for line in numstat.lines() {
         let mut parts = line.splitn(3, '\t');
         let a = parts.next().unwrap_or("0").parse::<i64>().unwrap_or(0);
         let r = parts.next().unwrap_or("0").parse::<i64>().unwrap_or(0);
         if let Some(path) = parts.next() {
-            counts.insert(path.trim_matches('"').to_string(), (a, r));
+            idx.counts
+                .insert(path.trim_matches('"').to_string(), (a, r));
         }
     }
+
+    // Hunk counts come from `diff HEAD` (staged + unstaged), which is what
+    // the per-item call used.
     let mut hunk_args: Vec<&str> = vec!["diff", "HEAD", "--no-renames", "--"];
-    for f in file_paths {
+    for f in all_paths {
         hunk_args.push(f.as_str());
     }
-    let mut hunks: i64 = git_run(app, &hunk_args)
-        .unwrap_or_default()
-        .lines()
-        .filter(|l| l.starts_with("@@"))
-        .count() as i64;
+    let head_diff = git_run(app, &hunk_args).unwrap_or_default();
+    idx.spawns += 1;
+    for (path, body) in split_diff_by_file(&head_diff) {
+        let n = body.lines().filter(|l| l.starts_with("@@")).count() as i64;
+        idx.hunks_by_path.insert(path.to_string(), n);
+    }
+
+    // The displayed per-item diff bodies come from plain `git diff` (unstaged
+    // only) — a DIFFERENT diff from the one above, which is why this is a
+    // fourth union call rather than a reuse. Folding them would silently
+    // change what the pane renders for an item with staged changes.
+    let mut body_args: Vec<&str> = vec!["diff", "--"];
+    for f in all_paths {
+        body_args.push(f.as_str());
+    }
+    let unstaged = git_run(app, &body_args).unwrap_or_default();
+    idx.spawns += 1;
+    for (path, body) in split_diff_by_file(&unstaged) {
+        idx.diff_by_path.insert(path.to_string(), body);
+    }
+    Some(idx)
+}
+
+// Pure projection of one item's declared paths out of the shared index.
+fn worklist_change_activity_for(
+    idx: &WorklistChangeIndex,
+    file_paths: &[String],
+) -> Option<(serde_json::Value, serde_json::Value)> {
+    if file_paths.is_empty() {
+        return None;
+    }
+    let root = &idx.root;
+    let mut hunks: i64 = file_paths
+        .iter()
+        .map(|p| idx.hunks_by_path.get(p.as_str()).copied().unwrap_or(0))
+        .sum();
     let mut changed_files: Vec<serde_json::Value> = Vec::new();
     let (mut add_sum, mut rem_sum, mut changed_n) = (0i64, 0i64, 0usize);
     let mut last_ms: i64 = 0;
     for p in file_paths {
-        let status = status_by_path
+        let status = idx
+            .status_by_path
             .get(p.as_str())
             .copied()
             .unwrap_or("unchanged");
-        let (mut a, r) = counts.get(p.as_str()).copied().unwrap_or((0, 0));
+        let (mut a, r) = idx.counts.get(p.as_str()).copied().unwrap_or((0, 0));
         if status == "new" && a == 0 {
             // Untracked: numstat cannot see it — the whole file counts as
             // added (read and count; never `git add -N`, which mutates the
@@ -49289,17 +49410,11 @@ fn worklist_change_activity<R: tauri::Runtime>(
         }));
     }
     let total = file_paths.len();
-    // Labeled-field format per iterate feedback: the strip lives on the
-    // collapsed summary line, scannable across a set of items.
-    // Max-compression format (2026-08-20 iterate): the strip lives on a
-    // one-line summary that must not wrap.
     let disk_label = if changed_n == 0 {
         "no changes yet".to_string()
     } else {
         // plan-vs-work-count-semantics: attribute the denominator to the
-        // PLAN — "2 of 3 planned" reads plan-vs-actual, not unfinished
-        // (the files list is the agent's prediction; a partial count can
-        // be completion when a listed file proved unneeded).
+        // PLAN — "2 of 3 planned" reads plan-vs-actual, not unfinished.
         format!("files: {} of {} planned", changed_n, total)
     };
     let activity_label = if changed_n == 0 {
@@ -49797,7 +49912,11 @@ fn handle_worklist_commit<R: tauri::Runtime>(
                 continue;
             }
             let fps = worklist_item_files(item);
-            let changed = worklist_change_activity(app, &fps)
+            // issue-323: one item's worth of index — this is the commit
+            // gate's has-changes check, not the board build, so scoping the
+            // union to this item's own paths is both correct and cheapest.
+            let changed = worklist_change_index(app, &fps)
+                .and_then(|idx| worklist_change_activity_for(&idx, &fps))
                 .and_then(|(_, s)| s.get("changed").and_then(|v| v.as_u64()))
                 .unwrap_or(0);
             if changed == 0 {
@@ -54035,4 +54154,100 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod worklist_change_projection_tests {
+    use super::{worklist_change_activity_for, WorklistChangeIndex};
+    use std::collections::HashMap;
+
+    fn idx(pairs: &[(&str, &str, i64, i64, i64)]) -> WorklistChangeIndex {
+        let mut status_by_path = HashMap::new();
+        let mut counts = HashMap::new();
+        let mut hunks_by_path = HashMap::new();
+        for (path, status, a, r, h) in pairs {
+            let st: &'static str = match *status {
+                "new" => "new",
+                "deleted" => "deleted",
+                _ => "modified",
+            };
+            status_by_path.insert((*path).to_string(), st);
+            counts.insert((*path).to_string(), (*a, *r));
+            hunks_by_path.insert((*path).to_string(), *h);
+        }
+        WorklistChangeIndex {
+            root: std::env::temp_dir(),
+            status_by_path,
+            counts,
+            hunks_by_path,
+            diff_by_path: HashMap::new(),
+            spawns: 0,
+        }
+    }
+
+    fn field(v: &serde_json::Value, k: &str) -> i64 {
+        v.get(k).and_then(|x| x.as_i64()).unwrap_or(-1)
+    }
+
+    #[test]
+    fn an_item_sees_only_its_own_paths_in_a_shared_index() {
+        // issue-323's whole safety claim: the index is scoped to the union of
+        // every item's paths, and projection is by exact path equality, so a
+        // neighbour's changes cannot leak into this item's numbers.
+        let i = idx(&[
+            ("mine.rs", "modified", 10, 2, 3),
+            ("theirs.rs", "modified", 999, 999, 99),
+        ]);
+        let (_, sum) = worklist_change_activity_for(&i, &["mine.rs".to_string()]).unwrap();
+        assert_eq!(field(&sum, "added"), 10);
+        assert_eq!(field(&sum, "removed"), 2);
+        assert_eq!(
+            field(&sum, "hunks"),
+            3,
+            "neighbour hunks must not be summed"
+        );
+        assert_eq!(field(&sum, "changed"), 1);
+        assert_eq!(field(&sum, "total"), 1);
+    }
+
+    #[test]
+    fn hunks_sum_across_an_items_own_files() {
+        let i = idx(&[
+            ("a.rs", "modified", 1, 1, 2),
+            ("b.rs", "modified", 3, 0, 5),
+            ("elsewhere.rs", "modified", 7, 7, 7),
+        ]);
+        let files = vec!["a.rs".to_string(), "b.rs".to_string()];
+        let (_, sum) = worklist_change_activity_for(&i, &files).unwrap();
+        assert_eq!(field(&sum, "hunks"), 7, "2 + 5, not 14");
+        assert_eq!(field(&sum, "added"), 4);
+        assert_eq!(field(&sum, "changed"), 2);
+    }
+
+    #[test]
+    fn paths_absent_from_the_index_read_as_unchanged() {
+        let i = idx(&[("other.rs", "modified", 5, 5, 5)]);
+        let files = vec!["clean.rs".to_string()];
+        let (rows, sum) = worklist_change_activity_for(&i, &files).unwrap();
+        assert_eq!(field(&sum, "changed"), 0);
+        assert_eq!(
+            field(&sum, "total"),
+            1,
+            "the plan denominator still counts it"
+        );
+        assert_eq!(
+            sum.get("diskLabel").and_then(|v| v.as_str()),
+            Some("no changes yet")
+        );
+        assert_eq!(
+            rows[0].get("status").and_then(|v| v.as_str()),
+            Some("unchanged")
+        );
+    }
+
+    #[test]
+    fn an_empty_file_list_projects_to_none() {
+        let i = idx(&[("x.rs", "modified", 1, 1, 1)]);
+        assert!(worklist_change_activity_for(&i, &[]).is_none());
+    }
 }

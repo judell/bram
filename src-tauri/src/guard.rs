@@ -157,49 +157,6 @@ fn authority_worklist_hook(
             v.reason
         ),
     );
-    // issue-327 phase A (OBSERVE-ONLY): resolve the item being worked and the
-    // path a write targets, and record what a later provenance ledger WOULD
-    // attribute. Emits nothing but a breadcrumb; the verdict above is already
-    // decided and is not consulted or altered here. `ms` is the whole hook's
-    // elapsed time including this probe, because that is the cost a ledger
-    // would pay on every write and these hooks sit in the path of every tool
-    // call. Graduation is read off `grep Provenance hook-events.log`: does
-    // `item=` resolve on covered writes, does `path=` resolve on the Bash path
-    // at a rate comparable to Edit/Write, and is the added latency invisible.
-    // Gated on "this allow resolved a repo path", NOT on a reason string.
-    // Reasons are provider-specific: Claude emits `covered-by-worklist-item`
-    // (172 records) while Codex emits `passed-checks` for everything it allows
-    // (56) and never the former. Keying on the reason would have made this
-    // Claude-only while the trace looked healthy -- the exact shape of a
-    // half-the-fleet instrument this project has shipped before.
-    if v.decision == "allow" {
-        let (item, paths) = crate::guard_policy::provenance_probe(payload, &root, &v.target);
-        if !paths.is_empty() {
-            let path_field = paths.join(",");
-            // exists= is an annotation, not a filter: PreToolUse runs before
-            // the write, so `no` covers both a phantom (the `Changing`
-            // blockquote) and a genuine new file. Phase B separates them; this
-            // records the ratio.
-            let exists_field = crate::guard_policy::provenance_paths_exist(&root, &paths)
-                .into_iter()
-                .map(|e| if e { "yes" } else { "no" })
-                .collect::<Vec<_>>()
-                .join(",");
-            append_breadcrumb(
-                &root,
-                provider,
-                "Provenance",
-                &tool,
-                &format!(
-                    "op=would-attribute item={} path={} exists={} ms={}",
-                    item.as_deref().unwrap_or("none"),
-                    path_field,
-                    exists_field,
-                    started.elapsed().as_millis()
-                ),
-            );
-        }
-    }
     if v.decision == "allow" {
         // Lifecycle bookkeeping writes: emit Claude's PreToolUse allow
         // decision so the user is not prompted (transcribed from

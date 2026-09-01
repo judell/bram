@@ -51,6 +51,8 @@ resources/outbound-turns/
 resources/.bram-port
 resources/.bram-port.json
 resources/.inflight-claim.json
+resources/.claim-intervals.json
+resources/.pty-intent.jsonl
 resources/.worklist-authorization.json
 resources/.worklist-intent.json
 resources/.worklist-result.json

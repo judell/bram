@@ -37522,6 +37522,116 @@ fn record_claim_interval<R: tauri::Runtime>(
     );
 }
 
+// The retirement decision, pure so the adjacency rule can be tested without an
+// AppHandle or a repo. Returns (records to keep, ref names to delete).
+fn claim_intervals_partition(
+    intervals: &[serde_json::Value],
+    live: &std::collections::HashSet<String>,
+) -> (Vec<serde_json::Value>, Vec<String>) {
+    let owned = |rec: &serde_json::Value| -> bool {
+        rec.get("ids")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .any(|id| live.contains(id))
+            })
+            .unwrap_or(false)
+    };
+    let mut keep = Vec::new();
+    let mut retire = Vec::new();
+    for (n, rec) in intervals.iter().enumerate() {
+        // The oldest record has no predecessor: it bounds the first interval
+        // only, so its own owner alone decides its fate.
+        if owned(rec) || (n > 0 && owned(&intervals[n - 1])) {
+            keep.push(rec.clone());
+            continue;
+        }
+        match rec.get("ref").and_then(|v| v.as_str()) {
+            Some(r) => retire.push(r.to_string()),
+            // A record with no ref name cannot be retired from git, so keeping
+            // it is the safe side: dropping it would orphan whatever ref it
+            // was meant to name.
+            None => keep.push(rec.clone()),
+        }
+    }
+    (keep, retire)
+}
+
+// issue-327 hygiene: retire boundaries whose intervals no longer have a live
+// owner. Called after a successful prune mutation, which is the one path both
+// drops and `worklist-commit` funnel through (commit delegates its prune to
+// `handle_worklist_mutate`).
+//
+// A ref is a SHARED boundary: `r_N` ends the interval owned by record `N-1`
+// and begins the one owned by record `N`. Deleting a ref that still bounds a
+// live item's interval would destroy that item's diff base while the board
+// went on offering the item as attributable -- strictly worse than never
+// pruning, because the failure would surface only when someone asked for the
+// diff. So a boundary is deletable only when NEITHER adjacent interval has a
+// live owner.
+//
+// Records are appended in claim order, so the predecessor is simply `N-1`.
+// That is deliberate rather than incidental: sorting by `atMs` would be
+// ambiguous for two boundaries landing in the same millisecond, and insertion
+// order is the ground truth for which claim followed which.
+fn prune_claim_intervals<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let Some(root) = project_root(Some(app)) else {
+        return;
+    };
+    let sidecar = root.join(CLAIM_INTERVALS_REL);
+    let Ok(text) = std::fs::read_to_string(&sidecar) else {
+        return;
+    };
+    let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return;
+    };
+    let intervals: Vec<serde_json::Value> = match doc.get("intervals").and_then(|v| v.as_array()) {
+        Some(a) if !a.is_empty() => a.clone(),
+        _ => return,
+    };
+    let live: std::collections::HashSet<String> = worklist_file(app)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| {
+            v.get("items").and_then(|i| i.as_array()).map(|arr| {
+                arr.iter()
+                    .filter_map(|it| it.get("id").and_then(|x| x.as_str()))
+                    .map(String::from)
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+    let (keep, retire) = claim_intervals_partition(&intervals, &live);
+    if retire.is_empty() {
+        return;
+    }
+    let removed = retire.len();
+    for r in &retire {
+        let _ = std::process::Command::new("git")
+            .current_dir(&root)
+            .args(["update-ref", "-d", r])
+            .output();
+    }
+    if let Some(obj) = doc.as_object_mut() {
+        obj.insert(
+            "intervals".to_string(),
+            serde_json::Value::Array(keep.clone()),
+        );
+    }
+    if let Ok(body) = serde_json::to_string_pretty(&doc) {
+        let tmp = sidecar.with_extension("json.tmp");
+        if std::fs::write(&tmp, format!("{}\n", body)).is_ok() {
+            let _ = std::fs::rename(&tmp, &sidecar);
+        }
+    }
+    append_bram_trace_line(
+        app,
+        "claim-interval",
+        &format!("op=prune removed={} kept={}", removed, keep.len()),
+    );
+}
+
 // The synthetic write at the drop-policy validator writes and immediately
 // clears purely to drive a UI refresh; it owns no interval, so it must not
 // manufacture a zero-length boundary.
@@ -50413,6 +50523,12 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
         );
     }
 
+    // issue-327 hygiene: the board just shrank, so boundaries whose intervals
+    // lost their last live owner are now retirable.
+    if op == "prune" && !affected.is_empty() {
+        prune_claim_intervals(app);
+    }
+
     // Successful mutate is the mechanical completion point for approved/drop
     // worklist cycles. Clear any matching inflight sentinel immediately so the
     // Workspace spinner does not wait for the later silence-detected fallback.
@@ -55033,5 +55149,73 @@ mod claim_interval_tests {
             "A's work must NOT appear in the A..B interval: {patch}"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod claim_interval_prune_tests {
+    use super::claim_intervals_partition;
+    use serde_json::json;
+    use std::collections::HashSet;
+
+    fn rec(r: &str, ids: &[&str]) -> serde_json::Value {
+        json!({"ref": r, "ids": ids, "atMs": 1, "kind": "approved", "tree": "t"})
+    }
+    fn live(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    // The hazard the rule exists for: r2 begins B's interval but ENDS A's, so
+    // while A is live it must survive even though B is gone.
+    #[test]
+    fn a_boundary_bounding_a_live_interval_survives() {
+        let ivs = vec![rec("refs/a", &["A"]), rec("refs/b", &["B"])];
+        let (keep, retire) = claim_intervals_partition(&ivs, &live(&["A"]));
+        assert!(
+            retire.is_empty(),
+            "nothing retirable while A lives: {retire:?}"
+        );
+        assert_eq!(keep.len(), 2);
+    }
+
+    #[test]
+    fn both_neighbours_dead_retires_the_boundary() {
+        let ivs = vec![
+            rec("refs/a", &["A"]),
+            rec("refs/b", &["B"]),
+            rec("refs/c", &["C"]),
+        ];
+        // Only C survives: refs/a has no live predecessor and a dead owner;
+        // refs/b is dead-owned but PRECEDES C's boundary -- still, refs/c is
+        // the one that bounds C, so refs/b is retirable and refs/c is not.
+        let (_, retire) = claim_intervals_partition(&ivs, &live(&["C"]));
+        assert_eq!(retire, vec!["refs/a".to_string(), "refs/b".to_string()]);
+    }
+
+    #[test]
+    fn empty_board_retires_everything() {
+        let ivs = vec![rec("refs/a", &["A"]), rec("refs/b", &["B"])];
+        let (keep, retire) = claim_intervals_partition(&ivs, &live(&[]));
+        assert!(keep.is_empty());
+        assert_eq!(retire.len(), 2);
+    }
+
+    // A multi-id claim keeps its boundary while ANY of its items survives.
+    #[test]
+    fn multi_id_claim_survives_on_one_live_member() {
+        let ivs = vec![rec("refs/a", &["A", "B"])];
+        let (keep, retire) = claim_intervals_partition(&ivs, &live(&["B"]));
+        assert!(retire.is_empty());
+        assert_eq!(keep.len(), 1);
+    }
+
+    // A record naming no ref cannot be retired from git; keeping it is the
+    // safe side, since dropping it would orphan whatever it was meant to name.
+    #[test]
+    fn record_without_a_ref_is_kept_not_silently_dropped() {
+        let ivs = vec![serde_json::json!({"ids": ["A"]})];
+        let (keep, retire) = claim_intervals_partition(&ivs, &live(&[]));
+        assert!(retire.is_empty());
+        assert_eq!(keep.len(), 1);
     }
 }

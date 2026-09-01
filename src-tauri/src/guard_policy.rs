@@ -632,6 +632,25 @@ pub(crate) fn provenance_probe(
     (item, paths)
 }
 
+// issue-327 phase A follow-up: annotate, do not filter.
+//
+// The soak's one quality defect was `path=Changing` — a markdown blockquote
+// (`> Changing the font size...`) inside a heredoc, read by redirect_targets as
+// a shell redirect. normalize_target kept it because it resolves under the
+// project root, and it cannot check existence: PreToolUse runs BEFORE the
+// write, so a legitimate new file does not exist yet either.
+//
+// Recording `exists` rather than dropping the path is the observe-only move.
+// `exists=no` covers both a phantom and a genuine new-file creation; the ratio
+// between them is exactly what phase B's confirmation step has to handle, and
+// filtering here on a shape heuristic would discard that data invisibly.
+//
+// A stat failure reads as `false` rather than erroring — nothing in this path
+// may reach a verdict.
+pub(crate) fn provenance_paths_exist(root: &Path, paths: &[String]) -> Vec<bool> {
+    paths.iter().map(|p| root.join(p).exists()).collect()
+}
+
 // The single claimed id, or None. Multi-id claims report the first: phase A is
 // measuring whether identity resolves at all, and a plural claim is a separate
 // question from an absent one.
@@ -6397,6 +6416,27 @@ mod provenance_probe_tests {
             paths,
             vec!["resources/thing.json".to_string()],
             "repo-relative, and no trailing separator"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn existence_is_annotated_per_path_not_used_to_filter() {
+        use super::provenance_paths_exist;
+        let root = scratch("exists");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/real.rs"), "fn main() {}").unwrap();
+        let paths = vec![
+            "src/real.rs".to_string(),
+            "Changing".to_string(),
+            "src/not-yet-created.rs".to_string(),
+        ];
+        assert_eq!(
+            provenance_paths_exist(&root, &paths),
+            vec![true, false, false],
+            "the phantom and the not-yet-written file are indistinguishable here \
+             by design — PreToolUse runs before the write, so phase B's \
+             confirmation step is what separates them"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

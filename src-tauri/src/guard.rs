@@ -176,15 +176,25 @@ fn authority_worklist_hook(
         let (item, paths) = crate::guard_policy::provenance_probe(payload, &root, &v.target);
         if !paths.is_empty() {
             let path_field = paths.join(",");
+            // exists= is an annotation, not a filter: PreToolUse runs before
+            // the write, so `no` covers both a phantom (the `Changing`
+            // blockquote) and a genuine new file. Phase B separates them; this
+            // records the ratio.
+            let exists_field = crate::guard_policy::provenance_paths_exist(&root, &paths)
+                .into_iter()
+                .map(|e| if e { "yes" } else { "no" })
+                .collect::<Vec<_>>()
+                .join(",");
             append_breadcrumb(
                 &root,
                 provider,
                 "Provenance",
                 &tool,
                 &format!(
-                    "op=would-attribute item={} path={} ms={}",
+                    "op=would-attribute item={} path={} exists={} ms={}",
                     item.as_deref().unwrap_or("none"),
                     path_field,
+                    exists_field,
                     started.elapsed().as_millis()
                 ),
             );

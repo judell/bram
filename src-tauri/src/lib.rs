@@ -15360,7 +15360,13 @@ fn pty_spawn(
     // these keystrokes queue and run as the first command.
     let configured_provider = SessionProvider::from_str(configured_agent_provider(&app))
         .unwrap_or(SessionProvider::Claude);
-    let startup_policy = configured_startup_policy(&app);
+    // Decide before typing the launch command so the PTY reader cannot miss
+    // the provider's first TUI boot-evidence frame. An unseen unmanaged repo
+    // gets one fresh session; once its greeting is delivered, later launches
+    // go straight back to the user's configured/default resume policy.
+    let first_unmanaged_launch = arm_repo_startup_greeting_if_needed(&app);
+    let configured_startup_policy = configured_startup_policy(&app);
+    let startup_policy = startup_policy_for_repo(configured_startup_policy, first_unmanaged_launch);
     let last_active = if startup_policy == AgentStartupPolicy::LastActive {
         validated_last_active_session(&app)
     } else {
@@ -15399,9 +15405,11 @@ fn pty_spawn(
                     &app,
                     "agent-switch",
                     &format!(
-                        "op=autostart provider={} policy={} exact_session={} fallback={} command={}",
+                        "op=autostart provider={} policy={} configured_policy={} first_unmanaged={} exact_session={} fallback={} command={}",
                         provider,
                         startup_policy.as_str(),
+                        configured_startup_policy.as_str(),
+                        first_unmanaged_launch,
                         launch.session_id.as_deref().unwrap_or(""),
                         launch.fallback,
                         command
@@ -15694,6 +15702,14 @@ fn queue_pty_intent(
     payload: serde_json::Value,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    queue_pty_intent_inner(&app, payload, &state)
+}
+
+fn queue_pty_intent_inner<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    payload: serde_json::Value,
+    state: &State<'_, AppState>,
+) -> Result<(), String> {
     let kind = payload
         .get("kind")
         .and_then(|v| v.as_str())
@@ -15709,6 +15725,16 @@ fn queue_pty_intent(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    let source = payload
+        .get("source")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let evidence = payload
+        .get("evidence")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     if !matches!(
         kind.as_str(),
         "toShell" | "toTurn" | "sendKeys" | "menuAnswer"
@@ -15718,7 +15744,7 @@ fn queue_pty_intent(
     if kind == "menuAnswer" && prompt_id.is_empty() {
         return Err("missing promptId for menuAnswer".to_string());
     }
-    let Some(path) = pty_intent_file(&app) else {
+    let Some(path) = pty_intent_file(app) else {
         return Err("project root unknown".to_string());
     };
     if let Some(parent) = path.parent() {
@@ -15742,6 +15768,14 @@ fn queue_pty_intent(
             "at": unix_now_ms(),
         })
     };
+    if let Some(obj) = line.as_object_mut() {
+        if !source.is_empty() {
+            obj.insert("source".to_string(), serde_json::json!(source));
+        }
+        if !evidence.is_empty() {
+            obj.insert("evidence".to_string(), serde_json::json!(evidence));
+        }
+    }
     if matches!(kind.as_str(), "toShell" | "toTurn") && agent_boot_hold_active() {
         if let Some(obj) = line.as_object_mut() {
             obj.insert(
@@ -15770,12 +15804,18 @@ fn queue_pty_intent(
     }
     if bram_trace_enabled() {
         append_bram_trace_line(
-            &app,
+            app,
             "pty-intent",
-            &format!("op=enqueue id={} kind={} bytes={}", id, kind, data.len()),
+            &format!(
+                "op=enqueue id={} kind={} bytes={} source={}",
+                id,
+                kind,
+                data.len(),
+                source
+            ),
         );
     }
-    drain_pty_intents(&app, &state)
+    drain_pty_intents(app, state)
 }
 
 // Drains every queued intent in `resources/.pty-intent.jsonl` through
@@ -15859,6 +15899,15 @@ fn drain_pty_intents<R: tauri::Runtime>(
             .get("promptId")
             .and_then(|v| v.as_str())
             .unwrap_or("");
+        let source = intent.get("source").and_then(|v| v.as_str()).unwrap_or("");
+        let evidence = intent
+            .get("evidence")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let intent_id = intent
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("intent");
         if matches!(kind, "toShell" | "toTurn") {
             if blocking_tool.is_some() {
                 held += 1;
@@ -15966,8 +16015,51 @@ fn drain_pty_intents<R: tauri::Runtime>(
         match write_result {
             Ok(()) => {
                 wrote += 1;
+                if source == "repo-startup-greeting" {
+                    match mark_repo_startup_greeting_delivered(app) {
+                        Ok(marker) => {
+                            if bram_trace_enabled() {
+                                append_bram_trace_line(
+                                    app,
+                                    "startup-greeting",
+                                    &format!(
+                                        "op=sent id={} evidence={} bytes={} marker={}",
+                                        intent_id,
+                                        evidence,
+                                        data.len(),
+                                        marker.display()
+                                    ),
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            if bram_trace_enabled() {
+                                append_bram_trace_line(
+                                    app,
+                                    "startup-greeting",
+                                    &format!(
+                                        "op=error stage=mark-delivered id={} error={}",
+                                        intent_id,
+                                        bram_trace_preview(&e, 120)
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
             }
             Err(e) => {
+                if source == "repo-startup-greeting" && bram_trace_enabled() {
+                    append_bram_trace_line(
+                        app,
+                        "startup-greeting",
+                        &format!(
+                            "op=error stage=send id={} error={}",
+                            intent_id,
+                            bram_trace_preview(&e, 120)
+                        ),
+                    );
+                }
                 drain_error = Some(e);
                 remaining.push(line.to_string());
             }
@@ -17532,6 +17624,17 @@ fn startup_policy_from_shell(shell: Option<&ShellConfig>) -> AgentStartupPolicy 
     }
 }
 
+fn startup_policy_for_repo(
+    configured: AgentStartupPolicy,
+    first_unmanaged_launch: bool,
+) -> AgentStartupPolicy {
+    if first_unmanaged_launch {
+        AgentStartupPolicy::NewSession
+    } else {
+        configured
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AgentStartupLaunch {
     provider: SessionProvider,
@@ -17579,8 +17682,8 @@ fn resolve_agent_startup_launch(
 mod agent_startup_policy_tests {
     use super::{
         merge_settings_into_config, new_session_launch_command, resolve_agent_startup_launch,
-        settings_view_from_config, startup_policy_from_shell, AgentStartupPolicy, ProjectConfig,
-        SessionProvider, ShellConfig,
+        settings_view_from_config, startup_policy_for_repo, startup_policy_from_shell,
+        AgentStartupPolicy, ProjectConfig, SessionProvider, ShellConfig,
     };
 
     fn shell(json: &str) -> ShellConfig {
@@ -17608,6 +17711,26 @@ mod agent_startup_policy_tests {
         let config = shell(r#"{"continueLast":false,"startupPolicy":"lastActive"}"#);
         assert_eq!(
             startup_policy_from_shell(Some(&config)),
+            AgentStartupPolicy::LastActive
+        );
+    }
+
+    #[test]
+    fn first_unmanaged_launch_is_fresh_then_configured_policy_resumes() {
+        assert_eq!(
+            startup_policy_for_repo(AgentStartupPolicy::AgentRecent, true),
+            AgentStartupPolicy::NewSession
+        );
+        assert_eq!(
+            startup_policy_for_repo(AgentStartupPolicy::LastActive, true),
+            AgentStartupPolicy::NewSession
+        );
+        assert_eq!(
+            startup_policy_for_repo(AgentStartupPolicy::AgentRecent, false),
+            AgentStartupPolicy::AgentRecent
+        );
+        assert_eq!(
+            startup_policy_for_repo(AgentStartupPolicy::LastActive, false),
             AgentStartupPolicy::LastActive
         );
     }
@@ -22853,6 +22976,171 @@ fn has_project_settings(dir: &Path) -> bool {
 // about intent, not looser: running Setup is a deliberate act on this project.
 fn project_is_managed(dir: &Path) -> bool {
     has_project_settings(dir) || dir.join(WORKLIST_AUTH_REL).exists()
+}
+
+const REPO_STARTUP_GREETING: &str = "Hello, this is Bram. I just woke up in a repo that I haven't seen before. You can ask me to look around, assess what is here, and suggest what might need doing next.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepoStartupGreetingClaim {
+    SendUnseen,
+    SendRetry,
+    SuppressAlreadySeen,
+    SuppressAlreadyManaged,
+}
+
+impl RepoStartupGreetingClaim {
+    fn should_send(self) -> bool {
+        matches!(self, Self::SendUnseen | Self::SendRetry)
+    }
+
+    fn reason(self) -> &'static str {
+        match self {
+            Self::SendUnseen => "unseen-repo",
+            Self::SendRetry => "undelivered-retry",
+            Self::SuppressAlreadySeen => "already-seen",
+            Self::SuppressAlreadyManaged => "already-managed",
+        }
+    }
+}
+
+fn repo_startup_greeting_marker_path(cache_dir: &Path, project_root: &Path) -> PathBuf {
+    let canonical = strip_unc_prefix(
+        project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.to_path_buf()),
+    );
+    cache_dir
+        .join("repo-startup-greeting")
+        .join(format!("{}.json", encode_path_for_filename(&canonical)))
+}
+
+// Decide whether this repo still needs its startup greeting. The marker lives
+// in the app cache, not the project, so merely looking around does not dirty an
+// unfamiliar checkout. A marker without deliveredAtMs is an interrupted old
+// claim (including the first field-test build) and retries instead of silently
+// consuming the greeting.
+fn claim_repo_startup_greeting(
+    marker: &Path,
+    already_managed: bool,
+) -> Result<RepoStartupGreetingClaim, String> {
+    if already_managed {
+        return Ok(RepoStartupGreetingClaim::SuppressAlreadyManaged);
+    }
+    let text = match std::fs::read_to_string(marker) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(RepoStartupGreetingClaim::SendUnseen)
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+    let delivered = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|body| body.get("deliveredAtMs").and_then(|v| v.as_i64()))
+        .unwrap_or(0)
+        > 0;
+    Ok(if delivered {
+        RepoStartupGreetingClaim::SuppressAlreadySeen
+    } else {
+        RepoStartupGreetingClaim::SendRetry
+    })
+}
+
+fn persist_repo_startup_greeting_delivered(
+    marker: &Path,
+    delivered_at_ms: i64,
+) -> Result<(), String> {
+    if let Some(parent) = marker.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let body = serde_json::json!({
+        "schema": 1,
+        "deliveredAtMs": delivered_at_ms,
+    });
+    std::fs::write(marker, format!("{}\n", body)).map_err(|e| e.to_string())
+}
+
+fn repo_startup_greeting_marker_for_app<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<PathBuf, String> {
+    let Some(root) = project_root(Some(app)) else {
+        return Err("project root unknown".to_string());
+    };
+    let cache = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+    Ok(repo_startup_greeting_marker_path(&cache, &root))
+}
+
+fn mark_repo_startup_greeting_delivered<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<PathBuf, String> {
+    let marker = repo_startup_greeting_marker_for_app(app)?;
+    persist_repo_startup_greeting_delivered(&marker, unix_now_ms())?;
+    Ok(marker)
+}
+
+// Returns true when this is the first unmanaged launch (or a retry whose
+// greeting never reached the agent). The caller uses that same decision to
+// force a fresh provider session for this launch only.
+fn arm_repo_startup_greeting_if_needed<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
+    let Some(root) = project_root(Some(app)) else {
+        return false;
+    };
+    let marker = match repo_startup_greeting_marker_for_app(app) {
+        Ok(marker) => marker,
+        Err(e) => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "startup-greeting",
+                    &format!(
+                        "op=error stage=cache-dir error={}",
+                        bram_trace_preview(&e.to_string(), 120)
+                    ),
+                );
+            }
+            return false;
+        }
+    };
+    match claim_repo_startup_greeting(&marker, project_is_managed(&root)) {
+        Ok(claim) if claim.should_send() => {
+            REPO_STARTUP_GREETING_PENDING.store(true, std::sync::atomic::Ordering::Release);
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "startup-greeting",
+                    &format!(
+                        "op=armed reason={} marker={}",
+                        claim.reason(),
+                        marker.display()
+                    ),
+                );
+            }
+            true
+        }
+        Ok(claim) => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "startup-greeting",
+                    &format!("op=suppressed reason={}", claim.reason()),
+                );
+            }
+            false
+        }
+        Err(e) => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "startup-greeting",
+                    &format!(
+                        "op=error stage=claim marker={} error={}",
+                        marker.display(),
+                        bram_trace_preview(&e, 120)
+                    ),
+                );
+            }
+            false
+        }
+    }
 }
 
 fn start_search_indexer<R: tauri::Runtime>(app: AppHandle<R>) {
@@ -30568,7 +30856,10 @@ static AGENT_BOOT_HOLD_GENERATION: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 static AGENT_BOOT_RELEASED_GENERATION: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+static REPO_STARTUP_GREETING_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 const AGENT_BOOT_HOLD_EXPIRE_MS: i64 = 30_000;
+const REPO_STARTUP_GREETING_SETTLE_MS: u64 = 250;
 
 fn agent_boot_hold_provider_cell() -> &'static Mutex<String> {
     static CELL: OnceLock<Mutex<String>> = OnceLock::new();
@@ -30735,8 +31026,60 @@ fn agent_boot_evidence_match(buf: &[u8]) -> Option<&'static str> {
         .find_map(|(p, n)| buf.windows(p.len()).any(|w| w == *p).then_some(*n))
 }
 
+fn schedule_repo_startup_greeting<R: tauri::Runtime>(app: AppHandle<R>, evidence: &'static str) {
+    if REPO_STARTUP_GREETING_PENDING
+        .compare_exchange(
+            true,
+            false,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .is_err()
+    {
+        return;
+    }
+    thread::spawn(move || {
+        thread::sleep(std::time::Duration::from_millis(
+            REPO_STARTUP_GREETING_SETTLE_MS,
+        ));
+        let state = app.state::<AppState>();
+        let payload = serde_json::json!({
+            "kind": "toTurn",
+            "data": REPO_STARTUP_GREETING,
+            "source": "repo-startup-greeting",
+            "evidence": evidence,
+        });
+        match queue_pty_intent_inner(&app, payload, &state) {
+            Ok(()) => {
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        &app,
+                        "startup-greeting",
+                        &format!("op=queued evidence={}", evidence),
+                    );
+                }
+            }
+            Err(e) => {
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        &app,
+                        "startup-greeting",
+                        &format!(
+                            "op=error stage=enqueue evidence={} error={}",
+                            evidence,
+                            bram_trace_preview(&e, 120)
+                        ),
+                    );
+                }
+            }
+        }
+    });
+}
+
 fn agent_boot_evidence_scan<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
-    if !agent_boot_hold_active() {
+    let boot_hold_active = agent_boot_hold_active();
+    let greeting_pending = REPO_STARTUP_GREETING_PENDING.load(std::sync::atomic::Ordering::Acquire);
+    if !boot_hold_active && !greeting_pending {
         return;
     }
     let mut buf: Vec<u8> = Vec::with_capacity(chunk.len() + 16);
@@ -30749,7 +31092,12 @@ fn agent_boot_evidence_scan<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8])
         buf.extend_from_slice(chunk);
     }
     if let Some(name) = agent_boot_evidence_match(&buf) {
-        clear_agent_boot_hold(app, name);
+        if boot_hold_active {
+            clear_agent_boot_hold(app, name);
+        }
+        if greeting_pending {
+            schedule_repo_startup_greeting(app.clone(), name);
+        }
     }
 }
 
@@ -31071,6 +31419,77 @@ mod project_managed_tests {
         std::fs::write(d.join(".bram.json"), "{}\n").unwrap();
         assert!(project_is_managed(&d));
         let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+mod repo_startup_greeting_tests {
+    use super::{
+        claim_repo_startup_greeting, persist_repo_startup_greeting_delivered,
+        repo_startup_greeting_marker_path, RepoStartupGreetingClaim, REPO_STARTUP_GREETING,
+    };
+
+    fn scratch(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let base = std::env::temp_dir().join(format!(
+            "bram-startup-greeting-{}-{}",
+            name,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let project = base.join("project");
+        let cache = base.join("cache");
+        std::fs::create_dir_all(&project).unwrap();
+        (base, cache)
+    }
+
+    #[test]
+    fn unseen_repo_retries_until_delivery_then_suppresses() {
+        let (base, cache) = scratch("unseen");
+        let project = base.join("project");
+        let marker = repo_startup_greeting_marker_path(&cache, &project);
+
+        assert_eq!(
+            claim_repo_startup_greeting(&marker, false).unwrap(),
+            RepoStartupGreetingClaim::SendUnseen
+        );
+        assert!(
+            !marker.exists(),
+            "arming alone must not consume the greeting"
+        );
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, "{\"claimedAtMs\":100}\n").unwrap();
+        assert_eq!(
+            claim_repo_startup_greeting(&marker, false).unwrap(),
+            RepoStartupGreetingClaim::SendRetry
+        );
+        persist_repo_startup_greeting_delivered(&marker, 200).unwrap();
+        assert_eq!(
+            claim_repo_startup_greeting(&marker, false).unwrap(),
+            RepoStartupGreetingClaim::SuppressAlreadySeen
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn already_managed_repo_keeps_normal_startup_without_a_marker() {
+        let (base, cache) = scratch("managed");
+        let project = base.join("project");
+        let marker = repo_startup_greeting_marker_path(&cache, &project);
+
+        assert_eq!(
+            claim_repo_startup_greeting(&marker, true).unwrap(),
+            RepoStartupGreetingClaim::SuppressAlreadyManaged
+        );
+        assert!(!marker.exists());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn greeting_text_is_the_approved_copy() {
+        assert_eq!(
+            REPO_STARTUP_GREETING,
+            "Hello, this is Bram. I just woke up in a repo that I haven't seen before. You can ask me to look around, assess what is here, and suggest what might need doing next."
+        );
     }
 }
 

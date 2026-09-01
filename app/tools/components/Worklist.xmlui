@@ -154,6 +154,12 @@
            reader knows the per-row marks are exhaustive without reading every
            row. Says "no shared files" when there are none - the absence is
            worth one word, and it keeps the line from appearing and vanishing.
+           Counts CHANGED overlap (declared paths that are actually dirty), not
+           declared overlap: two items planning to touch one file is not
+           contention, and reporting it as such is what made this surface feel
+           like it was announcing a problem rather than naming one. The
+           declared fact keeps its home at the Start click, where
+           __bramStartConsequence raises it when it becomes consequential.
            "across all N items" marks universality, which is what the clique
            degenerates to and the useful collapsed fact when everyone claims
            one file. -->
@@ -223,7 +229,7 @@
            xmlui-side board is proposing one; collapse to onRowClick when
            it lands). The cell tint doubles as the pinned-row cue. -->
       <Table
-        data="{window.__bramOverlapIndex(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value)}"
+        data="{window.__bramOverlapChangedIndex(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value)}"
         onRowEnter="(item) => window.__bramSetOverlapFocus(item.claimants)"
         onRowLeave="window.__bramClearOverlapFocus()">
         <Column header="file" width="2*">

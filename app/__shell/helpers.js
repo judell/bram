@@ -2742,6 +2742,11 @@ window.__bramHasUnclaimedChanges = function (worklistValue) {
 // committable: the consequential click is Start, which is what forecloses
 // committing either item alone. By the time exclusivity can be evaluated the
 // work is already done.
+//
+// For the same reason it stays on the DECLARED index while the Review-overlaps
+// panel moved to __bramOverlapChangedIndex: before Start there is nothing on
+// disk to intersect with, so predictions are the only signal there is. Do not
+// "fix" the divergence -- the two surfaces answer different questions.
 window.__bramSelectionSharedFileCount = function (items, sel, claim) {
   var chosen = sel || [];
   if (chosen.length < 2) return 0;
@@ -2990,9 +2995,15 @@ window.__bramOverlapIndex = function (items, claim) {
 window.__bramOverlapHeaderLine = function (items, claim) {
   var list = items || [];
   var n = list.length;
-  var index = window.__bramOverlapIndex(list, claim);
+  var index = window.__bramOverlapChangedIndex(list, claim);
   var head = n + " item" + (n === 1 ? "" : "s");
-  if (!index.length) return head + " \u00b7 no shared files";
+  // Two different absences, and the distinction is the point of this item: no
+  // item pair shares a path at all, versus a pair that shares one where
+  // nothing has been written yet. The second used to read as contention.
+  if (!index.length) {
+    var anyDeclared = (window.__bramOverlapIndex(list, claim) || []).length > 0;
+    return head + (anyDeclared ? " \u00b7 no shared files changed" : " \u00b7 no shared files");
+  }
   var touched = {};
   index.forEach(function (e) { e.claimants.forEach(function (id) { touched[id] = true; }); });
   var k = Object.keys(touched).length;
@@ -3000,8 +3011,47 @@ window.__bramOverlapHeaderLine = function (items, claim) {
     " across " + (k === n && n > 1 ? "all " : "") + k + " item" + (k === 1 ? "" : "s");
 };
 
+// The overlap that MATTERS AT THE GATE: declared overlap intersected with
+// paths that have actually changed. __bramOverlapIndex above answers the
+// pre-Start question and must stay on declared `files` -- see its consumer
+// __bramSelectionSharedFileCount, whose whole point is that predictions are
+// all that exist before work begins. This one answers the commit-gate
+// question, and every peer surface (__bramItemChangedSplit and everything
+// built on it) already reasons this way; the index was the outlier.
+//
+// The dirtiness test is about the FILE, not about who wrote it. `changedFiles`
+// is per item but scoped to that item's own declared paths, so two claimants
+// of a dirty shared path both carry a record for it and neither record says
+// who authored a hunk. Bram has no per-hunk authorship (#327, closed
+// won't-build) -- and two items on a dirty shared file is contention
+// PRECISELY because which of them wrote it cannot be known.
+window.__bramOverlapChangedIndex = function (items, claim) {
+  var declared = window.__bramOverlapIndex(items, claim) || [];
+  if (!declared.length) return [];
+  var list = items || [];
+  var dirty = {};
+  for (var i = 0; i < list.length; i++) {
+    var files = (list[i] && list[i].changedFiles) || [];
+    for (var j = 0; j < files.length; j++) {
+      var f = files[j];
+      if (!f || !f.path) continue;
+      if ((f.added || 0) > 0 || (f.removed || 0) > 0) dirty[f.path] = true;
+    }
+  }
+  // Dirty is NOT sufficient, and shipping it alone reproduced the very false
+  // positive this item exists to remove: with no per-hunk authorship, a dirty
+  // path is credited to every declarant, so one item doing all the work reads
+  // as contention with claimants that never started. __bramItemChangedSplit
+  // has always required a BEGUN sharer for exactly this reason; begunCount is
+  // already on every entry. An item that has not begun cannot have written
+  // anything, which is the one authorship fact Bram does know for certain.
+  return declared.filter(function (e) {
+    return !!dirty[e.path] && (e.begunCount || 0) >= 2;
+  });
+};
+
 window.__bramOverlapAny = function (items, claim) {
-  return window.__bramOverlapIndex(items, claim).length > 0;
+  return window.__bramOverlapChangedIndex(items, claim).length > 0;
 };
 
 // One index row. `all N items` for a universal file.

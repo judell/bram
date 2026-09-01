@@ -37574,6 +37574,259 @@ fn claim_intervals_partition(
     (keep, retire)
 }
 
+// issue-327 attribution. Ownership of a changed line is decided by WHICH CLAIM
+// INTERVAL introduced it, replayed positionally through the boundary chain.
+//
+// Two properties make this affordable, both measured before building:
+//   * one whole-tree `git diff` per boundary pair covers every file at once, so
+//     cost is independent of how many paths the board touches (the #323 lesson,
+//     applied up front rather than after a regression);
+//   * a CLOSED interval compares two fixed trees, so its edit script is immutable
+//     and cacheable for the process lifetime. Only the open interval, last
+//     boundary to worktree, is recomputed per board build.
+//
+// Attribution is POSITIONAL, never by line content. A content-keyed lookup
+// silently misattributes duplicate lines -- blank lines and code fences get
+// credited to whichever claimant's patch first contained that text. It looks
+// right on sparse fixtures and produces confident nonsense on real files.
+#[derive(Clone, Debug, PartialEq)]
+struct AttrHunk {
+    old_start: usize,
+    lines: Vec<(char, ())>,
+}
+
+// One file's edit script from a single interval.
+fn parse_attr_diff(out: &str) -> std::collections::HashMap<String, Vec<AttrHunk>> {
+    let mut per_file: std::collections::HashMap<String, Vec<AttrHunk>> = Default::default();
+    let mut path: Option<String> = None;
+    let mut cur: Option<AttrHunk> = None;
+    for line in out.lines() {
+        if let Some(rest) = line.strip_prefix("+++ b/") {
+            if let (Some(p), Some(h)) = (path.take(), cur.take()) {
+                per_file.entry(p).or_default().push(h);
+            }
+            path = Some(rest.to_string());
+            continue;
+        }
+        if line.starts_with("+++ ") || line.starts_with("--- ") || line.starts_with("diff --git") {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("@@ -") {
+            if let (Some(p), Some(h)) = (path.clone(), cur.take()) {
+                per_file.entry(p).or_default().push(h);
+            }
+            let start: usize = rest
+                .split(|c| c == ',' || c == ' ')
+                .next()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1);
+            cur = Some(AttrHunk {
+                old_start: start,
+                lines: Vec::new(),
+            });
+            continue;
+        }
+        if let Some(h) = cur.as_mut() {
+            match line.chars().next() {
+                Some(c @ ('+' | '-' | ' ')) => h.lines.push((c, ())),
+                // "\ No newline at end of file" and anything else advances nothing.
+                _ => {}
+            }
+        }
+    }
+    if let (Some(p), Some(h)) = (path, cur) {
+        per_file.entry(p).or_default().push(h);
+    }
+    per_file
+}
+
+// Apply one interval's hunks for one file to that file's ownership vector.
+// `delta` tracks how far earlier hunks in the same file have shifted positions,
+// because each hunk's `old_start` addresses the file as it was BEFORE this
+// interval, while `owners` is mutated in place as we go.
+fn apply_attr_hunks(owners: &mut Vec<Option<String>>, hunks: &[AttrHunk], owner: &str) {
+    let mut delta: isize = 0;
+    for h in hunks {
+        let mut i = (h.old_start as isize - 1 + delta).max(0) as usize;
+        for (c, _) in &h.lines {
+            match c {
+                ' ' => i = (i + 1).min(owners.len()),
+                '-' => {
+                    if i < owners.len() {
+                        owners.remove(i);
+                        delta -= 1;
+                    }
+                }
+                '+' => {
+                    let at = i.min(owners.len());
+                    owners.insert(at, Some(owner.to_string()));
+                    i = at + 1;
+                    delta += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+// Collapse a per-line ownership vector into contiguous runs. Unowned lines are
+// a first-class state -- work predating the capture phase, or done with no claim
+// live -- and are reported as such rather than folded into a neighbour.
+fn attr_runs(owners: &[Option<String>]) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < owners.len() {
+        let who = owners[i].clone();
+        let start = i;
+        while i < owners.len() && owners[i] == who {
+            i += 1;
+        }
+        if let Some(id) = who {
+            out.push(serde_json::json!({
+                "startLine": start + 1, "endLine": i, "itemId": id
+            }));
+        }
+    }
+    out
+}
+
+// Drive the replay across the whole boundary chain and return per-path runs.
+//
+// Closed intervals are immutable (two fixed trees), so their parsed edit scripts
+// are cached for the process lifetime with no invalidation logic. Only the final
+// pair -- last boundary against the working tree -- is recomputed per call, which
+// is one `git diff` on top of the board build's existing four spawns.
+fn claim_attribution_runs<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> std::collections::HashMap<String, Vec<serde_json::Value>> {
+    let mut empty = Default::default();
+    let Some(root) = project_root(Some(app)) else {
+        return empty;
+    };
+    let sidecar = root.join(CLAIM_INTERVALS_REL);
+    let Ok(text) = std::fs::read_to_string(&sidecar) else {
+        return empty;
+    };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return empty;
+    };
+    let Some(arr) = doc.get("intervals").and_then(|v| v.as_array()) else {
+        return empty;
+    };
+    if arr.is_empty() {
+        return empty;
+    }
+    // Spawns are counted and traced, the way #323 counts the board build's own.
+    // A cache whose hit rate is asserted rather than measured is how a "cached"
+    // path quietly keeps paying full price.
+    let spawns = std::cell::Cell::new(0usize);
+    let git = |args: &[&str]| -> Option<String> {
+        spawns.set(spawns.get() + 1);
+        let out = std::process::Command::new("git")
+            .current_dir(&root)
+            .args(args)
+            .output()
+            .ok()?;
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    static CACHE: OnceLock<
+        Mutex<std::collections::HashMap<String, std::collections::HashMap<String, Vec<AttrHunk>>>>,
+    > = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(Default::default()));
+
+    // (owner, per-file hunks) for each interval, oldest first.
+    let mut steps: Vec<(
+        Option<String>,
+        std::collections::HashMap<String, Vec<AttrHunk>>,
+    )> = Vec::new();
+    for (i, rec) in arr.iter().enumerate() {
+        let Some(a) = rec.get("ref").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        // A claim covering several ids owns its interval as a SET, so nothing in
+        // it is attributable to one item. Leave those lines unowned rather than
+        // crediting the first id -- that would be a guess wearing a fact's face.
+        let ids = rec.get("ids").and_then(|v| v.as_array());
+        let owner = match ids.map(|a| a.len()) {
+            Some(1) => ids.and_then(|a| a[0].as_str()).map(String::from),
+            _ => None,
+        };
+        let next = arr
+            .get(i + 1)
+            .and_then(|r| r.get("ref"))
+            .and_then(|v| v.as_str());
+        let parsed = match next {
+            Some(b) => {
+                let key = format!("{}..{}", a, b);
+                if let Some(hit) = cache.lock().ok().and_then(|c| c.get(&key).cloned()) {
+                    hit
+                } else {
+                    let out = git(&["diff", a, b]).unwrap_or_default();
+                    let parsed = parse_attr_diff(&out);
+                    if let Ok(mut c) = cache.lock() {
+                        c.insert(key, parsed.clone());
+                    }
+                    parsed
+                }
+            }
+            // The OPEN interval: never cached, it changes with every edit.
+            None => parse_attr_diff(&git(&["diff", a]).unwrap_or_default()),
+        };
+        steps.push((owner, parsed));
+    }
+    let base = arr[0].get("ref").and_then(|v| v.as_str()).unwrap_or("");
+    let mut paths: std::collections::HashSet<String> = Default::default();
+    for (_, m) in &steps {
+        for k in m.keys() {
+            paths.insert(k.clone());
+        }
+    }
+    let mut out: std::collections::HashMap<String, Vec<serde_json::Value>> = Default::default();
+    static BASE: OnceLock<Mutex<std::collections::HashMap<String, usize>>> = OnceLock::new();
+    let base_cache = BASE.get_or_init(|| Mutex::new(Default::default()));
+    for path in paths {
+        // The base tree is fixed, so a path's line count there never changes.
+        let bkey = format!("{}:{}", base, path);
+        let n = match base_cache.lock().ok().and_then(|c| c.get(&bkey).copied()) {
+            Some(hit) => hit,
+            None => {
+                let v = git(&["show", &bkey])
+                    .map(|c| if c.is_empty() { 0 } else { c.lines().count() })
+                    .unwrap_or(0);
+                if let Ok(mut c) = base_cache.lock() {
+                    c.insert(bkey, v);
+                }
+                v
+            }
+        };
+        let mut owners: Vec<Option<String>> = vec![None; n];
+        for (owner, m) in &steps {
+            if let Some(hunks) = m.get(&path) {
+                match owner {
+                    Some(id) => apply_attr_hunks(&mut owners, hunks, id),
+                    // Unattributable interval: still replay it so later
+                    // positions stay correct, but own nothing.
+                    None => apply_attr_hunks(&mut owners, hunks, "\u{0}"),
+                }
+            }
+        }
+        for o in owners.iter_mut() {
+            if o.as_deref() == Some("\u{0}") {
+                *o = None;
+            }
+        }
+        let runs = attr_runs(&owners);
+        if !runs.is_empty() {
+            out.insert(path, runs);
+        }
+    }
+    let _ = &mut empty;
+    CLAIM_ATTR_SPAWNS.store(spawns.get(), std::sync::atomic::Ordering::Relaxed);
+    out
+}
+
+static CLAIM_ATTR_SPAWNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 // issue-327 hygiene: retire boundaries whose intervals no longer have a live
 // owner. Called after a successful prune mutation, which is the one path both
 // drops and `worklist-commit` funnel through (commit delegates its prune to
@@ -48915,6 +49168,35 @@ fn route_request<R: tauri::Runtime>(
                 serde_json::Value::Array(unclaimed),
             );
         }
+        // issue-327: per-path ownership runs from the claim-interval replay, so
+        // the overlaps panel can say what each claimant DID rather than only
+        // that they share a path, and the diff view can mark where authorship
+        // changes. One source of truth for both surfaces. Always present, same
+        // absent-vs-empty reasoning as above.
+        {
+            let attr_started = std::time::Instant::now();
+            let runs = claim_attribution_runs(app);
+            let paths = runs.len();
+            let total: usize = runs.values().map(|v| v.len()).sum();
+            let mut map = serde_json::Map::new();
+            for (k, v) in runs {
+                map.insert(k, serde_json::Value::Array(v));
+            }
+            if let Some(obj) = doc.as_object_mut() {
+                obj.insert("attribution".to_string(), serde_json::Value::Object(map));
+            }
+            append_bram_trace_line(
+                app,
+                "claim-interval",
+                &format!(
+                    "op=attribute paths={} runs={} spawns={} ms={}",
+                    paths,
+                    total,
+                    CLAIM_ATTR_SPAWNS.load(std::sync::atomic::Ordering::Relaxed),
+                    attr_started.elapsed().as_millis()
+                ),
+            );
+        }
         // #286: the ids the currently live inflight claim covers, so an
         // agent reading the board mid-turn can see which ids it still
         // holds without a separate /__inflight round trip. Empty array
@@ -55288,5 +55570,103 @@ mod claim_interval_prune_tests {
         let (keep, retire) = claim_intervals_partition(&ivs, &live(&[]));
         assert!(retire.is_empty());
         assert_eq!(keep.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod claim_attribution_tests {
+    use super::{apply_attr_hunks, attr_runs, parse_attr_diff};
+
+    fn owners(n: usize) -> Vec<Option<String>> {
+        vec![None; n]
+    }
+    fn ids(o: &[Option<String>]) -> String {
+        o.iter()
+            .map(|x| x.as_deref().unwrap_or("."))
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    #[test]
+    fn parses_path_and_hunk_start() {
+        let d =
+            "diff --git a/f.md b/f.md\n--- a/f.md\n+++ b/f.md\n@@ -3,2 +3,3 @@ ctx\n x\n+new\n y\n";
+        let m = parse_attr_diff(d);
+        let h = &m["f.md"];
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].old_start, 3);
+        assert_eq!(h[0].lines.len(), 3);
+    }
+
+    #[test]
+    fn insertion_owns_only_the_added_lines() {
+        let mut o = owners(4);
+        let m = parse_attr_diff("+++ b/f\n@@ -2,1 +2,3 @@\n a\n+X\n+Y\n");
+        apply_attr_hunks(&mut o, &m["f"], "A");
+        assert_eq!(ids(&o), "..AA..");
+    }
+
+    // The regression this whole design exists to avoid: identical line CONTENT
+    // owned by different claimants. A content-keyed lookup collapses these.
+    #[test]
+    fn duplicate_lines_are_attributed_by_position_not_content() {
+        let mut o = owners(2);
+        // A inserts a blank + fence at the top...
+        let a = parse_attr_diff("+++ b/f\n@@ -1,0 +1,2 @@\n+\n+```\n");
+        apply_attr_hunks(&mut o, &a["f"], "A");
+        // ...C inserts an IDENTICAL blank + fence further down.
+        let c = parse_attr_diff("+++ b/f\n@@ -4,0 +4,2 @@\n+\n+```\n");
+        apply_attr_hunks(&mut o, &c["f"], "C");
+        assert_eq!(ids(&o), "AA.CC.");
+    }
+
+    // Four claimants, three hunks: two edited ADJACENT regions and git merged
+    // them. Whole-hunk attribution fails here; the replay must not.
+    #[test]
+    fn adjacent_claimants_split_within_one_region() {
+        let mut o = owners(2);
+        let a = parse_attr_diff("+++ b/f\n@@ -1,0 +1,3 @@\n+a1\n+a2\n+a3\n");
+        apply_attr_hunks(&mut o, &a["f"], "A");
+        let d = parse_attr_diff("+++ b/f\n@@ -4,0 +4,2 @@\n+d1\n+d2\n");
+        apply_attr_hunks(&mut o, &d["f"], "D");
+        assert_eq!(ids(&o), "AAADD..");
+        let runs = attr_runs(&o);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0]["itemId"], "A");
+        assert_eq!(runs[0]["endLine"], 3);
+        assert_eq!(runs[1]["itemId"], "D");
+        assert_eq!(runs[1]["startLine"], 4);
+        assert_eq!(runs[1]["endLine"], 5);
+    }
+
+    #[test]
+    fn deletions_remove_ownership_and_shift_later_hunks() {
+        let mut o = owners(5);
+        let a = parse_attr_diff("+++ b/f\n@@ -2,2 +2,1 @@\n-old\n+new\n");
+        apply_attr_hunks(&mut o, &a["f"], "A");
+        assert_eq!(ids(&o), ".A...");
+    }
+
+    // Unowned lines are a state, not a gap: they must not appear as runs, and
+    // must not be folded into a neighbouring claimant's run.
+    #[test]
+    fn unowned_lines_are_excluded_from_runs() {
+        let mut o = owners(3);
+        let a = parse_attr_diff("+++ b/f\n@@ -2,0 +2,1 @@\n+X\n");
+        apply_attr_hunks(&mut o, &a["f"], "A");
+        let runs = attr_runs(&o);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0]["startLine"], 2);
+        assert_eq!(runs[0]["endLine"], 2);
+    }
+
+    #[test]
+    fn zero_work_interval_contributes_nothing() {
+        let mut o = owners(3);
+        let m = parse_attr_diff("");
+        assert!(m.is_empty());
+        apply_attr_hunks(&mut o, &[], "A");
+        assert_eq!(ids(&o), "...");
+        assert!(attr_runs(&o).is_empty());
     }
 }

@@ -512,16 +512,7 @@
               width="100%"
               gap="$space-2"
               verticalAlignment="center">
-              <!-- The width lives on the wrapper, not the styled Text. `ch` is
-                   "the advance measure of the glyph 0 OF THE ELEMENT'S FONT"
-                   (common-units.md), so the same count resolved to different
-                   physical widths on a caption header and a monospace cell —
-                   widening column 1's header and pushing every later column
-                   right. Sizing a shared wrapper resolves it in one inherited
-                   font for both, whatever variants they carry later. -->
-              <VStack width="{filesColCh}ch" minWidth="14rem" gap="$space-0">
-                <Text textAlign="start" variant="caption" value="files expected to change" />
-              </VStack>
+              <Text width="{filesColCh}ch" minWidth="14rem" textAlign="start" variant="caption" value="files expected to change" />
               <Text width="140px" textAlign="start" variant="caption" value="changes" />
               <Text width="*" minWidth="8rem" textAlign="start" variant="caption" value="shared with" />
             </HStack>
@@ -534,12 +525,12 @@
                   gap="$space-2"
                   verticalAlignment="center"
                   onClick="diffKeys = window.__bramFlipDiffExpansion(diffKeys, rowId, $item.path)">
-                  <VStack width="{filesColCh}ch" minWidth="14rem" gap="$space-0">
-                    <Text
-                      value="{(rowBegun &amp;&amp; window.__bramDiffForPath(rowItem, $item.path) ? (window.__bramDiffExpanded(diffKeys, rowId, $item.path) ? '\u25be ' : '\u25b8 ') : '') + $item.path}"
-                      variant="code"
-                      fontSize="$fontSize-sm" />
-                  </VStack>
+                  <Text
+                    width="{filesColCh}ch"
+                    minWidth="14rem"
+                    value="{(rowBegun &amp;&amp; window.__bramDiffForPath(rowItem, $item.path) ? (window.__bramDiffExpanded(diffKeys, rowId, $item.path) ? '\u25be ' : '\u25b8 ') : '') + $item.path}"
+                    variant="code"
+                    fontSize="$fontSize-sm" />
                   <Text
                     width="140px"
                     textAlign="start"

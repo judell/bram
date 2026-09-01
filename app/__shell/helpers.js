@@ -2420,7 +2420,51 @@ window.__bramGreenLitAge = function (item) {
   return days === 1 ? "yesterday" : days + "d ago";
 };
 
-window.__bramWorklist2Strip = function (item, claim, items) {
+// issue-327: how many of a file's changed lines this item actually wrote,
+// from the claim-interval runs in the payload. Runs describe lines PRESENT in
+// the final file, so this counts additions only -- a deletion leaves no line to
+// attribute. Reporting a "-" figure here would be inventing one.
+window.__bramOwnClause = function (item, attribution) {
+  var own = window.__bramItemOwnAdded(item, attribution);
+  return own === null ? "" : " \u00b7 yours: +" + own;
+};
+
+window.__bramItemOwnAdded = function (item, attribution) {
+  var attr = attribution || {};
+  var files = (item && item.changedFiles) || [];
+  var own = 0;
+  var covered = false;
+  for (var i = 0; i < files.length; i++) {
+    var runs = attr[files[i] && files[i].path] || [];
+    if (runs.length) covered = true;
+    for (var j = 0; j < runs.length; j++) {
+      if (runs[j].itemId === item.id) own += runs[j].endLine - runs[j].startLine + 1;
+    }
+  }
+  // `covered` distinguishes "wrote none of it" from "nothing is attributable
+  // here" -- work predating the capture phase, or done with no claim live.
+  // Only the first is a number worth printing.
+  return covered ? own : null;
+};
+
+// The "shared with" cell, narrowed to claimants that have BEGUN. Same rule and
+// reason as d1798ca in the overlaps panel: an item that has not begun cannot
+// have written anything, so it cannot be sharing the file with anyone. That fix
+// did not reach this column because only the panel was looked at.
+window.__bramSharedWithBegun = function (file, items, claim) {
+  var sharers = (file && file.sharedWith) || [];
+  var list = items || [];
+  var byId = {};
+  for (var i = 0; i < list.length; i++) if (list[i] && list[i].id) byId[list[i].id] = list[i];
+  var out = [];
+  for (var j = 0; j < sharers.length; j++) {
+    var it = byId[sharers[j]];
+    if (it && window.__bramWorklist2Begun(it, claim)) out.push(sharers[j]);
+  }
+  return out;
+};
+
+window.__bramWorklist2Strip = function (item, claim, items, attribution) {
   if (!item) return "";
   // issue-266: the close declaration belongs on the status line for
   // scannability, never buried in the expanded body.
@@ -2504,6 +2548,11 @@ window.__bramWorklist2Strip = function (item, claim, items) {
           // item whose changes are all on shared paths.
           " in " + (split.exclusive.length + split.shared.length) +
           " of " + (cs.total || 0) + " planned" + sharedNote +
+          // Two questions, both answered, neither substituted for the other:
+          // `+N` is what a commit would TAKE (whole-file staging, whoever wrote
+          // it) and `yours:` is what this item actually wrote. They converge
+          // once commits stage by claim interval.
+          window.__bramOwnClause(item, attribution) +
           (t ? " · last: " + t : ""),
       );
     }
@@ -9347,10 +9396,6 @@ window.__bramDiffWalkMatches = function (rows, terms, visit) {
   return occ;
 };
 
-// Canonical rendered-diff find plan. Counting, active-row selection, and
-// decoration all come from this one walk; callers never reconstruct the
-// target independently. expectedTotal is CommitDetail's raw-patch count and
-// rides the plan for trace verification of counted == rendered.
 window.__bramDiffFindPlan = function (rows, needle, activeIndex, expectedTotal) {
   rows = rows || [];
   var terms = window.__bramSearchTerms(needle);

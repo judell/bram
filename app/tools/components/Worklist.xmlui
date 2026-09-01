@@ -443,7 +443,7 @@
           <Text
             color="$textColor-secondary"
             tooltip="{window.__bramWorklist2StripTooltip($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items)}"
-            value="{window.__bramWorklist2Strip($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items)}" />
+            value="{window.__bramWorklist2Strip($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items, worklist.value &amp;&amp; worklist.value.attribution)}" />
           <!-- issue-278: the row backlink is GONE, on live evidence.
                It was redundant and, worse, it put a SECOND meaning of "shared"
                on a line that already had one. Live board, 2026-08-24:
@@ -548,7 +548,7 @@
                     minWidth="8rem"
                     textAlign="start"
                     overflowMode="flow"
-                    value="{$item.sharedWith &amp;&amp; $item.sharedWith.length > 0 ? window.__bramJoinIds($item.sharedWith) : ''}" />
+                    value="{window.__bramJoinIds(window.__bramSharedWithBegun($item, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value))}" />
                 </HStack>
                 <!-- Gated on rowBegun, carried down from the section that used
                      to hold the single Diff view: a plan row that has begun

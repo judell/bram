@@ -51701,6 +51701,59 @@ fn handle_worklist_commit<R: tauri::Runtime>(
             return worklist_json_error(400, msg);
         }
     };
+    // issue-336: host-side exclusivity backstop. The pane withholds Commit on
+    // entanglement, but non-pane callers (the Codex intent transport, a
+    // hand-built curl) reach this route without that check, and staging is
+    // whole-file. Refuse when a path this commit stages carries LINES
+    // ATTRIBUTED to a begun item outside the request — the precise dangerous
+    // condition. Deliberately attribution-based rather than declared-files
+    // based: a blunt declared-overlap refusal would break the sanctioned
+    // serialize-entangled flow (committing the first item while the second is
+    // begun but has written nothing), while an owner with attributed lines in
+    // a staged path is positive evidence the commit would take work that is
+    // not this item's. Unattributed lines stay uncaught, honestly — the
+    // attribution machinery never guesses.
+    {
+        let runs_by_path = claim_attribution_runs(app);
+        let requested: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
+        for path in &files {
+            let Some(runs) = runs_by_path.get(path) else {
+                continue;
+            };
+            for run in runs {
+                let Some(owner) = run.get("itemId").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if requested.contains(owner) {
+                    continue;
+                }
+                let owner_begun = items.iter().any(|it| {
+                    it.get("id").and_then(|v| v.as_str()) == Some(owner)
+                        && (it.get("status").and_then(|v| v.as_str()) == Some("applied")
+                            || it.get("begunAtMs").and_then(|v| v.as_i64()).unwrap_or(0) > 0)
+                });
+                if owner_begun {
+                    if bram_trace_enabled() {
+                        append_bram_trace_line(
+                            app,
+                            "worklist-commit",
+                            &format!("op=refuse-entangled path={} owner={}", path, owner),
+                        );
+                    }
+                    return worklist_json_error(
+                        409,
+                        format!(
+                            "commit refused: {} carries lines attributed to {}, which is not in \
+                             this request. Whole-file staging would land that item's work under \
+                             this commit's id and message. Commit {} first, approve both \
+                             together, or isolate hunks (see conventions.md, split-shared-files).",
+                            path, owner, owner
+                        ),
+                    );
+                }
+            }
+        }
+    }
     // Auto-stage installed twins of listed canonicals (see
     // INSTALLED_TWIN_PAIRS). Extending `files` here covers the scoped
     // git add AND both unrelated-staged checks below in one place; an

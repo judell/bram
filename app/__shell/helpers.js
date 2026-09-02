@@ -2331,11 +2331,42 @@ window.__bramSelectionAllCommittable = function (items, sel, claim) {
   if (picked.length !== chosen.length) return false;
   for (var i = 0; i < picked.length; i++) {
     var it = picked[i];
-    if ((it.status || "proposed") === "applied") continue;
+    // #336: no `applied` short-circuit. Exclusivity is what makes the Commit
+    // offer safe, and it must cover every committable population -- the old
+    // short-circuit guarded the newer begun-`proposed` items while leaving
+    // the historical `applied` ones unguarded, so two entangled applied
+    // items were both offered a button that would land one item's work
+    // under the other's id. Begun-ness is trivially true for applied items.
     if (!window.__bramWorklist2Begun(it, claim)) return false;
     if (!window.__bramItemChangedSplit(it, list, claim).exclusive.length) return false;
   }
   return true;
+};
+
+// #336: the begun items this one shares CHANGED paths with -- the claimants
+// whose existence is why Commit is withheld. Named on the strip so the
+// missing button reads as an instruction rather than a regression.
+window.__bramItemShareBlockers = function (item, items, claim) {
+  var byId = {};
+  var list = items || [];
+  for (var i = 0; i < list.length; i++) byId[list[i].id] = list[i];
+  var out = [];
+  var seen = {};
+  var files = (item && item.changedFiles) || [];
+  for (var j = 0; j < files.length; j++) {
+    var f = files[j];
+    if (!f || ((f.added || 0) <= 0 && (f.removed || 0) <= 0)) continue;
+    var sharers = f.sharedWith || [];
+    for (var k = 0; k < sharers.length; k++) {
+      var id = sharers[k];
+      var other = byId[id];
+      if (other && window.__bramWorklist2Begun(other, claim) && !seen[id]) {
+        seen[id] = true;
+        out.push(id);
+      }
+    }
+  }
+  return out;
 };
 
 // Does this commit need the allow_proposed path? True when any ticked item is
@@ -2634,7 +2665,12 @@ window.__bramOwnershipSummary = function (patch, runs, rowId, independence) {
     if (!id) relation = "no claim was live when these lines were written";
     else if (Object.prototype.hasOwnProperty.call(verdicts, id)) {
       var v = verdicts[id];
-      if (v.independent) relation = "independently committable";
+      // #336: the verdict is about PATCH separability and must not read as a
+      // promise about the gate, which stages whole files until
+      // stage-by-claim-interval lands. Keep the measurement, drop the false
+      // assurance; the parenthetical retires with that item.
+      if (v.independent)
+        relation = "patch applies independently (a commit still stages whole files)";
       else if ((v.dependsOn || []).length)
         relation = "depends on " + v.dependsOn.join(", ");
       else relation = "not independently committable";
@@ -2771,18 +2807,34 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution) {
           (t ? " · last: " + t : ""),
       );
     }
-    // Not committable: every changed path is claimed by another begun item, so
-    // not one line is attributable here. Reporting the totals would credit a
-    // neighbour's work to this row -- the bug that started this whole thread.
+    // Not committable: every changed path is claimed by another begun item.
+    // (The pre-#327 version of this comment said "not one line is attributable
+    // here", which is now false — attribution knows exactly whose lines these
+    // are, and the own-clause below reports this item's share. What is still
+    // true: the whole-file TOTALS would credit neighbours' work to this row.)
     // ...and if it is ALSO stalled, say which button unsticks it. This is the
     // branch the motivating row lands in (notice-banner-component: begun,
     // 1 of 7 files changed, that file shared with issue-269), so omitting the
     // hint here would have left the very case that prompted the split showing
     // a Stalled icon above a line that never names Start.
     var nShared = split.shared.length;
+    // #336: this branch now also receives entangled APPLIED items (the
+    // exclusivity check covers them since the short-circuit fell). Two
+    // truths, both said: whether this item has work of its own here (the
+    // old wording claimed "nothing" for an item with 70 attributed lines),
+    // and WHO is blocking, so the absent Commit button names its cause.
+    var own = window.__bramOwnClause(item, attribution);
+    var blockers = window.__bramItemShareBlockers(item, items, claim);
+    var head = own
+      ? "Changes only on shared files" + own
+      : "Nothing of its own changed";
     return withCloses(
-      "Nothing of its own changed · " + nShared + " shared file" +
+      head + " · " + nShared + " shared file" +
         (nShared === 1 ? "" : "s") + " changed" +
+        (blockers.length
+          ? " with " + blockers.join(", ") + " — commit " +
+            (blockers.length === 1 ? "it" : "those") + " first"
+          : "") +
         (window.__bramItemNeedsStart(item, claim) ? " · Start again" : ""),
     );
   }

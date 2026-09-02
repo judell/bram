@@ -608,14 +608,25 @@ retired in the 0.5.3 run after its config-off path produced a dead-end
 row — the offer was only ever visibility, never authorization, so
 removing the flag removed a bug class and no capability.)
 
-Exclusivity is what makes the widened offer safe, and the host does
-**not** enforce it — only the pane does. `worklist_commit_files_for_ids`
-(`lib.rs`) stages whatever files the approved ids declare, whoever
-changed them; it has no notion of which hunk belongs to which item.
-So an agent driving `worklist-commit` directly for a still-`proposed`
-item — the Codex intent-file transport, or a hand-built curl, neither
-of which goes through the pane's own gate check — must apply the same
-exclusivity rule the pane applies before it would have offered Commit:
+Exclusivity is what makes the widened offer safe, and since #336 it is
+enforced on **both** sides. The pane withholds Commit from any
+committable item — `applied` included, a population the check
+originally skipped — whose changed paths are claimed by another begun
+item, and names the blocking claimant on the strip. The host backstops
+the non-pane callers: `worklist-commit` refuses (409) when a path it
+would stage carries **lines attributed to** a begun item outside the
+request — attribution-based rather than declared-files-based on
+purpose, so the sanctioned serialize-entangled flow (commit the first
+item while the second is begun but has written nothing) still works,
+while a commit that would genuinely take another item's lines is
+stopped with the owner named (trace: `op=refuse-entangled`).
+Unattributed lines are honestly uncaught — attribution never guesses —
+so the agent-side rule below still stands, not as the only guard but
+as the first one. An agent driving `worklist-commit` directly for a
+still-`proposed` item — the Codex intent-file transport, or a
+hand-built curl, neither of which goes through the pane's own gate
+check — must apply the same exclusivity rule the pane applies before
+it would have offered Commit:
 every one of that item's changed paths must be free of any *other*
 begun item's claim (`applied`, or `proposed` with `begunAtMs` set).
 An item whose changed paths are entirely shared with another begun
@@ -626,13 +637,27 @@ message, with no record afterward of which item wrote which hunk
 any other non-committable item: report it in chat and wait, per *Warn
 when a new item would entangle a committable item* below.
 
+**The dangerous default is the opposite of the intuition** (#336's
+field lesson, stated because the person who wrote these conventions
+had it backwards): committing all N entangled items **together** is
+safe — every changed line is accounted for by an id in that commit —
+while committing **one of N** is what silently absorbs a neighbour's
+work. Separation is the risky operation, not aggregation.
+
 **Commit gate: call `worklist-commit`.** This is the traditional
 two-stage path: every id in the request is already `applied`, so
 `gate` is plain `approved`, not `apply-and-commit`. Send one request
 with `{ ids, message }` when the selected items land together. For
 `split-shared-files`, isolate one item's hunks on disk, call
 `worklist-commit` for that id, restore the next item's isolated hunks,
-and repeat. Each successful subset call retires only those ids from the
+and repeat. The interval-diff route serves each item's own patch, and
+`git apply --check` (forward and reverse) gates each step — both
+field-proven exact (#336's follow-up: two entangled items, `unique:`
+figures matching the isolated diffs to the line). **Build-gate every
+intermediate state before committing it**: hunk isolation can produce
+a tree that compiles in neither direction, and a non-building
+intermediate commit poisons `git bisect` for exactly the
+investigations these per-item commits exist to support. Each successful subset call retires only those ids from the
 authorization and inflight claim; the remaining ids and embedded item
 bodies stay live for the later commits, and the final call consumes the
 record. The host verifies approved auth, requires every requested id to

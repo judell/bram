@@ -820,42 +820,189 @@ fn gh_issue_write(c: &[char]) -> bool {
     cmd_verb(c, &["gh"], Some(&["issue"]), GH_ISSUE_WRITE_VERBS)
 }
 
-fn write_patterns_match(command: &str, skip: SkipPattern) -> bool {
-    let c = chars(command);
+// #333: quoted spans are argument DATA for shell-token classification — a
+// grep pattern containing `git apply` must not classify the grep as a write.
+// Interior characters of single-/double-quoted spans become spaces; the
+// delimiters stay. Backslash escapes are honoured outside single quotes.
+// Returns None on an unterminated quote: the caller falls back to the flat
+// scan, so ambiguity degrades to over-denying, never under-denying.
+//
+// The interpreter trap is handled structurally, not here: `bash -c` / `sh -c`
+// / `node -e` classify as writes by the FLAG, which sits outside the quotes,
+// and the python/open inspectors below deliberately receive the RAW command
+// because the quoted script body is exactly what they inspect.
+fn mask_quoted_spans(command: &str) -> Option<String> {
+    let mut out = String::with_capacity(command.len());
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for ch in command.chars() {
+        match quote {
+            None => {
+                if escaped {
+                    escaped = false;
+                    out.push(ch);
+                } else if ch == '\\' {
+                    escaped = true;
+                    out.push(ch);
+                } else if ch == '\'' || ch == '"' {
+                    quote = Some(ch);
+                    out.push(ch);
+                } else {
+                    out.push(ch);
+                }
+            }
+            Some(q) => {
+                if escaped {
+                    escaped = false;
+                    out.push(' ');
+                } else if q == '"' && ch == '\\' {
+                    escaped = true;
+                    out.push(' ');
+                } else if ch == q {
+                    quote = None;
+                    out.push(ch);
+                } else {
+                    out.push(if ch == '\n' { '\n' } else { ' ' });
+                }
+            }
+        }
+    }
+    (quote.is_none() && !escaped).then_some(out)
+}
+
+// #333: every `git <write-verb>` invocation with its argument tokens, up to a
+// command separator — so listing forms can be judged per invocation and a
+// compound like `git tag --list && git push` still classifies as a write.
+fn git_verb_segments(c: &[char]) -> Vec<(&'static str, Vec<String>)> {
+    let mut out = Vec::new();
+    for i in 0..c.len() {
+        if !at_boundary(c, i) {
+            continue;
+        }
+        let Some(j) = lit(c, i, "git") else { continue };
+        let Some(j) = ws1(c, j) else { continue };
+        for verb in GIT_WRITE_VERBS {
+            let Some(k) = lit(c, j, verb) else { continue };
+            if !word_end(c, k) {
+                continue;
+            }
+            let mut args = Vec::new();
+            let mut p = k;
+            loop {
+                while p < c.len() && matches!(c[p], ' ' | '\t') {
+                    p += 1;
+                }
+                if p >= c.len() || matches!(c[p], ';' | '&' | '|' | '`' | '(' | ')' | '\n') {
+                    break;
+                }
+                let start = p;
+                while p < c.len()
+                    && !c[p].is_whitespace()
+                    && !matches!(c[p], ';' | '&' | '|' | '`' | '(' | ')')
+                {
+                    p += 1;
+                }
+                let tok: String = c[start..p].iter().collect();
+                let tok = tok.trim_matches(['\'', '"']).to_string();
+                if !tok.is_empty() {
+                    args.push(tok);
+                }
+            }
+            out.push((*verb, args));
+            break;
+        }
+    }
+    out
+}
+
+// #333: the enumerated read-only shapes of mutation-capable git verbs.
+// Anything outside them stays a write — `git tag v1` must keep denying.
+fn git_invocation_is_readonly(verb: &str, args: &[String]) -> bool {
+    match verb {
+        // With -l/--list, tag is a listing whatever else follows (patterns
+        // are matched, never created).
+        "tag" => args.iter().any(|a| a == "-l" || a == "--list"),
+        // Bare `git branch` lists. Otherwise: only known listing flags, plus
+        // bare pattern tokens when --list is present. NOT `-l`, which
+        // historically meant create-with-reflog.
+        "branch" => {
+            let allowed = [
+                "--list",
+                "-a",
+                "-r",
+                "-v",
+                "-vv",
+                "--all",
+                "--remotes",
+                "--show-current",
+            ];
+            let has_list = args.iter().any(|a| a == "--list");
+            args.iter()
+                .all(|a| allowed.contains(&a.as_str()) || (has_list && !a.starts_with('-')))
+        }
+        "stash" => matches!(
+            args.first().map(String::as_str),
+            Some("list") | Some("show")
+        ),
+        _ => false,
+    }
+}
+
+/// #333: the classifier names its evidence. `None` = not a write; `Some(tok)`
+/// = a write, where `tok` is the matched token — surfaced in the deny reason
+/// so a misclassification is a one-line diagnosis instead of a guessing game.
+fn write_patterns_token(command: &str, skip: SkipPattern) -> Option<String> {
+    // Quote-blind checks first, on the RAW command: redirects have their own
+    // quote-awareness (#299 case 3), and the python/open inspectors read
+    // quoted script bodies on purpose.
     if redirect_is_write(command) {
-        return true;
-    }
-    if cmd_word(&c, &["tee"]) {
-        return true;
-    }
-    if cmd_inplace(&c, "sed", "-i") || cmd_inplace(&c, "perl", "-i") {
-        return true;
-    }
-    if cmd_word(&c, &["rm", "mv", "cp", "truncate", "install"]) {
-        return true;
-    }
-    if cmd_verb(&c, &["git"], None, GIT_WRITE_VERBS) {
-        return true;
-    }
-    if skip != SkipPattern::GhIssueWrite && gh_issue_write(&c) {
-        return true;
-    }
-    if open_write_mode(&c) {
-        return true;
+        return Some("redirect".to_string());
     }
     if python_dash_c_writes(command) {
-        return true;
+        return Some("python -c".to_string());
+    }
+    let masked_owned = mask_quoted_spans(command);
+    let scan: &str = masked_owned.as_deref().unwrap_or(command);
+    let c = chars(scan);
+    if open_write_mode(&c) {
+        return Some("open(write-mode)".to_string());
+    }
+    if cmd_word(&c, &["tee"]) {
+        return Some("tee".to_string());
+    }
+    if cmd_inplace(&c, "sed", "-i") {
+        return Some("sed -i".to_string());
+    }
+    if cmd_inplace(&c, "perl", "-i") {
+        return Some("perl -i".to_string());
+    }
+    for w in ["rm", "mv", "cp", "truncate", "install"] {
+        if cmd_word(&c, &[w]) {
+            return Some(w.to_string());
+        }
+    }
+    for (verb, args) in git_verb_segments(&c) {
+        if !git_invocation_is_readonly(verb, &args) {
+            return Some(format!("git {}", verb));
+        }
+    }
+    if skip != SkipPattern::GhIssueWrite && gh_issue_write(&c) {
+        return Some("gh issue <write-verb>".to_string());
     }
     if cmd_flag(&c, "node", "-e") {
-        return true;
+        return Some("node -e".to_string());
     }
     if cmd_flag(&c, "bash", "-c") {
-        return true;
+        return Some("bash -c".to_string());
     }
     if cmd_flag(&c, "sh", "-c") {
-        return true;
+        return Some("sh -c".to_string());
     }
-    false
+    None
+}
+
+fn write_patterns_match(command: &str, skip: SkipPattern) -> bool {
+    write_patterns_token(command, skip).is_some()
 }
 
 fn bash_writes(command: &str) -> bool {
@@ -2108,8 +2255,17 @@ fn bash_branch(payload: &Value) -> ShadowVerdict {
     if push_cmd(&command) {
         body.push_str("\n  - This looks like a push. The user can click Push in the Commits tab; an agent push is allowed only in the 10-minute window after a gate commit (see judell/bram#283).");
     }
+    // #333: name the evidence. The classifier knows which token made this a
+    // write; saying so turns a misclassification report into a one-line
+    // diagnosis instead of three lost turns.
+    let token =
+        write_patterns_token(&command, SkipPattern::None).unwrap_or_else(|| "?".to_string());
     deny_msg(
-        format!("bash-write-no-coverage:root={}", project_root.display()),
+        format!(
+            "bash-write-no-coverage:token={}:root={}",
+            token,
+            project_root.display()
+        ),
         "-",
         "Bash",
         &preview,
@@ -4064,6 +4220,79 @@ mod guard_policy_tests {
 
     // --- signature gates (python lines 1330-1381) ---------------------------
 
+    // #333: read-only listing forms of mutation-capable git verbs, and write
+    // tokens inside quoted argument data. The adversarial half is the point:
+    // every mutating neighbour must keep denying, and quoted-but-executed
+    // interpreter bodies must stay classified as writes.
+    #[test]
+    fn bash_classifier_git_listing_forms_and_quoting() {
+        // Case A: listing forms are read-only…
+        for cmd in [
+            "git tag --list",
+            "git tag -l \"v0.6.*\"",
+            "git tag --list | tail -20 && git status -sb && git log --oneline",
+            "git stash list",
+            "git stash show",
+            "git branch",
+            "git branch -a",
+            "git branch --list \"issue-*\"",
+        ] {
+            assert!(!bash_writes(cmd), "should be read-only: {}", cmd);
+        }
+        // …and every mutating neighbour still denies.
+        for cmd in [
+            "git tag v1.0",
+            "git tag -a v1.0 -m x",
+            "git stash",
+            "git stash pop",
+            "git branch -d old",
+            "git branch new-branch",
+            "git branch --list && git push",
+            "git commit -m \"x\"",
+        ] {
+            assert!(bash_writes(cmd), "must stay a write: {}", cmd);
+        }
+
+        // Case B: write tokens inside quoted argument data are data.
+        for cmd in [
+            "grep -n \"GIT_INDEX_FILE\\|git apply\\|--check\\|temp_dir\" src-tauri/src/lib.rs | head -40",
+            "grep 'rm -rf' notes.md",
+            "echo \"git push origin\"",
+            "rg \"git checkout\" docs/",
+        ] {
+            assert!(!bash_writes(cmd), "quoted pattern is data: {}", cmd);
+        }
+        // Quoted-but-executed stays a write: the interpreter FLAG classifies.
+        for cmd in [
+            "sh -c \"rm -rf x\"",
+            "bash -c 'git tag v1'",
+            "python3 -c 'open(\"f\",\"w\").write(\"x\")'",
+            "rm \"some file.txt\"",
+            "git commit -m \"just listing things: git tag --list\"",
+        ] {
+            assert!(bash_writes(cmd), "must stay a write: {}", cmd);
+        }
+        // Unterminated quote: masking declines, flat scan rules — over-deny.
+        // (`|` is a word boundary; a bare `"` never was, which is why the
+        // token needs the pipe in front to demonstrate the fallback.)
+        assert!(bash_writes("grep \"x\\|rm -rf notes.md"));
+        assert!(!bash_writes("grep \"x\\|rm -rf\" notes.md"));
+
+        // The classifier names its evidence.
+        assert_eq!(
+            write_patterns_token("rm x", SkipPattern::None).as_deref(),
+            Some("rm")
+        );
+        assert_eq!(
+            write_patterns_token("git tag v1", SkipPattern::None).as_deref(),
+            Some("git tag")
+        );
+        assert_eq!(
+            write_patterns_token("git tag --list", SkipPattern::None),
+            None
+        );
+    }
+
     // #331: the fixture gap that shipped the bug — every prior test passed a
     // bare path. Quoted paths (the idiomatic Windows spelling) and MSYS paths
     // never parsed; the guard then blamed the signature it had never read.
@@ -4941,7 +5170,7 @@ mod guard_policy_tests {
         assert_eq!(
             header_of(&v),
             format!(
-                "[worklist-guard] tool=Bash target=rm stale.txt cwd={root} decision=deny reason=bash-write-no-coverage:root={root}",
+                "[worklist-guard] tool=Bash target=rm stale.txt cwd={root} decision=deny reason=bash-write-no-coverage:token=rm:root={root}",
                 root = root.display()
             )
         );

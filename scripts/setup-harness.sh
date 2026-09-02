@@ -109,6 +109,23 @@ fingerprint() {
 
 run_setup() { api "__enhance/run?force=true" > /dev/null; }
 
+# first-run-sequence-greeting-vs-setup: Setup now runs automatically inside
+# pty_spawn, before the agent autostart. The trace is the observable record of
+# that decision; poll briefly because the PTY spawn can trail the port bind.
+assert_trace() {
+  local dir="$1" pattern="$2" name="$3"
+  local i
+  for i in $(seq 1 20); do
+    if grep -q "$pattern" "$dir/resources/bram-traces/bram-trace.log" 2>/dev/null; then
+      ok "$name"
+      return 0
+    fi
+    sleep 0.5
+  done
+  bad "$name" "no line matching: $pattern"
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # Shared assertion table. Everything here traces to a bug the issue record
 # actually caught; see the worklist draft setup-verification-harness.md.
@@ -201,8 +218,11 @@ scenario_pristine_nogit() {
   local dir="$WORK_ROOT/pristine_nogit"; mkdir -p "$dir"
   printf '# scratch\n' > "$dir/README.md"
   launch "$dir" || return
-  assert_field firstRun true "a never-set-up project IS a first run"
-  run_setup; sleep 1
+  # Auto-setup replaced the old post-launch "firstRun true" observation: by
+  # the time the API answers, Setup has already run. The trace records what
+  # firstRun was at the moment of decision.
+  assert_trace "$dir" "\[auto-setup\] op=ran firstRun=true" "auto-setup ran on first launch"
+  sleep 1
   assert_setup_landed "$dir"
   assert_idempotent "$dir"
   shutdown_bram
@@ -215,7 +235,8 @@ scenario_pristine_git() {
   git -C "$dir" add -A
   git -C "$dir" -c user.email=h@h -c user.name=harness commit -qm init
   launch "$dir" || return
-  run_setup; sleep 1
+  assert_trace "$dir" "\[auto-setup\] op=ran firstRun=true" "auto-setup ran on first launch"
+  sleep 1
   assert_setup_landed "$dir"
 
   # #249's real failure: Setup must not leave TRACKED files modified. Untracked
@@ -274,6 +295,13 @@ scenario_nested() {
     ok "nestedUnder reported ($nested)"
   else
     bad "nestedUnder reported" "got: $nested"
+  fi
+  # The targeting check: a nested launch must not be auto-set-up.
+  assert_trace "$dir" "\[auto-setup\] op=skip reason=nested" "auto-setup skipped on nested launch"
+  if [ -e "$dir/resources/.worklist-authorization.json" ]; then
+    bad "nested launch not seeded" "worklist authorization present"
+  else
+    ok "nested launch not seeded"
   fi
   shutdown_bram
 }

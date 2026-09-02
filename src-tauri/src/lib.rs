@@ -15365,6 +15365,13 @@ fn pty_spawn(
     // gets one fresh session; once its greeting is delivered, later launches
     // go straight back to the user's configured/default resume policy.
     let first_unmanaged_launch = arm_repo_startup_greeting_if_needed(&app);
+    // first-run-sequence-greeting-vs-setup: Setup runs here, AFTER the
+    // greeting is armed (arming checks project_is_managed, which auto-setup
+    // is about to flip) and BEFORE the agent autostart below — so the agent's
+    // first session starts with hooks already registered and no restart is
+    // ever needed on this path. Runs at every launch, gated on needs-setup,
+    // so a provider CLI installed after first run gets picked up too.
+    auto_setup_before_launch(&app);
     let configured_startup_policy = configured_startup_policy(&app);
     let startup_policy = startup_policy_for_repo(configured_startup_policy, first_unmanaged_launch);
     let last_active = if startup_policy == AgentStartupPolicy::LastActive {
@@ -15372,7 +15379,37 @@ fn pty_spawn(
     } else {
         None
     };
-    let launch = resolve_agent_startup_launch(startup_policy, configured_provider, last_active);
+    let mut launch = resolve_agent_startup_launch(startup_policy, configured_provider, last_active);
+    // first-run-sequence-greeting-vs-setup, the sole-CLI rung of the launch
+    // ladder: a repo where only the OTHER provider's CLI exists should not
+    // stumble on the Claude default. The PATH probe is advisory (the host's
+    // PATH can be poorer than the PTY's login shell), so act only in the
+    // conservative direction: switch when the picked CLI is missing AND the
+    // other is present; when neither is found, leave the pick alone.
+    {
+        let picked = session_provider_label(launch.provider);
+        if !agent_cli_on_path(picked) {
+            let other = match launch.provider {
+                SessionProvider::Claude => SessionProvider::Codex,
+                SessionProvider::Codex => SessionProvider::Claude,
+            };
+            if agent_cli_on_path(session_provider_label(other)) {
+                append_bram_trace_line(
+                    &app,
+                    "agent-switch",
+                    &format!(
+                        "op=launch-fallback reason=cli-missing from={} to={}",
+                        picked,
+                        session_provider_label(other)
+                    ),
+                );
+                launch.provider = other;
+                launch.resume = false;
+                launch.session_id = None;
+            }
+        }
+    }
+    let launch = launch;
     let provider = session_provider_label(launch.provider);
     // switch-agent-no-session-to-resume: the same precondition the switch path
     // needs, and for the same reason. startup_policy_for_repo forces
@@ -23108,11 +23145,21 @@ fn mark_repo_startup_greeting_projected<R: tauri::Runtime>(
 }
 
 fn repo_startup_greeting_turn() -> serde_json::Value {
+    // The greeting is the entire first-run surface: when Setup just ran
+    // automatically (auto_setup_before_launch), the announcement rides the
+    // same assistant message instead of a banner. Empty announcement leaves
+    // the approved copy byte-identical.
+    let announcement = auto_setup_announcement();
+    let text = if announcement.is_empty() {
+        REPO_STARTUP_GREETING.to_string()
+    } else {
+        format!("{}\n\n{}", REPO_STARTUP_GREETING, announcement)
+    };
     serde_json::json!({
         "role": "assistant",
         "entries": [{
             "kind": "text",
-            "text": REPO_STARTUP_GREETING,
+            "text": text,
         }],
         "bramOwned": true,
     })
@@ -23142,6 +23189,132 @@ fn note_repo_startup_greeting_projected<R: tauri::Runtime>(app: &AppHandle<R>) {
                     "op=error stage=mark-projected error={}",
                     bram_trace_preview(&e, 120)
                 ),
+            );
+        }
+    }
+}
+
+// first-run-sequence-greeting-vs-setup: the announcement the startup greeting
+// appends when Setup just ran automatically. Empty except on the launch that
+// performed an auto-setup, so the greeting-shape tests (exact approved copy)
+// hold in every other context.
+static AUTO_SETUP_ANNOUNCEMENT: OnceLock<Mutex<String>> = OnceLock::new();
+
+fn auto_setup_announcement() -> String {
+    AUTO_SETUP_ANNOUNCEMENT
+        .get_or_init(|| Mutex::new(String::new()))
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_default()
+}
+
+fn append_auto_setup_announcement(text: &str) {
+    if let Ok(mut s) = AUTO_SETUP_ANNOUNCEMENT
+        .get_or_init(|| Mutex::new(String::new()))
+        .lock()
+    {
+        if !s.is_empty() {
+            s.push_str("\n\n");
+        }
+        s.push_str(text);
+    }
+}
+
+// Advisory PATH probe for a provider CLI. The HOST process's PATH can be
+// poorer than the login shell the PTY runs (GUI launches), so a miss here is
+// weak evidence — callers must only act on it in the conservative direction:
+// switch providers only when the configured CLI is missing AND the other is
+// found; never suppress work because neither was found.
+fn agent_cli_on_path(name: &str) -> bool {
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+    for dir in std::env::split_paths(&paths) {
+        if dir.join(name).is_file() {
+            return true;
+        }
+        if cfg!(windows) {
+            for ext in ["exe", "cmd", "bat"] {
+                if dir.join(format!("{}.{}", name, ext)).is_file() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+// first-run-sequence-greeting-vs-setup: Setup runs automatically, before the
+// agent launches, whenever any provider's coordination is missing or stale.
+// This ordering is what deletes the restart step: hooks are registered before
+// the agent's first session starts, and Claude Code captures hooks at session
+// startup. The probe-at-every-launch shape also covers a provider CLI
+// installed after first run — its needs-setup flag flips true and the next
+// launch installs it, no consent dialog (the consent happened when the user
+// pointed Bram at the repo; a dialog whose "no" branch is a broken product is
+// a speed bump, not consent).
+//
+// Targeting guards, in order: run_enhance itself refuses $HOME (#294); a
+// launch nested under a managed parent skips auto-setup entirely (near-
+// certainly a mis-launch — the existing nested banner is the surface for it).
+// On failure the needs-setup banner remains as the fallback surface; this
+// function never blocks the launch path.
+fn auto_setup_before_launch<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let status: serde_json::Value = match enhance_status(app)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+    {
+        Some(v) => v,
+        None => {
+            append_bram_trace_line(app, "auto-setup", "op=skip reason=status-unavailable");
+            return;
+        }
+    };
+    if !status["nestedUnder"].is_null() {
+        append_bram_trace_line(app, "auto-setup", "op=skip reason=nested");
+        return;
+    }
+    let claude_needs = status["claudeNeedsSetup"].as_bool().unwrap_or(false);
+    let codex_needs = status["codexNeedsSetup"].as_bool().unwrap_or(false);
+    if !claude_needs && !codex_needs {
+        append_bram_trace_line(app, "auto-setup", "op=skip reason=current");
+        return;
+    }
+    let first_run = status["firstRun"].as_bool().unwrap_or(false);
+    match run_enhance(app, false) {
+        Ok(body) => {
+            let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            let wrote = parsed["wrote"].as_array().map(|a| a.len()).unwrap_or(0);
+            let skipped = parsed["skipped"].as_array().map(|a| a.len()).unwrap_or(0);
+            append_bram_trace_line(
+                app,
+                "auto-setup",
+                &format!(
+                    "op=ran firstRun={} claudeNeeded={} codexNeeded={} wrote={} skipped={}",
+                    first_run, claude_needs, codex_needs, wrote, skipped
+                ),
+            );
+            if first_run && wrote > 0 {
+                // Name the root: on a machine with several managed checkouts,
+                // "which repo did it just set up" is not answerable from the
+                // window alone (#330's Windows validation asked for this).
+                let root_label = project_root(Some(app))
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "this repo".to_string());
+                append_auto_setup_announcement(&format!(
+                    "I also just set up agent coordination for {} \u{2014} Setup wrote \
+                     .claude/, AGENTS.md and resources/ (all visible in git status). If this \
+                     repo shouldn't be managed by Bram, say so and I'll undo it.",
+                    root_label
+                ));
+            }
+            emit_replayable_signal(app, "enhance-status-changed");
+        }
+        Err(e) => {
+            append_bram_trace_line(
+                app,
+                "auto-setup",
+                &format!("op=error error={}", bram_trace_preview(&e, 200)),
             );
         }
     }

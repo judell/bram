@@ -31047,6 +31047,47 @@ fn send_ledger_tail_fragment(preview: &str) -> String {
         .collect()
 }
 
+// esc-abort-stale-input-latch-unverified: is this entry's payload visibly
+// sitting in the CLI composer? Pure core so it is testable without the PTY;
+// `send_ledger_payload_in_tail` is the live wrapper. ONE implementation with
+// two callers on purpose — the strand branch's cause discrimination and the
+// abort branch's stale-input latch ask the identical question, and a
+// predicate answered two ways invites the two answers to disagree.
+fn send_ledger_payload_in_tail_of(tail: &str, preview: &str) -> bool {
+    let frag = send_ledger_tail_fragment(preview);
+    !frag.trim().is_empty() && tail.contains(frag.trim())
+}
+
+fn send_ledger_payload_in_tail(preview: &str) -> bool {
+    send_ledger_payload_in_tail_of(&pty_tail_snippet(400), preview)
+}
+
+#[cfg(test)]
+mod send_ledger_payload_in_tail_tests {
+    use super::send_ledger_payload_in_tail_of as p;
+
+    #[test]
+    fn payload_visible_in_the_composer_is_observed() {
+        assert!(p(
+            "PS> Propose a worklist item to address #335",
+            "Propose a worklist item to address #335"
+        ));
+    }
+    #[test]
+    fn empty_composer_is_not_an_observation_of_presence() {
+        // The esc-abort specimen (2026-09-02 18:02): Esc landed 8.7s after
+        // delivery, the CLI re-staged nothing, and the branch nevertheless
+        // latched "stale terminal input" on an unchecked premise.
+        assert!(!p("PS> ", "Propose a worklist item to address #335"));
+    }
+    #[test]
+    fn empty_preview_never_claims_presence() {
+        // A blank fragment would otherwise `contains("")` its way to true and
+        // latch on every abort.
+        assert!(!p("PS> anything at all", "   "));
+    }
+}
+
 // Extract the plain text of a user-shaped record for the synthetic
 // filter. Claude user records carry string content or an array of
 // text blocks; Codex carries payload.message or payload.content
@@ -33009,11 +33050,9 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                 // the injection was swallowed entirely. Hoisted out of the
                 // forensics block because the restore's clear decision
                 // keys on it too (#306).
-                let payload_in_tail = {
-                    let tail = pty_tail_snippet(400);
-                    let frag = send_ledger_tail_fragment(&entry.preview);
-                    !frag.trim().is_empty() && tail.contains(frag.trim())
-                };
+                // esc-abort-stale-input-latch-unverified: was an inline copy;
+                // now the shared predicate the abort branch uses too.
+                let payload_in_tail = send_ledger_payload_in_tail(&entry.preview);
                 {
                     let tail = pty_tail_snippet(400);
                     let last_out = LAST_PTY_OUTPUT_MS.load(std::sync::atomic::Ordering::Relaxed);
@@ -33199,12 +33238,34 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                             // interrupted the answer" with "my question was
                             // lost" (live specimen 2026-07-06 20:33). Keep
                             // the ledger record; leave the composer alone.
-                            // The CLI's re-staged copy now sits in the
+                            // The CLI's re-staged copy MAY now sit in the
                             // terminal input — latch it as known-stale so
                             // the next pane send clears it before
                             // injecting (pane-send-clears-stale-terminal-input).
-                            set_stale_terminal_input_latched_at(now);
-                            transitions.push(format!("op=aborted-no-restore id={}", entry.id,));
+                            //
+                            // esc-abort-stale-input-latch-unverified: that
+                            // re-staging used to be ASSUMED, and the assumption
+                            // is false whenever Esc arrives well after landing
+                            // — it then interrupts the RESPONSE and the CLI
+                            // re-stages nothing. Live specimen 2026-09-02
+                            // 18:02: Esc 8.7s after delivery, input empty, and
+                            // the banner told the user their message was "back
+                            // in the terminal input… press Enter there to
+                            // resend it" — a falsehood with harmful
+                            // instructions attached. This branch had already
+                            // decided there was nothing to give back
+                            // (aborted-no-restore); latching stale input in the
+                            // same breath asserted the opposite. Check the
+                            // composer instead, with the same predicate the
+                            // strand branch calls decisive.
+                            let payload_in_tail = send_ledger_payload_in_tail(&entry.preview);
+                            if payload_in_tail {
+                                set_stale_terminal_input_latched_at(now);
+                            }
+                            transitions.push(format!(
+                                "op=aborted-no-restore id={} payload_in_tail={} latched={}",
+                                entry.id, payload_in_tail, payload_in_tail,
+                            ));
                         }
                     }
                 } else {

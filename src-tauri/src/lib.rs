@@ -30794,6 +30794,11 @@ struct SendLedgerEntry {
     // is distinguishable from delivery trouble (pa11 #7: 8 "slow landings"
     // were all queue waits behind a genuinely open prior turn).
     turn_open_at_inject: bool,
+    // issue-335 phase 1: why this entry last failed to resolve on a sweep
+    // ("" until one fails). Held on the entry so the trace emits one line per
+    // distinct reason rather than one per sweep — the negative result is on
+    // the record without flooding a log that sweeps several times a second.
+    last_unresolved_reason: &'static str,
 }
 
 const SEND_LEDGER_CAP: usize = 50;
@@ -31103,6 +31108,59 @@ fn send_ledger_record_text(r: &serde_json::Value) -> String {
 // not delivery — queue records carry the text at enqueue time, and
 // assistant records can quote it back). Extracted pure for #307's
 // two-session search; the entry loop calls it once per candidate session.
+// issue-335 phase 1: WHY did a sweep fail to resolve an injected entry? The
+// ledger traced only its two outcomes -- `state=landed` and `state=stranded`
+// -- so a sweep that looked and matched nothing was indistinguishable from a
+// sweep that never ran. That is the ambiguity that left #335 with three
+// candidate causes and no way to separate them after the fact (the same shape
+// as the claim-interval `op=prune-noop` gap closed by 859f09a).
+//
+// The three reasons are the three candidates, and they are mutually exclusive:
+// the offset does not address the text at all; the needle is genuinely absent
+// after it (a payload-transformation or wrong-file problem); or the needle IS
+// present and every line carrying it was refused by the delivery semantics (a
+// record-shape or synthetic-filter problem). Classification only -- never
+// payload text, never file contents, per this kind's standing rule.
+fn send_ledger_unresolved_reason(needle: &str, text: &str, rel_offset: usize) -> &'static str {
+    if needle.is_empty() {
+        return "empty-needle";
+    }
+    if rel_offset >= text.len() {
+        return "offset-past-end";
+    }
+    let start = char_floor(text, rel_offset);
+    if !text[start..].contains(needle) {
+        return "needle-absent";
+    }
+    "semantics-rejected"
+}
+
+#[cfg(test)]
+mod send_ledger_unresolved_reason_tests {
+    use super::send_ledger_unresolved_reason as r;
+    // A user record carrying the needle: present and accepted, so reaching the
+    // classifier at all means the caller saw no delivery -- which for this
+    // shape can only be a semantics refusal.
+    const USER: &str = "{\"type\":\"user\",\"message\":{\"content\":\"probe\"}}\n";
+
+    #[test]
+    fn offset_beyond_text_is_named_not_conflated_with_absence() {
+        assert_eq!(r("probe", USER, USER.len() + 10), "offset-past-end");
+    }
+    #[test]
+    fn needle_missing_after_offset_is_absence() {
+        assert_eq!(r("nowhere", USER, 0), "needle-absent");
+    }
+    #[test]
+    fn needle_present_but_unaccepted_is_a_semantics_refusal() {
+        assert_eq!(r("probe", USER, 0), "semantics-rejected");
+    }
+    #[test]
+    fn empty_needle_is_its_own_reason_rather_than_a_false_absence() {
+        assert_eq!(r("", USER, 0), "empty-needle");
+    }
+}
+
 fn send_ledger_find_delivery(text: &str, rel_offset: usize, needle: &str) -> Option<bool> {
     let start = char_floor(text, rel_offset);
     let suffix = &text[start..];
@@ -32522,6 +32580,7 @@ fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
             nudged: false,
             would_notice_at_ms: 0,
             turn_open_at_inject,
+            last_unresolved_reason: "",
         },
         None => SendLedgerEntry {
             id: format!("{}-inline", now),
@@ -32543,6 +32602,7 @@ fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
             nudged: false,
             would_notice_at_ms: 0,
             turn_open_at_inject,
+            last_unresolved_reason: "",
         },
     };
     // issue-305 (observe-only): a send racing a live terminal modal gets a
@@ -32831,6 +32891,15 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
             };
             let (delivered, landed_in_inject_session) =
                 send_ledger_resolve_delivery(&needle, (search_text, rel_offset), inject_candidate);
+            // issue-335 phase 1: classified against the PRIMARY candidate only.
+            // When the session re-anchored, `search_text` is the current
+            // session and the inject session was searched as a fallback, so
+            // read a reason here together with sid_changed rather than alone.
+            let unresolved_reason = if delivered.is_none() {
+                send_ledger_unresolved_reason(&needle, search_text, rel_offset)
+            } else {
+                ""
+            };
             if let Some(via_queue) = delivered {
                 entry.state = "landed";
                 entry.resolved_at_ms = now;
@@ -32927,10 +32996,11 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                 entry.state = "stranded";
                 entry.resolved_at_ms = now;
                 transitions.push(format!(
-                    "op=transition id={} state=stranded cause={} elapsed_ms={}",
+                    "op=transition id={} state=stranded cause={} elapsed_ms={} unresolved={}",
                     entry.id,
                     entry.cause,
                     now - entry.injected_at_ms,
+                    unresolved_reason,
                 ));
                 // Scene capture: the strand names its own cause. The
                 // decisive bit is payload_in_tail — true means the text is
@@ -33018,6 +33088,24 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                         payload: entry.payload.clone(),
                     });
                 }
+            } else if unresolved_reason != entry.last_unresolved_reason {
+                // issue-335 phase 1: still in flight and still unmatched. Name
+                // the reason once per distinct value, so a sweep that ran and
+                // legitimately found nothing is on the record — the negative
+                // result whose absence made #335 undiagnosable — without one
+                // line per sweep. A reason that CHANGES mid-flight is itself
+                // the interesting signal (e.g. offset-past-end settling into
+                // needle-absent once the provider writes).
+                entry.last_unresolved_reason = unresolved_reason;
+                transitions.push(format!(
+                    "op=unresolved id={} reason={} needle_len={} rel_offset={} text_len={} sid_changed={}",
+                    entry.id,
+                    unresolved_reason,
+                    needle.len(),
+                    rel_offset,
+                    search_text.len(),
+                    sid_changed,
+                ));
             }
         }
         // Escape-sweep only: the DOMINANT live Esc case (2026-07-03 acid
@@ -44584,6 +44672,7 @@ mod session_turn_tests {
             nudged: false,
             would_notice_at_ms: 0,
             turn_open_at_inject: false,
+            last_unresolved_reason: "",
         };
         assert_eq!(
             super::send_ledger_needle(&framed),

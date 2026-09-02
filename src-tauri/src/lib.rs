@@ -569,6 +569,29 @@ fn parse_cli_flags() {
             println!("bram {}", env!("CARGO_PKG_VERSION"));
             std::process::exit(0);
         }
+        // issue-332: windowless hash queries so a launcher (tb.ps1) can tell
+        // whether the embedded app/ tree matches a checkout without
+        // re-implementing the algorithm. Both print one hex line and exit.
+        "--embedded-app-hash" => {
+            println!("{}", embedded_app_hash());
+            std::process::exit(0);
+        }
+        "--hash-app-dir" => {
+            let Some(dir) = args.get(2) else {
+                eprintln!("bram: --hash-app-dir requires a directory path");
+                std::process::exit(1);
+            };
+            match disk_app_hash(Path::new(dir)) {
+                Some(h) => {
+                    println!("{}", h);
+                    std::process::exit(0);
+                }
+                None => {
+                    eprintln!("bram: cannot hash {} (missing or unreadable)", dir);
+                    std::process::exit(1);
+                }
+            }
+        }
         s if s.starts_with('-') => {
             eprintln!("bram: unknown option '{}'", s);
             eprintln!("Try 'bram --help' for more information.");
@@ -14683,6 +14706,136 @@ fn resolve_app_root<R: tauri::Runtime>(app: Option<&AppHandle<R>>) -> Option<Pat
     bram_app_root_candidates(resource_dir, executable_dir, current_exe)
         .into_iter()
         .find(|path| path.exists())
+}
+
+// issue-332: make embedded-app/ staleness LEGIBLE rather than rebuilding on
+// every markup edit. `include_dir!` embeds all of app/ while build.rs watches
+// one file, so a markup-only edit followed by `cargo build` can leave a
+// raw-binary launch (tb.ps1's mode) serving markup the build did not contain
+// — silently. The chosen remedy is a content hash computed by ONE algorithm
+// living in this binary, exposed two ways (`--embedded-app-hash` for the
+// baked tree, `--hash-app-dir <path>` for a checkout), so tb.ps1 compares two
+// strings instead of re-implementing a canonical tree hash in PowerShell.
+// FNV-1a: this is a drift tell, not a security boundary.
+fn fnv1a64(h: &mut u64, bytes: &[u8]) {
+    for &b in bytes {
+        *h ^= b as u64;
+        *h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+}
+
+// OS junk files exist on disk but not in the embed (or vice versa) and must
+// not read as drift.
+fn app_tree_junk(name: &str) -> bool {
+    matches!(name, ".DS_Store" | "Thumbs.db")
+}
+
+fn hash_app_tree_entries(mut entries: Vec<(String, Vec<u8>)>) -> String {
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for (path, bytes) in &entries {
+        fnv1a64(&mut h, path.as_bytes());
+        fnv1a64(&mut h, &[0]);
+        fnv1a64(&mut h, bytes);
+        fnv1a64(&mut h, &[0]);
+    }
+    format!("{:016x}", h)
+}
+
+fn embedded_app_tree_entries(dir: &Dir, out: &mut Vec<(String, Vec<u8>)>) {
+    for f in dir.files() {
+        let rel = f.path().to_string_lossy().replace('\\', "/");
+        let name = rel.rsplit('/').next().unwrap_or(&rel);
+        if app_tree_junk(name) {
+            continue;
+        }
+        out.push((rel, f.contents().to_vec()));
+    }
+    for d in dir.dirs() {
+        embedded_app_tree_entries(d, out);
+    }
+}
+
+fn embedded_app_hash() -> &'static str {
+    static HASH: OnceLock<String> = OnceLock::new();
+    HASH.get_or_init(|| {
+        let mut v = Vec::new();
+        embedded_app_tree_entries(&EMBEDDED_APP, &mut v);
+        hash_app_tree_entries(v)
+    })
+}
+
+fn disk_app_tree_entries(
+    root: &Path,
+    base: &Path,
+    out: &mut Vec<(String, Vec<u8>)>,
+) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(base)? {
+        let p = entry?.path();
+        if p.is_dir() {
+            disk_app_tree_entries(root, &p, out)?;
+        } else if p.is_file() {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if app_tree_junk(name) {
+                continue;
+            }
+            let rel = p
+                .strip_prefix(root)
+                .unwrap_or(&p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.push((rel, std::fs::read(&p)?));
+        }
+    }
+    Ok(())
+}
+
+fn disk_app_hash(dir: &Path) -> Option<String> {
+    let mut v = Vec::new();
+    disk_app_tree_entries(dir, dir, &mut v).ok()?;
+    if v.is_empty() {
+        return None;
+    }
+    Some(hash_app_tree_entries(v))
+}
+
+#[cfg(test)]
+mod app_tree_hash_tests {
+    use super::{disk_app_hash, embedded_app_hash};
+    use std::path::PathBuf;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("bram-hash-test-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        d
+    }
+
+    #[test]
+    fn identical_trees_hash_equal_and_one_byte_differs() {
+        let a = scratch("a");
+        std::fs::write(a.join("x.txt"), b"hello").unwrap();
+        std::fs::write(a.join("sub/y.txt"), b"world").unwrap();
+        let b = scratch("b");
+        std::fs::write(b.join("x.txt"), b"hello").unwrap();
+        std::fs::write(b.join("sub/y.txt"), b"world").unwrap();
+        assert_eq!(disk_app_hash(&a), disk_app_hash(&b));
+        // Junk files do not read as drift.
+        std::fs::write(b.join(".DS_Store"), b"junk").unwrap();
+        assert_eq!(disk_app_hash(&a), disk_app_hash(&b));
+        // One byte does.
+        std::fs::write(b.join("sub/y.txt"), b"worle").unwrap();
+        assert_ne!(disk_app_hash(&a), disk_app_hash(&b));
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn embedded_hash_is_stable_and_shaped() {
+        let h = embedded_app_hash();
+        assert_eq!(h.len(), 16);
+        assert_eq!(h, embedded_app_hash());
+    }
 }
 
 #[tauri::command]
@@ -48405,6 +48558,17 @@ fn route_request<R: tauri::Runtime>(
             obj.insert(
                 "forge".to_string(),
                 serde_json::Value::String(forge_adapter(app).label().to_string()),
+            );
+            // issue-332: which app/ tree is this process actually serving,
+            // and which markup vintage is baked in — answerable after the
+            // fact from any machine (Status tab, or a curl).
+            obj.insert(
+                "embeddedAppHash".to_string(),
+                serde_json::Value::String(embedded_app_hash().to_string()),
+            );
+            obj.insert(
+                "servingEmbedded".to_string(),
+                serde_json::Value::Bool(resolve_app_root(Some(app)).is_none()),
             );
             // project-identity-chip: publish the same identity the OS window
             // title carries (shell_window_title_parts) so the pane can render

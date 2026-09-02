@@ -272,6 +272,23 @@ of later builds. This is also why `cargo build` still matters even
 for pure-JS changes you validated via reload: it refreshes the
 embedded fallback that installed binaries will serve.
 
+**And one sharper fact inside that mode (#332):** `include_dir!`
+embeds all of `app/` while `build.rs` declares `rerun-if-changed` for
+exactly one file under it (the loose-ends skill). So a markup-only
+edit followed by `cargo build` recompiles nothing, and a raw-binary
+launch silently serves markup from an older vintage. This is
+deliberate — watching `app/` wholesale would recompile a ~55k-line
+crate on every `.xmlui` edit, for a path the documented `./bram`
+launch serves from disk anyway, and release builds run from clean
+checkouts so shipped binaries always embed fresh. The staleness is
+made legible instead: `bram --embedded-app-hash` prints the baked
+tree's content hash, `bram --hash-app-dir <path>` hashes a checkout
+with the same algorithm, `/__app-info` reports `embeddedAppHash` and
+`servingEmbedded`, and `tb.ps1` compares the two hashes in its
+preflight and warns `STALE EMBEDDED app/` on mismatch. When testing
+`app/**` behavior through a raw-binary launch, trust that preflight,
+not the build's exit status.
+
 Residual caution, kept on purpose: a pane reload re-executes
 `helpers.js` in the iframe, but long-lived listeners, pre-XMLUI
 globals, and parent-window state can carry stale behavior across a

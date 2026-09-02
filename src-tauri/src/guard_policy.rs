@@ -966,7 +966,7 @@ fn forge_positional_body_file(command: &str) -> Option<String> {
         return None;
     }
     let token = command.split_whitespace().last()?.trim_matches(['\'', '"']);
-    (!token.is_empty() && !token.starts_with('-')).then(|| token.to_string())
+    (!token.is_empty() && !token.starts_with('-')).then(|| normalize_body_file_path(token))
 }
 
 fn forge_api_body(command: &str) -> Option<String> {
@@ -1009,7 +1009,8 @@ fn body_file_arg(command: &str) -> Option<String> {
                 e += 1;
             }
             if e > k {
-                return Some(c[k..e].iter().collect());
+                let raw: String = c[k..e].iter().collect();
+                return Some(normalize_body_file_path(&raw));
             }
         }
     }
@@ -1064,6 +1065,46 @@ fn body_literal_arg(command: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// #331: strip exactly one pair of matching surrounding quotes, nothing else.
+/// Deliberately NOT unquote_shell: its `\n` unescaping would corrupt a Windows
+/// path like `C:\Users\jon\new\body.md`, turning `\new` into a newline. A
+/// path token needs its bytes preserved.
+fn strip_surrounding_quotes(value: &str) -> &str {
+    let b = value.as_bytes();
+    if b.len() >= 2 && (b[0] == b'"' || b[0] == b'\'') && b[b.len() - 1] == b[0] {
+        &value[1..value.len() - 1]
+    } else {
+        value
+    }
+}
+
+/// #331: an MSYS absolute path (`/c/Users/...`) mapped to its drive form
+/// (`C:/Users/...`). Pure and platform-independent so it can be tested
+/// anywhere; call sites gate on Windows, where the Bash tool is a Git Bash
+/// shell and the MSYS spelling is the natural one. On POSIX `/c/...` is a
+/// legitimate real path and must not be rewritten.
+fn msys_drive_path(value: &str) -> Option<String> {
+    let c: Vec<char> = value.chars().collect();
+    if c.len() >= 2 && c[0] == '/' && c[1].is_ascii_alphabetic() && (c.len() == 2 || c[2] == '/') {
+        let rest: String = c[2..].iter().collect();
+        return Some(format!("{}:{}", c[1].to_ascii_uppercase(), rest));
+    }
+    None
+}
+
+/// #331: what body_file_arg and the positional variant hand onward. Quoted
+/// paths are the idiomatic Windows spelling and were previously taken
+/// verbatim — the file then never opened, and the guard blamed the signature.
+fn normalize_body_file_path(raw: &str) -> String {
+    let stripped = strip_surrounding_quotes(raw);
+    if cfg!(windows) {
+        if let Some(mapped) = msys_drive_path(stripped) {
+            return mapped;
+        }
+    }
+    stripped.to_string()
 }
 
 fn unquote_shell(value: &str) -> String {
@@ -1944,10 +1985,28 @@ fn bash_branch(payload: &Value) -> ShadowVerdict {
             ),
         );
     }
-    let (cb_verdict, _cb_detail) = crossboundary_signature_verdict(&command, &cwd);
-    if cb_verdict == "unsigned"
-        || (cb_verdict == "unparsed" && !matches!(_cb_detail, "body-file-stdin" | "no-body-flag"))
-    {
+    let (cb_verdict, cb_detail) = crossboundary_signature_verdict(&command, &cwd);
+    // #331: an unreadable named body is still denied (fail-open would defeat
+    // the check), but it is a DIFFERENT failure from an unsigned body and
+    // must say so — the flat "crossboundary-unsigned" cost the Windows filer
+    // three turns of re-verifying a signature the guard never read.
+    if cb_verdict == "unparsed" && !matches!(cb_detail, "body-file-stdin" | "no-body-flag") {
+        let path = body_file_arg(&command)
+            .or_else(|| forge_positional_body_file(&command))
+            .unwrap_or_else(|| "<unresolved path>".to_string());
+        return deny_msg(
+            format!("crossboundary-unparsed:{}", cb_detail),
+            "-",
+            "Bash",
+            &preview,
+            &cwd_s,
+            &format!(
+                "The body file for this forge write could not be read, so its signature could not be verified:\n    {}\nAn unreadable named body is denied rather than silently bypassed (conventions.md, 'Signing agent-authored forge artifacts'). Check the path and retry — quoted and MSYS-style paths are accepted.",
+                path
+            ),
+        );
+    }
+    if cb_verdict == "unsigned" {
         // python:1916-1934
         return deny_msg(
             "crossboundary-unsigned",
@@ -3530,10 +3589,23 @@ Use --body-file - (stdin) or --body-file <path> instead.\nDetected: <match>",
             "-",
         );
     }
-    let (cb_verdict, _cb_detail) = crossboundary_signature_verdict(&command, cwd);
-    if cb_verdict == "unsigned"
-        || (cb_verdict == "unparsed" && !matches!(_cb_detail, "body-file-stdin" | "no-body-flag"))
-    {
+    let (cb_verdict, cb_detail) = crossboundary_signature_verdict(&command, cwd);
+    // #331: same split as the Claude site — codex_deny's reason is the first
+    // message line, so the distinct first line is what makes the trace
+    // distinguish unreadable from unsigned.
+    if cb_verdict == "unparsed" && !matches!(cb_detail, "body-file-stdin" | "no-body-flag") {
+        let path = body_file_arg(&command)
+            .or_else(|| forge_positional_body_file(&command))
+            .unwrap_or_else(|| "<unresolved path>".to_string());
+        return codex_deny(
+            &format!(
+                "The body file for this forge write could not be read, so its signature could not be verified.\n    {}\nAn unreadable named body is denied rather than silently bypassed (conventions.md, 'Signing agent-authored forge artifacts'). Check the path and retry — quoted and MSYS-style paths are accepted.",
+                path
+            ),
+            "-",
+        );
+    }
+    if cb_verdict == "unsigned" {
         return codex_deny(
             "This agent-authored forge artifact lacks the full repository-qualified signature.\nOpen the first line with:\n    <owner>'s <Agent> (<thread>, <model>) speaking from the <Project> project (<origin-host>/<path>):\nSee conventions.md, 'Signing agent-authored forge artifacts' — every artifact, every comment, not just the first in a thread.",
             "-",
@@ -3991,6 +4063,61 @@ mod guard_policy_tests {
     }
 
     // --- signature gates (python lines 1330-1381) ---------------------------
+
+    // #331: the fixture gap that shipped the bug — every prior test passed a
+    // bare path. Quoted paths (the idiomatic Windows spelling) and MSYS paths
+    // never parsed; the guard then blamed the signature it had never read.
+    #[test]
+    fn body_file_quoted_and_msys_paths() {
+        let td = scratch("sig331");
+        let signed = "Jon's Claude (main thread, Opus 5) speaking from the Bram project (github.com/judell/bram):\n\nBody.";
+        let body_path = td.join("signed.md");
+        std::fs::write(&body_path, signed).unwrap();
+
+        // Double-quoted absolute path reads and verifies.
+        let quoted_abs = format!("gh issue comment 5 --body-file \"{}\"", body_path.display());
+        assert_eq!(
+            crossboundary_signature_verdict(&quoted_abs, &td).0,
+            "signed"
+        );
+
+        // Single-quoted relative path resolves against cwd.
+        assert_eq!(
+            crossboundary_signature_verdict("gh issue comment 5 --body-file 'signed.md'", &td).0,
+            "signed"
+        );
+
+        // An unreadable named file is unparsed WITH the distinguishing
+        // detail — the deny site formats this as
+        // crossboundary-unparsed:body-file-unreadable, never as unsigned.
+        assert_eq!(
+            crossboundary_signature_verdict(
+                "gh issue comment 5 --body-file \"/nope/missing.md\"",
+                &td
+            ),
+            ("unparsed", "body-file-unreadable")
+        );
+
+        // MSYS mapping is pure and testable everywhere; call sites gate on
+        // Windows. /tmp must not read as a drive.
+        assert_eq!(
+            msys_drive_path("/c/Users/jon/body.md").as_deref(),
+            Some("C:/Users/jon/body.md")
+        );
+        assert_eq!(msys_drive_path("/tmp/body.md"), None);
+        assert_eq!(msys_drive_path("relative/path.md"), None);
+
+        // Quote stripping preserves backslashes byte-for-byte: unquote_shell's
+        // \n unescaping would corrupt C:\Users\jon\new\b.md.
+        assert_eq!(
+            strip_surrounding_quotes("\"C:\\Users\\jon\\new\\b.md\""),
+            "C:\\Users\\jon\\new\\b.md"
+        );
+        assert_eq!(strip_surrounding_quotes("'x.md'"), "x.md");
+        assert_eq!(strip_surrounding_quotes("\"mismatched'"), "\"mismatched'");
+
+        let _ = std::fs::remove_dir_all(&td);
+    }
 
     #[test]
     fn crossboundary_signature_gates() {

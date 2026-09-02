@@ -1114,12 +1114,16 @@ verified rather than nominally required, and an issue-only post is
 allowed on its own merits rather than depending on whatever worklist
 items happen to be in flight — a heredoc redirect in the same command is
 another write pattern, which correctly disqualifies the issue-only
-exemption. The trace names which happened:
+exemption. The deny reason names which happened (#331 — an unreadable
+body was previously reported as an unsigned one, steering the fix
+effort at the wrong target):
 
-- `crossboundary-unparsed:body-file-unreadable` — the body was not
-  readable; the check passed without verifying anything.
-- `crossboundary-signed:body-file` — the body was read and the signature
-  confirmed.
+- `crossboundary-unparsed:body-file-unreadable` — the named body file
+  could not be read; the write is denied (never silently bypassed) and
+  the message names the path that failed to open. Quoted paths and, on
+  Windows, MSYS `/c/...` spellings are accepted.
+- `crossboundary-unsigned` — the body was read and lacks the
+  signature.
 
 
 ## Working across project boundaries

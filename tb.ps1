@@ -54,6 +54,30 @@ if ($headDate) {
   }
 }
 
+# issue-332: this raw-binary launch has no adjacent app/, so it serves the
+# EMBEDDED app/ tree — and build.rs watches exactly one file under app/, so a
+# markup-only edit followed by a build can leave the embed at an older
+# vintage with no error anywhere. The binary owns the hash algorithm; we just
+# compare two strings. Older binaries lack the flags and skip the check.
+try {
+  $embHash  = (& $exe --embedded-app-hash 2>$null | Select-Object -Last 1)
+  $diskHash = (& $exe --hash-app-dir (Join-Path $repoRoot "app") 2>$null | Select-Object -Last 1)
+  if ($embHash -and $diskHash) {
+    if ($embHash -ne $diskHash) {
+      Write-Output ""
+      Write-Warning ("STALE EMBEDDED app/: binary embeds {0}; on-disk app/ hashes {1}." -f $embHash, $diskHash)
+      Write-Warning "This launch serves the embedded tree, so any app/** behavior you observe"
+      Write-Warning "reflects the markup baked at the last recompile, not the checkout. Force a"
+      Write-Warning "re-embed by rebuilding after any Rust change, or:"
+      Write-Warning "    (Get-Item src-tauri\src\lib.rs).LastWriteTime = Get-Date ; .\build.ps1"
+    } else {
+      Write-Output ("app/   : embedded tree matches on-disk checkout ({0})" -f $embHash)
+    }
+  }
+} catch {
+  Write-Warning "embedded-app hash preflight unavailable: $_"
+}
+
 # A second instance is the usual cause of a failed rebuild, and of two Bram
 # windows disagreeing about shared machine-global state (~/.bram/bram-guard.exe
 # is one link, whichever instance ensured it last wins).

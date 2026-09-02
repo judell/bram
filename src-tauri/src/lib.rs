@@ -37827,6 +37827,256 @@ fn claim_attribution_runs<R: tauri::Runtime>(
 
 static CLAIM_ATTR_SPAWNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+// issue-327 scoped diff (worklist-file-ownership-view): one scope's own patch
+// for one path. A scope is a single item id — the concatenation of
+// `git diff <a> <b> -- <path>` over the intervals that item solely owns, each
+// a plain single-owner diff (the Gerrit patch-set / GitHub per-commit
+// convention: scope, don't annotate) — or "__unattributed", the intervals
+// owned by no single item (multi-id claims). Work predating the first capture
+// belongs to no interval, so it appears only in the combined diff; this route
+// reports what the claim store records and never guesses.
+//
+// Computed lazily per request rather than carried in the board payload — the
+// #323 lesson: a scope is opened by a click, so its cost is paid on that
+// click, not on every board build.
+fn claim_interval_diff<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    scope: &str,
+    path: &str,
+) -> serde_json::Value {
+    let empty = serde_json::json!({ "patch": "", "intervals": 0 });
+    let Some(root) = project_root(Some(app)) else {
+        return empty;
+    };
+    let Ok(text) = std::fs::read_to_string(root.join(CLAIM_INTERVALS_REL)) else {
+        return empty;
+    };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return empty;
+    };
+    let Some(arr) = doc.get("intervals").and_then(|v| v.as_array()) else {
+        return empty;
+    };
+    let mut patch = String::new();
+    let mut matched = 0usize;
+    let mut spawns = 0usize;
+    for (i, rec) in arr.iter().enumerate() {
+        let Some(a) = rec.get("ref").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        // Same ownership rule as the attribution replay: a multi-id claim owns
+        // its interval as a set, attributable to no one item.
+        let ids = rec.get("ids").and_then(|v| v.as_array());
+        let owner = match ids.map(|a| a.len()) {
+            Some(1) => ids.and_then(|a| a[0].as_str()),
+            _ => None,
+        };
+        let wanted = match owner {
+            Some(id) => id == scope,
+            None => scope == "__unattributed",
+        };
+        if !wanted {
+            continue;
+        }
+        let next = arr
+            .get(i + 1)
+            .and_then(|r| r.get("ref"))
+            .and_then(|v| v.as_str());
+        // The open interval (no successor) diffs against the working tree.
+        let mut args: Vec<&str> = vec!["diff", a];
+        if let Some(b) = next {
+            args.push(b);
+        }
+        args.push("--");
+        args.push(path);
+        spawns += 1;
+        let out = std::process::Command::new("git")
+            .current_dir(&root)
+            .args(&args)
+            .output();
+        if let Ok(o) = out {
+            let s = String::from_utf8_lossy(&o.stdout);
+            if !s.trim().is_empty() {
+                matched += 1;
+                patch.push_str(&s);
+            }
+        }
+    }
+    append_bram_trace_line(
+        app,
+        "claim-interval",
+        &format!(
+            "op=scoped-diff scope={} path={} intervals={} spawns={}",
+            scope, path, matched, spawns
+        ),
+    );
+    serde_json::json!({ "patch": patch, "intervals": matched })
+}
+
+// issue-327 independence: is a claimant's work committable WITHOUT its
+// neighbours'? Decided by measurement, never by heuristic — the fixture's own
+// doc (5fb78fe) records the rule: `git apply --check` is the whole test.
+// Success means the patch applies to a tree lacking the other items' work;
+// failure means the change is defined relative to an earlier item's output and
+// the requested state exists in nobody's record. Hunk-sharing is NOT the test:
+// adjacency merges hunks without creating dependence, and dependence is
+// directional (measured 2026-09-01: bram-ref-namespaces failed against HEAD
+// and applied cleanly after safety-snapshot; safety-snapshot applied alone).
+//
+// All checks run in a throwaway GIT_INDEX_FILE against the HEAD tree — the
+// worktree is never touched. Cost is a few spawns per call, and the route is
+// fetched per expanded file on demand, never on board build.
+fn claim_interval_independence<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    path: &str,
+) -> serde_json::Value {
+    let empty = serde_json::json!({ "items": {} });
+    let Some(root) = project_root(Some(app)) else {
+        return empty;
+    };
+    let Ok(text) = std::fs::read_to_string(root.join(CLAIM_INTERVALS_REL)) else {
+        return empty;
+    };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return empty;
+    };
+    let Some(arr) = doc.get("intervals").and_then(|v| v.as_array()) else {
+        return empty;
+    };
+    let spawns = std::cell::Cell::new(0usize);
+    let git_out = |args: &[&str], env_idx: Option<&Path>| -> Option<std::process::Output> {
+        spawns.set(spawns.get() + 1);
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(&root).args(args);
+        if let Some(idx) = env_idx {
+            cmd.env("GIT_INDEX_FILE", idx);
+        }
+        cmd.output().ok()
+    };
+    // Per-owner patches for this path, in record order (first appearance).
+    // Owners with several intervals get their patches concatenated; when
+    // claims interleave, that concatenation is relative to intervening work —
+    // the check below then honestly reports the dependence.
+    let mut order: Vec<String> = Vec::new();
+    let mut patches: std::collections::HashMap<String, String> = Default::default();
+    for (i, rec) in arr.iter().enumerate() {
+        let Some(a) = rec.get("ref").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let ids = rec.get("ids").and_then(|v| v.as_array());
+        let owner = match ids.map(|a| a.len()) {
+            Some(1) => ids.and_then(|a| a[0].as_str()).map(String::from),
+            _ => None,
+        };
+        let Some(owner) = owner else { continue };
+        let next = arr
+            .get(i + 1)
+            .and_then(|r| r.get("ref"))
+            .and_then(|v| v.as_str());
+        let mut args: Vec<&str> = vec!["diff", a];
+        if let Some(b) = next {
+            args.push(b);
+        }
+        args.push("--");
+        args.push(path);
+        let out = git_out(&args, None)
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        if out.trim().is_empty() {
+            continue;
+        }
+        if !patches.contains_key(&owner) {
+            order.push(owner.clone());
+        }
+        patches.entry(owner).or_default().push_str(&out);
+    }
+    // A fresh HEAD-only index, plus the given patches applied in order.
+    // Returns None when a BASE patch fails (base unusable), Some(check result)
+    // otherwise.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let check = |bases: &[&str], candidate: &str| -> Option<bool> {
+        let idx = std::env::temp_dir().join(format!(
+            "bram-indep-index-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_file(&idx);
+        let mut ok = git_out(&["read-tree", "HEAD"], Some(&idx))
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        let pfile = idx.with_extension("patch");
+        for b in bases {
+            if !ok {
+                break;
+            }
+            ok = std::fs::write(&pfile, b).is_ok()
+                && git_out(
+                    &["apply", "--cached", pfile.to_str().unwrap_or("")],
+                    Some(&idx),
+                )
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+        }
+        let result = if !ok {
+            None
+        } else {
+            Some(
+                std::fs::write(&pfile, candidate).is_ok()
+                    && git_out(
+                        &["apply", "--cached", "--check", pfile.to_str().unwrap_or("")],
+                        Some(&idx),
+                    )
+                    .map(|o| o.status.success())
+                    .unwrap_or(false),
+            )
+        };
+        let _ = std::fs::remove_file(&idx);
+        let _ = std::fs::remove_file(&pfile);
+        result
+    };
+    let mut items = serde_json::Map::new();
+    for (pos, id) in order.iter().enumerate() {
+        let patch = &patches[id];
+        if check(&[], patch) == Some(true) {
+            items.insert(id.clone(), serde_json::json!({ "independent": true }));
+            continue;
+        }
+        // Dependent: name the earlier claimant(s) whose work makes it apply.
+        // Singles first (the common adjacency case), then the cumulative
+        // prefix; an unresolvable candidate reports dependence with no names
+        // rather than guessing.
+        let earlier: Vec<&String> = order[..pos].iter().collect();
+        let mut depends_on: Vec<String> = Vec::new();
+        for e in &earlier {
+            if check(&[patches[*e].as_str()], patch) == Some(true) {
+                depends_on.push((*e).clone());
+                break;
+            }
+        }
+        if depends_on.is_empty() && !earlier.is_empty() {
+            let bases: Vec<&str> = earlier.iter().map(|e| patches[*e].as_str()).collect();
+            if check(&bases, patch) == Some(true) {
+                depends_on = earlier.iter().map(|e| (*e).clone()).collect();
+            }
+        }
+        items.insert(
+            id.clone(),
+            serde_json::json!({ "independent": false, "dependsOn": depends_on }),
+        );
+    }
+    append_bram_trace_line(
+        app,
+        "claim-interval",
+        &format!(
+            "op=independence path={} claimants={} spawns={}",
+            path,
+            order.len(),
+            spawns.get()
+        ),
+    );
+    serde_json::json!({ "items": items })
+}
+
 // issue-327 hygiene: retire boundaries whose intervals no longer have a live
 // owner. Called after a successful prune mutation, which is the one path both
 // drops and `worklist-commit` funnel through (commit delegates its prune to
@@ -48761,6 +49011,50 @@ fn route_request<R: tauri::Runtime>(
         let body = serde_json::json!({ "pending": pending })
             .to_string()
             .into_bytes();
+        return (200, "application/json; charset=utf-8", body);
+    }
+
+    // issue-327 scoped diff: serve one scope's interval patch for one path,
+    // fetched lazily when the Diff tab's scope selector leaves "All changes".
+    if path == "__worklist/interval-diff" {
+        let mut id = String::new();
+        let mut fpath = String::new();
+        for pair in query.split('&') {
+            if let Some(v) = pair.strip_prefix("id=") {
+                id = percent_decode(v);
+            } else if let Some(v) = pair.strip_prefix("path=") {
+                fpath = percent_decode(v);
+            }
+        }
+        if id.is_empty() || fpath.is_empty() {
+            return (
+                400,
+                "application/json; charset=utf-8",
+                br#"{"error":"id and path required"}"#.to_vec(),
+            );
+        }
+        let body = serde_json::to_vec(&claim_interval_diff(app, &id, &fpath)).unwrap_or_default();
+        return (200, "application/json; charset=utf-8", body);
+    }
+
+    // issue-327 independence: measured per-claimant separability for one path,
+    // fetched on demand when a file expander renders its Ownership summary.
+    if path == "__worklist/independence" {
+        let mut fpath = String::new();
+        for pair in query.split('&') {
+            if let Some(v) = pair.strip_prefix("path=") {
+                fpath = percent_decode(v);
+            }
+        }
+        if fpath.is_empty() {
+            return (
+                400,
+                "application/json; charset=utf-8",
+                br#"{"error":"path required"}"#.to_vec(),
+            );
+        }
+        let body =
+            serde_json::to_vec(&claim_interval_independence(app, &fpath)).unwrap_or_default();
         return (200, "application/json; charset=utf-8", body);
     }
 

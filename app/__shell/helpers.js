@@ -2426,7 +2426,222 @@ window.__bramGreenLitAge = function (item) {
 // attribute. Reporting a "-" figure here would be inventing one.
 window.__bramOwnClause = function (item, attribution) {
   var own = window.__bramItemOwnAdded(item, attribution);
-  return own === null ? "" : " \u00b7 yours: +" + own;
+  return own === null ? "" : " \u00b7 unique: +" + own;
+};
+
+// issue-327: the Ownership tab's rows -- the file's changed lines in file
+// order, as CURRENT content rather than a diff, with elisions where nothing
+// changed. Built from the patch the payload already carries, so no extra fetch:
+// every owned line is an addition, and the patch holds exactly those.
+//
+// Not a diff. Four attempts at rendering attribution inside one failed on
+// supersession (a rewritten line's earlier version has nowhere to appear) and on
+// interleaving (per-line alternation reads as breakage). A file view sidesteps
+// both: it shows what is there and who put it there, which is what every blame
+// tool has always shown.
+window.__bramOwnershipRows = function (patch, runs) {
+  var spans = runs || [];
+  var ownerAt = function (n) {
+    for (var i = 0; i < spans.length; i++) {
+      if (n >= spans[i].startLine && n <= spans[i].endLine) return spans[i].itemId;
+    }
+    return null;
+  };
+  var lines = String(patch == null ? "" : patch).split("\n");
+  var hits = [];
+  var n = 0;
+  for (var i = 0; i < lines.length; i++) {
+    var l = lines[i];
+    var m = /^@@ -\d+(?:,\d+)? \+(\d+)/.exec(l);
+    if (m) {
+      n = parseInt(m[1], 10);
+      continue;
+    }
+    if (l.charAt(0) === "+") {
+      if (l.indexOf("+++ ") === 0) continue;
+      hits.push({ n: n, text: l.slice(1), owner: ownerAt(n) });
+      n += 1;
+    } else if (l.charAt(0) === "-") {
+      // deletions leave no line in the file, so nothing to own or show
+    } else if (l.charAt(0) === " ") {
+      n += 1;
+    }
+  }
+  // Elide the unowned stretches between changed regions, so the tab stays
+  // proportional to the CHANGE rather than the file: helpers.js is 11,000 lines
+  // and would show 55.
+  var out = [];
+  var prevLine = 0;
+  var prevOwner = "\u0000";
+  for (var k = 0; k < hits.length; k++) {
+    var h = hits[k];
+    var gap = h.n - prevLine - 1;
+    if (gap > 0) {
+      out.push({ kind: "elide", count: gap });
+      prevOwner = "\u0000";
+    }
+    out.push({
+      kind: "line",
+      n: h.n,
+      text: h.text,
+      owner: h.owner,
+      // One label per run, the rule that survived review. In a file view this
+      // is uncontroversial: it is what blame output has always looked like.
+      runStart: h.owner !== prevOwner,
+    });
+    prevOwner = h.owner;
+    prevLine = h.n;
+  }
+  return out;
+};
+
+// issue-327 file-table experiment: map a Table row selection onto the keyed
+// diff-expansion store. Single-select master-detail per the documented
+// pattern (https://www.xmlui.org/docs/howto/build-a-master-detail-layout):
+// selecting a file row opens its Tabs, selecting another switches, an empty
+// selection closes. One expansion per item; diffKeys stays the source of
+// truth (Table selection is component-internal and positional, the
+// ExpandableItem class of state, so nothing but the highlight relies on it).
+window.__bramTableSelectDiff = function (keys, itemId, sel) {
+  var prefix = String(itemId) + "::";
+  var next = (keys || []).filter(function (k) {
+    return String(k).indexOf(prefix) !== 0;
+  });
+  var picked = sel && sel.length ? sel[sel.length - 1] : null;
+  if (picked && picked.path) next.push(window.__bramDiffExpansionKey(itemId, picked.path));
+  return next;
+};
+
+// issue-327 scoped diff: the scopes a file's Diff tab offers. "All changes" is
+// the combined patch (commit truth: whole-file staging takes all of it); each
+// claimant with attributed lines is its own scope, rendered as that item's
+// interval diff -- one owner per view, the Gerrit patch-set / GitHub
+// per-commit convention (scope, don't annotate); "unattributed" appears only
+// when some changed line has no owner. The row's own item is listed first: it
+// is the default lens.
+window.__bramDiffScopeOptions = function (patch, runs, rowId) {
+  var opts = [{ value: "__all", label: "All" }];
+  var spans = runs || [];
+  var seen = {};
+  var order = [];
+  for (var i = 0; i < spans.length; i++) {
+    var id = spans[i].itemId;
+    if (id && !seen[id]) {
+      seen[id] = true;
+      if (id === rowId) order.unshift(id);
+      else order.push(id);
+    }
+  }
+  for (var j = 0; j < order.length; j++) {
+    opts.push({
+      value: order[j],
+      label: order[j] + (order[j] === rowId ? " (this item)" : ""),
+    });
+  }
+  var rows = window.__bramOwnershipRows(patch, spans);
+  for (var k = 0; k < rows.length; k++) {
+    if (rows[k].kind === "line" && !rows[k].owner) {
+      opts.push({ value: "__unattributed", label: "unattributed" });
+      break;
+    }
+  }
+  return opts;
+};
+
+// Scope selection is CONTROLLED and id-keyed, the diffKeys discipline one
+// level down: Select's own state is positional inside an Items loop, so the
+// map -- not the widget -- is what the DiffViews and the DataSource read.
+// Default lens: the row you opened from, when it owns lines here; else all.
+window.__bramDiffScope = function (scopeKeys, itemId, path, runs) {
+  var k = window.__bramDiffExpansionKey(itemId, path);
+  var map = scopeKeys || {};
+  if (Object.prototype.hasOwnProperty.call(map, k)) return map[k];
+  var spans = runs || [];
+  for (var i = 0; i < spans.length; i++) {
+    if (spans[i].itemId === itemId) return itemId;
+  }
+  return "__all";
+};
+window.__bramSetDiffScope = function (scopeKeys, itemId, path, value) {
+  var map = scopeKeys || {};
+  var next = {};
+  for (var k in map) {
+    if (Object.prototype.hasOwnProperty.call(map, k)) next[k] = map[k];
+  }
+  next[window.__bramDiffExpansionKey(itemId, path)] = value;
+  return next;
+};
+
+// issue-327 ownership summary: the Ownership tab's rows, one per claimant of
+// this file, seen from the ROW ITEM's point of view. The line-by-line file
+// view was rejected at rendered review as illegible; what a reader needs
+// beside the scoped diff is the one thing it cannot show -- who else is in
+// this file, how much is theirs, and whether each claimant's work is
+// separable. Separability is MEASURED, never inferred from hunk geometry:
+// `independence` is /__worklist/independence's per-claimant `git apply
+// --check` verdict (the 5fb78fe rule -- hunk-sharing is adjacency, dependence
+// is directional). Absent a verdict the relation says nothing rather than
+// guessing. Added lines only, the "yours: +22" convention: deletions leave no
+// line to own, so runs cannot count them.
+window.__bramOwnershipSummary = function (patch, runs, rowId, independence) {
+  var spans = runs || [];
+  var ownerAt = function (n) {
+    for (var i = 0; i < spans.length; i++) {
+      if (n >= spans[i].startLine && n <= spans[i].endLine) return spans[i].itemId;
+    }
+    return null;
+  };
+  var lines = String(patch == null ? "" : patch).split("\n");
+  var n = 0;
+  var hunk = -1;
+  var per = {};
+  var order = [];
+  for (var i = 0; i < lines.length; i++) {
+    var l = lines[i];
+    var m = /^@@ -\d+(?:,\d+)? \+(\d+)/.exec(l);
+    if (m) {
+      n = parseInt(m[1], 10);
+      hunk += 1;
+      continue;
+    }
+    if (l.charAt(0) === "+") {
+      if (l.indexOf("+++ ") === 0) continue;
+      var who = ownerAt(n) || "";
+      if (!per[who]) {
+        per[who] = { added: 0, hunks: {} };
+        order.push(who);
+      }
+      per[who].added += 1;
+      per[who].hunks[hunk] = true;
+      n += 1;
+    } else if (l.charAt(0) === " ") {
+      n += 1;
+    }
+  }
+  // Row item first, then by contribution; unattributed last.
+  order.sort(function (a, b) {
+    if (a === rowId) return -1;
+    if (b === rowId) return 1;
+    if (!a) return 1;
+    if (!b) return -1;
+    return per[b].added - per[a].added;
+  });
+  var verdicts = (independence && independence.items) || {};
+  var out = [];
+  for (var k = 0; k < order.length; k++) {
+    var id = order[k];
+    var relation = "";
+    if (!id) relation = "no claim was live when these lines were written";
+    else if (Object.prototype.hasOwnProperty.call(verdicts, id)) {
+      var v = verdicts[id];
+      if (v.independent) relation = "independently committable";
+      else if ((v.dependsOn || []).length)
+        relation = "depends on " + v.dependsOn.join(", ");
+      else relation = "not independently committable";
+    }
+    out.push({ id: id || null, added: per[id].added, relation: relation });
+  }
+  return out;
 };
 
 window.__bramItemOwnAdded = function (item, attribution) {

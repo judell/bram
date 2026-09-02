@@ -2,6 +2,7 @@
   name="Worklist"
   var.expandedKeys="{window.__bramRestoreWorklist2Expansion()}"
   var.diffKeys="{[]}"
+  var.diffScopes="{{}}"
   var.worklist2Feedback="{{}}"
   var.worklist2Close="{{}}"
   var.worklist2NewItemOpen="{false}"
@@ -442,6 +443,7 @@
                small to deliver. -->
           <Text
             color="$textColor-secondary"
+            overflowMode="flow"
             tooltip="{window.__bramWorklist2StripTooltip($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items)}"
             value="{window.__bramWorklist2Strip($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items, worklist.value &amp;&amp; worklist.value.attribution)}" />
           <!-- issue-278: the row backlink is GONE, on live evidence.
@@ -513,52 +515,158 @@
                  reading as this item's work — they are never concatenated into
                  one body — and turns a 2,000-line untracked file into a row you
                  may decline to open rather than a wall. -->
-            <HStack
+            <!-- issue-327 file-table experiment: header row and file rows are
+                 a real Table, so the columns align by construction. Table has
+                 no single-click row event (only rowDoubleClick and hover —
+                 the Review-overlaps table above uses the hover pair), so
+                 "click the file row to open it" is single-row selection per
+                 the master-detail pattern:
+                 https://www.xmlui.org/docs/howto/build-a-master-detail-layout
+                 Selecting a row opens its Tabs below the table; selecting
+                 another switches. diffKeys stays the expansion source of
+                 truth — the Table's own selection is internal, positional
+                 state (the ExpandableItem class), trusted only for the
+                 highlight. -->
+            <Table
               when="{$item.changedFiles}"
-              width="100%"
-              gap="$space-2"
-              verticalAlignment="center">
-              <Text width="{filesColCh}ch" minWidth="14rem" textAlign="start" variant="caption" value="files expected to change" />
-              <Text width="140px" textAlign="start" variant="caption" value="changes" />
-              <Text width="*" minWidth="8rem" textAlign="start" variant="caption" value="shared with" />
-            </HStack>
+              data="{$item.changedFiles}"
+              idKey="path"
+              rowsSelectable="{rowBegun}"
+              enableMultiRowSelection="{false}"
+              onSelectionDidChange="(sel) => diffKeys = window.__bramTableSelectDiff(diffKeys, rowId, sel)">
+              <Column header="files expected to change" width="2*" headerHorizontalAlignment="start">
+                <Text
+                  variant="code"
+                  fontSize="$fontSize-sm"
+                  value="{$item.path}" />
+              </Column>
+              <Column header="changes" width="140px" headerHorizontalAlignment="start">
+                <Text
+                  variant="code"
+                  fontSize="$fontSize-sm"
+                  value="{!rowBegun || $item.status === 'unchanged' ? '' : '+' + $item.added + ' −' + $item.removed + ($item.status === 'new' ? ' (new)' : ($item.status === 'deleted' ? ' (deleted)' : ''))}" />
+              </Column>
+              <Column header="shared with" width="3*" headerHorizontalAlignment="start">
+                <Text
+                  overflowMode="flow"
+                  value="{window.__bramJoinIds(window.__bramSharedWithBegun($item, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value))}" />
+              </Column>
+            </Table>
             <Items
               when="{$item.changedFiles}"
               data="{$item.changedFiles}">
               <VStack gap="$space-0" width="100%">
-                <HStack
-                  width="100%"
-                  gap="$space-2"
-                  verticalAlignment="center"
-                  onClick="diffKeys = window.__bramFlipDiffExpansion(diffKeys, rowId, $item.path)">
-                  <Text
-                    width="{filesColCh}ch"
-                    minWidth="14rem"
-                    value="{(rowBegun &amp;&amp; window.__bramDiffForPath(rowItem, $item.path) ? (window.__bramDiffExpanded(diffKeys, rowId, $item.path) ? '\u25be ' : '\u25b8 ') : '') + $item.path}"
-                    variant="code"
-                    fontSize="$fontSize-sm" />
-                  <Text
-                    width="140px"
-                    textAlign="start"
-                    variant="code"
-                    fontSize="$fontSize-sm"
-                    value="{!rowBegun || $item.status === 'unchanged' ? '' : '+' + $item.added + ' −' + $item.removed + ($item.status === 'new' ? ' (new)' : ($item.status === 'deleted' ? ' (deleted)' : ''))}" />
-                  <Text
-                    width="*"
-                    minWidth="8rem"
-                    textAlign="start"
-                    overflowMode="flow"
-                    value="{window.__bramJoinIds(window.__bramSharedWithBegun($item, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value))}" />
-                </HStack>
                 <!-- Gated on rowBegun, carried down from the section that used
                      to hold the single Diff view: a plan row that has begun
                      nothing must offer no diffs, or it would display a
                      neighbour's uncommitted work as its own. -->
                 <VStack
                   when="{rowBegun &amp;&amp; window.__bramDiffExpanded(diffKeys, rowId, $item.path) &amp;&amp; window.__bramDiffForPath(rowItem, $item.path)}"
-                  paddingLeft="$space-4"
-                  paddingBottom="$space-2">
-                  <DiffView text="{cappedDiffText((window.__bramDiffForPath(rowItem, $item.path) || {}).patch || '')}" />
+                  paddingBottom="$space-2"
+                  var.filePatch="{(window.__bramDiffForPath(rowItem, $item.path) || {}).patch || ''}"
+                  var.fileRuns="{((worklist.value &amp;&amp; worklist.value.attribution) || {})[$item.path]}">
+                  <!-- issue-327: two views of one file. keepMounted because Tabs
+                       mounts only the active panel by default, and DiffView owns
+                       a DataSource posting to /__diff/annotate: without it every
+                       switch unmounts the diff and re-annotates it.
+                       https://www.xmlui.org/docs/reference/components/Tabs -->
+                  <Tabs keepMounted="true">
+                    <TabItem label="Diff">
+                      <!-- issue-327 scoped diff: scope, don't annotate. Every
+                           rendered diff has ONE owner — "All changes" is the
+                           combined patch (commit truth: whole-file staging takes
+                           all of it), and each claimant scope is that item's own
+                           interval diff, fetched lazily on selection. The
+                           Gerrit patch-set / GitHub per-commit convention; a
+                           scoped diff is against the item's own base, so its
+                           line numbers may not match the current file — that is
+                           what lets it show superseded work.
+                           https://www.xmlui.org/docs/reference/components/DataSource -->
+                      <VStack
+                        gap="$space-1"
+                        var.fileScope="{window.__bramDiffScope(diffScopes, rowId, $item.path, fileRuns)}">
+                          <DataSource
+                            id="scopedDiff"
+                            when="{fileScope !== '__all'}"
+                            url="/__worklist/interval-diff"
+                            queryParams="{{ id: fileScope, path: $item.path }}" />
+                          <HStack
+                            when="{(fileRuns || []).length > 0}"
+                            gap="$space-2"
+                            verticalAlignment="center">
+                            <Text variant="caption" value="Changes:" />
+                            <!-- valueTemplate: the selected value renders
+                                 centered by default and there is no theme var
+                                 for its alignment; a full-width start-aligned
+                                 Text is the documented fix.
+                                 https://www.xmlui.org/docs/howto/customize-a-selects-selected-value -->
+                            <Select
+                              width="30rem"
+                              data="{window.__bramDiffScopeOptions(filePatch, fileRuns, rowId)}"
+                              initialValue="{fileScope}"
+                              onDidChange="(v) => diffScopes = window.__bramSetDiffScope(diffScopes, rowId, $item.path, v)">
+                              <property name="valueTemplate">
+                                <Text width="100%" textAlign="start" value="{$item.label}" />
+                              </property>
+                            </Select>
+                          </HStack>
+                          <DiffView
+                            when="{fileScope === '__all'}"
+                            text="{cappedDiffText(filePatch)}" />
+                          <DiffView
+                            when="{fileScope !== '__all' &amp;&amp; !!(scopedDiff.value &amp;&amp; scopedDiff.value.patch)}"
+                            text="{cappedDiffText(scopedDiff.value.patch)}" />
+                          <Text
+                            when="{fileScope !== '__all' &amp;&amp; scopedDiff.value &amp;&amp; !scopedDiff.value.patch}"
+                            variant="caption"
+                            value="No changes recorded in this scope's claim intervals for this file." />
+                      </VStack>
+                    </TabItem>
+                    <!-- Ownership is a SUMMARY from the row item's point of
+                         view, not a line-by-line rendering — the file view was
+                         rejected at rendered review as illegible. One row per
+                         claimant: their own added lines, and the one thing the
+                         scoped diff cannot show — whether their work shares a
+                         hunk with this item's (inseparable in a whole-file
+                         commit) or sits in separate hunks. -->
+                    <TabItem label="Ownership">
+                      <!-- Same column geometry as the file table above
+                           (filesColCh / 140px / star, $space-2 gap), so the
+                           claimant sits under "files expected to change", the
+                           count under "changes", and the relation under
+                           "shared with". No item colors: the "(this item)"
+                           suffix and the relation text carry the meaning. -->
+                      <VStack gap="$space-1" paddingVertical="$space-2">
+                        <!-- Separability is measured on demand (git apply
+                             check, host-side), one fetch per expanded file —
+                             never on board build. Relations stay blank until
+                             the verdicts arrive rather than guessing. -->
+                        <DataSource
+                          id="pathIndependence"
+                          url="/__worklist/independence"
+                          queryParams="{{ path: $item.path }}" />
+                        <Table data="{window.__bramOwnershipSummary(filePatch, fileRuns, rowId, pathIndependence.value)}">
+                          <Column header="claimant" width="3*" headerHorizontalAlignment="start">
+                            <Text
+                              variant="code"
+                              fontSize="$fontSize-sm"
+                              value="{$item.id ? ($item.id === rowId ? $item.id + ' (this item)' : $item.id) : 'unattributed'}" />
+                          </Column>
+                          <Column header="unique" width="90px" headerHorizontalAlignment="start">
+                            <Text
+                              variant="code"
+                              fontSize="$fontSize-sm"
+                              value="{'+' + $item.added}" />
+                          </Column>
+                          <Column header="separability" width="3*" headerHorizontalAlignment="start">
+                            <Text
+                              overflowMode="flow"
+                              value="{$item.relation}" />
+                          </Column>
+                        </Table>
+                      </VStack>
+                    </TabItem>
+                  </Tabs>
                 </VStack>
               </VStack>
             </Items>

@@ -10681,6 +10681,39 @@ window.__bramSelectionCommitSweepsShared = function (items, sel, claim) {
   });
 };
 
+// issue-329: the Commits tab's phase-2 close banner ("close queued …
+// completes when the commit reaches the default branch"), with pending-since
+// per issue. The filer's preference, verbatim: visibility over a button —
+// "a status that cannot distinguish 'fine' from 'stuck' is the shape we are
+// now wary of." With the issues-poll sweep bounding staleness to about one
+// poll interval, a pending-since more than a couple of minutes old is
+// self-announcing as stuck. Returns "" when nothing is in phase 2; the
+// markup's `when` keys on that, keeping the attribute expressions single
+// calls instead of the inline filter chains this replaces.
+window.__bramCloseQueueBanner = function (queue, commits) {
+  var pending = (queue && queue.pending) || [];
+  var rows = commits || [];
+  var phase2 = pending.filter(function (p) {
+    return !rows.some(function (c) {
+      return (
+        !c.pushed &&
+        (c.pendingCloses || []).some(function (x) {
+          return x.issue === p.issue;
+        })
+      );
+    });
+  });
+  if (!phase2.length) return "";
+  var names = phase2.map(function (p) {
+    var t = p.createdAtMs ? new Date(p.createdAtMs).toLocaleTimeString() : "";
+    return "#" + p.issue + (t ? " (pending since " + t + ")" : "");
+  });
+  return (
+    "close queued for " + names.join(", ") +
+    " — completes when the commit reaches the default branch"
+  );
+};
+
 window.__bramSendLedgerNotice = function (payload, dismissedKey) {
   var entries = (payload && payload.entries) || [];
   var nowMs = (payload && payload.nowMs) || Date.now();

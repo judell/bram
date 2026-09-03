@@ -112,10 +112,10 @@
          banner claim phase-2 (pushed, awaiting default branch) during
          phase-1 (unpushed), tripling the voices for one close. -->
     <Text
-      when="{((closeQueue.value &amp;&amp; closeQueue.value.pending) || []).filter(p => !(commits.value || []).some(c => !c.pushed &amp;&amp; (c.pendingCloses || []).some(x => x.issue === p.issue))).length > 0}"
+      when="{window.__bramCloseQueueBanner(closeQueue.value, commits.value) !== ''}"
       fontSize="$fontSize-sm"
       color="$textColor-secondary"
-      value="{'close queued for ' + ((closeQueue.value &amp;&amp; closeQueue.value.pending) || []).filter(p => !(commits.value || []).some(c => !c.pushed &amp;&amp; (c.pendingCloses || []).some(x => x.issue === p.issue))).map(p => '#' + p.issue).join(', ') + ' — completes when the commit reaches the default branch'}" />
+      value="{window.__bramCloseQueueBanner(closeQueue.value, commits.value)}" />
 
     <VStack gap="$space-1" when="{commits.value &amp;&amp; commits.value.length > 0}">
       <!-- browse-tabs-adopt-searchresults: rows render through the shared

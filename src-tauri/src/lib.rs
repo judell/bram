@@ -23110,6 +23110,16 @@ fn run_index_buckets<R: tauri::Runtime>(
                 if n > 0 {
                     added.push((bucket.status_name().to_string(), n));
                 }
+                // issue-329: the periodic sweep. A forge-side merge moves no
+                // local ref and pushes nothing, so neither live trigger
+                // (button, refs-watch) can fire and a queued close waited
+                // indefinitely — 9m37s in the filing trace, cleared by luck.
+                // The issues pass is the natural cadence (~45s); an empty
+                // queue returns before any trace line, so this adds no noise
+                // and no spawns in the steady state. No new timer:
+                // push-over-polling holds — this is a consumer on a poll that
+                // already exists.
+                flush_pending_issue_closes(app, "issues-poll");
             }
         }
     }
@@ -49343,7 +49353,17 @@ fn route_request<R: tauri::Runtime>(
             .map(|p| read_pending_issue_closes(&p))
             .unwrap_or_default()
             .iter()
-            .map(|r| serde_json::json!({"issue": r.issue, "commitSha": r.commit_sha}))
+            .map(|r| {
+                // issue-329: pending-since. With the issues-poll sweep
+                // bounding staleness to roughly one poll interval, an old
+                // timestamp is self-announcing as stuck — the filer's
+                // visibility-over-a-button preference.
+                serde_json::json!({
+                    "issue": r.issue,
+                    "commitSha": r.commit_sha,
+                    "createdAtMs": r.created_at_ms,
+                })
+            })
             .collect();
         let body = serde_json::json!({ "pending": pending })
             .to_string()

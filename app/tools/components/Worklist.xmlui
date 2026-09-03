@@ -168,6 +168,9 @@
       <Text
         fontSize="$fontSize-sm"
         color="$textColor-secondary"
+        width="*"
+        textAlign="start"
+        overflowMode="flow"
         value="{window.__bramOverlapHeaderLine(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value)}" />
       <Button
         when="{window.__bramOverlapAny(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value)}"
@@ -230,7 +233,7 @@
            xmlui-side board is proposing one; collapse to onRowClick when
            it lands). The cell tint doubles as the pinned-row cue. -->
       <Table
-        data="{window.__bramOverlapChangedIndex(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value)}"
+        data="{window.__bramOverlapDisplayIndex(worklist.value &amp;&amp; worklist.value.items, inflightClaim.value)}"
         onRowEnter="(item) => window.__bramSetOverlapFocus(item.claimants)"
         onRowLeave="window.__bramClearOverlapFocus()">
         <Column header="file" width="2*">
@@ -239,7 +242,12 @@
             cursor="pointer"
             backgroundColor="{window.__bramOverlapPinnedRow(overlapFocus.value, $item.path) ? '$color-primary-100' : 'transparent'}"
             onClick="window.__bramToggleOverlapPin($item.path, $item.claimants)">
-            <Text value="{$item.path}" variant="code" fontSize="$fontSize-sm" tooltip="{$item.path}" />
+            <Text
+              value="{$item.path}"
+              variant="code"
+              fontSize="$fontSize-sm"
+              color="{$item.planned ? '$textColor-secondary' : '$textColor-primary'}"
+              tooltip="{$item.path}" />
           </HStack>
         </Column>
         <Column header="items" width="110px">
@@ -251,7 +259,8 @@
             <Text
               fontSize="$fontSize-sm"
               color="$textColor-secondary"
-              value="{window.__bramOverlapRowCount($item, worklist.value &amp;&amp; worklist.value.items)}" />
+              overflowMode="flow"
+              value="{window.__bramOverlapRowCount($item, worklist.value &amp;&amp; worklist.value.items) + ($item.planned ? ' · planned' : '')}" />
           </HStack>
         </Column>
         <!-- Natural-width badges that wrap: `wrapContent="true"`, the same
@@ -259,7 +268,15 @@
              surviving colour tie is row badge <-> here, so these keep the
              item's own colour; the short label carries identity when two
              items collide on a hue, which they do past six items. -->
-        <Column header="claimed by" width="3*">
+        <!-- Static on purpose: a binding expression in Column `header`
+             silently unmounts the whole Table (observed live, 2026-09-03; no
+             console error, no render). Filed as xmlui-org/xmlui#3867 — when
+             dynamic headers land, this label follows its rows' tense
+             ("planned by" / "claimed by"), as does the file table's
+             "files expected to change" header below (expected vs changed,
+             the same tense problem). Until then the two-tense label plus the
+             per-row `· planned` marker carry the distinction. -->
+        <Column header="planned / claimed by" width="3*">
           <HStack
             width="100%"
             cursor="pointer"
@@ -441,7 +458,11 @@
                out"). At -sm the amber had too little ink to register as a
                signal at all - the colour was carrying meaning the type was too
                small to deliver. -->
+          <!-- width="*" bounds the flow wrap: without it the Text sizes to
+               content, overflows the row edge, and clips mid-word instead of
+               wrapping inside the available width (observed 2026-09-03). -->
           <Text
+            width="*"
             color="$textColor-secondary"
             overflowMode="flow"
             tooltip="{window.__bramWorklist2StripTooltip($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items)}"
@@ -534,6 +555,10 @@
               rowsSelectable="{rowBegun}"
               enableMultiRowSelection="{false}"
               onSelectionDidChange="(sel) => diffKeys = window.__bramTableSelectDiff(diffKeys, rowId, sel)">
+              <!-- "expected to change" is the planning tense; on a begun row
+                   whose work is done it should read "changed". Same
+                   static-header constraint as the overlaps table — waits on
+                   xmlui-org/xmlui#3867 (dynamic Column headers). -->
               <Column header="files expected to change" width="2*" headerHorizontalAlignment="start">
                 <Text
                   variant="code"
@@ -547,9 +572,23 @@
                   value="{!rowBegun || $item.status === 'unchanged' ? '' : '+' + $item.added + ' −' + $item.removed + ($item.status === 'new' ? ' (new)' : ($item.status === 'deleted' ? ' (deleted)' : ''))}" />
               </Column>
               <Column header="shared with" width="3*" headerHorizontalAlignment="start">
-                <Text
-                  overflowMode="flow"
-                  value="{window.__bramJoinIds(window.__bramSharedWithBegun($item, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value))}" />
+                <!-- worklist-surface-planned-overlap: two tenses, visually
+                     distinct. Begun sharers (work overlap) full strength;
+                     never-begun co-declarants (plan overlap) muted with
+                     `· planned`, restoring the visibility d1798ca removed
+                     without reopening the credit lie it fixed. -->
+                <VStack gap="$space-0">
+                  <Text
+                    when="{window.__bramSharedWithBegun($item, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value).length > 0}"
+                    overflowMode="flow"
+                    value="{window.__bramJoinIds(window.__bramSharedWithBegun($item, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value))}" />
+                  <Text
+                    when="{window.__bramSharedWithPlanned($item, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value).length > 0}"
+                    overflowMode="flow"
+                    variant="caption"
+                    color="$textColor-secondary"
+                    value="{window.__bramJoinIds(window.__bramSharedWithPlanned($item, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value)) + ' · planned'}" />
+                </VStack>
               </Column>
             </Table>
             <Items

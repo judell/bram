@@ -2715,6 +2715,24 @@ window.__bramSharedWithBegun = function (file, items, claim) {
   return out;
 };
 
+// worklist-surface-planned-overlap: the complement — sharers that have NOT
+// begun. Plan overlap, not work overlap. d1798ca correctly stopped naming
+// these as claimants of CHANGES (a never-begun item shares no work); the
+// Start decision still needs them, and the row marks the tense (`· planned`)
+// so the credit lie d1798ca fixed cannot return through this door.
+window.__bramSharedWithPlanned = function (file, items, claim) {
+  var sharers = (file && file.sharedWith) || [];
+  var list = items || [];
+  var byId = {};
+  for (var i = 0; i < list.length; i++) if (list[i] && list[i].id) byId[list[i].id] = list[i];
+  var out = [];
+  for (var j = 0; j < sharers.length; j++) {
+    var it = byId[sharers[j]];
+    if (it && !window.__bramWorklist2Begun(it, claim)) out.push(sharers[j]);
+  }
+  return out;
+};
+
 window.__bramWorklist2Strip = function (item, claim, items, attribution) {
   if (!item) return "";
   // issue-266: the close declaration belongs on the status line for
@@ -3316,15 +3334,28 @@ window.__bramOverlapHeaderLine = function (items, claim) {
   // Two different absences, and the distinction is the point of this item: no
   // item pair shares a path at all, versus a pair that shares one where
   // nothing has been written yet. The second used to read as contention.
+  // worklist-surface-planned-overlap: declared-but-unchanged overlap gets its
+  // own clause instead of hiding inside "no shared files changed" \u2014 the live
+  // case that motivated this had two proposed items planning the same two
+  // files and a header the reader heard as "no overlap".
+  var declaredIdx = window.__bramOverlapIndex(list, claim) || [];
+  var changedPaths = {};
+  index.forEach(function (e) { changedPaths[e.path] = true; });
+  var plannedOnly = declaredIdx.filter(function (e) { return !changedPaths[e.path]; }).length;
+  var plannedClause = plannedOnly
+    ? " \u00b7 " + plannedOnly + " file" + (plannedOnly === 1 ? "" : "s") + " planned by multiple items"
+    : "";
   if (!index.length) {
-    var anyDeclared = (window.__bramOverlapIndex(list, claim) || []).length > 0;
-    return head + (anyDeclared ? " \u00b7 no shared files changed" : " \u00b7 no shared files");
+    return head + (declaredIdx.length
+      ? " \u00b7 no shared files changed" + plannedClause
+      : " \u00b7 no shared files");
   }
   var touched = {};
   index.forEach(function (e) { e.claimants.forEach(function (id) { touched[id] = true; }); });
   var k = Object.keys(touched).length;
   return head + " \u00b7 " + index.length + " shared file" + (index.length === 1 ? "" : "s") +
-    " across " + (k === n && n > 1 ? "all " : "") + k + " item" + (k === 1 ? "" : "s");
+    " across " + (k === n && n > 1 ? "all " : "") + k + " item" + (k === 1 ? "" : "s") +
+    plannedClause;
 };
 
 // The overlap that MATTERS AT THE GATE: declared overlap intersected with
@@ -3389,9 +3420,35 @@ window.__bramOverlapChangedIndex = function (items, claim) {
   return out;
 };
 
-window.__bramOverlapAny = function (items, claim) {
-  return window.__bramOverlapChangedIndex(items, claim).length > 0;
+// worklist-surface-planned-overlap: the panel (and its hover→row tint) now
+// serves the Start decision too, not only the commit-gate one. Contention
+// rows keep primacy (c20b4c9's verdict intact: predictions are not
+// contention); planned-only rows follow, tense-marked, because the live case
+// that reopened this had two proposed items planning the same files and no
+// surface offering the claimant↔row hover at exactly the moment order was
+// being decided.
+window.__bramOverlapDisplayIndex = function (items, claim) {
+  var changed = window.__bramOverlapChangedIndex(items, claim) || [];
+  var seen = {};
+  var out = [];
+  changed.forEach(function (e) {
+    seen[e.path] = true;
+    e.planned = false;
+    out.push(e);
+  });
+  (window.__bramOverlapIndex(items, claim) || []).forEach(function (e) {
+    if (!seen[e.path]) {
+      e.planned = true;
+      out.push(e);
+    }
+  });
+  return out;
 };
+
+window.__bramOverlapAny = function (items, claim) {
+  return window.__bramOverlapDisplayIndex(items, claim).length > 0;
+};
+
 
 // One index row. `all N items` for a universal file.
 window.__bramOverlapRowCount = function (entry, items) {

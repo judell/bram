@@ -61,8 +61,17 @@
        to bring it back for a debugging/wording exercise (0.5.3 gate run:
        useful for articulating the messages in context, not wanted as
        permanent UI). -->
+  <!-- worklist-surface-planned-overlap: the gateExplainer flag gate is
+       REMOVED. The 0.5.3 run retired this line from permanent UI, but the
+       2026-09-03 live case reversed that verdict for the one thing it says:
+       a user deciding whether to Start two items had a board reading "no
+       shared files changed" and nothing naming the planned entanglement at
+       the decision point. __bramStartConsequence already returns "" except
+       when the selection makes it consequential (shared files, or a mixed
+       begun/unbegun selection), so un-gating shows text only when there is a
+       consequence to state. -->
   <HStack
-    when="{gateConfig.value &amp;&amp; gateConfig.value.gateExplainer === true &amp;&amp; !!window.__bramStartConsequence(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)}"
+    when="{!!window.__bramStartConsequence(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)}"
     horizontalAlignment="center"
     paddingHorizontal="$space-8"
     paddingTop="$space-1">

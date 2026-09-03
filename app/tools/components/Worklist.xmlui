@@ -371,14 +371,21 @@
            inner gap. -->
       <VStack
         gap="$space-1"
-        paddingBottom="$space-2"
-        borderRadius="$borderRadius"
-        backgroundColor="{window.__bramOverlapFocusedRow(overlapFocus.value, $item.id) ? '$color-primary-100' : 'transparent'}">
+        paddingBottom="$space-2">
         <!-- worklist2-remove-expander-chrome: no indicator glyphs (History's
              chrome-free section headers are the precedent); the header line
              itself is the toggle. The selection Checkbox sits OUTSIDE the
-             toggling region so ticking never flips expansion. -->
-        <HStack gap="$space-2" verticalAlignment="center">
+             toggling region so ticking never flips expansion.
+
+             The overlap-focus tint lives HERE, on the expander line, not on
+             the row container: tinting the container floods an expanded
+             row's whole body (file table, Before/After) and drowns what it
+             marks (2026-09-03: "only tint the expander not its contents"). -->
+        <HStack
+          gap="$space-2"
+          verticalAlignment="center"
+          borderRadius="$borderRadius"
+          backgroundColor="{window.__bramOverlapFocusedRow(overlapFocus.value, $item.id) ? '$color-primary-100' : 'transparent'}">
           <Checkbox
             initialValue="{(worklist2Selected || []).includes($item.id) || window.__bramWorklist2RowClaimed(inflightClaim.value, $item.id)}"
             enabled="{window.__bramWorklist2RowSelectable(inflightClaim.value)}"

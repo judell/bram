@@ -55616,6 +55616,61 @@ pub fn run() {
                         );
                     }
                 }
+                // issue-342: honor the project's .gitignore directory entries,
+                // not just the hardcoded noise dirs. The freeze cause is always
+                // a high-frequency write stream into a gitignored SCRATCH DIR
+                // (Playwright test-results/, cargo target/) the old four-name
+                // list didn't cover, so every artifact dispatched a git-status
+                // refresh. Matching gitignored directory names kills it at the
+                // source. Root .gitignore, simple single-segment dir entries
+                // only; nested .gitignores and glob/negation patterns are a
+                // follow-up. Computed once at watcher start — a .gitignore edit
+                // is picked up on the next launch.
+                fn gitignore_ignored_dir_names(proj_root: &std::path::Path) -> Vec<String> {
+                    let mut out: Vec<String> = Vec::new();
+                    let Ok(content) = std::fs::read_to_string(proj_root.join(".gitignore")) else {
+                        return out;
+                    };
+                    for raw in content.lines() {
+                        let line = raw.trim();
+                        if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+                            continue;
+                        }
+                        // Globs and internal path separators are not the plain
+                        // scratch-dir class this targets.
+                        if line.contains('*') || line.contains('?') || line.contains('[') {
+                            continue;
+                        }
+                        let seg = line.trim_matches('/');
+                        if seg.is_empty() || seg.contains('/') {
+                            continue;
+                        }
+                        if !out.iter().any(|e| e == seg) {
+                            out.push(seg.to_string());
+                        }
+                    }
+                    out
+                }
+                let gitignore_dirs = gitignore_ignored_dir_names(&proj_root_path);
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        &app_handle,
+                        "watcher",
+                        &format!(
+                            "op=gitignore-dirs count={} dirs={}",
+                            gitignore_dirs.len(),
+                            gitignore_dirs.join(",")
+                        ),
+                    );
+                }
+                // issue-342: trailing-edge coalesce for git-status-changed. The
+                // 100ms path was tuned for human-speed atomic saves; a bulk
+                // change to NON-ignored tracked files can still burst, so emit
+                // once when it quiets — riding the recv_timeout wake the way the
+                // tools/worklist debounces do. Low-frequency .git-state signals
+                // (commits, ref moves) stay immediate below.
+                let git_status_debounce = Duration::from_millis(1000);
+                let mut pending_git_status_since: Option<Instant> = None;
                 use std::sync::mpsc::RecvTimeoutError;
                 loop {
                     let res = rx.recv_timeout(Duration::from_millis(100));
@@ -55649,6 +55704,14 @@ pub fn run() {
                             pending_worklist_since = None;
                         }
                     }
+                    // issue-342: fire the coalesced git-status-changed once the
+                    // burst of non-ignored working-tree changes has quieted.
+                    if let Some(since) = pending_git_status_since {
+                        if since.elapsed() >= git_status_debounce {
+                            emit_replayable_signal(&app_handle, "git-status-changed");
+                            pending_git_status_since = None;
+                        }
+                    }
                     let event = match res {
                         Ok(Ok(ev)) => ev,
                         Ok(Err(_)) => continue,
@@ -55657,8 +55720,11 @@ pub fn run() {
                     };
                     let in_ignored_dir = |p: &std::path::Path| {
                         let igs = [".git", "target", "node_modules", "resources"];
-                        p.components()
-                            .any(|c| igs.iter().any(|ig| c.as_os_str() == *ig))
+                        p.components().any(|c| {
+                            let name = c.as_os_str();
+                            igs.iter().any(|ig| name == *ig)
+                                || gitignore_dirs.iter().any(|g| name == g.as_str())
+                        })
                     };
                     let trace_rel_path = |p: &std::path::Path| {
                         let rel = p
@@ -56089,15 +56155,18 @@ pub fn run() {
                     }
 
                     // git-status-changed: any project file change that's
-                    // not in the standard ignored directories. Commits
-                    // refetches its log. Noisier than the others but
-                    // bounded by the watcher's existing 100ms debounce.
+                    // not in the ignored directories (hardcoded noise dirs +
+                    // the project's .gitignore dir entries, issue-342). Commits
+                    // refetches its log. Coalesced by the trailing-edge
+                    // git-status debounce above, not emitted per event.
                     let is_git_status_event = event.paths.iter().any(|p| {
                         p.starts_with(&proj_root_path) && !in_ignored_dir(p)
                     });
                     if is_git_status_event {
                         trace_dispatch("git-status", &[]);
-                        emit_replayable_signal(&app_handle, "git-status-changed");
+                        // issue-342: defer to the trailing-edge debounce above
+                        // instead of emitting per event.
+                        pending_git_status_since = Some(Instant::now());
                     }
 
                     // .bram.json gets its own dispatch: we have to

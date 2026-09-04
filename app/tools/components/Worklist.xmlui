@@ -724,12 +724,18 @@
               <Text value="{$item}" variant="code" fontSize="$fontSize-sm" />
             </Items>
           </VStack>
+          <!-- prose-section-headers-clickable: chevron + pointer + accent so
+               these read as toggles, not labels — the file rows' old glyph
+               vocabulary, applied to all three prose siblings uniformly. -->
           <HStack
             when="{$item.before}"
             gap="$space-1"
             verticalAlignment="center"
+            cursor="pointer"
             onClick="expandedKeys = window.__bramFlipExpansionKey(expandedKeys, $item.id + '::before')">
-            <Text value="Before" />
+            <Text
+              color="$color-primary-600"
+              value="{((expandedKeys || []).includes($item.id + '::before') ? '▾ ' : '▸ ') + 'Before'}" />
           </HStack>
           <VStack
             when="{(expandedKeys || []).includes($item.id + '::before') &amp;&amp; $item.before}"
@@ -740,8 +746,11 @@
             when="{$item.after}"
             gap="$space-1"
             verticalAlignment="center"
+            cursor="pointer"
             onClick="expandedKeys = window.__bramFlipExpansionKey(expandedKeys, $item.id + '::after')">
-            <Text value="After" />
+            <Text
+              color="$color-primary-600"
+              value="{((expandedKeys || []).includes($item.id + '::after') ? '▾ ' : '▸ ') + 'After'}" />
           </HStack>
           <VStack
             when="{(expandedKeys || []).includes($item.id + '::after') &amp;&amp; $item.after}"
@@ -768,8 +777,11 @@
             when="{(((worklist2Sent || {})[$item.id] || []).concat($item.feedbackHistory || [])).length > 0}"
             gap="$space-1"
             verticalAlignment="center"
+            cursor="pointer"
             onClick="expandedKeys = window.__bramFlipExpansionKey(expandedKeys, $item.id + '::feedback')">
-            <Text value="Feedback" />
+            <Text
+              color="$color-primary-600"
+              value="{((expandedKeys || []).includes($item.id + '::feedback') ? '▾ ' : '▸ ') + 'Feedback'}" />
           </HStack>
           <VStack
             when="{(expandedKeys || []).includes($item.id + '::feedback') &amp;&amp; (((worklist2Sent || {})[$item.id] || []).concat($item.feedbackHistory || [])).length > 0}"

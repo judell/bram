@@ -2536,22 +2536,53 @@ window.__bramOwnClause = function (item, attribution) {
 // companion to the scoped Diff and the Ownership summary. Unowned lines carry
 // owner=null and render plain; owned regions read as marked passages in
 // context rather than as isolated hunks.
-window.__bramFileContextRows = function (content, runs, rowId) {
+window.__bramFileContextRows = function (content, runs, rowId, items) {
+  // worklist2-file-tab-rerender-blowup: this is called from a binding that
+  // re-evaluates on every worklist refetch tick, so it MUST return the SAME
+  // array object when its inputs are value-equal — a fresh array is a new
+  // identity, and a new identity re-renders every row (the 2026-09-04
+  // freeze class). Ownership colors are baked into each row here for the
+  // same reason: per-row markup bindings that reach into worklist.value
+  // re-fire on every tick, one per rendered line.
   var spans = runs || [];
+  var text = String(content == null ? "" : content);
+  var sig =
+    JSON.stringify(spans) +
+    "|" +
+    String(rowId) +
+    "|" +
+    (items || [])
+      .map(function (it) {
+        return it.id;
+      })
+      .join(",");
+  var cache = (window.__bramFileContextRowsCache =
+    window.__bramFileContextRowsCache || {});
+  var hit = cache[rowId];
+  if (hit && hit.sig === sig && hit.content === text) return hit.rows;
   var ownerAt = function (n) {
     for (var i = 0; i < spans.length; i++) {
       if (n >= spans[i].startLine && n <= spans[i].endLine) return spans[i].itemId;
     }
     return null;
   };
-  var lines = String(content == null ? "" : content).split("\n");
+  var lines = text.split("\n");
   // A trailing newline yields a spurious final empty element; drop it.
   if (lines.length && lines[lines.length - 1] === "") lines.pop();
   var out = [];
   for (var i = 0; i < lines.length; i++) {
-    out.push({ n: i + 1, text: lines[i], owner: ownerAt(i + 1) });
+    var owner = ownerAt(i + 1);
+    out.push({
+      n: i + 1,
+      text: lines[i],
+      owner: owner,
+      bg: owner
+        ? window.__bramItemColor(owner, items, owner === rowId ? 100 : 50)
+        : "transparent",
+      fg: owner && owner !== rowId ? "$textColor-secondary" : "$textColor-primary",
+    });
   }
-  var _ = rowId; // emphasis is applied at render time via owner === rowId
+  cache[rowId] = { sig: sig, content: text, rows: out };
   return out;
 };
 

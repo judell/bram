@@ -742,12 +742,25 @@
                         <VStack
                           when="{fileContext.value &amp;&amp; fileContext.value.ok}"
                           gap="$space-0">
-                          <Items data="{window.__bramFileContextRows(fileContext.value.content, fileRuns, rowId)}">
+                          <!-- worklist2-file-tab-rerender-blowup: List, not
+                               Items — Items re-renders every element on every
+                               render and is documented for <~100 items
+                               (xmlui.org/docs/howto/iterate-without-a-container-element);
+                               a 200 KB file is thousands of rows. List
+                               virtualizes inside its own bounded viewport.
+                               Ownership colors ride on the row objects (bg/fg,
+                               baked in __bramFileContextRows with the memoized
+                               array identity) so no per-row binding touches
+                               worklist.value. -->
+                          <List
+                            data="{window.__bramFileContextRows(fileContext.value.content, fileRuns, rowId, worklist.value &amp;&amp; worklist.value.items)}"
+                            idKey="n"
+                            height="24rem">
                             <HStack
                               width="100%"
                               gap="$space-2"
                               verticalAlignment="start"
-                              backgroundColor="{$item.owner ? window.__bramItemColor($item.owner, worklist.value &amp;&amp; worklist.value.items, $item.owner === rowId ? 100 : 50) : 'transparent'}">
+                              backgroundColor="{$item.bg}">
                               <Text
                                 width="3rem"
                                 textAlign="end"
@@ -761,10 +774,10 @@
                                 whiteSpace="pre-wrap"
                                 fontFamily="$fontFamily-monospace"
                                 fontSize="$fontSize-sm"
-                                color="{$item.owner &amp;&amp; $item.owner !== rowId ? '$textColor-secondary' : '$textColor-primary'}"
+                                color="{$item.fg}"
                                 value="{$item.text}" />
                             </HStack>
-                          </Items>
+                          </List>
                           <Text
                             when="{fileContext.value.truncated}"
                             variant="caption"

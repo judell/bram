@@ -36395,18 +36395,29 @@ fn context_search<R: tauri::Runtime>(
 // previously-set-up project still has a stale hook from an older release —
 // without this, the Setup button stays hidden after an upgrade and
 // enhance_run never re-fires to overwrite the stale file.
-fn hook_matches_bundle<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    on_disk: &Path,
-    bundle_rel: &str,
-) -> bool {
+// #334 (Walt's ask): the seeded conventions copy opens with a version
+// marker so cross-release size/content series self-document. This is the
+// single source of truth for the installed file's exact bytes — the Setup
+// writer and both currency checks (the needs-setup flag and the Status
+// row) all consume it, so the stamp can never make a fresh install read
+// "stale". Same version in, identical bytes out: Setup's byte-idempotence
+// holds, and the marker moves only when the release does. The canonical
+// app/__shell/conventions.md stays unstamped.
+fn seeded_conventions_bytes<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<Vec<u8>> {
+    let (bundle, _) = serve_app_file(Some(app), "__shell/conventions.md")?;
+    let mut out = format!("<!-- bram v{} -->\n", env!("CARGO_PKG_VERSION")).into_bytes();
+    out.extend_from_slice(&bundle);
+    Some(out)
+}
+
+fn sidecar_matches_seeded<R: tauri::Runtime>(app: &AppHandle<R>, on_disk: &Path) -> bool {
     let Ok(disk_bytes) = std::fs::read(on_disk) else {
         return false;
     };
-    let Some((bundle_bytes, _)) = serve_app_file(Some(app), bundle_rel) else {
-        return false;
-    };
-    disk_bytes == bundle_bytes
+    match seeded_conventions_bytes(app) {
+        Some(expected) => disk_bytes == expected,
+        None => false,
+    }
 }
 
 fn extract_marker_block<'a>(disk: &'a str, start: &str, end: &str) -> Option<&'a str> {
@@ -36692,8 +36703,8 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
     // Codex side. Without this, a stale sidecar (bundle bumped after Setup
     // last ran) leaves `claude_installed` true and the Setup banner hidden,
     // even though Agent Coordination correctly flags the row as stale.
-    let claude_sidecar_current = is_source_repo
-        || (sidecar.exists() && hook_matches_bundle(app, &sidecar, "__shell/conventions.md"));
+    let claude_sidecar_current =
+        is_source_repo || (sidecar.exists() && sidecar_matches_seeded(app, &sidecar));
     // retire-python-hooks-rust-only: registration currency is the whole
     // Claude hook story — there are no installed scripts to compare, only
     // the bram-guard link (whose absence makes the expected commands None,
@@ -37081,10 +37092,10 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
     // Conventions sidecar — skipped on the source repo.
     let sidecar_path = proj.join(ENHANCE_SIDECAR_REL);
     if !is_source_repo {
-        let (conventions_bytes, _mime) = serve_app_file(Some(app), "__shell/conventions.md")
+        // Stamped with the writing release's version marker — see
+        // seeded_conventions_bytes (#334).
+        let conventions = seeded_conventions_bytes(app)
             .ok_or_else(|| "conventions template not found".to_string())?;
-        let conventions = String::from_utf8(conventions_bytes)
-            .map_err(|e| format!("conventions template not utf-8: {}", e))?;
         if let Some(parent) = sidecar_path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("create {}: {}", parent.display(), e))?;
@@ -37092,13 +37103,7 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
         // Always write in non-source repos — the sidecar is a whole-file
         // Setup-managed bundle with no user-edit story, and conventions.md
         // changes ship every release. Issue #173.
-        write_template_if_safe(
-            &sidecar_path,
-            conventions.as_bytes(),
-            true,
-            &mut wrote,
-            &mut skipped,
-        )?;
+        write_template_if_safe(&sidecar_path, &conventions, true, &mut wrote, &mut skipped)?;
         // Migration: remove the legacy sidecar so the project doesn't end
         // up with two convention files. NotFound is fine (legacy install
         // wasn't there, or already migrated).
@@ -41306,10 +41311,10 @@ fn agent_coordination_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_j
                 "seen": seen,
             }));
         } else {
-            let matches = hook_matches_bundle(app, &path, "__shell/conventions.md");
+            let matches = sidecar_matches_seeded(app, &path);
             let disk_len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            let bundle_len = serve_app_file(Some(app), "__shell/conventions.md")
-                .map(|(b, _)| b.len() as u64)
+            let bundle_len = seeded_conventions_bytes(app)
+                .map(|b| b.len() as u64)
                 .unwrap_or(0);
             rows.push(json!({
                 "signal": ENHANCE_SIDECAR_REL,

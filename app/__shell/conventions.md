@@ -1797,6 +1797,27 @@ note <n> -m "…"` for comments). The worklist contract around issues
 (`closesIssues`, `issue-<N>-` ids, close-on-push-automatic) is
 forge-agnostic and identical on both.
 
+### Resource-heavy test suites: cap the workers
+
+When running a multi-worker browser test suite (Playwright, or anything
+else that spawns a browser per worker) from an agent session, cap
+parallelism explicitly — e.g. `npx playwright test --workers=2` —
+instead of accepting the default worker-per-core.
+
+The receipt: on 2026-09-04 a subagent ran a Playwright spec five times
+back-to-back at default parallelism (8 workers) on a machine whose swap
+was nearly full. The machine-wide memory pressure froze **every**
+webview on the machine — both running Bram instances' panes stalled for
+26–126 seconds at a stretch, tracking the test runs exactly. An
+identical 78.6 s freeze from 2026-08-25 carries the same signature, so
+this is a class, not a one-off.
+
+The worst multiplier is the fail-retry loop: a failing test that
+retries with tracing enabled spawns extra browsers *and* records
+traces. Iterating on a failing spec is exactly when the cap matters
+most — which is also exactly when an agent is most likely to be
+re-running the suite over and over.
+
 ### Windows: Smart App Control blocks on unsigned binaries
 
 Bram ships unsigned binaries, and on some Windows 11 machines Smart

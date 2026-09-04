@@ -1,0 +1,92 @@
+<Component
+  name="Inbox"
+  var.lanesReady="{!!(inbox.value &amp;&amp; inbox.value.lanes)}"
+  var.emptyAll="{lanesReady &amp;&amp;
+    inbox.value.lanes.needsYouNow.length === 0 &amp;&amp;
+    inbox.value.lanes.yourDecision.length === 0 &amp;&amp;
+    inbox.value.lanes.othersHands.length === 0 &amp;&amp;
+    inbox.value.lanes.looseEnds.length === 0}">
+
+  <!-- The engine's data seam is GET /__needs-you (serve_needs_you, #338).
+       This tab renders it; the reconciliation lives host-side. -->
+  <DataSource id="inbox" url="/__needs-you" />
+
+  <VStack padding="$space-4" gap="$space-4" width="*">
+    <Heading level="h2" value="Needs You" />
+
+    <!-- Progress annotation while the freshness / reconciliation check runs
+         (docs/needs-you-inbox.md): a blank inbox must read as *verifying*,
+         never as "nothing waiting" — that false negative is the one signal
+         this surface exists to prevent. -->
+    <Text when="{!lanesReady}" color="$textColor-secondary">
+      Checking what's waiting on you…
+    </Text>
+
+    <Text when="{emptyAll}" color="$textColor-secondary">
+      Nothing is waiting on you right now.
+    </Text>
+
+    <!-- Needs you now -->
+    <VStack gap="$space-2" when="{lanesReady &amp;&amp; inbox.value.lanes.needsYouNow.length > 0}">
+      <Heading level="h4" value="🔴 Needs you now" />
+      <Items data="{inbox.value.lanes.needsYouNow}">
+        <Card>
+          <VStack gap="$space-1">
+            <Text fontWeight="$fontWeight-bold">{$item.title}</Text>
+            <Text fontSize="$fontSize-sm" color="$textColor-secondary">{$item.detail}</Text>
+            <Button variant="ghost" size="sm" label="Open" onClick="navigate($item.link)" />
+          </VStack>
+        </Card>
+      </Items>
+    </VStack>
+
+    <!-- Your decision, when you're ready -->
+    <VStack gap="$space-2" when="{lanesReady &amp;&amp; inbox.value.lanes.yourDecision.length > 0}">
+      <Heading level="h4" value="🟡 Your decision, when you're ready" />
+      <Items data="{inbox.value.lanes.yourDecision}">
+        <Card>
+          <VStack gap="$space-1">
+            <Text fontWeight="$fontWeight-bold">{$item.title}</Text>
+            <Text fontSize="$fontSize-sm" color="$textColor-secondary">{$item.detail}</Text>
+            <Button variant="ghost" size="sm" label="Open" onClick="navigate($item.link)" />
+          </VStack>
+        </Card>
+      </Items>
+    </VStack>
+
+    <!-- In someone else's hands -->
+    <VStack gap="$space-2" when="{lanesReady &amp;&amp; inbox.value.lanes.othersHands.length > 0}">
+      <Heading level="h4" value="🟢 In someone else's hands" />
+      <Items data="{inbox.value.lanes.othersHands}">
+        <Card>
+          <VStack gap="$space-1">
+            <Text fontWeight="$fontWeight-bold">{$item.title}</Text>
+            <Text fontSize="$fontSize-sm" color="$textColor-secondary">{$item.detail}</Text>
+            <Button variant="ghost" size="sm" label="Open" onClick="navigate($item.link)" />
+          </VStack>
+        </Card>
+      </Items>
+    </VStack>
+
+    <!-- Loose ends -->
+    <VStack gap="$space-2" when="{lanesReady &amp;&amp; inbox.value.lanes.looseEnds.length > 0}">
+      <Heading level="h4" value="⚪ Loose ends" />
+      <Items data="{inbox.value.lanes.looseEnds}">
+        <Card>
+          <VStack gap="$space-1">
+            <Text fontWeight="$fontWeight-bold">{$item.title}</Text>
+            <Text fontSize="$fontSize-sm" color="$textColor-secondary">{$item.detail}</Text>
+            <Button variant="ghost" size="sm" label="Open" onClick="navigate($item.link)" />
+          </VStack>
+        </Card>
+      </Items>
+    </VStack>
+
+    <!-- v1 scope note, straight from the engine payload. -->
+    <VStack when="{lanesReady &amp;&amp; inbox.value.notes}" gap="$space-1" marginTop="$space-2">
+      <Items data="{inbox.value.notes}">
+        <Text fontSize="$fontSize-sm" color="$textColor-secondary">{$item}</Text>
+      </Items>
+    </VStack>
+  </VStack>
+</Component>

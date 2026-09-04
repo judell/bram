@@ -44519,6 +44519,223 @@ fn worklist_items(doc: &serde_json::Value) -> Vec<serde_json::Value> {
         .unwrap_or_default()
 }
 
+// ---------------------------------------------------------------------------
+// "Needs You" inbox — the ownership engine (docs/needs-you-inbox.md, #338).
+//
+// The whole surface derives from one rule: an item is in the user's lane when
+// the last move was not theirs and it is theirs to make next. `owner_state_lane`
+// is that rule as a pure function; every lane — and, later, the ping — projects
+// from it, never hand-assigned per source. This is the engine slice only:
+// host-side, exposed as data at `GET /__needs-you`; the pane surface and the
+// ping are separate later items.
+//
+// v1 covers the ground-truth LOCAL sources (worklist, commits, queued closes),
+// which Bram already computes reliably. Full issue/PR whose-court triage
+// (reviews requested, checks, merge state) needs the forge adapter's PR data
+// and lands in a later slice — per Requirement 0 we render only what we can
+// verify, and mark everything else rather than assert it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum NeedsYouLane {
+    NeedsYouNow,
+    YourDecision,
+    OthersHands,
+    LooseEnds,
+}
+
+fn owner_state_lane(court_user: bool, blocking: bool, loose_end: bool) -> NeedsYouLane {
+    if loose_end {
+        NeedsYouLane::LooseEnds
+    } else if court_user {
+        if blocking {
+            NeedsYouLane::NeedsYouNow
+        } else {
+            NeedsYouLane::YourDecision
+        }
+    } else {
+        NeedsYouLane::OthersHands
+    }
+}
+
+fn needs_you_lane_key(lane: NeedsYouLane) -> &'static str {
+    match lane {
+        NeedsYouLane::NeedsYouNow => "needsYouNow",
+        NeedsYouLane::YourDecision => "yourDecision",
+        NeedsYouLane::OthersHands => "othersHands",
+        NeedsYouLane::LooseEnds => "looseEnds",
+    }
+}
+
+fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str, Vec<u8>) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+
+    // (lane, rendered item) — bucketed AFTER owner_state_lane decides, so the
+    // lane assignment is never hand-written per source.
+    let mut classified: Vec<(NeedsYouLane, serde_json::Value)> = Vec::new();
+
+    // bram-local: worklist items with work on disk awaiting your decision.
+    // `applied`, or a begun `proposed` item, is the honest host-side signal
+    // that the ball is in your court and blocking (a commit or drop is next).
+    // Exact committability/exclusivity lives client-side; this is ground truth
+    // enough for the lane.
+    let doc = worklist_doc(app);
+    for item in worklist_items(&doc) {
+        let id = item
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if id.is_empty() {
+            continue;
+        }
+        let status = item
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("proposed");
+        let begun = item.get("begunAtMs").is_some();
+        let waiting = status == "applied" || (status == "proposed" && begun);
+        if !waiting {
+            continue;
+        }
+        let closes: Vec<String> = item
+            .get("closesIssues")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|e| e.get("number").and_then(|n| n.as_i64()))
+                    .map(|n| format!("#{}", n))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut detail = String::from("Changes are on disk, waiting for your commit or drop.");
+        if !closes.is_empty() {
+            detail.push_str(&format!(" Would close {}.", closes.join(", ")));
+        }
+        let lane = owner_state_lane(true, true, false);
+        classified.push((
+            lane,
+            serde_json::json!({
+                "source": "bram-local",
+                "id": id,
+                "title": format!("Worklist item \u{201c}{}\u{201d} is ready to commit", id),
+                "detail": detail,
+                "link": "/worklist2",
+                "court": "user",
+                "blocking": true,
+                "verified": true,
+            }),
+        ));
+    }
+
+    // commits: unpushed commits (ground truth via git).
+    let unpushed = git_run(app, &["rev-list", "--count", "HEAD", "--not", "--remotes=origin"])
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or(0);
+    if unpushed > 0 {
+        let lane = owner_state_lane(true, false, true);
+        classified.push((
+            lane,
+            serde_json::json!({
+                "source": "commit",
+                "id": "unpushed",
+                "title": format!("{} commit{} ready to push", unpushed, if unpushed == 1 { "" } else { "s" }),
+                "detail": "Push to publish them \u{2014} and to fire any queued issue closes.",
+                "link": "/commits",
+                "court": "user",
+                "blocking": false,
+                "verified": true,
+            }),
+        ));
+    }
+
+    // bram-local: issue closes queued for your next push (ground truth).
+    let pending = issue_close_queue_file(app)
+        .map(|p| read_pending_issue_closes(&p))
+        .unwrap_or_default();
+    if !pending.is_empty() {
+        let issues: Vec<String> = pending.iter().map(|r| format!("#{}", r.issue)).collect();
+        let lane = owner_state_lane(true, false, true);
+        classified.push((
+            lane,
+            serde_json::json!({
+                "source": "bram-local",
+                "id": "queued-closes",
+                "title": format!("{} issue close{} queued", pending.len(), if pending.len() == 1 { "" } else { "s" }),
+                "detail": format!("{} will close on your next push, once the commit reaches the default branch.", issues.join(", ")),
+                "link": "/commits",
+                "court": "user",
+                "blocking": false,
+                "verified": true,
+            }),
+        ));
+    }
+
+    // Bucket by the lane owner_state_lane chose — never hand-assigned.
+    let mut needs_now: Vec<serde_json::Value> = Vec::new();
+    let mut your_decision: Vec<serde_json::Value> = Vec::new();
+    let mut others_hands: Vec<serde_json::Value> = Vec::new();
+    let mut loose_ends: Vec<serde_json::Value> = Vec::new();
+    for (lane, v) in classified {
+        match lane {
+            NeedsYouLane::NeedsYouNow => needs_now.push(v),
+            NeedsYouLane::YourDecision => your_decision.push(v),
+            NeedsYouLane::OthersHands => others_hands.push(v),
+            NeedsYouLane::LooseEnds => loose_ends.push(v),
+        }
+    }
+
+    append_bram_trace_line(
+        app,
+        "needs-you",
+        &format!(
+            "op=serve now={} decision={} others={} loose={}",
+            needs_now.len(),
+            your_decision.len(),
+            others_hands.len(),
+            loose_ends.len()
+        ),
+    );
+
+    let body = serde_json::json!({
+        "verifiedAtMs": now_ms,
+        "lanes": {
+            "needsYouNow": needs_now,
+            "yourDecision": your_decision,
+            "othersHands": others_hands,
+            "looseEnds": loose_ends,
+        },
+        "notes": [
+            "v1 covers ground-truth local sources \u{2014} worklist, commits, queued closes. Full issue and PR whose-court triage (reviews requested, checks, merge state) lands in a later slice (#338)."
+        ],
+    })
+    .to_string()
+    .into_bytes();
+    (200, "application/json; charset=utf-8", body)
+}
+
+#[cfg(test)]
+mod needs_you_tests {
+    use super::*;
+
+    #[test]
+    fn owner_state_lane_projects_court_and_blocking() {
+        assert_eq!(needs_you_lane_key(owner_state_lane(true, true, false)), "needsYouNow");
+        assert_eq!(needs_you_lane_key(owner_state_lane(true, false, false)), "yourDecision");
+        assert_eq!(needs_you_lane_key(owner_state_lane(false, true, false)), "othersHands");
+        assert_eq!(needs_you_lane_key(owner_state_lane(false, false, false)), "othersHands");
+    }
+
+    #[test]
+    fn loose_end_wins_over_court() {
+        // A one-click local action is a loose end regardless of court/blocking.
+        assert_eq!(needs_you_lane_key(owner_state_lane(true, true, true)), "looseEnds");
+        assert_eq!(needs_you_lane_key(owner_state_lane(false, false, true)), "looseEnds");
+    }
+}
+
 fn worklist_description(doc: &serde_json::Value) -> String {
     doc.get("description")
         .and_then(|v| v.as_str())
@@ -49563,6 +49780,12 @@ fn route_request<R: tauri::Runtime>(
             .to_string()
             .into_bytes();
         return (200, "application/json; charset=utf-8", body);
+    }
+
+    // Needs You inbox — the ownership engine's data seam (#338). The pane's
+    // Inbox tab renders this; the engine itself is `serve_needs_you`.
+    if path == "__needs-you" {
+        return serve_needs_you(app);
     }
 
     // issue-327 scoped diff: serve one scope's interval patch for one path,

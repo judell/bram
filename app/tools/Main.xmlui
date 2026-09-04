@@ -477,7 +477,7 @@
     </property>
     <!-- worklist2 cutover complete: the legacy Workspace tab and its
          Show legacy Worklist setting were retired in the 0.5.3 run. -->
-    <NavLink label="Needs You" to="/needs-you" />
+    <NavLink label="Awaiting You" to="/needs-you" />
     <NavLink label="Worklist" to="/worklist2" />
     <NavLink label="Transcript" to="/transcript" />
     <NavLink label="Search" to="/search" />

@@ -11,8 +11,23 @@
        This tab renders it; the reconciliation lives host-side. -->
   <DataSource id="inbox" url="/__needs-you" />
 
+  <!-- issue-338 live-refresh: refetch on the same host events the engine's
+       ground-truth lanes derive from — no poll (push-over-polling). -->
+  <PushSource id="inboxWorklistEvt" initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('worklist-changed')}" />
+  <ChangeListener listenTo="{inboxWorklistEvt.value &amp;&amp; inboxWorklistEvt.value.tick}"
+    onDidChange="() => inbox.refetch()" />
+  <PushSource id="inboxGitStatusEvt" initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('git-status-changed', false)}" />
+  <ChangeListener listenTo="{inboxGitStatusEvt.value &amp;&amp; inboxGitStatusEvt.value.tick}"
+    onDidChange="() => inbox.refetch()" />
+  <PushSource id="inboxIssuesEvt" initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('issues-changed')}" />
+  <ChangeListener listenTo="{inboxIssuesEvt.value &amp;&amp; inboxIssuesEvt.value.tick}"
+    onDidChange="() => inbox.refetch()" />
+
   <VStack padding="$space-4" gap="$space-4" width="*">
-    <Heading level="h2" value="Needs You" />
+    <Heading level="h2" value="Awaiting You" />
 
     <!-- Progress annotation while the freshness / reconciliation check runs
          (docs/needs-you-inbox.md): a blank inbox must read as *verifying*,

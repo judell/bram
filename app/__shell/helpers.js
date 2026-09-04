@@ -2778,17 +2778,32 @@ window.__bramOwnershipSummary = function (patch, runs, rowId, independence) {
   for (var k = 0; k < order.length; k++) {
     var id = order[k];
     var relation = "";
-    if (!id) relation = "no claim was live when these lines were written";
+    // ownership-reports-consequences (Jon, 2026-09-04): every row states what
+    // a Commit click DOES, in the reader's language — never a bookkeeping
+    // adjective the reader must translate. The old strings ("independently
+    // committable", "no claim was live…") reported mechanism; a designer-level
+    // reader needed a forensic session per row to find the action in them.
+    // The unattributed row asks nothing of the reader — it exists only so
+    // the claimant counts visibly sum to the file's total. Say the one
+    // plain fact and stop; the ordering nuance (they commit under whichever
+    // item goes last) lives in the docs, not in a table cell. Two rounds of
+    // cleverer copy here both failed the "what am I supposed to DO with
+    // this?" test (Jon, 2026-09-04).
+    if (!id)
+      relation = "no action needed — these lines will go along with this file's last commit";
     else if (Object.prototype.hasOwnProperty.call(verdicts, id)) {
       var v = verdicts[id];
-      // issue-327: the gate now stages by claim interval, so an independent
-      // patch commits exactly its own lines. The parenthetical that warned
-      // otherwise (#336's whole-file caveat) retired when interval staging
-      // landed.
-      if (v.independent) relation = "independently committable";
+      // issue-327: the gate stages by claim interval, so an independent
+      // patch commits exactly its own lines.
+      if (v.independent) relation = "commits cleanly on its own, in any order";
       else if ((v.dependsOn || []).length)
-        relation = "depends on " + v.dependsOn.join(", ");
-      else relation = "not independently committable";
+        relation =
+          "commit " +
+          v.dependsOn.join(", ") +
+          " first — these changes build on its work";
+      else
+        relation =
+          "cannot commit alone — commit together with this file's other items";
     }
     out.push({ id: id || null, added: per[id].added, relation: relation });
   }

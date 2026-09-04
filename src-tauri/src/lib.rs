@@ -16359,6 +16359,14 @@ fn record_prefixed_inflight_sentinel<R: tauri::Runtime>(
     if ids.is_empty() {
         return;
     }
+    // iterate-edits-need-claim-boundaries: the snapshot variant below stamps
+    // the claim boundary itself (record_claim_interval, pre-overwrite), so
+    // refinement work attributes to the item being refined. Do NOT add an
+    // explicit record_claim_interval here: both calls would run before the
+    // sentinel overwrite, so the unchanged-ids dedupe cannot see the first
+    // one, and each Refine click writes a zero-length duplicate boundary
+    // (live receipt: two kind=iterate refs 246 ms apart, same tree,
+    // 2026-09-04 21:49Z).
     write_inflight_claim_sentinel(app, &ids, sentinel_kind);
     // iterate-writes-feedback-history: record the iterate as a worklist-history
     // feedback event so it surfaces in the History tab and lights the live
@@ -38197,6 +38205,101 @@ type AttributionResult = (
     std::collections::HashMap<String, (usize, usize)>,
 );
 
+// iterate-edits-need-claim-boundaries: an interval whose recorded owner has
+// left the board (committed and pruned) is a GHOST — its lines are almost
+// always later refinements to a still-live begun item covering the same path
+// (live case 2026-09-04: +146 lines of issue-338 forge work credited to the
+// long-committed watcher-coalesce item, verdict "not independently
+// committable"). Every consumer of interval ownership — the attribution
+// runs, the scoped diff that interval staging commits, and the independence
+// check — resolves through this index so display and staging agree. A ghost
+// resolves per path to the UNIQUE live begun item whose declared files cover
+// it; ambiguity stays unowned rather than guessed ("a guess wearing a fact's
+// face"). Each resolution is collected by the caller and traced as
+// op=ghost-owner-reassigned so the inference is auditable, never silent.
+struct GhostOwnerIndex {
+    live: std::collections::HashSet<String>,
+    begun_files: Vec<(String, Vec<String>)>,
+}
+
+fn ghost_owner_index<R: tauri::Runtime>(app: &AppHandle<R>) -> GhostOwnerIndex {
+    let mut live = std::collections::HashSet::new();
+    let mut begun_files: Vec<(String, Vec<String>)> = Vec::new();
+    if let Some(path) = worklist_file(app) {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(items) = doc.get("items").and_then(|v| v.as_array()) {
+                    for item in items {
+                        let Some(id) = item.get("id").and_then(|v| v.as_str()) else {
+                            continue;
+                        };
+                        live.insert(id.to_string());
+                        if item.get("begunAtMs").is_none() {
+                            continue;
+                        }
+                        let mut files: Vec<String> = item
+                            .get("files")
+                            .and_then(|v| v.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|f| f.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if let Some(f) = item.get("file").and_then(|v| v.as_str()) {
+                            files.push(f.to_string());
+                        }
+                        begun_files.push((id.to_string(), files));
+                    }
+                }
+            }
+        }
+    }
+    GhostOwnerIndex { live, begun_files }
+}
+
+impl GhostOwnerIndex {
+    // Returns (effective owner, Some(ghost id) when a reassignment or drop
+    // happened). A live owner passes through untouched.
+    fn resolve(&self, owner: Option<String>, path: &str) -> (Option<String>, Option<String>) {
+        let Some(id) = owner else {
+            return (None, None);
+        };
+        if self.live.contains(&id) {
+            return (Some(id), None);
+        }
+        let mut hits = self
+            .begun_files
+            .iter()
+            .filter(|(_, files)| files.iter().any(|f| staged_path_covered_by(f, path)));
+        match (hits.next(), hits.next()) {
+            (Some((cand, _)), None) => (Some(cand.clone()), Some(id)),
+            _ => (None, Some(id)),
+        }
+    }
+}
+
+fn trace_ghost_reassignments<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    site: &str,
+    notes: &std::collections::BTreeSet<String>,
+) {
+    if notes.is_empty() {
+        return;
+    }
+    let joined: Vec<&str> = notes.iter().map(|s| s.as_str()).take(6).collect();
+    append_bram_trace_line(
+        app,
+        "claim-interval",
+        &format!(
+            "op=ghost-owner-reassigned site={} n={} map={}",
+            site,
+            notes.len(),
+            joined.join(",")
+        ),
+    );
+}
+
 fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionResult {
     let mut empty: AttributionResult = Default::default();
     let Some(root) = project_root(Some(app)) else {
@@ -38215,6 +38318,8 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
     if arr.is_empty() {
         return empty;
     }
+    let ghosts = ghost_owner_index(app);
+    let mut ghost_notes: std::collections::BTreeSet<String> = Default::default();
     // Spawns are counted and traced, the way #323 counts the board build's own.
     // A cache whose hit rate is asserted rather than measured is how a "cached"
     // path quietly keeps paying full price.
@@ -38317,10 +38422,23 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
         };
         let Some(n) = n else { continue };
         // Collect this path's ordered (owner, hunks) steps and replay through
-        // the pure, unit-tested core.
+        // the pure, unit-tested core. Ghost owners resolve per path here so
+        // the rendered runs never credit a departed item.
         let path_steps: Vec<(Option<String>, Vec<AttrHunk>)> = steps
             .iter()
-            .filter_map(|(owner, m)| m.get(&path).map(|h| (owner.clone(), h.clone())))
+            .filter_map(|(owner, m)| {
+                m.get(&path).map(|h| {
+                    let (eff, from) = ghosts.resolve(owner.clone(), &path);
+                    if let Some(f) = from {
+                        ghost_notes.insert(format!(
+                            "{}→{}",
+                            f,
+                            eff.as_deref().unwrap_or("unowned")
+                        ));
+                    }
+                    (eff, h.clone())
+                })
+            })
             .collect();
         let runs = attribution_runs_for_path(n, &path_steps);
         if !runs.is_empty() {
@@ -38333,8 +38451,12 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
     // figure should report on a contended path.
     let mut totals: std::collections::HashMap<String, (usize, usize)> = Default::default();
     for (owner, m) in &steps {
-        let Some(id) = owner else { continue };
-        for hunks in m.values() {
+        for (path, hunks) in m {
+            let (eff, from) = ghosts.resolve(owner.clone(), path);
+            if let Some(f) = from {
+                ghost_notes.insert(format!("{}→{}", f, eff.as_deref().unwrap_or("unowned")));
+            }
+            let Some(id) = eff else { continue };
             for h in hunks {
                 for (c, _) in &h.lines {
                     let e = totals.entry(id.clone()).or_insert((0, 0));
@@ -38347,6 +38469,7 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
             }
         }
     }
+    trace_ghost_reassignments(app, "attribution", &ghost_notes);
     let _ = &mut empty;
     CLAIM_ATTR_SPAWNS.store(spawns.get(), std::sync::atomic::Ordering::Relaxed);
     (out, totals)
@@ -38384,6 +38507,8 @@ fn claim_interval_diff<R: tauri::Runtime>(
     let Some(arr) = doc.get("intervals").and_then(|v| v.as_array()) else {
         return empty;
     };
+    let ghosts = ghost_owner_index(app);
+    let mut ghost_notes: std::collections::BTreeSet<String> = Default::default();
     let mut patch = String::new();
     let mut matched = 0usize;
     let mut spawns = 0usize;
@@ -38392,13 +38517,27 @@ fn claim_interval_diff<R: tauri::Runtime>(
             continue;
         };
         // Same ownership rule as the attribution replay: a multi-id claim owns
-        // its interval as a set, attributable to no one item.
+        // its interval as a set, attributable to no one item. Ghost intervals
+        // are deliberately NOT reassigned here (unlike the runs): their
+        // patches span old trees whose content may already be in HEAD, so
+        // pulling one into an item's commit patch can never apply — the first
+        // live attempt failed on exactly this ("patch does not apply" across
+        // three files, 2026-09-04 22:1x). A ghost's surviving lines ride with
+        // the file's next WHOLE-FILE commit, which is what the Ownership
+        // "no item" row promises.
         let ids = rec.get("ids").and_then(|v| v.as_array());
         let owner = match ids.map(|a| a.len()) {
-            Some(1) => ids.and_then(|a| a[0].as_str()),
+            Some(1) => ids.and_then(|a| a[0].as_str()).map(String::from),
             _ => None,
         };
-        let wanted = match owner {
+        let owner = match owner {
+            Some(id) if !ghosts.live.contains(&id) => {
+                ghost_notes.insert(format!("{}→unowned", id));
+                None
+            }
+            other => other,
+        };
+        let wanted = match &owner {
             Some(id) => id == scope,
             None => scope == "__unattributed",
         };
@@ -38429,6 +38568,7 @@ fn claim_interval_diff<R: tauri::Runtime>(
             }
         }
     }
+    trace_ghost_reassignments(app, "scoped-diff", &ghost_notes);
     append_bram_trace_line(
         app,
         "claim-interval",
@@ -38617,6 +38757,8 @@ fn claim_interval_independence<R: tauri::Runtime>(
     // Owners with several intervals get their patches concatenated; when
     // claims interleave, that concatenation is relative to intervening work —
     // the check below then honestly reports the dependence.
+    let ghosts = ghost_owner_index(app);
+    let mut ghost_notes: std::collections::BTreeSet<String> = Default::default();
     let mut order: Vec<String> = Vec::new();
     let mut patches: std::collections::HashMap<String, String> = Default::default();
     for (i, rec) in arr.iter().enumerate() {
@@ -38627,6 +38769,17 @@ fn claim_interval_independence<R: tauri::Runtime>(
         let owner = match ids.map(|a| a.len()) {
             Some(1) => ids.and_then(|a| a[0].as_str()).map(String::from),
             _ => None,
+        };
+        // Ghost intervals are excluded here for the same reason the scoped
+        // diff excludes them: their stale patches fail apply-checks against
+        // HEAD and would report false dependence. Unowned lines don't take
+        // part in independence — they ride with whole-file commits.
+        let owner = match owner {
+            Some(id) if !ghosts.live.contains(&id) => {
+                ghost_notes.insert(format!("{}→unowned", id));
+                None
+            }
+            other => other,
         };
         let Some(owner) = owner else { continue };
         let next = arr
@@ -38724,6 +38877,7 @@ fn claim_interval_independence<R: tauri::Runtime>(
             serde_json::json!({ "independent": false, "dependsOn": depends_on }),
         );
     }
+    trace_ghost_reassignments(app, "independence", &ghost_notes);
     append_bram_trace_line(
         app,
         "claim-interval",
@@ -56880,7 +57034,7 @@ mod claim_interval_tests {
 
 #[cfg(test)]
 mod claim_interval_prune_tests {
-    use super::claim_intervals_partition;
+    use super::{claim_intervals_partition, GhostOwnerIndex};
     use serde_json::json;
     use std::collections::HashSet;
 
@@ -56974,6 +57128,64 @@ mod claim_interval_prune_tests {
         let (keep, retire) = claim_intervals_partition(&ivs, &live(&[]));
         assert!(retire.is_empty());
         assert_eq!(keep.len(), 1);
+    }
+
+    fn ghost_idx(live: &[&str], begun: &[(&str, &[&str])]) -> GhostOwnerIndex {
+        GhostOwnerIndex {
+            live: live.iter().map(|s| s.to_string()).collect(),
+            begun_files: begun
+                .iter()
+                .map(|(id, files)| {
+                    (
+                        id.to_string(),
+                        files.iter().map(|f| f.to_string()).collect(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn live_owner_passes_through_untouched() {
+        let idx = ghost_idx(&["A"], &[("A", &["src/x.rs"])]);
+        assert_eq!(
+            idx.resolve(Some("A".into()), "src/x.rs"),
+            (Some("A".into()), None)
+        );
+    }
+
+    // The 2026-09-04 shape: watcher-coalesce committed+pruned, issue-338 the
+    // sole live begun claimant of lib.rs — the ghost's lines are 338's.
+    #[test]
+    fn ghost_resolves_to_unique_covering_begun_item() {
+        let idx = ghost_idx(&["B"], &[("B", &["src-tauri/src/lib.rs"])]);
+        assert_eq!(
+            idx.resolve(Some("dead".into()), "src-tauri/src/lib.rs"),
+            (Some("B".into()), Some("dead".into()))
+        );
+    }
+
+    #[test]
+    fn ghost_with_ambiguous_or_no_cover_drops_to_unowned() {
+        let two = ghost_idx(&["B", "C"], &[("B", &["src/x.rs"]), ("C", &["src/x.rs"])]);
+        assert_eq!(
+            two.resolve(Some("dead".into()), "src/x.rs"),
+            (None, Some("dead".into()))
+        );
+        let none = ghost_idx(&["B"], &[("B", &["other.rs"])]);
+        assert_eq!(
+            none.resolve(Some("dead".into()), "src/x.rs"),
+            (None, Some("dead".into()))
+        );
+    }
+
+    #[test]
+    fn directory_entries_cover_nested_paths() {
+        let idx = ghost_idx(&["B"], &[("B", &["app/tools"])]);
+        assert_eq!(
+            idx.resolve(Some("dead".into()), "app/tools/Main.xmlui"),
+            (Some("B".into()), Some("dead".into()))
+        );
     }
 }
 

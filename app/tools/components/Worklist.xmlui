@@ -595,22 +595,23 @@
                   value="{!rowBegun || $item.status === 'unchanged' ? '' : '+' + $item.added + ' −' + $item.removed + ($item.status === 'new' ? ' (new)' : ($item.status === 'deleted' ? ' (deleted)' : ''))}" />
               </Column>
               <Column header="shared with" width="3*" headerHorizontalAlignment="start">
-                <!-- worklist-surface-planned-overlap: two tenses, visually
-                     distinct. Begun sharers (work overlap) full strength;
-                     never-begun co-declarants (plan overlap) muted with
-                     `· planned`, restoring the visibility d1798ca removed
-                     without reopening the credit lie it fixed. -->
+                <!-- worklist-surface-planned-overlap: two tenses, carried by
+                     LEADING LABELS in plain text, not by style (Jon,
+                     2026-09-04: "don't use color. lead with done: or
+                     planned:"). `done:` = that item's changes are in this
+                     file now; `planned:` = it merely declares this file —
+                     zero of the CHANGES-column lines are its. Style-only
+                     distinction failed twice: muting read as accident, and
+                     the counts read as belonging to the sharers. -->
                 <VStack gap="$space-0">
                   <Text
                     when="{window.__bramSharedWithBegun($item, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value).length > 0}"
                     overflowMode="flow"
-                    value="{window.__bramJoinIds(window.__bramSharedWithBegun($item, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value))}" />
+                    value="{'done: ' + window.__bramJoinIds(window.__bramSharedWithBegun($item, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value))}" />
                   <Text
                     when="{window.__bramSharedWithPlanned($item, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value).length > 0}"
                     overflowMode="flow"
-                    variant="caption"
-                    color="$textColor-secondary"
-                    value="{window.__bramJoinIds(window.__bramSharedWithPlanned($item, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value)) + ' · planned'}" />
+                    value="{'planned: ' + window.__bramJoinIds(window.__bramSharedWithPlanned($item, worklist.value &amp;&amp; worklist.value.items, inflightClaim.value))}" />
                 </VStack>
               </Column>
             </Table>
@@ -712,7 +713,7 @@
                             <Text
                               variant="code"
                               fontSize="$fontSize-sm"
-                              value="{$item.id ? ($item.id === rowId ? $item.id + ' (this item)' : $item.id) : 'unattributed'}" />
+                              value="{$item.id ? ($item.id === rowId ? $item.id + ' (this item)' : $item.id) : 'no item'}" />
                           </Column>
                           <Column header="unique" width="90px" headerHorizontalAlignment="start">
                             <Text
@@ -720,7 +721,7 @@
                               fontSize="$fontSize-sm"
                               value="{'+' + $item.added}" />
                           </Column>
-                          <Column header="separability" width="3*" headerHorizontalAlignment="start">
+                          <Column header="what commit does" width="3*" headerHorizontalAlignment="start">
                             <Text
                               overflowMode="flow"
                               value="{$item.relation}" />

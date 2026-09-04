@@ -461,3 +461,106 @@ When a startup assertion fails, prefer fixing the *fixture* over the
 product until you have shown the failure reproduces outside the
 harness — the first `already_setup` failure was the harness committing
 its own live trace log, not Setup churn.
+
+## The synthetic-testbed method: drive a real instance, read its trace
+
+**This is the default way to develop a pane or interaction change — not
+an occasional technique.** For anything a user sees or clicks, stand up
+a throwaway Bram showing the *whole range* of the feature's states at
+once, drive it by hand, and refine against its trace. The startup-dance
+section above is one *scripted* application of the second-instance
+pattern; this is the general, *exploratory* loop it belongs to. Jon,
+after a first sitting that reshaped a surface in minutes: "just
+absolutely the way to develop."
+
+### The loop
+
+- **Stand up a second full Bram** against a scratch fixture
+  (`./bram <scratch>`) — the startup-dance second-instance pattern
+  generalized past startup. The fixture's `resources/worklist.json`,
+  `resources/.claim-intervals.json`, and `refs/bram/claims/*` are
+  hand-built to display *every* state the change must handle **on one
+  board**. For interval staging that was a disjoint entanglement, a
+  supersession, a wrong-order dependency, and an unentangled solo, all
+  present at once — the range a scripted test would cover one case per
+  assertion, laid out for the eye simultaneously.
+- **The human drives it as a clueless user** — clicking around,
+  misclicking, hitting real states. This is the fuzzer. It finds what
+  scripted expectations miss because it moves the way hands actually
+  move, not the way a test author predicted they would.
+- **The agent reads the trace, not the screen.** The orchestrator
+  watches the demo instance's
+  `resources/bram-traces/bram-trace.log` and diagnoses from
+  host-observable evidence — the log-first drill, run live instead of
+  post-mortem.
+- **Edits land in seconds.** Under the `./bram` symlink launch the demo
+  serves `app/**` from the *source* repo's disk (`helpers.js`,
+  `*.xmlui`, `vendor/**`) per request, so an edit shows on a pane reload
+  with no rebuild and no relaunch — the reload boundary this doc already
+  establishes, turned into a development cadence. Edit → reload → look →
+  refine, tightened to the length of a reload. (Rust still
+  rebuilds+relaunches; the pane does not.)
+- **Reset to baseline on one word.** Keep the fixture's baseline as a
+  snapshot (HEAD + claim refs + `resources/` sidecars); reset restores
+  it so each probe starts clean.
+
+### Why it's the way, not a technique
+
+- It makes the *render-what-the-reader-sees* rule (in
+  `app/__shell/conventions.md`) continuous. A green test verifies
+  behavior; this verifies communication, live — the half a passing spec
+  cannot reach.
+- It puts the human on realistic input and the agent on tireless
+  observation — each doing what it is best at.
+- It turns the trace from a forensic artifact into a live conversation.
+
+### Receipts (proof, not decoration)
+
+In its first sittings the method surfaced, in minutes each:
+
+- the terse-strip + `tooltipMarkdown` redesign — five iterations
+  against live renders, each visible on reload;
+- an accidental **Drop that could not be canceled** — destructive, a
+  ~90s agent turn, and Escape never routed to the agent's PTY (#340);
+- an **env-inheritance bug** that silently disabled the demo agent's
+  transcript.
+
+None were reachable by reading code; all were obvious the moment a
+human drove an instrumented instance.
+
+### Two launch-hygiene requirements the method itself surfaced
+
+- **Scrub `CLAUDE_CODE_*` on launch.** An agent-launched instance
+  inherits the parent's `CLAUDE_CODE_CHILD_SESSION` and its siblings;
+  the demo's own agent then reads the marker, concludes it is a child
+  session, and disables transcript saving. Launch with
+  `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ID`,
+  `CLAUDE_CODE_BRIDGE_SESSION_ID`, `CLAUDE_CODE_MESSAGING_SOCKET`,
+  `CLAUDE_CODE_MESSAGING_TOKEN`, `CLAUDE_CODE_ENTRYPOINT`, and
+  `CLAUDE_CODE_EXECPATH` unset (`env -u …`). (#339)
+- **Kill by PID, never `pkill bram`** — your working session is a
+  `bram` process too (the same trap the startup-dance section names).
+
+### Institutionalization (#339)
+
+`scripts/demo-instance.sh` builds synthetic starters and hydrates them;
+the durable scenario library is **git branches** (`scenario/<name>`),
+strictly more powerful than regenerate-from-script because a branch
+captures real *stumbled-into* states, not only synthesized ones — the
+externalized-context principle applied to fixtures. A parked scenario
+is a git object you can bisect, blame, diff, and hand to another
+machine. One wrinkle shapes the verbs: the board reads *uncommitted*
+work, so "using" a branch is checkout **plus** a small
+`git reset --mixed <boundary>` hydrate that moves the pending-work
+commit back into the dirty worktree; claim refs coexist across
+scenarios because each boundary's `atMs` id is unique.
+
+### Relationship to the scripted sections
+
+The Worklist-gate walkthrough and the startup-dance harness are
+*scripted* checks with fixed expectation tables — good for regression,
+weak at discovery. This is their *exploratory* complement: unscripted
+human driving against the full state range, for finding what you didn't
+know to script. The two feed each other — graduating a finding here
+into a `scenario/` branch or a harness assertion is how an exploratory
+discovery becomes a durable regression guard.

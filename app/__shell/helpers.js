@@ -2201,18 +2201,27 @@ window.__bramInflightBlocker = function (claim) {
 // Un-begun sharers are ignored on the same reasoning __bramWorklistOverlapGroups
 // uses: an item that has never been approved has not run, so it cannot have
 // contributed.
-window.__bramItemChangedSplit = function (item, items, claim) {
+window.__bramItemChangedSplit = function (item, items, claim, coSelected) {
   var out = { exclusive: [], shared: [], sharedDeclared: [], added: 0, removed: 0, sharedAdded: 0, sharedRemoved: 0 };
   var files = (item && item.changedFiles) || [];
   var byId = {};
   var list = items || [];
   for (var i = 0; i < list.length; i++) byId[list[i].id] = list[i];
+  // issue-337: exclusivity is scoped to the OPERATION being gated. A begun
+  // sharer that is co-selected for the same commit does not entangle — the
+  // #336 inversion (committing all N together is safe: every line is
+  // accounted for by an id in that commit), and the exact scope the host
+  // backstop already uses (owners outside the REQUEST refuse; owners inside
+  // it pass). Callers with no selection context omit the param and get the
+  // strict per-item reading unchanged.
+  var co = coSelected || [];
   for (var j = 0; j < files.length; j++) {
     var f = files[j];
     if (!f) continue;
     var sharers = f.sharedWith || [];
     var begunSharer = false;
     for (var k = 0; k < sharers.length; k++) {
+      if (co.indexOf(sharers[k]) !== -1) continue;
       var other = byId[sharers[k]];
       if (other && window.__bramWorklist2Begun(other, claim)) begunSharer = true;
     }
@@ -2338,7 +2347,12 @@ window.__bramSelectionAllCommittable = function (items, sel, claim) {
     // items were both offered a button that would land one item's work
     // under the other's id. Begun-ness is trivially true for applied items.
     if (!window.__bramWorklist2Begun(it, claim)) return false;
-    if (!window.__bramItemChangedSplit(it, list, claim).exclusive.length) return false;
+    // issue-337: pass the selection so co-selected begun sharers do not veto
+    // each other. Single-item selections are unchanged (every other claimant
+    // is outside a one-item selection — the #336 guard intact); Andrew's
+    // six-way batch, where the co-selected rows' union covers every path,
+    // lights Commit N instead of offering only Drop.
+    if (!window.__bramItemChangedSplit(it, list, claim, chosen).exclusive.length) return false;
   }
   return true;
 };

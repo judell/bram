@@ -38005,6 +38005,32 @@ fn apply_attr_hunks(owners: &mut Vec<Option<String>>, hunks: &[AttrHunk], owner:
     }
 }
 
+// The per-path replay core, pure and testable: given the base tree's line
+// count and the ordered (owner, hunks) steps that touch this path, produce the
+// ownership runs. Extracted from claim_attribution_runs so the chain-replay —
+// the part that failed to reproduce a 2026-09-03 field anomaly and that #327's
+// interval staging depends on for positional exactness — is unit-testable
+// without a git repo or an AppHandle. Verified against the adversarial shape:
+// an old base, an intervening committed resize applied by an earlier step, and
+// a sole claimant editing at a high line number, all land at the true
+// positions (see attribution_replay_survives_intervening_resize).
+fn attribution_runs_for_path(
+    base_n: usize,
+    path_steps: &[(Option<String>, Vec<AttrHunk>)],
+) -> Vec<serde_json::Value> {
+    let mut owners: Vec<Option<String>> = vec![None; base_n];
+    for (owner, hunks) in path_steps {
+        let who = owner.as_deref().unwrap_or("\u{0}");
+        apply_attr_hunks(&mut owners, hunks, who);
+    }
+    for o in owners.iter_mut() {
+        if o.as_deref() == Some("\u{0}") {
+            *o = None;
+        }
+    }
+    attr_runs(&owners)
+}
+
 // Collapse a per-line ownership vector into contiguous runs. Unowned lines are
 // a first-class state -- work predating the capture phase, or done with no claim
 // live -- and are reported as such rather than folded into a neighbour.
@@ -38124,34 +38150,42 @@ fn claim_attribution_runs<R: tauri::Runtime>(
         // The base tree is fixed, so a path's line count there never changes.
         let bkey = format!("{}:{}", base, path);
         let n = match base_cache.lock().ok().and_then(|c| c.get(&bkey).copied()) {
-            Some(hit) => hit,
+            Some(hit) => Some(hit),
             None => {
-                let v = git(&["show", &bkey])
-                    .map(|c| if c.is_empty() { 0 } else { c.lines().count() })
-                    .unwrap_or(0);
-                if let Ok(mut c) = base_cache.lock() {
-                    c.insert(bkey, v);
+                // fix-attribution-run-line-offset: distinguish a git FAILURE
+                // (base ref pruned mid-read, unreadable) from an honestly
+                // empty base (file created after the base — 0 is correct
+                // there). A failure previously fell through to n=0, which
+                // collapses every run toward line 1 and emits WRONG
+                // attribution; the honest fallback is to skip the path and
+                // report it unattributed. Only successful reads are cached.
+                match git(&["show", &bkey]) {
+                    Some(c) => {
+                        let v = if c.is_empty() { 0 } else { c.lines().count() };
+                        if let Ok(mut cache) = base_cache.lock() {
+                            cache.insert(bkey, v);
+                        }
+                        Some(v)
+                    }
+                    None => {
+                        append_bram_trace_line(
+                            app,
+                            "claim-interval",
+                            &format!("op=attr-base-unreadable path={}", path),
+                        );
+                        None
+                    }
                 }
-                v
             }
         };
-        let mut owners: Vec<Option<String>> = vec![None; n];
-        for (owner, m) in &steps {
-            if let Some(hunks) = m.get(&path) {
-                match owner {
-                    Some(id) => apply_attr_hunks(&mut owners, hunks, id),
-                    // Unattributable interval: still replay it so later
-                    // positions stay correct, but own nothing.
-                    None => apply_attr_hunks(&mut owners, hunks, "\u{0}"),
-                }
-            }
-        }
-        for o in owners.iter_mut() {
-            if o.as_deref() == Some("\u{0}") {
-                *o = None;
-            }
-        }
-        let runs = attr_runs(&owners);
+        let Some(n) = n else { continue };
+        // Collect this path's ordered (owner, hunks) steps and replay through
+        // the pure, unit-tested core.
+        let path_steps: Vec<(Option<String>, Vec<AttrHunk>)> = steps
+            .iter()
+            .filter_map(|(owner, m)| m.get(&path).map(|h| (owner.clone(), h.clone())))
+            .collect();
+        let runs = attribution_runs_for_path(n, &path_steps);
         if !runs.is_empty() {
             out.insert(path, runs);
         }
@@ -51398,6 +51432,17 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
                     ),
                 );
             }
+            // issue-337 papercut: a refusal specifically for TTL expiry
+            // proves the authorization dead — the claim it anchored is dead
+            // with it. Retire the refused ids from the inflight claim in the
+            // same motion, so a batch member whose advance missed the TTL
+            // does not lock row selection board-wide until a manual
+            // /__worklist/end (field case: ~60s late, "Changes in progress"
+            // over finished work). Other refusals leave the claim alone —
+            // they may be retried under the same auth.
+            if e.contains("authorization expired") {
+                let _ = shrink_inflight_claim_sentinel(app, &ids);
+            }
             return (
                 400,
                 "application/json; charset=utf-8",
@@ -56308,6 +56353,43 @@ mod claim_attribution_tests {
         let m = parse_attr_diff("+++ b/f\n@@ -2,1 +2,3 @@\n a\n+X\n+Y\n");
         apply_attr_hunks(&mut o, &m["f"], "A");
         assert_eq!(ids(&o), "..AA..");
+    }
+
+    // fix-attribution-run-line-offset: the chain-replay must place a sole
+    // claimant's added lines at their TRUE positions even when the base tree
+    // is old and an earlier interval grew the file (a committed resize). This
+    // is the adversarial shape #327's interval staging depends on; it
+    // reproduces (in-repo, no git needed) the scratch case that proved the
+    // algorithm sound after the 2026-09-03 field anomaly. base is 40 lines;
+    // item-old inserts 5 after line 5 (file → 45); item-mid touches nothing;
+    // prose edits near the end. Prose's run must sit where prose actually
+    // edited, not shifted by the intervening growth.
+    fn hunks(diff: &str) -> Vec<super::AttrHunk> {
+        super::parse_attr_diff(diff)["f"].clone()
+    }
+    #[test]
+    fn attribution_replay_survives_intervening_resize() {
+        let base_n = 40;
+        let step_old = (
+            Some("item-old".to_string()),
+            hunks("+++ b/f\n@@ -5,1 +5,6 @@\n line5\n+g1\n+g2\n+g3\n+g4\n+g5\n"),
+        );
+        // item-mid touches the file in neither direction; it simply is not a
+        // step for this path (mirrors an empty interval diff).
+        let step_prose = (
+            Some("prose".to_string()),
+            hunks("+++ b/f\n@@ -41,1 +41,3 @@\n line38\n+edit1\n+edit2\n"),
+        );
+        let runs = super::attribution_runs_for_path(base_n, &[step_old, step_prose]);
+        // item-old owns the 5 grown lines at 6..10; prose owns its 2 edits at
+        // the grown position 42..43 — not shifted low.
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0]["itemId"], "item-old");
+        assert_eq!(runs[0]["startLine"], 6);
+        assert_eq!(runs[0]["endLine"], 10);
+        assert_eq!(runs[1]["itemId"], "prose");
+        assert_eq!(runs[1]["startLine"], 42);
+        assert_eq!(runs[1]["endLine"], 43);
     }
 
     // The regression this whole design exists to avoid: identical line CONTENT

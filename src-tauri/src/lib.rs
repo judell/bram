@@ -55894,6 +55894,21 @@ pub fn run() {
                 // (commits, ref moves) stay immediate below.
                 let git_status_debounce = Duration::from_millis(1000);
                 let mut pending_git_status_since: Option<Instant> = None;
+                // watcher-coalesce-session-jsonl-storm: trailing-edge coalesce
+                // for the session-JSONL WEBVIEW cascade (talk-session-changed,
+                // subagents-changed, search-index reindex). A subagent's
+                // transcript grows on every append during a spec run, and
+                // emitting the cascade per append starves the webview (the
+                // xmlui freeze: 798 heartbeat-drift with git-status already
+                // fixed). Trailing-edge fires the FINAL state after the burst
+                // quiets, so unlike the leading-edge debounce removed earlier
+                // it does not strand the last write (the isWaitingForAssistant
+                // flip). Turn-end detection stays per-event below — only the
+                // webview emits are deferred.
+                let session_emit_debounce = Duration::from_millis(400);
+                let mut pending_session_emit_since: Option<Instant> = None;
+                let mut pending_session_emit_paths: Vec<std::path::PathBuf> = Vec::new();
+                let mut pending_subagents_emit = false;
                 use std::sync::mpsc::RecvTimeoutError;
                 loop {
                     let res = rx.recv_timeout(Duration::from_millis(100));
@@ -55933,6 +55948,27 @@ pub fn run() {
                         if since.elapsed() >= git_status_debounce {
                             emit_replayable_signal(&app_handle, "git-status-changed");
                             pending_git_status_since = None;
+                        }
+                    }
+                    // watcher-coalesce-session-jsonl-storm: fire the coalesced
+                    // session-activity emits once the append burst has quieted.
+                    if let Some(since) = pending_session_emit_since {
+                        if since.elapsed() >= session_emit_debounce {
+                            if pending_subagents_emit {
+                                emit_replayable_signal(&app_handle, "subagents-changed");
+                                pending_subagents_emit = false;
+                            }
+                            if !pending_session_emit_paths.is_empty() {
+                                emit_talk_session_changed_for_path_providers(
+                                    &app_handle,
+                                    &pending_session_emit_paths,
+                                    claude_sessions_dir.as_ref(),
+                                    codex_sessions_dir.as_ref(),
+                                );
+                                pending_session_emit_paths.clear();
+                                search_index_request(IndexBucket::Sessions);
+                            }
+                            pending_session_emit_since = None;
                         }
                     }
                     let event = match res {
@@ -56138,7 +56174,9 @@ pub fn run() {
                         .any(|p| p.components().any(|c| c.as_os_str() == "subagents"));
                     if is_subagent_event {
                         trace_dispatch("subagents", &[]);
-                        emit_replayable_signal(&app_handle, "subagents-changed");
+                        // watcher-coalesce: defer to the trailing-edge fire.
+                        pending_subagents_emit = true;
+                        pending_session_emit_since = Some(Instant::now());
                     }
 
                     // Session JSONL changes get their own dispatch. The
@@ -56221,25 +56259,16 @@ pub fn run() {
                                 janitor_resolved_claims(&app_handle);
                             }
                         }
-                        // Removed the 100ms leading-edge debounce: it
-                        // suppressed the FINAL write of an agent
-                        // response burst (the one that flips
-                        // isWaitingForAssistant to false), wedging the
-                        // tools-pane spinner + disabled input until the
-                        // next user activity. XMLUI dedupes refetches
-                        // via structural sharing, so burst-emitting per
-                        // event is fine.
-                        emit_talk_session_changed_for_path_providers(
-                            &app_handle,
-                            &event.paths,
-                            claude_sessions_dir.as_ref(),
-                            codex_sessions_dir.as_ref(),
-                        );
-                        // Event-driven indexing: session JSONL grew — reindex
-                        // sessions. The indexer coalesces the burst and
-                        // serializes passes, so continuous growth is naturally
-                        // debounced (one pass per quiet gap, not per write).
-                        search_index_request(IndexBucket::Sessions);
+                        // watcher-coalesce-session-jsonl-storm: the webview
+                        // emit + reindex are deferred to the trailing-edge fire
+                        // at the top of the loop. A leading-edge debounce here
+                        // was removed once because it dropped the FINAL write's
+                        // emit (wedging the spinner) — trailing-edge fires that
+                        // final emit after the burst quiets, so it coalesces the
+                        // storm WITHOUT the wedge. The per-event turn-end
+                        // detection above is unaffected.
+                        pending_session_emit_paths = event.paths.clone();
+                        pending_session_emit_since = Some(Instant::now());
                         continue;
                     }
 

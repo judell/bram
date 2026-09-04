@@ -38058,10 +38058,17 @@ fn attr_runs(owners: &[Option<String>]) -> Vec<serde_json::Value> {
 // are cached for the process lifetime with no invalidation logic. Only the final
 // pair -- last boundary against the working tree -- is recomputed per call, which
 // is one `git diff` on top of the board build's existing four spawns.
-fn claim_attribution_runs<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-) -> std::collections::HashMap<String, Vec<serde_json::Value>> {
-    let mut empty = Default::default();
+type AttributionResult = (
+    std::collections::HashMap<String, Vec<serde_json::Value>>,
+    // issue-327: per-item interval-patch shortstat (added, removed) — what
+    // committing that item actually takes, since interval staging commits the
+    // item's own patch. Differs from the surviving-owned run count under
+    // supersession, and carries the removed count the runs cannot.
+    std::collections::HashMap<String, (usize, usize)>,
+);
+
+fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionResult {
+    let mut empty: AttributionResult = Default::default();
     let Some(root) = project_root(Some(app)) else {
         return empty;
     };
@@ -38190,9 +38197,29 @@ fn claim_attribution_runs<R: tauri::Runtime>(
             out.insert(path, runs);
         }
     }
+    // issue-327: per-item interval-patch totals — the '+'/'-' counts across
+    // each single-owner interval's hunks. This is exactly what interval
+    // staging commits for the item, and it is what the strip's "will commit"
+    // figure should report on a contended path.
+    let mut totals: std::collections::HashMap<String, (usize, usize)> = Default::default();
+    for (owner, m) in &steps {
+        let Some(id) = owner else { continue };
+        for hunks in m.values() {
+            for h in hunks {
+                for (c, _) in &h.lines {
+                    let e = totals.entry(id.clone()).or_insert((0, 0));
+                    match c {
+                        '+' => e.0 += 1,
+                        '-' => e.1 += 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
     let _ = &mut empty;
     CLAIM_ATTR_SPAWNS.store(spawns.get(), std::sync::atomic::Ordering::Relaxed);
-    out
+    (out, totals)
 }
 
 static CLAIM_ATTR_SPAWNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -38281,6 +38308,139 @@ fn claim_interval_diff<R: tauri::Runtime>(
         ),
     );
     serde_json::json!({ "patch": patch, "intervals": matched })
+}
+
+// issue-327 interval staging: commit the requested items' OWN hunks by
+// applying their interval patches to a scratch index seeded from HEAD and
+// committing that tree — the worktree and the real index are NEVER touched.
+// This is what makes committing one entangled item safe while another begun
+// item's uncommitted work remains in shared files: whole-file staging takes
+// the neighbour's hunks, interval staging takes only what claim_interval_diff
+// attributes to the requested ids.
+//
+// Order-independence is decided by git, not enforced: `git apply --check`
+// against the HEAD-seeded index fails when a requested item's patch is defined
+// relative to another begun item's work not in this request (the dependency
+// case), and the caller reports it. Returns (sha, committed_paths) or an error
+// the handler surfaces (falling back to whole-file staging only when there is
+// genuinely no interval to stage).
+fn interval_stage_commit<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    ids: &[String],
+    message: &str,
+    item_files: &std::collections::HashMap<String, Vec<String>>,
+) -> Result<(String, Vec<String>), String> {
+    let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
+    // Combined interval patch: each requested id's own hunks across its files.
+    let mut patch = String::new();
+    let mut committed: Vec<String> = Vec::new();
+    for id in ids {
+        for path in item_files.get(id).cloned().unwrap_or_default() {
+            let d = claim_interval_diff(app, id, &path);
+            if let Some(p) = d.get("patch").and_then(|v| v.as_str()) {
+                if !p.trim().is_empty() {
+                    patch.push_str(p);
+                    if !committed.contains(&path) {
+                        committed.push(path);
+                    }
+                }
+            }
+        }
+    }
+    if patch.trim().is_empty() {
+        return Err("no-interval".to_string());
+    }
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let idx = std::env::temp_dir().join(format!(
+        "bram-commit-index-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let pfile = idx.with_extension("patch");
+    let _ = std::fs::remove_file(&idx);
+    let git_idx = |args: &[&str]| -> Result<String, String> {
+        let out = std::process::Command::new("git")
+            .current_dir(&root)
+            .env("GIT_INDEX_FILE", &idx)
+            .args(args)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let cleanup = || {
+        let _ = std::fs::remove_file(&idx);
+        let _ = std::fs::remove_file(&pfile);
+    };
+    if let Err(e) = git_idx(&["read-tree", "HEAD"]) {
+        cleanup();
+        return Err(format!("scratch index seed failed: {}", e));
+    }
+    if let Err(e) = std::fs::write(&pfile, &patch) {
+        cleanup();
+        return Err(format!("patch write failed: {}", e));
+    }
+    let pfile_s = pfile.to_string_lossy().to_string();
+    // The order-independence gate. `--3way` is deliberately NOT used: on
+    // genuinely overlapping edits it writes conflict markers and succeeds,
+    // which would commit `<<<<<<<` under an item's id.
+    if let Err(e) = git_idx(&["apply", "--cached", "--check", &pfile_s]) {
+        cleanup();
+        return Err(format!(
+            "commit refused: the requested item's interval patch does not apply to HEAD — its \
+             change is defined relative to another begun item's work not in this request. Commit \
+             that item first, or approve both together. (git apply: {})",
+            e
+        ));
+    }
+    if let Err(e) = git_idx(&["apply", "--cached", &pfile_s]) {
+        cleanup();
+        return Err(format!("interval apply failed after check passed: {}", e));
+    }
+    let tree = match git_idx(&["write-tree"]) {
+        Ok(t) => t,
+        Err(e) => {
+            cleanup();
+            return Err(format!("write-tree failed: {}", e));
+        }
+    };
+    let head = match git_run(app, &["rev-parse", "HEAD"]) {
+        Ok(s) => s.trim().to_string(),
+        Err(e) => {
+            cleanup();
+            return Err(e);
+        }
+    };
+    // commit-tree ignores the index (it takes a tree + parent), so no
+    // GIT_INDEX_FILE — it must use the real repo, and it never touches the
+    // worktree or the real index.
+    let sha = match git_run(app, &["commit-tree", &tree, "-p", &head, "-m", message]) {
+        Ok(s) => s.trim().to_string(),
+        Err(e) => {
+            cleanup();
+            return Err(format!("commit-tree failed: {}", e));
+        }
+    };
+    if let Err(e) = git_run(app, &["update-ref", "HEAD", &sha]) {
+        cleanup();
+        return Err(format!("update-ref failed: {}", e));
+    }
+    cleanup();
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "worklist-commit",
+            &format!(
+                "op=interval-staged sha={} files={} ids={}",
+                &sha[..sha.len().min(7)],
+                committed.len(),
+                ids.len()
+            ),
+        );
+    }
+    Ok((sha, committed))
 }
 
 // issue-327 independence: is a claimant's work committable WITHOUT its
@@ -49860,15 +50020,26 @@ fn route_request<R: tauri::Runtime>(
         // absent-vs-empty reasoning as above.
         {
             let attr_started = std::time::Instant::now();
-            let runs = claim_attribution_runs(app);
+            let (runs, totals) = claim_attribution_runs(app);
             let paths = runs.len();
             let total: usize = runs.values().map(|v| v.len()).sum();
             let mut map = serde_json::Map::new();
             for (k, v) in runs {
                 map.insert(k, serde_json::Value::Array(v));
             }
+            // issue-327: per-item interval-patch shortstat, so the strip can
+            // report what a commit actually takes rather than the whole-file
+            // total. `{ itemId: { added, removed } }`.
+            let mut totals_map = serde_json::Map::new();
+            for (id, (a, r)) in totals {
+                totals_map.insert(id, serde_json::json!({ "added": a, "removed": r }));
+            }
             if let Some(obj) = doc.as_object_mut() {
                 obj.insert("attribution".to_string(), serde_json::Value::Object(map));
+                obj.insert(
+                    "attributionTotals".to_string(),
+                    serde_json::Value::Object(totals_map),
+                );
             }
             append_bram_trace_line(
                 app,
@@ -51778,10 +51949,18 @@ fn handle_worklist_commit<R: tauri::Runtime>(
     // a staged path is positive evidence the commit would take work that is
     // not this item's. Unattributed lines stay uncaught, honestly — the
     // attribution machinery never guesses.
+    // issue-327: when a staged path carries lines attributed to a begun item
+    // OUTSIDE this request, whole-file staging would take that item's work.
+    // This used to be a hard 409 (issue-336's interim guard). Now it triggers
+    // INTERVAL STAGING: commit only the requested items' own hunks via a
+    // scratch index, leaving the neighbour's uncommitted work in the worktree.
+    // The 409 survives only as the fallback when there is genuinely no interval
+    // to stage (work predating capture) — the honest baseline.
+    let mut needs_interval_stage = false;
     {
-        let runs_by_path = claim_attribution_runs(app);
+        let (runs_by_path, _) = claim_attribution_runs(app);
         let requested: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
-        for path in &files {
+        'scan: for path in &files {
             let Some(runs) = runs_by_path.get(path) else {
                 continue;
             };
@@ -51802,144 +51981,168 @@ fn handle_worklist_commit<R: tauri::Runtime>(
                         append_bram_trace_line(
                             app,
                             "worklist-commit",
-                            &format!("op=refuse-entangled path={} owner={}", path, owner),
+                            &format!("op=entangled-interval-stage path={} owner={}", path, owner),
                         );
                     }
-                    return worklist_json_error(
-                        409,
-                        format!(
-                            "commit refused: {} carries lines attributed to {}, which is not in \
-                             this request. Whole-file staging would land that item's work under \
-                             this commit's id and message. Commit {} first, approve both \
-                             together, or isolate hunks (see conventions.md, split-shared-files).",
-                            path, owner, owner
-                        ),
-                    );
+                    needs_interval_stage = true;
+                    break 'scan;
                 }
             }
         }
     }
-    // Auto-stage installed twins of listed canonicals (see
-    // INSTALLED_TWIN_PAIRS). Extending `files` here covers the scoped
-    // git add AND both unrelated-staged checks below in one place; an
-    // unchanged twin stages nothing, so this is a no-op unless the
-    // build refreshed it.
-    for twin in installed_twins_for(&files) {
-        if bram_trace_enabled() {
-            append_bram_trace_line(
-                app,
-                "worklist-commit",
-                &format!("op=auto-stage-twin path={}", twin),
-            );
-        }
-        files.push(twin);
-    }
-
-    // issue-308: phase progress. A large commit (85 files, >2 min in the
-    // field report) is indistinguishable from a wedged one to a caller
-    // watching a blocked HTTP request, and the route was previously silent
-    // between entry and completion. These three lines — staging,
-    // committing, committed — put the phase edges in the trace so "still
-    // working" and "stuck" can be told apart without touching git state.
-    // Counts and the short sha only; never file contents.
-    if bram_trace_enabled() {
-        append_bram_trace_line(
-            app,
-            "worklist-commit",
-            &format!("op=staging files={}", files.len()),
-        );
-    }
-
-    let staged_before = match git_staged_files(app) {
-        Ok(files) => files,
-        Err(e) => return worklist_json_error(500, e),
-    };
-    if let Err(e) = ensure_no_unrelated_staged_files(&staged_before, &files) {
-        return worklist_json_error(400, e);
-    }
-
-    // Stage per-file, tolerating paths git cannot match at all — even
-    // with `-A`, a pathspec that matches neither the working tree nor
-    // the index (never tracked, or its deletion already committed)
-    // fails the whole add. A stale worklist `files` entry aborted
-    // delete-phase tranche 1's commit four times this way
-    // (worklist-commit-stage-deletions, 2026-07-06). Unmatched paths
-    // are skipped and traced; every other add failure still aborts,
-    // and the staged_after emptiness guard below still refuses a
-    // commit where nothing staged.
-    let mut skipped_unmatched: Vec<String> = Vec::new();
-    for file in &files {
-        let add_args = worklist_commit_add_args(std::slice::from_ref(file));
-        if let Err(e) = git_run_owned(app, &add_args) {
-            if e.contains("did not match any files") {
-                skipped_unmatched.push(file.clone());
-                continue;
-            }
-            return worklist_json_error(500, format!("git add failed: {}", e.trim()));
-        }
-    }
-    if !skipped_unmatched.is_empty() && bram_trace_enabled() {
-        append_bram_trace_line(
-            app,
-            "worklist-commit",
-            &format!("op=skip-unmatched files={:?}", skipped_unmatched),
-        );
-    }
-    let staged_after = match git_staged_files(app) {
-        Ok(files) => files,
-        Err(e) => return worklist_json_error(500, e),
-    };
-    if let Err(e) = ensure_no_unrelated_staged_files(&staged_after, &files) {
-        return worklist_json_error(400, e);
-    }
-    if staged_after.is_empty() {
-        return worklist_json_error(400, "no staged changes for approved files");
-    }
-
-    let mut commit_args = vec![
-        "commit".to_string(),
-        "-m".to_string(),
-        message.to_string(),
-        "--".to_string(),
-    ];
-    // Scope the commit pathspec to what is actually STAGED for the item,
-    // not `files − skipped_unmatched`. A deletion staged before this call
-    // (the apply did `git rm`) makes `git add -A -- <path>` report "did
-    // not match any files" — the path landed in skipped_unmatched and was
-    // dropped from the commit, leaving the staged deletion behind to block
-    // the NEXT commit as an unrelated staged file (pa elections field
-    // report, worklist-commit-omits-staged-deletions). `staged_after`
-    // lists staged deletions, so intersecting with it includes them; a
-    // truly-unmatched path (never tracked, gone) is absent from it and
-    // stays excluded, and `git commit -- <path>` never sees a
-    // nothing-matching pathspec.
-    commit_args.extend(
-        files
+    // issue-327: per-id declared files, for the interval-staging patch builder.
+    let mut item_files_map: std::collections::HashMap<String, Vec<String>> = Default::default();
+    for id in &ids {
+        if let Some(item) = items
             .iter()
-            .filter(|f| staged_after.iter().any(|s| staged_path_covered_by(f, s)))
-            .cloned(),
-    );
-    // issue-312 belt-and-braces: the cost of that bug was its silence — ok
-    // plus a sha, the item pruned, and files left in the index for the next
-    // commit to refuse or absorb. Anything the item staged but the pathspec
-    // would not carry is a bug in the scoping above, so say so BEFORE
-    // committing rather than reporting success over it.
-    let committed_paths: Vec<String> = commit_args
-        .iter()
-        .skip_while(|a| a.as_str() != "--")
-        .skip(1)
-        .cloned()
-        .collect();
-    let left_behind = staged_paths_left_behind(&committed_paths, &staged_after);
-    if !left_behind.is_empty() {
+            .find(|it| it.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
+        {
+            item_files_map.insert(id.clone(), worklist_item_files(item));
+        }
+    }
+
+    // issue-327: interval-staged commit (entangled subset) or whole-file
+    // commit (the default). Both produce `sha` + `committed_paths` and
+    // converge on the shared post-commit tail below.
+    let sha: String;
+    let committed_paths: Vec<String>;
+    if needs_interval_stage {
+        match interval_stage_commit(app, &ids, message, &item_files_map) {
+            Ok((s, cp)) => {
+                sha = s;
+                committed_paths = cp;
+            }
+            Err(e) if e == "no-interval" => {
+                return worklist_json_error(
+                    409,
+                    "commit refused: this item's changes are entirely shared with another begun \
+                     item and it has no claim interval to stage from (work predating the capture \
+                     phase). Commit them together, or separate the hunks by hand."
+                        .to_string(),
+                );
+            }
+            Err(e) => return worklist_json_error(409, e),
+        }
+    } else {
+        // Whole-file staging: the default path, unchanged. Auto-stage
+        // installed twins of listed canonicals, then git add + git commit
+        // scoped to the item's files.
+        for twin in installed_twins_for(&files) {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "worklist-commit",
+                    &format!("op=auto-stage-twin path={}", twin),
+                );
+            }
+            files.push(twin);
+        }
+
+        // issue-308: phase progress. A large commit (85 files, >2 min in the
+        // field report) is indistinguishable from a wedged one to a caller
+        // watching a blocked HTTP request, and the route was previously silent
+        // between entry and completion. These three lines — staging,
+        // committing, committed — put the phase edges in the trace so "still
+        // working" and "stuck" can be told apart without touching git state.
+        // Counts and the short sha only; never file contents.
         if bram_trace_enabled() {
             append_bram_trace_line(
                 app,
                 "worklist-commit",
-                &format!("op=left-behind count={}", left_behind.len()),
+                &format!("op=staging files={}", files.len()),
             );
         }
-        return worklist_json_error(
+
+        let staged_before = match git_staged_files(app) {
+            Ok(files) => files,
+            Err(e) => return worklist_json_error(500, e),
+        };
+        if let Err(e) = ensure_no_unrelated_staged_files(&staged_before, &files) {
+            return worklist_json_error(400, e);
+        }
+
+        // Stage per-file, tolerating paths git cannot match at all — even
+        // with `-A`, a pathspec that matches neither the working tree nor
+        // the index (never tracked, or its deletion already committed)
+        // fails the whole add. A stale worklist `files` entry aborted
+        // delete-phase tranche 1's commit four times this way
+        // (worklist-commit-stage-deletions, 2026-07-06). Unmatched paths
+        // are skipped and traced; every other add failure still aborts,
+        // and the staged_after emptiness guard below still refuses a
+        // commit where nothing staged.
+        let mut skipped_unmatched: Vec<String> = Vec::new();
+        for file in &files {
+            let add_args = worklist_commit_add_args(std::slice::from_ref(file));
+            if let Err(e) = git_run_owned(app, &add_args) {
+                if e.contains("did not match any files") {
+                    skipped_unmatched.push(file.clone());
+                    continue;
+                }
+                return worklist_json_error(500, format!("git add failed: {}", e.trim()));
+            }
+        }
+        if !skipped_unmatched.is_empty() && bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "worklist-commit",
+                &format!("op=skip-unmatched files={:?}", skipped_unmatched),
+            );
+        }
+        let staged_after = match git_staged_files(app) {
+            Ok(files) => files,
+            Err(e) => return worklist_json_error(500, e),
+        };
+        if let Err(e) = ensure_no_unrelated_staged_files(&staged_after, &files) {
+            return worklist_json_error(400, e);
+        }
+        if staged_after.is_empty() {
+            return worklist_json_error(400, "no staged changes for approved files");
+        }
+
+        let mut commit_args = vec![
+            "commit".to_string(),
+            "-m".to_string(),
+            message.to_string(),
+            "--".to_string(),
+        ];
+        // Scope the commit pathspec to what is actually STAGED for the item,
+        // not `files − skipped_unmatched`. A deletion staged before this call
+        // (the apply did `git rm`) makes `git add -A -- <path>` report "did
+        // not match any files" — the path landed in skipped_unmatched and was
+        // dropped from the commit, leaving the staged deletion behind to block
+        // the NEXT commit as an unrelated staged file (pa elections field
+        // report, worklist-commit-omits-staged-deletions). `staged_after`
+        // lists staged deletions, so intersecting with it includes them; a
+        // truly-unmatched path (never tracked, gone) is absent from it and
+        // stays excluded, and `git commit -- <path>` never sees a
+        // nothing-matching pathspec.
+        commit_args.extend(
+            files
+                .iter()
+                .filter(|f| staged_after.iter().any(|s| staged_path_covered_by(f, s)))
+                .cloned(),
+        );
+        // issue-312 belt-and-braces: the cost of that bug was its silence — ok
+        // plus a sha, the item pruned, and files left in the index for the next
+        // commit to refuse or absorb. Anything the item staged but the pathspec
+        // would not carry is a bug in the scoping above, so say so BEFORE
+        // committing rather than reporting success over it.
+        let commit_pathspec: Vec<String> = commit_args
+            .iter()
+            .skip_while(|a| a.as_str() != "--")
+            .skip(1)
+            .cloned()
+            .collect();
+        let left_behind = staged_paths_left_behind(&commit_pathspec, &staged_after);
+        if !left_behind.is_empty() {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "worklist-commit",
+                    &format!("op=left-behind count={}", left_behind.len()),
+                );
+            }
+            return worklist_json_error(
             500,
             format!(
                 "refusing to commit: {} staged path(s) the approved items declared are not covered by the commit pathspec (e.g. {}). This is a Bram bug, not a policy decision; the index is unchanged.",
@@ -51952,38 +52155,39 @@ fn handle_worklist_commit<R: tauri::Runtime>(
                     .join(", ")
             ),
         );
-    }
-    if bram_trace_enabled() {
-        append_bram_trace_line(app, "worklist-commit", "op=committing");
-    }
-    if let Err(e) = git_run_owned(app, &commit_args) {
-        return worklist_json_error(500, format!("git commit failed: {}", e.trim()));
-    }
-    let sha = match git_run(app, &["rev-parse", "HEAD"]) {
-        Ok(s) => s.trim().to_string(),
-        Err(e) => {
-            return worklist_json_error(
-                500,
-                format!("commit created but sha lookup failed: {}", e.trim()),
-            )
         }
-    };
-    if bram_trace_enabled() {
-        append_bram_trace_line(
-            app,
-            "worklist-commit",
-            &format!("op=committed sha={}", &sha[..sha.len().min(7)]),
-        );
+        if bram_trace_enabled() {
+            append_bram_trace_line(app, "worklist-commit", "op=committing");
+        }
+        if let Err(e) = git_run_owned(app, &commit_args) {
+            return worklist_json_error(500, format!("git commit failed: {}", e.trim()));
+        }
+        sha = match git_run(app, &["rev-parse", "HEAD"]) {
+            Ok(s) => s.trim().to_string(),
+            Err(e) => {
+                return worklist_json_error(
+                    500,
+                    format!("commit created but sha lookup failed: {}", e.trim()),
+                )
+            }
+        };
+        committed_paths = files
+            .iter()
+            .filter(|f| staged_after.contains(f))
+            .cloned()
+            .collect();
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "worklist-commit",
+                &format!("op=committed sha={}", &sha[..sha.len().min(7)]),
+            );
+        }
     }
 
     let branch = git_run(app, &["rev-parse", "--abbrev-ref", "HEAD"])
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
-    let committed_paths: Vec<String> = files
-        .iter()
-        .filter(|f| staged_after.contains(f))
-        .cloned()
-        .collect();
     append_audit_record(
         app,
         audit_commit_record(

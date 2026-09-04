@@ -2245,10 +2245,51 @@ window.__bramItemChangedSplit = function (item, items, claim, coSelected) {
 
 // The shared paths behind the strip's counts. Filenames only -- the row
 // stays a scan line and the paths are one hover away.
-window.__bramWorklist2StripTooltip = function (item, claim, items) {
+window.__bramWorklist2StripTooltip = function (item, claim, items, attributionTotals) {
   var split = window.__bramItemChangedSplit(item, items, claim);
+  // For a committable row, the terse label dropped the on-disk total, the
+  // shared paths, the plan denominator and the last-change time; the tooltip
+  // is where they land, expanded rather than compressed. (worklist2-strip-terse)
+  if (window.__bramSelectionAllCommittable(items || [], [item.id], claim)) {
+    var cs = item.changeSummary || {};
+    var fileAdded = split.added + split.sharedAdded;
+    var fileRemoved = split.removed + split.sharedRemoved;
+    var totals = (attributionTotals || {})[item.id];
+    var takesAdded = totals ? totals.added : fileAdded;
+    var takesRemoved = totals ? totals.removed : fileRemoved;
+    var changed = split.exclusive.length + split.shared.length;
+    var lines = [];
+    lines.push(
+      "Commits +" + takesAdded + " −" + takesRemoved + " — this item's own hunks",
+    );
+    if (takesAdded !== fileAdded || takesRemoved !== fileRemoved) {
+      lines.push(
+        "On disk: +" + fileAdded + " −" + fileRemoved +
+          " — shared files carry neighbours' lines too",
+      );
+    }
+    lines.push("Files: " + changed + " of " + (cs.total || 0) + " planned");
+    if (split.shared.length) {
+      lines.push(
+        "Shares " + split.shared.length + " file" +
+          (split.shared.length === 1 ? "" : "s") + " with begun items: " +
+          split.shared.join(", "),
+      );
+    }
+    if (cs.lastChangeMs) {
+      lines.push("Last change: " + new Date(cs.lastChangeMs).toLocaleTimeString());
+    }
+    // Rendered via tooltipMarkdown: a blank line between facts makes each a
+    // markdown paragraph, so they render with paragraph spacing (Jon,
+    // 2026-09-03: "a bit of line separation"). The plain `tooltip` prop
+    // collapsed newlines to spaces and the Tooltip has no max-width, so it
+    // ran off-screen as one line before the switch to tooltipMarkdown.
+    return lines.join("\n\n");
+  }
+  // Non-committable rows: name the shared paths that block this row, or
+  // nothing when it isn't entangled.
   if (!split.shared.length) return "";
-  return split.shared.join("\n");
+  return "Shares " + split.shared.join(", ");
 };
 
 // Can every ticked item be STARTED — that is, does each need a fresh
@@ -2347,12 +2388,17 @@ window.__bramSelectionAllCommittable = function (items, sel, claim) {
     // items were both offered a button that would land one item's work
     // under the other's id. Begun-ness is trivially true for applied items.
     if (!window.__bramWorklist2Begun(it, claim)) return false;
-    // issue-337: pass the selection so co-selected begun sharers do not veto
-    // each other. Single-item selections are unchanged (every other claimant
-    // is outside a one-item selection — the #336 guard intact); Andrew's
-    // six-way batch, where the co-selected rows' union covers every path,
-    // lights Commit N instead of offering only Drop.
-    if (!window.__bramItemChangedSplit(it, list, claim, chosen).exclusive.length) return false;
+    // issue-327: exclusivity is no longer required to OFFER Commit. The host
+    // now interval-stages an entangled item's own hunks (scratch index, HEAD
+    // parent, worktree untouched), so a shared path is committable — the
+    // neighbour's uncommitted work simply stays in the worktree. What remains
+    // required is that the item has CHANGES of its own to commit (exclusive OR
+    // shared); a begun item with nothing on disk is not committable. The host
+    // still refuses a genuinely dependent commit (git apply --check fails) and
+    // names the item to commit first, so offering here is safe — the #336
+    // withholding and the #337 selection-scoping both retire into this.
+    var split = window.__bramItemChangedSplit(it, list, claim, chosen);
+    if (!split.exclusive.length && !split.shared.length) return false;
   }
   return true;
 };
@@ -2484,6 +2530,31 @@ window.__bramOwnClause = function (item, attribution) {
 // interleaving (per-line alternation reads as breakage). A file view sidesteps
 // both: it shows what is there and who put it there, which is what every blame
 // tool has always shown.
+// worklist-file-context-view: the whole current file as line rows, each
+// tagged with its claimant (from the attribution runs) so the File tab can
+// show WHERE each item's work sits in the full document — the big-picture
+// companion to the scoped Diff and the Ownership summary. Unowned lines carry
+// owner=null and render plain; owned regions read as marked passages in
+// context rather than as isolated hunks.
+window.__bramFileContextRows = function (content, runs, rowId) {
+  var spans = runs || [];
+  var ownerAt = function (n) {
+    for (var i = 0; i < spans.length; i++) {
+      if (n >= spans[i].startLine && n <= spans[i].endLine) return spans[i].itemId;
+    }
+    return null;
+  };
+  var lines = String(content == null ? "" : content).split("\n");
+  // A trailing newline yields a spurious final empty element; drop it.
+  if (lines.length && lines[lines.length - 1] === "") lines.pop();
+  var out = [];
+  for (var i = 0; i < lines.length; i++) {
+    out.push({ n: i + 1, text: lines[i], owner: ownerAt(i + 1) });
+  }
+  var _ = rowId; // emphasis is applied at render time via owner === rowId
+  return out;
+};
+
 window.__bramOwnershipRows = function (patch, runs) {
   var spans = runs || [];
   var ownerAt = function (n) {
@@ -2679,12 +2750,11 @@ window.__bramOwnershipSummary = function (patch, runs, rowId, independence) {
     if (!id) relation = "no claim was live when these lines were written";
     else if (Object.prototype.hasOwnProperty.call(verdicts, id)) {
       var v = verdicts[id];
-      // #336: the verdict is about PATCH separability and must not read as a
-      // promise about the gate, which stages whole files until
-      // stage-by-claim-interval lands. Keep the measurement, drop the false
-      // assurance; the parenthetical retires with that item.
-      if (v.independent)
-        relation = "patch applies independently (a commit still stages whole files)";
+      // issue-327: the gate now stages by claim interval, so an independent
+      // patch commits exactly its own lines. The parenthetical that warned
+      // otherwise (#336's whole-file caveat) retired when interval staging
+      // landed.
+      if (v.independent) relation = "independently committable";
       else if ((v.dependsOn || []).length)
         relation = "depends on " + v.dependsOn.join(", ");
       else relation = "not independently committable";
@@ -2747,7 +2817,7 @@ window.__bramSharedWithPlanned = function (file, items, claim) {
   return out;
 };
 
-window.__bramWorklist2Strip = function (item, claim, items, attribution) {
+window.__bramWorklist2Strip = function (item, claim, items, attribution, attributionTotals) {
   if (!item) return "";
   // issue-266: the close declaration belongs on the status line for
   // scannability, never buried in the expanded body.
@@ -2822,21 +2892,35 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution) {
       // TAKE (whole files, whoever wrote them) and how far the work has got
       // against its own plan -- "1 of 2 planned" is the signal that a commit
       // now would be committing something unfinished.
+      // issue-327: lead with what a commit actually TAKES. Interval staging
+      // commits the item's own hunks, so the headline is its interval-patch
+      // shortstat (attributionTotals). On a contended path that is less than
+      // the file total, which is shown as "on disk" context; for an
+      // unentangled item the two are equal and it reads as it always did. The
+      // old dual-number collapses into one honest figure. Items predating
+      // capture have no totals -- fall back to the file sum (what whole-file
+      // staging takes for them).
+      // worklist2-strip-terse (2026-09-03): the label carries only what
+      // decides "commit or not" — the item's own take, a partial-plan flag
+      // when the work is unfinished, and a bare "shared" flag when a commit
+      // would be entangled. Everything else (the on-disk file total, the
+      // shared paths by name, the last-change time, the plan denominator)
+      // moved to __bramWorklist2StripTooltip. The strip was a run-on
+      // sentence; the tooltip is where the expansion belongs.
+      var fileAdded = split.added + split.sharedAdded;
+      var fileRemoved = split.removed + split.sharedRemoved;
+      var totals = (attributionTotals || {})[item.id];
+      var takesAdded = totals ? totals.added : fileAdded;
+      var takesRemoved = totals ? totals.removed : fileRemoved;
+      var changedCount = split.exclusive.length + split.shared.length;
+      var partialFlag =
+        (cs.total || 0) > changedCount
+          ? " · " + changedCount + " of " + (cs.total || 0)
+          : "";
+      var sharedFlag = split.shared.length ? " · shared" : "";
       return withCloses(
-        "Will commit +" + (split.added + split.sharedAdded) +
-          " \u2212" + (split.removed + split.sharedRemoved) +
-          // Files a commit would TAKE, which is exclusive + shared: a commit
-          // stages whole files regardless of who else claims them. Counting
-          // only exclusives printed "0 of 2 planned" beside "+471 −125" for an
-          // item whose changes are all on shared paths.
-          " in " + (split.exclusive.length + split.shared.length) +
-          " of " + (cs.total || 0) + " planned" + sharedNote +
-          // Two questions, both answered, neither substituted for the other:
-          // `+N` is what a commit would TAKE (whole-file staging, whoever wrote
-          // it) and `yours:` is what this item actually wrote. They converge
-          // once commits stage by claim interval.
-          window.__bramOwnClause(item, attribution) +
-          (t ? " · last: " + t : ""),
+        "Will commit +" + takesAdded + " −" + takesRemoved +
+          partialFlag + sharedFlag,
       );
     }
     // Not committable: every changed path is claimed by another begun item.

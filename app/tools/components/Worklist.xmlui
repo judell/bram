@@ -456,7 +456,18 @@
                Natural width, so it never wraps (Jon: "make the main badges not
                wrap"); the earlier fixed-width slot is what forced two-line
                ids. -->
-          <Text value="{$item.id}" tooltip="{$item.id}" />
+          <!-- worklist2-id-column (2026-09-03, Jon: "align the messages in a
+               second column"): a fixed-width slot so every strip starts at the
+               same x. This is the aligned-column fix the comments above (L426,
+               L449) always pointed to; the earlier attempt's two-line-id
+               regression is avoided by maxLines=1 + ellipsis truncation, with
+               the full id recoverable in the tooltip it already carries. -->
+          <Text
+            value="{$item.id}"
+            tooltip="{$item.id}"
+            width="17rem"
+            maxLines="1"
+            overflowMode="ellipsis" />
           <!-- Basenames in the line, full paths in the tooltip: the row is a
                scan line and repo-relative paths would swamp it.
 
@@ -468,12 +479,17 @@
           <!-- width="*" bounds the flow wrap: without it the Text sizes to
                content, overflows the row edge, and clips mid-word instead of
                wrapping inside the available width (observed 2026-09-03). -->
+          <!-- fontSize one notch below base: the base size was chosen when
+               the strip carried colorized amber text that needed ink to
+               register; those colors are gone, so -sm reads fine and reclaims
+               vertical space. -->
           <Text
             width="*"
+            fontSize="$fontSize-sm"
             color="$textColor-secondary"
             overflowMode="flow"
-            tooltip="{window.__bramWorklist2StripTooltip($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items)}"
-            value="{window.__bramWorklist2Strip($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items, worklist.value &amp;&amp; worklist.value.attribution)}" />
+            tooltipMarkdown="{window.__bramWorklist2StripTooltip($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items, worklist.value &amp;&amp; worklist.value.attributionTotals)}"
+            value="{window.__bramWorklist2Strip($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items, worklist.value &amp;&amp; worklist.value.attribution, worklist.value &amp;&amp; worklist.value.attributionTotals)}" />
           <!-- issue-278: the row backlink is GONE, on live evidence.
                It was redundant and, worse, it put a SECOND meaning of "shared"
                on a line that already had one. Live board, 2026-08-24:
@@ -710,6 +726,56 @@
                               value="{$item.relation}" />
                           </Column>
                         </Table>
+                      </VStack>
+                    </TabItem>
+                    <!-- worklist-file-context-view: the WHOLE current file with
+                         each item's lines tinted in place — the big picture the
+                         scoped Diff and the Ownership summary lose. Reuses
+                         /__local-file-preview (working-tree content, 200 KB cap)
+                         and the payload's attribution runs. Fetches on expand;
+                         one local read per opened file. -->
+                    <TabItem label="File">
+                      <VStack gap="$space-0" paddingVertical="$space-2">
+                        <DataSource
+                          id="fileContext"
+                          url="{'/__local-file-preview?path=' + encodeURIComponent($item.path)}" />
+                        <VStack
+                          when="{fileContext.value &amp;&amp; fileContext.value.ok}"
+                          gap="$space-0">
+                          <Items data="{window.__bramFileContextRows(fileContext.value.content, fileRuns, rowId)}">
+                            <HStack
+                              width="100%"
+                              gap="$space-2"
+                              verticalAlignment="start"
+                              backgroundColor="{$item.owner ? window.__bramItemColor($item.owner, worklist.value &amp;&amp; worklist.value.items, $item.owner === rowId ? 100 : 50) : 'transparent'}">
+                              <Text
+                                width="3rem"
+                                textAlign="end"
+                                variant="caption"
+                                fontFamily="$fontFamily-monospace"
+                                fontSize="$fontSize-xs"
+                                color="$textColor-secondary"
+                                value="{$item.n}" />
+                              <Text
+                                width="*"
+                                whiteSpace="pre-wrap"
+                                fontFamily="$fontFamily-monospace"
+                                fontSize="$fontSize-sm"
+                                color="{$item.owner &amp;&amp; $item.owner !== rowId ? '$textColor-secondary' : '$textColor-primary'}"
+                                value="{$item.text}" />
+                            </HStack>
+                          </Items>
+                          <Text
+                            when="{fileContext.value.truncated}"
+                            variant="caption"
+                            color="$textColor-secondary"
+                            paddingTop="$space-1"
+                            value="⋯ file truncated at 200 KB; owned regions past this point are not shown." />
+                        </VStack>
+                        <Text
+                          when="{fileContext.value &amp;&amp; !fileContext.value.ok}"
+                          variant="caption"
+                          value="{(fileContext.value &amp;&amp; fileContext.value.error) || 'Preview unavailable.'}" />
                       </VStack>
                     </TabItem>
                   </Tabs>

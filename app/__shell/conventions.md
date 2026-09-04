@@ -608,34 +608,38 @@ retired in the 0.5.3 run after its config-off path produced a dead-end
 row — the offer was only ever visibility, never authorization, so
 removing the flag removed a bug class and no capability.)
 
-Exclusivity is what makes the widened offer safe, and since #336 it is
-enforced on **both** sides. The pane withholds Commit from any
-committable item — `applied` included, a population the check
-originally skipped — whose changed paths are claimed by another begun
-item, and names the blocking claimant on the strip. The host backstops
-the non-pane callers: `worklist-commit` refuses (409) when a path it
-would stage carries **lines attributed to** a begun item outside the
-request — attribution-based rather than declared-files-based on
-purpose, so the sanctioned serialize-entangled flow (commit the first
-item while the second is begun but has written nothing) still works,
-while a commit that would genuinely take another item's lines is
-stopped with the owner named (trace: `op=refuse-entangled`).
-Unattributed lines are honestly uncaught — attribution never guesses —
-so the agent-side rule below still stands, not as the only guard but
-as the first one. An agent driving `worklist-commit` directly for a
-still-`proposed` item — the Codex intent-file transport, or a
-hand-built curl, neither of which goes through the pane's own gate
-check — must apply the same exclusivity rule the pane applies before
-it would have offered Commit:
-every one of that item's changed paths must be free of any *other*
-begun item's claim (`applied`, or `proposed` with `begunAtMs` set).
-An item whose changed paths are entirely shared with another begun
-item is not committable that way — committing it would take the
-neighbour's uncommitted work and land it under this item's id and
-message, with no record afterward of which item wrote which hunk
-(`worklist.json` carries no per-hunk authorship). Treat that case like
-any other non-committable item: report it in chat and wait, per *Warn
-when a new item would entangle a committable item* below.
+**Interval staging (#327) makes entangled commits safe, so Commit is
+offered on any begun item with changes.** When a commit would stage a
+path carrying lines attributed to a begun item *outside the request*,
+`worklist-commit` no longer refuses — it stages only the requested
+items' OWN hunks: their claim-interval patches applied to a scratch
+index seeded from `HEAD`, committed via `git commit-tree` +
+`update-ref`, with the worktree and the real index **never touched**.
+The neighbour's uncommitted work simply stays in the worktree
+(`git diff HEAD` then shows exactly it). The commit is hunk-exact —
+per-item authorship is preserved in git history, which is the
+misattribution this whole mechanism exists to prevent (trace:
+`op=entangled-interval-stage` then `op=interval-staged`).
+
+Order-independence is decided by git, not enforced: the interval
+patch is gated with `git apply --check` against the HEAD-seeded index.
+Success means any order is fine; failure means the requested item's
+change is *defined relative to* another begun item's work not in the
+request, and the response names the item to commit first. `--3way` is
+deliberately not used (it writes conflict markers and succeeds).
+
+The **409 refusal survives only** when an entangled item has NO claim
+interval to stage from — work predating the capture phase, or done
+with no claim live. There is nothing to isolate, so the honest answer
+is to commit the items together (safe: every line accounted for by an
+id in that commit) or separate the hunks by hand. This is also the
+`no-interval` fallback the host reports.
+
+Consequently the pane offers Commit on any begun item with changes of
+its own (exclusive or shared), and the strip's `unique:` figure is what
+a commit now takes on a contended path. The #336 whole-file
+withholding, and the #337 selection-scoping that softened it, both
+retire into interval staging.
 
 **The dangerous default is the opposite of the intuition** (#336's
 field lesson, stated because the person who wrote these conventions

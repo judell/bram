@@ -18945,11 +18945,136 @@ fn log_from_right_pane(app: AppHandle, payload: serde_json::Value) {
                 category,
                 &format!("{}={} {}", label_key, safe_label, safe_rest),
             );
+            // heartbeat-drift-memory-receipt: a large foreground drift is the
+            // one moment memory evidence matters (the 2026-09-04 freeze class
+            // was machine-wide swap pressure, diagnosable only after the
+            // fact). Sample host-side memory now and log it beside the drift
+            // line, so the next freeze carries its own receipt.
+            if label == "heartbeat-drift" {
+                let drift_ms = payload
+                    .get("drift_ms")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let hidden = payload
+                    .get("hidden")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if drift_ms >= 2000 && !hidden {
+                    maybe_emit_memory_receipt(&app, drift_ms);
+                }
+            }
         }
         return;
     }
     let (safe_payload, _) = redact_sensitive_text(&payload.to_string());
     eprintln!("[right-pane] {}", safe_payload);
+}
+
+// heartbeat-drift-memory-receipt: one `[memory]` line per qualifying drift,
+// rate-limited so an escalating freeze (drift reports every tick) doesn't
+// spam. Sampling is on-demand only — zero cost until a freeze is being
+// reported — and platform-gated: macOS carries the incident class; other
+// platforms emit nothing until equivalent calls are added.
+fn maybe_emit_memory_receipt(app: &AppHandle, drift_ms: u64) {
+    static LAST_EMIT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let last = LAST_EMIT_MS.load(std::sync::atomic::Ordering::Relaxed);
+    if now_ms.saturating_sub(last) < 5000 {
+        return;
+    }
+    LAST_EMIT_MS.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+    if let Some(sample) = sample_host_memory() {
+        append_bram_trace_line(
+            app,
+            "memory",
+            &format!("op=drift-receipt drift_ms={} {}", drift_ms, sample),
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn sample_host_memory() -> Option<String> {
+    fn sysctl_u64(name: &str) -> Option<u64> {
+        let cname = std::ffi::CString::new(name).ok()?;
+        let mut buf = [0u8; 8];
+        let mut len = buf.len();
+        let rc = unsafe {
+            libc::sysctlbyname(
+                cname.as_ptr(),
+                buf.as_mut_ptr() as *mut libc::c_void,
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc != 0 {
+            return None;
+        }
+        match len {
+            4 => Some(u32::from_ne_bytes(buf[..4].try_into().ok()?) as u64),
+            8 => Some(u64::from_ne_bytes(buf)),
+            _ => None,
+        }
+    }
+    // Swap is the load-bearing signal for the freeze class: 7.0/8.0 GB used
+    // was the amplifier on 2026-09-04.
+    let mut swap: libc::xsw_usage = unsafe { std::mem::zeroed() };
+    let mut swap_len = std::mem::size_of::<libc::xsw_usage>();
+    let swap_name = std::ffi::CString::new("vm.swapusage").ok()?;
+    let swap_rc = unsafe {
+        libc::sysctlbyname(
+            swap_name.as_ptr(),
+            &mut swap as *mut libc::xsw_usage as *mut libc::c_void,
+            &mut swap_len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    let (swap_used_mb, swap_total_mb) = if swap_rc == 0 {
+        (
+            swap.xsu_used / (1024 * 1024),
+            swap.xsu_total / (1024 * 1024),
+        )
+    } else {
+        (0, 0)
+    };
+    // 1 = normal, 2 = warn, 4 = critical.
+    let pressure = sysctl_u64("kern.memorystatus_vm_pressure_level").unwrap_or(0);
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
+    let free_pct = match (sysctl_u64("vm.page_free_count"), sysctl_u64("hw.memsize")) {
+        (Some(free_pages), Some(total_bytes)) if total_bytes > 0 => {
+            (free_pages * page_size * 100) / total_bytes
+        }
+        _ => 0,
+    };
+    let mut task: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+    let task_size = std::mem::size_of::<libc::proc_taskinfo>() as i32;
+    let task_rc = unsafe {
+        libc::proc_pidinfo(
+            std::process::id() as i32,
+            libc::PROC_PIDTASKINFO,
+            0,
+            &mut task as *mut libc::proc_taskinfo as *mut libc::c_void,
+            task_size,
+        )
+    };
+    let rss_mb = if task_rc == task_size {
+        task.pti_resident_size / (1024 * 1024)
+    } else {
+        0
+    };
+    Some(format!(
+        "swap_used_mb={} swap_total_mb={} pressure={} free_pct={} rss_mb={}",
+        swap_used_mb, swap_total_mb, pressure, free_pct, rss_mb
+    ))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn sample_host_memory() -> Option<String> {
+    None
 }
 
 #[tauri::command]

@@ -47610,7 +47610,7 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>, trigger: &s
                 }
                 _ => {
                     eprintln!(
-                        "[issue-close-queue] op=orphaned issue={} sha={} (not on origin, no patch-id match; will retry next push)",
+                        "[issue-close-queue] op=awaiting-push issue={} sha={} (not on origin, no patch-id match; will retry next push)",
                         record.issue, record.commit_sha
                     );
                     if bram_trace_enabled() {
@@ -47618,7 +47618,7 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>, trigger: &s
                             app,
                             "issue-close-queue",
                             &format!(
-                                "op=orphaned issue={} sha={}",
+                                "op=awaiting-push issue={} sha={}",
                                 record.issue, record.commit_sha
                             ),
                         );

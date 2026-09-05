@@ -22249,8 +22249,11 @@ mod session_intent_text_tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../app/__shell/helpers.js"
         ));
-        assert!(detail.contains("when=\"{$item.aiDescription}\""));
-        assert!(detail.contains("value=\"{'— ' + $item.aiDescription}\""));
+        // native-tool-descriptions-by-default widened the fallback chain:
+        // the row leads with aiDescription when Haiku resolved one, else the
+        // agent-authored description, keyless.
+        assert!(detail.contains("when=\"{$item.aiDescription || $item.description}\""));
+        assert!(detail.contains("value=\"{'— ' + ($item.aiDescription || $item.description)}\""));
         assert!(detail.contains("$item.__findPreview"));
         assert!(helpers.contains("ev.aiDescription"));
     }

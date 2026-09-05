@@ -1138,11 +1138,37 @@ fn forge_api_body(command: &str) -> Option<String> {
     Some(command[start..end].replace("\\n", "\n"))
 }
 
-/// `(?:--body-file|-F)(?:=|\s+)(\S+)`
+/// `(?:--body-file|-F)(?:=|\s+)(value)`, with two #347 corrections to the
+/// original naive positional scan:
+/// - Flags are matched only OUTSIDE quoted regions and at a token boundary —
+///   a `-F` inside a quoted `--title` argument is prose, not a flag (filing
+///   #347 itself was denied on exactly that).
+/// - `-F` in gh api carries field syntax: `-F key=@path` is file-backed and
+///   the file is the part after the `@` (the prefix was previously left on
+///   the path, so a readable signed body was denied as unreadable);
+///   `-F key=value` with no `@` names no file and the scan continues.
 fn body_file_arg(command: &str) -> Option<String> {
     let c = chars(command);
-    for i in 0..c.len() {
+    let mut quote: Option<char> = None;
+    let mut i = 0usize;
+    while i < c.len() {
+        if let Some(q) = quote {
+            if c[i] == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if matches!(c[i], '\'' | '"') {
+            quote = Some(c[i]);
+            i += 1;
+            continue;
+        }
+        let mut matched_end: Option<usize> = None;
         for flag in ["--body-file", "-F"] {
+            if !at_boundary(&c, i) {
+                break;
+            }
             let Some(j) = lit(&c, i, flag) else { continue };
             let k = if j < c.len() && c[j] == '=' {
                 j + 1
@@ -1151,14 +1177,77 @@ fn body_file_arg(command: &str) -> Option<String> {
             } else {
                 continue;
             };
+            // Value runs to the matching quote when it opens with one
+            // (quoted paths may contain spaces), else to whitespace.
             let mut e = k;
-            while e < c.len() && !c[e].is_whitespace() {
+            if e < c.len() && matches!(c[e], '\'' | '"') {
+                let q = c[e];
                 e += 1;
+                while e < c.len() && c[e] != q {
+                    e += 1;
+                }
+                if e < c.len() {
+                    e += 1;
+                }
+            } else {
+                while e < c.len() && !c[e].is_whitespace() {
+                    e += 1;
+                }
             }
             if e > k {
                 let raw: String = c[k..e].iter().collect();
+                if flag == "-F" {
+                    if let Some((_, value)) = raw.split_once('=') {
+                        let value = strip_surrounding_quotes(value);
+                        match value.strip_prefix('@') {
+                            Some(path) => return Some(normalize_body_file_path(path)),
+                            // Inline field, not a file: skip the value and
+                            // keep scanning (a real --body-file may follow).
+                            None => {
+                                matched_end = Some(e);
+                                break;
+                            }
+                        }
+                    }
+                }
                 return Some(normalize_body_file_path(&raw));
             }
+        }
+        i = matched_end.unwrap_or(i + 1);
+    }
+    None
+}
+
+/// `--input(?:=|\s+)(\S+)` — gh api's JSON payload file. Recognized (#347) so
+/// the file-backed `--input` route is signature-verified like `-F body=@`,
+/// instead of falling open as no-inspectable-body while the equivalent
+/// field-syntax write is checked.
+fn input_file_arg(command: &str) -> Option<String> {
+    if !command.to_ascii_lowercase().contains("gh api") {
+        return None;
+    }
+    let c = chars(command);
+    for i in 0..c.len() {
+        let Some(j) = lit(&c, i, "--input") else {
+            continue;
+        };
+        if !at_boundary(&c, i) {
+            continue;
+        }
+        let k = if j < c.len() && c[j] == '=' {
+            j + 1
+        } else if let Some(k) = ws1(&c, j) {
+            k
+        } else {
+            continue;
+        };
+        let mut e = k;
+        while e < c.len() && !c[e].is_whitespace() {
+            e += 1;
+        }
+        if e > k {
+            let raw: String = c[k..e].iter().collect();
+            return Some(normalize_body_file_path(&raw));
         }
     }
     None
@@ -1280,6 +1369,30 @@ fn crossboundary_body(command: &str, cwd: &Path) -> (Option<String>, &'static st
                 "body-file",
             ),
             Err(_) => (None, "body-file-unreadable"),
+        };
+    }
+    // #347: gh api --input <file> is a JSON payload; its `body` field is the
+    // inspectable prose. A payload with no body field is metadata-only
+    // (input-json-no-body fails open at the verdict sites); an unreadable or
+    // unparseable named file is denied, per #331's named-file principle.
+    if let Some(path) = input_file_arg(command) {
+        if path == "-" {
+            return (None, "input-file-stdin");
+        }
+        let candidate = if Path::new(&path).is_absolute() {
+            PathBuf::from(&path)
+        } else {
+            cwd.join(&path)
+        };
+        return match std::fs::read(&candidate) {
+            Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                Ok(v) => match v.get("body").and_then(|b| b.as_str()) {
+                    Some(b) => (Some(b.to_string()), "input-json-body"),
+                    None => (None, "input-json-no-body"),
+                },
+                Err(_) => (None, "input-json-unparseable"),
+            },
+            Err(_) => (None, "input-file-unreadable"),
         };
     }
     if let Some(lit) = body_literal_arg(command) {
@@ -2137,8 +2250,14 @@ fn bash_branch(payload: &Value) -> ShadowVerdict {
     // the check), but it is a DIFFERENT failure from an unsigned body and
     // must say so — the flat "crossboundary-unsigned" cost the Windows filer
     // three turns of re-verifying a signature the guard never read.
-    if cb_verdict == "unparsed" && !matches!(cb_detail, "body-file-stdin" | "no-body-flag") {
+    if cb_verdict == "unparsed"
+        && !matches!(
+            cb_detail,
+            "body-file-stdin" | "no-body-flag" | "input-file-stdin" | "input-json-no-body"
+        )
+    {
         let path = body_file_arg(&command)
+            .or_else(|| input_file_arg(&command))
             .or_else(|| forge_positional_body_file(&command))
             .unwrap_or_else(|| "<unresolved path>".to_string());
         return deny_msg(
@@ -3749,8 +3868,14 @@ Use --body-file - (stdin) or --body-file <path> instead.\nDetected: <match>",
     // #331: same split as the Claude site — codex_deny's reason is the first
     // message line, so the distinct first line is what makes the trace
     // distinguish unreadable from unsigned.
-    if cb_verdict == "unparsed" && !matches!(cb_detail, "body-file-stdin" | "no-body-flag") {
+    if cb_verdict == "unparsed"
+        && !matches!(
+            cb_detail,
+            "body-file-stdin" | "no-body-flag" | "input-file-stdin" | "input-json-no-body"
+        )
+    {
         let path = body_file_arg(&command)
+            .or_else(|| input_file_arg(&command))
             .or_else(|| forge_positional_body_file(&command))
             .unwrap_or_else(|| "<unresolved path>".to_string());
         return codex_deny(
@@ -4344,6 +4469,102 @@ mod guard_policy_tests {
         );
         assert_eq!(strip_surrounding_quotes("'x.md'"), "x.md");
         assert_eq!(strip_surrounding_quotes("\"mismatched'"), "\"mismatched'");
+
+        let _ = std::fs::remove_dir_all(&td);
+    }
+
+    // #347: the two extractor defects found retrofitting signatures, plus the
+    // --input route they forced as a workaround.
+    #[test]
+    fn body_file_field_syntax_quotes_and_input() {
+        let td = scratch("sig347");
+        let signed = "Jon's Claude (main thread, Fable 5, macOS) speaking from the Bram project (github.com/judell/bram):\n\nBody.";
+        let body_path = td.join("signed.md");
+        std::fs::write(&body_path, signed).unwrap();
+
+        // gh api field syntax: the file is AFTER the @ — previously the
+        // whole `body=@/path` token was opened as the path and a readable
+        // signed body was denied unreadable.
+        let api_patch = format!(
+            "gh api repos/judell/bram/issues/comments/1 -X PATCH -F body=@{}",
+            body_path.display()
+        );
+        assert_eq!(crossboundary_signature_verdict(&api_patch, &td).0, "signed");
+
+        // -F key=value with no @ names no file; the real --body-file later
+        // in the command is the one verified.
+        let inline_field = format!(
+            "gh api repos/judell/bram/issues/comments/1 -X PATCH -F state=open --body-file {}",
+            body_path.display()
+        );
+        assert_eq!(
+            crossboundary_signature_verdict(&inline_field, &td).0,
+            "signed"
+        );
+
+        // A flag-shaped substring inside a quoted argument is prose, not a
+        // flag — filing #347 itself was denied on its own --title.
+        let quoted_title = format!(
+            "gh issue create --title \"Guard mis-parses gh api -F body=@file: prefix left\" --body-file {}",
+            body_path.display()
+        );
+        assert_eq!(
+            crossboundary_signature_verdict(&quoted_title, &td).0,
+            "signed"
+        );
+
+        // Unreadable field-syntax file: denied naming the BARE path.
+        assert_eq!(
+            crossboundary_body(
+                "gh api repos/judell/bram/issues/comments/1 -X PATCH -F body=@/nope/missing.md",
+                &td
+            ),
+            (None, "body-file-unreadable")
+        );
+        assert_eq!(
+            body_file_arg("gh api x -X PATCH -F body=@/nope/missing.md").as_deref(),
+            Some("/nope/missing.md")
+        );
+
+        // --input: signed JSON body verifies; missing body field fails open
+        // as metadata-only; unreadable and unparseable stay denied.
+        let payload = td.join("payload.json");
+        std::fs::write(&payload, serde_json::json!({ "body": signed }).to_string()).unwrap();
+        let input_cmd = format!(
+            "gh api repos/judell/bram/issues/comments/1 -X PATCH --input {}",
+            payload.display()
+        );
+        assert_eq!(
+            crossboundary_signature_verdict(&input_cmd, &td),
+            ("signed", "input-json-body")
+        );
+        let meta_only = td.join("meta.json");
+        std::fs::write(&meta_only, "{\"state\":\"closed\"}").unwrap();
+        let meta_cmd = format!(
+            "gh api repos/judell/bram/issues/comments/1 -X PATCH --input {}",
+            meta_only.display()
+        );
+        assert_eq!(
+            crossboundary_signature_verdict(&meta_cmd, &td),
+            ("unparsed", "input-json-no-body")
+        );
+        assert_eq!(
+            crossboundary_signature_verdict(
+                "gh api repos/judell/bram/issues/comments/1 -X PATCH --input /nope/missing.json",
+                &td
+            ),
+            ("unparsed", "input-file-unreadable")
+        );
+        let not_json = td.join("not.json");
+        std::fs::write(&not_json, "not json at all").unwrap();
+        let bad_cmd = format!(
+            "gh api repos/judell/bram/issues/comments/1 -X PATCH --input {}",
+            not_json.display()
+        );
+        assert_eq!(
+            crossboundary_signature_verdict(&bad_cmd, &td),
+            ("unparsed", "input-json-unparseable")
+        );
 
         let _ = std::fs::remove_dir_all(&td);
     }

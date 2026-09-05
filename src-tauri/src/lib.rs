@@ -53087,6 +53087,24 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
 // items. The agent supplies ids + message; the host verifies approved auth,
 // stages only the approved files, commits only those pathspecs, then prunes via
 // the same mutate path used by the legacy agent-driven commit flow.
+// commit-refusal-clears-claim: a commit refused by interval staging did no
+// work and consumed no authorization, but the approval click already raised
+// the inflight sentinel — so the refusal used to leave the row spinning and
+// its selection locked, recoverable only by a manual POST /__worklist/end
+// (live case 2026-09-05: inbox-dismiss-forge-items, whose interval depended
+// on issue-338's uncommitted work). Release the sentinel for exactly the
+// requested ids before returning the 409; the approval record is untouched,
+// so the user can retry after committing the named dependency. Uses the
+// incremental shrink so a partial (one-of-N) refusal only releases those ids.
+fn release_claim_on_commit_refusal<R: tauri::Runtime>(app: &AppHandle<R>, ids: &[String]) {
+    let _ = shrink_inflight_claim_sentinel(app, ids);
+    append_bram_trace_line(
+        app,
+        "inflight-sentinel",
+        &format!("op=clear-on-commit-refusal ids={}", ids.join(",")),
+    );
+}
+
 fn handle_worklist_commit<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
@@ -53296,6 +53314,7 @@ fn handle_worklist_commit<R: tauri::Runtime>(
                 committed_paths = cp;
             }
             Err(e) if e == "no-interval" => {
+                release_claim_on_commit_refusal(app, &ids);
                 return worklist_json_error(
                     409,
                     "commit refused: this item's changes are entirely shared with another begun \
@@ -53304,7 +53323,10 @@ fn handle_worklist_commit<R: tauri::Runtime>(
                         .to_string(),
                 );
             }
-            Err(e) => return worklist_json_error(409, e),
+            Err(e) => {
+                release_claim_on_commit_refusal(app, &ids);
+                return worklist_json_error(409, e);
+            }
         }
     } else {
         // Whole-file staging: the default path, unchanged. Auto-stage

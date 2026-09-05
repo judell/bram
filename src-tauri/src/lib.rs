@@ -53096,6 +53096,65 @@ fn handle_worklist_mutate<R: tauri::Runtime>(
 // requested ids before returning the 409; the approval record is untouched,
 // so the user can retry after committing the named dependency. Uses the
 // incremental shrink so a partial (one-of-N) refusal only releases those ids.
+// guard-helper-coverage-on-markup-refs: after a commit, scan its committed
+// .xmlui files for `window.__bramFoo(` calls and warn (report-only) about any
+// `__bramFoo` that HEAD's app/__shell/helpers.js does not define — the case
+// where an item's .xmlui landed but its helper stayed uncommitted because
+// helpers.js was left off the item's `files` (b6de5146). A heuristic, not a
+// JS parse: greedy on the `window.__bramNAME(` shape, tolerant of false
+// negatives, and it reads HEAD (post-commit) so a helper committed in an
+// earlier commit is correctly seen as defined.
+fn warn_missing_helper_coverage<R: tauri::Runtime>(app: &AppHandle<R>, committed_paths: &[String]) {
+    let xmlui: Vec<&String> = committed_paths
+        .iter()
+        .filter(|p| p.ends_with(".xmlui"))
+        .collect();
+    if xmlui.is_empty() {
+        return;
+    }
+    let Ok(helpers) = git_run(app, &["show", "HEAD:app/__shell/helpers.js"]) else {
+        return;
+    };
+    // Collect referenced helper names from the committed markup.
+    let mut refs: std::collections::BTreeSet<String> = Default::default();
+    for path in &xmlui {
+        let Ok(src) = git_run(app, &["show", &format!("HEAD:{}", path)]) else {
+            continue;
+        };
+        let mut rest = src.as_str();
+        while let Some(i) = rest.find("window.__bram") {
+            rest = &rest[i + "window.".len()..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            // Only a call site: the next non-name char must be '('.
+            if rest[name.len()..].trim_start().starts_with('(') {
+                refs.insert(name);
+            }
+        }
+    }
+    let missing: Vec<&String> = refs
+        .iter()
+        .filter(|name| {
+            // Defined as `NAME =` (window.NAME = ... or bare) or `function NAME`.
+            !helpers.contains(&format!("{} =", name))
+                && !helpers.contains(&format!("function {}", name))
+        })
+        .collect();
+    for name in missing {
+        eprintln!(
+            "[helper-coverage] committed markup calls window.{} but HEAD helpers.js does not define it — add app/__shell/helpers.js to the item's files?",
+            name
+        );
+        append_bram_trace_line(
+            app,
+            "helper-coverage",
+            &format!("op=undefined-ref helper={}", name),
+        );
+    }
+}
+
 fn release_claim_on_commit_refusal<R: tauri::Runtime>(app: &AppHandle<R>, ids: &[String]) {
     let _ = shrink_inflight_claim_sentinel(app, ids);
     append_bram_trace_line(
@@ -53489,6 +53548,14 @@ fn handle_worklist_commit<R: tauri::Runtime>(
             );
         }
     }
+
+    // guard-helper-coverage-on-markup-refs: report-only check that a
+    // committed .xmlui does not call a window.__bram* helper the committed
+    // tree fails to define — the b6de5146 gap, where a Dismiss button
+    // landed without its helper because the item's files omitted
+    // helpers.js. Warns; never blocks (the helper may legitimately live in
+    // an earlier commit).
+    warn_missing_helper_coverage(app, &committed_paths);
 
     let branch = git_run(app, &["rev-parse", "--abbrev-ref", "HEAD"])
         .map(|s| s.trim().to_string())

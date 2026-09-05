@@ -10726,13 +10726,12 @@ window.__bramRestoreSendNoticeDismissed = function () {
   return __bramReadLS("bram.sendNoticeDismissed", "");
 };
 
-// Banner dismissed-version restores (banner-dismissed-flash-on-load): read
+// Banner dismissed-version restore (banner-dismissed-flash-on-load): read
 // synchronously in the App var default so the dismissed version is known on the
 // very first render — no async gap where the banner flashes before onInit's
-// read lands. Mirrors __bramRestoreSendNoticeDismissed.
-window.__bramRestoreToolDescBannerDismissed = function () {
-  return __bramReadLS("bram.toolDescBannerDismissedVersion", "");
-};
+// read lands. Mirrors __bramRestoreSendNoticeDismissed. (The tool-descriptions
+// banner's twin retired with retire-tool-desc-launch-banner; its stale
+// localStorage key is simply never read again.)
 window.__bramRestoreUpdateBannerDismissed = function () {
   return __bramReadLS("bram.updateBannerDismissedVersion", "");
 };

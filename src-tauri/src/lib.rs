@@ -38203,6 +38203,12 @@ type AttributionResult = (
     // item's own patch. Differs from the surviving-owned run count under
     // supersession, and carries the removed count the runs cannot.
     std::collections::HashMap<String, (usize, usize)>,
+    // will-commit-matches-the-button: the same shortstat broken down per
+    // path (path → itemId → (added, removed)), so the will-commit
+    // computation can charge an item its interval take on entangled paths
+    // and the whole-file stat on exclusive ones — the way worklist-commit
+    // actually executes.
+    std::collections::HashMap<String, std::collections::HashMap<String, (usize, usize)>>,
 );
 
 // iterate-edits-need-claim-boundaries / ghost-reassignment-inflates-totals:
@@ -38419,19 +38425,34 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
     // staging commits for the item, and it is what the strip's "will commit"
     // figure should report on a contended path.
     let mut totals: std::collections::HashMap<String, (usize, usize)> = Default::default();
+    let mut totals_by_path: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, (usize, usize)>,
+    > = Default::default();
     for (owner, m) in &steps {
         let (eff, from) = ghosts.strip_ghost(owner.clone());
         if let Some(f) = from {
             ghost_notes.insert(format!("{}→unowned", f));
         }
         let Some(id) = eff else { continue };
-        for hunks in m.values() {
+        for (path, hunks) in m {
             for h in hunks {
                 for (c, _) in &h.lines {
                     let e = totals.entry(id.clone()).or_insert((0, 0));
+                    let p = totals_by_path
+                        .entry(path.clone())
+                        .or_default()
+                        .entry(id.clone())
+                        .or_insert((0, 0));
                     match c {
-                        '+' => e.0 += 1,
-                        '-' => e.1 += 1,
+                        '+' => {
+                            e.0 += 1;
+                            p.0 += 1;
+                        }
+                        '-' => {
+                            e.1 += 1;
+                            p.1 += 1;
+                        }
                         _ => {}
                     }
                 }
@@ -38441,7 +38462,7 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
     trace_ghost_reassignments(app, "attribution", &ghost_notes);
     let _ = &mut empty;
     CLAIM_ATTR_SPAWNS.store(spawns.get(), std::sync::atomic::Ordering::Relaxed);
-    (out, totals)
+    (out, totals, totals_by_path)
 }
 
 static CLAIM_ATTR_SPAWNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -50511,9 +50532,26 @@ fn route_request<R: tauri::Runtime>(
         // absent-vs-empty reasoning as above.
         {
             let attr_started = std::time::Instant::now();
-            let (runs, totals) = claim_attribution_runs(app);
+            let (runs, totals, totals_by_path) = claim_attribution_runs(app);
             let paths = runs.len();
             let total: usize = runs.values().map(|v| v.len()).sum();
+            // Which begun items have attributed lines on each path — the
+            // entanglement test the will-commit computation below shares
+            // with the commit route's own scan.
+            let mut owners_by_path: std::collections::HashMap<
+                String,
+                std::collections::HashSet<String>,
+            > = Default::default();
+            for (k, v) in &runs {
+                for run in v {
+                    if let Some(id) = run.get("itemId").and_then(|x| x.as_str()) {
+                        owners_by_path
+                            .entry(k.clone())
+                            .or_default()
+                            .insert(id.to_string());
+                    }
+                }
+            }
             let mut map = serde_json::Map::new();
             for (k, v) in runs {
                 map.insert(k, serde_json::Value::Array(v));
@@ -50531,6 +50569,88 @@ fn route_request<R: tauri::Runtime>(
                     "attributionTotals".to_string(),
                     serde_json::Value::Object(totals_map),
                 );
+            }
+            // will-commit-matches-the-button: per begun item, the headline
+            // number computed the way worklist-commit EXECUTES — per path,
+            // whole-file stat where this item is the only begun claimant
+            // (unattributed lines ride along), its own interval take where
+            // the path is entangled. The old header summed interval patches
+            // across all paths and undercounted the button (live case
+            // 2026-09-04: "Will commit +185 −1" while an exclusive
+            // Inbox.xmlui alone carried +32 −15 its commit would take).
+            if let Some(items) = doc.get_mut("items").and_then(|v| v.as_array_mut()) {
+                let begun: std::collections::HashSet<String> = items
+                    .iter()
+                    .filter(|it| it.get("begunAtMs").is_some())
+                    .filter_map(|it| it.get("id").and_then(|v| v.as_str()).map(String::from))
+                    .collect();
+                for item in items.iter_mut() {
+                    let Some(id) = item.get("id").and_then(|v| v.as_str()).map(String::from) else {
+                        continue;
+                    };
+                    if !begun.contains(&id) {
+                        continue;
+                    }
+                    let Some(records) = item.get_mut("changedFiles").and_then(|v| v.as_array_mut())
+                    else {
+                        continue;
+                    };
+                    let mut wc = (0usize, 0usize);
+                    let mut interval_paths: Vec<String> = Vec::new();
+                    for rec in records.iter_mut() {
+                        let Some(path) = rec.get("path").and_then(|v| v.as_str()).map(String::from)
+                        else {
+                            continue;
+                        };
+                        let entangled = owners_by_path
+                            .get(&path)
+                            .map(|o| o.iter().any(|owner| *owner != id && begun.contains(owner)))
+                            .unwrap_or(false);
+                        let (a, r) = if entangled {
+                            interval_paths.push(path.clone());
+                            totals_by_path
+                                .get(&path)
+                                .and_then(|m| m.get(&id))
+                                .copied()
+                                .unwrap_or((0, 0))
+                        } else {
+                            (
+                                rec.get("added").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                                rec.get("removed").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                            )
+                        };
+                        wc.0 += a;
+                        wc.1 += r;
+                        // The per-row take, so the CHANGES column can show the
+                        // number that actually sums to the header ("still does
+                        // not add up", 2026-09-04: the header was honest but
+                        // its addends were invisible — the entangled row
+                        // showed only the file total).
+                        if let Some(obj) = rec.as_object_mut() {
+                            obj.insert("takeAdded".to_string(), serde_json::json!(a));
+                            obj.insert("takeRemoved".to_string(), serde_json::json!(r));
+                        }
+                    }
+                    if !interval_paths.is_empty() {
+                        append_bram_trace_line(
+                            app,
+                            "claim-interval",
+                            &format!(
+                                "op=will-commit item={} take=+{}-{} interval_paths={}",
+                                id,
+                                wc.0,
+                                wc.1,
+                                interval_paths.join(",")
+                            ),
+                        );
+                    }
+                    if let Some(obj) = item.as_object_mut() {
+                        obj.insert(
+                            "willCommit".to_string(),
+                            serde_json::json!({ "added": wc.0, "removed": wc.1 }),
+                        );
+                    }
+                }
             }
             append_bram_trace_line(
                 app,
@@ -52449,7 +52569,7 @@ fn handle_worklist_commit<R: tauri::Runtime>(
     // to stage (work predating capture) — the honest baseline.
     let mut needs_interval_stage = false;
     {
-        let (runs_by_path, _) = claim_attribution_runs(app);
+        let (runs_by_path, _, _) = claim_attribution_runs(app);
         let requested: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
         'scan: for path in &files {
             let Some(runs) = runs_by_path.get(path) else {

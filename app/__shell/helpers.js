@@ -2264,13 +2264,17 @@ window.__bramWorklist2StripTooltip = function (item, claim, items, attributionTo
     var cs = item.changeSummary || {};
     var fileAdded = split.added + split.sharedAdded;
     var fileRemoved = split.removed + split.sharedRemoved;
+    // will-commit-matches-the-button: same preference order as the strip, so
+    // header and tooltip quote one number with one meaning.
+    var wc = item.willCommit;
     var totals = (attributionTotals || {})[item.id];
-    var takesAdded = totals ? totals.added : fileAdded;
-    var takesRemoved = totals ? totals.removed : fileRemoved;
+    var takesAdded = wc ? wc.added : totals ? totals.added : fileAdded;
+    var takesRemoved = wc ? wc.removed : totals ? totals.removed : fileRemoved;
     var changed = split.exclusive.length + split.shared.length;
     var lines = [];
     lines.push(
-      "Commits +" + takesAdded + " −" + takesRemoved + " — this item's own hunks",
+      "Commits +" + takesAdded + " −" + takesRemoved +
+        " — exclusive files whole, own hunks on shared files",
     );
     if (takesAdded !== fileAdded || takesRemoved !== fileRemoved) {
       lines.push(
@@ -2820,6 +2824,24 @@ window.__bramOwnershipSummary = function (patch, runs, rowId, independence) {
   return out;
 };
 
+// will-commit-matches-the-button: the CHANGES cell for a file row. On an
+// entangled path the row leads with the item's own take — the number that
+// actually sums to the "Will commit" header — with the file total as
+// context ("+170 −1 of +404 −18"). On exclusive paths take == total and
+// the cell reads as it always did. Extracted from an inline markup
+// expression per the single-call handler rule.
+window.__bramFileChangesCell = function (rec, rowBegun) {
+  if (!rowBegun || !rec || rec.status === "unchanged") return "";
+  var suffix =
+    rec.status === "new" ? " (new)" : rec.status === "deleted" ? " (deleted)" : "";
+  var total = "+" + rec.added + " −" + rec.removed;
+  var hasTake = typeof rec.takeAdded === "number";
+  if (hasTake && (rec.takeAdded !== rec.added || rec.takeRemoved !== rec.removed)) {
+    return "+" + rec.takeAdded + " −" + rec.takeRemoved + " of " + total + suffix;
+  }
+  return total + suffix;
+};
+
 window.__bramItemOwnAdded = function (item, attribution) {
   var attr = attribution || {};
   var files = (item && item.changedFiles) || [];
@@ -2965,9 +2987,15 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, attribu
       // sentence; the tooltip is where the expansion belongs.
       var fileAdded = split.added + split.sharedAdded;
       var fileRemoved = split.removed + split.sharedRemoved;
+      // will-commit-matches-the-button: prefer the host's willCommit, which
+      // is computed the way worklist-commit executes (whole-file on
+      // exclusive paths, interval take on entangled ones). The older
+      // fallbacks — interval totals, then file sums — cover hosts that
+      // predate it.
+      var wc = item.willCommit;
       var totals = (attributionTotals || {})[item.id];
-      var takesAdded = totals ? totals.added : fileAdded;
-      var takesRemoved = totals ? totals.removed : fileRemoved;
+      var takesAdded = wc ? wc.added : totals ? totals.added : fileAdded;
+      var takesRemoved = wc ? wc.removed : totals ? totals.removed : fileRemoved;
       var changedCount = split.exclusive.length + split.shared.length;
       var partialFlag =
         (cs.total || 0) > changedCount

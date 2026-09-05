@@ -594,11 +594,17 @@
                   fontSize="$fontSize-sm"
                   value="{$item.path}" />
               </Column>
-              <Column header="changes" width="140px" headerHorizontalAlignment="start">
+              <!-- 200px: the entangled "of" form ("+170 −1 of +416 −18")
+                   clipped its tail at 140px. -->
+              <Column header="changes" width="200px" headerHorizontalAlignment="start">
+                <!-- Entangled rows lead with the item's own take ("+170 −1 of
+                     +404 −18") so the header is visibly the sum of the
+                     column's first numbers — the addends were invisible
+                     before (Jon, 2026-09-04: "still does not add up"). -->
                 <Text
                   variant="code"
                   fontSize="$fontSize-sm"
-                  value="{!rowBegun || $item.status === 'unchanged' ? '' : '+' + $item.added + ' −' + $item.removed + ($item.status === 'new' ? ' (new)' : ($item.status === 'deleted' ? ' (deleted)' : ''))}" />
+                  value="{window.__bramFileChangesCell($item, rowBegun)}" />
               </Column>
               <Column header="shared with" width="3*" headerHorizontalAlignment="start">
                 <!-- worklist-surface-planned-overlap: two tenses, carried by

@@ -38195,14 +38195,40 @@ fn parse_attr_diff(out: &str) -> std::collections::HashMap<String, Vec<AttrHunk>
     let mut path: Option<String> = None;
     let mut cur: Option<AttrHunk> = None;
     for line in out.lines() {
+        // attribution-run-line-offset-in-views: take the path from the
+        // `diff --git a/X b/X` header, which is present for EVERY file —
+        // add, modify, delete, rename. The old code keyed on `+++ b/<path>`,
+        // but a DELETED file's target line is `+++ /dev/null`, so its path
+        // was never set and its `-` hunks were attributed to the
+        // alphabetically-preceding file. Live case 2026-09-05: two deleted
+        // files (.needs-you-dismissed.json -13, downloads.sh -16) bled a
+        // phantom -29 onto docs/trace-vocabulary.md, shifting every run and
+        // rendering the change as "no item". The b/ path is the target
+        // (the new name on a rename), which is what attribution wants.
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            if let (Some(p), Some(h)) = (path.take(), cur.take()) {
+                per_file.entry(p).or_default().push(h);
+            }
+            cur = None;
+            // The b/ target: present for add/modify/delete/rename, so it is
+            // set even when the later `+++` line is `/dev/null` (a deletion).
+            path = rest.split(" b/").nth(1).map(|s| s.to_string());
+            continue;
+        }
+        // `+++ b/<path>` still sets the path — it is the only header in the
+        // synthetic diffs the unit tests feed (no `diff --git` line), and in
+        // a real diff it merely re-confirms the diff --git target. A deletion
+        // is `+++ /dev/null`, which correctly does NOT match and so leaves the
+        // diff --git path in place.
         if let Some(rest) = line.strip_prefix("+++ b/") {
             if let (Some(p), Some(h)) = (path.take(), cur.take()) {
                 per_file.entry(p).or_default().push(h);
             }
+            cur = None;
             path = Some(rest.to_string());
             continue;
         }
-        if line.starts_with("+++ ") || line.starts_with("--- ") || line.starts_with("diff --git") {
+        if line.starts_with("+++ ") || line.starts_with("--- ") {
             continue;
         }
         if let Some(rest) = line.strip_prefix("@@ -") {
@@ -38272,6 +38298,23 @@ fn apply_attr_hunks(owners: &mut Vec<Option<String>>, hunks: &[AttrHunk], owner:
 // an old base, an intervening committed resize applied by an earlier step, and
 // a sole claimant editing at a high line number, all land at the true
 // positions (see attribution_replay_survives_intervening_resize).
+// attribution-run-line-offset-in-views: the replay reconstructs a file's
+// length as base_n + the net +/- of every interval step; if that does not
+// equal the actual working-file length, the runs are line-shifted by the
+// difference and every view that maps a working-diff line to a run is wrong.
+// Returns Some(offset) — file_len minus reconstructed length, signed — when
+// they diverge; None when they agree (the healthy state). Pure so the
+// tripwire's arithmetic is verifiable without a repo.
+fn attr_replay_line_offset(base_n: usize, net: isize, file_len: usize) -> Option<isize> {
+    let replay_len = (base_n as isize + net).max(0);
+    let offset = file_len as isize - replay_len;
+    if offset != 0 {
+        Some(offset)
+    } else {
+        None
+    }
+}
+
 fn attribution_runs_for_path(
     base_n: usize,
     path_steps: &[(Option<String>, Vec<AttrHunk>)],
@@ -38432,6 +38475,22 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
             .ok()?;
         Some(String::from_utf8_lossy(&out.stdout).into_owned())
     };
+    // attribution-run-line-offset-in-views: resolve a claim ref to its
+    // content-addressed OID. The interval and base caches are keyed by this,
+    // NOT by the ref NAME — a claim ref (refs/bram/claims/<at_ms>) is
+    // overwritten when an at_ms collides (the same duplicate-boundary hazard
+    // seen at 246 ms), so a name-keyed cache serves the FIRST tree's diff/
+    // count while the ref now points at another tree. That staleness was the
+    // #324/trace-vocabulary offset: cached base_n=136 while the ref's tree
+    // was 166, shifting every run by 30. OID keys make a reused name a fresh
+    // entry. Falls back to the ref name if rev-parse fails (an unresolved
+    // ref cannot be diffed anyway).
+    let oid = |r: &str| -> String {
+        git(&["rev-parse", &format!("{}^{{tree}}", r)])
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| r.to_string())
+    };
     static CACHE: OnceLock<
         Mutex<std::collections::HashMap<String, std::collections::HashMap<String, Vec<AttrHunk>>>>,
     > = OnceLock::new();
@@ -38460,7 +38519,7 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
             .and_then(|v| v.as_str());
         let parsed = match next {
             Some(b) => {
-                let key = format!("{}..{}", a, b);
+                let key = format!("{}..{}", oid(a), oid(b));
                 if let Some(hit) = cache.lock().ok().and_then(|c| c.get(&key).cloned()) {
                     hit
                 } else {
@@ -38487,9 +38546,12 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
     let mut out: std::collections::HashMap<String, Vec<serde_json::Value>> = Default::default();
     static BASE: OnceLock<Mutex<std::collections::HashMap<String, usize>>> = OnceLock::new();
     let base_cache = BASE.get_or_init(|| Mutex::new(Default::default()));
+    let base_oid = oid(base);
     for path in paths {
-        // The base tree is fixed, so a path's line count there never changes.
-        let bkey = format!("{}:{}", base, path);
+        // Key by the base tree's OID, not the ref name (attribution-run-line-
+        // offset-in-views): a reused ref name would otherwise serve a stale
+        // line count from a prior tree — the #324/trace-vocabulary offset.
+        let bkey = format!("{}:{}", base_oid, path);
         let n = match base_cache.lock().ok().and_then(|c| c.get(&bkey).copied()) {
             Some(hit) => Some(hit),
             None => {
@@ -38536,6 +38598,57 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
             })
             .collect();
         let runs = attribution_runs_for_path(n, &path_steps);
+        // attribution-run-line-offset-in-views (observe-only): the replay
+        // reconstructs the file from the OLDEST surviving boundary tree
+        // forward; if that reconstruction's length diverges from the actual
+        // working file, every run's line number is off by the difference, and
+        // the Ownership tab / Diff scope selector then map working-diff lines
+        // to the wrong run (or to none — the "no item" #324/trace-vocabulary
+        // case: run at 56, real diff at 86). Boundary retirement on commit is
+        // the suspected cause (a retired tree drops the interval that captured
+        // an intervening committed resize). This tripwire makes the offset
+        // loud: replay_len is base_n plus the net +/- of every step for this
+        // path; file_len is ground truth. A mismatch means the rendered
+        // attribution for this path is line-shifted. Zero is the healthy
+        // state; any line is a real offset to chase.
+        let net: isize = path_steps
+            .iter()
+            .flat_map(|(_, hunks)| hunks.iter())
+            .flat_map(|h| h.lines.iter())
+            .map(|(c, _)| match c {
+                '+' => 1,
+                '-' => -1,
+                _ => 0,
+            })
+            .sum();
+        if let Some(root) = project_root(Some(app)) {
+            if let Ok(content) = std::fs::read_to_string(root.join(&path)) {
+                let file_len = content.lines().count();
+                if let Some(offset) = attr_replay_line_offset(n, net, file_len) {
+                    if !runs.is_empty() {
+                        // Dump the inputs, not just the verdict — the 2026-09-05
+                        // hunt kept theorizing base_n/net from outside while the
+                        // process saw different values. base_oid + base_n + net +
+                        // steps make the next fire self-diagnosing.
+                        append_bram_trace_line(
+                            app,
+                            "claim-interval",
+                            &format!(
+                                "op=run-line-mismatch path={} base_oid={} base_n={} net={} steps={} replay_len={} file_len={} offset={}",
+                                path,
+                                &base_oid[..base_oid.len().min(12)],
+                                n,
+                                net,
+                                path_steps.len(),
+                                (n as isize + net).max(0),
+                                file_len,
+                                offset
+                            ),
+                        );
+                    }
+                }
+            }
+        }
         if !runs.is_empty() {
             out.insert(path, runs);
         }
@@ -58174,7 +58287,23 @@ mod claim_interval_prune_tests {
 
 #[cfg(test)]
 mod claim_attribution_tests {
-    use super::{apply_attr_hunks, attr_runs, parse_attr_diff};
+    use super::{apply_attr_hunks, attr_replay_line_offset, attr_runs, parse_attr_diff};
+
+    // attribution-run-line-offset-in-views: the tripwire's arithmetic. The
+    // #324/trace-vocabulary shape was a run rendered at line 56 while the
+    // real diff sat at 86 — a +30 offset the replay length would have exposed.
+    #[test]
+    fn replay_offset_detects_length_divergence() {
+        // Healthy: base 50, net +36, file 86 → no offset.
+        assert_eq!(attr_replay_line_offset(50, 36, 86), None);
+        // The live shape: replay reconstructs 56, file is 86 → +30.
+        assert_eq!(attr_replay_line_offset(50, 6, 86), Some(30));
+        // Shrink case: replay 100, file 90 → -10.
+        assert_eq!(attr_replay_line_offset(100, 0, 90), Some(-10));
+        // Net that would underflow clamps at 0, not a panic.
+        assert_eq!(attr_replay_line_offset(3, -10, 0), None);
+        assert_eq!(attr_replay_line_offset(3, -10, 5), Some(5));
+    }
 
     fn owners(n: usize) -> Vec<Option<String>> {
         vec![None; n]
@@ -58203,6 +58332,32 @@ mod claim_attribution_tests {
         let m = parse_attr_diff("+++ b/f\n@@ -2,1 +2,3 @@\n a\n+X\n+Y\n");
         apply_attr_hunks(&mut o, &m["f"], "A");
         assert_eq!(ids(&o), "..AA..");
+    }
+
+    // attribution-run-line-offset-in-views: a DELETED file's target line is
+    // `+++ /dev/null`, so its `-` hunks must attribute to the file named by
+    // `diff --git`, NOT bleed onto the preceding file. The live bug: a delete
+    // right after a modify put the deletions on the modified file, shifting
+    // every run and rendering the change as "no item".
+    #[test]
+    fn deleted_file_hunks_do_not_bleed_onto_preceding_file() {
+        let d = "diff --git a/keep.md b/keep.md\n--- a/keep.md\n+++ b/keep.md\n\
+                 @@ -1,1 +1,1 @@\n-old\n+new\n\
+                 diff --git a/gone.txt b/gone.txt\ndeleted file mode 100644\n\
+                 --- a/gone.txt\n+++ /dev/null\n@@ -1,3 +0,0 @@\n-a\n-b\n-c\n";
+        let m = parse_attr_diff(d);
+        // keep.md gets ONLY its own +1/-1, not gone.txt's three deletions.
+        let keep_net: isize = m["keep.md"]
+            .iter()
+            .flat_map(|h| h.lines.iter())
+            .map(|(c, _)| match c {
+                '+' => 1,
+                '-' => -1,
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(keep_net, 0, "keep.md must not absorb gone.txt's deletions");
+        assert!(m.contains_key("gone.txt"), "the deletion attributes to gone.txt");
     }
 
     // fix-attribution-run-line-offset: the chain-replay must place a sole

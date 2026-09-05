@@ -44877,10 +44877,13 @@ fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str,
     }
 
     // commits: unpushed commits (ground truth via git).
-    let unpushed = git_run(app, &["rev-list", "--count", "HEAD", "--not", "--remotes=origin"])
-        .ok()
-        .and_then(|s| s.trim().parse::<i64>().ok())
-        .unwrap_or(0);
+    let unpushed = git_run(
+        app,
+        &["rev-list", "--count", "HEAD", "--not", "--remotes=origin"],
+    )
+    .ok()
+    .and_then(|s| s.trim().parse::<i64>().ok())
+    .unwrap_or(0);
     if unpushed > 0 {
         let lane = owner_state_lane(true, false, true);
         classified.push((
@@ -44969,17 +44972,35 @@ mod needs_you_tests {
 
     #[test]
     fn owner_state_lane_projects_court_and_blocking() {
-        assert_eq!(needs_you_lane_key(owner_state_lane(true, true, false)), "needsYouNow");
-        assert_eq!(needs_you_lane_key(owner_state_lane(true, false, false)), "yourDecision");
-        assert_eq!(needs_you_lane_key(owner_state_lane(false, true, false)), "othersHands");
-        assert_eq!(needs_you_lane_key(owner_state_lane(false, false, false)), "othersHands");
+        assert_eq!(
+            needs_you_lane_key(owner_state_lane(true, true, false)),
+            "needsYouNow"
+        );
+        assert_eq!(
+            needs_you_lane_key(owner_state_lane(true, false, false)),
+            "yourDecision"
+        );
+        assert_eq!(
+            needs_you_lane_key(owner_state_lane(false, true, false)),
+            "othersHands"
+        );
+        assert_eq!(
+            needs_you_lane_key(owner_state_lane(false, false, false)),
+            "othersHands"
+        );
     }
 
     #[test]
     fn loose_end_wins_over_court() {
         // A one-click local action is a loose end regardless of court/blocking.
-        assert_eq!(needs_you_lane_key(owner_state_lane(true, true, true)), "looseEnds");
-        assert_eq!(needs_you_lane_key(owner_state_lane(false, false, true)), "looseEnds");
+        assert_eq!(
+            needs_you_lane_key(owner_state_lane(true, true, true)),
+            "looseEnds"
+        );
+        assert_eq!(
+            needs_you_lane_key(owner_state_lane(false, false, true)),
+            "looseEnds"
+        );
     }
 }
 

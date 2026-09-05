@@ -1053,18 +1053,22 @@ was correctly signed. The record was inconsistent along an axis no
 reader cares about. The cross-boundary case is a subset of the problem,
 and it was mistaken for the whole of it.
 
-**The form.** One canonical opener, six slots, all load-bearing —
-*whose* agent, *which* agent, *which thread*, *which model*, the familiar
-project name, and the exact repository that anchors the speaker's evidence:
+**The form.** One canonical opener, seven slots, all load-bearing —
+*whose* agent, *which* agent, *which thread*, *which model*, *which
+machine*, the familiar project name, and the exact repository that anchors
+the speaker's evidence:
 
-    <owner>'s <Agent> (<thread>, <model>) speaking from the <Project> project (<forge-host>/<owner-or-group>/<repo>):
+    <owner>'s <Agent> (<thread>, <model>, <os>) speaking from the <Project> project (<forge-host>/<owner-or-group>/<repo>):
 
 `<thread>` is `main thread` or `subagent`; `<model>` names the model
-producing the words. This project's instances:
+producing the words; `<os>` names the host platform — `macOS`, `Windows`,
+or `Linux` (finer detail like a distro is allowed, not required). This
+project's instances:
 
-    Jon's Claude (main thread, Fable 5) speaking from the Bram project (github.com/judell/bram):
-    Jon's Claude (subagent, Opus 5) speaking from the Bram project (github.com/judell/bram):
-    Jon's Codex (main thread, gpt-5.2-codex) speaking from the XMLUI project (github.com/xmlui-org/xmlui):
+    Jon's Claude (main thread, Fable 5, macOS) speaking from the Bram project (github.com/judell/bram):
+    Jon's Claude (subagent, Opus 5, macOS) speaking from the Bram project (github.com/judell/bram):
+    Jon's Claude (main thread, Opus 5, Windows) speaking from the Bram project (github.com/judell/bram):
+    Jon's Codex (main thread, gpt-5.2-codex, macOS) speaking from the XMLUI project (github.com/xmlui-org/xmlui):
 
 The repository locator is the checkout's `origin`, normalized to
 `host/path`: omit the scheme, credentials, trailing slash, and `.git`.
@@ -1077,13 +1081,18 @@ across forks, mirrors, same-named repositories, and forge providers.
 A form that names only the project ("from the xmlui side") leaves "who
 is speaking" unanswered, which is the half that matters when two agents
 work the same thread. Across a boundary the third slot also answers
-*which side the evidence comes from*. The two parenthetical slots
+*which side the evidence comes from*. The first two parenthetical slots
 (added 2026-08-28, when multi-agent orchestration made them
 unrecoverable otherwise) answer *evidential standing* — an
 orchestrator holds the design discussion, a delegated subagent saw
 only its brief — and *attribution*: judgment quality belongs to the
 model that produced the words, and heavy passes routinely run on a
-different model than the main loop.
+different model than the main loop. The third, `<os>` (added
+2026-09-05, judell/bram#346), answers *which machine*: two sessions of
+the same owner's same agent coordinating across platforms render
+otherwise-identical signatures, and the model name doesn't reliably
+distinguish them — on #346 every participant read "Jon's Claude …
+(github.com/judell/bram)" and the thread was illegible.
 
 Two rules that follow:
 

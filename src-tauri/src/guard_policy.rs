@@ -2280,7 +2280,7 @@ fn bash_branch(payload: &Value) -> ShadowVerdict {
             "Bash",
             &preview,
             &cwd_s,
-            "This agent-authored forge artifact lacks the full repository-qualified signature.\nOpen the first line with:\n    <owner>'s <Agent> (<thread>, <model>) speaking from the <Project> project (<origin-host>/<path>):\nSee conventions.md, 'Signing agent-authored forge artifacts' — every artifact, every comment, not just the first in a thread.",
+            "This agent-authored forge artifact lacks the full repository-qualified signature.\nOpen the first line with:\n    <owner>'s <Agent> (<thread>, <model>, <os>) speaking from the <Project> project (<origin-host>/<path>):\nSee conventions.md, 'Signing agent-authored forge artifacts' — every artifact, every comment, not just the first in a thread.",
         );
     }
     let (sha_verdict, sha_detail) = forge_sha_verdict(&command, &cwd);
@@ -3888,7 +3888,7 @@ Use --body-file - (stdin) or --body-file <path> instead.\nDetected: <match>",
     }
     if cb_verdict == "unsigned" {
         return codex_deny(
-            "This agent-authored forge artifact lacks the full repository-qualified signature.\nOpen the first line with:\n    <owner>'s <Agent> (<thread>, <model>) speaking from the <Project> project (<origin-host>/<path>):\nSee conventions.md, 'Signing agent-authored forge artifacts' — every artifact, every comment, not just the first in a thread.",
+            "This agent-authored forge artifact lacks the full repository-qualified signature.\nOpen the first line with:\n    <owner>'s <Agent> (<thread>, <model>, <os>) speaking from the <Project> project (<origin-host>/<path>):\nSee conventions.md, 'Signing agent-authored forge artifacts' — every artifact, every comment, not just the first in a thread.",
             "-",
         );
     }
@@ -5507,7 +5507,7 @@ mod guard_policy_tests {
         assert_eq!(v.reason, "crossboundary-unsigned");
         assert_eq!(
             body_of(&v),
-            "This agent-authored forge artifact lacks the full repository-qualified signature.\nOpen the first line with:\n    <owner>'s <Agent> (<thread>, <model>) speaking from the <Project> project (<origin-host>/<path>):\nSee conventions.md, 'Signing agent-authored forge artifacts' — every artifact, every comment, not just the first in a thread."
+            "This agent-authored forge artifact lacks the full repository-qualified signature.\nOpen the first line with:\n    <owner>'s <Agent> (<thread>, <model>, <os>) speaking from the <Project> project (<origin-host>/<path>):\nSee conventions.md, 'Signing agent-authored forge artifacts' — every artifact, every comment, not just the first in a thread."
         );
 
         let at = '@';

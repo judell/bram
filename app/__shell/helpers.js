@@ -1897,6 +1897,8 @@ window.settingsInfoBodies = {
     "Claude's descriptions.\n\n" +
     "**For Codex** — no native descriptions; rows show the raw command. " +
     "When the toggle is on, Bram uses Haiku to create descriptions.\n\n" +
+    "Flipping the toggle off hides existing Haiku descriptions; flipping it " +
+    "back on restores them from cache at no cost — flip freely to compare.\n\n" +
     "On sends tool material (command, diff, context, result excerpt) to the " +
     "Anthropic API — needs `ANTHROPIC_API_KEY`, billed per-token. " +
     "Credentials are redacted heuristically, not guaranteed. If Claude Code " +

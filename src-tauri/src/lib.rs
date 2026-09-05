@@ -44953,6 +44953,492 @@ fn needs_you_lane_key(lane: NeedsYouLane) -> &'static str {
     }
 }
 
+// issue-338 v2: forge-activity source. GitHub's notifications feed (gh api
+// /notifications, participating threads) is the efficient nominator of "someone
+// acted on a thread you're in"; the notification `reason` is the whose-court
+// answer, and the Requirement-0 verification (is the latest comment yours?)
+// both self-clears replied threads and is the seam a future Dismiss keys on.
+// First-cut bounds, stated honestly: unread + participating (so reading a
+// thread on GitHub without replying clears it — the clear-on-reply-only
+// refinement needs all=true + the Dismiss item); GitHub only (GitLab todos are
+// a follow-up); tier-1 link to the Issues tab (the exact comment is a
+// follow-up). Cached 30s so the inbox's event-driven refetch can't turn into a
+// notifications-API storm (#323).
+static NEEDS_YOU_FORGE_LOGIN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+static FORGE_AWAITING_CACHE: std::sync::Mutex<
+    Option<(std::time::Instant, Vec<(NeedsYouLane, serde_json::Value)>)>,
+> = std::sync::Mutex::new(None);
+
+fn needs_you_forge_login<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<String> {
+    NEEDS_YOU_FORGE_LOGIN
+        .get_or_init(|| {
+            project_root(Some(app))
+                .filter(|_| project_forge(app) == Forge::GitHub)
+                .and_then(|root| {
+                    std::process::Command::new("gh")
+                        .current_dir(&root)
+                        .args(["api", "/user", "--jq", ".login"])
+                        .output()
+                        .ok()
+                        .filter(|o| o.status.success())
+                        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                        .filter(|s| !s.is_empty())
+                })
+        })
+        .clone()
+}
+
+// issue-338 backgrounding (Jon: "background the check carefully at launch so
+// I don't wait if I open the awaiting page"): the serve NEVER blocks on gh.
+// This reads the snapshot the refresher below maintains; None means the
+// first pass hasn't completed yet, which the serve reports as a note rather
+// than a blank lane (the false-negative this surface exists to prevent).
+fn forge_awaiting_items_cached() -> Option<Vec<(NeedsYouLane, serde_json::Value)>> {
+    FORGE_AWAITING_CACHE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|(_, c)| c.clone())
+}
+
+// Warm at launch (short settle delay), refresh on a 90s cadence, and emit
+// needs-you-changed only when the (id, marker) signature moves — the pane
+// refetches on the event, so fresh forge activity appears without a poll
+// and without anyone waiting on a click.
+fn spawn_forge_awaiting_refresher(app: AppHandle) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let mut last_sig = String::new();
+        loop {
+            let fresh = forge_awaiting_items_fetch(&app);
+            let mut keys: Vec<String> = fresh
+                .iter()
+                .map(|(_, v)| {
+                    format!(
+                        "{}|{}",
+                        v.get("id").and_then(|x| x.as_str()).unwrap_or(""),
+                        v.get("activityMarker")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                    )
+                })
+                .collect();
+            keys.sort();
+            let sig = keys.join(",");
+            let changed = sig != last_sig;
+            let n = fresh.len();
+            *FORGE_AWAITING_CACHE.lock().unwrap() = Some((std::time::Instant::now(), fresh));
+            if changed {
+                last_sig = sig;
+                emit_replayable_signal(&app, "needs-you-changed");
+            }
+            append_bram_trace_line(
+                &app,
+                "needs-you",
+                &format!("op=forge-refresh n={} changed={}", n, changed as u8),
+            );
+            std::thread::sleep(std::time::Duration::from_secs(90));
+        }
+    });
+}
+
+// issue-338 local sweep: open issues where someone other than you moved
+// last, read from the indexer's cached issues list — zero gh calls, so it
+// runs on the serve's hot path. This catches what the notifications feed
+// structurally cannot: a stranger's brand-new issue when your watch
+// settings don't cover "all activity" (#343 arrived invisibly this way).
+// Freshness rides the indexer (~45s) and the pane's existing
+// issues-changed refetch; your reply self-clears on the next index pass.
+fn local_issue_sweep_items<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    skip_numbers: &std::collections::HashSet<u64>,
+) -> Vec<(NeedsYouLane, serde_json::Value)> {
+    let mut out = Vec::new();
+    // Non-blocking login peek: OnceLock::get never runs (or waits on) the
+    // initializer. The refresher thread's first notifications fetch warms
+    // it; until then the sweep returns empty and the warming note covers
+    // the gap. get_or_init here made the first serve WAIT ~seconds for a
+    // gh api /user racing the refresher (testbed, 2026-09-05: 7.7s serve).
+    let Some(login) = NEEDS_YOU_FORGE_LOGIN.get().cloned().flatten() else {
+        return out;
+    };
+    // Cache-only issues read: the gh_issues_list fallback live-builds on a
+    // cache miss, which blocks the serve on gh — the exact wait this
+    // backgrounding exists to remove. No cache yet → empty sweep; the
+    // indexer fills it within a pass and issues-changed refetches the pane.
+    let cached: Option<String> = search_index_db_path(app)
+        .and_then(|db| search_index::open(&db.to_string_lossy()).ok())
+        .and_then(|conn| search_index::get_extra(&conn, "issues:list").ok())
+        .flatten();
+    let Some(text) = cached.filter(|t| !t.is_empty()) else {
+        return out;
+    };
+    let Ok(serde_json::Value::Array(issues)) = serde_json::from_str(&text) else {
+        return out;
+    };
+    for rec in &issues {
+        let state = rec.get("state").and_then(|v| v.as_str()).unwrap_or("");
+        if !state.eq_ignore_ascii_case("open") {
+            continue;
+        }
+        let number = rec.get("number").and_then(|v| v.as_u64()).unwrap_or(0);
+        if number == 0 || skip_numbers.contains(&number) {
+            continue;
+        }
+        let author = rec
+            .get("author")
+            .and_then(|a| a.get("login"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let n_comments = rec
+            .get("comments")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        let last = if n_comments > 0 {
+            rec.get("latestCommentAuthor")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+        } else {
+            author
+        };
+        if last.is_empty() || last.eq_ignore_ascii_case(&login) {
+            continue;
+        }
+        let title = rec.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        let url = rec.get("url").and_then(|v| v.as_str()).unwrap_or("");
+        let marker = rec
+            .get("latestCommentAt")
+            .or_else(|| rec.get("activityAt"))
+            .or_else(|| rec.get("updatedAt"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let fresh_issue = n_comments == 0;
+        let lane = if fresh_issue {
+            NeedsYouLane::NeedsYouNow
+        } else {
+            NeedsYouLane::YourDecision
+        };
+        let headline = if fresh_issue {
+            format!("New issue #{} \u{2014} {}", number, title)
+        } else {
+            format!("New reply on #{} (open) \u{2014} {}", number, title)
+        };
+        out.push((
+            lane,
+            serde_json::json!({
+                "source": "forge",
+                "id": format!("forge-issue-{}", number),
+                "title": headline,
+                "detail": format!("{} moved last.", last),
+                "link": "/issues",
+                "externalUrl": url,
+                "court": "user",
+                "blocking": fresh_issue,
+                "verified": true,
+                "activityMarker": marker,
+            }),
+        ));
+    }
+    out
+}
+
+fn forge_awaiting_items_fetch<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Vec<(NeedsYouLane, serde_json::Value)> {
+    let mut out: Vec<(NeedsYouLane, serde_json::Value)> = Vec::new();
+    let root = match project_root(Some(app)) {
+        Some(r) if project_forge(app) == Forge::GitHub => r,
+        _ => return out,
+    };
+    let repo = match repo_owner_name(app) {
+        Some(r) if !r.is_empty() => r,
+        _ => return out,
+    };
+    let me = needs_you_forge_login(app);
+    // all=true: the unread flag is the wrong signal — a notification Jon
+    // glanced at in email or on the web is marked read while the thread
+    // still awaits his reply (live case 2026-09-04: Walt's comments on
+    // #328/#334, read but unanswered, invisible to the unread-only feed).
+    // Who-moved-last (the latest-comment author gate below) is the real
+    // test; querying read threads too lets it do that job.
+    let stdout = match gh_json_out(
+        &root,
+        &["api", "/notifications?all=true&participating=true"],
+        "gh notifications",
+    ) {
+        Ok(s) => s,
+        Err(_) => {
+            append_bram_trace_line(app, "needs-you", "op=forge-error stage=fetch");
+            return out;
+        }
+    };
+    let threads: Vec<serde_json::Value> = match serde_json::from_slice(&stdout) {
+        Ok(v) => v,
+        Err(_) => {
+            append_bram_trace_line(app, "needs-you", "op=forge-error stage=parse");
+            return out;
+        }
+    };
+    // GitHub returns threads newest-first; the cap bounds the per-thread
+    // author lookups the all=true universe would otherwise admit.
+    for t in threads.iter().take(30) {
+        let repo_full = t
+            .get("repository")
+            .and_then(|r| r.get("full_name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !repo_full.eq_ignore_ascii_case(repo.as_str()) {
+            continue;
+        }
+        let reason = t.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+        let subject = t.get("subject");
+        let title = subject
+            .and_then(|s| s.get("title"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let subj_url = subject
+            .and_then(|s| s.get("url"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let number = subj_url.rsplit('/').next().unwrap_or("");
+        let updated = t
+            .get("updated_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let latest_comment_url = subject
+            .and_then(|s| s.get("latest_comment_url"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let (lane, blocking, asked) = match reason {
+            "mention" | "assign" | "review_requested" => (NeedsYouLane::NeedsYouNow, true, true),
+            // "author": someone acted on a thread Jon opened — the repo
+            // owner's most common awaiting-reply shape, and GitHub's reason
+            // for it is author, not comment. "state_change": a comment can
+            // hide behind a later state event's thread reason (#329,
+            // 2026-09-04: Walt's reply 22 s before a state change). Both are
+            // safe to admit because the latest-comment gate below keeps only
+            // threads where someone else moved last.
+            "comment" | "subscribed" | "author" | "state_change" => {
+                (NeedsYouLane::YourDecision, false, false)
+            }
+            _ => continue,
+        };
+
+        // Requirement 0, widened for all=true: confirm the thread's TRUE
+        // latest comment is not yours — your reply being the last move means
+        // self-cleared, whatever the reason. The notification's
+        // latest_comment_url is no good for this: it is a snapshot from the
+        // last other-party event, and your own later reply never refreshes
+        // it (live case 2026-09-04: #305, answered 9 s after the snapshot,
+        // still read "new reply"). So ask the issue itself. per_page=100
+        // covers realistic threads in one call; past that the check reads
+        // the first hundred, which only risks resurfacing an answered
+        // mega-thread. Asked reasons (mention/assign/review_requested) stay
+        // verified when the check is inconclusive or the thread has no
+        // comments; comment-shaped reasons REQUIRE a confirmed other-author,
+        // because all=true would otherwise admit every read thread ever.
+        let mut verified = asked;
+        let comments_url = format!(
+            "{}/comments?per_page=100",
+            subj_url.replace("/pulls/", "/issues/")
+        );
+        if let Some(login) = me.as_ref() {
+            if let Ok(cout) = gh_json_out(
+                &root,
+                &[
+                    "api",
+                    comments_url.as_str(),
+                    "--jq",
+                    ".[-1].user.login // \"\"",
+                ],
+                "gh last comment author",
+            ) {
+                let author = String::from_utf8_lossy(&cout).trim().to_string();
+                if !author.is_empty() {
+                    if author.eq_ignore_ascii_case(login.as_str()) {
+                        continue;
+                    }
+                    verified = true;
+                }
+            }
+        }
+        if !verified {
+            continue;
+        }
+
+        // Issue state rides in the headline ("#329 (closed)" vs "#328
+        // (open)"): a reply on a closed thread is a different kind of ask
+        // than one holding an issue open, and the reader should see which
+        // without clicking through. One extra call per KEPT item only.
+        let state = gh_json_out(
+            &root,
+            &[
+                "api",
+                subj_url.replace("/pulls/", "/issues/").as_str(),
+                "--jq",
+                ".state",
+            ],
+            "gh issue state",
+        )
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o).trim().to_lowercase())
+        .unwrap_or_default();
+        let numbered = if state.is_empty() {
+            format!("#{}", number)
+        } else {
+            format!("#{} ({})", number, state)
+        };
+        let headline = match reason {
+            "mention" => format!("You're mentioned on {} \u{2014} {}", numbered, title),
+            "assign" => format!("You're assigned {} \u{2014} {}", numbered, title),
+            "review_requested" => {
+                format!("Review requested on {} \u{2014} {}", numbered, title)
+            }
+            _ => format!("New reply on {} \u{2014} {}", numbered, title),
+        };
+        let marker = if latest_comment_url.is_empty() {
+            updated
+        } else {
+            latest_comment_url
+        };
+        out.push((
+            lane,
+            serde_json::json!({
+                "source": "forge",
+                "id": format!("forge-{}", subj_url),
+                "title": headline,
+                "detail": format!("GitHub notification (reason: {}).", reason),
+                "link": "/issues",
+                // The thread's web page: replying is the act that clears the
+                // item, and GitHub is where replying happens — so Open goes
+                // there, not to the in-app Issues tab. Derived from the API
+                // subject url; empty subj_url leaves it empty and the pane
+                // falls back to the local link.
+                "externalUrl": subj_url
+                    .replace("api.github.com/repos/", "github.com/")
+                    .replace("/pulls/", "/pull/"),
+                "court": "user",
+                "blocking": blocking,
+                "verified": verified,
+                "activityMarker": marker,
+            }),
+        ));
+    }
+    append_bram_trace_line(
+        app,
+        "needs-you",
+        &format!(
+            "op=forge-fetch threads={} kept={}",
+            threads.len(),
+            out.len()
+        ),
+    );
+    out
+}
+
+// inbox-dismiss-forge-items: dismiss-until-new-activity for forge items.
+// Reply-clears remains the primary loop; Dismiss is the escape hatch for
+// items that ask nothing (an FYI mention demanded a reply to clear — Jon,
+// 2026-09-04: "that's going to be a pain"). A dismissal is the pair
+// (id, activityMarker): new activity on the thread moves the marker, so a
+// dismissed thread that gains a later comment correctly reappears — never
+// dismiss-forever.
+const NEEDS_YOU_DISMISSED_REL: &str = "resources/.needs-you-dismissed.json";
+
+fn needs_you_dismissed_pairs<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<(String, String)> {
+    let Some(root) = project_root(Some(app)) else {
+        return Vec::new();
+    };
+    std::fs::read_to_string(root.join(NEEDS_YOU_DISMISSED_REL))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|d| d.get("dismissed").and_then(|v| v.as_array()).cloned())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| {
+                    Some((
+                        e.get("id")?.as_str()?.to_string(),
+                        e.get("marker")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn write_needs_you_dismissed<R: tauri::Runtime>(app: &AppHandle<R>, pairs: &[(String, String)]) {
+    let Some(root) = project_root(Some(app)) else {
+        return;
+    };
+    let arr: Vec<serde_json::Value> = pairs
+        .iter()
+        .map(|(id, m)| serde_json::json!({ "id": id, "marker": m }))
+        .collect();
+    let doc = serde_json::json!({ "version": 1, "dismissed": arr });
+    let path = root.join(NEEDS_YOU_DISMISSED_REL);
+    if let Ok(body) = serde_json::to_string_pretty(&doc) {
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, format!("{}\n", body)).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+}
+
+fn handle_needs_you_dismiss<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    body: &[u8],
+) -> (u16, &'static str, Vec<u8>) {
+    let parsed: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                400,
+                "application/json; charset=utf-8",
+                br#"{"error":"invalid json"}"#.to_vec(),
+            )
+        }
+    };
+    let id = parsed.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let marker = parsed
+        .get("activityMarker")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if id.is_empty() || marker.is_empty() {
+        return (
+            400,
+            "application/json; charset=utf-8",
+            br#"{"error":"id and activityMarker required"}"#.to_vec(),
+        );
+    }
+    let mut pairs = needs_you_dismissed_pairs(app);
+    if !pairs.iter().any(|(i, m)| i == id && m == marker) {
+        pairs.push((id.to_string(), marker.to_string()));
+        write_needs_you_dismissed(app, &pairs);
+    }
+    append_bram_trace_line(
+        app,
+        "needs-you",
+        &format!("op=dismiss id={} marker={}", id, marker),
+    );
+    // Push, not callback: the pane refetches on this event. The APICall
+    // onSuccess refetch was observed NOT firing (2026-09-05 01:23Z — two
+    // dismiss POSTs, zero GETs between them, item cleared only on reload;
+    // same family as the delayed-onSuccess xmlui-org/xmlui#3540 note in
+    // conventions). The host emit is authoritative for every surface.
+    emit_replayable_signal(app, "needs-you-changed");
+    (
+        200,
+        "application/json; charset=utf-8",
+        br#"{"ok":true}"#.to_vec(),
+    )
+}
+
 fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str, Vec<u8>) {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -44997,7 +45483,8 @@ fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str,
                     .collect()
             })
             .unwrap_or_default();
-        let mut detail = String::from("Changes are on disk, waiting for your commit or drop.");
+        let mut detail =
+            String::from("Changes are on disk, waiting for your commit, refine, or drop.");
         if !closes.is_empty() {
             detail.push_str(&format!(" Would close {}.", closes.join(", ")));
         }
@@ -45064,6 +45551,64 @@ fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str,
         ));
     }
 
+    // issue-338 v2: forge activity — issue/PR threads awaiting the user,
+    // from TWO sources merged: the background-refreshed notifications
+    // snapshot (never blocks this serve; None = first pass still warming,
+    // reported below as a note), and the LOCAL issues-cache sweep (open
+    // issues where someone else moved last — catches what notifications
+    // structurally miss, e.g. a stranger's brand-new issue, #343).
+    // Notification items win the dedupe: they carry the richer reason.
+    // inbox-dismiss-forge-items: dismissed (id, marker) pairs are dropped;
+    // a moved marker (new activity) no longer matches, so the item returns.
+    // Dismissals whose id left the merged set are pruned.
+    let mut forge_warming = false;
+    {
+        let dismissed = needs_you_dismissed_pairs(app);
+        let notif = forge_awaiting_items_cached();
+        forge_warming = notif.is_none();
+        let notif = notif.unwrap_or_default();
+        let notif_numbers: std::collections::HashSet<u64> = notif
+            .iter()
+            .filter_map(|(_, v)| v.get("id").and_then(|x| x.as_str()))
+            .filter_map(|id| id.rsplit('/').next().and_then(|n| n.parse::<u64>().ok()))
+            .collect();
+        let mut forge_entries = notif;
+        forge_entries.extend(local_issue_sweep_items(app, &notif_numbers));
+        let live_ids: std::collections::HashSet<String> = forge_entries
+            .iter()
+            .filter_map(|(_, v)| v.get("id").and_then(|x| x.as_str()).map(String::from))
+            .collect();
+        let mut filtered = 0usize;
+        for entry in forge_entries {
+            let id = entry.1.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            let marker = entry
+                .1
+                .get("activityMarker")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if dismissed.iter().any(|(i, m)| i == id && m == marker) {
+                filtered += 1;
+                continue;
+            }
+            classified.push(entry);
+        }
+        if filtered > 0 {
+            append_bram_trace_line(
+                app,
+                "needs-you",
+                &format!("op=dismiss-filtered n={}", filtered),
+            );
+        }
+        let kept: Vec<(String, String)> = dismissed
+            .iter()
+            .filter(|(i, _)| live_ids.contains(i))
+            .cloned()
+            .collect();
+        if kept.len() != dismissed.len() {
+            write_needs_you_dismissed(app, &kept);
+        }
+    }
+
     // Bucket by the lane owner_state_lane chose — never hand-assigned.
     let mut needs_now: Vec<serde_json::Value> = Vec::new();
     let mut your_decision: Vec<serde_json::Value> = Vec::new();
@@ -45090,6 +45635,15 @@ fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str,
         ),
     );
 
+    let mut notes: Vec<String> = vec![
+        "Forge activity merges two sources (GitHub-only for now): your notifications, and a local sweep of open issues where someone else moved last. An item clears when you reply (you become the last mover) or when you Dismiss it; reading without replying does not clear it. Dismissed items return on new activity (#338).".to_string(),
+    ];
+    if forge_warming {
+        notes.push(
+            "The forge activity check is still warming up — issue/PR items from notifications appear shortly."
+                .to_string(),
+        );
+    }
     let body = serde_json::json!({
         "verifiedAtMs": now_ms,
         "lanes": {
@@ -45098,9 +45652,7 @@ fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str,
             "othersHands": others_hands,
             "looseEnds": loose_ends,
         },
-        "notes": [
-            "v1 covers ground-truth local sources \u{2014} worklist, commits, queued closes. Full issue and PR whose-court triage (reviews requested, checks, merge state) lands in a later slice (#338)."
-        ],
+        "notes": notes,
     })
     .to_string()
     .into_bytes();
@@ -55400,6 +55952,17 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             let _ = request.as_reader().read_to_end(&mut buf);
             handle_iterate_end(app, &buf)
         }
+    } else if path == "__needs-you/dismiss" {
+        // inbox-dismiss-forge-items: record a (id, activityMarker) dismissal;
+        // the serve drops matching forge items until new activity moves the
+        // marker.
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            let mut buf = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut buf);
+            handle_needs_you_dismiss(app, &buf)
+        }
     } else if path == "__git/pull-rebase" {
         if method != "POST" {
             (405, "text/plain; charset=utf-8", b"POST only".to_vec())
@@ -55995,6 +56558,11 @@ pub fn run() {
             // Remove any stale pty-intent queue from a prior session so
             // its intents don't replay into the fresh PTY. Refs #86.
             cleanup_stale_pty_intents(app.handle());
+            // issue-338: warm the forge-notifications snapshot in the
+            // background so opening Awaiting You never waits on gh, then
+            // keep it fresh on a 90s cadence, emitting needs-you-changed
+            // only when the (id, marker) signature moves.
+            spawn_forge_awaiting_refresher(app.handle().clone());
             let internal_origin = format!("http://127.0.0.1:{}", port);
             eprintln!("[bram] internal HTTP server: {}", internal_origin);
             // Tools pane lives at xd's app/tools/index.html, served via

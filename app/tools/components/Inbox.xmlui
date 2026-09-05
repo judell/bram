@@ -11,23 +11,69 @@
        This tab renders it; the reconciliation lives host-side. -->
   <DataSource id="inbox" url="/__needs-you" />
 
+  <!-- inbox-dismiss-forge-items: the dismiss POST + refetch is driven
+       directly from the button click by window.__bramDismissForgeItem (a
+       real-JS fetch). Not because the XMLUI event path is broken — it
+       isn't, it clears the row — but because on the 2026-09-05 testbed
+       drive it did so ~30 s after the click (root cause unestablished; an
+       exact 30 s reads like a timer, NOT the general PushSource latency the
+       rest of the pane disproves daily). A user action should drive its own
+       feedback synchronously regardless: never round-trip through the host
+       event bus to learn what you just did. The needs-you-changed listener
+       below still catches background "new activity". -->
+
+
   <!-- issue-338 live-refresh: refetch on the same host events the engine's
-       ground-truth lanes derive from — no poll (push-over-polling). -->
+       ground-truth lanes derive from — no poll (push-over-polling).
+       Canonical __bramRefetchOnLiveEvent at top-level attribute position
+       (the earlier `() => inbox.refetch()` arrow was the silent-abort trap,
+       docs/developing-bram.md). These DO fire — the 2026-09-05 testbed
+       drive traced event → __bramRefetchOnLiveEvent → GET — but ~30 s after
+       the triggering event (root cause not isolated). Acceptable for
+       background updates (an item appearing a beat late is invisible); NOT
+       acceptable as the response to a Dismiss click, which is why that path
+       is click-driven above. -->
   <PushSource id="inboxWorklistEvt" initial="{null}"
     subscribe="{window.bramSubscribeTauriEvent('worklist-changed')}" />
   <ChangeListener listenTo="{inboxWorklistEvt.value &amp;&amp; inboxWorklistEvt.value.tick}"
-    onDidChange="() => inbox.refetch()" />
+    onDidChange="window.__bramRefetchOnLiveEvent(inboxWorklistEvt.value, inbox)" />
   <PushSource id="inboxGitStatusEvt" initial="{null}"
     subscribe="{window.bramSubscribeTauriEvent('git-status-changed', false)}" />
   <ChangeListener listenTo="{inboxGitStatusEvt.value &amp;&amp; inboxGitStatusEvt.value.tick}"
-    onDidChange="() => inbox.refetch()" />
+    onDidChange="window.__bramRefetchOnLiveEvent(inboxGitStatusEvt.value, inbox)" />
   <PushSource id="inboxIssuesEvt" initial="{null}"
     subscribe="{window.bramSubscribeTauriEvent('issues-changed')}" />
   <ChangeListener listenTo="{inboxIssuesEvt.value &amp;&amp; inboxIssuesEvt.value.tick}"
-    onDidChange="() => inbox.refetch()" />
+    onDidChange="window.__bramRefetchOnLiveEvent(inboxIssuesEvt.value, inbox)" />
+  <!-- needs-you-changed also fires from the background forge refresher when
+       new activity appears; this listener catches that (latency invisible
+       for the appear case). The dismiss click does NOT wait on it. -->
+  <PushSource id="inboxDismissEvt" initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('needs-you-changed')}" />
+  <ChangeListener listenTo="{inboxDismissEvt.value &amp;&amp; inboxDismissEvt.value.tick}"
+    onDidChange="window.__bramRefetchOnLiveEvent(inboxDismissEvt.value, inbox)" />
+
+  <!-- Scope/limitations notes live behind the standard info-icon modal
+       (the Context "About Context" pattern), one note per paragraph. -->
+  <ModalDialog id="awaitingNotesDialog" title="Notes">
+    <VStack gap="$space-3">
+      <Items data="{inbox.value &amp;&amp; inbox.value.notes}">
+        <Text>{$item}</Text>
+      </Items>
+    </VStack>
+  </ModalDialog>
 
   <VStack padding="$space-4" gap="$space-4" width="*">
-    <Heading level="h2" value="Awaiting You" />
+    <HStack verticalAlignment="center" gap="$space-2">
+      <Heading level="h2" value="Awaiting You" />
+      <Button
+        when="{lanesReady &amp;&amp; inbox.value.notes &amp;&amp; inbox.value.notes.length > 0}"
+        label="ⓘ"
+        variant="ghost"
+        size="sm"
+        tooltip="Notes"
+        onClick="awaitingNotesDialog.open()" />
+    </HStack>
 
     <!-- Progress annotation while the freshness / reconciliation check runs
          (docs/needs-you-inbox.md): a blank inbox must read as *verifying*,
@@ -47,9 +93,13 @@
       <Items data="{inbox.value.lanes.needsYouNow}">
         <Card>
           <VStack gap="$space-1">
-            <Text fontWeight="$fontWeight-bold">{$item.title}</Text>
+            <Text>{$item.title}</Text>
             <Text fontSize="$fontSize-sm" color="$textColor-secondary">{$item.detail}</Text>
-            <Button variant="ghost" size="sm" label="Open" onClick="navigate($item.link)" />
+            <HStack gap="$space-1">
+              <Button when="{!$item.externalUrl}" variant="ghost" size="sm" label="Open" onClick="navigate($item.link)" />
+              <Button when="{$item.externalUrl}" variant="ghost" size="sm" label="Open" onClick="openExternal($item.externalUrl)" />
+              <Button when="{$item.source === 'forge' &amp;&amp; $item.activityMarker}" variant="ghost" size="sm" label="Dismiss" tooltip="Hide until this thread has new activity" onClick="window.__bramDismissForgeItem(inbox, $item.id, $item.activityMarker)" />
+            </HStack>
           </VStack>
         </Card>
       </Items>
@@ -61,9 +111,13 @@
       <Items data="{inbox.value.lanes.yourDecision}">
         <Card>
           <VStack gap="$space-1">
-            <Text fontWeight="$fontWeight-bold">{$item.title}</Text>
+            <Text>{$item.title}</Text>
             <Text fontSize="$fontSize-sm" color="$textColor-secondary">{$item.detail}</Text>
-            <Button variant="ghost" size="sm" label="Open" onClick="navigate($item.link)" />
+            <HStack gap="$space-1">
+              <Button when="{!$item.externalUrl}" variant="ghost" size="sm" label="Open" onClick="navigate($item.link)" />
+              <Button when="{$item.externalUrl}" variant="ghost" size="sm" label="Open" onClick="openExternal($item.externalUrl)" />
+              <Button when="{$item.source === 'forge' &amp;&amp; $item.activityMarker}" variant="ghost" size="sm" label="Dismiss" tooltip="Hide until this thread has new activity" onClick="window.__bramDismissForgeItem(inbox, $item.id, $item.activityMarker)" />
+            </HStack>
           </VStack>
         </Card>
       </Items>
@@ -75,9 +129,13 @@
       <Items data="{inbox.value.lanes.othersHands}">
         <Card>
           <VStack gap="$space-1">
-            <Text fontWeight="$fontWeight-bold">{$item.title}</Text>
+            <Text>{$item.title}</Text>
             <Text fontSize="$fontSize-sm" color="$textColor-secondary">{$item.detail}</Text>
-            <Button variant="ghost" size="sm" label="Open" onClick="navigate($item.link)" />
+            <HStack gap="$space-1">
+              <Button when="{!$item.externalUrl}" variant="ghost" size="sm" label="Open" onClick="navigate($item.link)" />
+              <Button when="{$item.externalUrl}" variant="ghost" size="sm" label="Open" onClick="openExternal($item.externalUrl)" />
+              <Button when="{$item.source === 'forge' &amp;&amp; $item.activityMarker}" variant="ghost" size="sm" label="Dismiss" tooltip="Hide until this thread has new activity" onClick="window.__bramDismissForgeItem(inbox, $item.id, $item.activityMarker)" />
+            </HStack>
           </VStack>
         </Card>
       </Items>
@@ -89,19 +147,17 @@
       <Items data="{inbox.value.lanes.looseEnds}">
         <Card>
           <VStack gap="$space-1">
-            <Text fontWeight="$fontWeight-bold">{$item.title}</Text>
+            <Text>{$item.title}</Text>
             <Text fontSize="$fontSize-sm" color="$textColor-secondary">{$item.detail}</Text>
-            <Button variant="ghost" size="sm" label="Open" onClick="navigate($item.link)" />
+            <HStack gap="$space-1">
+              <Button when="{!$item.externalUrl}" variant="ghost" size="sm" label="Open" onClick="navigate($item.link)" />
+              <Button when="{$item.externalUrl}" variant="ghost" size="sm" label="Open" onClick="openExternal($item.externalUrl)" />
+              <Button when="{$item.source === 'forge' &amp;&amp; $item.activityMarker}" variant="ghost" size="sm" label="Dismiss" tooltip="Hide until this thread has new activity" onClick="window.__bramDismissForgeItem(inbox, $item.id, $item.activityMarker)" />
+            </HStack>
           </VStack>
         </Card>
       </Items>
     </VStack>
 
-    <!-- v1 scope note, straight from the engine payload. -->
-    <VStack when="{lanesReady &amp;&amp; inbox.value.notes}" gap="$space-1" marginTop="$space-2">
-      <Items data="{inbox.value.notes}">
-        <Text fontSize="$fontSize-sm" color="$textColor-secondary">{$item}</Text>
-      </Items>
-    </VStack>
   </VStack>
 </Component>

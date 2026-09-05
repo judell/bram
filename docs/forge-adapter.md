@@ -83,6 +83,11 @@ stderr lines, never a hard failure.
 - GitLab issue lists cap at one `--per-page 100` page.
 - Comments are not expanded in GitLab list/view payloads
   (`commentsCount` carries the number; bodies need a notes fetch).
+- **Notifications read** (issue-338 "Awaiting You" forge source): the inbox
+  reads `gh api /notifications?participating=true` and verifies a thread's
+  latest-comment author, both GitHub-only. GitLab's analogue is the **todos
+  API** (`glab api /todos`), an unbuilt follow-up — the adapter gains a
+  read-only `notifications`/`todos` capability with the GitHub arm first.
 - No search-hit highlighting on GitLab.
 - Worklist-history commit-URL resolution (`parse_github_commit_url`)
   remains GitHub-shaped; GitLab history rows show the raw URL.

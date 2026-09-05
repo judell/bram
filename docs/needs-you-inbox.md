@@ -109,6 +109,16 @@ the one genuinely new data source. They enter through the forge
 adapter (`docs/forge-adapter.md`), GitHub first, so the surface stays
 forge-agnostic the way issues already are.
 
+> **Landed (issue-338 v2, GitHub-first):** the forge-activity source reads
+> `gh api /notifications?participating=true` and triages by the notification
+> `reason` — `mention`/`assign`/`review_requested` → 🔴 Needs you now,
+> `comment`/`subscribed` (verified: latest comment not yours) → 🟡 Your
+> decision. It self-clears when your reply becomes latest. First-cut bounds:
+> unread+participating (reading on GitHub without replying clears it), tier-1
+> link to the Issues tab, 30 s cache. The explicit **Dismiss** (keyed to the
+> emitted activity marker), the `all=true` clear-on-reply-only refinement, the
+> exact-comment link-out, and GitLab todos are their own follow-ups.
+
 ## The surface
 
 A new pane tab (XMLUI), four lanes, and per item:

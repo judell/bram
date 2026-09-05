@@ -886,37 +886,12 @@
               </VStack>
             </Items>
           </VStack>
-          <!-- worklist2-closes-once: the strip already declares closes for
-               plans; this row appears only once begun, when its tickboxes
-               and comment box are interactive. Not while a live claim
-               covers the item (worklist2-closes-row-not-while-in-flight):
-               from an approval click until the claim resolves, the close
-               selection is already recorded host-side, so the controls
-               would be dead — and on the one-click apply-and-commit path
-               that in-flight span is the row's whole remaining life. -->
-          <HStack
-            when="{$item.closesIssues &amp;&amp; $item.closesIssues.length > 0 &amp;&amp; window.__bramWorklist2Begun($item, inflightClaim.value) &amp;&amp; !window.__bramItemInflightKind(inflightClaim.value, $item.id, '', '', 0)}"
-            gap="$space-2"
-            verticalAlignment="center"
-            var.witem="{$item}">
-            <!-- issue-328: the expansion's close CHECKBOX is gone — the
-                 gate bar is the one consent surface (gate-only toggle, Jon
-                 2026-09-05). The expansion keeps the issue reference and
-                 the optional closing comment; both write the shared window
-                 map directly, so no page-var mirror can clobber a gate
-                 untick. -->
-            <Text value="closes" fontSize="$fontSize-sm" color="$textColor-secondary" />
-            <Items data="{$item.closesIssues}">
-              <HStack gap="$space-0_5" verticalAlignment="center" var.issue="{normalizeCloseIssue($item)}">
-                <Text value="{'#' + issue.number}" fontSize="$fontSize-sm" tooltip="{issue.title || ''}" />
-                <TextBox
-                  when="{window.__bramWorklist2Begun(witem, inflightClaim.value)}"
-                  width="16rem"
-                  placeholder="closing comment (optional)"
-                  onDidChange="(v) => window.__bramGateCloseComment(witem.id, issue.number, v, witem.closesIssues)" />
-              </HStack>
-            </Items>
-          </HStack>
+          <!-- issue-328 single surface: the expansion's whole closes block
+               is GONE — checkbox first (gate-only toggle, 5e0618d), then
+               label and comment box too ("i thought we got rid of the
+               double closer"). The gate line carries consent AND the
+               optional closing comment; the strip's "· closes #N" remains
+               as information, not a control. -->
         </VStack>
       </VStack>
     </Items>

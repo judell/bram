@@ -127,6 +127,14 @@
           value="{'closes #' + $item.number}"
           fontSize="$fontSize-sm"
           tooltip="{$item.title}" />
+        <!-- issue-328 single surface: the closing comment lives HERE, beside
+             the consent it annotates — the row expansion's closes block is
+             gone ("i thought we got rid of the double closer"). Same shared
+             map as the toggle and the payload builder. -->
+        <TextBox
+          width="14rem"
+          placeholder="closing comment (optional)"
+          onDidChange="(v) => window.__bramGateCloseComment($item.itemId, $item.number, v, $item.closesIssues)" />
       </HStack>
     </Items>
   </HStack>

@@ -11498,10 +11498,17 @@ window.gitPush = function (commitsDs, statusDs, branch, onError) {
 // payload is acknowledged. Sends ride toTurn — send-gate, send ledger, and
 // strand forensics apply like any other pane send.
 var __BRAM_QUEUE_RECOVERY_KEY = "bram.agent-message-queue.unsaved";
+// issue-324: the base version this pane last read from /__queue. null until
+// hydration, so a pre-hydration save carries no version and the host refuses
+// it — the populated queue cannot be clobbered by a click-before-hydrate.
+window.__bramQueueVersion = null;
 var __bramQueueSaveTimer = null;
 function __bramQueueScheduleSave(entries) {
   var snapshot = entries || [];
-  var payload = JSON.stringify({ entries: snapshot });
+  var payload = JSON.stringify({
+    entries: snapshot,
+    version: window.__bramQueueVersion,
+  });
   try {
     sessionStorage.setItem(__BRAM_QUEUE_RECOVERY_KEY, payload);
   } catch {}
@@ -11514,7 +11521,19 @@ function __bramQueueScheduleSave(entries) {
       body: payload,
     })
       .then(function (response) {
+        if (response.status === 409) {
+          // A concurrent writer (or a stale base) moved the version. Do not
+          // retry blind — that is the overwrite this guard exists to prevent.
+          window.logToHost({ kind: "queue-save", phase: "stale-version" });
+          throw new Error("queue save refused: stale-version");
+        }
         if (!response.ok) throw new Error("queue save returned " + response.status);
+        response
+          .json()
+          .then(function (r) {
+            if (r && typeof r.version === "number") window.__bramQueueVersion = r.version;
+          })
+          .catch(function () {});
         // queue-remount-stale-hydration: do NOT clear the snapshot on save.
         // It is the session-scoped source of truth (overwritten on every
         // mutation); clearing it handed remount back to the /__queue
@@ -11642,7 +11661,12 @@ window.__bramWorklistAccept = function (payload) {
   // Keep the board already rendered -- discard, never blank.
   return __bramWlAccepted || payload;
 };
-window.__bramQueueRestore = function (hostEntries) {
+window.__bramQueueRestore = function (hostEntries, hostVersion) {
+  // issue-324: capture the host's version at hydration; every later save
+  // carries it as its precondition base. Before this runs, __bramQueueVersion
+  // stays null and no save can land (host refuses a version-less write).
+  window.__bramQueueVersion = typeof hostVersion === "number" ? hostVersion : 0;
+  window.__bramIframeTrace("queue", { op: "hydrate", version: window.__bramQueueVersion });
   var fallback = Array.isArray(hostEntries) ? hostEntries : [];
   var raw = "";
   try {
@@ -11710,6 +11734,10 @@ window.__bramQueueSetTargetItem = function (entries, idx, targetItemId) {
   return next;
 };
 window.__bramQueueAdd = function (entries) {
+  // issue-324 belt (the markup disables + until entries !== null): if called
+  // pre-hydration, do NOT fabricate a one-blank queue and schedule a save
+  // that would clobber the stored contents — return the input untouched.
+  if (entries === null || entries === undefined) return entries;
   var next = (entries || []).slice();
   var now = Date.now();
   next.unshift({

@@ -50219,7 +50219,27 @@ fn route_request<R: tauri::Runtime>(
                 b"no project root".to_vec(),
             );
         };
-        let bytes = std::fs::read(&qpath).unwrap_or_else(|_| b"{\"entries\":[]}\n".to_vec());
+        // issue-324: guarantee a `version` in the served payload (default 0 for
+        // a missing/legacy file) so the client has a base to send back on save.
+        let mut doc = std::fs::read(&qpath)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .unwrap_or_else(|| serde_json::json!({ "entries": [] }));
+        if !doc.get("entries").map(|e| e.is_array()).unwrap_or(false) {
+            doc = serde_json::json!({ "entries": [] });
+        }
+        let ver = doc.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
+        if let Some(obj) = doc.as_object_mut() {
+            obj.insert("version".to_string(), serde_json::json!(ver));
+        }
+        let n = doc
+            .get("entries")
+            .and_then(|e| e.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        append_bram_trace_line(app, "queue", &format!("op=read version={} n={}", ver, n));
+        let bytes =
+            serde_json::to_vec(&doc).unwrap_or_else(|_| b"{\"entries\":[],\"version\":0}".to_vec());
         return (200, "application/json; charset=utf-8", bytes);
     }
 
@@ -51903,13 +51923,66 @@ fn handle_queue_save<R: tauri::Runtime>(
             b"no project root".to_vec(),
         );
     };
-    let pretty = serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".to_string());
+    // issue-324: version precondition, the worklist.json pattern. The write
+    // must carry the `version` it read; it is refused unless that equals the
+    // on-disk version. This closes BOTH the reported click-before-hydrate
+    // path (an un-hydrated pane never read a version, so its save carries
+    // none → refused, and the populated queue survives) and the general
+    // last-writer-wins overwrite. A missing/legacy on-disk file is version 0.
+    let n = v
+        .get("entries")
+        .and_then(|e| e.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    let base = v.get("version").and_then(|x| x.as_u64());
+    let on_disk = std::fs::read(&qpath)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|d| d.get("version").and_then(|x| x.as_u64()))
+        .unwrap_or(0);
+    match base {
+        Some(b) if b == on_disk => {}
+        _ => {
+            append_bram_trace_line(
+                app,
+                "queue",
+                &format!(
+                    "op=save-refused reason=stale-version base={:?} on_disk={} n={}",
+                    base, on_disk, n
+                ),
+            );
+            return (
+                409,
+                "application/json; charset=utf-8",
+                format!(
+                    "{{\"error\":\"stale-version\",\"onDisk\":{},\"base\":{}}}",
+                    on_disk,
+                    base.map(|b| b.to_string())
+                        .unwrap_or_else(|| "null".to_string())
+                )
+                .into_bytes(),
+            );
+        }
+    }
+    let next_ver = on_disk + 1;
+    let mut out = v.clone();
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("version".to_string(), serde_json::json!(next_ver));
+    }
+    let pretty = serde_json::to_string_pretty(&out).unwrap_or_else(|_| "{}".to_string());
     match std::fs::write(&qpath, format!("{}\n", pretty)) {
-        Ok(()) => (
-            200,
-            "application/json; charset=utf-8",
-            b"{\"ok\":true}".to_vec(),
-        ),
+        Ok(()) => {
+            append_bram_trace_line(
+                app,
+                "queue",
+                &format!("op=save n={} version={}", n, next_ver),
+            );
+            (
+                200,
+                "application/json; charset=utf-8",
+                format!("{{\"ok\":true,\"version\":{}}}", next_ver).into_bytes(),
+            )
+        }
         Err(e) => (
             500,
             "text/plain; charset=utf-8",

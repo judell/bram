@@ -26,7 +26,7 @@
     onDidChange="() => queueWorklist.refetch()" />
   <ChangeListener
     listenTo="{queueData.value}"
-    onDidChange="() => { if (entries === null &amp;&amp; queueData.value) { entries = window.__bramQueueRestore(queueData.value.entries || []); } }" />
+    onDidChange="() => { if (entries === null &amp;&amp; queueData.value) { entries = window.__bramQueueRestore(queueData.value.entries || [], queueData.value.version); } }" />
 
   <PushSource
     id="queueAgentStatus"
@@ -52,9 +52,14 @@
         <Text value="← Back" />
       </Link>
       <Heading level="h2">Queue</Heading>
+      <!-- issue-324: disabled until the /__queue DataSource hydrates
+           (entries !== null). A pre-hydration click used to add one blank
+           row and immediately persist it, silently overwriting the whole
+           stored queue with no way back. -->
       <Button
         label="+ New item"
         size="xs"
+        enabled="{entries !== null}"
         onClick="entries = window.__bramQueueAdd(entries)" />
       <Text
         fontSize="$fontSize-sm"

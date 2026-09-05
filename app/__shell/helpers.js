@@ -1544,13 +1544,23 @@ window.__bramGateAct = function (kind, items, sel, shareMode) {
   // Selection is literal user intent. Shared-file handling may change how the
   // agent prepares the commit, but never which ids this action authorizes.
   var ids0 = sel || [];
+  // issue-343: the trace comes FIRST — the old order (guard, then trace)
+  // made a click with an empty selection a perfectly silent no-op, which is
+  // exactly the evidence signature Andrew reported: no click line, no
+  // publish, no auth write, three times. The guard stays; it just can no
+  // longer hide.
+  window.__bramIframeTrace("click", {
+    target: "gatebar-" + kind,
+    count: ids0.length,
+    op: ids0.length ? "act" : "empty-selection",
+    store: (window.__bramW2Selection || []).length,
+  });
   if (!ids0.length) return;
   var text = String(window.__bramMessageAgentText || "");
   var body = window.__bramWithStagedImageMarkers(text, "feedback");
   if (kind === "commit" || kind === "start-commit") {
     body = window.__bramWithShareMode(body, shareMode || "together", items, ids0, null);
   }
-  window.__bramIframeTrace("click", { target: "gatebar-" + kind, count: ids0.length });
   var filter = (kind === "start" || kind === "start-commit") ? "proposed" : "";
   var ids = window.__bramSelectionIds(items, ids0, filter);
   window.__bramGateSent = window.__bramWorklist2CaptureSent(
@@ -4284,6 +4294,16 @@ window.__bramToggleRowSelection = function (sel, id, on) {
     return x !== id;
   });
   if (on) next.push(id);
+  // issue-343: the missing first link in the page→store chain. Andrew's
+  // window could not distinguish "ticks never happened" (disabled box)
+  // from "ticks vanished" (publish path dead) — this line makes ticks
+  // affirmative evidence, so silence now means the handler never ran.
+  window.__bramIframeTrace("w2-selection", {
+    op: "tick",
+    id: id,
+    on: !!on,
+    count: next.length,
+  });
   return next;
 };
 // worklist2-approve-and-commit: the one-click gate button shows only when

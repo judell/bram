@@ -386,8 +386,14 @@
           verticalAlignment="center"
           borderRadius="$borderRadius"
           backgroundColor="{window.__bramOverlapFocusedRow(overlapFocus.value, $item.id) ? '$color-primary-100' : 'transparent'}">
+          <!-- issue-343: the claim no longer paints a tick. A box that is
+               disabled while a claim is live (enabled= below) but RENDERED
+               ticked reads as a selection — Andrew's user "selected two
+               rows" that were claim-ticks, clicked Start, and the real
+               selection was empty. The visual state must match what Start
+               will receive; the claimed row's marker is its Spinner. -->
           <Checkbox
-            initialValue="{(worklist2Selected || []).includes($item.id) || window.__bramWorklist2RowClaimed(inflightClaim.value, $item.id)}"
+            initialValue="{(worklist2Selected || []).includes($item.id)}"
             enabled="{window.__bramWorklist2RowSelectable(inflightClaim.value)}"
             onDidChange="(v) => worklist2Selected = window.__bramToggleRowSelection(worklist2Selected || [], $item.id, v)" />
           <HStack

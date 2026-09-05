@@ -54,16 +54,72 @@ if ($headDate) {
   }
 }
 
-# issue-332: this raw-binary launch has no adjacent app/, so it serves the
-# EMBEDDED app/ tree — and build.rs watches exactly one file under app/, so a
-# markup-only edit followed by a build can leave the embed at an older
-# vintage with no error anywhere. The binary owns the hash algorithm; we just
-# compare two strings. Older binaries lack the flags and skip the check.
+# Serve app/ from the checkout, the way `./bram` does on macOS. That symlink is
+# load-bearing there: it puts the executable's parent at the repo root, so
+# serve_app_file's `exe_dir/app` candidate resolves and all of app/** is served
+# from disk per request — edits to .xmlui / helpers.js / vendor go live on a
+# pane reload, no rebuild. Launched from the target directory there is no
+# adjacent app/, so Bram falls back to the EMBEDDED tree and this dev loop pays
+# a full rebuild for a markup-only edit, quietly: the pane renders correctly,
+# from an older vintage.
+#
+# A directory JUNCTION beside the executable is the Windows answer, and the
+# choice among three is not arbitrary:
+#   - Junction (this): a SIBLING of the exe, so `cargo build` replaces bram.exe
+#     and never touches it. Needs no privileges.
+#   - Hardlinked bram.exe at the repo root (the literal ./bram analogue):
+#     measured working, but cargo replaces the exe by writing a NEW file, so the
+#     link would keep pointing at the old inode after any rebuild — a launcher
+#     silently running last week's binary while reporting success. Worse than
+#     the problem it solves.
+#   - Symlink: needs administrator rights or Developer Mode, which would make
+#     the default dev loop depend on machine configuration.
+#
+# Ensured on EVERY run, not created once: `cargo clean` and a fresh clone both
+# remove it, and a missing junction silently reverts this loop to embedded
+# serving — the exact failure being fixed.
+$appLink   = Join-Path (Split-Path -Parent $exe) "app"
+$appSource = Join-Path $repoRoot "app"
+$servesFromDisk = $false
+try {
+  $existing = Get-Item -LiteralPath $appLink -ErrorAction SilentlyContinue
+  if ($existing -and $existing.Target -and (Split-Path -Parent $existing.Target[0]) -ne $repoRoot) {
+    Remove-Item -LiteralPath $appLink -Force -Recurse   # points elsewhere; re-point it
+    $existing = $null
+  }
+  if (-not $existing) {
+    New-Item -ItemType Junction -Path $appLink -Target $appSource -ErrorAction Stop | Out-Null
+  }
+  $servesFromDisk = Test-Path -LiteralPath (Join-Path $appLink "tools\Main.xmlui")
+} catch {
+  Write-Warning "could not ensure the app/ junction ($_); this launch will serve the EMBEDDED tree."
+}
+
+# issue-332: build.rs watches exactly one file under app/, so a markup-only edit
+# followed by a build can leave the embed at an older vintage with no error
+# anywhere. The binary owns the hash algorithm; we just compare two strings.
+# Older binaries lack the flags and skip the check.
+#
+# Which question this answers depends on what we are about to serve. With the
+# junction in place the embedded tree is NOT what this launch renders, so a
+# mismatch is not a warning about this run — it is a fact about what a SHIPPED
+# binary would serve. Warning about it unconditionally would fire on every
+# launch and teach the reader to ignore a preflight that will one day be right.
 try {
   $embHash  = (& $exe --embedded-app-hash 2>$null | Select-Object -Last 1)
-  $diskHash = (& $exe --hash-app-dir (Join-Path $repoRoot "app") 2>$null | Select-Object -Last 1)
+  $diskHash = (& $exe --hash-app-dir $appSource 2>$null | Select-Object -Last 1)
   if ($embHash -and $diskHash) {
-    if ($embHash -ne $diskHash) {
+    if ($servesFromDisk) {
+      Write-Output ("app/   : served from disk via junction ({0})" -f $appLink)
+      if ($embHash -ne $diskHash) {
+        # ASCII only inside string literals: PS 5.1 reads a BOM-less .ps1 as
+        # ANSI, so a UTF-8 em-dash decodes to three CP1252 chars whose last is
+        # a curly quote -- which PowerShell honors as a string terminator and
+        # which breaks parsing in a way the error message does not explain.
+        # Em-dashes in # comments are harmless; in strings they are not.
+        Write-Output ("         (embedded tree is {0}, checkout {1} - affects shipped binaries, not this launch)" -f $embHash, $diskHash)
+      }
+    } elseif ($embHash -ne $diskHash) {
       Write-Output ""
       Write-Warning ("STALE EMBEDDED app/: binary embeds {0}; on-disk app/ hashes {1}." -f $embHash, $diskHash)
       Write-Warning "This launch serves the embedded tree, so any app/** behavior you observe"

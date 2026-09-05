@@ -20107,6 +20107,23 @@ impl SessionProvider {
     }
 }
 
+// issue-320: the Setup-banner predicate. With a provider active, it is that
+// provider's need; with NONE active — a fresh/failure-path launch before any
+// session — it is the PROJECT-level question (either provider needs Setup),
+// so the manual-fallback banner surfaces. Returning false for None (the old
+// behavior) hid the banner exactly when a fresh install needed it.
+fn provider_needs_setup_for(
+    active: Option<SessionProvider>,
+    claude_needs: bool,
+    codex_needs: bool,
+) -> bool {
+    match active {
+        Some(SessionProvider::Claude) => claude_needs,
+        Some(SessionProvider::Codex) => codex_needs,
+        None => claude_needs || codex_needs,
+    }
+}
+
 #[derive(Clone)]
 struct SessionRecord {
     provider: SessionProvider,
@@ -36882,11 +36899,8 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         && (!codex_hook_block_current || !codex_agents_current || !codex_instr_current);
     let claude_needs_setup = !core_installed || !claude_installed;
     let codex_needs_setup = !core_installed || !codex_installed;
-    let provider_needs_setup = match active_provider {
-        Some(SessionProvider::Claude) => claude_needs_setup,
-        Some(SessionProvider::Codex) => codex_needs_setup,
-        None => false,
-    };
+    let provider_needs_setup =
+        provider_needs_setup_for(active_provider, claude_needs_setup, codex_needs_setup);
     let active_provider_json = match active_provider {
         Some(SessionProvider::Claude) => json!("claude"),
         Some(SessionProvider::Codex) => json!("codex"),
@@ -45776,6 +45790,47 @@ fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str,
 mod needs_you_tests {
     use super::*;
 
+    // issue-320: the failure-path fix. With NO active provider, the banner
+    // predicate must reflect the project's need (either provider), not false.
+    #[test]
+    fn provider_needs_setup_none_falls_back_to_project_level() {
+        // No provider active — the fresh/failure-path launch #320 is about.
+        assert!(
+            provider_needs_setup_for(None, true, false),
+            "claude needs → banner"
+        );
+        assert!(
+            provider_needs_setup_for(None, false, true),
+            "codex needs → banner"
+        );
+        assert!(provider_needs_setup_for(None, true, true));
+        assert!(
+            !provider_needs_setup_for(None, false, false),
+            "neither needs → no banner"
+        );
+        // Provider active — unchanged: exactly that provider's need.
+        assert!(provider_needs_setup_for(
+            Some(SessionProvider::Claude),
+            true,
+            false
+        ));
+        assert!(!provider_needs_setup_for(
+            Some(SessionProvider::Claude),
+            false,
+            true
+        ));
+        assert!(provider_needs_setup_for(
+            Some(SessionProvider::Codex),
+            false,
+            true
+        ));
+        assert!(!provider_needs_setup_for(
+            Some(SessionProvider::Codex),
+            true,
+            false
+        ));
+    }
+
     #[test]
     fn owner_state_lane_projects_court_and_blocking() {
         assert_eq!(
@@ -52994,8 +53049,10 @@ fn handle_worklist_drop_direct<R: tauri::Runtime>(
     // Record the drop authorization (the pane click IS the authorization),
     // so resolve/prune are self-contained and race-free — no dependency on a
     // separate pane auth-invoke landing first.
-    let auth_items: Vec<serde_json::Value> =
-        ids.iter().map(|id| serde_json::json!({ "id": id })).collect();
+    let auth_items: Vec<serde_json::Value> = ids
+        .iter()
+        .map(|id| serde_json::json!({ "id": id }))
+        .collect();
     if let Err(e) = record_worklist_action_authorization(
         app.clone(),
         serde_json::json!({ "kind": "drop", "items": auth_items }),
@@ -58421,7 +58478,10 @@ mod claim_attribution_tests {
             })
             .sum();
         assert_eq!(keep_net, 0, "keep.md must not absorb gone.txt's deletions");
-        assert!(m.contains_key("gone.txt"), "the deletion attributes to gone.txt");
+        assert!(
+            m.contains_key("gone.txt"),
+            "the deletion attributes to gone.txt"
+        );
     }
 
     // fix-attribution-run-line-offset: the chain-replay must place a sole

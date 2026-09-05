@@ -544,8 +544,14 @@
     </Text>
   </VStack>
 
+  <!-- issue-320: gate on providerNeedsSetup ALONE, not activeProvider. The
+       host now answers providerNeedsSetup project-level when no provider is
+       active, so a fresh/failure-path launch (auto-setup skipped or failed)
+       finally shows the manual-fallback banner. The message (below) is
+       already provider-neutral; the codex-hook-refresh variant only appears
+       when Codex is the active provider. -->
   <VStack
-    when="{enhanceStatus.value && enhanceStatus.value.activeProvider && enhanceStatus.value.providerNeedsSetup && !setupCompleteProvider}"
+    when="{enhanceStatus.value && enhanceStatus.value.providerNeedsSetup && !setupCompleteProvider}"
     padding="$space-4"
     gap="$space-3"
     backgroundColor="$color-info-50"
@@ -576,7 +582,7 @@
 <HStack>
   <Button
     label="{enhanceStatus.value && enhanceStatus.value.providerSetupKind === 'codex-hook-refresh' ? 'Refresh Coordination' : 'Run Setup'}"
-    onClick="setupCompleteProvider = (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || ''; runEnhanceSetup.execute()" />
+    onClick="setupCompleteProvider = (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || 'setup'; runEnhanceSetup.execute()" />
 </HStack>
   </VStack>
 

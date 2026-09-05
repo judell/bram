@@ -10732,8 +10732,41 @@ window.__bramRestoreSendNoticeDismissed = function () {
 // read lands. Mirrors __bramRestoreSendNoticeDismissed. (The tool-descriptions
 // banner's twin retired with retire-tool-desc-launch-banner; its stale
 // localStorage key is simply never read again.)
+//
+// update-banner-dismiss-is-session-scoped: sessionStorage, NOT localStorage.
+// The X means "not now", and localStorage made it mean "never, on this whole
+// machine". Three properties combined badly: nothing ever cleared the value;
+// the tools pane runs at ONE origin, so a dismissal in the main window also
+// blanked the banner in every other instance including fresh scratch projects;
+// and `latest` comes from the GitHub API with no override, so nothing could
+// make the gate pass again. A user who clicked X once had permanently
+// forfeited one-click update for that release.
+//
+// Recovery was worse than it looks, which is why an escape hatch was not the
+// fix: the value is not a top-level key. __bramReadLS uses dot-path semantics
+// (see __bramSplitKey), so it lived at
+// JSON.parse(localStorage.bram).updateBannerDismissedVersion, and the obvious
+// localStorage.removeItem("bram.updateBannerDismissedVersion") is a no-op.
+//
+// sessionStorage fixes all three at once: per-window, so instances stop
+// interfering; cleared on relaunch, which is the natural cadence for an update
+// prompt; and synchronous, so the no-flash property above still holds. Anyone
+// currently stuck by the old localStorage value is freed by this change — it is
+// simply never read again, the same disposition the tool-descriptions key has.
 window.__bramRestoreUpdateBannerDismissed = function () {
-  return __bramReadLS("bram.updateBannerDismissedVersion", "");
+  try {
+    return sessionStorage.getItem("bram.updateBannerDismissedVersion") || "";
+  } catch (e) {
+    return "";
+  }
+};
+
+window.__bramDismissUpdateBanner = function (version) {
+  var v = version || "";
+  try {
+    sessionStorage.setItem("bram.updateBannerDismissedVersion", v);
+  } catch (e) {}
+  return v;
 };
 
 // worklist-shared-file-split-hint: the Worklist already shows WHICH other item

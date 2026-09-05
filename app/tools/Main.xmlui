@@ -461,7 +461,7 @@
         label="Dismiss"
         size="xs"
         variant="ghost"
-        onClick="updateBannerDismissedVersion = appInfo.value.latest; writeLocalStorage('bram.updateBannerDismissedVersion', appInfo.value.latest)" />
+        onClick="updateBannerDismissedVersion = window.__bramDismissUpdateBanner(appInfo.value.latest)" />
       <Text fontSize="$fontSize-sm" color="$textColor-secondary">
         The banner returns when a newer version is released.
       </Text>

@@ -1549,6 +1549,33 @@ window.__bramGateCloseToggle = function (itemId, issueNumber, checked, closesIss
 // The row-expansion comment box writes the window map directly too (the
 // expansion's own checkbox is GONE — gate-only toggle, Jon 2026-09-05),
 // which retires the whole-map-replace clobber the page-var mirror had.
+// issue-338 dismiss, driven directly from the CLICK. Jon's testbed drive
+// (2026-09-05) showed the host records the dismiss instantly (POST returns
+// in 0 ms) but the row lingered ~30 s before the event-driven refetch ran.
+// Root cause not established — and deliberately NOT blamed on general
+// PushSource latency, which the rest of the pane disproves every day; an
+// exact 30 s reads more like a timer this listener happened to wait for.
+// The fix stands on principle regardless: a user action should drive its
+// own feedback synchronously. This POSTs via fetch (real JS, as
+// replayLatest already does) and refetches the DataSource the moment the
+// POST returns — a DataSource value change re-renders promptly. The
+// needs-you-changed listener stays for background "new activity" updates,
+// where a beat of latency is invisible.
+window.__bramDismissForgeItem = function (ds, id, marker) {
+  if (typeof window.fetch !== "function") return;
+  window.__bramIframeTrace("inbox-dismiss-click", { id: id });
+  window
+    .fetch("/__needs-you/dismiss", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: id, activityMarker: marker }),
+    })
+    .then(function () {
+      if (ds && typeof ds.refetch === "function") ds.refetch();
+    })
+    .catch(function () {});
+};
+
 window.__bramGateCloseComment = function (itemId, issueNumber, text, closesIssues) {
   window.__bramW2CloseMap = window.__bramInlineCloseComment(
     window.__bramW2CloseMap, itemId, issueNumber, text, closesIssues);

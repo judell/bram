@@ -31559,6 +31559,146 @@ mod send_ledger_unresolved_reason_tests {
     }
 }
 
+// issue-335 phase 2: the INVARIANT the issue is about, as a standing
+// assertion — "if the exact user payload appears in the provider transcript
+// after that send's recorded offset, the send is landed, and no turn-state or
+// killed-turn classification may override that."
+//
+// Driven through the pure resolution seams rather than
+// `update_send_ledger_from_slice`, which takes an `AppHandle` and emits traces:
+// a Tauri mock would add no coverage of the decision under test. The scenarios
+// are #335's own suggested list, adopted as written.
+//
+// On point 3 specifically. The killed-turn classifier CANNOT be wired into
+// these tests, because it shares no state with the ledger — it is an early
+// return inside the working-status computation, verified while writing phase 1.
+// That structural independence IS the assertion: resolution depends only on the
+// transcript and the offset, so there is no state a boundary classification
+// could set that would change these outcomes. A future refactor that gave the
+// classifier a path into the ledger would have to break this module's premise
+// to do it.
+//
+// On point 5. "Emits no failed-send notice" is a property of the notice path,
+// not the resolution path, and is deliberately NOT asserted here — a test
+// reaching for it through these seams would pass for the wrong reason. What is
+// assertable, and is asserted, is the condition the notice is derived from:
+// these entries resolve as landed, so no strand and no notice can arise from
+// them.
+#[cfg(test)]
+mod send_ledger_killed_turn_race_tests {
+    use super::{send_ledger_resolve_delivery, send_ledger_unresolved_reason};
+
+    const A: &str = "Propose a worklist item to address #3859";
+    const B: &str = "Propose a worklist item to address #3847";
+    const C: &str = "just happened again";
+
+    fn user_record(text: &str) -> String {
+        format!(
+            "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"{}\"}}]}}}}\n",
+            text
+        )
+    }
+
+    fn assistant_record(text: &str) -> String {
+        format!(
+            "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"{}\"}}]}}}}\n",
+            text
+        )
+    }
+
+    // The `event_msg`/`item_completed` record #335 cites alongside the real
+    // delivery. It is NOT accepted (that arm requires `payload.type ==
+    // "user_message"`), which is why the `response_item` was the only delivery
+    // candidate and anything spoiling that single match produced silence.
+    fn item_completed_record(text: &str) -> String {
+        format!(
+            "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"item_completed\",\"message\":\"{}\"}}}}\n",
+            text
+        )
+    }
+
+    // Scenarios 1 + 2 + 3: turn A completes; B is injected just before A's
+    // delayed completion signal; B's exact payload is then written after B's
+    // recorded offset. B must be landed.
+    #[test]
+    fn payload_after_the_offset_is_landed_despite_the_racing_completion() {
+        let prefix = user_record(A) + &assistant_record("done with A");
+        let offset = prefix.len();
+        // Everything after the offset is what arrived post-injection: the
+        // delayed completion bookkeeping for A, then B's real user record.
+        let text = prefix + &item_completed_record(A) + &user_record(B);
+        let (delivered, from_inject) = send_ledger_resolve_delivery(B, (&text, offset), None);
+        assert_eq!(
+            delivered,
+            Some(false),
+            "B's payload is present after B's offset, so B landed"
+        );
+        assert!(!from_inject);
+    }
+
+    // The same transcript must NOT land B on the strength of the
+    // `item_completed` record alone — that is bookkeeping, not delivery.
+    #[test]
+    fn item_completed_bookkeeping_alone_is_not_delivery() {
+        let prefix = user_record(A) + &assistant_record("done with A");
+        let offset = prefix.len();
+        let text = prefix + &item_completed_record(B);
+        let (delivered, _) = send_ledger_resolve_delivery(B, (&text, offset), None);
+        assert_eq!(
+            delivered, None,
+            "item_completed carries the text but is not a delivery record"
+        );
+        assert_eq!(
+            send_ledger_unresolved_reason(B, &text, offset),
+            "semantics-rejected",
+            "the needle IS present; it was the record shape that refused"
+        );
+    }
+
+    // Scenario 4: a stale B cannot block C. Each entry resolves against its own
+    // needle and its own offset, so C lands while B is still unresolved.
+    #[test]
+    fn a_stale_pending_entry_does_not_block_a_later_send() {
+        let prefix = user_record(A);
+        let b_offset = prefix.len();
+        // B never appears; C is injected later and does.
+        let mid = prefix + &assistant_record("done with A");
+        let c_offset = mid.len();
+        let text = mid + &user_record(C);
+
+        let (c_delivered, _) = send_ledger_resolve_delivery(C, (&text, c_offset), None);
+        assert_eq!(
+            c_delivered,
+            Some(false),
+            "C resolves on its own offset and needle"
+        );
+
+        let (b_delivered, _) = send_ledger_resolve_delivery(B, (&text, b_offset), None);
+        assert_eq!(
+            b_delivered, None,
+            "B is genuinely absent — but it did not affect C"
+        );
+        assert_eq!(
+            send_ledger_unresolved_reason(B, &text, b_offset),
+            "needle-absent"
+        );
+    }
+
+    // An identical earlier send must not false-land a later entry: the offset,
+    // not the text, is what makes a delivery this entry's.
+    #[test]
+    fn an_identical_earlier_payload_before_the_offset_does_not_land_it() {
+        let earlier = user_record(B);
+        let offset = earlier.len();
+        let text = earlier + &assistant_record("answered the first one");
+        let (delivered, _) = send_ledger_resolve_delivery(B, (&text, offset), None);
+        assert_eq!(
+            delivered, None,
+            "the only occurrence precedes this entry's offset"
+        );
+    }
+}
+
 fn send_ledger_find_delivery(text: &str, rel_offset: usize, needle: &str) -> Option<bool> {
     let start = char_floor(text, rel_offset);
     let suffix = &text[start..];

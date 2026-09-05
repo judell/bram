@@ -313,25 +313,28 @@
           <Link noIndicator="true" onClick="expanded = window.__bramExpandTool(expanded, $item); atBottom = window.__bramFollowTransition(false, 'tool-expand', $props.agentId)">
             <HStack gap="$space-1" verticalAlignment="center">
               <!-- promote-tool-descriptions-to-row (inverted): the row leads
-                   with the Haiku-resolved intent (aiDescription, requested
-                   eagerly as rows arrive); hover shows the RAW command line —
-                   the opposite of the original command-first, describe-on-
-                   expand arrangement. Summary fills in until the description
-                   resolves. -->
+                   with intent; hover shows the RAW command line — the
+                   opposite of the original command-first, describe-on-expand
+                   arrangement. native-tool-descriptions-by-default: the
+                   agent-authored description (Claude's Bash tool requires
+                   one) renders with no opt-in and no API key; the Haiku
+                   aiDescription, when the ai.describeCommands opt-in
+                   resolves one, upgrades it in place. Summary fills in when
+                   neither exists (Codex rows without the opt-in). -->
               <Text
                 fontSize="$fontSize-sm"
                 fontWeight="bold"
                 tooltip="{($item.commandDisplay || $item.summary || '').slice(0, 500)}"
                 value="{((expanded || []).includes($item.id) ? '▾' : '▸') + '  🔧 ' + $item.name + ($item.nameDetail ? ' (' + $item.nameDetail + ')' : '')}" />
               <Text
-                when="{$item.aiDescription}"
+                when="{$item.aiDescription || $item.description}"
                 fontSize="$fontSize-sm"
                 color="$textColor-secondary"
                 maxLines="1"
                 tooltip="{($item.commandDisplay || $item.summary || '').slice(0, 500)}"
-                value="{'— ' + $item.aiDescription}" />
+                value="{'— ' + ($item.aiDescription || $item.description)}" />
               <Text
-                when="{!$item.aiDescription &amp;&amp; $item.summary &amp;&amp; $item.summary !== $item.name}"
+                when="{!($item.aiDescription || $item.description) &amp;&amp; $item.summary &amp;&amp; $item.summary !== $item.name}"
                 fontSize="$fontSize-sm"
                 color="$textColor-secondary"
                 tooltip="{($item.commandDisplay || $item.summary || '').slice(0, 500)}"

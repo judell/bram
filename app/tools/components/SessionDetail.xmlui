@@ -156,15 +156,18 @@
                   fontWeight="bold"
                   tooltip="{($item.commandDisplay || $item.summary || '').slice(0, 500)}"
                   value="{((expanded || []).includes($item.id) ? '▾' : '▸') + '  🔧 ' + $item.name + ($item.nameDetail ? ' (' + $item.nameDetail + ')' : '')}" />
+                <!-- native-tool-descriptions-by-default: agent-authored
+                     description renders keyless; Haiku aiDescription
+                     (opt-in) upgrades it. Same chain as Transcript.xmlui. -->
                 <Text
-                  when="{$item.aiDescription}"
+                  when="{$item.aiDescription || $item.description}"
                   fontSize="$fontSize-sm"
                   color="$textColor-secondary"
                   maxLines="1"
                   tooltip="{($item.commandDisplay || $item.summary || '').slice(0, 500)}"
-                  value="{'— ' + $item.aiDescription}" />
+                  value="{'— ' + ($item.aiDescription || $item.description)}" />
                 <Text
-                  when="{!$item.aiDescription &amp;&amp; $item.summary &amp;&amp; $item.summary !== $item.name}"
+                  when="{!($item.aiDescription || $item.description) &amp;&amp; $item.summary &amp;&amp; $item.summary !== $item.name}"
                   fontSize="$fontSize-sm"
                   color="$textColor-secondary"
                   tooltip="{($item.commandDisplay || $item.summary || '').slice(0, 500)}"

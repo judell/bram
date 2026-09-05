@@ -1891,14 +1891,18 @@ window.settingsInfoBodies = {
     "Whether the Search tab opens with all facet badges selected, or none.",
   ai:
     "## Tool Descriptions\n\n" +
-    "A one-line intent header above tool commands in the Transcript, from " +
-    "Claude Haiku. Off by default.\n\n" +
-    "Turning it on sends the selected tool material (command, diff, target, " +
-    "context, result excerpt) to the Anthropic API when `ANTHROPIC_API_KEY` " +
-    "is set. Credential shapes are redacted heuristically — not a guarantee.\n\n" +
-    "Billing: a key Claude Code accepts bills it per-token instead of your " +
-    "subscription. To keep it Bram-only, run `/config` → turn off \"Use " +
-    "custom API key\". Persists in `.bram.json` under `ai.describeCommands`.",
+    "The one-line intent header on Transcript tool rows.\n\n" +
+    "**For Claude** — rows already show Claude's own descriptions. No key, " +
+    "nothing to turn on. When the toggle is on, Bram uses Haiku to enhance " +
+    "Claude's descriptions.\n\n" +
+    "**For Codex** — no native descriptions; rows show the raw command. " +
+    "When the toggle is on, Bram uses Haiku to create descriptions.\n\n" +
+    "On sends tool material (command, diff, context, result excerpt) to the " +
+    "Anthropic API — needs `ANTHROPIC_API_KEY`, billed per-token. " +
+    "Credentials are redacted heuristically, not guaranteed. If Claude Code " +
+    "also accepts the key, run `/config` → turn off \"Use custom API key\" " +
+    "to keep it Bram-only.\n\n" +
+    "Stored in `.bram.json` as `ai.describeCommands`.",
   search:
     "## Commit depth\n\n" +
     "How many of the newest commits the search index covers, messages and " +
@@ -12352,7 +12356,7 @@ window.__bramHighlightSetting = function (key) {
 window.__bramTipsRegistry = [
   { id: 'tool-descriptions', priority: 10,
     url: 'https://blog.jonudell.net/2026/07/23/agents-that-narrate-their-work-are-the-best-team-players/',
-    text: 'Tip: Turn on Tool Descriptions (Settings) to make agentic work more legible.' },
+    text: 'Tip: Turn on Tool Descriptions (Settings) to have Haiku enhance the intent headers on tool rows — and add them where Codex leaves none.' },
   { id: 'terminal-toggle', priority: 15,
     text: 'Tip: Use the terminal button in the top toolbar to show or hide the terminal.' },
   { id: 'batch-actions', priority: 20, route: '/worklist2',

@@ -45594,6 +45594,10 @@ fn owner_state_lane(court_user: bool, blocking: bool, loose_end: bool) -> NeedsY
     }
 }
 
+// Lane → payload-key mapper. Only the lane tests read it (the serve path
+// buckets by matching the enum directly), so it is test-gated — as plain
+// code it was `cargo build`'s one dead_code warning.
+#[cfg(test)]
 fn needs_you_lane_key(lane: NeedsYouLane) -> &'static str {
     match lane {
         NeedsYouLane::NeedsYouNow => "needsYouNow",
@@ -46211,7 +46215,7 @@ fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str,
     // inbox-dismiss-forge-items: dismissed (id, marker) pairs are dropped;
     // a moved marker (new activity) no longer matches, so the item returns.
     // Dismissals whose id left the merged set are pruned.
-    let mut forge_warming = false;
+    let forge_warming;
     {
         let dismissed = needs_you_dismissed_pairs(app);
         let notif = forge_awaiting_items_cached();

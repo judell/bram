@@ -34168,6 +34168,22 @@ fn current_describe_model<R: tauri::Runtime>(app: &AppHandle<R>) -> String {
 fn describe_overlay_snapshot<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> std::collections::HashMap<String, String> {
+    // describe-toggle-governs-display: the Tool Descriptions toggle governs
+    // display as well as requests. When `ai.describeCommands` is off the
+    // overlay is empty, so rows fall back to the agent-authored description
+    // (or summary) — the cache is untouched, and flipping the toggle back on
+    // restores Haiku headers with zero new API calls. Suppression is traced
+    // once per off-flip, not per projection, to keep the log quiet.
+    static OVERLAY_SUPPRESSED_LOGGED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    let config = project_root(Some(app)).and_then(|root| load_project_config(&root));
+    if !project_config_describe_commands(config) {
+        if !OVERLAY_SUPPRESSED_LOGGED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            append_bram_trace_line(app, "ai-describe", "op=overlay-suppressed");
+        }
+        return std::collections::HashMap::new();
+    }
+    OVERLAY_SUPPRESSED_LOGGED.store(false, std::sync::atomic::Ordering::SeqCst);
     let model = current_describe_model(app);
     describe_cache_guard(app, &model)
         .ok()

@@ -53589,6 +53589,37 @@ fn handle_worklist_commit<R: tauri::Runtime>(
             return worklist_json_error(400, msg);
         }
     };
+    // worklist-commit-refuses-unformatted-rust: keep EVERY commit fmt-clean at
+    // the gate, so CI's Format check cannot regress from a commit made without
+    // `cargo fmt` (c2ff3e6a) or via interval staging (which uses commit-tree
+    // and so bypasses any git pre-commit hook). Source repo only, and only
+    // when the commit touches Rust. Gating on the WORKTREE is inductively
+    // sufficient: a clean worktree means the isolated hunks are clean, and
+    // prior gated commits kept HEAD clean, so the reconstructed interval tree
+    // is clean too. Fail-closed + release the claim (commit-refusal-clears-
+    // claim shape) so `cargo fmt` + retry is the fix. No cargo on PATH → do
+    // not block (CI stays the backstop).
+    if let Some(root) = project_root(Some(app)) {
+        let is_source = root.join(ENHANCE_SOURCE_BUNDLE_REL).exists();
+        let touches_rust = files.iter().any(|f| f.ends_with(".rs"));
+        if is_source && touches_rust {
+            let unformatted = std::process::Command::new("cargo")
+                .current_dir(root.join("src-tauri"))
+                .args(["fmt", "--check"])
+                .output()
+                .map(|o| !o.status.success())
+                .unwrap_or(false);
+            if unformatted {
+                append_bram_trace_line(app, "worklist-commit", "op=refuse-unformatted-rust");
+                release_claim_on_commit_refusal(app, &ids);
+                return worklist_json_error(
+                    409,
+                    "commit refused: Rust is not formatted. Run `cargo fmt` in src-tauri and retry."
+                        .to_string(),
+                );
+            }
+        }
+    }
     // issue-336: host-side exclusivity backstop. The pane withholds Commit on
     // entanglement, but non-pane callers (the Codex intent transport, a
     // hand-built curl) reach this route without that check, and staging is

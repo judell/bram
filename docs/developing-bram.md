@@ -311,6 +311,21 @@ the check passes. `src-tauri/rustfmt.toml` pins
 `style_edition = "2021"`, so your rustfmt and CI's agree even across
 toolchain updates.
 
+And now it is enforced at the gate, not just in CI
+(worklist-commit-refuses-unformatted-rust). When a `worklist-commit`
+in the source repo stages any `.rs`, the route runs `cargo fmt --check`
+on the worktree first and refuses (409 `op=refuse-unformatted-rust`,
+claim released) if it is dirty — so an unformatted Rust commit cannot
+land through the gate whether or not anyone ran `cargo fmt`, and whether
+it goes through whole-file or interval staging. A git pre-commit hook
+would NOT cover the interval path: it commits via `git commit-tree`,
+which runs no hooks. The worktree check is inductively sufficient — a
+clean worktree keeps the reconstructed interval tree clean because
+prior gated commits kept HEAD clean. The recurrence that motivated this
+(`c2ff3e6a` committed without `cargo fmt`; CI failed on that tip; the
+earlier one-shot fix `811ceaa` cleaned the drift but did not stop the
+next one) is why the discipline moved from "remember" to "cannot".
+
 That check is deliberately its own workflow. `build.yml` is
 `workflow_dispatch`-only because the Tauri matrix builds are expensive;
 a fmt check needs no system dependencies and no compilation, so it can

@@ -1648,6 +1648,25 @@ window.__bramGateAct = function (kind, items, sel, shareMode) {
     return;
   }
 
+  // issue-340: a FEEDBACK-LESS drop goes host-direct — POST /__worklist/drop
+  // does record-auth + resolve + prune in ~0.1s, instead of toTurn-ing a
+  // `drop:` turn to the agent (a ~90s window an accidental Drop could not
+  // interrupt from the pane). A drop carrying feedback still goes through the
+  // agent below so it can answer the feedback. The refetch that clears the
+  // rows fires from the worklist-changed event the route emits.
+  if (kind === "drop" && !String(text || "").trim()) {
+    window
+      .fetch("/__worklist/drop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: ids }),
+      })
+      .catch(function () {});
+    window.__bramW2SetSelection([]);
+    window.__bramClearComposer();
+    return;
+  }
+
   var opts = {
     items: items,
     selectedIds: ids,

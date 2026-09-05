@@ -52973,6 +52973,55 @@ fn apply_worklist_mutation(
     affected
 }
 
+// issue-340: host-direct drop — record the drop authorization, resolve it
+// (consume + return the recorded items), and prune, all in one host call
+// with no agent turn. This closes the accidental-drop gap: the destructive
+// act completes in milliseconds instead of after a ~90s agent turn the pane
+// could not interrupt. Only for FEEDBACK-LESS drops (the accidental case);
+// a drop carrying feedback still goes through the agent so it can answer.
+fn handle_worklist_drop_direct<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    body: &[u8],
+) -> (u16, &'static str, Vec<u8>) {
+    let req: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return worklist_json_error(400, format!("invalid JSON: {}", e)),
+    };
+    let ids = worklist_json_ids(&req, "ids");
+    if ids.is_empty() {
+        return worklist_json_error(400, "ids[] required");
+    }
+    // Record the drop authorization (the pane click IS the authorization),
+    // so resolve/prune are self-contained and race-free — no dependency on a
+    // separate pane auth-invoke landing first.
+    let auth_items: Vec<serde_json::Value> =
+        ids.iter().map(|id| serde_json::json!({ "id": id })).collect();
+    if let Err(e) = record_worklist_action_authorization(
+        app.clone(),
+        serde_json::json!({ "kind": "drop", "items": auth_items }),
+    ) {
+        return worklist_json_error(500, format!("auth: {}", e));
+    }
+    // resolve consumes the auth and writes the drop sentinel; prune clears it.
+    let _ = handle_worklist_resolve(app, Some(ids.clone()));
+    let prune_body = serde_json::json!({ "op": "prune", "ids": ids }).to_string();
+    let (code, _, mbytes) = handle_worklist_mutate(app, prune_body.as_bytes());
+    append_bram_trace_line(
+        app,
+        "worklist-drop",
+        &format!("op=host-direct ids={} prune_status={}", ids.join(","), code),
+    );
+    if code != 200 {
+        return (code, "application/json; charset=utf-8", mbytes);
+    }
+    emit_replayable_signal(app, "worklist-changed");
+    (
+        200,
+        "application/json; charset=utf-8",
+        format!("{{\"ok\":true,\"pruned\":{}}}", serde_json::json!(ids)).into_bytes(),
+    )
+}
+
 fn handle_worklist_mutate<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
@@ -56163,6 +56212,21 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             let mut buf = Vec::new();
             let _ = request.as_reader().read_to_end(&mut buf);
             handle_worklist_mutate(app, &buf)
+        }
+    } else if path == "__worklist/drop" {
+        // issue-340: a host-direct drop. A drop is pure host work
+        // (record-auth + resolve + prune), but routing it through an agent
+        // turn gave an accidental Drop a ~90s uninterruptible window with no
+        // cancel path in the pane. This route does all three atomically and
+        // returns in milliseconds, so the destructive act has effectively no
+        // in-flight window. The pane calls it for feedback-less drops instead
+        // of toTurn-ing a `drop:` turn to the agent.
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            let mut buf = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut buf);
+            handle_worklist_drop_direct(app, &buf)
         }
     } else if path == "__worklist/commit" {
         if method != "POST" {

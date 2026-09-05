@@ -393,67 +393,80 @@
     </VStack>
   </ModalDialog>
 
-  <!-- wrapContent: on a narrow window the done-state tail (installed line +
-       Relaunch now) otherwise falls off the right edge unseen (update-banner-
-       wrap; https://www.xmlui.org/docs/reference/components/Stack#wrapcontent). -->
-  <HStack
+  <!-- update-banner-two-rows: the offer and the outcome each own a row — a
+       single wrapping stream read as a run-on paragraph in the done state.
+       wrapContent still guards each row on narrow windows (update-banner-wrap;
+       https://www.xmlui.org/docs/reference/components/Stack#wrapcontent). -->
+  <VStack
     when="{appInfo.value &amp;&amp; appInfo.value.has_update &amp;&amp; appInfo.value.latest !== updateBannerDismissedVersion}"
     backgroundColor="$color-warn-100"
     padding="$space-2"
-    gap="$space-3"
-    wrapContent="true"
-    verticalAlignment="center">
-    <Text fontSize="$fontSize-sm">
-      Version {appInfo.value.latest} is available. (Current: {appInfo.value.current}.)
-    </Text>
-    <!-- clickable-update-from-banner: Update now runs the published install
-         script host-side (POST /__self-update); View release keeps the
-         learn-more / DIY path. Progress states below ride the selfUpdate
-         DataSource, refetched on the self-update-changed push. -->
-    <Button
-      when="{!selfUpdate.value || (selfUpdate.value.state !== 'running' &amp;&amp; selfUpdate.value.state !== 'done')}"
-      label="Update now"
-      size="xs"
-      onClick="window.__bramStartSelfUpdate()" />
-    <Button
-      label="View release"
-      size="xs"
-      variant="outlined"
-      onClick="appInfo.value.release_url &amp;&amp; openExternal(appInfo.value.release_url)" />
-    <Text
-      when="{selfUpdate.value &amp;&amp; selfUpdate.value.state === 'running'}"
-      fontSize="$fontSize-sm"
-      color="$textColor-secondary">
-      Updating… ({selfUpdate.value.phase})
-    </Text>
-    <Text
-      when="{selfUpdate.value &amp;&amp; selfUpdate.value.state === 'failed'}"
-      fontSize="$fontSize-sm"
-      color="$color-danger-500"
-      maxLines="1"
-      tooltip="{(selfUpdate.value.tail || []).join('\n').slice(0, 1000)}">
-      Update failed: {selfUpdate.value.error}
-    </Text>
-    <Text
-      when="{selfUpdate.value &amp;&amp; selfUpdate.value.state === 'done'}"
-      fontSize="$fontSize-sm">
-      Installed {selfUpdate.value.target_version} to {selfUpdate.value.installed_to} — takes effect next launch; no rush.
-    </Text>
-    <Button
-      when="{selfUpdate.value &amp;&amp; selfUpdate.value.state === 'done'}"
-      label="Relaunch now"
-      size="xs"
-      variant="outlined"
-      tooltip="Optional: quit this Bram and start the freshly installed one. Dismiss to keep working — the update applies whenever you next launch."
-      onClick="window.__bramSelfUpdateRelaunch()" />
-    <SpaceFiller />
-    <Button
-      label="✕"
-      variant="ghost"
-      size="xs"
-      tooltip="Dismiss — banner returns when a newer version is released"
-      onClick="updateBannerDismissedVersion = appInfo.value.latest; writeLocalStorage('bram.updateBannerDismissedVersion', appInfo.value.latest)" />
-  </HStack>
+    gap="$space-1">
+    <HStack gap="$space-3" wrapContent="true" verticalAlignment="center">
+      <Text fontSize="$fontSize-sm">
+        Version {appInfo.value.latest} is available. (Current: {appInfo.value.current}.)
+      </Text>
+      <!-- clickable-update-from-banner: Update now runs the published install
+           script host-side (POST /__self-update); View release keeps the
+           learn-more / DIY path. Outcome row below rides the selfUpdate
+           DataSource, refetched on the self-update-changed push. -->
+      <Button
+        when="{!selfUpdate.value || (selfUpdate.value.state !== 'running' &amp;&amp; selfUpdate.value.state !== 'done')}"
+        label="Update now"
+        size="xs"
+        onClick="window.__bramStartSelfUpdate()" />
+      <Button
+        label="View release"
+        size="xs"
+        variant="outlined"
+        onClick="appInfo.value.release_url &amp;&amp; openExternal(appInfo.value.release_url)" />
+    </HStack>
+    <HStack
+      when="{selfUpdate.value &amp;&amp; selfUpdate.value.state !== 'idle'}"
+      gap="$space-3"
+      wrapContent="true"
+      verticalAlignment="center">
+      <Text
+        when="{selfUpdate.value.state === 'running'}"
+        fontSize="$fontSize-sm"
+        color="$textColor-secondary">
+        Updating… ({selfUpdate.value.phase})
+      </Text>
+      <Text
+        when="{selfUpdate.value.state === 'failed'}"
+        fontSize="$fontSize-sm"
+        color="$color-danger-500"
+        maxLines="1"
+        tooltip="{(selfUpdate.value.tail || []).join('\n').slice(0, 1000)}">
+        Update failed: {selfUpdate.value.error}
+      </Text>
+      <Text
+        when="{selfUpdate.value.state === 'done'}"
+        fontSize="$fontSize-sm">
+        Installed {selfUpdate.value.target_version} to {selfUpdate.value.installed_to} — takes effect next launch; no rush.
+      </Text>
+      <Button
+        when="{selfUpdate.value.state === 'done'}"
+        label="Relaunch now"
+        size="xs"
+        variant="outlined"
+        tooltip="Optional: quit this Bram and start the freshly installed one. Dismiss to keep working — the update applies whenever you next launch."
+        onClick="window.__bramSelfUpdateRelaunch()" />
+    </HStack>
+    <!-- Row 3 — dismiss, with its message as text instead of a floating ✕
+         (the SpaceFiller-pushed ✕ wrapped into an orphan line on narrow
+         windows). -->
+    <HStack gap="$space-2" wrapContent="true" verticalAlignment="center">
+      <Button
+        label="Dismiss"
+        size="xs"
+        variant="ghost"
+        onClick="updateBannerDismissedVersion = appInfo.value.latest; writeLocalStorage('bram.updateBannerDismissedVersion', appInfo.value.latest)" />
+      <Text fontSize="$fontSize-sm" color="$textColor-secondary">
+        The banner returns when a newer version is released.
+      </Text>
+    </HStack>
+  </VStack>
 
   <!-- project-identity-chip: two Brams side by side are otherwise
        pixel-identical inside the pane, and the OS title bar (the only

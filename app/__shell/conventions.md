@@ -1797,6 +1797,16 @@ note <n> -m "…"` for comments). The worklist contract around issues
 (`closesIssues`, `issue-<N>-` ids, close-on-push-automatic) is
 forge-agnostic and identical on both.
 
+**When filing or commenting on an issue against Bram itself
+(judell/bram), cite the Bram version.** Triage of a version-less
+report starts with "which build is this?", unanswerable after the
+fact (live case: judell/bram#343). Two cheap lookups: the
+`<!-- bram vX.Y.Z -->` marker on the first line of
+`.claude/bram-conventions.md` (stamped by Setup at seed time), or the
+version field of `GET /__app-info` on the loopback port. If neither
+is available — an old seed, no running instance — say so in the
+report rather than omitting the version silently.
+
 ### Resource-heavy test suites: cap the workers
 
 When running a multi-worker browser test suite (Playwright, or anything

@@ -12686,6 +12686,360 @@ fn get_app_info() -> AppInfo {
     info
 }
 
+// ---- self-update (clickable-update-from-banner) ----
+//
+// POST /__self-update runs the SAME install flow the release page documents —
+// it fetches the published install script for the latest tag and runs it, so
+// the click-update and the copy-paste one-liner cannot drift apart. Unix
+// installs in place (the running process keeps its inode; new bytes take
+// effect on the next launch). Windows cannot overwrite a running image but
+// CAN rename one, so the script stages into a temp dir (-InstallDir) and the
+// host rename-swaps bram.exe / bram-guard.exe into ~/bin, leaving *.exe.old
+// for startup cleanup.
+//
+// Testability is part of the contract: BRAM_BASE_URL / BRAM_VERSION in
+// Bram's environment are passed through to the script (and govern the
+// script-fetch URL itself), so the whole chain can be pointed at a local
+// `python3 -m http.server` dry-run; BRAM_FAKE_CURRENT /
+// XMLUI_DESKTOP_FAKE_CURRENT (fetch_app_info) makes the real published
+// release count as an update without cutting a new one.
+
+#[derive(Clone, serde::Serialize)]
+struct SelfUpdateStatus {
+    state: String, // idle | running | done | failed
+    phase: String, // resolve | fetch-script | install | swap | (empty when idle)
+    tail: Vec<String>,
+    error: Option<String>,
+    installed_to: Option<String>,
+    target_version: Option<String>,
+    started_at_ms: i64,
+    finished_at_ms: Option<i64>,
+}
+
+impl Default for SelfUpdateStatus {
+    fn default() -> Self {
+        SelfUpdateStatus {
+            state: "idle".to_string(),
+            phase: String::new(),
+            tail: Vec::new(),
+            error: None,
+            installed_to: None,
+            target_version: None,
+            started_at_ms: 0,
+            finished_at_ms: None,
+        }
+    }
+}
+
+static SELF_UPDATE_STATUS: OnceLock<Mutex<SelfUpdateStatus>> = OnceLock::new();
+
+fn self_update_cell() -> &'static Mutex<SelfUpdateStatus> {
+    SELF_UPDATE_STATUS.get_or_init(|| Mutex::new(SelfUpdateStatus::default()))
+}
+
+fn self_update_mutate<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    f: impl FnOnce(&mut SelfUpdateStatus),
+) {
+    if let Ok(mut guard) = self_update_cell().lock() {
+        f(&mut guard);
+        append_bram_trace_line(
+            app,
+            "self-update",
+            &format!(
+                "op=state state={} phase={} error={}",
+                guard.state,
+                guard.phase,
+                guard.error.as_deref().unwrap_or("-")
+            ),
+        );
+    }
+    emit_replayable_signal(app, "self-update-changed");
+}
+
+// Keep the last lines of script output for the banner's failure rendering.
+fn self_update_tail(text: &str) -> Vec<String> {
+    text.lines()
+        .rev()
+        .take(12)
+        .map(|l| l.to_string())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
+// The release-asset base for a tag, honoring the same env overrides the
+// install scripts honor — one URL logic for the script fetch and the script
+// run, so a dry-run server sees the entire chain.
+fn self_update_base_url(tag: &str) -> String {
+    first_nonempty_env(&["BRAM_BASE_URL", "XMLUI_DESKTOP_BASE_URL"])
+        .unwrap_or_else(|| format!("https://github.com/judell/bram/releases/download/{}", tag))
+}
+
+fn handle_self_update_start<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str, Vec<u8>) {
+    const JSON: &str = "application/json; charset=utf-8";
+    {
+        let guard = match self_update_cell().lock() {
+            Ok(g) => g,
+            Err(_) => {
+                return (500, JSON, br#"{"ok":false,"error":"status lock"}"#.to_vec());
+            }
+        };
+        if guard.state == "running" {
+            return (
+                409,
+                JSON,
+                br#"{"ok":false,"error":"update already running"}"#.to_vec(),
+            );
+        }
+    }
+    let info = get_app_info();
+    let tag = match first_nonempty_env(&["BRAM_VERSION", "XMLUI_DESKTOP_VERSION"])
+        .or_else(|| info.latest.as_ref().map(|l| format!("v{}", l)))
+    {
+        Some(t) => t,
+        None => {
+            return (
+                409,
+                JSON,
+                br#"{"ok":false,"error":"no release info (update check failed)"}"#.to_vec(),
+            );
+        }
+    };
+    let target_version = tag.trim_start_matches('v').to_string();
+    self_update_mutate(app, |s| {
+        *s = SelfUpdateStatus {
+            state: "running".to_string(),
+            phase: "resolve".to_string(),
+            target_version: Some(target_version.clone()),
+            started_at_ms: unix_now_ms(),
+            ..SelfUpdateStatus::default()
+        };
+    });
+    let app2 = app.clone();
+    std::thread::spawn(move || run_self_update(&app2, &tag));
+    (200, JSON, br#"{"ok":true,"state":"running"}"#.to_vec())
+}
+
+fn run_self_update<R: tauri::Runtime>(app: &AppHandle<R>, tag: &str) {
+    let base = self_update_base_url(tag);
+    let fail = |app: &AppHandle<R>, phase: &str, error: String, tail: Vec<String>| {
+        self_update_mutate(app, |s| {
+            s.state = "failed".to_string();
+            s.phase = phase.to_string();
+            s.error = Some(error);
+            s.tail = tail;
+            s.finished_at_ms = Some(unix_now_ms());
+        });
+    };
+    let script_name = if cfg!(windows) {
+        "install.ps1"
+    } else {
+        "install.sh"
+    };
+    self_update_mutate(app, |s| s.phase = "fetch-script".to_string());
+    let tmp = std::env::temp_dir().join(format!("bram-self-update-{}", std::process::id()));
+    if let Err(e) = std::fs::create_dir_all(&tmp) {
+        return fail(
+            app,
+            "fetch-script",
+            format!("create temp dir: {}", e),
+            vec![],
+        );
+    }
+    let script_path = tmp.join(script_name);
+    let script_url = format!("{}/{}", base, script_name);
+    let fetched = std::process::Command::new("curl")
+        .args(["-fsSL", "-m", "30", &script_url, "-o"])
+        .arg(&script_path)
+        .output();
+    match fetched {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr).to_string();
+            return fail(
+                app,
+                "fetch-script",
+                format!("fetch {} failed", script_url),
+                self_update_tail(&err),
+            );
+        }
+        Err(e) => return fail(app, "fetch-script", format!("curl: {}", e), vec![]),
+    }
+    self_update_mutate(app, |s| s.phase = "install".to_string());
+    #[cfg(not(windows))]
+    let output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .env("BRAM_VERSION", tag)
+        .env("BRAM_BASE_URL", &base)
+        .output();
+    #[cfg(windows)]
+    let staging = tmp.join("staged");
+    #[cfg(windows)]
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(&script_path)
+        .args(["-Version", tag, "-BaseUrl", &base, "-InstallDir"])
+        .arg(&staging)
+        .output();
+    let output = match output {
+        Ok(o) => o,
+        Err(e) => {
+            return fail(
+                app,
+                "install",
+                format!("spawn install script: {}", e),
+                vec![],
+            )
+        }
+    };
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let tail = self_update_tail(&combined);
+    if !output.status.success() {
+        return fail(
+            app,
+            "install",
+            format!("install script exited {}", output.status),
+            tail,
+        );
+    }
+    // Unix: the script installed in place; learn the destination from its
+    // "Installing to <path>…" line. Windows: the script staged; swap now.
+    #[cfg(not(windows))]
+    let installed_to = combined
+        .lines()
+        .find_map(|l| l.strip_prefix("Installing to "))
+        .map(|rest| rest.trim_end_matches('…').trim().to_string());
+    #[cfg(windows)]
+    let installed_to = {
+        self_update_mutate(app, |s| s.phase = "swap".to_string());
+        match self_update_windows_swap(app, &staging) {
+            Ok(p) => Some(p),
+            Err(e) => return fail(app, "swap", e, tail),
+        }
+    };
+    let _ = std::fs::remove_dir_all(&tmp);
+    self_update_mutate(app, |s| {
+        s.state = "done".to_string();
+        s.phase = String::new();
+        s.tail = tail;
+        s.installed_to = installed_to;
+        s.finished_at_ms = Some(unix_now_ms());
+    });
+}
+
+// Windows rename-swap: a running image cannot be overwritten but can be
+// renamed on the same volume. bram-guard.exe runs only transiently (per hook
+// event), so a brief lock gets a short retry; a persistent guard lock is
+// reported in the error rather than silently half-swapped.
+#[cfg(windows)]
+fn self_update_windows_swap<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    staging: &Path,
+) -> Result<String, String> {
+    let install_dir = home_dir().ok_or("no home dir")?.join("bin");
+    std::fs::create_dir_all(&install_dir).map_err(|e| format!("create install dir: {}", e))?;
+    let mut installed_bram = None;
+    for name in ["bram.exe", "bram-guard.exe"] {
+        let staged = staging.join(name);
+        if !staged.exists() {
+            continue;
+        }
+        let live = install_dir.join(name);
+        if live.exists() {
+            let old = install_dir.join(format!("{}.old", name));
+            let _ = std::fs::remove_file(&old);
+            let mut renamed = false;
+            for _ in 0..5 {
+                match std::fs::rename(&live, &old) {
+                    Ok(_) => {
+                        renamed = true;
+                        break;
+                    }
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(200)),
+                }
+            }
+            if !renamed {
+                return Err(format!("could not move aside locked {}", name));
+            }
+        }
+        std::fs::rename(&staged, &live).map_err(|e| format!("place {}: {}", name, e))?;
+        append_bram_trace_line(app, "self-update", &format!("op=swapped file={}", name));
+        if name == "bram.exe" {
+            installed_bram = Some(live.display().to_string());
+        }
+    }
+    installed_bram.ok_or_else(|| "bram.exe not found in staged install".to_string())
+}
+
+// Startup cleanup for the Windows rename-swap leftovers. Best-effort: a
+// still-locked .old (previous process not fully gone) just waits for the
+// next launch.
+#[cfg(windows)]
+fn cleanup_self_update_leftovers() {
+    let Some(home) = home_dir() else { return };
+    let dir = home.join("bin");
+    for name in ["bram.exe.old", "bram-guard.exe.old"] {
+        let _ = std::fs::remove_file(dir.join(name));
+    }
+}
+
+#[cfg(not(windows))]
+fn cleanup_self_update_leftovers() {}
+
+// Relaunch into the freshly installed binary: spawn it against the current
+// project root, then exit this process. For an installed user the spawned
+// path IS the updated binary; under a dev symlink launch the installed copy
+// lives elsewhere, so prefer the recorded install destination when we have
+// one.
+fn handle_self_update_relaunch<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> (u16, &'static str, Vec<u8>) {
+    const JSON: &str = "application/json; charset=utf-8";
+    let installed = self_update_cell()
+        .lock()
+        .ok()
+        .and_then(|g| g.installed_to.clone())
+        .map(std::path::PathBuf::from);
+    let target = installed
+        .or_else(|| std::env::current_exe().ok())
+        .filter(|p| p.exists());
+    let Some(target) = target else {
+        return (
+            409,
+            JSON,
+            br#"{"ok":false,"error":"no relaunch target"}"#.to_vec(),
+        );
+    };
+    let mut cmd = std::process::Command::new(&target);
+    if let Some(root) = project_root(Some(app)) {
+        cmd.arg(root);
+    }
+    if let Err(e) = cmd.spawn() {
+        return (
+            500,
+            JSON,
+            format!("{{\"ok\":false,\"error\":\"spawn: {}\"}}", e).into_bytes(),
+        );
+    }
+    append_bram_trace_line(
+        app,
+        "self-update",
+        &format!("op=relaunch target={}", target.display()),
+    );
+    // Let the HTTP response flush before this process exits.
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        std::process::exit(0);
+    });
+    (200, JSON, br#"{"ok":true,"relaunching":true}"#.to_vec())
+}
+
 // Memoizes the `gh api /user` login lookup (git_log_recent) for the life of
 // the process — the local GitHub identity doesn't change mid-session, and the
 // call costs ~0.5s that was previously paid on every /__commits request.
@@ -50314,6 +50668,15 @@ fn route_request<R: tauri::Runtime>(
         return (200, "application/json; charset=utf-8", body);
     }
 
+    if path == "__self-update/status" {
+        let status = self_update_cell()
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        let body = serde_json::to_vec(&status).unwrap_or_default();
+        return (200, "application/json; charset=utf-8", body);
+    }
+
     if path == "__agent-status" {
         // Codex doesn't paint a rotating verb line and its silence
         // between turns is often shorter than the silence-clear gate
@@ -56451,7 +56814,22 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
         .map(|h| h.value.as_str().to_string());
 
     // POST-only routes (route_request is GET-only).
-    let (status, content_type, body) = if path == "__queue/save" {
+    let (status, content_type, body) = if path == "__self-update" {
+        // clickable-update-from-banner: start the install flow (idempotent
+        // guard: 409 while one runs). Progress rides /__self-update/status +
+        // the self-update-changed event.
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            handle_self_update_start(app)
+        }
+    } else if path == "__self-update/relaunch" {
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            handle_self_update_relaunch(app)
+        }
+    } else if path == "__queue/save" {
         if method != "POST" {
             (405, "text/plain; charset=utf-8", b"POST only".to_vec())
         } else {
@@ -57148,6 +57526,9 @@ pub fn run() {
             // Remove any stale Codex lifecycle intent/result files from a
             // prior session. Refs #130.
             cleanup_stale_worklist_intent(app.handle());
+            // Windows self-update leaves renamed-aside *.exe.old files
+            // (clickable-update-from-banner); delete them best-effort.
+            cleanup_self_update_leftovers();
             // Remove any stale pty-intent queue from a prior session so
             // its intents don't replay into the fresh PTY. Refs #86.
             cleanup_stale_pty_intents(app.handle());

@@ -76,6 +76,17 @@
     listenTo="{mainAgentStatus.value &amp;&amp; mainAgentStatus.value.state}"
     onDidChange="() => { headerInflightClaim.refetch(); window.__bramIframeTrace('header-inflight-refetch', {state: (mainAgentStatus.value &amp;&amp; mainAgentStatus.value.state) || ''}); }" />
   <DataSource id="appInfo" url="/__app-info" />
+  <!-- clickable-update-from-banner: self-update progress for the banner.
+       Pushed, never polled: the host emits self-update-changed on every
+       state/phase transition. -->
+  <DataSource id="selfUpdate" url="/__self-update/status" />
+  <PushSource
+    id="selfUpdateEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('self-update-changed')}" />
+  <ChangeListener
+    listenTo="{selfUpdateEvt.value}"
+    onDidChange="() => { selfUpdate.refetch(); window.__bramIframeTrace('refetch-called', {context: 'self-update-changed'}); }" />
   <!-- issue-231 footer tips: settings snapshot feeds the relevance gates
        (Tool Descriptions / batch actions); tick bumps re-pick on dismiss
        or next. One-shot fetch, no polling. -->
@@ -391,10 +402,46 @@
     <Text fontSize="$fontSize-sm">
       Version {appInfo.value.latest} is available. (Current: {appInfo.value.current}.)
     </Text>
+    <!-- clickable-update-from-banner: Update now runs the published install
+         script host-side (POST /__self-update); View release keeps the
+         learn-more / DIY path. Progress states below ride the selfUpdate
+         DataSource, refetched on the self-update-changed push. -->
     <Button
-      label="Download"
+      when="{!selfUpdate.value || (selfUpdate.value.state !== 'running' &amp;&amp; selfUpdate.value.state !== 'done')}"
+      label="Update now"
       size="xs"
+      onClick="window.__bramStartSelfUpdate()" />
+    <Button
+      label="View release"
+      size="xs"
+      variant="outlined"
       onClick="appInfo.value.release_url &amp;&amp; openExternal(appInfo.value.release_url)" />
+    <Text
+      when="{selfUpdate.value &amp;&amp; selfUpdate.value.state === 'running'}"
+      fontSize="$fontSize-sm"
+      color="$textColor-secondary">
+      Updating… ({selfUpdate.value.phase})
+    </Text>
+    <Text
+      when="{selfUpdate.value &amp;&amp; selfUpdate.value.state === 'failed'}"
+      fontSize="$fontSize-sm"
+      color="$color-danger-500"
+      maxLines="1"
+      tooltip="{(selfUpdate.value.tail || []).join('\n').slice(0, 1000)}">
+      Update failed: {selfUpdate.value.error}
+    </Text>
+    <Text
+      when="{selfUpdate.value &amp;&amp; selfUpdate.value.state === 'done'}"
+      fontSize="$fontSize-sm">
+      Installed {selfUpdate.value.target_version} to {selfUpdate.value.installed_to} — takes effect next launch; no rush.
+    </Text>
+    <Button
+      when="{selfUpdate.value &amp;&amp; selfUpdate.value.state === 'done'}"
+      label="Relaunch now"
+      size="xs"
+      variant="outlined"
+      tooltip="Optional: quit this Bram and start the freshly installed one. Dismiss to keep working — the update applies whenever you next launch."
+      onClick="window.__bramSelfUpdateRelaunch()" />
     <SpaceFiller />
     <Button
       label="✕"

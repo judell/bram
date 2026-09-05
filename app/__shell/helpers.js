@@ -11343,6 +11343,30 @@ function __bramDescribeLoadDone() {
   if (__describeLoad.inflight > 0) __describeLoad.inflight--;
   window.__bramDescribeInflight = __describeLoad.inflight;
 }
+// clickable-update-from-banner: the banner's Update now / Relaunch buttons.
+// Fire-and-forget POSTs — progress rides the self-update-changed Tauri event
+// into the selfUpdate DataSource refetch, so no response handling here beyond
+// tracing a refusal (409 while an update runs, or no release info).
+window.__bramStartSelfUpdate = function () {
+  window
+    .fetch("/__self-update", { method: "POST" })
+    .then(function (r) { return r.json().catch(function () { return {}; }); })
+    .then(function (j) {
+      if (j && j.ok === false) {
+        window.__bramIframeTrace("self-update", { op: "start-refused", error: String(j.error || "") });
+      }
+    })
+    .catch(function (e) {
+      window.__bramIframeTrace("self-update", { op: "start-error", error: String(e) });
+    });
+};
+window.__bramSelfUpdateRelaunch = function () {
+  window
+    .fetch("/__self-update/relaunch", { method: "POST" })
+    .catch(function (e) {
+      window.__bramIframeTrace("self-update", { op: "relaunch-error", error: String(e) });
+    });
+};
 window.__bramRequestCommandDescription = function (item, onDone, fromHold) {
   var id = item && item.id;
   var done = function () { try { if (onDone) onDone(); } catch (e) {} };

@@ -4,7 +4,6 @@
   var.diffKeys="{[]}"
   var.diffScopes="{{}}"
   var.worklist2Feedback="{{}}"
-  var.worklist2Close="{{}}"
   var.worklist2NewItemOpen="{false}"
   var.worklist2NewItemIssue="{null}"
   var.worklist2VoiceRecording="{false}"
@@ -133,11 +132,9 @@
   <ChangeListener
     listenTo="{w2SelStore.value}"
     onDidChange="() => worklist2Selected = (w2SelStore.value || []).slice()" />
-  <!-- The close-issue toggles live in the row expansions but the Commit
-       buttons are now in the Footer, so the map has to cross too. -->
-  <ChangeListener
-    listenTo="{worklist2Close}"
-    onDidChange="() => window.__bramW2SetCloseMap(worklist2Close)" />
+  <!-- issue-328: the worklist2Close page var and its mirror listener are
+       gone — the gate bar owns the close toggle, and the expansion's
+       comment box writes window.__bramW2CloseMap directly. -->
   <PushSource
     id="projectedTurnsDS"
     initial="{window.__bramProjectedLastExchange(null)}"
@@ -902,19 +899,21 @@
             gap="$space-2"
             verticalAlignment="center"
             var.witem="{$item}">
+            <!-- issue-328: the expansion's close CHECKBOX is gone — the
+                 gate bar is the one consent surface (gate-only toggle, Jon
+                 2026-09-05). The expansion keeps the issue reference and
+                 the optional closing comment; both write the shared window
+                 map directly, so no page-var mirror can clobber a gate
+                 untick. -->
             <Text value="closes" fontSize="$fontSize-sm" color="$textColor-secondary" />
             <Items data="{$item.closesIssues}">
               <HStack gap="$space-0_5" verticalAlignment="center" var.issue="{normalizeCloseIssue($item)}">
-                <Checkbox
-                  when="{window.__bramWorklist2Begun(witem, inflightClaim.value)}"
-                  initialValue="{true}"
-                  onDidChange="(v) => worklist2Close = window.__bramInlineCloseToggle(worklist2Close, witem.id, issue.number, v, witem.closesIssues)" />
                 <Text value="{'#' + issue.number}" fontSize="$fontSize-sm" tooltip="{issue.title || ''}" />
                 <TextBox
                   when="{window.__bramWorklist2Begun(witem, inflightClaim.value)}"
                   width="16rem"
-                  placeholder="comment (optional)"
-                  onDidChange="(v) => worklist2Close = window.__bramInlineCloseComment(worklist2Close, witem.id, issue.number, v, witem.closesIssues)" />
+                  placeholder="closing comment (optional)"
+                  onDidChange="(v) => window.__bramGateCloseComment(witem.id, issue.number, v, witem.closesIssues)" />
               </HStack>
             </Items>
           </HStack>

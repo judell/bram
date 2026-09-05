@@ -105,6 +105,31 @@
       <Option value="split" label="{shareSplitLabel}" />
     </RadioGroup>
   </HStack>
+  <!-- issue-328: close consent AT THE GATE. When the selection carries
+       closesIssues, one real checkbox per issue renders here — where the
+       decision happens — instead of only inside a row expansion nobody is
+       required to open. Default stays ticked (today's behavior, now
+       visible); unticking is one click and feeds the same __bramW2CloseMap
+       the payload builder reads, so what you see is what the commit sends.
+       Fresh rows per evaluation are fine: the checkbox's state lives in
+       the map, so a remount re-reads the truth. -->
+  <HStack
+    when="{(window.__bramGateCloseItems(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value) || []).length > 0}"
+    horizontalAlignment="center"
+    gap="$space-3"
+    paddingTop="$space-1">
+    <Items data="{window.__bramGateCloseItems(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value)}">
+      <HStack gap="$space-1" verticalAlignment="center">
+        <Checkbox
+          initialValue="{$item.close}"
+          onDidChange="(v) => window.__bramGateCloseToggle($item.itemId, $item.number, v, $item.closesIssues)" />
+        <Text
+          value="{'closes #' + $item.number}"
+          fontSize="$fontSize-sm"
+          tooltip="{$item.title}" />
+      </HStack>
+    </Items>
+  </HStack>
   <HStack
     when="{(gateSel.value || []).length > 0}"
     verticalAlignment="center"

@@ -1532,6 +1532,54 @@ window.__bramW2SetShareMode = function (m) { window.__bramW2ShareMode = m || "to
 window.__bramW2CloseMap = {};
 window.__bramW2SetCloseMap = function (m) { window.__bramW2CloseMap = m || {}; };
 
+// issue-328: close consent at the gate. The row-expansion toggles were the
+// only consent surface and lived behind an expansion nobody is required to
+// open, so `close-issue: N` reached the payload invisibly (Walt's 0.6.2
+// receipt: "closes #8" as settled fact, no tick box in sight). These two
+// helpers put a real checkbox per issue in the gate bar, wired to the SAME
+// map the row toggles and the payload builder use, so the surfaces cannot
+// disagree. Known small caveat: a later row-expansion toggle replaces the
+// whole map from the page var and can drop a gate untick made for a
+// DIFFERENT item in the same window — acceptable for the look/feel trial,
+// noted here so the next editor inherits it.
+window.__bramGateCloseToggle = function (itemId, issueNumber, checked, closesIssues) {
+  window.__bramW2CloseMap = window.__bramInlineCloseToggle(
+    window.__bramW2CloseMap, itemId, issueNumber, checked, closesIssues);
+};
+// The row-expansion comment box writes the window map directly too (the
+// expansion's own checkbox is GONE — gate-only toggle, Jon 2026-09-05),
+// which retires the whole-map-replace clobber the page-var mirror had.
+window.__bramGateCloseComment = function (itemId, issueNumber, text, closesIssues) {
+  window.__bramW2CloseMap = window.__bramInlineCloseComment(
+    window.__bramW2CloseMap, itemId, issueNumber, text, closesIssues);
+};
+// Flat rows for the gate line: selected items' closesIssues with their
+// current effective tick state (absent map entry = default all-ticked,
+// same rule as __bramInlineCloseState).
+window.__bramGateCloseItems = function (items, sel) {
+  var out = [];
+  var chosen = sel || [];
+  (items || []).forEach(function (it) {
+    if (!it || chosen.indexOf(it.id) < 0) return;
+    var closes = it.closesIssues || [];
+    if (!closes.length) return;
+    var st = window.__bramInlineCloseState(window.__bramW2CloseMap, it);
+    closes.forEach(function (e) {
+      var n = e && typeof e === "object" ? e.number : e;
+      var t = e && typeof e === "object" ? e.title || "" : "";
+      var cur = st[n] || { close: true, comment: "" };
+      out.push({
+        itemId: it.id,
+        number: n,
+        title: t,
+        close: !!cur.close,
+        closesIssues: closes,
+      });
+    });
+  });
+  return out;
+};
+
 // Ported verbatim from the five inline gate handlers. The differences between
 // them are real and easy to lose, so they are spelled out rather than folded:
 //   start          kind=approved

@@ -393,11 +393,15 @@
     </VStack>
   </ModalDialog>
 
+  <!-- wrapContent: on a narrow window the done-state tail (installed line +
+       Relaunch now) otherwise falls off the right edge unseen (update-banner-
+       wrap; https://www.xmlui.org/docs/reference/components/Stack#wrapcontent). -->
   <HStack
     when="{appInfo.value &amp;&amp; appInfo.value.has_update &amp;&amp; appInfo.value.latest !== updateBannerDismissedVersion}"
     backgroundColor="$color-warn-100"
     padding="$space-2"
     gap="$space-3"
+    wrapContent="true"
     verticalAlignment="center">
     <Text fontSize="$fontSize-sm">
       Version {appInfo.value.latest} is available. (Current: {appInfo.value.current}.)

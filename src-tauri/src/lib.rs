@@ -18905,6 +18905,79 @@ fn spawn_project_server(
     Ok(child)
 }
 
+// issue-341 (windows): every helper process this file spawns must be windowless.
+// Bram is a GUI-subsystem binary, so a plain Command::spawn of a console program
+// pops a conhost window — the same flash the dedicated bram-guard binary exists
+// to avoid on hook events. Reaping happens at launch, where a flashing console
+// would look like a crash.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+// issue-341 (windows): terminate a pid and everything below it. `force` picks
+// the graceful (WM_CLOSE / CTRL) or the /F form. Status is deliberately
+// ignored, exactly as the unix path ignores libc::kill's return: a pid that is
+// already gone is a non-zero exit and nothing else, and this function is
+// documented safe to call in that case.
+#[cfg(windows)]
+fn taskkill_tree(pid: u32, force: bool) {
+    use std::os::windows::process::CommandExt;
+    let mut cmd = std::process::Command::new("taskkill");
+    cmd.arg("/T");
+    if force {
+        cmd.arg("/F");
+    }
+    let _ = cmd
+        .args(["/PID", &pid.to_string()])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+// issue-341: the running command line for a pid, or "" when it cannot be read.
+// One platform seam so try_reap_orphan_server's verification -- the pid-reuse
+// guard -- stays a single implementation.
+//
+// On Windows the answer is better than on unix, for a reason worth knowing: the
+// unix probe fights exec (`sh -c` execs, and argv[0] can resolve somewhere else
+// entirely -- python3 becoming .../Python.app/Contents/MacOS/Python). `cmd /C`
+// does NOT exec: cmd.exe stays put with its original command line, so the
+// configured command appears verbatim and the caller's `contains(args)` test
+// matches what was recorded.
+//
+// PowerShell rather than the lighter options on purpose. `wmic` is deprecated
+// and already absent from recent Windows 11 images; `tasklist` returns only the
+// image name (`cmd.exe`), which cannot tell one wedged server from another and
+// would defeat the very guard this probe exists to be. The few hundred ms of
+// PowerShell startup is paid once per launch, and only when the port probe has
+// already found a listener that needs adjudicating.
+fn running_command_line(pid: u32) -> String {
+    #[cfg(unix)]
+    let out = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output();
+    #[cfg(windows)]
+    let out = {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &format!(
+                    "(Get-CimInstance Win32_Process -Filter \"ProcessId={}\").CommandLine",
+                    pid
+                ),
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+    };
+    out.ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
+}
+
 // issue-341: signal the spawned server's whole process group — TERM, a
 // short grace, then KILL — and clear the sidecar. Safe to call with a pid
 // that is already gone.
@@ -18919,12 +18992,23 @@ fn kill_server_group(pid: u32, root: Option<&Path>) {
         libc::kill(-(pid as i32), libc::SIGTERM);
         libc::kill(pid as i32, libc::SIGTERM);
     }
+    // issue-341 on Windows: `/T` is the tree, and the tree is the point. The
+    // spawn is `cmd /C <command>`, so the recorded pid is cmd.exe and the real
+    // server is its CHILD -- a pid-targeted kill would leave the port held.
+    // This is the same grandchild problem the unix path solves with
+    // process_group(0) plus a group signal. Without /F taskkill is the
+    // graceful form (WM_CLOSE to GUI, CTRL event to console), so the two calls
+    // straddle the sleep exactly as SIGTERM/SIGKILL do.
+    #[cfg(windows)]
+    taskkill_tree(pid, false);
     std::thread::sleep(std::time::Duration::from_millis(300));
     #[cfg(unix)]
     unsafe {
         libc::kill(-(pid as i32), libc::SIGKILL);
         libc::kill(pid as i32, libc::SIGKILL);
     }
+    #[cfg(windows)]
+    taskkill_tree(pid, true);
     if let Some(root) = root {
         let _ = std::fs::remove_file(root.join("resources/.target-server-pid"));
     }
@@ -18947,13 +19031,7 @@ fn try_reap_orphan_server(cfg: &ServerConfig, root: &Path) -> bool {
     if pid == 0 || recorded != cfg.command {
         return false;
     }
-    let running = std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "command="])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default();
+    let running = running_command_line(pid);
     // The live command must still look like ours. `sh -c` execs, and the
     // interpreter's argv[0] can resolve elsewhere entirely (live case:
     // `python3` became .../Python.app/Contents/MacOS/Python, containing

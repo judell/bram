@@ -18493,42 +18493,162 @@ fn spawn_project_server(
     let mut command = {
         let mut c = std::process::Command::new("sh");
         c.arg("-c").arg(&cfg.command);
+        // issue-341: own process group, so exit/reap can signal the GROUP.
+        // `sh -c` execs a single simple command (Walt's python was Bram's
+        // direct child), but a compound command leaves the real server as a
+        // grandchild that a pid-targeted kill misses.
+        use std::os::unix::process::CommandExt;
+        c.process_group(0);
         c
     };
 
-    let mut child = command
+    // issue-341: output goes to a FILE, not pipes. Walt's mechanism: once
+    // Bram exits, nothing drains the pipe, the server's per-request stderr
+    // log raises BrokenPipeError inside the handler, and the socket stays
+    // bound while every request gets an empty reply — a half-dead orphan.
+    // With a file, an orphan lingers HEALTHY: the next launch either
+    // reuses it (port responsive) or reaps it via the sidecar below.
+    let log_path = project_root.join("resources/bram-traces/target-server.log");
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| format!("open {}: {}", log_path.display(), e))?;
+    let log2 = log
+        .try_clone()
+        .map_err(|e| format!("clone log handle: {}", e))?;
+
+    let child = command
         .current_dir(&cwd)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::from(log))
+        .stderr(std::process::Stdio::from(log2))
         .spawn()
         .map_err(|e| format!("failed to spawn `{}`: {}", cfg.command, e))?;
 
     let pid = child.id();
     eprintln!(
-        "[server] spawned pid={} cwd={} cmd={}",
+        "[server] spawned pid={} pgid={} cwd={} cmd={} log={}",
+        pid,
         pid,
         cwd.display(),
-        cfg.command
+        cfg.command,
+        log_path.display()
+    );
+    // issue-341 sidecar: enough identity for the next launch to reap a
+    // verified orphan instead of printing a kill-it-yourself HINT.
+    let sidecar = project_root.join("resources/.target-server-pid");
+    let _ = std::fs::write(
+        &sidecar,
+        format!(
+            "{}\n",
+            serde_json::json!({ "pid": pid, "command": cfg.command, "port": cfg.port })
+        ),
     );
 
-    if let Some(stdout) = child.stdout.take() {
-        thread::spawn(move || {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines().map_while(Result::ok) {
-                eprintln!("[server] {}", line);
-            }
-        });
-    }
-    if let Some(stderr) = child.stderr.take() {
-        thread::spawn(move || {
-            let reader = BufReader::new(stderr);
-            for line in reader.lines().map_while(Result::ok) {
-                eprintln!("[server] {}", line);
-            }
-        });
-    }
-
     Ok(child)
+}
+
+// issue-341: signal the spawned server's whole process group — TERM, a
+// short grace, then KILL — and clear the sidecar. Safe to call with a pid
+// that is already gone.
+fn kill_server_group(pid: u32, root: Option<&Path>) {
+    // Signal the GROUP and the PID: our own spawns lead their group
+    // (process_group(0), pgid == pid), but a reaped orphan recorded by an
+    // older session — or spawned any other way — may not (live test case:
+    // a wedge whose pgid was its parent's; the group signal alone hit
+    // nothing and the port stayed held).
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGTERM);
+        libc::kill(pid as i32, libc::SIGTERM);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
+        libc::kill(pid as i32, libc::SIGKILL);
+    }
+    if let Some(root) = root {
+        let _ = std::fs::remove_file(root.join("resources/.target-server-pid"));
+    }
+}
+
+// issue-341: when the port probe finds a wedged (or lingering) listener,
+// reap it — but only after verifying the sidecar's recorded pid still runs
+// the recorded command (pid-reuse guard). Returns true when the port was
+// freed and a fresh spawn is safe.
+fn try_reap_orphan_server(cfg: &ServerConfig, root: &Path) -> bool {
+    let sidecar = root.join("resources/.target-server-pid");
+    let Ok(text) = std::fs::read_to_string(&sidecar) else {
+        return false;
+    };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    let pid = doc.get("pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let recorded = doc.get("command").and_then(|v| v.as_str()).unwrap_or("");
+    if pid == 0 || recorded != cfg.command {
+        return false;
+    }
+    let running = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    // The live command must still look like ours. `sh -c` execs, and the
+    // interpreter's argv[0] can resolve elsewhere entirely (live case:
+    // `python3` became .../Python.app/Contents/MacOS/Python, containing
+    // neither "python3" nor the configured string). The ARGUMENTS survive
+    // exec verbatim, so they are the identity: everything after the leading
+    // token must appear in the running command line; a single-token command
+    // falls back to a case-insensitive basename match.
+    let mut parts = cfg.command.splitn(2, char::is_whitespace);
+    let token = parts.next().unwrap_or("");
+    let args = parts.next().unwrap_or("").trim();
+    let verified = if running.is_empty() {
+        false
+    } else if !args.is_empty() {
+        running.contains(args)
+    } else {
+        running
+            .to_lowercase()
+            .split_whitespace()
+            .next()
+            .map(|first| {
+                first
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(first)
+                    .contains(&token.to_lowercase())
+            })
+            .unwrap_or(false)
+    };
+    if !verified {
+        eprintln!(
+            "[server] op=orphan-unverified pid={} running={:?}",
+            pid,
+            running.trim()
+        );
+        return false;
+    }
+    eprintln!(
+        "[server] op=orphan-reaped pid={} cmd={} (recorded by a prior session)",
+        pid, cfg.command
+    );
+    kill_server_group(pid, Some(root));
+    // Give the OS a beat to release the socket.
+    for _ in 0..20 {
+        if !is_port_listening(cfg.port) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    !is_port_listening(cfg.port)
 }
 
 // Block until the port answers or the timeout elapses. Returns true if
@@ -55909,7 +56029,30 @@ pub fn run() {
                     };
                     format!("{}/__project{}", TARGET_ORIGIN, path)
                 };
-                match probe_port_http(cfg.port, &cfg.path) {
+                // issue-341: a wedged port is now reaped, not refused, when
+                // the sidecar can verify the orphan is OURS (recorded pid
+                // still running the recorded command). Success re-probes as
+                // NotListening and falls into the normal spawn path below.
+                let mut probed = probe_port_http(cfg.port, &cfg.path);
+                if let PortStatus::Unresponsive(_) = &probed {
+                    if let Some(root) = project_root(Some(app.handle())) {
+                        if try_reap_orphan_server(cfg, &root) {
+                            append_bram_trace_line(
+                                app.handle(),
+                                "server",
+                                &format!("op=orphan-reaped port={}", cfg.port),
+                            );
+                            probed = PortStatus::NotListening;
+                        } else {
+                            append_bram_trace_line(
+                                app.handle(),
+                                "server",
+                                &format!("op=orphan-reap-declined port={}", cfg.port),
+                            );
+                        }
+                    }
+                }
+                match probed {
                     PortStatus::Live => {
                         eprintln!(
                             "[server] port {} is live (HTTP responsive); reusing (skipping spawn of `{}`)",
@@ -56894,6 +57037,14 @@ pub fn run() {
 
             Ok(())
         })
+        // issue-341: reap the target-app server when the main window goes
+        // away — the quit path that skipped ExitRequested (Walt's clean
+        // menu quit) still destroys the window first.
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) && window.label() == "main" {
+                kill_spawned_server_on_close(&window.app_handle().clone());
+            }
+        })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
@@ -56939,13 +57090,41 @@ pub fn run() {
                     let mut guard = state.0.lock().unwrap();
                     if let Some(mut spawned) = guard.take() {
                         let pid = spawned.child.id();
-                        let _ = spawned.child.kill();
+                        // issue-341: group kill + sidecar cleanup, not a
+                        // bare pid kill — compound sh -c commands leave the
+                        // real server as a grandchild.
+                        kill_server_group(pid, project_root(Some(app)).as_deref());
                         let _ = spawned.child.wait();
-                        eprintln!("[server] killed pid={} on exit", pid);
+                        eprintln!("[server] op=exit-kill pid={} via=exit-requested", pid);
+                        append_bram_trace_line(
+                            app,
+                            "server",
+                            &format!("op=exit-kill pid={} via=exit-requested", pid),
+                        );
                     }
                 }
             }
         });
+}
+
+// issue-341: belt for quit paths that bypass RunEvent::ExitRequested —
+// Walt's clean menu quit orphaned the child even though the exit-requested
+// kill existed, so the main window's destruction also reaps. Idempotent
+// with the exit-requested path: whichever fires first takes the child.
+fn kill_spawned_server_on_close<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let state = app.state::<SpawnedServerState>();
+    let mut guard = state.0.lock().unwrap();
+    if let Some(mut spawned) = guard.take() {
+        let pid = spawned.child.id();
+        kill_server_group(pid, project_root(Some(app)).as_deref());
+        let _ = spawned.child.wait();
+        eprintln!("[server] op=exit-kill pid={} via=window-destroyed", pid);
+        append_bram_trace_line(
+            app,
+            "server",
+            &format!("op=exit-kill pid={} via=window-destroyed", pid),
+        );
+    }
 }
 
 #[cfg(test)]

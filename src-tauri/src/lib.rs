@@ -53981,11 +53981,66 @@ fn route_request<R: tauri::Runtime>(
     }
 
     // Project-relative paths everywhere else.
+    // issue-358: root serving + SPA fallback for Bram-served target apps,
+    // enabling XMLUI's hash-free routing (useHashBasedRouting: false needs
+    // the server to answer app paths with index.html). Constraint inherited
+    // from EMBEDDED_APP's founding comment: XMLUI probes optional
+    // code-behind files that must genuinely 404 — so only extensionless
+    // misses fall back (the try_files-shaped predicate below), and asset
+    // typos keep their honest 404s. Reserved namespaces (__*, /query,
+    // resources/worklist.json) returned earlier in this function, so they
+    // are unshadowable by position. Projects without a root index.html keep
+    // the old behavior exactly.
     let proj = project_root(Some(app)).unwrap_or_else(|| PathBuf::from("."));
+    let index = proj.join("index.html");
+    if path.is_empty() {
+        return match std::fs::read(&index) {
+            Ok(bytes) => (200, mime_for(&index), bytes),
+            Err(_) => (404, "text/plain; charset=utf-8", Vec::new()),
+        };
+    }
     let full = proj.join(path);
     match std::fs::read(&full) {
         Ok(bytes) => (200, mime_for(&full), bytes),
-        Err(_) => (404, "text/plain; charset=utf-8", Vec::new()),
+        Err(_) => {
+            if spa_fallback_eligible(path) {
+                if let Ok(bytes) = std::fs::read(&index) {
+                    append_bram_trace_line(
+                        app,
+                        "spa-fallback",
+                        &format!("op=served path={}", path),
+                    );
+                    return (200, mime_for(&index), bytes);
+                }
+            }
+            (404, "text/plain; charset=utf-8", Vec::new())
+        }
+    }
+}
+
+// issue-358: an extensionless miss is an app route; a dotted final segment
+// is a real file that failed to resolve (asset typo, XMLUI code-behind
+// probe) and must keep its 404. Pure and unit-tested.
+fn spa_fallback_eligible(path: &str) -> bool {
+    let last = path.rsplit('/').next().unwrap_or(path);
+    !last.is_empty() && !last.contains('.')
+}
+
+#[cfg(test)]
+mod spa_fallback_tests {
+    use super::spa_fallback_eligible;
+
+    #[test]
+    fn app_routes_fall_back_and_file_misses_do_not() {
+        assert!(spa_fallback_eligible("details"));
+        assert!(spa_fallback_eligible("transactions/2026"));
+        // XMLUI code-behind probes and asset typos keep their 404s.
+        assert!(!spa_fallback_eligible("Main.xmlui.xs"));
+        assert!(!spa_fallback_eligible("components/Query.xmlui"));
+        assert!(!spa_fallback_eligible("img/logo.png"));
+        // Trailing slash: final segment empty — not a fallback candidate
+        // (the bare root is handled before the predicate).
+        assert!(!spa_fallback_eligible("details/"));
     }
 }
 

@@ -3359,6 +3359,16 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, attribu
         ", nothing came of it · Start again",
     );
   }
+  // issue-350-stranded-approval-reconciliation: the host marks an approved
+  // authorization with no claim and no agent activity since issue — the
+  // gate click's turn never reached the agent. "With the agent" would
+  // promise work nobody is doing (the #350 dead-end); say the true state
+  // and the way out.
+  if (item.strandedApproval) {
+    return withCloses(
+      "Approved — agent not yet notified · tell the agent to proceed, or Refine with a note",
+    );
+  }
   return withCloses("With the agent · nothing to do");
 };
 

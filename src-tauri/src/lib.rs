@@ -43794,6 +43794,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
                         "detail": completion_detail,
                         "seen": if completion_monitor.seen_at_ms > 0 { format_iso_utc_ms(completion_monitor.seen_at_ms) } else { String::new() },
                     },
+                    stranded_approval_row(app),
                     port_row,
                     loopback_row
                 ]
@@ -47779,6 +47780,104 @@ fn worklist_active_authorization_summary<R: tauri::Runtime>(
     }
     let issued = auth.get("issuedAtMs").and_then(|v| v.as_i64()).unwrap_or(0);
     Some((kind.to_string(), now.saturating_sub(issued), ids))
+}
+
+// issue-350-stranded-approval-reconciliation: the durable signature of an
+// approval whose turn never reached the agent — proven twice on 2026-09-06
+// (#350): `approved` auth unconsumed + no inflight claim + no agent
+// activity since it was issued (plus a grace window for the ordinary gap
+// between click and delivery). Queued pty-intents do NOT survive relaunch
+// (#86's stale-intent cleanup), so this record is the only artifact
+// reconciliation can build on. Detection + honest surfaces only — the host
+// deliberately does NOT re-inject the turn (observe-first; the freeze that
+// strands the approval is a renderer bug under separate investigation).
+const STRANDED_APPROVAL_GRACE_MS: i64 = 30_000;
+
+// The Status tab's Inflight Sentinel row for the stranded state — generic
+// {signal, level, state, detail} shape the tab renders as-is.
+fn stranded_approval_row<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
+    match stranded_approval_ids(app) {
+        Some((ids, age_ms)) => {
+            let mut sorted: Vec<String> = ids.into_iter().collect();
+            sorted.sort();
+            serde_json::json!({
+                "signal": "Stranded approval",
+                "level": "warn",
+                "state": format!("{} approved, agent not notified", sorted.join(", ")),
+                "detail": format!(
+                    "An approved authorization ({}s old) has no inflight claim and no agent activity since it was issued — the gate click's turn never reached the agent (#350). Recovery: tell the agent to proceed with the item, or Refine it with a note; the authorization is still valid.",
+                    age_ms / 1000
+                ),
+                "seen": "",
+            })
+        }
+        None => serde_json::json!({
+            "signal": "Stranded approval",
+            "level": "none",
+            "state": "none",
+            "detail": "No approved authorization is waiting without a claim and without agent activity (#350's stranded signature).",
+            "seen": "",
+        }),
+    }
+}
+
+fn stranded_approval_ids<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Option<(std::collections::HashSet<String>, i64)> {
+    let (kind, age_ms, ids) = worklist_active_authorization_summary(app)?;
+    if kind != "approved" || age_ms < STRANDED_APPROVAL_GRACE_MS {
+        return None;
+    }
+    let root = project_root(Some(app))?;
+    if root.join(INFLIGHT_CLAIM_REL).exists() {
+        return None;
+    }
+    let issued = unix_now_ms().saturating_sub(age_ms);
+    // Two roads to stranded, matching #350's two field shapes:
+    // - live process: no agent activity (PTY or JSONL) since the approval
+    //   was issued — the click's turn never arrived;
+    // - post-relaunch: the approval predates THIS process, and queued
+    //   pty-intents do not survive relaunch (#86), so whatever turn the
+    //   click built died with the old process — the fresh agent's boot
+    //   activity says nothing about delivery. (PROCESS_START is stamped on
+    //   the first call, which is the startup check.)
+    static PROCESS_START_MS: OnceLock<i64> = OnceLock::new();
+    let process_start = *PROCESS_START_MS.get_or_init(unix_now_ms);
+    let latest_activity = turn_state_cell()
+        .lock()
+        .map(|g| g.last_pty_activity_at_ms.max(g.last_jsonl_activity_at_ms))
+        .unwrap_or(0);
+    if latest_activity > issued && issued >= process_start {
+        return None;
+    }
+    trace_stranded_approval(app, &ids, age_ms, issued);
+    Some((ids, age_ms))
+}
+
+// One trace line per stranded record (keyed by issue time), not per board
+// serve — the serve runs constantly and the condition persists until acted
+// on.
+fn trace_stranded_approval<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    ids: &std::collections::HashSet<String>,
+    age_ms: i64,
+    issued: i64,
+) {
+    static TRACED: OnceLock<Mutex<std::collections::HashSet<i64>>> = OnceLock::new();
+    let fresh = TRACED
+        .get_or_init(|| Mutex::new(Default::default()))
+        .lock()
+        .map(|mut s| s.insert(issued))
+        .unwrap_or(false);
+    if fresh {
+        let mut sorted: Vec<&String> = ids.iter().collect();
+        sorted.sort();
+        append_bram_trace_line(
+            app,
+            "auth-record",
+            &format!("op=stranded ids={:?} age_ms={}", sorted, age_ms),
+        );
+    }
 }
 
 // issue-284 / issue-285: an Iterate turn's real text lives in
@@ -52049,10 +52148,20 @@ fn route_request<R: tauri::Runtime>(
         // (an approved-but-not-advanced row otherwise renders identically
         // to a never-approved one).
         if let Some((kind, age_ms, covered)) = worklist_active_authorization_summary(app) {
+            // issue-350-stranded-approval-reconciliation: an approved record
+            // with no claim and no agent activity since issue is an approval
+            // whose turn never arrived; the pane renders the honest strip
+            // ("Approved — agent not yet notified") off this flag instead of
+            // "With the agent".
+            let stranded = stranded_approval_ids(app).map(|(ids, _)| ids);
             if let Some(items) = doc.get_mut("items").and_then(|v| v.as_array_mut()) {
                 for item in items {
-                    let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                    if !id.is_empty() && covered.contains(id) {
+                    let id = item
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if !id.is_empty() && covered.contains(&id) {
                         if let Some(obj) = item.as_object_mut() {
                             obj.insert(
                                 "activeAuthorization".to_string(),
@@ -52062,6 +52171,12 @@ fn route_request<R: tauri::Runtime>(
                                 "authorizationAgeMs".to_string(),
                                 serde_json::Value::from(age_ms),
                             );
+                            if stranded.as_ref().map(|s| s.contains(&id)).unwrap_or(false) {
+                                obj.insert(
+                                    "strandedApproval".to_string(),
+                                    serde_json::Value::Bool(true),
+                                );
+                            }
                         }
                     }
                 }
@@ -58058,6 +58173,11 @@ pub fn run() {
             // /__enhance/status's gitToplevel; this line is the greppable
             // record that the launch began in that state.
             trace_git_toplevel_above_root(app.handle());
+            // issue-350-stranded-approval-reconciliation: a stranded approval
+            // survives relaunch (its turn's pty-intent does not, by #86's
+            // design), so name it at startup too — the trace dedupe keeps
+            // this and the board serve from double-logging one record.
+            let _ = stranded_approval_ids(app.handle());
             // Remove any stale pty-intent queue from a prior session so
             // its intents don't replay into the fresh PTY. Refs #86.
             cleanup_stale_pty_intents(app.handle());

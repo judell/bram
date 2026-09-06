@@ -241,16 +241,34 @@
               <Link
                 when="{$item.bramStateCommit &amp;&amp; repoOrigin.value &amp;&amp; repoOrigin.value.htmlBase}"
                 noIndicator
+                testId="row-control-cited-commit"
                 tooltip="{$item.bramStateDetail}"
                 onClick="openExternal(repoOrigin.value.htmlBase + '/commit/' + $item.bramStateCommit)">
                 <Text fontSize="$fontSize-sm" color="$textColor-secondary" maxLines="1"
                   value="{$item.bramState}" />
               </Link>
               <Text
-                when="{!($item.bramStateCommit &amp;&amp; repoOrigin.value &amp;&amp; repoOrigin.value.htmlBase)}"
+                when="{$item.bramState &amp;&amp; !($item.bramStateCommit &amp;&amp; repoOrigin.value &amp;&amp; repoOrigin.value.htmlBase)}"
                 fontSize="$fontSize-sm" color="$textColor-secondary" maxLines="1"
                 tooltip="{$item.bramStateDetail}"
-                value="{$item.bramState || '—'}" />
+                value="{$item.bramState}" />
+              <!-- issues-blank-bram-cell-starts-item: an open issue with no
+                   lifecycle state offers the next step instead of a dead dash —
+                   deep-links the Worklist's new-item composer with this issue
+                   preselected. Closed issues keep the plain dash. -->
+              <Link
+                when="{!$item.bramState &amp;&amp; $item.state === 'OPEN'}"
+                noIndicator
+                testId="row-control-new-item"
+                tooltip="Start a worklist item for this issue"
+                onClick="navigate('/worklist2', { queryParams: { newIssue: $item.number } })">
+                <Text fontSize="$fontSize-sm" color="$textColor-secondary" maxLines="1"
+                  value="new item" />
+              </Link>
+              <Text
+                when="{!$item.bramState &amp;&amp; $item.state !== 'OPEN'}"
+                fontSize="$fontSize-sm" color="$textColor-secondary" maxLines="1"
+                value="—" />
             </HStack>
             <VStack width="*" gap="0">
               <Text value="#{$item.number} {$item.title}" maxLines="1" />

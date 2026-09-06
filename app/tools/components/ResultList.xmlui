@@ -69,7 +69,12 @@
            documented trap). The Slot re-exposes the row as $item to the
            caller's rowTemplate, which evaluates in the caller's scope. -->
       <property name="itemTemplate">
-        <Card onClick="selectedHit = $item">
+        <!-- issues-blank-bram-cell-starts-item: a click that lands on an
+             anchor or button inside the row belongs to that control, not to
+             the row — without this, an embedded Link opened the detail modal
+             on its way to navigating (the interstitial Jon reported). The
+             helper returns the previous selection for such clicks. -->
+        <Card onClick="(e) => selectedHit = window.__bramRowClickHit(e, $item, selectedHit)">
           <Slot name="rowTemplate" item="{$item}" />
         </Card>
       </property>

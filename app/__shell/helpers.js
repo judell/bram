@@ -2802,6 +2802,28 @@ window.__bramFileHunkCount = function (rows) {
   return window.__bramFileHighlightBlocks(rows).length;
 };
 
+// issues-blank-bram-cell-starts-item: a ResultList row is clickable
+// anywhere (Card onClick → detail modal), so a link INSIDE a row also
+// opened the modal on its way to navigating — the "transited through the
+// issue page" interstitial. A click landing on (or within) an anchor or
+// button belongs to that control alone; the row returns the previous
+// selection unchanged. Fixed at the shared Card so every ResultList
+// consumer's embedded controls are covered.
+window.__bramRowClickHit = function (e, item, prev) {
+  var t = e && e.target;
+  while (t && t.tagName) {
+    // XMLUI's Link renders a DIV (observed: dom-click tagName=DIV on the
+    // new-item link), so tag sniffing alone misses — in-row controls carry
+    // an explicit testId marker (data-testid="row-control-…") instead.
+    var tid = (t.getAttribute && t.getAttribute("data-testid")) || "";
+    if (t.tagName === "A" || t.tagName === "BUTTON" || tid.indexOf("row-control") === 0) {
+      return prev;
+    }
+    t = t.parentElement;
+  }
+  return item;
+};
+
 // file-tab-truncation-misses-changes: when the preview payload is still
 // truncated (file beyond even the File tab's raised budget), say so instead
 // of silently rendering a wrong-looking prefix — the pre-fix failure was a

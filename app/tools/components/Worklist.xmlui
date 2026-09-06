@@ -769,9 +769,14 @@
                          one local read per opened file. -->
                     <TabItem label="File">
                       <VStack gap="$space-0" paddingVertical="$space-2">
+                        <!-- file-tab-truncation-misses-changes: this view wants
+                             the WHOLE file (elision keeps the DOM small); the
+                             route's 200 KB default is for point previews and
+                             silently served a 2.4 MB lib.rs as its first
+                             ~4,900 lines, hiding the item's changes entirely. -->
                         <DataSource
                           id="fileContext"
-                          url="{'/__local-file-preview?path=' + encodeURIComponent($item.path)}" />
+                          url="{'/__local-file-preview?maxBytes=8000000&amp;path=' + encodeURIComponent($item.path)}" />
                         <VStack
                           when="{fileContext.value &amp;&amp; fileContext.value.ok}"
                           gap="$space-0"
@@ -785,6 +790,11 @@
                                Large files arrive already elided: unhighlighted
                                stretches collapse into labeled cut rows in
                                __bramFileContextRows, so every block is nearby. -->
+                          <Text
+                            when="{window.__bramFileTruncationNote(fileContext.value)}"
+                            fontSize="$fontSize-sm"
+                            color="$textColor-secondary"
+                            value="{window.__bramFileTruncationNote(fileContext.value)}" />
                           <HunkNav
                             when="{window.__bramFileHunkCount(ctxRows) > 0}"
                             noun="highlight"

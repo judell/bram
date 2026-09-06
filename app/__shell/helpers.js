@@ -2802,6 +2802,27 @@ window.__bramFileHunkCount = function (rows) {
   return window.__bramFileHighlightBlocks(rows).length;
 };
 
+// file-tab-truncation-misses-changes: when the preview payload is still
+// truncated (file beyond even the File tab's raised budget), say so instead
+// of silently rendering a wrong-looking prefix — the pre-fix failure was a
+// 2.4 MB lib.rs served as its first 200 KB with the item's changes far past
+// the cut, so the view showed an unrelated prefix with no highlights and no
+// hint why. Returns '' when not truncated so the Text's `when` hides it.
+window.__bramFileTruncationNote = function (payload) {
+  if (!payload || !payload.truncated) return "";
+  var mb = function (n) {
+    return (Number(n || 0) / (1024 * 1024)).toFixed(1) + " MB";
+  };
+  var served = String(payload.content || "").length;
+  return (
+    "This file is " +
+    mb(payload.size) +
+    "; the preview shows only the first " +
+    mb(served) +
+    ". Changes beyond that point appear in the Diff tab."
+  );
+};
+
 // Hunk-navigation cursor state, id-keyed like diffScopes: one map, keys
 // "<rowId>::<path>:<view>", never component-local (the controlled-state
 // discipline; positional reuse in the Items loop would carry a cursor

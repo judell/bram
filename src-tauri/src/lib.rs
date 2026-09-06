@@ -51725,9 +51725,15 @@ fn route_request<R: tauri::Runtime>(
 
     if path == "__local-file-preview" {
         const MAX_PREVIEW_BYTES: u64 = 200_000;
+        // file-tab-truncation-misses-changes: the worklist File tab views
+        // whole large files (elision keeps the DOM small), so it asks for a
+        // bigger budget via maxBytes; every other caller keeps the 200 KB
+        // default. The ceiling bounds a hostile or mistaken request.
+        const MAX_PREVIEW_CEILING: u64 = 8_000_000;
         let mut file_path = String::new();
         let mut line: Option<u64> = None;
         let mut sha = String::new();
+        let mut max_bytes = MAX_PREVIEW_BYTES;
         for pair in query.split('&') {
             if let Some(enc) = pair.strip_prefix("path=") {
                 file_path = percent_decode(enc);
@@ -51735,6 +51741,10 @@ fn route_request<R: tauri::Runtime>(
                 line = percent_decode(enc).parse::<u64>().ok();
             } else if let Some(enc) = pair.strip_prefix("sha=") {
                 sha = percent_decode(enc);
+            } else if let Some(enc) = pair.strip_prefix("maxBytes=") {
+                if let Ok(n) = percent_decode(enc).parse::<u64>() {
+                    max_bytes = n.clamp(1, MAX_PREVIEW_CEILING);
+                }
             }
         }
         // history-file-links-local-at-commit: with a sha, serve the file as
@@ -51784,11 +51794,11 @@ fn route_request<R: tauri::Runtime>(
             }
             let mut file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
             let mut bytes = Vec::new();
-            let mut limited = (&mut file).take(MAX_PREVIEW_BYTES + 1);
+            let mut limited = (&mut file).take(max_bytes + 1);
             limited.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-            let truncated = bytes.len() as u64 > MAX_PREVIEW_BYTES;
+            let truncated = bytes.len() as u64 > max_bytes;
             if truncated {
-                bytes.truncate(MAX_PREVIEW_BYTES as usize);
+                bytes.truncate(max_bytes as usize);
             }
             if bytes.iter().any(|b| *b == 0) {
                 return Err(

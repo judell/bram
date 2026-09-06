@@ -3664,6 +3664,7 @@ window.__bramStartConsequence = function (items, sel, claim) {
   // exclusive changed path (applied items skip exclusivity, mirroring
   // __bramSelectionAllCommittable), and collect who blocks them.
   var blocked = [];
+  var empty = [];
   var blockerSet = {};
   var sharedPathSet = {};
   for (var b = 0; b < begun.length; b++) {
@@ -3671,6 +3672,20 @@ window.__bramStartConsequence = function (items, sel, claim) {
     if ((itb.status || "proposed") === "applied") continue;
     var split = window.__bramItemChangedSplit(itb, list, claim);
     if (split.exclusive.length) continue;
+    // issue-351: zero changes is NOT entanglement. An empty change set has
+    // a vacuously empty exclusive list, and with no blockers the `mutual`
+    // arm below fired the "entangled in shared files" copy on a lone item
+    // with an empty CHANGES column — sending the user to separate edits
+    // that do not exist. The ordinary state of a freshly begun item gets
+    // the ordinary sentence instead.
+    var hasAnyChange =
+      (itb.changeSummary && itb.changeSummary.changed > 0) ||
+      split.shared.length > 0 ||
+      split.sharedDeclared.length > 0;
+    if (!hasAnyChange) {
+      empty.push(itb.id);
+      continue;
+    }
     blocked.push(itb.id);
     var paths = split.shared.concat(split.sharedDeclared);
     for (var p = 0; p < paths.length; p++) sharedPathSet[paths[p]] = true;
@@ -3684,6 +3699,13 @@ window.__bramStartConsequence = function (items, sel, claim) {
         }
       }
     }
+  }
+  if (empty.length && !blocked.length) {
+    return (
+      window.__bramNameList(empty) +
+      (empty.length === 1 ? " has" : " have") +
+      " no changes yet — nothing to commit."
+    );
   }
   if (blocked.length) {
     var who = Object.keys(blockerSet);

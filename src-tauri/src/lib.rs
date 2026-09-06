@@ -20228,6 +20228,12 @@ fn has_stash_labeled<R: tauri::Runtime>(app: &AppHandle<R>, label: &str) -> bool
 // If the stash pop has conflicts, the stash is left in place so the user can
 // recover via `git stash list` / `git stash apply`.
 fn auto_rebase_and_push<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    // no-origin-console-error-remaining-paths: the Push button is hidden in
+    // a no-origin repo, but the route stays reachable (stale pane, curl) —
+    // refuse cleanly instead of surfacing git's fatal.
+    if !repo_has_origin(app) {
+        return Err("no remote configured — this is a local-only repository".to_string());
+    }
     let branch =
         git_run(app, &["rev-parse", "--abbrev-ref", "HEAD"]).map(|s| s.trim().to_string())?;
     git_run(app, &["fetch", "origin"])?;
@@ -20303,6 +20309,11 @@ fn auto_rebase_and_push<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), Str
 }
 
 fn pull_rebase_with_autostash<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    // no-origin-console-error-remaining-paths: same clean refusal as the
+    // push route — `git pull` in a no-origin repo fatals on 'origin'.
+    if !repo_has_origin(app) {
+        return Err("no remote configured — this is a local-only repository".to_string());
+    }
     let dirty = git_run(app, &["status", "--porcelain"])
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false);

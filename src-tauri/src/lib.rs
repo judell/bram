@@ -46818,6 +46818,17 @@ fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str,
     // Exact committability/exclusivity lives client-side; this is ground truth
     // enough for the lane.
     let doc = worklist_doc(app);
+    // awaiting-worklist-lane-respects-claims: an item covered by the LIVE
+    // inflight claim is WITH the agent, not awaiting the user — begunAtMs is
+    // stamped the instant an approval is recorded, so without this gate the
+    // lane said "ready to commit" while the Worklist strip honestly showed
+    // Starting… (2026-09-06, joint-interval-files-disambiguation in both
+    // screenshots at once). The item enters the lane when its claim retires,
+    // which is the same moment the spinner stops. A STRANDED approval
+    // (f10c8be) has no claim, so it still enters — correctly.
+    let claimed: std::collections::HashSet<String> = inflight_claim_ids_and_claimed_at(app)
+        .map(|(ids, _)| ids.into_iter().collect())
+        .unwrap_or_default();
     for item in worklist_items(&doc) {
         let id = item
             .get("id")
@@ -46833,7 +46844,7 @@ fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str,
             .unwrap_or("proposed");
         let begun = item.get("begunAtMs").is_some();
         let waiting = status == "applied" || (status == "proposed" && begun);
-        if !waiting {
+        if !waiting || claimed.contains(&id) {
             continue;
         }
         let closes: Vec<String> = item
@@ -46846,8 +46857,15 @@ fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str,
                     .collect()
             })
             .unwrap_or_default();
-        let mut detail =
-            String::from("Changes are on disk, waiting for your commit, refine, or drop.");
+        // awaiting-worklist-lane-respects-claims: assert on-disk changes
+        // only for `applied` (on disk by definition); a begun `proposed`
+        // item's changes were never checked here, and claiming them was the
+        // #351 banner's over-claiming in another surface.
+        let mut detail = if status == "applied" {
+            String::from("Changes are on disk, waiting for your commit, refine, or drop.")
+        } else {
+            String::from("Waiting for your commit, refine, or drop.")
+        };
         if !closes.is_empty() {
             detail.push_str(&format!(" Would close {}.", closes.join(", ")));
         }

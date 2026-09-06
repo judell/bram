@@ -55692,6 +55692,23 @@ fn handle_worklist_commit<R: tauri::Runtime>(
             ),
         );
     }
+    // guard-no-session-urls: same shape as the closing-keyword rejection.
+    // Session links are private telemetry; a push publishes them
+    // irreversibly and no opt-in exists. The prose rule did not bind (every
+    // ~/budget commit on 2026-09-06 carried the harness-default trailer
+    // despite the seeded conventions), so the gate enforces — and the
+    // PreToolUse guard covers direct git/forge writes for sessions that
+    // never reach this route.
+    if guard_policy::contains_session_url(message) {
+        return worklist_json_error(
+            400,
+            "commit message contains an agent session URL or Claude-Session trailer — \
+             session links are private telemetry and must not enter repository history. \
+             Remove the trailer/URL and retry. See conventions.md, 'No session URLs in \
+             public artifacts'."
+                .to_string(),
+        );
+    }
 
     let Some(auth_path) = worklist_auth_file(app) else {
         return worklist_json_error(500, "no project root");

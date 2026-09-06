@@ -1723,6 +1723,19 @@ suggests a `Claude-Session:` or similar trailer (the live case,
 history until Jon called it out). Attribution lines without URLs
 (e.g. `Co-Authored-By`) are a separate, allowed matter.
 
+**Enforced, not just requested** (guard-no-session-urls): the prose
+rule alone did not bind — on 2026-09-06 every commit in a managed
+project carried the harness-default `Claude-Session:` trailer despite
+this section being seeded there, because the harness instruction sits
+in the agent's prompt while this line sits deep in a large file. So,
+like the signature requirement above: the commit gate rejects a
+message containing a session URL or `Claude-Session:` trailer
+(rephrase and retry, nothing committed), and both provider guards
+deny a direct `git commit` or forge write whose command text or
+readable message/body file carries one (reason `no-session-url`).
+Greps and trace reads that mention the URL are untouched — only
+publishing-shaped commands are screened.
+
 ### Close-on-commit confirm dialog
 
 When an item's `applied` commit would resolve a GitHub issue, set

@@ -1147,6 +1147,97 @@ fn forge_api_body(command: &str) -> Option<String> {
 ///   the file is the part after the `@` (the prefix was previously left on
 ///   the path, so a readable signed body was denied as unreadable);
 ///   `-F key=value` with no `@` names no file and the scan continues.
+// guard-no-session-urls: session URLs are private telemetry; a commit or
+// forge body carrying one publishes it irreversibly, and no opt-in exists.
+// The prose rule (conventions, 'No session URLs in public artifacts')
+// demonstrably does not bind a session whose harness default says to append
+// the trailer — every ~/budget commit on 2026-09-06 carried one despite the
+// seeded rule — so this is enforcement, the cargo-fmt-at-the-gate shape.
+// The matcher is deliberately narrow: the session-URL host path and the
+// trailer key, case-insensitive. It is applied only to publishing-shaped
+// commands (git commit, forge writes) so a grep or trace inspection that
+// mentions the URL stays an ordinary read.
+pub(crate) fn contains_session_url(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("claude.ai/code/") || lower.contains("claude-session:")
+}
+
+// A command that runs `git … commit` in any of its segments. Segment-scoped
+// so `git log | grep commit` doesn't read as a commit — and even a false
+// positive only matters when the same command also carries a session URL.
+fn is_git_commit_command(command: &str) -> bool {
+    for line in command.split(['\n', ';', '|']) {
+        for sub in line.split("&&") {
+            let toks: Vec<&str> = sub.split_whitespace().collect();
+            if let Some(gi) = toks.iter().position(|t| *t == "git") {
+                if toks[gi + 1..].iter().any(|t| *t == "commit") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+// `git commit -F <path>` / `--file <path>` — the message file the guard must
+// scan, since the violation rides the message, not the command line.
+fn git_commit_message_file_arg(command: &str) -> Option<String> {
+    let toks: Vec<&str> = command.split_whitespace().collect();
+    for (i, t) in toks.iter().enumerate() {
+        if (*t == "-F" || *t == "--file") && i + 1 < toks.len() {
+            let v = toks[i + 1].trim_matches(|ch: char| ch == '"' || ch == '\'');
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+        if let Some(v) = t.strip_prefix("--file=") {
+            return Some(
+                v.trim_matches(|ch: char| ch == '"' || ch == '\'')
+                    .to_string(),
+            );
+        }
+    }
+    None
+}
+
+// deny when a publishing-shaped command carries a session URL in its command
+// text or in a readable message/body file. Returns ("deny", where) or
+// ("skip", ""). An unreadable named file is left to the signature check's
+// existing unreadable-body denial — this check never fails open on text it
+// DID read.
+fn session_url_verdict(command: &str, cwd: &Path) -> (&'static str, String) {
+    if !is_git_commit_command(command) && !is_forge_write(command) {
+        return ("skip", String::new());
+    }
+    if contains_session_url(command) {
+        return ("deny", "command-text".to_string());
+    }
+    let mut paths: Vec<String> = Vec::new();
+    if let Some(p) = git_commit_message_file_arg(command) {
+        paths.push(p);
+    }
+    if let Some(p) = body_file_arg(command) {
+        paths.push(p);
+    }
+    if let Some(p) = input_file_arg(command) {
+        paths.push(p);
+    }
+    for p in paths {
+        if p == "-" {
+            continue;
+        }
+        let candidate = Path::new(&p);
+        let text = std::fs::read_to_string(candidate)
+            .or_else(|_| std::fs::read_to_string(cwd.join(candidate)));
+        if let Ok(text) = text {
+            if contains_session_url(&text) {
+                return ("deny", p);
+            }
+        }
+    }
+    ("skip", String::new())
+}
+
 fn body_file_arg(command: &str) -> Option<String> {
     let c = chars(command);
     let mut quote: Option<char> = None;
@@ -2356,6 +2447,23 @@ fn bash_branch(payload: &Value) -> ShadowVerdict {
             &format!(
                 "The body contains a full commit SHA that does not resolve in this repository:\n    {}\nA fabricated or rebase-orphaned SHA renders as an ordinary link and 404s silently. Resolve the real hash with `git rev-parse <short-sha>` (or `git log --oneline`) and retry. See judell/bram#277.",
                 sha_detail
+            ),
+        );
+    }
+    let (su_verdict, su_where) = session_url_verdict(&command, &cwd);
+    if su_verdict == "deny" {
+        return deny_msg(
+            "no-session-url",
+            "-",
+            "Bash",
+            &preview,
+            &cwd_s,
+            &format!(
+                "This commit or forge write carries an agent session URL or Claude-Session \
+                 trailer (found in: {}). Session links are private telemetry; publishing \
+                 them is irreversible and no opt-in exists. Remove the trailer/URL and \
+                 retry. See conventions.md, 'No session URLs in public artifacts'.",
+                su_where
             ),
         );
     }
@@ -3974,6 +4082,20 @@ and retry. See judell/bram#277.",
         );
     }
 
+    let (su_verdict, su_where) = session_url_verdict(&command, cwd);
+    if su_verdict == "deny" {
+        return codex_deny(
+            &format!(
+                "This commit or forge write carries an agent session URL or Claude-Session \
+                 trailer (found in: {}). Session links are private telemetry; publishing \
+                 them is irreversible and no opt-in exists. Remove the trailer/URL and \
+                 retry. See conventions.md, 'No session URLs in public artifacts'.",
+                su_where
+            ),
+            "-",
+        );
+    }
+
     // #299 (case 1): a pure forge read is a read. Unlike the Claude guard this
     // side has no `gh issue <verb>` write pattern, so the forge verbs were
     // never captured here and this changes no verdict — it is pinned so a
@@ -4137,6 +4259,48 @@ mod guard_policy_tests {
     // --- ported from the retired scripts/tests/test_provider_hook_encoding.py,
     // whose subject (the Python guards) went away with them. The behaviours it
     // pinned are still ours to keep. ---
+
+    #[test]
+    fn session_urls_deny_in_publishing_commands_only() {
+        let cwd = std::env::temp_dir();
+        // Inline -m trailer: the ~/budget shape.
+        let (v, w) = session_url_verdict(
+            "git commit -m \"Fix\n\nClaude-Session: https://claude.ai/code/session_01Eau\"",
+            &cwd,
+        );
+        assert_eq!((v, w.as_str()), ("deny", "command-text"));
+        // Forge write with the URL in the command line.
+        let (v, _) = session_url_verdict(
+            "gh issue comment 5 --body \"see https://claude.ai/code/session_abc\"",
+            &cwd,
+        );
+        assert_eq!(v, "deny");
+        // A grep mentioning the URL is a read — never captured.
+        let (v, _) = session_url_verdict("grep -r claude.ai/code/ resources/", &cwd);
+        assert_eq!(v, "skip");
+        // Clean commit passes.
+        let (v, _) = session_url_verdict("git commit -m \"Honest message\"", &cwd);
+        assert_eq!(v, "skip");
+        // Message file carrying the trailer: read and denied, naming the file.
+        let f = cwd.join(format!("bram-su-test-{}.txt", std::process::id()));
+        std::fs::write(
+            &f,
+            "Subject\n\nClaude-Session: https://claude.ai/code/session_x\n",
+        )
+        .unwrap();
+        let (v, w) = session_url_verdict(&format!("git commit -F {}", f.to_string_lossy()), &cwd);
+        assert_eq!(v, "deny");
+        assert!(w.ends_with(".txt"));
+        let _ = std::fs::remove_file(&f);
+    }
+
+    #[test]
+    fn git_commit_detection_is_segment_scoped() {
+        assert!(is_git_commit_command("git commit -m x"));
+        assert!(is_git_commit_command("cd /x && git -C /y commit -F msg"));
+        assert!(!is_git_commit_command("git log --oneline | head"));
+        assert!(!is_git_commit_command("echo commit"));
+    }
 
     #[test]
     fn opt_out_survives_an_undecodable_transcript() {

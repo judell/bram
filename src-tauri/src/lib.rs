@@ -13390,13 +13390,21 @@ fn commits_list_cached<R: tauri::Runtime>(
                             .to_string();
                         if !head_sha.is_empty() && cache_top == head_sha {
                             // Recompute `pushed` live — cheap and must never be stale.
-                            let unpushed: HashSet<String> =
+                            // local-repo-no-origin-first-class: same no-remote
+                            // gate as git_log_recent — this cache-serve
+                            // recompute was the second copy of the rule, found
+                            // by the synthetic no-origin instance still
+                            // showing 2 unpushed after the first was gated.
+                            let unpushed: HashSet<String> = if repo_has_origin(app) {
                                 git_run(app, &["rev-list", "HEAD", "--not", "--remotes=origin"])
                                     .unwrap_or_default()
                                     .lines()
                                     .map(|l| l.trim().to_string())
                                     .filter(|s| !s.is_empty())
-                                    .collect();
+                                    .collect()
+                            } else {
+                                HashSet::new()
+                            };
                             for c in arr.iter_mut() {
                                 if let Some(sha) =
                                     c.get("sha").and_then(|v| v.as_str()).map(|s| s.to_string())

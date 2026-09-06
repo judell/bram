@@ -1,6 +1,6 @@
 <Component
   name="Worklist"
-  var.expandedKeys="{window.__bramRestoreWorklist2Expansion()}"
+  var.expandedKeys="{window.__bramRestoreWorklist2Expansion($queryParams.expand)}"
   var.diffKeys="{[]}"
   var.diffScopes="{{}}"
   var.worklist2Feedback="{{}}"
@@ -38,6 +38,14 @@
   <ChangeListener
     listenTo="{worklist.value &amp;&amp; worklist.value.items}"
     onDidChange="() => worklist2Selected = window.__bramSelectionIds(worklist.value &amp;&amp; worklist.value.items, worklist2Selected)" />
+  <!-- inbox-open-lands-expanded: Awaiting You's Open deep-links
+       /worklist2?expand=<id>; the var default consumes the param at mount,
+       this listener covers a param change while already mounted
+       ($queryParams is reactive:
+       https://www.xmlui.org/docs/howto/deep-link-to-a-tab-or-section). -->
+  <ChangeListener
+    listenTo="{$queryParams.expand}"
+    onDidChange="expandedKeys = window.__bramConsumeExpandParam(expandedKeys, $queryParams.expand)" />
   <!-- instrument-w2-selection-handoff: the prune's own view, logged before the
        assignment above lands, so a refetch that arrives with zero items is
        visible as the cause rather than inferred from the publish that follows. -->
@@ -368,7 +376,8 @@
            inner gap. -->
       <VStack
         gap="$space-1"
-        paddingBottom="$space-2">
+        paddingBottom="$space-2"
+        testId="worklist-row-{$item.id}">
         <!-- worklist2-remove-expander-chrome: no indicator glyphs (History's
              chrome-free section headers are the precedent); the header line
              itself is the toggle. The selection Checkbox sits OUTSIDE the

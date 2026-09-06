@@ -46384,7 +46384,9 @@ fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str,
                 "id": id,
                 "title": format!("Worklist item \u{201c}{}\u{201d} is ready to commit", id),
                 "detail": detail,
-                "link": "/worklist2",
+                // inbox-open-lands-expanded: deep-link so Open lands on the
+                // target row expanded (Worklist.xmlui consumes ?expand=).
+                "link": format!("/worklist2?expand={}", id),
                 "court": "user",
                 "blocking": true,
                 "verified": true,

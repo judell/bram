@@ -4261,12 +4261,42 @@ window.__bramPersistWorklist2Expansion = function (keys) {
   } catch (e) {}
   return keys || [];
 };
-window.__bramRestoreWorklist2Expansion = function () {
+// inbox-open-lands-expanded: `mergeId` (optional) folds a deep-link target
+// into the restored keys at mount — Awaiting You's Open navigates to
+// /worklist2?expand=<id> and the row should land expanded and visible.
+window.__bramRestoreWorklist2Expansion = function (mergeId) {
+  var keys;
   try {
-    return JSON.parse(sessionStorage.getItem("bram.worklist2.expanded") || "[]") || [];
+    keys = JSON.parse(sessionStorage.getItem("bram.worklist2.expanded") || "[]") || [];
   } catch (e) {
-    return [];
+    keys = [];
   }
+  if (mergeId && keys.indexOf(mergeId) === -1) {
+    keys = window.__bramPersistWorklist2Expansion(keys.concat([mergeId]));
+  }
+  if (mergeId) window.__bramScrollWorklistRowIntoView(mergeId);
+  return keys;
+};
+// Param changed while the Worklist is already mounted (a second Open for a
+// different row): same merge + scroll, from the live keys.
+window.__bramConsumeExpandParam = function (keys, id) {
+  if (!id) return keys || [];
+  window.__bramScrollWorklistRowIntoView(id);
+  return window.__bramToggleExpansionKey(keys, id, true);
+};
+// rAF retry against the row's data-testid, the settings-highlight scroller's
+// shape — the row may not be mounted on the first frames after navigation.
+window.__bramScrollWorklistRowIntoView = function (id) {
+  var tries = 0;
+  var attempt = function () {
+    var el = document.querySelector('[data-testid="worklist-row-' + id + '"]');
+    if (el && el.scrollIntoView) {
+      el.scrollIntoView({ block: "center", behavior: "smooth" });
+      return;
+    }
+    if (tries++ < 30) requestAnimationFrame(attempt);
+  };
+  requestAnimationFrame(attempt);
 };
 window.__bramToggleExpansionKey = function (keys, key, open) {
   var next = (keys || []).filter(function (k) {

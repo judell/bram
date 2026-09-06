@@ -2846,9 +2846,17 @@ window.__bramSetDiffScope = function (scopeKeys, itemId, path, value) {
 // line to own, so runs cannot count them.
 window.__bramOwnershipSummary = function (patch, runs, rowId, independence) {
   var spans = runs || [];
+  // joint-interval-files-disambiguation: a run may carry itemIds (a joint
+  // set from a one-click plural approval) instead of itemId. Bucket those
+  // under a composite key so they render as their own "shared" row rather
+  // than folding into unattributed.
   var ownerAt = function (n) {
     for (var i = 0; i < spans.length; i++) {
-      if (n >= spans[i].startLine && n <= spans[i].endLine) return spans[i].itemId;
+      if (n >= spans[i].startLine && n <= spans[i].endLine) {
+        if (spans[i].itemId) return spans[i].itemId;
+        if (spans[i].itemIds) return "__joint:" + spans[i].itemIds.join("+");
+        return null;
+      }
     }
     return null;
   };
@@ -2903,6 +2911,19 @@ window.__bramOwnershipSummary = function (patch, runs, rowId, independence) {
     // item goes last) lives in the docs, not in a table cell. Two rounds of
     // cleverer copy here both failed the "what am I supposed to DO with
     // this?" test (Jon, 2026-09-04).
+    if (id && id.indexOf("__joint:") === 0) {
+      // Shared claim (approved together in one click), no sole declarer:
+      // name the candidates and state the same commit consequence the
+      // unattributed row states — plain fact, no action demanded.
+      out.push({
+        id: null,
+        jointIds: id.slice("__joint:".length).split("+"),
+        added: per[id].added,
+        relation:
+          "claimed together in one approval — no single owner; these lines go with this file's last commit",
+      });
+      continue;
+    }
     if (!id)
       relation = "no action needed — these lines will go along with this file's last commit";
     else if (Object.prototype.hasOwnProperty.call(verdicts, id)) {
@@ -2922,6 +2943,14 @@ window.__bramOwnershipSummary = function (patch, runs, rowId, independence) {
     out.push({ id: id || null, added: per[id].added, relation: relation });
   }
   return out;
+};
+
+// Ownership claimant cell text: a single item id (suffixed for the row's
+// own item), a joint set ("shared: a + b"), or the no-item placeholder.
+window.__bramClaimantCell = function (item, rowId) {
+  if (item && item.jointIds) return "shared: " + item.jointIds.join(" + ");
+  if (item && item.id) return item.id === rowId ? item.id + " (this item)" : item.id;
+  return "no item";
 };
 
 // will-commit-matches-the-button: the CHANGES cell for a file row. On an

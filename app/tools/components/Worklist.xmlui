@@ -731,7 +731,7 @@
                             <Text
                               variant="code"
                               fontSize="$fontSize-sm"
-                              value="{$item.id ? ($item.id === rowId ? $item.id + ' (this item)' : $item.id) : 'no item'}" />
+                              value="{window.__bramClaimantCell($item, rowId)}" />
                           </Column>
                           <Column header="unique" width="90px" headerHorizontalAlignment="start">
                             <Text

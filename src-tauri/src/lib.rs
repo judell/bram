@@ -39115,12 +39115,150 @@ fn attr_runs(owners: &[Option<String>]) -> Vec<serde_json::Value> {
             i += 1;
         }
         if let Some(id) = who {
-            out.push(serde_json::json!({
-                "startLine": start + 1, "endLine": i, "itemId": id
-            }));
+            // joint-interval-files-disambiguation: a joint owner rides the
+            // same Option<String> plumbing as a marker-prefixed member list
+            // and expands here into an itemIds run — a first-class shared
+            // state, distinct from both a single owner and unowned.
+            if let Some(rest) = id.strip_prefix(JOINT_RUN_SEP) {
+                let members: Vec<&str> = rest.split(JOINT_RUN_SEP).collect();
+                out.push(serde_json::json!({
+                    "startLine": start + 1, "endLine": i, "itemIds": members
+                }));
+            } else {
+                out.push(serde_json::json!({
+                    "startLine": start + 1, "endLine": i, "itemId": id
+                }));
+            }
         }
     }
     out
+}
+
+// joint-interval-files-disambiguation: per-(interval, path) ownership for
+// multi-id claims. A one-click plural approval writes ONE claim covering all
+// its ids, so edits in that window land in a JOINT interval; ownership used
+// to leave every such line unowned ("no item"). Mined history (2026-09-05,
+// full trace archives + worklist-history): 78 of 1,563 sentinel claims were
+// multi-id, and 71% of their declared-file slots have exactly one declaring
+// id. So, per path: declared by exactly ONE of the claim's ids → attributed
+// to it (declaration + set membership is a fact, not a guess); declared by
+// several → a first-class JOINT state naming the live candidate set
+// (display-only — never an item's totals, never a staged patch); declared by
+// none → unowned as before. A joint set whose members ghost away is NOT
+// promoted to the survivor — that is the display-only inflation lie of
+// 2026-09-04 (see the ghost rules above).
+const JOINT_RUN_SEP: char = '\u{2}';
+
+enum IntervalPathOwner {
+    Single(String),
+    Joint(Vec<String>),
+    Unowned,
+}
+
+fn worklist_declared_files<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut map = std::collections::HashMap::new();
+    let Some(path) = worklist_file(app) else {
+        return map;
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return map;
+    };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return map;
+    };
+    let Some(items) = doc.get("items").and_then(|v| v.as_array()) else {
+        return map;
+    };
+    for item in items {
+        let Some(id) = item.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let mut files: Vec<String> = item
+            .get("files")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|f| f.as_str())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if files.is_empty() {
+            if let Some(f) = item.get("file").and_then(|v| v.as_str()) {
+                files.push(f.to_string());
+            }
+        }
+        map.insert(id.to_string(), files);
+    }
+    map
+}
+
+// Declared-coverage test, the guards' semantics in miniature: exact match or
+// a declared directory covering the path, with the one worktree prefix
+// stripped before matching (#309).
+fn declared_covers(declared: &str, path: &str) -> bool {
+    let path = path
+        .strip_prefix(".claude/worktrees/")
+        .and_then(|rest| rest.split_once('/').map(|(_, p)| p))
+        .unwrap_or(path);
+    let d = declared.trim_end_matches('/');
+    path == d || path.starts_with(&format!("{}/", d))
+}
+
+// One trace line per (path, owner) resolution per process — the board build
+// runs this on every serve, and an unbounded emit would flood the log with
+// identical lines (the describe-rebroadcast lesson applied to tracing).
+fn trace_joint_interval_resolved<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    path: &str,
+    owner: &str,
+    candidates: usize,
+) {
+    static TRACED: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    let key = format!("{}\u{1}{}", path, owner);
+    let fresh = TRACED
+        .get_or_init(|| Mutex::new(Default::default()))
+        .lock()
+        .map(|mut s| s.insert(key))
+        .unwrap_or(false);
+    if fresh {
+        append_bram_trace_line(
+            app,
+            "claim-interval",
+            &format!(
+                "op=joint-interval-resolved path={} owner={} candidates={}",
+                path, owner, candidates
+            ),
+        );
+    }
+}
+
+fn resolve_interval_path_owner(
+    ids: &[String],
+    path: &str,
+    declared: &std::collections::HashMap<String, Vec<String>>,
+) -> IntervalPathOwner {
+    match ids.len() {
+        0 => IntervalPathOwner::Unowned,
+        1 => IntervalPathOwner::Single(ids[0].clone()),
+        _ => {
+            let declarers: Vec<&String> = ids
+                .iter()
+                .filter(|id| {
+                    declared
+                        .get(*id)
+                        .map(|fs| fs.iter().any(|f| declared_covers(f, path)))
+                        .unwrap_or(false)
+                })
+                .collect();
+            match declarers.len() {
+                1 => IntervalPathOwner::Single(declarers[0].clone()),
+                _ => IntervalPathOwner::Joint(ids.to_vec()),
+            }
+        }
+    }
 }
 
 // Drive the replay across the whole boundary chain and return per-path runs.
@@ -39266,23 +39404,30 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
     > = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(Default::default()));
 
-    // (owner, per-file hunks) for each interval, oldest first.
+    // (claimed id-set, per-file hunks) for each interval, oldest first. The
+    // id-set resolves to an owner PER PATH (joint-interval-files-
+    // disambiguation): a multi-id claim's path declared by exactly one of
+    // its ids attributes to that id; declared by several, the lines carry
+    // the joint set; declared by none, unowned — the pre-resolution rule.
+    let declared = worklist_declared_files(app);
     let mut steps: Vec<(
-        Option<String>,
+        Vec<String>,
         std::collections::HashMap<String, Vec<AttrHunk>>,
     )> = Vec::new();
     for (i, rec) in arr.iter().enumerate() {
         let Some(a) = rec.get("ref").and_then(|v| v.as_str()) else {
             continue;
         };
-        // A claim covering several ids owns its interval as a SET, so nothing in
-        // it is attributable to one item. Leave those lines unowned rather than
-        // crediting the first id -- that would be a guess wearing a fact's face.
-        let ids = rec.get("ids").and_then(|v| v.as_array());
-        let owner = match ids.map(|a| a.len()) {
-            Some(1) => ids.and_then(|a| a[0].as_str()).map(String::from),
-            _ => None,
-        };
+        let ids: Vec<String> = rec
+            .get("ids")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
         let next = arr
             .get(i + 1)
             .and_then(|r| r.get("ref"))
@@ -39304,7 +39449,7 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
             // The OPEN interval: never cached, it changes with every edit.
             None => parse_attr_diff(&git(&["diff", a]).unwrap_or_default()),
         };
-        steps.push((owner, parsed));
+        steps.push((ids, parsed));
     }
     let base = arr[0].get("ref").and_then(|v| v.as_str()).unwrap_or("");
     let mut paths: std::collections::HashSet<String> = Default::default();
@@ -39354,15 +39499,40 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
         let Some(n) = n else { continue };
         // Collect this path's ordered (owner, hunks) steps and replay through
         // the pure, unit-tested core. Ghost owners strip to unowned so the
-        // rendered runs never credit a departed item.
+        // rendered runs never credit a departed item; a joint set drops its
+        // ghost members for display but never promotes to a lone survivor.
         let path_steps: Vec<(Option<String>, Vec<AttrHunk>)> = steps
             .iter()
-            .filter_map(|(owner, m)| {
+            .filter_map(|(ids, m)| {
                 m.get(&path).map(|h| {
-                    let (eff, from) = ghosts.strip_ghost(owner.clone());
-                    if let Some(f) = from {
-                        ghost_notes.insert(format!("{}→unowned", f));
-                    }
+                    let eff = match resolve_interval_path_owner(ids, &path, &declared) {
+                        IntervalPathOwner::Single(id) => {
+                            if ids.len() > 1 {
+                                trace_joint_interval_resolved(app, &path, &id, ids.len());
+                            }
+                            let (eff, from) = ghosts.strip_ghost(Some(id));
+                            if let Some(f) = from {
+                                ghost_notes.insert(format!("{}→unowned", f));
+                            }
+                            eff
+                        }
+                        IntervalPathOwner::Joint(set) => {
+                            let live: Vec<String> = set
+                                .into_iter()
+                                .filter(|i| ghosts.live.contains(i))
+                                .collect();
+                            if live.is_empty() {
+                                None
+                            } else {
+                                Some(format!(
+                                    "{}{}",
+                                    JOINT_RUN_SEP,
+                                    live.join(&JOINT_RUN_SEP.to_string())
+                                ))
+                            }
+                        }
+                        IntervalPathOwner::Unowned => None,
+                    };
                     (eff, h.clone())
                 })
             })
@@ -39432,13 +39602,22 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
         String,
         std::collections::HashMap<String, (usize, usize)>,
     > = Default::default();
-    for (owner, m) in &steps {
-        let (eff, from) = ghosts.strip_ghost(owner.clone());
-        if let Some(f) = from {
-            ghost_notes.insert(format!("{}→unowned", f));
-        }
-        let Some(id) = eff else { continue };
+    for (ids, m) in &steps {
         for (path, hunks) in m {
+            // Only a per-path SINGLE resolution contributes to an item's
+            // totals — joint sets are display-only, exactly like unowned,
+            // so no will-commit figure inflates on a shared claim.
+            let eff = match resolve_interval_path_owner(ids, path, &declared) {
+                IntervalPathOwner::Single(id) => {
+                    let (eff, from) = ghosts.strip_ghost(Some(id));
+                    if let Some(f) = from {
+                        ghost_notes.insert(format!("{}→unowned", f));
+                    }
+                    eff
+                }
+                _ => None,
+            };
+            let Some(id) = eff else { continue };
             for h in hunks {
                 for (c, _) in &h.lines {
                     let e = totals.entry(id.clone()).or_insert((0, 0));
@@ -39501,6 +39680,7 @@ fn claim_interval_diff<R: tauri::Runtime>(
         return empty;
     };
     let ghosts = ghost_owner_index(app);
+    let declared = worklist_declared_files(app);
     let mut ghost_notes: std::collections::BTreeSet<String> = Default::default();
     let mut patch = String::new();
     let mut matched = 0usize;
@@ -39509,18 +39689,29 @@ fn claim_interval_diff<R: tauri::Runtime>(
         let Some(a) = rec.get("ref").and_then(|v| v.as_str()) else {
             continue;
         };
-        // Same ownership rule as the attribution replay: a multi-id claim owns
-        // its interval as a set, attributable to no one item. Ghost intervals
-        // are deliberately NOT reassigned here (unlike the runs): their
-        // patches span old trees whose content may already be in HEAD, so
-        // pulling one into an item's commit patch can never apply — the first
-        // live attempt failed on exactly this ("patch does not apply" across
-        // three files, 2026-09-04 22:1x). A ghost's surviving lines ride with
-        // the file's next WHOLE-FILE commit, which is what the Ownership
-        // "no item" row promises.
-        let ids = rec.get("ids").and_then(|v| v.as_array());
-        let owner = match ids.map(|a| a.len()) {
-            Some(1) => ids.and_then(|a| a[0].as_str()).map(String::from),
+        // Same ownership rule as the attribution replay, per PATH (joint-
+        // interval-files-disambiguation): a multi-id claim's path declared by
+        // exactly one of its ids scopes to that id; declared by several or
+        // none, it stays out of every single-item scope (__unattributed
+        // collects it). Ghost intervals are deliberately NOT reassigned here
+        // (unlike the runs): their patches span old trees whose content may
+        // already be in HEAD, so pulling one into an item's commit patch can
+        // never apply — the first live attempt failed on exactly this
+        // ("patch does not apply" across three files, 2026-09-04 22:1x). A
+        // ghost's surviving lines ride with the file's next WHOLE-FILE
+        // commit, which is what the Ownership "no item" row promises.
+        let ids: Vec<String> = rec
+            .get("ids")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let owner = match resolve_interval_path_owner(&ids, path, &declared) {
+            IntervalPathOwner::Single(id) => Some(id),
             _ => None,
         };
         let (owner, from) = ghosts.strip_ghost(owner);
@@ -59340,6 +59531,67 @@ mod claim_attribution_tests {
         assert_eq!(runs[1]["itemId"], "prose");
         assert_eq!(runs[1]["startLine"], 42);
         assert_eq!(runs[1]["endLine"], 43);
+    }
+
+    // joint-interval-files-disambiguation: per-(interval, path) resolution.
+    #[test]
+    fn joint_interval_resolves_by_sole_declarer_and_stays_joint_otherwise() {
+        use super::{resolve_interval_path_owner, IntervalPathOwner};
+        let mut declared = std::collections::HashMap::new();
+        declared.insert("a".to_string(), vec!["src/lib.rs".to_string()]);
+        declared.insert(
+            "b".to_string(),
+            vec!["docs/x.md".to_string(), "docs/".to_string()],
+        );
+        let ids = vec!["a".to_string(), "b".to_string()];
+        // Declared by exactly one of the joint ids → that id.
+        assert!(matches!(
+            resolve_interval_path_owner(&ids, "src/lib.rs", &declared),
+            IntervalPathOwner::Single(ref s) if s == "a"
+        ));
+        // Directory declaration covers nested paths.
+        assert!(matches!(
+            resolve_interval_path_owner(&ids, "docs/deep/y.md", &declared),
+            IntervalPathOwner::Single(ref s) if s == "b"
+        ));
+        // Worktree-prefixed twin resolves like the real path (#309).
+        assert!(matches!(
+            resolve_interval_path_owner(&ids, ".claude/worktrees/agent-a/src/lib.rs", &declared),
+            IntervalPathOwner::Single(ref s) if s == "a"
+        ));
+        // Declared by NONE of them: the window's id-set is still the honest
+        // candidate list ("made while a+b were claimed"), so it stays joint
+        // rather than collapsing to bare unowned.
+        match resolve_interval_path_owner(&ids, "README.md", &declared) {
+            IntervalPathOwner::Joint(set) => assert_eq!(set, ids),
+            _ => panic!("zero-declarer multi-id path must stay with the joint set"),
+        }
+        // Declared by both → joint, the honest shared state.
+        declared.insert("a".to_string(), vec!["docs/x.md".to_string()]);
+        match resolve_interval_path_owner(&ids, "docs/x.md", &declared) {
+            IntervalPathOwner::Joint(set) => assert_eq!(set, ids),
+            _ => panic!("multi-declarer path must stay joint"),
+        }
+        // Single-id claims resolve as before, declaration or not.
+        assert!(matches!(
+            resolve_interval_path_owner(&ids[..1], "anything.txt", &declared),
+            IntervalPathOwner::Single(ref s) if s == "a"
+        ));
+    }
+
+    // A joint owner rides the marker encoding through the replay and expands
+    // into an itemIds run — never an itemId, never silently dropped.
+    #[test]
+    fn joint_marker_expands_to_item_ids_run() {
+        let sep = super::JOINT_RUN_SEP;
+        let joint = format!("{}a{}b", sep, sep);
+        let step = (Some(joint), hunks("+++ b/f\n@@ -1,0 +1,2 @@\n+j1\n+j2\n"));
+        let runs = super::attribution_runs_for_path(3, &[step]);
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0].get("itemId").is_none());
+        assert_eq!(runs[0]["itemIds"], serde_json::json!(["a", "b"]));
+        assert_eq!(runs[0]["startLine"], 1);
+        assert_eq!(runs[0]["endLine"], 2);
     }
 
     // The regression this whole design exists to avoid: identical line CONTENT

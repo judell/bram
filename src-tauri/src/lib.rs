@@ -13067,13 +13067,21 @@ fn git_log_recent<R: tauri::Runtime>(app: &AppHandle<R>, count: usize) -> Result
     // push would publish. Unlike `@{u}..HEAD`, this works on a branch with no
     // upstream (that fatals -> empty -> everything wrongly "pushed", hiding the
     // Push button) and still excludes commits already on origin/main.
-    let unpushed: HashSet<String> =
+    // local-repo-no-origin-first-class: with NO origin remote at all,
+    // `--remotes=origin` matches nothing and every commit in history reads
+    // "unpushed" — a meaningless distinction that lit a Push button which
+    // could only fatal. Unpushed is undefined without a remote; an empty
+    // set drops the distinction and the button with it.
+    let unpushed: HashSet<String> = if repo_has_origin(app) {
         git_run(app, &["rev-list", "HEAD", "--not", "--remotes=origin"])
             .unwrap_or_default()
             .lines()
             .map(|l| l.trim().to_string())
             .filter(|s| !s.is_empty())
-            .collect();
+            .collect()
+    } else {
+        HashSet::new()
+    };
     // Resolve the GitHub URL for the html_url field, if any.
     let remote_url = git_run(app, &["remote", "get-url", "origin"])
         .unwrap_or_default()
@@ -19713,6 +19721,14 @@ fn git_push(app: AppHandle, branch: Option<String>) -> Result<(), String> {
 }
 
 fn git_push_inner(app: &AppHandle, branch: Option<String>) -> Result<(), String> {
+    // local-repo-no-origin-first-class: belt and braces behind the pane's
+    // hidden Push — the friendly sentence instead of git's fatal.
+    if !repo_has_origin(app) {
+        return Err(
+            "no remote configured — this is a local repository. Add one (git remote add origin …) to enable Push."
+                .to_string(),
+        );
+    }
     let current = git_current_branch(app)?;
     if let Some(expected) = branch.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         if expected != current {
@@ -19947,11 +19963,29 @@ fn start_git_head_watch<R: tauri::Runtime>(app_handle: AppHandle<R>) {
     });
 }
 
+// local-repo-no-origin-first-class: a repo without an `origin` remote is a
+// legitimate working state, not an error. Detected once per call site;
+// callers gate their origin-dependent legs on it instead of surfacing
+// git's "fatal: 'origin' does not appear to be a git repository" at the
+// user (the live 2026-09-06 case: a freshly `git init`-ed local project).
+fn repo_has_origin<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
+    git_run(app, &["remote", "get-url", "origin"]).is_ok()
+}
+
 fn git_status_summary<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String> {
+    // local-repo-no-origin-first-class: without an origin the fetch (and
+    // the whole route with it, via `?`) used to fatal — the exact error a
+    // local-only repo showed for merely opening the Commits tab. ahead /
+    // behind already degrade to 0 through their unwrap_or when @{u} is
+    // absent; the payload's hasOrigin lets the pane say "local repository"
+    // instead of offering a Push that cannot work.
+    let has_origin = repo_has_origin(app);
     // Refresh the remote-tracking ref first; otherwise "behind" only
     // reflects the last fetch and the Pull button can be dimmed while
     // origin has new commits.
-    git_run(app, &["fetch", "origin"])?;
+    if has_origin {
+        git_run(app, &["fetch", "origin"])?;
+    }
     let ahead = git_run(app, &["rev-list", "--count", "@{u}..HEAD"])
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
@@ -19971,6 +20005,7 @@ fn git_status_summary<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, 
         "dirty": dirty,
         "branch": branch,
         "upstream": upstream,
+        "hasOrigin": has_origin,
     }))
     .map_err(|e| e.to_string())
 }
@@ -46626,13 +46661,19 @@ fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str,
     }
 
     // commits: unpushed commits (ground truth via git).
-    let unpushed = git_run(
-        app,
-        &["rev-list", "--count", "HEAD", "--not", "--remotes=origin"],
-    )
-    .ok()
-    .and_then(|s| s.trim().parse::<i64>().ok())
-    .unwrap_or(0);
+    // local-repo-no-origin-first-class: without a remote, "unpushed" is
+    // undefined — counting would put all of history in the loose-ends lane.
+    let unpushed = if repo_has_origin(app) {
+        git_run(
+            app,
+            &["rev-list", "--count", "HEAD", "--not", "--remotes=origin"],
+        )
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or(0)
+    } else {
+        0
+    };
     if unpushed > 0 {
         let lane = owner_state_lane(true, false, true);
         classified.push((

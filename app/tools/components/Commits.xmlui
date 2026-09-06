@@ -80,6 +80,15 @@
         size="xs"
         tooltip="{gitStatus.value &amp;&amp; gitStatus.value.upstream ? 'Push unpublished commits to ' + gitStatus.value.upstream : 'Push unpublished commits and set upstream on origin'}"
         onClick="pushError = null; gitPush(commits, gitStatus, gitStatus.value &amp;&amp; gitStatus.value.branch, (e) => pushError = e)" />
+      <!-- local-repo-no-origin-first-class: with no remote, unpushed is
+           undefined (the host marks no commit unpushed, so Push never
+           renders); say the state plainly instead of offering nothing. -->
+      <Text
+        when="{gitStatus.value &amp;&amp; gitStatus.value.hasOrigin === false}"
+        fontSize="$fontSize-sm"
+        color="$textColor-secondary"
+        tooltip="Add a remote (git remote add origin …) to enable Push"
+        value="local repository — no remote configured" />
       <Button
         label="{gitStatus.value &amp;&amp; gitStatus.value.behind > 0 ? 'Pull ' + gitStatus.value.behind : 'Pull'}"
         size="xs"

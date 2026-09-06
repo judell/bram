@@ -588,6 +588,19 @@ premise conflict with the issue's recorded disposition; the orchestrator
 held the claim across the question and the user was left asking "nobody is
 working but we are still spinning" with no visible way to respond.)
 
+And an apply-and-commit gate has a FOURTH ending in the same family
+(issue-348, where it ran the spinner for minutes with rows locked): **the
+user takes over the commit.** "I'll commit" is an ordinary thing to say —
+Commit is a button — but the claim set at approval expects the agent's
+`worklist-commit` to retire it, and a turn that ends on the user's
+announcement leaves the claim live, which locks row selection and thereby
+bars the user from the very Commit they announced. When the user says they
+will commit (or you end the turn handing them that choice), call
+`POST /__worklist/end` with the approved ids before ending the turn — the
+row unlocks, the pane's Commit works, and the host is already resilient
+from there: `worklist-commit` retires claims by the ids it resolves,
+whichever approval carried the click.
+
 **Apply-and-commit gate: skip `advance` — edit if needed, then
 `worklist-commit`.** `gate: "apply-and-commit"` is no longer only the
 pre-approval one-click **Start & commit** button's payload. As of

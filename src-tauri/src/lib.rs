@@ -13298,6 +13298,170 @@ fn rebuild_commits_list_cache<R: tauri::Runtime>(app: &AppHandle<R>, conn: &rusq
 // point. Joined from the queue file by sha, falling back to patch-id so a
 // rebase's SHA rewrite doesn't detach the attribution — the same identity
 // flush_pending_issue_closes uses to re-anchor.
+// issues-page-bram-lifecycle-column: which issues does a worklist item
+// link? By the two existing conventions only — the `issue-<N>-` id prefix
+// and `closesIssues` — so refs-only work deliberately does not register
+// (nothing claimed to close the issue).
+fn item_linked_issues(item: &serde_json::Value) -> Vec<u64> {
+    let mut out = Vec::new();
+    if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+        if let Some(rest) = id.strip_prefix("issue-") {
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if !digits.is_empty() && rest[digits.len()..].starts_with('-') {
+                if let Ok(n) = digits.parse::<u64>() {
+                    out.push(n);
+                }
+            }
+        }
+    }
+    if let Some(arr) = item.get("closesIssues").and_then(|v| v.as_array()) {
+        for e in arr {
+            if let Some(n) = e.get("number").and_then(|v| v.as_u64()) {
+                if !out.contains(&n) {
+                    out.push(n);
+                }
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod issue_link_tests {
+    use super::item_linked_issues;
+
+    #[test]
+    fn links_by_id_prefix_and_closes_issues_without_false_positives() {
+        let both = serde_json::json!({
+            "id": "issue-352-direct-edit-grant-own-slot",
+            "closesIssues": [{"number": 352, "title": "t"}, {"number": 99, "title": "u"}]
+        });
+        assert_eq!(item_linked_issues(&both), vec![352, 99]);
+        // A bare slug is not a link; digits must be followed by the dash.
+        assert!(item_linked_issues(&serde_json::json!({"id": "update-banner-wrap"})).is_empty());
+        assert!(item_linked_issues(&serde_json::json!({"id": "issue-352"})).is_empty());
+        // closesIssues alone links.
+        assert_eq!(
+            item_linked_issues(
+                &serde_json::json!({"id": "banner-fix", "closesIssues": [{"number": 351}]})
+            ),
+            vec![351]
+        );
+    }
+}
+
+// The Bram column's label map, lowest precedence written first so later
+// tiers overwrite: worklist-history ("committed"), the close-on-push queue
+// ("committed · closes on next push"), then a LIVE linked item's stage.
+fn bram_issue_lifecycle_map<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> std::collections::HashMap<u64, String> {
+    let mut map = history_committed_issue_map(app);
+    if let Some(path) = issue_close_queue_file(app) {
+        for r in read_pending_issue_closes(&path) {
+            map.insert(r.issue, "committed · closes on next push".to_string());
+        }
+    }
+    let claimed: std::collections::HashSet<String> = inflight_claim_ids_and_claimed_at(app)
+        .map(|(ids, _)| ids.into_iter().collect())
+        .unwrap_or_default();
+    let doc = worklist_doc(app);
+    for item in worklist_items(&doc) {
+        let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let status = item
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("proposed");
+        let stage = if claimed.contains(id) {
+            "with the agent"
+        } else if status == "applied" {
+            "ready to commit"
+        } else if item.get("begunAtMs").is_some() {
+            "started"
+        } else {
+            "proposed"
+        };
+        for n in item_linked_issues(&item) {
+            map.insert(n, stage.to_string());
+        }
+    }
+    map
+}
+
+// Tier 3: has any worklist-history entry linked this issue? The directory
+// is append-only and large (4.6k files in this repo), so the scan caches
+// per process and rebuilds only when the file count moves.
+fn history_committed_issue_map<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> std::collections::HashMap<u64, String> {
+    static CACHE: OnceLock<Mutex<(usize, std::collections::HashMap<u64, String>)>> =
+        OnceLock::new();
+    let Some(dir) = project_resource_path(app, "worklist-history") else {
+        return Default::default();
+    };
+    let files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
+                .collect()
+        })
+        .unwrap_or_default();
+    let cache = CACHE.get_or_init(|| Mutex::new((usize::MAX, Default::default())));
+    if let Ok(g) = cache.lock() {
+        if g.0 == files.len() {
+            return g.1.clone();
+        }
+    }
+    let mut map = std::collections::HashMap::new();
+    for p in &files {
+        let Ok(text) = std::fs::read_to_string(p) else {
+            continue;
+        };
+        let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        if let Some(items) = doc.get("items").and_then(|v| v.as_array()) {
+            for item in items {
+                for n in item_linked_issues(item) {
+                    map.insert(n, "committed".to_string());
+                }
+            }
+        }
+    }
+    if let Ok(mut g) = cache.lock() {
+        *g = (files.len(), map.clone());
+    }
+    map
+}
+
+// Annotate the served issues list with the Bram column; any parse trouble
+// serves the list unannotated rather than failing the route.
+fn attach_bram_issue_states<R: tauri::Runtime>(app: &AppHandle<R>, bytes: Vec<u8>) -> Vec<u8> {
+    let Ok(mut arr) = serde_json::from_slice::<Vec<serde_json::Value>>(&bytes) else {
+        return bytes;
+    };
+    let map = bram_issue_lifecycle_map(app);
+    if map.is_empty() {
+        return bytes;
+    }
+    for row in arr.iter_mut() {
+        let Some(n) = row.get("number").and_then(|v| v.as_u64()) else {
+            continue;
+        };
+        if let Some(label) = map.get(&n) {
+            if let Some(obj) = row.as_object_mut() {
+                obj.insert(
+                    "bramState".to_string(),
+                    serde_json::Value::String(label.clone()),
+                );
+            }
+        }
+    }
+    serde_json::to_vec(&arr).unwrap_or(bytes)
+}
+
 fn attach_pending_closes<R: tauri::Runtime>(app: &AppHandle<R>, arr: &mut Vec<serde_json::Value>) {
     let Some(path) = issue_close_queue_file(app) else {
         return;
@@ -51903,7 +52067,12 @@ fn route_request<R: tauri::Runtime>(
             }
         }
         return match gh_issues_list(app, limit, fresh) {
-            Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
+            // issues-page-bram-lifecycle-column: the second column's data.
+            Ok(bytes) => (
+                200,
+                "application/json; charset=utf-8",
+                attach_bram_issue_states(app, bytes),
+            ),
             Err(e) => {
                 eprintln!("[http /__issues] {}", e);
                 (500, "text/plain; charset=utf-8", e.into_bytes())

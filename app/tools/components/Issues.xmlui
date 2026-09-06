@@ -185,6 +185,15 @@
           <Text fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary"
             value="{window.sortLabel('STATE', sortField, sortDir, 'state')}" />
         </Link>
+        <!-- issues-page-bram-lifecycle-column: GitHub state and Bram state
+             are different facts; this column answers "is it in the
+             lifecycle, and where" (live item stage > queued close >
+             committed history > blank). -->
+        <Link width="150px" noIndicator
+          onClick="const r = window.toggleSort(sortField, sortDir, 'bramState', 'asc'); sortField = r.field; sortDir = r.dir">
+          <Text fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary"
+            value="{window.sortLabel('BRAM', sortField, sortDir, 'bramState')}" />
+        </Link>
         <Link width="*" noIndicator
           onClick="const r = window.toggleSort(sortField, sortDir, 'number', 'asc'); sortField = r.field; sortDir = r.dir">
           <Text fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary"
@@ -213,6 +222,10 @@
                 fontWeight="$fontWeight-bold"
                 color="{$item.state === 'OPEN' ? '$color-success-700' : '$textColor-secondary'}"
                 value="{$item.state === 'OPEN' ? 'open' : 'closed'}" />
+            </HStack>
+            <HStack width="150px" verticalAlignment="center">
+              <Text fontSize="$fontSize-sm" color="$textColor-secondary" maxLines="1"
+                value="{$item.bramState || '—'}" />
             </HStack>
             <VStack width="*" gap="0">
               <Text value="#{$item.number} {$item.title}" maxLines="1" />

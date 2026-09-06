@@ -156,6 +156,7 @@ without re-shipping content.
 | `/__worklist/mutate` | HTTP POST | body `{ op: "prune" \| "advance", ids: [...], status?: "applied" }` | `{ ok: true, pruned: [...] }` / `{ ok: true, advanced: [...] }`, or 400 `{ error: "…" }` on auth-kind mismatch | agent (curl) |
 | `/__worklist/commit` | HTTP POST | body `{ ids: [...], message: "..." }` | `{ ok: true, sha, queuedCloses: [n, ...] }` (`queuedCloses` = issues the host enqueued for close-on-push from the gate dialog's ticks; `[]` when declined or none declared — #354: narrate closes from this, not from `closesIssues`), or 400/500 `{ error: "..." }` | agent (curl) |
 | `/__worklist-config` | HTTP GET | — | `{ batchCommitActions: bool }` from `.bram.json` `worklist` block; defaults to `false` | agent pane iframe (`Workspace.xmlui` gates batch-commit UI on this) |
+| `/query` | HTTP POST | body `{ sql, params? }` (or a bare SQL string) — the de-facto XMLUI `dataType="sql"` wire contract | 200 JSON array of column-keyed row objects; 409 when `.bram.json` has no `db`; 400 on bad body / SQL error; read-only enforced at the engine (read-only open + `PRAGMA query_only`) | target app / pane markup (`DataSource dataType="sql"`), #355 |
 
 - `/__worklist` injects a `diff` field on each `applied` item (the output
   of `git diff -- <file>`) so rows with changes to commit can preview their

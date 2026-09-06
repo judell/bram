@@ -326,6 +326,13 @@ struct ProjectConfig {
     ai: Option<AiConfig>,
     #[serde(default)]
     search: Option<SearchConfig>,
+    // issue-355: project-designated SQLite database for the read-only
+    // /query route, relative to the project root. Explicit opt-in is the
+    // security posture — the route exposes nothing until this is set, and
+    // it can never reach Bram's own databases (the search index holds
+    // transcript content).
+    #[serde(default)]
+    db: Option<String>,
 }
 // (The transitional `guards.rustAuthority` toggle was retired by
 // retire-python-hooks-rust-only: the Rust bram-guard is the only
@@ -58325,6 +58332,258 @@ fn handle_hook_trace<R: tauri::Runtime>(
     (200, JSON, b"{\"ok\":true}".to_vec())
 }
 
+// issue-355: parse the de-facto `dataType="sql"` wire body — `{sql, params}`
+// (params optional), a JSON string, or bare text treated as the SQL (the
+// XMLUI runtime's fallback shapes). Pure and unit-tested.
+fn parse_query_route_body(bytes: &[u8]) -> Result<(String, Vec<serde_json::Value>), String> {
+    let text = String::from_utf8_lossy(bytes);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err("empty body — POST {\"sql\": \"...\", \"params\": [...]}".to_string());
+    }
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return match v {
+            serde_json::Value::String(s) => Ok((s, Vec::new())),
+            serde_json::Value::Object(map) => {
+                let sql = map
+                    .get("sql")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if sql.trim().is_empty() {
+                    return Err("body object has no \"sql\"".to_string());
+                }
+                let params = map
+                    .get("params")
+                    .and_then(|p| p.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                Ok((sql, params))
+            }
+            _ => Err("body must be {sql, params} or a SQL string".to_string()),
+        };
+    }
+    Ok((trimmed.to_string(), Vec::new()))
+}
+
+fn query_param_to_sql(v: &serde_json::Value) -> Box<dyn rusqlite::ToSql> {
+    match v {
+        serde_json::Value::Null => Box::new(rusqlite::types::Null),
+        serde_json::Value::Bool(b) => Box::new(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Box::new(i)
+            } else {
+                Box::new(n.as_f64().unwrap_or(0.0))
+            }
+        }
+        serde_json::Value::String(s) => Box::new(s.clone()),
+        other => Box::new(other.to_string()),
+    }
+}
+
+fn sqlite_value_to_json(v: rusqlite::types::ValueRef) -> serde_json::Value {
+    use rusqlite::types::ValueRef;
+    match v {
+        ValueRef::Null => serde_json::Value::Null,
+        ValueRef::Integer(i) => serde_json::json!(i),
+        ValueRef::Real(f) => serde_json::json!(f),
+        ValueRef::Text(t) => serde_json::Value::String(String::from_utf8_lossy(t).into_owned()),
+        ValueRef::Blob(b) => serde_json::Value::String(String::from_utf8_lossy(b).into_owned()),
+    }
+}
+
+// issue-355: read-only execution, enforced twice — the read-only open flag
+// AND `PRAGMA query_only` — so the route cannot mutate regardless of
+// statement text. No fragile is-it-a-SELECT string filtering: the engine
+// is the enforcement.
+fn execute_readonly_query(
+    db_path: &Path,
+    sql: &str,
+    params: &[serde_json::Value],
+) -> Result<Vec<serde_json::Value>, String> {
+    let conn = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| e.to_string())?;
+    conn.pragma_update(None, "query_only", true)
+        .map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let col_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let bound: Vec<Box<dyn rusqlite::ToSql>> = params.iter().map(query_param_to_sql).collect();
+    let refs: Vec<&dyn rusqlite::ToSql> = bound.iter().map(|b| b.as_ref()).collect();
+    let mut rows = stmt
+        .query(rusqlite::params_from_iter(refs))
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let mut obj = serde_json::Map::new();
+        for (i, name) in col_names.iter().enumerate() {
+            let value = row.get_ref(i).map_err(|e| e.to_string())?;
+            obj.insert(name.clone(), sqlite_value_to_json(value));
+        }
+        out.push(serde_json::Value::Object(obj));
+    }
+    Ok(out)
+}
+
+// issue-355: POST /query — the receiving end of XMLUI's
+// `DataSource dataType="sql"`, scoped to the ONE database the project
+// explicitly designates (`.bram.json` "db", resolved within the project
+// root). The route is a dev-time instrument: Bram's loopback is the
+// default project-content upstream, so relative `/query` from target
+// markup lands here in both the embedded pane and a browser view; a
+// project running its own dev server implements its own endpoint against
+// the same wire contract.
+fn handle_query_route<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    body: &[u8],
+) -> (u16, &'static str, Vec<u8>) {
+    const TEXT: &str = "text/plain; charset=utf-8";
+    let Some(root) = project_root(Some(app)) else {
+        return (500, TEXT, b"no project root".to_vec());
+    };
+    let Some(db_rel) = load_project_config(&root).and_then(|c| c.db) else {
+        append_bram_trace_line(app, "query-route", "op=refuse reason=no-db");
+        return (
+            409,
+            TEXT,
+            b"no database configured - set \"db\": \"<relative path>\" in .bram.json".to_vec(),
+        );
+    };
+    let root_canon = strip_unc_prefix(root.canonicalize().unwrap_or_else(|_| root.clone()));
+    let candidate = root.join(&db_rel);
+    let db_path = match candidate.canonicalize() {
+        Ok(p) => strip_unc_prefix(p),
+        Err(e) => {
+            append_bram_trace_line(app, "query-route", "op=refuse reason=db-missing");
+            return (
+                409,
+                TEXT,
+                format!("configured db {} not readable: {}", db_rel, e).into_bytes(),
+            );
+        }
+    };
+    if !db_path.starts_with(&root_canon) {
+        append_bram_trace_line(app, "query-route", "op=refuse reason=db-outside-root");
+        return (
+            403,
+            TEXT,
+            b"configured db resolves outside the project root".to_vec(),
+        );
+    }
+    let (sql, params) = match parse_query_route_body(body) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            append_bram_trace_line(app, "query-route", "op=refuse reason=bad-body");
+            return (400, TEXT, e.into_bytes());
+        }
+    };
+    let started = std::time::Instant::now();
+    match execute_readonly_query(&db_path, &sql, &params) {
+        Ok(rows) => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "query-route",
+                    &format!(
+                        "op=ok rows={} ms={}",
+                        rows.len(),
+                        started.elapsed().as_millis()
+                    ),
+                );
+            }
+            let body = serde_json::to_vec(&rows).unwrap_or_else(|_| b"[]".to_vec());
+            (200, "application/json; charset=utf-8", body)
+        }
+        Err(e) => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "query-route",
+                    &format!("op=sql-error detail={}", e.replace(['\n', '\r'], " ")),
+                );
+            }
+            (400, TEXT, e.into_bytes())
+        }
+    }
+}
+
+#[cfg(test)]
+mod query_route_tests {
+    use super::{execute_readonly_query, parse_query_route_body};
+
+    fn fixture_db(name: &str) -> std::path::PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("bram-query-{}-{}.db", name, std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let conn = rusqlite::Connection::open(&path).expect("create fixture db");
+        conn.execute_batch(
+            "CREATE TABLE txns (id INTEGER PRIMARY KEY, memo TEXT, amount REAL);
+             INSERT INTO txns VALUES (1, 'coffee', 4.5), (2, 'rent', 1200.0);",
+        )
+        .expect("seed fixture");
+        path
+    }
+
+    #[test]
+    fn body_shapes_object_string_and_bare_text() {
+        let (sql, params) =
+            parse_query_route_body(br#"{"sql":"SELECT * FROM t WHERE id = ?","params":[7]}"#)
+                .expect("object parses");
+        assert_eq!(sql, "SELECT * FROM t WHERE id = ?");
+        assert_eq!(params, vec![serde_json::json!(7)]);
+        let (sql, params) = parse_query_route_body(br#""SELECT 1""#).expect("JSON string parses");
+        assert_eq!((sql.as_str(), params.len()), ("SELECT 1", 0));
+        let (sql, _) = parse_query_route_body(b"SELECT 2").expect("bare text parses");
+        assert_eq!(sql, "SELECT 2");
+        assert!(parse_query_route_body(b"").is_err());
+        assert!(parse_query_route_body(br#"{"params":[1]}"#).is_err());
+    }
+
+    #[test]
+    fn rows_return_as_column_keyed_objects_with_params_bound() {
+        let db = fixture_db("rows");
+        let rows = execute_readonly_query(
+            &db,
+            "SELECT id, memo, amount FROM txns WHERE amount > ? ORDER BY id",
+            &[serde_json::json!(10)],
+        )
+        .expect("query runs");
+        assert_eq!(
+            rows,
+            vec![serde_json::json!({"id": 2, "memo": "rent", "amount": 1200.0})]
+        );
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn mutation_is_refused_by_the_engine() {
+        let db = fixture_db("readonly");
+        for sql in [
+            "INSERT INTO txns VALUES (3, 'x', 1.0)",
+            "UPDATE txns SET amount = 0",
+            "DELETE FROM txns",
+            "CREATE TABLE evil (a)",
+            "DROP TABLE txns",
+        ] {
+            let err = execute_readonly_query(&db, sql, &[]).expect_err("mutation must fail");
+            assert!(
+                err.contains("readonly") || err.contains("read-only") || err.contains("attempt"),
+                "unexpected error for {}: {}",
+                sql,
+                err
+            );
+        }
+        // The data is intact afterwards.
+        let rows =
+            execute_readonly_query(&db, "SELECT COUNT(*) AS n FROM txns", &[]).expect("count runs");
+        assert_eq!(rows, vec![serde_json::json!({"n": 2})]);
+        let _ = std::fs::remove_file(&db);
+    }
+}
+
 fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Request) {
     let url = request.url().to_string();
     let method = request.method().as_str().to_uppercase();
@@ -58366,6 +58625,17 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             (405, "text/plain; charset=utf-8", b"POST only".to_vec())
         } else {
             handle_self_update_relaunch(app)
+        }
+    } else if path == "query" {
+        // issue-355: the dataType="sql" receiving end. Unprefixed on
+        // purpose — target markup calls it with a relative URL, matching
+        // the xmlui test server's de-facto contract.
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            let mut buf = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut buf);
+            handle_query_route(app, &buf)
         }
     } else if path == "__queue/save" {
         if method != "POST" {

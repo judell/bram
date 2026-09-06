@@ -1837,6 +1837,40 @@ the auxiliary input is genuinely independent of the primary actions.
 The hot-reload table, launch discipline, and debug-build rules moved
 to `docs/developing-bram.md` in the Bram source repo.
 
+### Live SQL views via `/query` (project SQLite)
+
+When a managed project keeps data in SQLite, its target app (or the
+agent pane) can bind live views directly instead of consuming derived
+files: set `"db": "<relative path>"` in `.bram.json`, and Bram's
+loopback serves `POST /query` — the receiving end of XMLUI's
+`DataSource dataType="sql"`. Request body is `{ sql, params }`; the
+response is a JSON array of column-keyed row objects:
+
+```xml
+<DataSource id="txns" url="/query" method="POST" dataType="sql"
+  body="{{ sql: 'SELECT * FROM transactions ORDER BY txn_date', params: [] }}" />
+```
+
+- **Read-only, enforced at the engine** (read-only open plus
+  `PRAGMA query_only`): the UI can never mutate project data through
+  this route. The agent writes the database through ordinary
+  gate-governed file access (`sqlite3` CLI etc.) — that division of
+  authority is the design.
+- **Scratch-pad pattern**: the agent can materialize an analysis (a
+  normalized import, an aggregation, a cross-source join) as tables in
+  a project-local scratch database — e.g. a gitignored
+  `resources/scratch.db` pointed at by `db` — and hand the user a live
+  table or chart in three lines of markup. Analyses that prove out get
+  promoted to project-owned data and, if the app ships, a project-owned
+  endpoint.
+- **Scope**: only the explicitly designated project file is reachable —
+  never Bram's own databases — and the path must resolve inside the
+  project root. No `db` configured → the route refuses with guidance.
+- **Limitation**: when the project runs its own dev server, relative
+  `/query` reaches that server, not Bram; such projects implement their
+  own endpoint against the same wire contract (the xmlui test server is
+  one existing implementation), and the markup carries over unchanged.
+
 ### Updating forge issues via gh / glab
 
 Use the project's forge CLI directly — the Issues tab refetches on the

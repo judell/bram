@@ -31583,13 +31583,65 @@ fn send_ledger_tail_fragment(preview: &str) -> String {
 // two callers on purpose — the strand branch's cause discrimination and the
 // abort branch's stale-input latch ask the identical question, and a
 // predicate answered two ways invites the two answers to disagree.
+// Test seam preserving 6ca303f's boolean contract; live callers go through
+// send_ledger_payload_in_tail_detail for the basis.
+#[cfg(test)]
 fn send_ledger_payload_in_tail_of(tail: &str, preview: &str) -> bool {
-    let frag = send_ledger_tail_fragment(preview);
-    !frag.trim().is_empty() && tail.contains(frag.trim())
+    send_ledger_payload_in_composer_of(tail, preview).0
+}
+
+// interrupted-banner-verifies-restore: tail-contains is NOT composer-holds.
+// The tail is the last 400 collapsed chars of ALL PTY output, and an Esc
+// interrupt leaves the message's transcript ECHO inside that window — so
+// the 6ca303f predicate matched the echo and latched "back in the terminal
+// input" over an empty composer (Jon, 2026-09-06: "That's a lie. It wasn't
+// back."). The fragment must now appear AFTER the last composer marker —
+// the composer renders at the BOTTOM of the TUI, so the last marker is it;
+// an echo above an empty composer classifies `echo-only` and does not
+// latch. No marker at all (TUI shape drift) falls back to the old
+// whole-tail behavior rather than never latching, and says so.
+fn send_ledger_payload_in_composer_of(tail: &str, preview: &str) -> (bool, &'static str) {
+    let frag_owned = send_ledger_tail_fragment(preview);
+    let frag = frag_owned.trim();
+    if frag.is_empty() {
+        return (false, "empty-preview");
+    }
+    const MARKERS: [&str; 3] = ["│ > ", "❯ ", "> "];
+    let mut start: Option<usize> = None;
+    for m in MARKERS {
+        if let Some(i) = tail.rfind(m) {
+            let cand = i + m.len();
+            if start.map(|s| cand > s).unwrap_or(true) {
+                start = Some(cand);
+            }
+        }
+    }
+    match start {
+        Some(s) => {
+            if tail[s..].contains(frag) {
+                (true, "composer")
+            } else if tail.contains(frag) {
+                (false, "echo-only")
+            } else {
+                (false, "absent")
+            }
+        }
+        None => {
+            if tail.contains(frag) {
+                (true, "tail-fallback")
+            } else {
+                (false, "absent")
+            }
+        }
+    }
 }
 
 fn send_ledger_payload_in_tail(preview: &str) -> bool {
-    send_ledger_payload_in_tail_of(&pty_tail_snippet(400), preview)
+    send_ledger_payload_in_tail_detail(preview).0
+}
+
+fn send_ledger_payload_in_tail_detail(preview: &str) -> (bool, &'static str) {
+    send_ledger_payload_in_composer_of(&pty_tail_snippet(400), preview)
 }
 
 #[cfg(test)]
@@ -31615,6 +31667,38 @@ mod send_ledger_payload_in_tail_tests {
         // A blank fragment would otherwise `contains("")` its way to true and
         // latch on every abort.
         assert!(!p("PS> anything at all", "   "));
+    }
+
+    // interrupted-banner-verifies-restore: the 2026-09-06 false claim. The
+    // interrupt leaves the message's transcript ECHO in the tail window
+    // while the composer (the LAST prompt marker, bottom of the TUI) is
+    // empty — tail-contains matched the echo and the banner said the text
+    // was "back in the terminal input". Echo above an empty composer must
+    // classify echo-only and not latch; a genuine re-stage (fragment after
+    // the last marker) must.
+    #[test]
+    fn transcript_echo_above_an_empty_composer_does_not_latch() {
+        use super::send_ledger_payload_in_composer_of as c;
+        let echo_only = "> Now can you render it as a PDF? ⎿ Interrupted · nothing staged │ > ";
+        assert_eq!(
+            c(echo_only, "Now can you render it as a PDF?"),
+            (false, "echo-only")
+        );
+        let restaged =
+            "> Now can you render it as a PDF? ⎿ Interrupted │ > Now can you render it as a PDF?";
+        assert_eq!(
+            c(restaged, "Now can you render it as a PDF?"),
+            (true, "composer")
+        );
+        // No recognizable marker: fall back to the old whole-tail behavior
+        // and say so, rather than never latching under TUI shape drift.
+        assert_eq!(
+            c(
+                "Now can you render it as a PDF",
+                "Now can you render it as a PDF"
+            ),
+            (true, "tail-fallback")
+        );
     }
 }
 
@@ -33928,13 +34012,19 @@ fn update_send_ledger_from_slice<R: tauri::Runtime>(
                             // same breath asserted the opposite. Check the
                             // composer instead, with the same predicate the
                             // strand branch calls decisive.
-                            let payload_in_tail = send_ledger_payload_in_tail(&entry.preview);
+                            // interrupted-banner-verifies-restore: composer-
+                            // scoped now — the transcript ECHO of the message
+                            // in the tail window no longer counts as "back in
+                            // the terminal input" (basis=echo-only is exactly
+                            // that false claim, caught and not latched).
+                            let (payload_in_tail, basis) =
+                                send_ledger_payload_in_tail_detail(&entry.preview);
                             if payload_in_tail {
                                 set_stale_terminal_input_latched_at(now);
                             }
                             transitions.push(format!(
-                                "op=aborted-no-restore id={} payload_in_tail={} latched={}",
-                                entry.id, payload_in_tail, payload_in_tail,
+                                "op=aborted-no-restore id={} payload_in_tail={} latched={} basis={}",
+                                entry.id, payload_in_tail, payload_in_tail, basis,
                             ));
                         }
                     }

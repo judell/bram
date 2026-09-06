@@ -11400,7 +11400,14 @@ window.__bramSendLedgerNotice = function (payload, dismissedKey) {
     return "Your message" + label + " was interrupted before the agent took it — it's back in the composer.";
   }
   if (latest.state === "landed" && latest.cause === "aborted") {
-    if (!staleTerminalInput) return "";
+    // interrupted-banner-verifies-restore: staleTerminalInput is now a
+    // VERIFIED claim (host matched the message fragment after the tail's
+    // last composer marker — a transcript echo no longer counts). When the
+    // text was not observed in the composer, say that truth instead of
+    // instructing the user to press Enter on an input that may be empty
+    // (2026-09-06: "That's a lie. It wasn't back.").
+    if (!staleTerminalInput)
+      return "Response interrupted — your message" + label + " was not restored to the terminal input. Its text is kept in the send ledger (Status tab) if you want it back.";
     // Truthful semantics (2026-07-06 esc drill): the send landed as a
     // transport record but Esc made Claude Code retract and re-stage it
     // in the TERMINAL input, unanswered — and the copy there prepends

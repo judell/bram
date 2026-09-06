@@ -13335,7 +13335,23 @@ fn item_linked_issues(item: &serde_json::Value) -> Vec<u64> {
 
 #[cfg(test)]
 mod issue_link_tests {
-    use super::item_linked_issues;
+    use super::{extract_issue_refs, item_linked_issues};
+
+    #[test]
+    fn issue_refs_match_word_boundaries_only() {
+        // issues-bram-column-referenced-tier: the whole digit run is the
+        // number — a longer issue can never read as a shorter one.
+        assert_eq!(extract_issue_refs("refs #345 in prose"), vec![345]);
+        assert_eq!(extract_issue_refs("see #3450"), vec![3450]);
+        assert_eq!(extract_issue_refs("fix (#340)"), vec![340]);
+        assert_eq!(extract_issue_refs("Refs #339, #345"), vec![339, 345]);
+        // Preceded by alphanumeric / underscore / '#': not a reference.
+        assert!(extract_issue_refs("sha#12").is_empty());
+        assert!(extract_issue_refs("x_#12").is_empty());
+        assert!(extract_issue_refs("##12").is_empty());
+        // Bare '#' with no digits.
+        assert!(extract_issue_refs("# heading and #!").is_empty());
+    }
 
     #[test]
     fn links_by_id_prefix_and_closes_issues_without_false_positives() {
@@ -13360,10 +13376,90 @@ mod issue_link_tests {
 // The Bram column's label map, lowest precedence written first so later
 // tiers overwrite: worklist-history ("committed"), the close-on-push queue
 // ("committed · closes on next push"), then a LIVE linked item's stage.
+// issues-bram-column-referenced-tier: word-boundary "#N" references in a
+// commit message. The whole digit run is taken, so "#3450" yields 3450 and
+// can never masquerade as 345; a '#' preceded by an alphanumeric (or another
+// '#') is not a reference. Pure and unit-tested.
+fn extract_issue_refs(text: &str) -> Vec<u64> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'#' {
+            let prev_ok = i == 0 || {
+                let p = bytes[i - 1];
+                !p.is_ascii_alphanumeric() && p != b'#' && p != b'_'
+            };
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if prev_ok && j > i + 1 {
+                if let Ok(n) = text[i + 1..j].parse::<u64>() {
+                    out.push(n);
+                }
+            }
+            i = j.max(i + 1);
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+// Tier 4, lowest precedence (issues-bram-column-referenced-tier): commits
+// whose message cites "#N" with no declared link anywhere. Field case: #339's
+// work landed via e2636ec and #345 was cited by a10f9c1, yet both rendered
+// "—" — identical to a minutes-old issue — because no item ever carried the
+// id prefix or closesIssues. Newest-first log, first sighting wins (most
+// recent citing commit); bounded at the commit index's -n2000 depth, beyond
+// which the state honestly degrades to "—". Cached per HEAD: the answer only
+// changes when a commit lands.
+fn referenced_issue_commit_map<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> std::collections::HashMap<u64, String> {
+    static CACHE: OnceLock<Mutex<(String, std::collections::HashMap<u64, String>)>> =
+        OnceLock::new();
+    let head = git_run(app, &["rev-parse", "HEAD"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    if head.is_empty() {
+        return Default::default();
+    }
+    let cache = CACHE.get_or_init(|| Mutex::new((String::new(), Default::default())));
+    if let Ok(g) = cache.lock() {
+        if g.0 == head {
+            return g.1.clone();
+        }
+    }
+    let mut map = std::collections::HashMap::new();
+    if let Ok(out) = git_run(app, &["log", "-n2000", "--format=%h%x00%B%x1e"]) {
+        for rec in out.split('\u{1e}') {
+            let mut parts = rec.splitn(2, '\u{0}');
+            let sha = parts.next().unwrap_or("").trim().to_string();
+            let body = parts.next().unwrap_or("");
+            if sha.is_empty() {
+                continue;
+            }
+            for n in extract_issue_refs(body) {
+                map.entry(n)
+                    .or_insert_with(|| format!("referenced {}", sha));
+            }
+        }
+    }
+    if let Ok(mut g) = cache.lock() {
+        *g = (head, map.clone());
+    }
+    map
+}
+
 fn bram_issue_lifecycle_map<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> std::collections::HashMap<u64, String> {
-    let mut map = history_committed_issue_map(app);
+    // Precedence by overwrite order: referenced (weakest) is laid down first
+    // and every stronger tier replaces it.
+    let mut map = referenced_issue_commit_map(app);
+    map.extend(history_committed_issue_map(app));
     if let Some(path) = issue_close_queue_file(app) {
         for r in read_pending_issue_closes(&path) {
             map.insert(r.issue, "committed · closes on next push".to_string());

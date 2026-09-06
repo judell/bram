@@ -1442,7 +1442,7 @@ fn normalize_repo_locator(remote: &str) -> Option<String> {
     Some(format!("{}/{}", host.to_ascii_lowercase(), path))
 }
 
-fn expected_repo_locator(cwd: &Path) -> Option<String> {
+pub(crate) fn expected_repo_locator(cwd: &Path) -> Option<String> {
     let safe_directory = format!("safe.directory={}", cwd.display());
     let output = std::process::Command::new("git")
         .args(["-c", &safe_directory, "remote", "get-url", "origin"])
@@ -1467,6 +1467,10 @@ pub(crate) struct AgentSignature<'a> {
     pub(crate) model: &'a str,
     pub(crate) os: Option<&'a str>,
     pub(crate) machine: Option<&'a str>,
+    // awaiting-cross-project-agent-moves: the human-familiar project name
+    // ("Bram", "Budget") — display material for the Awaiting surface; the
+    // locator is what identity comparisons use.
+    pub(crate) project: &'a str,
     pub(crate) locator: &'a str,
 }
 
@@ -1502,6 +1506,7 @@ pub(crate) fn parse_agent_signature(line: &str) -> Option<AgentSignature<'_>> {
         model,
         os,
         machine,
+        project: project.trim(),
         locator: locator.trim(),
     })
 }

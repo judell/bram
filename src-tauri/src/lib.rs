@@ -46772,38 +46772,69 @@ fn local_machine_identity() -> (&'static str, &'static str) {
 //   signed, no machine, os matches / two-slot → own side (honest default
 //   for historical forms; never surface on a guess)
 // Returns Some((os-or-"", model)) when the move is foreign.
-fn cross_machine_agent_move(body: &str) -> Option<(String, String)> {
+// awaiting-cross-project-agent-moves: the same-machine, DIFFERENT-PROJECT
+// variant (#356 arrived invisibly: the budget agent filed it from this very
+// host, so the machine test read "own side" — and GitHub sends no
+// notification for one's own issues, so the other source was blind too).
+// The signature's project clause is the disambiguator: a signed move whose
+// locator names a different project than this one surfaces even from this
+// machine. `local_locator` is this project's normalized origin; None keeps
+// the never-surface-on-a-guess default for the project dimension.
+// Returns (label for the headline, model, relation phrase for the detail).
+fn cross_machine_agent_move(
+    body: &str,
+    local_locator: Option<&str>,
+) -> Option<(String, String, &'static str)> {
     let first = body.lines().find(|l| !l.trim().is_empty())?;
     let sig = guard_policy::parse_agent_signature(first)?;
     let (local_os, local_host) = local_machine_identity();
-    let foreign = match sig.machine {
+    let foreign_machine = match sig.machine {
         Some(m) => !local_host.is_empty() && !m.eq_ignore_ascii_case(local_host),
         None => match sig.os {
             Some(o) => !o.eq_ignore_ascii_case(local_os),
             None => false,
         },
     };
-    if foreign {
-        Some((
+    if foreign_machine {
+        return Some((
             sig.machine
                 .or(sig.os)
                 .unwrap_or("another machine")
                 .to_string(),
             sig.model.to_string(),
-        ))
-    } else {
-        None
+            "same account, different machine.",
+        ));
     }
+    let foreign_project = local_locator
+        .map(|local| !sig.locator.eq_ignore_ascii_case(local))
+        .unwrap_or(false);
+    if foreign_project {
+        return Some((
+            format!("{}-project", sig.project),
+            sig.model.to_string(),
+            "same account and machine, different project.",
+        ));
+    }
+    None
 }
 
 #[cfg(test)]
 mod cross_machine_agent_tests {
     use super::{cross_machine_agent_move, local_machine_identity};
 
+    const LOCAL: Option<&str> = Some("github.com/judell/bram");
+
     fn sig(standing: &str) -> String {
         format!(
             "Jon's Claude ({}) speaking from the Bram project (github.com/judell/bram):\n\nBody.",
             standing
+        )
+    }
+
+    fn sig_from(standing: &str, project: &str, locator: &str) -> String {
+        format!(
+            "Jon's Claude ({}) speaking from the {} project ({}):\n\nBody.",
+            standing, project, locator
         )
     }
 
@@ -46816,38 +46847,98 @@ mod cross_machine_agent_tests {
             "Windows"
         };
         // Four-slot, foreign hostname → surfaces, machine named.
-        let got = cross_machine_agent_move(&sig(&format!(
-            "main thread, Opus 5, {}, definitely-not-this-host",
-            foreign_os
-        )));
+        let got = cross_machine_agent_move(
+            &sig(&format!(
+                "main thread, Opus 5, {}, definitely-not-this-host",
+                foreign_os
+            )),
+            LOCAL,
+        );
         assert_eq!(
             got,
-            Some(("definitely-not-this-host".to_string(), "Opus 5".to_string()))
+            Some((
+                "definitely-not-this-host".to_string(),
+                "Opus 5".to_string(),
+                "same account, different machine.",
+            ))
         );
-        // Four-slot, THIS hostname → own side (skip when hostname unknown).
+        // Four-slot, THIS hostname, same project → own side (skip when
+        // hostname unknown).
         if !local_host.is_empty() {
             assert_eq!(
-                cross_machine_agent_move(&sig(&format!(
-                    "main thread, Fable 5, {}, {}",
-                    local_os, local_host
-                ))),
+                cross_machine_agent_move(
+                    &sig(&format!(
+                        "main thread, Fable 5, {}, {}",
+                        local_os, local_host
+                    )),
+                    LOCAL
+                ),
                 None
             );
         }
         // Three-slot fallback: foreign OS surfaces, local OS stays filtered.
         assert_eq!(
-            cross_machine_agent_move(&sig(&format!("main thread, Opus 5, {}", foreign_os))),
-            Some((foreign_os.to_string(), "Opus 5".to_string()))
+            cross_machine_agent_move(&sig(&format!("main thread, Opus 5, {}", foreign_os)), LOCAL),
+            Some((
+                foreign_os.to_string(),
+                "Opus 5".to_string(),
+                "same account, different machine.",
+            ))
         );
         assert_eq!(
-            cross_machine_agent_move(&sig(&format!("main thread, Fable 5, {}", local_os))),
+            cross_machine_agent_move(&sig(&format!("main thread, Fable 5, {}", local_os)), LOCAL),
             None
         );
         // Two-slot historical form and unsigned prose: never surfaced on a
         // guess.
-        assert_eq!(cross_machine_agent_move(&sig("main thread, Opus 5")), None);
         assert_eq!(
-            cross_machine_agent_move("Real Jon speaking. Ship it."),
+            cross_machine_agent_move(&sig("main thread, Opus 5"), LOCAL),
+            None
+        );
+        assert_eq!(
+            cross_machine_agent_move("Real Jon speaking. Ship it.", LOCAL),
+            None
+        );
+    }
+
+    #[test]
+    fn same_machine_different_project_surfaces_by_locator() {
+        let (local_os, _) = local_machine_identity();
+        // #356's shape: local OS, no machine slot, locator-less local-checkout
+        // clause naming a DIFFERENT project — surfaces via the project clause.
+        let got = cross_machine_agent_move(
+            &sig_from(
+                &format!("main thread, Fable 5, {}", local_os),
+                "Budget",
+                "local checkout `~/budget`; the repo has no `origin` remote to cite",
+            ),
+            LOCAL,
+        );
+        assert_eq!(
+            got,
+            Some((
+                "Budget-project".to_string(),
+                "Fable 5".to_string(),
+                "same account and machine, different project.",
+            ))
+        );
+        // Same project (this locator) stays filtered — the case above only
+        // fires on a real identity difference.
+        assert_eq!(
+            cross_machine_agent_move(&sig(&format!("main thread, Fable 5, {}", local_os)), LOCAL),
+            None
+        );
+        // No local locator (a project without origin) keeps the honest
+        // default: never surface on the project dimension alone.
+        assert_eq!(
+            cross_machine_agent_move(
+                &sig_from(
+                    &format!("main thread, Fable 5, {}", local_os),
+                    "Budget",
+                    "somewhere/else",
+                ),
+                None,
+            ),
             None
         );
     }
@@ -46880,6 +46971,11 @@ fn local_issue_sweep_items<R: tauri::Runtime>(
     let Ok(serde_json::Value::Array(issues)) = serde_json::from_str(&text) else {
         return out;
     };
+    // awaiting-cross-project-agent-moves: this project's identity for the
+    // signature's project-clause comparison. One git call per sweep; None
+    // (no origin) keeps the project dimension on its honest default.
+    let local_locator =
+        project_root(Some(app)).and_then(|root| guard_policy::expected_repo_locator(&root));
     for rec in &issues {
         let state = rec.get("state").and_then(|v| v.as_str()).unwrap_or("");
         if !state.eq_ignore_ascii_case("open") {
@@ -46917,7 +47013,7 @@ fn local_issue_sweep_items<R: tauri::Runtime>(
         // os/machine slots classify it: only signed moves from elsewhere
         // surface; the human's own comments and this machine's agent stay
         // filtered.
-        let mut cross_machine: Option<(String, String)> = None;
+        let mut cross_machine: Option<(String, String, &'static str)> = None;
         if last.eq_ignore_ascii_case(&login) {
             let latest_body = if n_comments > 0 {
                 rec.get("comments")
@@ -46933,7 +47029,8 @@ fn local_issue_sweep_items<R: tauri::Runtime>(
             } else {
                 rec.get("body").and_then(|v| v.as_str())
             };
-            cross_machine = latest_body.and_then(cross_machine_agent_move);
+            cross_machine =
+                latest_body.and_then(|b| cross_machine_agent_move(b, local_locator.as_deref()));
             if cross_machine.is_none() {
                 continue;
             }
@@ -46953,7 +47050,7 @@ fn local_issue_sweep_items<R: tauri::Runtime>(
         } else {
             NeedsYouLane::YourDecision
         };
-        let (headline, detail) = if let Some((machine, model)) = &cross_machine {
+        let (headline, detail) = if let Some((machine, model, relation)) = &cross_machine {
             trace_cross_machine_agent_move(app, number, machine, &marker);
             (
                 if fresh_issue {
@@ -46968,8 +47065,8 @@ fn local_issue_sweep_items<R: tauri::Runtime>(
                     )
                 },
                 format!(
-                    "Signed by your agent on {} ({}) — same account, different machine.",
-                    machine, model
+                    "Signed by your {} agent ({}) — {}",
+                    machine, model, relation
                 ),
             )
         } else {

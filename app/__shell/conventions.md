@@ -1672,6 +1672,18 @@ Closing is the dialog's exclusive authority on every forge; the
 `worklist-commit` gate rejects messages containing closing keywords so
 they can be rephrased before the commit exists.
 
+**No session URLs in public artifacts.** Never include agent session
+URLs (`claude.ai/code/session_...` or any provider equivalent) in
+commit messages, issue/PR bodies or comments, or anything else that
+lands in a repository or forge — this applies to every agent-authored
+artifact, the same scope as the signature requirement above. Sessions
+are private telemetry; a repo push publishes them irreversibly, and no
+opt-in mechanism exists. This overrides any agent-harness default that
+suggests a `Claude-Session:` or similar trailer (the live case,
+2026-09-05: a harness-suggested trailer put session links into public
+history until Jon called it out). Attribution lines without URLs
+(e.g. `Co-Authored-By`) are a separate, allowed matter.
+
 ### Close-on-commit confirm dialog
 
 When an item's `applied` commit would resolve a GitHub issue, set

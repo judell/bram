@@ -11,8 +11,9 @@
   var.issueRefreshTick="{0}"
   var.sortField="updatedAt"
   var.sortDir="desc"
+  var.stateFilter="open"
   var.issuesSource="{(issuesFull.value &amp;&amp; issuesFull.value.length > 0) ? issuesFull.value : (issuesFirstPage.value || [])}"
-  var.sortedIssues="{(issuesSource || []).slice().sort(function(a, b) {
+  var.sortedIssues="{(issuesSource || []).filter(i => stateFilter === 'both' || (stateFilter === 'open') === (i.state === 'OPEN')).sort(function(a, b) {
     const av = sortField === 'number' ? Number(a.number || 0) : (a[sortField] || '');
     const bv = sortField === 'number' ? Number(b.number || 0) : (b[sortField] || '');
     if (av < bv) return sortDir === 'asc' ? -1 : 1;
@@ -144,6 +145,15 @@
   <VStack padding="$space-4" gap="$space-4" overflowY="auto" height="100%">
     <HStack gap="$space-3" verticalAlignment="center">
       <Heading level="h2">Issues</Heading>
+      <RadioGroup
+        initialValue="open"
+        orientation="horizontal"
+        gap="$space-3"
+        onDidChange="(v) => stateFilter = v">
+        <Option value="open" label="open" />
+        <Option value="closed" label="closed" />
+        <Option value="both" label="both" />
+      </RadioGroup>
       <SearchBox
         boxWidth="22rem"
         placeholder="Filter issues…"

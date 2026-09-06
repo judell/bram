@@ -154,7 +154,7 @@ without re-shipping content.
 | `/__worklist/init` | HTTP GET | — | same shape as `/__worklist` (file created if missing) | agent pane iframe |
 | `/__worklist/resolve` | HTTP GET | `ids=foo,bar` | active: `{ kind, ids, items, mismatchedIds, issuedAtMs, source, consumedAtMs }` · consumed: `{ kind: "no_active_authorization", consumedAtMs }` | agent (curl) |
 | `/__worklist/mutate` | HTTP POST | body `{ op: "prune" \| "advance", ids: [...], status?: "applied" }` | `{ ok: true, pruned: [...] }` / `{ ok: true, advanced: [...] }`, or 400 `{ error: "…" }` on auth-kind mismatch | agent (curl) |
-| `/__worklist/commit` | HTTP POST | body `{ ids: [...], message: "..." }` | `{ ok: true, sha }`, or 400/500 `{ error: "..." }` | agent (curl) |
+| `/__worklist/commit` | HTTP POST | body `{ ids: [...], message: "..." }` | `{ ok: true, sha, queuedCloses: [n, ...] }` (`queuedCloses` = issues the host enqueued for close-on-push from the gate dialog's ticks; `[]` when declined or none declared — #354: narrate closes from this, not from `closesIssues`), or 400/500 `{ error: "..." }` | agent (curl) |
 | `/__worklist-config` | HTTP GET | — | `{ batchCommitActions: bool }` from `.bram.json` `worklist` block; defaults to `false` | agent pane iframe (`Workspace.xmlui` gates batch-commit UI on this) |
 
 - `/__worklist` injects a `diff` field on each `applied` item (the output

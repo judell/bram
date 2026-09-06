@@ -49949,16 +49949,33 @@ fn worklist_auth_feedback_for_ids(
 }
 
 // From the committed subset of an approved-auth record's embedded items,
+// the dialog's ticked close selections. Pure over the auth value, so the
+// unticked case (#354: consent declined → empty vec) is testable.
+fn close_selections_for_ids(
+    auth: &serde_json::Value,
+    committed_ids: &[String],
+) -> Vec<(u64, Option<String>)> {
+    worklist_auth_feedback_for_ids(auth, committed_ids)
+        .iter()
+        .flat_map(|feedback| parse_close_issue_selections(feedback))
+        .collect()
+}
+
+// From the committed subset of an approved-auth record's embedded items,
 // enqueue a close intent per ticked issue bound to the just-created commit
 // SHA. Scoping matters when one plural authorization produces several commits.
+// Returns the issue numbers actually enqueued (#354): the commit response
+// reports them so the agent narrates the OUTCOME, not the item's
+// closesIssues declaration — which stays correctly set even when the user
+// unticks every close at the gate.
 fn enqueue_issue_closes_from_auth<R: tauri::Runtime>(
     app: &AppHandle<R>,
     auth: &serde_json::Value,
     committed_ids: &[String],
     commit_sha: &str,
-) {
+) -> Vec<u64> {
     let Some(path) = issue_close_queue_file(app) else {
-        return;
+        return Vec::new();
     };
     let _guard = issue_close_queue_lock()
         .lock()
@@ -49966,8 +49983,9 @@ fn enqueue_issue_closes_from_auth<R: tauri::Runtime>(
     // Recorded once per commit: the rebase-stable identity the flush falls
     // back to when the Push button's auto-rebase rewrites this SHA.
     let patch_id = project_root(Some(app)).and_then(|root| git_commit_patch_id(&root, commit_sha));
-    for feedback in worklist_auth_feedback_for_ids(auth, committed_ids) {
-        for (issue, comment) in parse_close_issue_selections(&feedback) {
+    let mut enqueued: Vec<u64> = Vec::new();
+    for (issue, comment) in close_selections_for_ids(auth, committed_ids) {
+        {
             let record = PendingIssueClose {
                 issue,
                 commit_sha: commit_sha.to_string(),
@@ -49979,6 +49997,7 @@ fn enqueue_issue_closes_from_auth<R: tauri::Runtime>(
             if let Err(e) = enqueue_pending_issue_close_path(&path, record) {
                 eprintln!("[issue-close-queue] enqueue #{} failed: {}", issue, e);
             } else {
+                enqueued.push(issue);
                 // The audit ledger caught the 2026-08-24 clobber while the
                 // trace was blind to it: the queue's writes belong in the
                 // same grep as its flushes.
@@ -50004,6 +50023,7 @@ fn enqueue_issue_closes_from_auth<R: tauri::Runtime>(
             }
         }
     }
+    enqueued
 }
 
 // issue-237: closing an issue should mean the fix reached the DEFAULT
@@ -55645,8 +55665,11 @@ fn handle_worklist_commit<R: tauri::Runtime>(
 
     // close-on-push-automatic: record the commit-gate dialog's close-issue
     // selections as pending closes bound to this SHA. Nothing closes now; the
-    // user's next Push triggers flush_pending_issue_closes.
-    enqueue_issue_closes_from_auth(app, &auth, &ids, &sha);
+    // user's next Push triggers flush_pending_issue_closes. The enqueued list
+    // rides the response (#354): the agent's post-commit narration must report
+    // the outcome, and an empty list is the user declining every tick — a
+    // fact the agent cannot see any other way.
+    let queued_closes = enqueue_issue_closes_from_auth(app, &auth, &ids, &sha);
 
     // worklist-commit-refresh-commits-cache: the gate just created the
     // commit, so refresh the commits:list cache now (local git, ~tens of ms)
@@ -55675,6 +55698,7 @@ fn handle_worklist_commit<R: tauri::Runtime>(
             serde_json::json!({
                 "error": "commit created but prune failed",
                 "sha": sha,
+                "queuedCloses": queued_closes,
                 "prune": parsed,
             })
             .to_string()
@@ -55685,7 +55709,7 @@ fn handle_worklist_commit<R: tauri::Runtime>(
     (
         200,
         "application/json; charset=utf-8",
-        serde_json::json!({ "ok": true, "sha": sha })
+        serde_json::json!({ "ok": true, "sha": sha, "queuedCloses": queued_closes })
             .to_string()
             .into_bytes(),
     )
@@ -55872,6 +55896,29 @@ mod worklist_authorization_tests {
             worklist_auth_feedback_for_ids(&auth, &ids(&["b"])),
             vec!["close-issue: 20".to_string()]
         );
+    }
+
+    #[test]
+    fn close_selections_report_outcome_not_declaration() {
+        // issue-354: the response's queuedCloses derives from these
+        // selections. Ticked → the issue number; unticked → empty even
+        // though the item's closesIssues declaration still stands (the
+        // declaration is what made the gate offer the tick); comments
+        // ride along.
+        use super::close_selections_for_ids;
+        let ticked = json!({
+            "items": [{"id":"a", "feedback":"ship it\nclose-issue: 16 comment: \"thanks\""}]
+        });
+        assert_eq!(
+            close_selections_for_ids(&ticked, &ids(&["a"])),
+            vec![(16, Some("thanks".to_string()))]
+        );
+        let unticked = json!({
+            "items": [{"id":"a", "feedback":"ship it"}]
+        });
+        assert_eq!(close_selections_for_ids(&unticked, &ids(&["a"])), vec![]);
+        let no_feedback = json!({ "items": [{"id":"a"}] });
+        assert_eq!(close_selections_for_ids(&no_feedback, &ids(&["a"])), vec![]);
     }
 
     #[test]

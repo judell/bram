@@ -1769,6 +1769,19 @@ never silently push others stacked behind it.
 **Approve without closing** arrives as feedback with no `close-issue:`
 lines — commit only, nothing queued.
 
+**Narrate the close outcome from the response, never from `closesIssues`.**
+`worklist-commit`'s success body carries `queuedCloses` — the issue
+numbers the host actually enqueued (`{"ok":true,"sha":"…","queuedCloses":[16]}`;
+the Codex result file carries the same bytes). Announce "queued to close
+on your next Push" **only** for issues named there. An empty
+`queuedCloses` means the user declined every tick (or none was offered):
+say nothing about closing, or state plainly that no close was queued.
+The item's `closesIssues` is the *offer* — it is what makes the gate
+render the tick, and it stays correctly set even when the user unticks —
+so narrating from it reports intent as outcome (#354's field failure: the
+user deliberately declined, the host honoured it, and the report claimed
+a close was queued anyway).
+
 
 ## Bram shell mechanics
 

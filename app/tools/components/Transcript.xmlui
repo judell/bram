@@ -326,15 +326,19 @@
                 fontWeight="bold"
                 tooltip="{($item.commandDisplay || $item.summary || '').slice(0, 500)}"
                 value="{((expanded || []).includes($item.id) ? '▾' : '▸') + '  🔧 ' + $item.name + ($item.nameDetail ? ' (' + $item.nameDetail + ')' : '')}" />
+              <!-- native-intent-for-read-edit-rows: the chain gains the
+                   preceding-narration rung (__bramRowIntent) so Read/Edit
+                   rows — tools with no description param — stop rendering
+                   bare filenames while Bash rows narrate. -->
               <Text
-                when="{$item.aiDescription || $item.description}"
+                when="{window.__bramRowIntent($item)}"
                 fontSize="$fontSize-sm"
                 color="$textColor-secondary"
                 maxLines="1"
                 tooltip="{($item.commandDisplay || $item.summary || '').slice(0, 500)}"
-                value="{'— ' + ($item.aiDescription || $item.description)}" />
+                value="{'— ' + window.__bramRowIntent($item)}" />
               <Text
-                when="{!($item.aiDescription || $item.description) &amp;&amp; $item.summary &amp;&amp; $item.summary !== $item.name}"
+                when="{!window.__bramRowIntent($item) &amp;&amp; $item.summary &amp;&amp; $item.summary !== $item.name}"
                 fontSize="$fontSize-sm"
                 color="$textColor-secondary"
                 tooltip="{($item.commandDisplay || $item.summary || '').slice(0, 500)}"

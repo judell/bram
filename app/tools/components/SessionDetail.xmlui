@@ -158,16 +158,19 @@
                   value="{((expanded || []).includes($item.id) ? '▾' : '▸') + '  🔧 ' + $item.name + ($item.nameDetail ? ' (' + $item.nameDetail + ')' : '')}" />
                 <!-- native-tool-descriptions-by-default: agent-authored
                      description renders keyless; Haiku aiDescription
-                     (opt-in) upgrades it. Same chain as Transcript.xmlui. -->
+                     (opt-in) upgrades it. Same chain as Transcript.xmlui,
+                     including the preceding-narration rung (present on
+                     live-projection entries; absent fields just fall
+                     through to summary here). -->
                 <Text
-                  when="{$item.aiDescription || $item.description}"
+                  when="{window.__bramRowIntent($item)}"
                   fontSize="$fontSize-sm"
                   color="$textColor-secondary"
                   maxLines="1"
                   tooltip="{($item.commandDisplay || $item.summary || '').slice(0, 500)}"
-                  value="{'— ' + ($item.aiDescription || $item.description)}" />
+                  value="{'— ' + window.__bramRowIntent($item)}" />
                 <Text
-                  when="{!($item.aiDescription || $item.description) &amp;&amp; $item.summary &amp;&amp; $item.summary !== $item.name}"
+                  when="{!window.__bramRowIntent($item) &amp;&amp; $item.summary &amp;&amp; $item.summary !== $item.name}"
                   fontSize="$fontSize-sm"
                   color="$textColor-secondary"
                   tooltip="{($item.commandDisplay || $item.summary || '').slice(0, 500)}"

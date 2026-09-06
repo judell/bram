@@ -1907,9 +1907,9 @@ window.settingsInfoBodies = {
   ai:
     "## Tool Descriptions\n\n" +
     "The one-line intent header on Transcript tool rows.\n\n" +
-    "**For Claude** — rows already show Claude's own descriptions. No key, " +
-    "nothing to turn on. When the toggle is on, Bram uses Haiku to enhance " +
-    "Claude's descriptions.\n\n" +
+    "**For Claude** — rows already lead with Claude's own words: Bash tool " +
+    "descriptions, and the narration preceding other calls. No key, nothing " +
+    "to turn on. When the toggle is on, Bram uses Haiku to enhance them.\n\n" +
     "**For Codex** — no native descriptions; rows show the raw command. " +
     "When the toggle is on, Bram uses Haiku to create descriptions.\n\n" +
     "Flipping the toggle off hides existing Haiku descriptions; flipping it " +
@@ -7925,8 +7925,76 @@ window.__bramProjectedTurnEqual = function (a, b) {
   return true;
 };
 
+// native-intent-for-read-edit-rows: shape a narration sentence for row
+// display — the LAST sentence of the prose, end-capped with a trailing
+// ellipsis (the probe's front-truncation artifact, "…se two things", is
+// exactly what this forbids), and a minimum-length guard so bare "Now:"
+// fragments fall back to the mechanical summary.
+// The collapsed row's intent chain: Haiku's header when resolved, else the
+// agent-authored description (Bash/Task), else the preceding narration
+// (annotated below), else empty — the caller falls back to the mechanical
+// summary.
+window.__bramRowIntent = function (item) {
+  if (!item) return "";
+  return item.aiDescription || item.description || item.precedingIntent || "";
+};
+
+window.__bramShapePrecedingIntent = function (prose) {
+  if (!prose) return "";
+  var flat = String(prose).replace(/\s+/g, " ").trim();
+  if (!flat) return "";
+  var m = flat.match(/[^.!?]*[.!?:]?\s*$/);
+  var tail = ((m && m[0]) || flat).trim();
+  if (!tail) tail = flat;
+  if (tail.length > 90) tail = tail.slice(0, 89).trim() + "…";
+  if (tail.length < 12) return "";
+  return tail;
+};
+
+// native-intent-for-read-edit-rows: annotate tool entries that carry no
+// agent-authored description (Read/Edit/Write/Grep — only Bash and Task
+// have the param) with the narration immediately preceding them, so the
+// native tier stops alternating between intent and bare filenames. Probe
+// receipts (2026-09-06, this session's projection: 293 such rows, 84%
+// gain a line) shaped the three guards:
+// - AGENT text entries only — the describe pipeline's user-turn fallback
+//   presented the user's own words as agent intent (circular on
+//   @-mention reads), so a user turn resets the narration instead;
+// - first row of a consecutive same-narration group only — three Reads
+//   under one sentence each captioned identically read as noise;
+// - sentence shaping via __bramShapePrecedingIntent above.
+// Runs once per broadcast, before reference preservation; the field is
+// derived deterministically from turn content, so a reused prior turn
+// reference already carries it.
+window.__bramAnnotatePrecedingIntent = function (turns) {
+  var list = turns || [];
+  for (var i = 0; i < list.length; i++) {
+    var t = list[i] || {};
+    if (t.role !== "assistant") continue;
+    var lastProse = "";
+    var lastApplied = "";
+    var es = t.entries || [];
+    for (var k = 0; k < es.length; k++) {
+      var e = es[k];
+      if (!e) continue;
+      if (e.kind === "text" && e.text) {
+        lastProse = e.text;
+        lastApplied = "";
+        continue;
+      }
+      if (e.kind !== "tool") continue;
+      if (e.description) continue; // native intent exists; group continues
+      var shaped = window.__bramShapePrecedingIntent(lastProse);
+      e.precedingIntent = shaped && shaped !== lastApplied ? shaped : "";
+      if (e.precedingIntent) lastApplied = shaped;
+    }
+  }
+  return list;
+};
+
 window.__bramBroadcastProjectedTurns = function (payload, reason) {
   var __bcastT0 = Date.now();
+  if (payload && payload.turns) window.__bramAnnotatePrecedingIntent(payload.turns);
   var prev = __projectedTurnsValue;
   if (payload && prev && prev.sid === payload.sid) {
     var prevTurns = prev.turns || [];

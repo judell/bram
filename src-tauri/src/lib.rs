@@ -2092,6 +2092,13 @@ fn clear_hook_permission_menu_display<R: tauri::Runtime>(
 
 #[allow(dead_code)]
 fn bram_trace_log_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    // issue-353: no trace file at a home-directory root — persisting one
+    // would recreate the very ~/resources scaffold the startup refusal
+    // exists to prevent. Returning None silences both the startup
+    // prepare/archive pass and every append_bram_trace_line call.
+    if project_root_is_home() {
+        return None;
+    }
     project_resource_path(app, "bram-traces/bram-trace.log")
 }
 
@@ -24401,6 +24408,12 @@ fn auto_setup_before_launch<R: tauri::Runtime>(app: &AppHandle<R>) {
         append_bram_trace_line(app, "auto-setup", "op=skip reason=nested");
         return;
     }
+    // issue-353: a $HOME nesting root was excluded above rather than
+    // suppressing auto-setup (Walt's two-day silent staleness). One line
+    // per launch keeps the stray scaffold visible in the project trace.
+    if status["nestedUnderIgnoredHome"].as_bool().unwrap_or(false) {
+        append_bram_trace_line(app, "auto-setup", "op=nested-root-is-home-ignored");
+    }
     let claude_needs = status["claudeNeedsSetup"].as_bool().unwrap_or(false);
     let codex_needs = status["codexNeedsSetup"].as_bool().unwrap_or(false);
     if !claude_needs && !codex_needs {
@@ -38020,12 +38033,10 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
     // A parent carrying .bram.json means this launch is nested inside an
     // already-managed project, which is near-certainly a mistake: nested
     // managed projects are not a configuration anyone wants.
-    let nested_under = root.as_ref().and_then(|p| {
-        p.ancestors()
-            .skip(1)
-            .find(|a| has_project_settings(a))
-            .map(|a| a.to_string_lossy().to_string())
-    });
+    let (nested_under, nested_under_ignored_home) = root
+        .as_ref()
+        .map(|p| nested_managed_parent(p, home_dir().as_deref()))
+        .unwrap_or((None, false));
     // Weaker corroborating hint, deliberately not its own warning: subproject
     // layouts make "cwd is not the git toplevel" legitimately common, and a
     // warning that fires on normal setups trains the dismiss reflex.
@@ -38051,6 +38062,7 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         "projectRoot": root.as_ref().map(|p| p.to_string_lossy().to_string()),
         "firstRun": first_run,
         "nestedUnder": nested_under,
+        "nestedUnderIgnoredHome": nested_under_ignored_home,
         "strayHomeScaffold": stray_home_scaffold,
         "gitToplevel": git_toplevel,
         "enhanced": core_installed && claude_installed && codex_installed,
@@ -38180,6 +38192,45 @@ fn path_is_home_dir(root: &Path, home: &Path) -> bool {
     canon(root) == canon(home)
 }
 
+// issue-353: launching Bram with the project root AT the home directory
+// is never a real project, and the scaffold it writes (port files, the
+// trace directory) is what later makes every repo under home read as
+// "nested". Refusal at the source keeps ~/resources from coming into
+// existence at all. Cached once — the answer cannot change within a
+// process lifetime, and the trace writer consults it on every line.
+fn project_root_is_home() -> bool {
+    static ROOT_IS_HOME: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ROOT_IS_HOME.get_or_init(|| {
+        home_dir()
+            .map(|home| path_is_home_dir(&determine_project_root(), &home))
+            .unwrap_or(false)
+    })
+}
+
+// issue-353: the nearest managed ancestor, excluding $HOME — a nesting
+// root equal to home is a stray mis-launch scaffold (a full project
+// scaffold written into the home directory), never a configuration
+// anyone wants, and treating it as a managed parent silently disabled
+// auto-setup for every repo on Walt's machine for two days. The second
+// return says whether a home root was excluded, so status can surface
+// the anomaly without it being load-bearing.
+fn nested_managed_parent(root: &Path, home: Option<&Path>) -> (Option<String>, bool) {
+    let mut ignored_home = false;
+    let nested = root
+        .ancestors()
+        .skip(1)
+        .find(|a| has_project_settings(a))
+        .filter(|a| {
+            let is_home = home.map(|h| path_is_home_dir(a, h)).unwrap_or(false);
+            if is_home {
+                ignored_home = true;
+            }
+            !is_home
+        })
+        .map(|a| a.to_string_lossy().to_string());
+    (nested, ignored_home)
+}
+
 // The safety net for scaffolds that already exist (issue-294 ask 3): a
 // home directory that is NOT the project root but carries the guard
 // marker captures every unmanaged home-subtree path. Deliberately not an
@@ -38196,7 +38247,9 @@ fn stray_home_scaffold_marker(home: &Path, root: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod home_scaffold_tests {
-    use super::{path_is_home_dir, stray_home_scaffold_marker, WORKLIST_AUTH_REL};
+    use super::{
+        nested_managed_parent, path_is_home_dir, stray_home_scaffold_marker, WORKLIST_AUTH_REL,
+    };
     use std::path::PathBuf;
 
     fn scratch(name: &str) -> PathBuf {
@@ -38225,6 +38278,34 @@ mod home_scaffold_tests {
         let proj = home.join("projects").join("app");
         std::fs::create_dir_all(&proj).expect("create project dir");
         assert!(!path_is_home_dir(&proj, &home));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn nested_parent_excludes_home_root() {
+        // Walt's #353 shape: a scaffolded $HOME carries .bram.json, and a
+        // real project sits underneath. Home must not count as a managed
+        // parent — auto-setup keeps working — but the exclusion is flagged.
+        let home = scratch("nested-home");
+        std::fs::write(home.join(".bram.json"), "{}").expect("write settings");
+        let proj = home.join("dev").join("garden_tour");
+        std::fs::create_dir_all(&proj).expect("create project dir");
+        assert_eq!(nested_managed_parent(&proj, Some(&home)), (None, true));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn nested_parent_keeps_real_managed_ancestor() {
+        // A genuinely managed parent below home (the harness's `nested`
+        // scenario) still reports, and the home flag stays false.
+        let home = scratch("nested-real");
+        let parent = home.join("parent");
+        let proj = parent.join("child");
+        std::fs::create_dir_all(&proj).expect("create project dir");
+        std::fs::write(parent.join(".bram.json"), "{}").expect("write settings");
+        let (nested, ignored_home) = nested_managed_parent(&proj, Some(&home));
+        assert_eq!(nested.as_deref(), Some(parent.to_string_lossy().as_ref()));
+        assert!(!ignored_home);
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -58828,7 +58909,19 @@ pub fn run() {
             // lsof shows a listener, but curl still gets connection refused.
             if let Some(proj) = startup_project_root.as_ref() {
                 let port_path = proj.join("resources/.bram-port");
-                if wait_for_loopback_http(port, 5000) {
+                // issue-353: never scaffold the home directory. The port
+                // files are the write that creates ~/resources on a
+                // mis-launch, and everything under home then reads as
+                // nested. Stderr only — trace persistence is likewise
+                // refused at a home root (bram_trace_log_file).
+                if project_root_is_home() {
+                    eprintln!(
+                        "[bram] op=refuse-home-scaffold root={} — project root is the home \
+                         directory; startup scaffold (port files, trace directory) not written \
+                         (issue #353)",
+                        proj.display()
+                    );
+                } else if wait_for_loopback_http(port, 5000) {
                     match write_bram_port_files(proj, port, started_at_ms) {
                         Ok(()) => eprintln!(
                             "[bram] wrote ready port files: {}, {}",

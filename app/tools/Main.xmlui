@@ -1,4 +1,4 @@
-<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{window.__bramRestoreUpdateBannerDismissed ? window.__bramRestoreUpdateBannerDismissed() : ''}" var.toplevelBannerDismissed="{false}" var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.agentSwitching="{false}" var.transcriptAgentId="{''}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}" var.dismissedAgentIds="{window.__bramRestoreDismissedAgents()}"
+<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{window.__bramRestoreUpdateBannerDismissed ? window.__bramRestoreUpdateBannerDismissed() : ''}" var.toplevelBannerDismissed="{false}" var.strayScaffoldBannerDismissed="{false}" var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.agentSwitching="{false}" var.transcriptAgentId="{''}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}" var.dismissedAgentIds="{window.__bramRestoreDismissedAgents()}"
   onInit="startBramLatestJsonlPush(() => (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || '')">
   <PushSource
     id="mainAgentStatus"
@@ -636,6 +636,37 @@
       size="xs"
       tooltip="Dismiss for this session"
       onClick="toplevelBannerDismissed = true" />
+  </HStack>
+
+  <!-- issue-353: a stray Setup scaffold in the home directory (from an
+       earlier mis-launch at $HOME). The host computes strayHomeScaffold
+       at startup but until now nothing in the pane used it — Walt's
+       machine ran two days with auto-setup silently skipped for every
+       repo under home. Same session-scoped dismissal as the toplevel
+       banner above. -->
+  <HStack
+    when="{enhanceStatus.value &amp;&amp; enhanceStatus.value.strayHomeScaffold &amp;&amp; !strayScaffoldBannerDismissed}"
+    backgroundColor="$color-warn-100"
+    padding="$space-2"
+    gap="$space-3"
+    wrapContent="true"
+    verticalAlignment="center">
+    <Text fontSize="$fontSize-sm">
+      A Bram scaffold exists in your home directory
+      (<Text inline="true" fontFamily="$fontFamily-monospace" value="{enhanceStatus.value.strayHomeScaffold}" />),
+      likely from an earlier launch at
+      <Text inline="true" fontFamily="$fontFamily-monospace" value="~" /> by mistake.
+      It can make projects under your home directory misbehave — remove the stray
+      <Text inline="true" fontFamily="$fontFamily-monospace" value="~/resources" /> and
+      <Text inline="true" fontFamily="$fontFamily-monospace" value="~/.bram.json" /> to clear this.
+    </Text>
+    <SpaceFiller />
+    <Button
+      label="✕"
+      variant="ghost"
+      size="xs"
+      tooltip="Dismiss for this session"
+      onClick="strayScaffoldBannerDismissed = true" />
   </HStack>
 
   <!-- issue-320: gate on providerNeedsSetup ALONE, not activeProvider. The

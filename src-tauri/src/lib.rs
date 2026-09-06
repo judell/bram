@@ -16782,7 +16782,9 @@ fn record_skip_worklist_authorization<R: tauri::Runtime>(app: &AppHandle<R>, tur
     if trimmed.strip_prefix("skip-worklist:").is_none() {
         return;
     }
-    let Some(path) = worklist_auth_file(app) else {
+    // issue-352: the grant's own sidecar — a later gate click writing the
+    // shared authorization file can no longer destroy it.
+    let Some(path) = worklist_direct_edit_file(app) else {
         return;
     };
     if let Some(parent) = path.parent() {
@@ -22386,11 +22388,15 @@ mod session_intent_text_tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../app/__shell/helpers.js"
         ));
-        // native-tool-descriptions-by-default widened the fallback chain:
-        // the row leads with aiDescription when Haiku resolved one, else the
-        // agent-authored description, keyless.
-        assert!(detail.contains("when=\"{$item.aiDescription || $item.description}\""));
-        assert!(detail.contains("value=\"{'— ' + ($item.aiDescription || $item.description)}\""));
+        // The intent chain lives in ONE helper now (__bramRowIntent:
+        // aiDescription || description || precedingIntent, from
+        // native-tool-descriptions-by-default + native-intent-for-read-edit-
+        // rows) — assert the markup binds it and the helper defines the
+        // chain, so a chain change breaks here once, not per-literal (this
+        // assertion has now chased the markup twice).
+        assert!(detail.contains("when=\"{window.__bramRowIntent($item)}\""));
+        assert!(detail.contains("value=\"{'— ' + window.__bramRowIntent($item)}\""));
+        assert!(helpers.contains("item.aiDescription || item.description || item.precedingIntent"));
         assert!(detail.contains("$item.__findPreview"));
         assert!(helpers.contains("ev.aiDescription"));
     }
@@ -38569,6 +38575,18 @@ fn worklist_auth_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> 
     project_relative_path(app, WORKLIST_AUTH_REL)
 }
 
+// issue-352: direct-edit grants live in their OWN sidecar. The shared
+// authorization file is single-slot and gate-scoped; a grant is TTL-scoped
+// consent, and sharing the slot meant any gate click destroyed a live grant
+// mid-window (op=clobber prior_kind=direct-edit, ~20s into a 1h TTL, the
+// authorized edit denied 25s later). The guards read this file first and
+// honor a legacy-located record for one release.
+const WORKLIST_DIRECT_EDIT_REL: &str = "resources/.worklist-direct-edit.json";
+
+fn worklist_direct_edit_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    project_relative_path(app, WORKLIST_DIRECT_EDIT_REL)
+}
+
 fn worklist_push_mirror_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
     project_relative_path(app, WORKLIST_PUSH_MIRROR_REL)
 }
@@ -48150,7 +48168,9 @@ fn record_codex_direct_edit_authorization<R: tauri::Runtime>(app: &AppHandle<R>,
     {
         return;
     }
-    let Some(path) = worklist_auth_file(app) else {
+    // issue-352: same sidecar as the skip-worklist writer — grants and gate
+    // records no longer share a slot.
+    let Some(path) = worklist_direct_edit_file(app) else {
         return;
     };
     if let Some(parent) = path.parent() {

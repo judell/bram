@@ -1960,8 +1960,35 @@ fn num_field(rec: &serde_json::Map<String, Value>, keys: &[&str]) -> f64 {
     0.0
 }
 
+// issue-352: direct-edit grants moved to their own sidecar so a gate click
+// (which replaces the single-slot shared authorization file) can no longer
+// destroy a live grant mid-TTL — the Budget-project incident: a Drop click
+// clobbered a 20s-old grant and the just-authorized edit was denied. The
+// sidecar is authoritative; the legacy shared-file location stays honored
+// for one release so a grant written by an old binary survives the upgrade
+// mid-window.
+const DIRECT_EDIT_REL: &str = "resources/.worklist-direct-edit.json";
+
 fn bypass_lookup_detail(project_root: &Path, path_rel: &str) -> (bool, &'static str) {
-    let Ok(text) = std::fs::read_to_string(project_root.join(AUTH_REL)) else {
+    let primary = bypass_lookup_in(&project_root.join(DIRECT_EDIT_REL), path_rel);
+    if primary.0 {
+        return primary;
+    }
+    let legacy = bypass_lookup_in(&project_root.join(AUTH_REL), path_rel);
+    if legacy.0 {
+        return legacy;
+    }
+    // Neither matched: report the more informative failure for the deny
+    // message (a stale/path-not-covered beats a bare absent).
+    if primary.1 != "absent" {
+        primary
+    } else {
+        legacy
+    }
+}
+
+fn bypass_lookup_in(file: &Path, path_rel: &str) -> (bool, &'static str) {
+    let Ok(text) = std::fs::read_to_string(file) else {
         return (false, "absent");
     };
     let Ok(doc) = serde_json::from_str::<Value>(&text) else {
@@ -2880,8 +2907,15 @@ fn codex_normalize_target(cwd: &Path, target: &str) -> Option<String> {
 
 /// Codex `fresh_bypass`: reads ONLY snake_case `issued_at_ms` (the Claude
 /// guard accepts `issuedAtMs` first), and has no per-root detail vocabulary.
+/// issue-352: sidecar first, legacy shared file honored for one release —
+/// the same precedence as the Claude arm's bypass_lookup_detail.
 fn codex_fresh_bypass(cwd: &Path, path_rel: &str) -> bool {
-    let Ok(text) = std::fs::read_to_string(cwd.join(AUTH_REL)) else {
+    codex_fresh_bypass_in(&cwd.join(DIRECT_EDIT_REL), path_rel)
+        || codex_fresh_bypass_in(&cwd.join(AUTH_REL), path_rel)
+}
+
+fn codex_fresh_bypass_in(file: &Path, path_rel: &str) -> bool {
+    let Ok(text) = std::fs::read_to_string(file) else {
         return false;
     };
     let Ok(doc) = serde_json::from_str::<Value>(&text) else {
@@ -4499,6 +4533,72 @@ mod guard_policy_tests {
         assert_eq!(strip_surrounding_quotes("'x.md'"), "x.md");
         assert_eq!(strip_surrounding_quotes("\"mismatched'"), "\"mismatched'");
 
+        let _ = std::fs::remove_dir_all(&td);
+    }
+
+    // issue-352: a gate click writing the shared single-slot file must not
+    // revoke a live direct-edit grant — the grant lives in its own sidecar.
+    // Replays the Budget-project timeline: grant written, unrelated Drop
+    // recorded 20s later, the authorized edit must still pass.
+    #[test]
+    fn direct_edit_grant_survives_gate_click_clobber() {
+        let td = scratch("sig352");
+        std::fs::create_dir_all(td.join("resources")).unwrap();
+        let now = now_ms() as i64;
+        // The grant, in its sidecar (new-binary shape).
+        std::fs::write(
+            td.join(DIRECT_EDIT_REL),
+            format!(
+                "{{\"kind\":\"direct-edit\",\"issued_at_ms\":{},\"issuedAtMs\":{},\"paths\":[\"*\"]}}",
+                now, now
+            ),
+        )
+        .unwrap();
+        // The unrelated gate click, replacing the shared slot entirely.
+        std::fs::write(
+            td.join(AUTH_REL),
+            format!(
+                "{{\"kind\":\"drop\",\"ids\":[\"belt-tightening-log\"],\"issued_at_ms\":{}}}",
+                now
+            ),
+        )
+        .unwrap();
+        assert!(
+            fresh_bypass(&td, "README.md"),
+            "Claude arm: grant must survive"
+        );
+        assert!(
+            codex_fresh_bypass(&td, "README.md"),
+            "Codex arm: grant must survive"
+        );
+        // Legacy compat: a grant still in the shared file (old binary) is
+        // honored when no sidecar exists.
+        let _ = std::fs::remove_file(td.join(DIRECT_EDIT_REL));
+        std::fs::write(
+            td.join(AUTH_REL),
+            format!(
+                "{{\"kind\":\"direct-edit\",\"issued_at_ms\":{},\"issuedAtMs\":{},\"paths\":[\"*\"]}}",
+                now, now
+            ),
+        )
+        .unwrap();
+        assert!(
+            fresh_bypass(&td, "README.md"),
+            "legacy location still honored"
+        );
+        assert!(codex_fresh_bypass(&td, "README.md"));
+        // A stale sidecar grant reports stale, not absent, and does not pass.
+        std::fs::write(
+            td.join(DIRECT_EDIT_REL),
+            format!(
+                "{{\"kind\":\"direct-edit\",\"issued_at_ms\":{},\"issuedAtMs\":{},\"paths\":[\"*\"]}}",
+                now - 2 * 3_600_000,
+                now - 2 * 3_600_000
+            ),
+        )
+        .unwrap();
+        std::fs::write(td.join(AUTH_REL), "{\"kind\":\"none\"}").unwrap();
+        assert_eq!(bypass_lookup_detail(&td, "README.md"), (false, "stale"));
         let _ = std::fs::remove_dir_all(&td);
     }
 

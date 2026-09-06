@@ -136,8 +136,12 @@ change is "small":
  `PreToolUse` and allows inline; for Codex, Bram's host-side `toTurn` path
  matches the same phrase and writes a one-turn `direct-edit` record
  (`kind:"direct-edit"`, `paths:["*"]`, 1h TTL) to
- `resources/.worklist-authorization.json`, which the single Codex
- `PreToolUse` hook reads via `fresh_bypass()`. The phrase itself is
+ `resources/.worklist-direct-edit.json` — the grant's OWN sidecar
+ (issue-352: the shared authorization file is single-slot and any gate
+ click replaces it, which destroyed a live grant mid-TTL) — which the
+ single Codex `PreToolUse` hook reads via `fresh_bypass()` (legacy
+ records in `.worklist-authorization.json` stay honored for one
+ release). The phrase itself is
  identical, so the user-facing contract is the same regardless of agent.
  Codex prose opt-outs record a `direct-edit` line in the audit ledger via
  that same host `toTurn` path; Claude prose opt-outs have no equivalent
@@ -157,7 +161,7 @@ change is "small":
   Refine: tell users to click the button, do not instruct them to
   type or paste the wire format. When the host's `toTurn` write path
   sees the prefix it writes the same one-turn `direct-edit` record to
-  `resources/.worklist-authorization.json` that the prose opt-out
+  `resources/.worklist-direct-edit.json` that the prose opt-out
   writes, then forwards the **entire turn text including the prefix**
   to the agent (unlike `approved:` / `drop:` / `iterate:`, which the
   agent is told not to mention but the prefix is left in place so the

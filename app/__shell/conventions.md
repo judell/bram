@@ -1574,6 +1574,20 @@ the finding comment and its same-day correction):
   hunks. Each commit then stages a clean per-item diff with no hunk
   surgery, and the second item's changes become exclusive the moment
   the first commit lands.
+- **A same-click plural approval cannot split its shared files at the
+  gate** (#356): one click writes ONE claim and one capture boundary,
+  so both items' edits to a shared declared path land in a JOINT
+  interval that per-item staging has nothing to stage from. A
+  `split-shared-files` commit of one such id is **refused** (409,
+  `op=refuse-joint-interval`, claim released), naming the joint ids —
+  it is not honored, and before this refusal existed it silently
+  absorbed the neighbour's hunks under the requested id (the issue's
+  filing case and its same-day source-repo reproduction). Commit the
+  joint items **together** (safe — every changed line is accounted for
+  by an id in that commit), or separate the hunks by hand. When
+  per-item commits on a shared file are the goal, approve the items in
+  **separate clicks**: each then gets its own claim and boundary, and
+  interval staging splits them correctly.
 - **End the remaining ids' claim before handing the user a commit
   decision.** A live claim locks row selection, and the locked
   selection is where the Commit button lives — the user sees a gate bar

@@ -55765,6 +55765,60 @@ fn handle_worklist_commit<R: tauri::Runtime>(
                 continue;
             };
             for run in runs {
+                // issue-356: a JOINT run carries `itemIds`, not `itemId`, so
+                // this scan used to skip it silently — which is exactly how a
+                // same-click plural approval (one claim, one capture
+                // boundary, joint runs on the shared declared path) let a
+                // single-id commit stage the file wholesale and absorb the
+                // neighbour's hunks under the requested item's message.
+                // Interval staging cannot split a joint run (there is no
+                // per-item interval to stage from), so the honest answer is
+                // the 409: commit the joint items together — safe, every
+                // line accounted for — or separate the hunks by hand.
+                if let Some(members) = run.get("itemIds").and_then(|v| v.as_array()) {
+                    let member_ids: Vec<String> = members
+                        .iter()
+                        .filter_map(|m| m.as_str().map(String::from))
+                        .collect();
+                    let outside_begun = member_ids.iter().any(|owner| {
+                        !requested.contains(owner.as_str())
+                            && items.iter().any(|it| {
+                                it.get("id").and_then(|v| v.as_str()) == Some(owner.as_str())
+                                    && (it.get("status").and_then(|v| v.as_str())
+                                        == Some("applied")
+                                        || it
+                                            .get("begunAtMs")
+                                            .and_then(|v| v.as_i64())
+                                            .unwrap_or(0)
+                                            > 0)
+                            })
+                    });
+                    if outside_begun {
+                        append_bram_trace_line(
+                            app,
+                            "worklist-commit",
+                            &format!(
+                                "op=refuse-joint-interval path={} ids=[{}]",
+                                path,
+                                member_ids.join(",")
+                            ),
+                        );
+                        release_claim_on_commit_refusal(app, &ids);
+                        return worklist_json_error(
+                            409,
+                            format!(
+                                "commit refused: {} carries work jointly attributed to [{}] \
+                                 (items approved together share one capture boundary, so their \
+                                 shared-file changes cannot be split per item). Commit those \
+                                 items together — safe, every line is accounted for — or \
+                                 separate the hunks by hand and retry.",
+                                path,
+                                member_ids.join(", ")
+                            ),
+                        );
+                    }
+                    continue;
+                }
                 let Some(owner) = run.get("itemId").and_then(|v| v.as_str()) else {
                     continue;
                 };

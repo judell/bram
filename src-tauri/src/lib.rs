@@ -24143,6 +24143,36 @@ fn agent_cli_on_path(name: &str) -> bool {
 // certainly a mis-launch — the existing nested banner is the surface for it).
 // On failure the needs-setup banner remains as the fallback surface; this
 // function never blocks the launch path.
+// warn-when-git-toplevel-above-root: one startup line when the project root
+// sits inside a larger git repository (git resolves upward from a .git-less
+// root). Everything git-backed then operates on the ENCLOSING repo — the
+// legibility half of the fix; the operational half is capture_claim_tree's
+// pathspec scoping.
+fn trace_git_toplevel_above_root<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let Some(root) = project_root(Some(app)) else {
+        return;
+    };
+    let toplevel = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(&root)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|t| !t.is_empty() && Path::new(t) != root.as_path());
+    if let Some(t) = toplevel {
+        append_bram_trace_line(
+            app,
+            "startup",
+            &format!(
+                "op=git-toplevel-above-root toplevel={} root={}",
+                t,
+                root.display()
+            ),
+        );
+    }
+}
+
 fn auto_setup_before_launch<R: tauri::Runtime>(app: &AppHandle<R>) {
     let status: serde_json::Value = match enhance_status(app)
         .ok()
@@ -38795,8 +38825,18 @@ fn capture_claim_tree(root: &Path) -> Option<String> {
         }
         Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
     };
+    // warn-when-git-toplevel-above-root: the add is PATHSPEC-SCOPED to the
+    // project subtree ("." relative to root). Unscoped `add -A` operates on
+    // the entire working tree in git >= 2.0 even from a subdirectory, so a
+    // project nested inside a larger repo hashed everything the enclosing
+    // repo could see — live case 2026-09-06: a `~/Downloads` project inside
+    // a home-directory repo blocked a Drop route 132 s behind two `git add
+    // -A` walks and wrote ~12 GiB of objects into `~/.git` in one evening.
+    // When root == toplevel, "." is the whole repo and nothing changes.
+    // Boundaries stay exact for everything the project can claim; content
+    // outside the root was never attributable anyway.
     let tree = run(&["read-tree", "HEAD"])
-        .and_then(|_| run(&["add", "-A"]))
+        .and_then(|_| run(&["add", "-A", "--", "."]))
         .and_then(|_| run(&["write-tree"]));
     let _ = std::fs::remove_file(&idx);
     tree.filter(|t| !t.is_empty())
@@ -57963,6 +58003,12 @@ pub fn run() {
             // Windows self-update leaves renamed-aside *.exe.old files
             // (clickable-update-from-banner); delete them best-effort.
             cleanup_self_update_leftovers();
+            // warn-when-git-toplevel-above-root: name the enclosing-repo
+            // condition once at startup, at the cause (the same family as
+            // nestedUnder / strayHomeScaffold). The pane banner keys off
+            // /__enhance/status's gitToplevel; this line is the greppable
+            // record that the launch began in that state.
+            trace_git_toplevel_above_root(app.handle());
             // Remove any stale pty-intent queue from a prior session so
             // its intents don't replay into the fresh PTY. Refs #86.
             cleanup_stale_pty_intents(app.handle());

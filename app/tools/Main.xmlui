@@ -1,4 +1,4 @@
-<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{window.__bramRestoreUpdateBannerDismissed ? window.__bramRestoreUpdateBannerDismissed() : ''}" var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.agentSwitching="{false}" var.transcriptAgentId="{''}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}" var.dismissedAgentIds="{window.__bramRestoreDismissedAgents()}"
+<App layout="vertical-sticky" var.rightPaneSize="(measuring…)" var.updateBannerDismissedVersion="{window.__bramRestoreUpdateBannerDismissed ? window.__bramRestoreUpdateBannerDismissed() : ''}" var.toplevelBannerDismissed="{false}" var.setupCompleteProvider="{''}" var.lastSeenAgentVerb="{''}" var.agentSwitching="{false}" var.transcriptAgentId="{''}" var.sendNoticeDismissed="{window.__bramRestoreSendNoticeDismissed()}" var.dismissedAgentIds="{window.__bramRestoreDismissedAgents()}"
   onInit="startBramLatestJsonlPush(() => (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider) || '')">
   <PushSource
     id="mainAgentStatus"
@@ -607,6 +607,36 @@
       <Text inline="true" fontWeight="$fontWeight-bold" value="{enhanceStatus.value.gitToplevel}" />.
     </Text>
   </VStack>
+
+  <!-- warn-when-git-toplevel-above-root: standing banner whenever the
+       project root sits inside a larger git repo (the firstRun note above
+       covers only the first launch). Consequence in user terms, both paths
+       named. Dismissal is session-scoped on purpose (the 30033d8 lesson:
+       ✕ means "not now", not "never") — an intentional monorepo subproject
+       re-dismisses per launch or lives with one line. -->
+  <HStack
+    when="{enhanceStatus.value &amp;&amp; enhanceStatus.value.gitToplevel &amp;&amp; !toplevelBannerDismissed}"
+    backgroundColor="$color-warn-100"
+    padding="$space-2"
+    gap="$space-3"
+    wrapContent="true"
+    verticalAlignment="center">
+    <Text fontSize="$fontSize-sm">
+      This folder has no git repository of its own — commits, diffs, and attribution here
+      operate on the enclosing repo
+      <Text inline="true" fontWeight="$fontWeight-bold" value="{enhanceStatus.value.gitToplevel}" />.
+      If that isn't intended, run <Text inline="true" fontFamily="$fontFamily-monospace" value="git init" />
+      in <Text inline="true" fontWeight="$fontWeight-bold" value="{enhanceStatus.value.projectRoot}" />
+      or launch Bram at the repository root.
+    </Text>
+    <SpaceFiller />
+    <Button
+      label="✕"
+      variant="ghost"
+      size="xs"
+      tooltip="Dismiss for this session"
+      onClick="toplevelBannerDismissed = true" />
+  </HStack>
 
   <!-- issue-320: gate on providerNeedsSetup ALONE, not activeProvider. The
        host now answers providerNeedsSetup project-level when no provider is

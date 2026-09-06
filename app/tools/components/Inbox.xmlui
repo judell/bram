@@ -94,6 +94,7 @@
         <Card>
           <VStack gap="$space-1">
             <Text>{$item.title}</Text>
+            <Text when="{$item.activityAt}" fontSize="$fontSize-xs" color="$textColor-secondary">{getDateUntilNow($item.activityAt) + ' ago'}</Text>
             <Text fontSize="$fontSize-sm" color="$textColor-secondary">{$item.detail}</Text>
             <HStack gap="$space-1">
               <Button when="{!$item.externalUrl}" variant="ghost" size="sm" label="Open" onClick="navigate($item.link)" />
@@ -112,6 +113,7 @@
         <Card>
           <VStack gap="$space-1">
             <Text>{$item.title}</Text>
+            <Text when="{$item.activityAt}" fontSize="$fontSize-xs" color="$textColor-secondary">{getDateUntilNow($item.activityAt) + ' ago'}</Text>
             <Text fontSize="$fontSize-sm" color="$textColor-secondary">{$item.detail}</Text>
             <HStack gap="$space-1">
               <Button when="{!$item.externalUrl}" variant="ghost" size="sm" label="Open" onClick="navigate($item.link)" />
@@ -130,6 +132,7 @@
         <Card>
           <VStack gap="$space-1">
             <Text>{$item.title}</Text>
+            <Text when="{$item.activityAt}" fontSize="$fontSize-xs" color="$textColor-secondary">{getDateUntilNow($item.activityAt) + ' ago'}</Text>
             <Text fontSize="$fontSize-sm" color="$textColor-secondary">{$item.detail}</Text>
             <HStack gap="$space-1">
               <Button when="{!$item.externalUrl}" variant="ghost" size="sm" label="Open" onClick="navigate($item.link)" />
@@ -148,6 +151,7 @@
         <Card>
           <VStack gap="$space-1">
             <Text>{$item.title}</Text>
+            <Text when="{$item.activityAt}" fontSize="$fontSize-xs" color="$textColor-secondary">{getDateUntilNow($item.activityAt) + ' ago'}</Text>
             <Text fontSize="$fontSize-sm" color="$textColor-secondary">{$item.detail}</Text>
             <HStack gap="$space-1">
               <Button when="{!$item.externalUrl}" variant="ghost" size="sm" label="Open" onClick="navigate($item.link)" />

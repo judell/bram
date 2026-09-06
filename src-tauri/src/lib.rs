@@ -47099,6 +47099,9 @@ fn local_issue_sweep_items<R: tauri::Runtime>(
                 "blocking": fresh_issue,
                 "verified": true,
                 "activityMarker": marker,
+                // needs-you-row-timestamps: for sweep rows the marker IS a
+                // timestamp; serve it under the display name the pane renders.
+                "activityAt": marker,
             }),
         ));
     }
@@ -47291,7 +47294,7 @@ fn forge_awaiting_items_fetch<R: tauri::Runtime>(
             _ => format!("New reply on {} \u{2014} {}", numbered, title),
         };
         let marker = if latest_comment_url.is_empty() {
-            updated
+            updated.clone()
         } else {
             latest_comment_url
         };
@@ -47300,6 +47303,10 @@ fn forge_awaiting_items_fetch<R: tauri::Runtime>(
             serde_json::json!({
                 "source": "forge",
                 "id": format!("forge-{}", subj_url),
+                // needs-you-row-timestamps: the marker is an identity (often
+                // a comment URL), so the display time is its own field —
+                // the thread's updated_at.
+                "activityAt": updated,
                 "title": headline,
                 "detail": format!("GitHub notification (reason: {}).", reason),
                 "link": "/issues",
@@ -47339,7 +47346,52 @@ fn forge_awaiting_items_fetch<R: tauri::Runtime>(
 // dismiss-forever.
 const NEEDS_YOU_DISMISSED_REL: &str = "resources/.needs-you-dismissed.json";
 
-fn needs_you_dismissed_pairs<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<(String, String)> {
+// needs-you-durable-dismissals: how long a dismissal outlives its thread's
+// absence from the fetch. Retirement is by marker movement (new activity)
+// or this age — never by absence, which proves nothing about the thread
+// (the v1 absence-prune ran per serve, so the post-relaunch warming window
+// — an empty notifications cache — silently forgot every notification
+// dismissal; Jon's 17:27 dismissals resurfaced within hours).
+const NEEDS_YOU_DISMISS_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
+// Pure retention rule: fresh records survive regardless of any fetch
+// state; aged ones retire. Returns (kept, pruned_count).
+fn retain_needs_you_dismissals(
+    records: Vec<(String, String, i64)>,
+    now_ms: i64,
+) -> (Vec<(String, String, i64)>, usize) {
+    let before = records.len();
+    let kept: Vec<(String, String, i64)> = records
+        .into_iter()
+        .filter(|(_, _, at)| now_ms.saturating_sub(*at) < NEEDS_YOU_DISMISS_TTL_MS)
+        .collect();
+    let pruned = before - kept.len();
+    (kept, pruned)
+}
+
+#[cfg(test)]
+mod needs_you_dismissal_retention_tests {
+    use super::{retain_needs_you_dismissals, NEEDS_YOU_DISMISS_TTL_MS};
+
+    #[test]
+    fn fresh_records_survive_and_aged_ones_retire() {
+        let now = 1_788_729_000_000i64;
+        let records = vec![
+            ("forge-issue-341".to_string(), "m1".to_string(), now - 1000),
+            (
+                "forge-old".to_string(),
+                "m2".to_string(),
+                now - NEEDS_YOU_DISMISS_TTL_MS - 1,
+            ),
+        ];
+        let (kept, pruned) = retain_needs_you_dismissals(records, now);
+        assert_eq!(pruned, 1);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].0, "forge-issue-341");
+    }
+}
+
+fn needs_you_dismissed_pairs<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<(String, String, i64)> {
     let Some(root) = project_root(Some(app)) else {
         return Vec::new();
     };
@@ -47353,6 +47405,12 @@ fn needs_you_dismissed_pairs<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<(Stri
                     Some((
                         e.get("id")?.as_str()?.to_string(),
                         e.get("marker")?.as_str()?.to_string(),
+                        // Pre-TTL records (version 1) carry no stamp; treat
+                        // them as dismissed now so the migration costs them
+                        // nothing rather than retiring them on sight.
+                        e.get("dismissedAtMs")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or_else(unix_now_ms),
                     ))
                 })
                 .collect()
@@ -47360,15 +47418,18 @@ fn needs_you_dismissed_pairs<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<(Stri
         .unwrap_or_default()
 }
 
-fn write_needs_you_dismissed<R: tauri::Runtime>(app: &AppHandle<R>, pairs: &[(String, String)]) {
+fn write_needs_you_dismissed<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    pairs: &[(String, String, i64)],
+) {
     let Some(root) = project_root(Some(app)) else {
         return;
     };
     let arr: Vec<serde_json::Value> = pairs
         .iter()
-        .map(|(id, m)| serde_json::json!({ "id": id, "marker": m }))
+        .map(|(id, m, at)| serde_json::json!({ "id": id, "marker": m, "dismissedAtMs": at }))
         .collect();
-    let doc = serde_json::json!({ "version": 1, "dismissed": arr });
+    let doc = serde_json::json!({ "version": 2, "dismissed": arr });
     let path = root.join(NEEDS_YOU_DISMISSED_REL);
     if let Ok(body) = serde_json::to_string_pretty(&doc) {
         let tmp = path.with_extension("json.tmp");
@@ -47405,8 +47466,8 @@ fn handle_needs_you_dismiss<R: tauri::Runtime>(
         );
     }
     let mut pairs = needs_you_dismissed_pairs(app);
-    if !pairs.iter().any(|(i, m)| i == id && m == marker) {
-        pairs.push((id.to_string(), marker.to_string()));
+    if !pairs.iter().any(|(i, m, _)| i == id && m == marker) {
+        pairs.push((id.to_string(), marker.to_string(), unix_now_ms()));
         write_needs_you_dismissed(app, &pairs);
     }
     append_bram_trace_line(
@@ -47502,6 +47563,11 @@ fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str,
                 "id": id,
                 "title": format!("Worklist item \u{201c}{}\u{201d} is ready to commit", id),
                 "detail": detail,
+                // needs-you-row-timestamps: when work began, as display time.
+                "activityAt": item
+                    .get("begunAtMs")
+                    .and_then(|v| v.as_i64())
+                    .map(format_iso_utc_ms),
                 // inbox-open-lands-expanded: deep-link so Open lands on the
                 // target row expanded (Worklist.xmlui consumes ?expand=).
                 "link": format!("/worklist2?expand={}", id),
@@ -47588,10 +47654,6 @@ fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str,
             .collect();
         let mut forge_entries = notif;
         forge_entries.extend(local_issue_sweep_items(app, &notif_numbers));
-        let live_ids: std::collections::HashSet<String> = forge_entries
-            .iter()
-            .filter_map(|(_, v)| v.get("id").and_then(|x| x.as_str()).map(String::from))
-            .collect();
         let mut filtered = 0usize;
         for entry in forge_entries {
             let id = entry.1.get("id").and_then(|v| v.as_str()).unwrap_or("");
@@ -47600,7 +47662,7 @@ fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str,
                 .get("activityMarker")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            if dismissed.iter().any(|(i, m)| i == id && m == marker) {
+            if dismissed.iter().any(|(i, m, _)| i == id && m == marker) {
                 filtered += 1;
                 continue;
             }
@@ -47613,12 +47675,20 @@ fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str,
                 &format!("op=dismiss-filtered n={}", filtered),
             );
         }
-        let kept: Vec<(String, String)> = dismissed
-            .iter()
-            .filter(|(i, _)| live_ids.contains(i))
-            .cloned()
-            .collect();
-        if kept.len() != dismissed.len() {
+        // needs-you-durable-dismissals: retirement by AGE only. The v1
+        // absence-prune ran here and forgot every notification dismissal
+        // during the post-relaunch warming window (empty notifications
+        // cache → ids absent → records dropped), which is how dismissed
+        // rows came back. A record's thread leaving the fetch proves
+        // nothing; a moved marker already resurfaces the row without
+        // touching the record.
+        let (kept, pruned) = retain_needs_you_dismissals(dismissed, unix_now_ms());
+        if pruned > 0 {
+            append_bram_trace_line(
+                app,
+                "needs-you",
+                &format!("op=dismiss-pruned reason=aged n={}", pruned),
+            );
             write_needs_you_dismissed(app, &kept);
         }
     }

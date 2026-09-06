@@ -12935,8 +12935,13 @@ fn run_self_update<R: tauri::Runtime>(app: &AppHandle<R>, tag: &str) {
 
 // Windows rename-swap: a running image cannot be overwritten but can be
 // renamed on the same volume. bram-guard.exe runs only transiently (per hook
-// event), so a brief lock gets a short retry; a persistent guard lock is
-// reported in the error rather than silently half-swapped.
+// event), so a brief lock gets a short retry; a persistent lock is reported
+// in an error naming the paths that actually failed.
+// issue-349: the sidecar name is UNIQUE per swap (timestamp suffix). A fixed
+// `bram.exe.old` collided on the second consecutive update while another
+// instance still ran the pre-update image: the locked sidecar could not be
+// removed, the rename had no destination, and the error blamed `bram.exe`,
+// which was never the blocker.
 #[cfg(windows)]
 fn self_update_windows_swap<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -12952,20 +12957,22 @@ fn self_update_windows_swap<R: tauri::Runtime>(
         }
         let live = install_dir.join(name);
         if live.exists() {
-            let old = install_dir.join(format!("{}.old", name));
-            let _ = std::fs::remove_file(&old);
-            let mut renamed = false;
+            let old = install_dir.join(format!("{}.old-{}", name, unix_now_ms()));
+            let mut result = Ok(());
             for _ in 0..5 {
-                match std::fs::rename(&live, &old) {
-                    Ok(_) => {
-                        renamed = true;
-                        break;
-                    }
-                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(200)),
+                result = std::fs::rename(&live, &old);
+                if result.is_ok() {
+                    break;
                 }
+                std::thread::sleep(std::time::Duration::from_millis(200));
             }
-            if !renamed {
-                return Err(format!("could not move aside locked {}", name));
+            if let Err(e) = result {
+                return Err(format!(
+                    "could not move aside {} (renaming to {}): {}",
+                    live.display(),
+                    old.display(),
+                    e
+                ));
             }
         }
         std::fs::rename(&staged, &live).map_err(|e| format!("place {}: {}", name, e))?;
@@ -12978,14 +12985,23 @@ fn self_update_windows_swap<R: tauri::Runtime>(
 }
 
 // Startup cleanup for the Windows rename-swap leftovers. Best-effort: a
-// still-locked .old (previous process not fully gone) just waits for the
-// next launch.
+// still-locked sidecar (previous process not fully gone) just waits for the
+// next launch. issue-349: sidecar names are unique per swap, so cleanup
+// globs the `.old` prefix instead of naming two fixed files (the legacy
+// fixed names match the same prefix and are swept too).
 #[cfg(windows)]
 fn cleanup_self_update_leftovers() {
     let Some(home) = home_dir() else { return };
     let dir = home.join("bin");
-    for name in ["bram.exe.old", "bram-guard.exe.old"] {
-        let _ = std::fs::remove_file(dir.join(name));
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        if name.starts_with("bram.exe.old") || name.starts_with("bram-guard.exe.old") {
+            let _ = std::fs::remove_file(entry.path());
+        }
     }
 }
 

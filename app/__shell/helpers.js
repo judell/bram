@@ -2676,28 +2676,183 @@ window.__bramFileContextRows = function (content, runs, rowId, items) {
   if (hit && hit.sig === sig && hit.content === text) return hit.rows;
   var ownerAt = function (n) {
     for (var i = 0; i < spans.length; i++) {
-      if (n >= spans[i].startLine && n <= spans[i].endLine) return spans[i].itemId;
+      if (n >= spans[i].startLine && n <= spans[i].endLine) {
+        if (spans[i].itemId) return spans[i].itemId;
+        // joint-interval-files-disambiguation: a shared-claim run still
+        // highlights (neutral tint) — it is a marked passage, just not one
+        // item's.
+        if (spans[i].itemIds) return "__joint";
+        return null;
+      }
     }
     return null;
   };
   var lines = text.split("\n");
   // A trailing newline yields a spurious final empty element; drop it.
   if (lines.length && lines[lines.length - 1] === "") lines.pop();
-  var out = [];
+  var full = [];
   for (var i = 0; i < lines.length; i++) {
     var owner = ownerAt(i + 1);
-    out.push({
+    full.push({
+      k: i + 1,
       n: i + 1,
       text: lines[i],
       owner: owner,
       bg: owner
-        ? window.__bramItemColor(owner, items, owner === rowId ? 100 : 50)
+        ? owner === "__joint"
+          ? "$color-surface-200"
+          : window.__bramItemColor(owner, items, owner === rowId ? 100 : 50)
         : "transparent",
       fg: owner && owner !== rowId ? "$textColor-secondary" : "$textColor-primary",
     });
   }
-  cache[rowId] = { sig: sig, content: text, rows: out };
-  return out;
+  // worklist-file-hunk-navigation: in a large file (lib.rs-sized), the
+  // highlights sit screens apart; elide the unhighlighted stretches into
+  // labeled cut rows so every highlight can come into view. Context lines
+  // survive around each highlight; small gaps are not worth a cut row; a
+  // file with no highlights at all stays whole (a cut would eat everything
+  // and there is nothing to navigate anyway).
+  var ELIDE_MIN_FILE = 400;
+  var CONTEXT = 3;
+  var MIN_GAP = 12;
+  var rows = full;
+  var anyOwned = false;
+  for (var j = 0; j < full.length; j++) {
+    if (full[j].owner) {
+      anyOwned = true;
+      break;
+    }
+  }
+  if (anyOwned && full.length > ELIDE_MIN_FILE) {
+    var keep = new Array(full.length);
+    for (var j2 = 0; j2 < full.length; j2++) {
+      if (full[j2].owner) {
+        for (
+          var c = Math.max(0, j2 - CONTEXT);
+          c <= Math.min(full.length - 1, j2 + CONTEXT);
+          c++
+        ) {
+          keep[c] = true;
+        }
+      }
+    }
+    rows = [];
+    var g = 0;
+    while (g < full.length) {
+      if (keep[g]) {
+        rows.push(full[g]);
+        g += 1;
+        continue;
+      }
+      var gapStart = g;
+      while (g < full.length && !keep[g]) g += 1;
+      var gapLen = g - gapStart;
+      if (gapLen > MIN_GAP) {
+        var a = full[gapStart].n;
+        var b = full[g - 1].n;
+        rows.push({
+          k: "cut-" + a,
+          cut: true,
+          n: "⋯",
+          text: "lines " + a + "–" + b + " (" + gapLen + " lines without highlights)",
+          owner: null,
+          bg: "$color-surface-100",
+          fg: "$textColor-secondary",
+        });
+      } else {
+        for (var e = gapStart; e < g; e++) rows.push(full[e]);
+      }
+    }
+  }
+  cache[rowId] = { sig: sig, content: text, rows: rows };
+  return rows;
+};
+
+// worklist-file-hunk-navigation: highlight blocks in a File-view rows array —
+// the indexes (in the possibly-elided array) where a run of highlighted rows
+// begins. Memoized by array identity: the rows array itself is memoized
+// above, so a WeakMap entry lives exactly as long as its rows do.
+window.__bramFileHighlightBlocks = function (rows) {
+  var memo = (window.__bramFileBlocksMemo = window.__bramFileBlocksMemo || new WeakMap());
+  var list = rows || [];
+  if (memo.has(list)) return memo.get(list);
+  var blocks = [];
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].owner && (i === 0 || !list[i - 1].owner)) blocks.push(i);
+  }
+  if (list.length) memo.set(list, blocks);
+  return blocks;
+};
+window.__bramFileHunkCount = function (rows) {
+  return window.__bramFileHighlightBlocks(rows).length;
+};
+
+// Hunk-navigation cursor state, id-keyed like diffScopes: one map, keys
+// "<rowId>::<path>:<view>", never component-local (the controlled-state
+// discipline; positional reuse in the Items loop would carry a cursor
+// across files).
+window.__bramHunkNavGet = function (map, rowId, path, view) {
+  var v = (map || {})[window.__bramDiffExpansionKey(rowId, path) + ":" + view];
+  return typeof v === "number" ? v : 0;
+};
+window.__bramHunkCount = function (patchText) {
+  var m = String(patchText || "").match(/^@@ -/gm);
+  return m ? m.length : 0;
+};
+// Diff view step: clamp the cursor, scroll via the ACTIVE DiffView's
+// scrollToHunk method (its full mode is a virtualized List — the first cut
+// of this scanned the DOM for "@@" leaves and silently reached nothing,
+// because unmounted rows have no DOM), and return the updated map. Deltas
+// arrive pre-clamped from HunkNav's position-aware enablement; the clamp
+// here is belt and braces.
+window.__bramDiffHunkStep = function (map, rowId, path, delta, patchText, viewRef) {
+  var count = window.__bramHunkCount(patchText);
+  if (!count) return map || {};
+  var cur = window.__bramHunkNavGet(map, rowId, path, "diff");
+  var next = Math.max(0, Math.min(count - 1, cur + delta));
+  if (viewRef && typeof viewRef.scrollToHunk === "function") {
+    viewRef.scrollToHunk(next);
+  } else {
+    window.__bramIframeTrace("hunk-nav", { op: "no-scroll-method", path: String(path) });
+  }
+  return window.__bramMapSet(
+    map,
+    window.__bramDiffExpansionKey(rowId, path) + ":diff",
+    next
+  );
+};
+// The method body behind DiffView.scrollToHunk: nth kind==='hunk' row in the
+// plan, scrolled through the inner List's own API
+// (https://www.xmlui.org/docs/reference/components/List#scrolltoindex).
+window.__bramDiffViewScrollToHunk = function (listRef, plan, n) {
+  var rows = (plan && plan.rows) || [];
+  var seen = 0;
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i].kind === "hunk") {
+      if (seen === n) {
+        if (listRef && listRef.scrollToIndex) listRef.scrollToIndex(i);
+        return true;
+      }
+      seen += 1;
+    }
+  }
+  return false;
+};
+// File view step: same cursor discipline; the target is a virtualized List
+// row, so scrolling goes through the component's own scrollToIndex — a DOM
+// query cannot reach an unmounted row
+// (https://www.xmlui.org/docs/reference/components/List#scrolltoindex).
+window.__bramFileHunkStep = function (map, rowId, path, delta, rows, listRef) {
+  var blocks = window.__bramFileHighlightBlocks(rows);
+  if (!blocks.length) return map || {};
+  var cur = window.__bramHunkNavGet(map, rowId, path, "file");
+  var next = Math.max(0, Math.min(blocks.length - 1, cur + delta));
+  if (listRef && listRef.scrollToIndex) listRef.scrollToIndex(blocks[next]);
+  return window.__bramMapSet(
+    map,
+    window.__bramDiffExpansionKey(rowId, path) + ":file",
+    next
+  );
 };
 
 window.__bramOwnershipRows = function (patch, runs) {

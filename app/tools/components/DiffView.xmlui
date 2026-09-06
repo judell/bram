@@ -16,6 +16,12 @@
        painted occurrences agree. -->
   <variable name="diffFindPlan"
     value="{window.__bramDiffFindPlan(diffViewRows(annotate.value, $props.text), $props.needle, $props.activeIndex, $props.expectedMatchCount)}" />
+  <!-- worklist-file-hunk-navigation: scroll the nth hunk header into view.
+       The plan's rows are 1:1 with patch lines (kind 'hunk' marks headers),
+       and the full-mode List virtualizes, so the scroll must ride the
+       component's own scrollToIndex — DOM queries cannot reach unmounted
+       rows. Compact mode has no List; the helper no-ops there. -->
+  <method name="scrollToHunk">(n) => window.__bramDiffViewScrollToHunk(diffRowsList, diffFindPlan, n)</method>
   <!-- backgroundColor-mark-diff{Add,Del}-Text below are the word-diff
        emphasis colours, resolved by Text from the segment's `variant`
        (xmlui-org/xmlui#3782). Two names rather than one because the

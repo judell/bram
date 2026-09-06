@@ -3,6 +3,7 @@
   var.expandedKeys="{window.__bramRestoreWorklist2Expansion($queryParams.expand)}"
   var.diffKeys="{[]}"
   var.diffScopes="{{}}"
+  var.hunkNavKeys="{{}}"
   var.worklist2Feedback="{{}}"
   var.worklist2NewItemOpen="{false}"
   var.worklist2NewItemIssue="{null}"
@@ -691,10 +692,23 @@
                               </property>
                             </Select>
                           </HStack>
+                          <!-- worklist-file-hunk-navigation: step through the
+                               ACTIVE patch's hunks (the scope selector decides
+                               which patch renders, so nav counts the same
+                               capped text the DiffView shows). Cursor is
+                               id-keyed in hunkNavKeys; scroll finds the hunk
+                               header inside the wrapper below. -->
+                          <HunkNav
+                            when="{window.__bramHunkCount(cappedDiffText(fileScope === '__all' ? filePatch : ((scopedDiff.value || {}).patch || ''))) > 0}"
+                            matchCount="{window.__bramHunkCount(cappedDiffText(fileScope === '__all' ? filePatch : ((scopedDiff.value || {}).patch || '')))}"
+                            current="{window.__bramHunkNavGet(hunkNavKeys, rowId, $item.path, 'diff')}"
+                            onStep="(d) => hunkNavKeys = window.__bramDiffHunkStep(hunkNavKeys, rowId, $item.path, d, cappedDiffText(fileScope === '__all' ? filePatch : ((scopedDiff.value || {}).patch || '')), fileScope === '__all' ? diffAllView : diffScopedView)" />
                           <DiffView
+                            id="diffAllView"
                             when="{fileScope === '__all'}"
                             text="{cappedDiffText(filePatch)}" />
                           <DiffView
+                            id="diffScopedView"
                             when="{fileScope !== '__all' &amp;&amp; !!(scopedDiff.value &amp;&amp; scopedDiff.value.patch)}"
                             text="{cappedDiffText(scopedDiff.value.patch)}" />
                           <Text
@@ -760,7 +774,23 @@
                           url="{'/__local-file-preview?path=' + encodeURIComponent($item.path)}" />
                         <VStack
                           when="{fileContext.value &amp;&amp; fileContext.value.ok}"
-                          gap="$space-0">
+                          gap="$space-0"
+                          var.ctxRows="{window.__bramFileContextRows(fileContext.value.content, fileRuns, rowId, worklist.value &amp;&amp; worklist.value.items)}">
+                          <!-- worklist-file-hunk-navigation: step through the
+                               highlight blocks. The List virtualizes, so the
+                               step helper scrolls via scrollToIndex on the
+                               component ref — a DOM query cannot reach an
+                               unmounted row
+                               (https://www.xmlui.org/docs/reference/components/List#scrolltoindex).
+                               Large files arrive already elided: unhighlighted
+                               stretches collapse into labeled cut rows in
+                               __bramFileContextRows, so every block is nearby. -->
+                          <HunkNav
+                            when="{window.__bramFileHunkCount(ctxRows) > 0}"
+                            noun="highlight"
+                            matchCount="{window.__bramFileHunkCount(ctxRows)}"
+                            current="{window.__bramHunkNavGet(hunkNavKeys, rowId, $item.path, 'file')}"
+                            onStep="(d) => hunkNavKeys = window.__bramFileHunkStep(hunkNavKeys, rowId, $item.path, d, ctxRows, fileCtxList)" />
                           <!-- worklist2-file-tab-rerender-blowup: List, not
                                Items — Items re-renders every element on every
                                render and is documented for <~100 items
@@ -772,8 +802,9 @@
                                array identity) so no per-row binding touches
                                worklist.value. -->
                           <List
-                            data="{window.__bramFileContextRows(fileContext.value.content, fileRuns, rowId, worklist.value &amp;&amp; worklist.value.items)}"
-                            idKey="n"
+                            id="fileCtxList"
+                            data="{ctxRows}"
+                            idKey="k"
                             height="24rem">
                             <HStack
                               width="100%"

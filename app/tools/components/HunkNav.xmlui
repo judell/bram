@@ -1,0 +1,30 @@
+<Component name="HunkNav">
+  <!-- worklist-file-hunk-navigation: the FindBar's jump/step cluster
+       (⤒ ▲ ▼ ⤓ + counter) without the needle box, for stepping through a
+       diff's hunks or a file view's highlight blocks. Same step(delta)
+       contract and position-aware enablement as FindBar (findbar-first-last):
+       the host owns the cursor state and the scroll target; deltas are
+       computed so first lands on 0 and last on n-1 exactly.
+       props   matchCount, current (0-based), noun (defaults to 'hunk')
+       events  step(delta) -->
+  <HStack gap="$space-1" verticalAlignment="center">
+    <Button size="xs" variant="outlined" label="⤒"
+      enabled="{($props.matchCount || 0) > 0 &amp;&amp; ($props.current || 0) > 0}"
+      tooltip="First {$props.noun || 'hunk'}"
+      onClick="emitEvent('step', -($props.current || 0))" />
+    <Button size="xs" variant="outlined" label="▲"
+      enabled="{($props.matchCount || 0) > 0 &amp;&amp; ($props.current || 0) > 0}"
+      tooltip="Previous {$props.noun || 'hunk'}"
+      onClick="emitEvent('step', -1)" />
+    <Button size="xs" variant="outlined" label="▼"
+      enabled="{($props.matchCount || 0) > 0 &amp;&amp; ($props.current || 0) < ($props.matchCount || 0) - 1}"
+      tooltip="Next {$props.noun || 'hunk'}"
+      onClick="emitEvent('step', 1)" />
+    <Button size="xs" variant="outlined" label="⤓"
+      enabled="{($props.matchCount || 0) > 0 &amp;&amp; ($props.current || 0) < ($props.matchCount || 0) - 1}"
+      tooltip="Last {$props.noun || 'hunk'}"
+      onClick="emitEvent('step', ($props.matchCount || 0) - 1 - ($props.current || 0))" />
+    <Text fontSize="$fontSize-sm" color="$textColor-secondary"
+      value="{($props.matchCount || 0) ? (($props.current || 0) + 1) + ' / ' + $props.matchCount + ' ' + ($props.noun || 'hunk') + 's' : ''}" />
+  </HStack>
+</Component>

@@ -40490,6 +40490,30 @@ fn interval_stage_commit<R: tauri::Runtime>(
         return Err(format!("update-ref failed: {}", e));
     }
     cleanup();
+    // issue-357: update-ref moved HEAD but the REAL index still holds
+    // pre-commit blobs for every path this commit touched, so each reads
+    // `MM` in git status and the next plain worklist-commit refuses on
+    // "unrelated files are staged" — phantom staging with zero real work
+    // (live case: bd4f3d8 then the #355 commit, refused on a clean-worktree
+    // guard_policy.rs). Refresh exactly the committed paths — the automated
+    // form of the manual `git reset -- <paths>` recovery; the worktree (the
+    // neighbour's uncommitted hunks) is untouched. Failure is traced, not
+    // fatal: the commit is already real, and the stale index is a hazard
+    // the next commit's refusal names.
+    {
+        let mut args: Vec<&str> = vec!["reset", "-q", "--"];
+        args.extend(committed.iter().map(|s| s.as_str()));
+        if let Err(e) = git_run(app, &args) {
+            append_bram_trace_line(
+                app,
+                "worklist-commit",
+                &format!(
+                    "op=interval-index-refresh-failed detail={}",
+                    e.replace(['\n', '\r'], " ")
+                ),
+            );
+        }
+    }
     if bram_trace_enabled() {
         append_bram_trace_line(
             app,

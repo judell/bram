@@ -46212,6 +46212,126 @@ fn spawn_forge_awaiting_refresher(app: AppHandle) {
 // settings don't cover "all activity" (#343 arrived invisibly this way).
 // Freshness rides the indexer (~45s) and the pane's existing
 // issues-changed refetch; your reply self-clears on the next index pass.
+// awaiting-cross-machine-agent-moves: this machine's identity for signature
+// classification — platform constant plus short hostname, cached.
+fn local_machine_identity() -> (&'static str, &'static str) {
+    const OS: &str = if cfg!(target_os = "macos") {
+        "macOS"
+    } else if cfg!(windows) {
+        "Windows"
+    } else {
+        "Linux"
+    };
+    static HOST: OnceLock<String> = OnceLock::new();
+    let host = HOST.get_or_init(|| {
+        if cfg!(windows) {
+            std::env::var("COMPUTERNAME").unwrap_or_default()
+        } else {
+            std::process::Command::new("hostname")
+                .arg("-s")
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default()
+        }
+    });
+    (OS, host.as_str())
+}
+
+// awaiting-cross-machine-agent-moves: classify a same-account move by its
+// signature. Every agent posts through the owner's forge account, and
+// GitHub sends no notifications for one's own comments — so an agent on
+// ANOTHER machine was structurally invisible to this surface (live case:
+// the #346 endgame report landed while the pane was watched for it). The
+// signature's os/machine slots are the machine-readable provenance:
+//   unsigned                        → the human typed it → own move
+//   signed, machine == this host    → this machine's agent → own side
+//   signed, machine != this host    → your agent elsewhere → SURFACE
+//   signed, no machine, os differs  → elsewhere (three-slot fallback)
+//   signed, no machine, os matches / two-slot → own side (honest default
+//   for historical forms; never surface on a guess)
+// Returns Some((os-or-"", model)) when the move is foreign.
+fn cross_machine_agent_move(body: &str) -> Option<(String, String)> {
+    let first = body.lines().find(|l| !l.trim().is_empty())?;
+    let sig = guard_policy::parse_agent_signature(first)?;
+    let (local_os, local_host) = local_machine_identity();
+    let foreign = match sig.machine {
+        Some(m) => !local_host.is_empty() && !m.eq_ignore_ascii_case(local_host),
+        None => match sig.os {
+            Some(o) => !o.eq_ignore_ascii_case(local_os),
+            None => false,
+        },
+    };
+    if foreign {
+        Some((
+            sig.machine
+                .or(sig.os)
+                .unwrap_or("another machine")
+                .to_string(),
+            sig.model.to_string(),
+        ))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod cross_machine_agent_tests {
+    use super::{cross_machine_agent_move, local_machine_identity};
+
+    fn sig(standing: &str) -> String {
+        format!(
+            "Jon's Claude ({}) speaking from the Bram project (github.com/judell/bram):\n\nBody.",
+            standing
+        )
+    }
+
+    #[test]
+    fn classifies_by_machine_then_os_and_defaults_to_own() {
+        let (local_os, local_host) = local_machine_identity();
+        let foreign_os = if local_os == "Windows" {
+            "macOS"
+        } else {
+            "Windows"
+        };
+        // Four-slot, foreign hostname → surfaces, machine named.
+        let got = cross_machine_agent_move(&sig(&format!(
+            "main thread, Opus 5, {}, definitely-not-this-host",
+            foreign_os
+        )));
+        assert_eq!(
+            got,
+            Some(("definitely-not-this-host".to_string(), "Opus 5".to_string()))
+        );
+        // Four-slot, THIS hostname → own side (skip when hostname unknown).
+        if !local_host.is_empty() {
+            assert_eq!(
+                cross_machine_agent_move(&sig(&format!(
+                    "main thread, Fable 5, {}, {}",
+                    local_os, local_host
+                ))),
+                None
+            );
+        }
+        // Three-slot fallback: foreign OS surfaces, local OS stays filtered.
+        assert_eq!(
+            cross_machine_agent_move(&sig(&format!("main thread, Opus 5, {}", foreign_os))),
+            Some((foreign_os.to_string(), "Opus 5".to_string()))
+        );
+        assert_eq!(
+            cross_machine_agent_move(&sig(&format!("main thread, Fable 5, {}", local_os))),
+            None
+        );
+        // Two-slot historical form and unsigned prose: never surfaced on a
+        // guess.
+        assert_eq!(cross_machine_agent_move(&sig("main thread, Opus 5")), None);
+        assert_eq!(
+            cross_machine_agent_move("Real Jon speaking. Ship it."),
+            None
+        );
+    }
+}
+
 fn local_issue_sweep_items<R: tauri::Runtime>(
     app: &AppHandle<R>,
     skip_numbers: &std::collections::HashSet<u64>,
@@ -46265,8 +46385,37 @@ fn local_issue_sweep_items<R: tauri::Runtime>(
         } else {
             author
         };
-        if last.is_empty() || last.eq_ignore_ascii_case(&login) {
+        if last.is_empty() {
             continue;
+        }
+        // awaiting-cross-machine-agent-moves: a move by the local login used
+        // to be filtered unconditionally — which made an agent posting from
+        // ANOTHER machine (through the same account) structurally invisible
+        // here, and GitHub sends no notification for one's own comments, so
+        // the other source could not see it either. The signature's
+        // os/machine slots classify it: only signed moves from elsewhere
+        // surface; the human's own comments and this machine's agent stay
+        // filtered.
+        let mut cross_machine: Option<(String, String)> = None;
+        if last.eq_ignore_ascii_case(&login) {
+            let latest_body = if n_comments > 0 {
+                rec.get("comments")
+                    .and_then(|v| v.as_array())
+                    .and_then(|arr| {
+                        arr.iter()
+                            .filter_map(|c| {
+                                Some((c.get("createdAt")?.as_str()?, c.get("body")?.as_str()?))
+                            })
+                            .max_by(|a, b| a.0.cmp(b.0))
+                            .map(|(_, b)| b)
+                    })
+            } else {
+                rec.get("body").and_then(|v| v.as_str())
+            };
+            cross_machine = latest_body.and_then(cross_machine_agent_move);
+            if cross_machine.is_none() {
+                continue;
+            }
         }
         let title = rec.get("title").and_then(|v| v.as_str()).unwrap_or("");
         let url = rec.get("url").and_then(|v| v.as_str()).unwrap_or("");
@@ -46283,10 +46432,34 @@ fn local_issue_sweep_items<R: tauri::Runtime>(
         } else {
             NeedsYouLane::YourDecision
         };
-        let headline = if fresh_issue {
-            format!("New issue #{} \u{2014} {}", number, title)
+        let (headline, detail) = if let Some((machine, model)) = &cross_machine {
+            trace_cross_machine_agent_move(app, number, machine, &marker);
+            (
+                if fresh_issue {
+                    format!(
+                        "Your {} agent filed #{} \u{2014} {}",
+                        machine, number, title
+                    )
+                } else {
+                    format!(
+                        "Your {} agent replied on #{} \u{2014} {}",
+                        machine, number, title
+                    )
+                },
+                format!(
+                    "Signed by your agent on {} ({}) — same account, different machine.",
+                    machine, model
+                ),
+            )
         } else {
-            format!("New reply on #{} (open) \u{2014} {}", number, title)
+            (
+                if fresh_issue {
+                    format!("New issue #{} \u{2014} {}", number, title)
+                } else {
+                    format!("New reply on #{} (open) \u{2014} {}", number, title)
+                },
+                format!("{} moved last.", last),
+            )
         };
         out.push((
             lane,
@@ -46294,7 +46467,7 @@ fn local_issue_sweep_items<R: tauri::Runtime>(
                 "source": "forge",
                 "id": format!("forge-issue-{}", number),
                 "title": headline,
-                "detail": format!("{} moved last.", last),
+                "detail": detail,
                 "link": "/issues",
                 "externalUrl": url,
                 "court": "user",
@@ -46305,6 +46478,33 @@ fn local_issue_sweep_items<R: tauri::Runtime>(
         ));
     }
     out
+}
+
+// One line per (issue, activity marker) — the sweep runs on the serve's hot
+// path, and the state persists until the user replies.
+fn trace_cross_machine_agent_move<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    number: u64,
+    machine: &str,
+    marker: &str,
+) {
+    static TRACED: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    let key = format!("{}|{}", number, marker);
+    let fresh = TRACED
+        .get_or_init(|| Mutex::new(Default::default()))
+        .lock()
+        .map(|mut s| s.insert(key))
+        .unwrap_or(false);
+    if fresh {
+        append_bram_trace_line(
+            app,
+            "needs-you",
+            &format!(
+                "op=cross-machine-agent issue={} machine={}",
+                number, machine
+            ),
+        );
+    }
 }
 
 fn forge_awaiting_items_fetch<R: tauri::Runtime>(

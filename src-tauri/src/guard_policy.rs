@@ -1455,7 +1455,22 @@ fn expected_repo_locator(cwd: &Path) -> Option<String> {
     normalize_repo_locator(&String::from_utf8_lossy(&output.stdout))
 }
 
-fn signature_line_locator(line: &str) -> Option<&str> {
+// awaiting-cross-machine-agent-moves: the parsed agent signature, shared
+// with the Awaiting You sweep in lib.rs — one grammar, two consumers. The
+// standing slots after thread and model are optional and positional:
+// `<os>` (added 2026-09-05, #346 legibility) then `<machine>` (the short
+// hostname, added same day so two same-OS machines are distinguishable and
+// the sweep can classify same-account comments exactly). Older two- and
+// three-slot signatures parse with the trailing fields None.
+pub(crate) struct AgentSignature<'a> {
+    pub(crate) thread: &'a str,
+    pub(crate) model: &'a str,
+    pub(crate) os: Option<&'a str>,
+    pub(crate) machine: Option<&'a str>,
+    pub(crate) locator: &'a str,
+}
+
+pub(crate) fn parse_agent_signature(line: &str) -> Option<AgentSignature<'_>> {
     let line = line
         .trim()
         .trim_start_matches(|ch| matches!(ch, '_' | '*' | '>' | '#' | '-' | ' '))
@@ -1469,16 +1484,30 @@ fn signature_line_locator(line: &str) -> Option<&str> {
         return None;
     }
     let (standing, rest) = rest.split_once(") speaking from the ")?;
-    let (thread, model) = standing.split_once(", ")?;
-    if !matches!(thread, "main thread" | "subagent") || model.trim().is_empty() {
+    let mut slots = standing.split(", ");
+    let thread = slots.next()?.trim();
+    let model = slots.next()?.trim();
+    if !matches!(thread, "main thread" | "subagent") || model.is_empty() {
         return None;
     }
+    let os = slots.next().map(str::trim).filter(|s| !s.is_empty());
+    let machine = slots.next().map(str::trim).filter(|s| !s.is_empty());
     let rest = rest.strip_suffix("):")?;
     let (project, locator) = rest.rsplit_once(" project (")?;
     if project.trim().is_empty() || locator.trim().is_empty() {
         return None;
     }
-    Some(locator.trim())
+    Some(AgentSignature {
+        thread,
+        model,
+        os,
+        machine,
+        locator: locator.trim(),
+    })
+}
+
+fn signature_line_locator(line: &str) -> Option<&str> {
+    parse_agent_signature(line).map(|s| s.locator)
 }
 
 /// True iff the first non-empty line carries the full canonical signature and
@@ -2280,7 +2309,7 @@ fn bash_branch(payload: &Value) -> ShadowVerdict {
             "Bash",
             &preview,
             &cwd_s,
-            "This agent-authored forge artifact lacks the full repository-qualified signature.\nOpen the first line with:\n    <owner>'s <Agent> (<thread>, <model>, <os>) speaking from the <Project> project (<origin-host>/<path>):\nSee conventions.md, 'Signing agent-authored forge artifacts' — every artifact, every comment, not just the first in a thread.",
+            "This agent-authored forge artifact lacks the full repository-qualified signature.\nOpen the first line with:\n    <owner>'s <Agent> (<thread>, <model>, <os>, <machine>) speaking from the <Project> project (<origin-host>/<path>):\nSee conventions.md, 'Signing agent-authored forge artifacts' — every artifact, every comment, not just the first in a thread.",
         );
     }
     let (sha_verdict, sha_detail) = forge_sha_verdict(&command, &cwd);
@@ -3888,7 +3917,7 @@ Use --body-file - (stdin) or --body-file <path> instead.\nDetected: <match>",
     }
     if cb_verdict == "unsigned" {
         return codex_deny(
-            "This agent-authored forge artifact lacks the full repository-qualified signature.\nOpen the first line with:\n    <owner>'s <Agent> (<thread>, <model>, <os>) speaking from the <Project> project (<origin-host>/<path>):\nSee conventions.md, 'Signing agent-authored forge artifacts' — every artifact, every comment, not just the first in a thread.",
+            "This agent-authored forge artifact lacks the full repository-qualified signature.\nOpen the first line with:\n    <owner>'s <Agent> (<thread>, <model>, <os>, <machine>) speaking from the <Project> project (<origin-host>/<path>):\nSee conventions.md, 'Signing agent-authored forge artifacts' — every artifact, every comment, not just the first in a thread.",
             "-",
         );
     }
@@ -5507,7 +5536,7 @@ mod guard_policy_tests {
         assert_eq!(v.reason, "crossboundary-unsigned");
         assert_eq!(
             body_of(&v),
-            "This agent-authored forge artifact lacks the full repository-qualified signature.\nOpen the first line with:\n    <owner>'s <Agent> (<thread>, <model>, <os>) speaking from the <Project> project (<origin-host>/<path>):\nSee conventions.md, 'Signing agent-authored forge artifacts' — every artifact, every comment, not just the first in a thread."
+            "This agent-authored forge artifact lacks the full repository-qualified signature.\nOpen the first line with:\n    <owner>'s <Agent> (<thread>, <model>, <os>, <machine>) speaking from the <Project> project (<origin-host>/<path>):\nSee conventions.md, 'Signing agent-authored forge artifacts' — every artifact, every comment, not just the first in a thread."
         );
 
         let at = '@';

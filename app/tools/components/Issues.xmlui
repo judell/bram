@@ -234,7 +234,22 @@
                 value="{$item.state === 'OPEN' ? 'open' : 'closed'}" />
             </HStack>
             <HStack width="150px" verticalAlignment="center">
-              <Text fontSize="$fontSize-sm" color="$textColor-secondary" maxLines="1"
+              <!-- issues-bram-referenced-legible: the referenced tier links its
+                   citing commit on the forge (404s until pushed, heals on push —
+                   the History-tab convention) and carries the commit's subject
+                   and date as the hover tooltip. Other tiers stay plain text. -->
+              <Link
+                when="{$item.bramStateCommit &amp;&amp; repoOrigin.value &amp;&amp; repoOrigin.value.htmlBase}"
+                noIndicator
+                tooltip="{$item.bramStateDetail}"
+                onClick="openExternal(repoOrigin.value.htmlBase + '/commit/' + $item.bramStateCommit)">
+                <Text fontSize="$fontSize-sm" color="$textColor-secondary" maxLines="1"
+                  value="{$item.bramState}" />
+              </Link>
+              <Text
+                when="{!($item.bramStateCommit &amp;&amp; repoOrigin.value &amp;&amp; repoOrigin.value.htmlBase)}"
+                fontSize="$fontSize-sm" color="$textColor-secondary" maxLines="1"
+                tooltip="{$item.bramStateDetail}"
                 value="{$item.bramState || '—'}" />
             </HStack>
             <VStack width="*" gap="0">

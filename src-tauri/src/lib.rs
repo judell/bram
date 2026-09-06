@@ -13354,6 +13354,17 @@ mod issue_link_tests {
     }
 
     #[test]
+    fn referenced_cite_detail_reads_human() {
+        let c = super::ReferencedCite {
+            sha: "a".repeat(40),
+            short: "aaa0327".to_string(),
+            subject: "Subject line".to_string(),
+            date: "2026-09-06".to_string(),
+        };
+        assert_eq!(c.detail(), "cited by aaa0327 \"Subject line\" (2026-09-06)");
+    }
+
+    #[test]
     fn links_by_id_prefix_and_closes_issues_without_false_positives() {
         let both = serde_json::json!({
             "id": "issue-352-direct-edit-grant-own-slot",
@@ -13407,6 +13418,27 @@ fn extract_issue_refs(text: &str) -> Vec<u64> {
     out
 }
 
+// One citing commit for the referenced tier: enough to render a legible,
+// linkable cell (issues-bram-referenced-legible — the first cut served a
+// bare short SHA, inscrutable in a scanning column and unverifiable from
+// the issue side until the commit is pushed).
+#[derive(Clone)]
+struct ReferencedCite {
+    sha: String,
+    short: String,
+    subject: String,
+    date: String,
+}
+
+impl ReferencedCite {
+    fn detail(&self) -> String {
+        format!(
+            "cited by {} \"{}\" ({})",
+            self.short, self.subject, self.date
+        )
+    }
+}
+
 // Tier 4, lowest precedence (issues-bram-column-referenced-tier): commits
 // whose message cites "#N" with no declared link anywhere. Field case: #339's
 // work landed via e2636ec and #345 was cited by a10f9c1, yet both rendered
@@ -13417,8 +13449,8 @@ fn extract_issue_refs(text: &str) -> Vec<u64> {
 // changes when a commit lands.
 fn referenced_issue_commit_map<R: tauri::Runtime>(
     app: &AppHandle<R>,
-) -> std::collections::HashMap<u64, String> {
-    static CACHE: OnceLock<Mutex<(String, std::collections::HashMap<u64, String>)>> =
+) -> std::collections::HashMap<u64, ReferencedCite> {
+    static CACHE: OnceLock<Mutex<(String, std::collections::HashMap<u64, ReferencedCite>)>> =
         OnceLock::new();
     let head = git_run(app, &["rev-parse", "HEAD"])
         .map(|s| s.trim().to_string())
@@ -13433,17 +13465,27 @@ fn referenced_issue_commit_map<R: tauri::Runtime>(
         }
     }
     let mut map = std::collections::HashMap::new();
-    if let Ok(out) = git_run(app, &["log", "-n2000", "--format=%h%x00%B%x1e"]) {
+    if let Ok(out) = git_run(
+        app,
+        &["log", "-n2000", "--format=%H%x00%h%x00%as%x00%s%x00%B%x1e"],
+    ) {
         for rec in out.split('\u{1e}') {
-            let mut parts = rec.splitn(2, '\u{0}');
+            let mut parts = rec.splitn(5, '\u{0}');
             let sha = parts.next().unwrap_or("").trim().to_string();
+            let short = parts.next().unwrap_or("").trim().to_string();
+            let date = parts.next().unwrap_or("").trim().to_string();
+            let subject = parts.next().unwrap_or("").trim().to_string();
             let body = parts.next().unwrap_or("");
             if sha.is_empty() {
                 continue;
             }
             for n in extract_issue_refs(body) {
-                map.entry(n)
-                    .or_insert_with(|| format!("referenced {}", sha));
+                map.entry(n).or_insert_with(|| ReferencedCite {
+                    sha: sha.clone(),
+                    short: short.clone(),
+                    subject: subject.clone(),
+                    date: date.clone(),
+                });
             }
         }
     }
@@ -13458,7 +13500,10 @@ fn bram_issue_lifecycle_map<R: tauri::Runtime>(
 ) -> std::collections::HashMap<u64, String> {
     // Precedence by overwrite order: referenced (weakest) is laid down first
     // and every stronger tier replaces it.
-    let mut map = referenced_issue_commit_map(app);
+    let mut map: std::collections::HashMap<u64, String> = referenced_issue_commit_map(app)
+        .keys()
+        .map(|n| (*n, "referenced".to_string()))
+        .collect();
     map.extend(history_committed_issue_map(app));
     if let Some(path) = issue_close_queue_file(app) {
         for r in read_pending_issue_closes(&path) {
@@ -13549,6 +13594,10 @@ fn attach_bram_issue_states<R: tauri::Runtime>(app: &AppHandle<R>, bytes: Vec<u8
     if map.is_empty() {
         return bytes;
     }
+    // issues-bram-referenced-legible: rows whose surviving label is the
+    // referenced tier also carry the citing commit (full SHA for the link)
+    // and a human detail line for the tooltip.
+    let cites = referenced_issue_commit_map(app);
     for row in arr.iter_mut() {
         let Some(n) = row.get("number").and_then(|v| v.as_u64()) else {
             continue;
@@ -13559,6 +13608,18 @@ fn attach_bram_issue_states<R: tauri::Runtime>(app: &AppHandle<R>, bytes: Vec<u8
                     "bramState".to_string(),
                     serde_json::Value::String(label.clone()),
                 );
+                if label == "referenced" {
+                    if let Some(cite) = cites.get(&n) {
+                        obj.insert(
+                            "bramStateCommit".to_string(),
+                            serde_json::Value::String(cite.sha.clone()),
+                        );
+                        obj.insert(
+                            "bramStateDetail".to_string(),
+                            serde_json::Value::String(cite.detail()),
+                        );
+                    }
+                }
             }
         }
     }

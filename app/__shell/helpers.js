@@ -704,17 +704,32 @@ window.recordWorklistActionAuthorization = function (payload) {
     });
 };
 
+// issue-350-gate-click-brackets: synchronous stage marks via the IPC trace
+// channel (logToHost dispatches before a renderer death that follows it —
+// the describe-patch precedent). #350's two freezes died inside this
+// pipeline with no evidence; a freeze now names its last completed stage.
+// Notably: occurrence 1 left a host-side auth record with no sentinel —
+// under these brackets that reads as submit-begin + missing auth-recorded,
+// pinning the death to the invoke continuation.
 window.submitAuthorizedWorklistTurn = function (result, onFailure) {
   result = result || {};
   var payload = result.authorizationPayload || null;
   var turnText = result.turnText || "";
+  window.__bramIframeTrace("gate-click", {
+    stage: "submit-begin",
+    hasAuth: !!payload,
+    textLength: turnText.length,
+  });
   if (!payload) {
     if (turnText) window.toTurn(turnText);
+    window.__bramIframeTrace("gate-click", { stage: "submit-end", via: "no-auth" });
     return;
   }
   window.recordWorklistActionAuthorization(payload).then(function (ok) {
+    window.__bramIframeTrace("gate-click", { stage: ok ? "auth-recorded" : "auth-failed" });
     if (ok && turnText) window.toTurn(turnText);
     if (!ok && typeof onFailure === "function") onFailure();
+    window.__bramIframeTrace("gate-click", { stage: "submit-end", via: ok ? "auth" : "auth-failed" });
   });
 };
 // sendKeys writes raw bytes to the PTY with NO trailing newline (unlike
@@ -4604,6 +4619,7 @@ window.__bramWorklist2BatchIterate = function (ids, text) {
   // the agent) read files that exist.
   var list = ids || [];
   var body = text || "";
+  window.__bramIframeTrace("gate-click", { stage: "prep-begin", scope: "iterate", count: list.length });
   var now = Date.now();
   var writes = list.map(function (id) {
     var ref = now + "-" + id;
@@ -4614,6 +4630,7 @@ window.__bramWorklist2BatchIterate = function (ids, text) {
     });
   });
   return Promise.all(writes).then(function (items) {
+    window.__bramIframeTrace("gate-click", { stage: "prep-end", scope: "iterate" });
     var r = {
       turnText: "iterate: " + JSON.stringify({ items: items }),
       authorizationPayload: null,
@@ -4694,6 +4711,7 @@ window.__bramSelectionIds = function (items, sel, status) {
 
 window.__bramPrepareBatchWorklistActionSubmission = function (opts) {
   opts = opts || {};
+  window.__bramIframeTrace("gate-click", { stage: "prep-begin", scope: "batch" });
   var items = opts.items || [];
   var kind = opts.kind === "drop" ? "drop" : "approved";
   var sel = opts.selectedIds && opts.selectedIds.length ? opts.selectedIds : null;
@@ -4709,6 +4727,7 @@ window.__bramPrepareBatchWorklistActionSubmission = function (opts) {
   var authItems = kind === "drop"
     ? window.__bramBuildBatchDropItems(items, feedback, sel)
     : window.__bramBuildBatchApproveItems(items, feedback, sel, opts.oneShot, opts.closeMap);
+  window.__bramIframeTrace("gate-click", { stage: "prep-end", scope: "batch", kind: kind });
   return {
     turnText: (kind === "drop" ? "drop: " : "approved: ") + (
       kind === "drop"
@@ -5173,6 +5192,7 @@ window.__bramPrepareWorklistMessageSubmission = function (opts) {
 
 window.__bramPrepareWorklistActionSubmission = function (opts) {
   opts = opts || {};
+  window.__bramIframeTrace("gate-click", { stage: "prep-begin", scope: "single", kind: opts.kind || opts.payloadKind || "" });
   window.__bramWorklistActionSubmissionSeq = (window.__bramWorklistActionSubmissionSeq || 0) + 1;
   var seq = window.__bramWorklistActionSubmissionSeq;
   var kind = opts.kind || "";
@@ -5233,6 +5253,7 @@ window.__bramPrepareWorklistActionSubmission = function (opts) {
   }
 
   var pasteState = window.__bramPasteStateSnapshot(opts.voiceTarget || "message-agent");
+  window.__bramIframeTrace("gate-click", { stage: "prep-end", scope: "single", kind: kind });
   return {
     seq: seq,
     feedback: feedback,

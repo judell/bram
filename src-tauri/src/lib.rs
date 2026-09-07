@@ -31131,6 +31131,164 @@ fn st_subagent_finished(jsonl_path: &Path) -> bool {
     false
 }
 
+// issue-244: the tail heuristic above can misreport `finished` — a subagent
+// whose last visible content is a bare text block reads as finished even
+// when it is actually paused awaiting ITS OWN background work (a nested
+// async Task/Bash dispatch), because the text block was just an interim
+// remark, not a final answer. The only signal that cannot lie about
+// completion is the PARENT transcript recording the Task's own result: a
+// `<task-notification>` block whose `<task-id>` names this subagent's
+// agentId, delivered when Claude Code's task queue resolves the dispatch
+// (statuses observed in the field: completed, killed, stopped — all mean
+// the Task call itself has ended, so any of them counts). This is
+// deliberately a raw substring scan over the parent session's raw JSONL
+// bytes rather than a per-line JSON parse: the notification's `content` is
+// a bare string (not the usual tool_result content-block array), so a
+// plain text search is simpler than schema-matching two different record
+// shapes (the `queue-operation` enqueue record and the delivered `user`
+// turn), and it's proven directly against real transcripts under
+// ~/.claude/projects/-Users-jonudell-bram/ (issue-244 investigation).
+fn st_parent_agent_task_finished(session_text: &str, agent_id: &str) -> bool {
+    if agent_id.is_empty() {
+        return false;
+    }
+    let marker = format!("<task-id>{}</task-id>", agent_id);
+    let mut idx = 0usize;
+    while let Some(rel) = session_text
+        .get(idx..)
+        .and_then(|s| s.find(marker.as_str()))
+    {
+        let abs = idx + rel;
+        // Require the id to actually sit inside a <task-notification>...
+        // </task-notification> block (bounded lookback/lookahead — these
+        // blocks run at most a few KB) rather than trusting a bare
+        // substring match, since unrelated notification kinds (e.g.
+        // artifact-auto-react) share the outer tag family without a
+        // <task-id> of their own.
+        let back_start = abs.saturating_sub(8192);
+        if let Some(open_rel) = session_text[back_start..abs].rfind("<task-notification>") {
+            let open_abs = back_start + open_rel;
+            if let Some(close_rel) = session_text[open_abs..].find("</task-notification>") {
+                let close_abs = open_abs + close_rel + "</task-notification>".len();
+                if close_abs > abs {
+                    return true;
+                }
+            }
+        }
+        idx = abs + marker.len();
+    }
+    false
+}
+
+// Recency window for the roster's `running` verdict. A subagent's JSONL
+// mtime advancing within this window means it is actively appending; past
+// it (and with no parent-side completion evidence — see
+// st_parent_agent_task_finished above) it reads as `waiting` instead of
+// silently keeping a stale `running`/`finished` guess. Sized generously
+// (2 minutes, not seconds) because a legitimate long tool call in progress
+// (a `cargo build`/`cargo test`, a slow web fetch) can leave a subagent's
+// transcript untouched for minutes without the subagent being stalled —
+// this is a judgment call, not a value read off an existing constant,
+// since nothing else in the codebase tracks subagent-stream recency.
+const SUBAGENT_RECENT_ACTIVITY_MS: i64 = 120_000;
+
+// Pure three-state derivation, decoupled from the filesystem so it's
+// unit-testable with plain fixtures: `finished` (parent transcript recorded
+// the Task result — see st_parent_agent_task_finished) beats recency, since
+// a subagent can go quiet for good reason right as it wraps up; otherwise
+// `running` when the stream mtime is within SUBAGENT_RECENT_ACTIVITY_MS of
+// now, else `waiting` (idle with no parent-recorded completion — stopped
+// awaiting background work, or wedged).
+fn st_subagent_state_str(parent_finished: bool, updated_at_ms: i64, now_ms: i64) -> &'static str {
+    if parent_finished {
+        "finished"
+    } else if now_ms.saturating_sub(updated_at_ms) < SUBAGENT_RECENT_ACTIVITY_MS {
+        "running"
+    } else {
+        "waiting"
+    }
+}
+
+#[cfg(test)]
+mod subagent_state_tests {
+    use super::{
+        st_parent_agent_task_finished, st_subagent_state_str, SUBAGENT_RECENT_ACTIVITY_MS,
+    };
+
+    // Shape observed in a real transcript (issue-244 investigation): the
+    // delivered `user` turn's message.content is a bare string (not a
+    // tool_result content-block array) carrying the escaped notification.
+    fn notification_record(agent_id: &str, status: &str) -> String {
+        format!(
+            "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"<task-notification>\\n<task-id>{}</task-id>\\n<tool-use-id>toolu_x</tool-use-id>\\n<status>{}</status>\\n<summary>done</summary>\\n</task-notification>\"}}}}",
+            agent_id, status
+        )
+    }
+
+    #[test]
+    fn parent_notification_marks_finished_for_completed() {
+        let text = notification_record("a06b67728569211a2", "completed");
+        assert!(st_parent_agent_task_finished(&text, "a06b67728569211a2"));
+    }
+
+    #[test]
+    fn parent_notification_marks_finished_for_killed_or_stopped() {
+        // Observed statuses on background-shell task-notifications; a Task
+        // subagent notification carrying either still means the Task call
+        // itself has ended.
+        assert!(st_parent_agent_task_finished(
+            &notification_record("agent1", "killed"),
+            "agent1"
+        ));
+        assert!(st_parent_agent_task_finished(
+            &notification_record("agent2", "stopped"),
+            "agent2"
+        ));
+    }
+
+    #[test]
+    fn unrelated_agent_id_does_not_match() {
+        let text = notification_record("other-agent", "completed");
+        assert!(!st_parent_agent_task_finished(&text, "abc123"));
+    }
+
+    #[test]
+    fn bare_task_id_outside_notification_wrapper_does_not_match() {
+        // Defensive: a coincidental substring with no <task-notification>
+        // wrapper around it must not count as completion evidence.
+        let text = "some unrelated text <task-id>abc123</task-id> with no wrapper";
+        assert!(!st_parent_agent_task_finished(text, "abc123"));
+    }
+
+    #[test]
+    fn empty_agent_id_never_matches() {
+        let text = notification_record("", "completed");
+        assert!(!st_parent_agent_task_finished(&text, ""));
+    }
+
+    #[test]
+    fn state_running_when_recently_active_and_not_finished() {
+        let now = 1_000_000i64;
+        let updated = now - 1_000; // 1s ago, well within the window
+        assert_eq!(st_subagent_state_str(false, updated, now), "running");
+    }
+
+    #[test]
+    fn state_waiting_when_idle_and_not_finished() {
+        let now = 1_000_000i64;
+        let updated = now - (SUBAGENT_RECENT_ACTIVITY_MS + 1);
+        assert_eq!(st_subagent_state_str(false, updated, now), "waiting");
+    }
+
+    #[test]
+    fn state_finished_wins_regardless_of_recency() {
+        let now = 1_000_000i64;
+        let updated = now - 1_000; // recently active per mtime, but the
+                                   // parent already recorded completion
+        assert_eq!(st_subagent_state_str(true, updated, now), "finished");
+    }
+}
+
 // Model a subagent ran on: the first assistant record's message.model in
 // its transcript. Head-bounded read — the dispatch prompt (first user
 // record) is KBs, so 128 KB comfortably reaches the first assistant line.
@@ -31297,8 +31455,11 @@ fn st_last_session_model(session_path: &Path) -> String {
 }
 
 // /__agents — roster of the active session's subagents: label fields from
-// each meta.json sidecar, running/finished from the transcript tail,
-// started/updated from file times. Drives the footer chips strip.
+// each meta.json sidecar; a three-state `state` (running/waiting/finished,
+// issue-244 — see st_subagent_state_str) from the subagent's own mtime
+// recency plus the parent transcript's Task-completion evidence; a legacy
+// `finished` boolean derived from `state`; started/updated from file
+// times. Drives the footer chips strip.
 fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String> {
     let empty = || {
         serde_json::to_vec(&serde_json::json!({ "sid": "", "agents": [] }))
@@ -31328,6 +31489,16 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
     if files.is_empty() {
         return empty_session();
     }
+    // issue-244: one read of the parent transcript, reused for every row's
+    // parent-side completion check below — precedent for a full-session
+    // read with no mtime cache already exists (build_conversation_cache_entry
+    // reads the whole file too; that path caches, this one is small/rare
+    // enough by comparison — one roster poll per subagents-changed tick —
+    // that it doesn't need to). A read failure degrades to "no parent
+    // evidence found", which only ever pushes a row toward `waiting`
+    // instead of `finished` — conservative, never a false completion.
+    let session_text = std::fs::read_to_string(&session_path).unwrap_or_default();
+    let now_ms = to_ms(std::time::SystemTime::now());
     let mut agents: Vec<serde_json::Value> = Vec::new();
     for sf in files {
         let Ok(md) = std::fs::metadata(&sf.jsonl_path) else {
@@ -31336,6 +31507,8 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
         let updated_at_ms = md.modified().map(to_ms).unwrap_or(0);
         let started_at_ms = md.created().map(to_ms).unwrap_or(updated_at_ms);
         let meta = st_read_subagent_meta(&sf.dir, &sf.agent_id).unwrap_or(serde_json::Value::Null);
+        let parent_finished = st_parent_agent_task_finished(&session_text, &sf.agent_id);
+        let state = st_subagent_state_str(parent_finished, updated_at_ms, now_ms);
         agents.push(serde_json::json!({
             "agentId": sf.agent_id,
             "agentType": meta.get("agentType").and_then(|v| v.as_str()).unwrap_or(""),
@@ -31344,7 +31517,12 @@ fn read_subagent_roster<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>
             // Workflow membership (the wf_… run dir), for pane grouping.
             "workflowId": sf.workflow_id.as_deref().unwrap_or(""),
             "model": st_subagent_model(&sf.jsonl_path),
-            "finished": st_subagent_finished(&sf.jsonl_path),
+            // Three-state truth (issue-244): "running" | "waiting" |
+            // "finished" — see st_subagent_state_str. `finished` is KEPT as
+            // a boolean, now derived from `state`, so pane builds that
+            // predate this field's introduction degrade gracefully.
+            "state": state,
+            "finished": state == "finished",
             "startedAtMs": started_at_ms,
             "updatedAtMs": updated_at_ms,
         }));

@@ -11073,13 +11073,30 @@ window.__bramProjectedLastExchange = function (payload) {
 // (not a helper here) so the hot-reloaded markup keeps working against a
 // running binary that predates this file.
 
+// Effective three-state read for an agent roster row (issue-244:
+// running | waiting | finished — see st_subagent_state_str in lib.rs).
+// Prefers the host's `state` field; a stale pane against an older host
+// (no `state` field yet) degrades to the legacy two-state read on
+// `finished` so it never renders undefined/blank.
+function __bramAgentState(agent) {
+  if (!agent) return "running";
+  if (agent.state) return agent.state;
+  return agent.finished ? "finished" : "running";
+}
+
 // Footer chip label: description (fallback agentType), truncated, with a
-// running/finished glyph.
+// running/waiting/finished glyph. issue-244: a subagent whose stream went
+// idle while it's actually paused on its own background work no longer
+// reads as finished (✓) — it gets ⏸ (chosen over ◔ as the clearer "paused"
+// glyph in the chip's small label font) until the parent transcript
+// records the Task's real completion.
 window.__bramAgentChipLabel = function (agent) {
   if (!agent) return "";
   var label = agent.description || agent.agentType || agent.agentId || "";
   if (label.length > 28) label = label.slice(0, 27) + "…";
-  return label + (agent.finished ? " ✓" : " ●");
+  var state = __bramAgentState(agent);
+  var glyph = state === "finished" ? " ✓" : state === "waiting" ? " ⏸" : " ●";
+  return label + glyph;
 };
 
 // "claude-fable-5" → "Fable 5", "claude-haiku-4-5-20251001" → "Haiku 4.5":
@@ -11106,11 +11123,18 @@ window.__bramMainChipTooltip = function (roster) {
 };
 
 // Chip / overflow-item tooltip: type, description, and the model the
-// subagent ran on (host-extracted from the transcript head).
+// subagent ran on (host-extracted from the transcript head). issue-244: a
+// `waiting` subagent gets an explicit note distinguishing it from a
+// genuine finish — its stream went idle but the parent transcript hasn't
+// recorded the Task's completion, so it may be paused on background work
+// or wedged.
 window.__bramAgentChipTooltip = function (agent) {
   if (!agent) return "";
   var s = (agent.agentType || "agent") + ": " + (agent.description || agent.agentId || "");
   if (agent.model) s += " — " + agent.model;
+  if (__bramAgentState(agent) === "waiting") {
+    s += " — Stopped, awaiting background work — not finished.";
+  }
   return s;
 };
 

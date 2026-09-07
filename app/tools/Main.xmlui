@@ -871,12 +871,22 @@
         gap="$space-1"
         paddingHorizontal="$space-1"
         verticalAlignment="center">
-        <Button
-          label="Main"
-          size="xs"
-          variant="outlined"
-          tooltip="{window.__bramMainChipTooltip ? window.__bramMainChipTooltip(footerAgents.value) : 'Show the main conversation in the Transcript tab'}"
-          onClick="transcriptAgentId = ''; window.__bramSetVisibleRange(null); navigate('/transcript')" />
+        <!-- Bold the chip whose stream the Transcript is currently showing
+             (App-scope transcriptAgentId): fontWeight-Button theme var per
+             https://www.xmlui.org/docs/reference/components/Button#styling,
+             applied via a Theme wrapper — same pattern as the TextArea
+             placeholder-size override in MessageAgentComposer.xmlui. Weight
+             only, orthogonal to the running-state variant/themeColor
+             bindings below, so a later three-state rekey of those composes
+             without touching this. -->
+        <Theme fontWeight-Button="{transcriptAgentId === '' ? 'bold' : '$fontWeight-medium'}">
+          <Button
+            label="Main"
+            size="xs"
+            variant="outlined"
+            tooltip="{window.__bramMainChipTooltip ? window.__bramMainChipTooltip(footerAgents.value) : 'Show the main conversation in the Transcript tab'}"
+            onClick="transcriptAgentId = ''; window.__bramSetVisibleRange(null); navigate('/transcript')" />
+        </Theme>
         <!-- One continuous reverse-chron read: newest chip leftmost (after
              Main), then the dropdown continues newest→oldest top-down. Each
              chip pairs its label with a ghost ✕ that appends the agentId to
@@ -892,13 +902,18 @@
                  (filled, accent) instead of the quiet outlined+secondary a
                  finished chip keeps — Button's own themeColor/variant
                  props, no new component. -->
-            <Button
-              label="{window.__bramAgentChipLabel($item)}"
-              size="xs"
-              variant="{$item.finished ? 'outlined' : 'solid'}"
-              themeColor="{$item.finished ? 'secondary' : 'primary'}"
-              tooltip="{(window.__bramAgentChipTooltip || window.__bramAgentChipLabel)($item)}"
-              onClick="transcriptAgentId = $item.agentId; window.__bramSetVisibleRange(null); navigate('/transcript')" />
+            <!-- Same fontWeight-Button bolding as the Main chip above,
+                 keyed to this chip's own agentId; weight only, composes
+                 with the finished-keyed variant/themeColor untouched. -->
+            <Theme fontWeight-Button="{transcriptAgentId === $item.agentId ? 'bold' : '$fontWeight-medium'}">
+              <Button
+                label="{window.__bramAgentChipLabel($item)}"
+                size="xs"
+                variant="{($item.state || ($item.finished ? 'finished' : 'running')) === 'running' ? 'solid' : 'outlined'}"
+                themeColor="{($item.state || ($item.finished ? 'finished' : 'running')) === 'finished' ? 'secondary' : 'primary'}"
+                tooltip="{(window.__bramAgentChipTooltip || window.__bramAgentChipLabel)($item)}"
+                onClick="transcriptAgentId = $item.agentId; window.__bramSetVisibleRange(null); navigate('/transcript')" />
+            </Theme>
             <Button
               label="✕"
               size="xs"
@@ -907,6 +922,10 @@
               onClick="dismissedAgentIds = window.__bramDismissAgent(dismissedAgentIds, $item.agentId)" />
           </HStack>
         </Items>
+        <!-- Overflow MenuItems deliberately do NOT get the fontWeight-Button
+             bolding above — a collapsed agent's selection state still lives
+             in its session-info line, the same "selection lives in the
+             session line" rationale that predates this bolding change. -->
         <DropdownMenu
           when="{window.__bramVisibleFooterAgents(footerAgents.value, dismissedAgentIds).length > 3}"
           label="{'+' + (window.__bramVisibleFooterAgents(footerAgents.value, dismissedAgentIds).length - 3) + ' more'}"

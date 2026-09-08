@@ -775,6 +775,15 @@ window.__bramSendMenuAnswer = function (text, promptId) {
   var id = String(promptId || "");
   var data = String(text || "");
   var invoke = getTauriInvoke();
+  // dismiss-click-evidence-before-guard audit: this guard used to run
+  // before any trace, so a permission-menu click with no invoke bridge
+  // (or a stripped id/data) returned here with zero evidence — same
+  // anti-pattern as #343 (gitPush, __bramCloseIssue) and the dismiss fix
+  // above. Trace first with an op field naming which condition failed.
+  window.__bramIframeTrace("menu-answer-client", {
+    op: !invoke ? "no-invoke" : (!id || !data) ? "bad-input" : "act",
+    promptId: id,
+  });
   if (!invoke || !id || !data) return;
   if (window.__bramSentMenuAnswerIds.has(id)) {
     window.__bramIframeTrace("menu-answer-client", {
@@ -926,6 +935,12 @@ window.__bramReloadAgentSession = function (provider, sessionId) {
 window.__bramCreateNewSession = function (provider, title) {
   var key = String(provider || "").toLowerCase() === "codex" ? "codex" : "claude";
   var invoke = getTauriInvoke();
+  // dismiss-click-evidence-before-guard audit: __bramCreateNewSessionClick
+  // (the only caller) has no trace of its own — unlike
+  // __bramReloadAgentSessionClick's "click" stage — so a no-invoke guard
+  // here previously reached the caller's toast only, with nothing in
+  // bram-trace.log. Same anti-pattern as #343 (gitPush, __bramCloseIssue).
+  window.__bramIframeTrace("new-session-client", { op: invoke ? "act" : "no-invoke", provider: key });
   if (!invoke) return Promise.reject(new Error("Tauri IPC unavailable"));
   return window.__bramWithAgentCommandTimeout(
     invoke("create_new_session", { provider: key, title: String(title || "") }),
@@ -1697,9 +1712,22 @@ window.__bramGateCloseToggle = function (itemId, issueNumber, checked, closesIss
 // POST returns — a DataSource value change re-renders promptly. The
 // needs-you-changed listener stays for background "new activity" updates,
 // where a beat of latency is invisible.
+//
+// dismiss-click-evidence-before-guard: Awaiting You dismissals failed
+// silently for two days (2026-09-07/08) because the old order put the
+// `typeof window.fetch !== "function"` guard BEFORE the trace call — any
+// pane state where the guard fired left zero inbox-dismiss-click evidence.
+// Same anti-pattern #343 already fixed for gitPush and __bramCloseIssue
+// (686a106): trace first with an op field so a dead click names itself,
+// and breadcrumb the no-fetch path via logToHost (its own fetch-independent
+// fallback) before returning.
 window.__bramDismissForgeItem = function (ds, id, marker) {
-  if (typeof window.fetch !== "function") return;
-  window.__bramIframeTrace("inbox-dismiss-click", { id: id });
+  var hasFetch = typeof window.fetch === "function";
+  window.__bramIframeTrace("inbox-dismiss-click", { id: id, op: hasFetch ? "act" : "no-fetch" });
+  if (!hasFetch) {
+    window.logToHost({ kind: "inbox-dismiss", phase: "no-fetch", id: id });
+    return;
+  }
   window
     .fetch("/__needs-you/dismiss", {
       method: "POST",

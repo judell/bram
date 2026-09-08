@@ -80,6 +80,7 @@
            end-anchored spread is deliberate — position carries meaning). -->
       <VStack width="fit-content" horizontalAlignment="start" itemWidth="fit-content" gap="$space-1">
         <Button
+          when="{(w2Sel.value || []).length > 0}"
           label="Chat"
           variant="ghost"
           size="xs"
@@ -94,7 +95,11 @@
              selection routing (__bramComposerEnterSubmit) is unchanged.
              The skip-worklist button also remains retired (the typed
              skip-worklist: prefix and the "just do it" phrase are the
-             direct-edit grants until that design settles). -->
+             direct-edit grants until that design settles). Idle-Chat is
+             retired too: with no Worklist selection the button is hidden
+             entirely, so there is deliberately no pointer-device send
+             affordance — Enter is the whole story (counterpoint recorded
+             in the item draft). -->
         <Button
           label="Esc"
           variant="ghost"

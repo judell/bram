@@ -4318,7 +4318,9 @@ window.__bramStartConsequence = function (items, sel, claim) {
       "These share " + (n === 1 ? "a file" : n + " files") + ". " +
       (begun.length === 2 ? "Both" : "All") +
       " were started together in one click, so their shared-file edits can " +
-      "only be committed together -- there is no separating them now."
+      "only be committed together -- or ask the agent to separate them " +
+      "(it parks one item's changes, you Drop that item, commit the other, " +
+      "then it restores and re-proposes)."
     );
   }
   return (

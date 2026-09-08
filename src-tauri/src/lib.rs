@@ -57885,7 +57885,13 @@ fn handle_worklist_commit<R: tauri::Runtime>(
                                  cannot be split per item after the fact). Commit those items \
                                  together — every line is accounted for. Per-item commits on a \
                                  shared path require approving each item in a SEPARATE click, \
-                                 before any of them begins.",
+                                 before any of them begins. Or, for separate commits NOW: park \
+                                 one item's changes (save its patch, reverse-apply it), Drop \
+                                 that item, commit this one, then restore the patch and \
+                                 re-propose it — a dropped partner no longer blocks, and \
+                                 staging follows current content. Editing the worktree WITHOUT \
+                                 the Drop does not clear this refusal: the joint attribution is \
+                                 recorded, not derived from the diff.",
                                 path,
                                 member_ids.join(", ")
                             ),

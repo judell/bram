@@ -118,7 +118,7 @@
     <RadioGroup
       initialValue="{startMode}"
       onDidChange="(v) => { startMode = window.__bramW2SetStartMode(v) }">
-      <Option value="together" label="Start together — shared-file edits will only commit together" />
+      <Option value="together" label="Start together — shared-file edits commit together (separable later only via the agent's park/drop/re-propose)" />
       <Option value="one" label="Start one at a time — each click starts the next; per-item commits stay possible" />
     </RadioGroup>
   </HStack>
@@ -135,7 +135,7 @@
     <Text
       fontSize="$fontSize-sm"
       color="$textColor-secondary"
-      value="{'Committable together with ' + window.__bramNameList(window.__bramSelectionJointMissing(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)) + ' — select both.'}" />
+      value="{'Committable together with ' + window.__bramNameList(window.__bramSelectionJointMissing(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)) + ' — select both, or ask the agent to separate them (park, drop, re-propose).'}" />
   </HStack>
   <!-- avoid-futile-joint-commit: shareJointShared reads the host-computed
        `jointWith` field (/__worklist per-item, same change) via

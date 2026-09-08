@@ -1620,6 +1620,25 @@ the finding comment and its same-day correction):
   per-item commits on a shared file are the goal, approve the items in
   **separate clicks**: each then gets its own claim and boundary, and
   interval staging splits them correctly.
+- **The satisfiable third out for an existing joint: the park/drop/
+  re-propose dance** (futile-joint-messages-name-the-dance; field-required
+  2026-09-08 when a same-click pair each had to drive its own PR). This is
+  CONTENT surgery, categorically different from the in-place hand-separation
+  #356 proved unsatisfiable — editing the worktree alone can never clear the
+  refusal, because the joint attribution is recorded, not derived from the
+  diff. The steps, in order: (1) the agent parks one item's entire diff
+  (save its patch — the interval-diff route or `git diff` scoped to its
+  regions — then reverse-apply, keeping the patch file); (2) the user
+  **Drops** that item — the step that dissolves the block, since a dropped
+  partner is no longer begun and staging then follows current content;
+  (3) commit the surviving item (whole-file, clean; cut a branch first when
+  each item drives its own PR); (4) the agent restores the patch and
+  re-proposes the dropped item — same id, same draft, its history honestly
+  reading drop → re-propose; (5) the user Starts & commits it under its own
+  fresh boundary. Every line lands under its right id; the cost is one
+  extra Drop and one extra Start. The host's `op=refuse-joint-interval`
+  message names this path; do not undo a correctly parked worktree because
+  the refusal fired before the Drop.
 - **End the remaining ids' claim before handing the user a commit
   decision.** A live claim locks row selection, and the locked
   selection is where the Commit button lives — the user sees a gate bar

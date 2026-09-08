@@ -40820,7 +40820,12 @@ fn claim_interval_diff<R: tauri::Runtime>(
             scope, path, matched, spawns
         ),
     );
-    serde_json::json!({ "patch": patch, "intervals": matched })
+    // issue-273-membership-engine-observe: the spawn count rides the return so
+    // the membership engine's own `op=membership spawns=` figure can include
+    // the diffs this call ran on its behalf (the CLAIM_ATTR_SPAWNS discipline:
+    // a cost asserted rather than measured is how a path quietly pays full
+    // price). Additive — both prior consumers read only `patch`/`intervals`.
+    serde_json::json!({ "patch": patch, "intervals": matched, "spawns": spawns })
 }
 
 // issue-327 interval staging: commit the requested items' OWN hunks by
@@ -41245,6 +41250,762 @@ mod residual_disclosure_tests {
         assert_eq!(
             residual_owner_label(&lines(&[2, 3]), &runs, &begun(&["a"])),
             "unowned"
+        );
+    }
+}
+
+// issue-273-membership-engine-observe: the HEAD-diff MEMBERSHIP engine,
+// observe-only (docs/attribution-model.md §4, Migration step 1). Runs beside
+// the replay (`claim_attribution_runs`) on every board serve and feeds
+// NOTHING but traces — the board payload, pane, gate, and staging all keep
+// reading the replay until the observation earns the flip (§6 criteria 1, 7).
+//
+// Universe: the current `git diff HEAD` restricted to live BEGUN items'
+// declared paths, plus untracked non-ignored files under those paths
+// (enumerated by NAME via `git status --porcelain -uall -- <pathspecs>`;
+// content is read only for a declared untracked file, to count its lines).
+// The engine never diffs the whole tree — that bound is the budget lesson
+// (§2.7 of the model doc: replay cost scales with CAPTURED content, 167
+// untracked files ≈ 315,000 phantom diff lines, `ms=10230`; membership's
+// universe never contains that bulk).
+//
+// Owner assignment: per candidate (live begun item × declared path), the
+// candidate patch is the item's claim-interval evidence (`claim_interval_diff`
+// for single-owner intervals; `membership_joint_patches` for multi-id claims,
+// declaration-disambiguated per path exactly as `resolve_interval_path_owner`
+// does). Membership is decided by whether that evidence accounts for CURRENT
+// content: `git apply --cached --check --reverse` against a scratch capture
+// of the present state — a temp GIT_INDEX_FILE seeded `read-tree HEAD` plus a
+// pathspec-scoped `add -A` (the `capture_claim_tree` machinery bounded to
+// declared paths, so untracked declared files are probe-visible without
+// hashing the tree at large). Evidence that reverse-applies against HEAD
+// itself is already committed — out of the universe, no membership (the
+// `op=interval-already-applied` insight applied before counting, not after).
+// A candidate hunk whose new-side block occurs at multiple placements in the
+// current file is AMBIGUOUS — §4's identical-context duplicate rule, the
+// fourth first-class state; the occurrence count is used ONLY to declare
+// ambiguity, never to assign an owner (the lib.rs positional-not-content
+// discipline, see the warning above `parse_attr_diff`). Everything in the
+// universe accounted to no candidate is UNOWNED — by subtraction, not by
+// error term. Conservation (§6 criterion 1): per path,
+// single + joint + ambiguous + unowned must sum to the path's `git diff
+// HEAD` counts; a breach traces `op=membership-conservation-broken` — a
+// TRIPWIRE whose provenance check is the deliberate-violation unit test
+// `conservation_breach_reports_deliberate_violation`, per the
+// soak-vs-tripwire rule in docs/developing-bram.md.
+
+// The reverse-application footprint of a candidate patch, mapped to new-side
+// line numbers by walking each hunk's BODY — the `diff_residual_lines`
+// body-walk generalized to multi-file patches and to counting removed lines.
+// `removed` is evidence-baseline-relative and therefore EXCLUDED from the
+// HEAD-relative conservation arithmetic (the dependency fixture's live fire:
+// a modification patch "removes" a line that never existed vs HEAD). It is
+// kept, test-read only for now, for the deletion-attribution flip (§4's
+// deletion case) — the same reserved-slot discipline as `unowned_by_path`.
+struct MembershipFootprint {
+    added_lines: Vec<usize>,
+    #[allow(dead_code)]
+    removed: usize,
+}
+
+fn membership_patch_footprint(patch: &str) -> MembershipFootprint {
+    let mut added_lines: Vec<usize> = Vec::new();
+    let mut removed = 0usize;
+    let mut new_line = 0usize;
+    let mut in_hunk = false;
+    for line in patch.lines() {
+        if let Some(rest) = line.strip_prefix("@@ ") {
+            in_hunk = true;
+            new_line = rest
+                .split_whitespace()
+                .find(|t| t.starts_with('+'))
+                .map(|t| {
+                    let spec = &t[1..];
+                    spec.split_once(',')
+                        .map(|(s, _)| s)
+                        .unwrap_or(spec)
+                        .parse()
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0);
+            continue;
+        }
+        if line.starts_with("diff ") || line.starts_with("index ") {
+            in_hunk = false;
+            continue;
+        }
+        if !in_hunk {
+            continue;
+        }
+        if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        }
+        if line.starts_with('+') {
+            added_lines.push(new_line);
+            new_line += 1;
+        } else if line.starts_with('-') {
+            removed += 1;
+        } else if !line.starts_with('\\') {
+            // Context line; "\ No newline at end of file" advances nothing.
+            new_line += 1;
+        }
+    }
+    MembershipFootprint {
+        added_lines,
+        removed,
+    }
+}
+
+// Each hunk's NEW-SIDE text block — context plus added lines, prefixes
+// stripped — the unit of the ambiguity probe: a block occurring at more than
+// one placement in the current file means reverse-apply could have anchored
+// the hunk at either (identical context), so the region's membership is
+// declared ambiguous rather than resolved by coin flip (§4, the never-guess
+// principle). Hunks with no changed line are skipped: pure context anchors
+// nothing.
+fn membership_hunk_new_blocks(patch: &str) -> Vec<Vec<String>> {
+    let mut blocks: Vec<Vec<String>> = Vec::new();
+    let mut cur: Option<(Vec<String>, bool)> = None;
+    let close = |cur: &mut Option<(Vec<String>, bool)>, blocks: &mut Vec<Vec<String>>| {
+        if let Some((lines, changed)) = cur.take() {
+            if changed && !lines.is_empty() {
+                blocks.push(lines);
+            }
+        }
+    };
+    for line in patch.lines() {
+        if line.starts_with("@@ ") {
+            close(&mut cur, &mut blocks);
+            cur = Some((Vec::new(), false));
+            continue;
+        }
+        if line.starts_with("diff ") || line.starts_with("index ") {
+            close(&mut cur, &mut blocks);
+            continue;
+        }
+        if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        }
+        if let Some((lines, changed)) = cur.as_mut() {
+            if let Some(rest) = line.strip_prefix('+') {
+                lines.push(rest.to_string());
+                *changed = true;
+            } else if line.starts_with('-') {
+                // A deletion contributes no new-side line but marks the hunk
+                // as carrying a change, so a pure-deletion hunk's CONTEXT
+                // still gets its placement checked.
+                *changed = true;
+            } else if let Some(rest) = line.strip_prefix(' ') {
+                lines.push(rest.to_string());
+            } else if line.is_empty() {
+                // An empty context line can arrive with its leading space
+                // trimmed by transport; it is still a new-side line.
+                lines.push(String::new());
+            }
+        }
+    }
+    close(&mut cur, &mut blocks);
+    blocks
+}
+
+// Non-overlapping occurrences of `block` as consecutive lines of `content`.
+// > 1 is the ambiguity signal.
+fn membership_block_occurrences(content: &str, block: &[String]) -> usize {
+    if block.is_empty() {
+        return 0;
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let mut n = 0usize;
+    let mut i = 0usize;
+    while i + block.len() <= lines.len() {
+        if block
+            .iter()
+            .zip(&lines[i..i + block.len()])
+            .all(|(b, l)| b == l)
+        {
+            n += 1;
+            i += block.len();
+        } else {
+            i += 1;
+        }
+    }
+    n
+}
+
+// Unowned by SUBTRACTION — the conservation law's defining move (§4: "not by
+// error term"). Returns the unowned bucket plus whether the subtraction had
+// to clamp (attributed exceeded the universe — over-attribution the breach
+// checker below will report).
+fn membership_unowned(
+    universe: (usize, usize),
+    attributed: (usize, usize),
+) -> ((usize, usize), bool) {
+    let unowned = (
+        universe.0.saturating_sub(attributed.0),
+        universe.1.saturating_sub(attributed.1),
+    );
+    let clamped = attributed.0 > universe.0 || attributed.1 > universe.1;
+    (unowned, clamped)
+}
+
+// The conservation TRIPWIRE's pure checker (§6 criterion 1): per path,
+// single + joint + ambiguous + unowned line counts must sum to the path's
+// `git diff HEAD` counts. Returns Some((expected, got)) as summed totals on
+// divergence, None when conservation holds. Pure so its provenance check is
+// a deliberate-violation unit test rather than a wait for fires — a
+// tripwire's zero and a dead instrument's zero are identical in a grep
+// (docs/developing-bram.md, soak-vs-tripwire).
+fn membership_conservation_breach(
+    universe: (usize, usize),
+    single: (usize, usize),
+    joint: (usize, usize),
+    ambiguous: (usize, usize),
+    unowned: (usize, usize),
+) -> Option<(usize, usize)> {
+    let got = (
+        single.0 + joint.0 + ambiguous.0 + unowned.0,
+        single.1 + joint.1 + ambiguous.1 + unowned.1,
+    );
+    if got == universe {
+        None
+    } else {
+        Some((universe.0 + universe.1, got.0 + got.1))
+    }
+}
+
+// Joint candidate patches for one path: the multi-id claims' intervals whose
+// per-path declaration resolves to a JOINT set (several declarers — exactly
+// `resolve_interval_path_owner`'s rule), filtered to live begun members and
+// grouped by the surviving member set. The single-declarer case never reaches
+// here: it resolves to Single and rides `claim_interval_diff`'s scope for
+// that id. Ghosts fall out for free — a ghost is not on the board, so it is
+// never begun.
+fn membership_joint_patches(
+    root: &Path,
+    path: &str,
+    declared: &std::collections::HashMap<String, Vec<String>>,
+    begun: &std::collections::HashSet<String>,
+    spawns: &std::cell::Cell<usize>,
+) -> Vec<(Vec<String>, String)> {
+    let Ok(text) = std::fs::read_to_string(root.join(CLAIM_INTERVALS_REL)) else {
+        return Vec::new();
+    };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let Some(arr) = doc.get("intervals").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut grouped: std::collections::BTreeMap<Vec<String>, String> = Default::default();
+    for (i, rec) in arr.iter().enumerate() {
+        let Some(a) = rec.get("ref").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let ids: Vec<String> = rec
+            .get("ids")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let IntervalPathOwner::Joint(set) = resolve_interval_path_owner(&ids, path, declared)
+        else {
+            continue;
+        };
+        let mut members: Vec<String> = set.into_iter().filter(|m| begun.contains(m)).collect();
+        if members.len() < 2 {
+            continue;
+        }
+        members.sort();
+        let next = arr
+            .get(i + 1)
+            .and_then(|r| r.get("ref"))
+            .and_then(|v| v.as_str());
+        let mut args: Vec<&str> = vec!["diff", a];
+        if let Some(b) = next {
+            args.push(b);
+        }
+        args.push("--");
+        args.push(path);
+        spawns.set(spawns.get() + 1);
+        if let Ok(o) = std::process::Command::new("git")
+            .current_dir(root)
+            .args(&args)
+            .output()
+        {
+            let s = String::from_utf8_lossy(&o.stdout);
+            if !s.trim().is_empty() {
+                grouped.entry(members).or_default().push_str(&s);
+            }
+        }
+    }
+    grouped.into_iter().collect()
+}
+
+// One path's membership partition while the engine accumulates. Counts are
+// (added, removed); `owners` is the id set membership attributes on the path
+// (single + joint + ambiguous candidates alike), the coarse unit the
+// divergence comparison uses.
+#[derive(Default)]
+struct MembershipPathBuckets {
+    single: (usize, usize),
+    joint: (usize, usize),
+    ambiguous: (usize, usize),
+    owners: std::collections::BTreeSet<String>,
+}
+
+// The engine driver. Observe-only: its entire output is three trace ops —
+// `op=membership` (cost, every run), `op=membership-diverges` (per path
+// where the two models' owner sets disagree), and
+// `op=membership-conservation-broken` (the tripwire). Probes run only over
+// live begun items × their declared paths; the engine never diffs the whole
+// tree and never enumerates untracked content beyond names.
+fn membership_engine_observe<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    replay_owners_by_path: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+    replay_joint_by_path: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+) {
+    let started = std::time::Instant::now();
+    let spawns = std::cell::Cell::new(0usize);
+    let trace_cost =
+        |app: &AppHandle<R>, paths: usize, spawns: usize, started: std::time::Instant| {
+            append_bram_trace_line(
+                app,
+                "claim-interval",
+                &format!(
+                    "op=membership paths={} ms={} spawns={}",
+                    paths,
+                    started.elapsed().as_millis(),
+                    spawns
+                ),
+            );
+        };
+    let Some(root) = project_root(Some(app)) else {
+        return;
+    };
+    // Live begun items: on the board (worklist.json is the live set) with
+    // status "applied" or a host-stamped begunAtMs — the candidate roster,
+    // and the engine's cost bound.
+    let mut begun_files: Vec<(String, Vec<String>)> = Vec::new();
+    if let Some(wf) = worklist_file(app) {
+        if let Ok(text) = std::fs::read_to_string(&wf) {
+            if let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(items) = doc.get("items").and_then(|v| v.as_array()) {
+                    for item in items {
+                        let Some(id) = item.get("id").and_then(|v| v.as_str()) else {
+                            continue;
+                        };
+                        let applied =
+                            item.get("status").and_then(|v| v.as_str()) == Some("applied");
+                        let begun_at =
+                            item.get("begunAtMs").and_then(|v| v.as_i64()).unwrap_or(0) > 0;
+                        if !applied && !begun_at {
+                            continue;
+                        }
+                        let files = worklist_item_files(item);
+                        if files.is_empty() {
+                            continue;
+                        }
+                        begun_files.push((id.to_string(), files));
+                    }
+                }
+            }
+        }
+    }
+    if begun_files.is_empty() {
+        trace_cost(app, 0, spawns.get(), started);
+        return;
+    }
+    let begun_ids: std::collections::HashSet<String> =
+        begun_files.iter().map(|(id, _)| id.clone()).collect();
+    // Pathspecs: the union of begun items' declared entries (files or
+    // directories — git pathspec semantics match `declared_covers` up to the
+    // worktree-prefix strip). Every git call below is scoped to these.
+    let mut pathspecs: Vec<String> = begun_files
+        .iter()
+        .flat_map(|(_, fs)| fs.iter().cloned())
+        .collect();
+    pathspecs.sort();
+    pathspecs.dedup();
+    let git = |args: &[&str]| -> Option<String> {
+        spawns.set(spawns.get() + 1);
+        let out = std::process::Command::new("git")
+            .current_dir(&root)
+            .args(args)
+            .output()
+            .ok()?;
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    // Universe, tracked half: one pathspec-scoped numstat — per concrete
+    // changed path, (added, removed) vs HEAD. Never the whole tree.
+    let mut universe: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+    {
+        let mut args: Vec<&str> = vec!["diff", "HEAD", "--no-renames", "--numstat", "--"];
+        args.extend(pathspecs.iter().map(|s| s.as_str()));
+        for line in git(&args).unwrap_or_default().lines() {
+            let mut parts = line.splitn(3, '\t');
+            let (Some(a), Some(r), Some(p)) = (parts.next(), parts.next(), parts.next()) else {
+                continue;
+            };
+            // Binary files numstat as "-\t-"; they carry no line counts and
+            // contribute a (0, 0) universe entry — present, but lineless.
+            let path = p.trim().trim_matches('"').to_string();
+            if path.is_empty() {
+                continue;
+            }
+            universe.insert(
+                path,
+                (
+                    a.parse::<usize>().unwrap_or(0),
+                    r.parse::<usize>().unwrap_or(0),
+                ),
+            );
+        }
+    }
+    // Universe, untracked half: names only via scoped status (-uall so a
+    // wholly-untracked directory lists its files, not the directory); content
+    // is read solely to count a DECLARED untracked file's lines — the model's
+    // universe includes untracked non-ignored files as pure additions.
+    {
+        let mut args: Vec<&str> = vec!["status", "--porcelain", "--no-renames", "-uall", "--"];
+        args.extend(pathspecs.iter().map(|s| s.as_str()));
+        for line in git(&args).unwrap_or_default().lines() {
+            let Some(rest) = line.strip_prefix("?? ") else {
+                continue;
+            };
+            let path = rest.trim().trim_matches('"').to_string();
+            if path.is_empty() {
+                continue;
+            }
+            let n = std::fs::read(root.join(&path))
+                .map(|b| String::from_utf8_lossy(&b).lines().count())
+                .unwrap_or(0);
+            // UNION with the numstat half, never first-wins: a path can be
+            // deleted-vs-HEAD on the tracked side AND present as untracked
+            // content at once (HEAD has it, the index dropped it, the
+            // worktree recreated it — the scenario machinery's reset-mixed
+            // shape, and any real flow that unstages a rewrite). Skipping
+            // the untracked count there missed the present line entirely:
+            // the second live conservation fire, universe=0,1 single=1,0.
+            let entry = universe.entry(path).or_insert((0, 0));
+            entry.0 += n;
+        }
+    }
+    if universe.is_empty() {
+        trace_cost(app, 0, spawns.get(), started);
+        return;
+    }
+    // Scratch state for the probes. idx_head is HEAD alone (the
+    // already-committed screen); idx_now is HEAD plus a pathspec-scoped
+    // `add -A` — the present state of exactly the declared paths, untracked
+    // content included (why a plain HEAD index cannot serve: a created
+    // file's evidence must reverse-apply against something that HAS it).
+    // `apply --cached --check` never writes, so each index seeds once.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tag = format!(
+        "{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let idx_head = std::env::temp_dir().join(format!("bram-membership-head-{}", tag));
+    let idx_now = std::env::temp_dir().join(format!("bram-membership-now-{}", tag));
+    let pfile = std::env::temp_dir().join(format!("bram-membership-{}.patch", tag));
+    let cleanup = || {
+        let _ = std::fs::remove_file(&idx_head);
+        let _ = std::fs::remove_file(&idx_now);
+        let _ = std::fs::remove_file(&pfile);
+    };
+    let git_idx = |idx: &Path, args: &[&str]| -> bool {
+        spawns.set(spawns.get() + 1);
+        std::process::Command::new("git")
+            .current_dir(&root)
+            .env("GIT_INDEX_FILE", idx)
+            .args(args)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    let seeded = git_idx(&idx_head, &["read-tree", "HEAD"])
+        && git_idx(&idx_now, &["read-tree", "HEAD"])
+        && {
+            let mut args: Vec<&str> = vec!["add", "-A", "--"];
+            args.extend(pathspecs.iter().map(|s| s.as_str()));
+            git_idx(&idx_now, &args)
+        };
+    if !seeded {
+        // Fail open, like capture_claim_tree: an observe-only engine must be
+        // incapable of blocking a board serve. The cost line still lands so
+        // the absence of partition traces is attributable.
+        cleanup();
+        trace_cost(app, 0, spawns.get(), started);
+        return;
+    }
+    let pfile_s = pfile.to_string_lossy().to_string();
+    let probe = |idx: &Path, patch: &str| -> bool {
+        if std::fs::write(&pfile, patch).is_err() {
+            return false;
+        }
+        git_idx(
+            idx,
+            &["apply", "--cached", "--check", "--reverse", &pfile_s],
+        )
+    };
+    let declared = worklist_declared_files(app);
+    let mut content_cache: std::collections::HashMap<String, Option<String>> = Default::default();
+    let mut per_path: std::collections::BTreeMap<String, MembershipPathBuckets> =
+        Default::default();
+    for path in universe.keys() {
+        let buckets = per_path.entry(path.clone()).or_default();
+        // Candidate patches: per single begun declarer via claim_interval_diff
+        // (the reused evidence derivation), plus the joint groups.
+        let mut candidates: Vec<(Vec<String>, String)> = Vec::new();
+        for (id, files) in &begun_files {
+            if !files.iter().any(|f| declared_covers(f, path)) {
+                continue;
+            }
+            let d = claim_interval_diff(app, id, path);
+            spawns
+                .set(spawns.get() + d.get("spawns").and_then(|v| v.as_u64()).unwrap_or(0) as usize);
+            if let Some(p) = d.get("patch").and_then(|v| v.as_str()) {
+                if !p.trim().is_empty() {
+                    candidates.push((vec![id.clone()], p.to_string()));
+                }
+            }
+        }
+        candidates.extend(membership_joint_patches(
+            &root, path, &declared, &begun_ids, &spawns,
+        ));
+        for (members, patch) in candidates {
+            // Already in HEAD → committed content, out of the universe: no
+            // membership (counting it would break conservation against a
+            // universe that by construction excludes it).
+            if probe(&idx_head, &patch) {
+                continue;
+            }
+            // The membership test proper: does this evidence account for the
+            // present state? Drifted evidence (superseded, rewritten) fails
+            // here and contributes nothing — its lines land unowned by
+            // subtraction, the model's honest degradation (§4).
+            if !probe(&idx_now, &patch) {
+                continue;
+            }
+            let fp = membership_patch_footprint(&patch);
+            // PRESENT lines only. A candidate's `removed` count is measured
+            // against its own evidence baseline (the boundary tree), not
+            // against HEAD — a modification patch "removes" a line that never
+            // existed vs HEAD when it rewrites an earlier claimant's work, and
+            // counting that into a HEAD-relative universe double-books (first
+            // live fire: the dependency fixture, expected=1 got=2, 2026-09-08).
+            // HEAD-relative deletions stay in the universe's second axis and
+            // land UNOWNED by subtraction: deletion attribution is deferred,
+            // openly, not approximated (§4's deletion case awaits the flips).
+            let counts = (fp.added_lines.len(), 0);
+            let content = content_cache.entry(path.clone()).or_insert_with(|| {
+                std::fs::read(root.join(path))
+                    .ok()
+                    .map(|b| String::from_utf8_lossy(&b).into_owned())
+            });
+            // Identical-context duplicate placement → the whole candidate's
+            // take on this path is declared ambiguous (coarse: region-level
+            // splitting is a display concern for the later flips, not for
+            // the observation).
+            let ambiguous = content
+                .as_deref()
+                .map(|c| {
+                    membership_hunk_new_blocks(&patch)
+                        .iter()
+                        .any(|b| membership_block_occurrences(c, b) > 1)
+                })
+                .unwrap_or(false);
+            let bucket = if ambiguous {
+                &mut buckets.ambiguous
+            } else if members.len() > 1 {
+                &mut buckets.joint
+            } else {
+                &mut buckets.single
+            };
+            bucket.0 += counts.0;
+            bucket.1 += counts.1;
+            buckets.owners.extend(members);
+        }
+    }
+    cleanup();
+    // Per-path finalization: unowned by subtraction, the conservation
+    // tripwire, and the coarse divergence comparison against the replay
+    // (owner id-set inequality, not line-exact — restricted to the
+    // membership universe, since membership makes no claim about paths
+    // with no current diff).
+    for (path, m) in &per_path {
+        let u = universe.get(path).copied().unwrap_or((0, 0));
+        let attributed = (
+            m.single.0 + m.joint.0 + m.ambiguous.0,
+            m.single.1 + m.joint.1 + m.ambiguous.1,
+        );
+        let (unowned, _clamped) = membership_unowned(u, attributed);
+        if let Some((expected, got)) =
+            membership_conservation_breach(u, m.single, m.joint, m.ambiguous, unowned)
+        {
+            append_bram_trace_line(
+                app,
+                "claim-interval",
+                &format!(
+                    "op=membership-conservation-broken path={} expected={} got={} \
+                     universe={},{} single={},{} joint={},{} ambiguous={},{} unowned={},{}",
+                    path,
+                    expected,
+                    got,
+                    u.0,
+                    u.1,
+                    m.single.0,
+                    m.single.1,
+                    m.joint.0,
+                    m.joint.1,
+                    m.ambiguous.0,
+                    m.ambiguous.1,
+                    unowned.0,
+                    unowned.1
+                ),
+            );
+        }
+        let mut replay: std::collections::BTreeSet<String> = replay_owners_by_path
+            .get(path)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default();
+        if let Some(j) = replay_joint_by_path.get(path) {
+            replay.extend(j.iter().cloned());
+        }
+        if replay != m.owners {
+            let join = |s: &std::collections::BTreeSet<String>| -> String {
+                if s.is_empty() {
+                    "-".to_string()
+                } else {
+                    s.iter().cloned().collect::<Vec<_>>().join(",")
+                }
+            };
+            append_bram_trace_line(
+                app,
+                "claim-interval",
+                &format!(
+                    "op=membership-diverges path={} replay={} membership={}",
+                    path,
+                    join(&replay),
+                    join(&m.owners)
+                ),
+            );
+        }
+    }
+    trace_cost(app, per_path.len(), spawns.get(), started);
+}
+
+#[cfg(test)]
+mod membership_engine_tests {
+    use super::{
+        membership_block_occurrences, membership_conservation_breach, membership_hunk_new_blocks,
+        membership_patch_footprint, membership_unowned,
+    };
+
+    #[test]
+    fn footprint_maps_plus_lines_to_new_side_numbers() {
+        let patch =
+            "@@ -1,3 +1,4 @@\n a\n+new-two\n b\n c\n@@ -10,2 +11,3 @@\n j\n+new-twelve\n k\n";
+        let fp = membership_patch_footprint(patch);
+        assert_eq!(fp.added_lines, vec![2, 12]);
+        assert_eq!(fp.removed, 0);
+    }
+
+    #[test]
+    fn footprint_counts_removed_and_resets_per_file() {
+        let patch = "diff --git a/x b/x\nindex 111..222 100644\n--- a/x\n+++ b/x\n\
+                     @@ -1,2 +1,2 @@\n a\n-old\n+new\n\
+                     diff --git a/y b/y\n--- a/y\n+++ b/y\n@@ -5,1 +5,2 @@\n ctx\n+added\n";
+        let fp = membership_patch_footprint(patch);
+        assert_eq!(fp.added_lines, vec![2, 6]);
+        assert_eq!(fp.removed, 1);
+    }
+
+    #[test]
+    fn hunk_new_blocks_capture_context_and_added_lines() {
+        let patch = "@@ -1,3 +1,4 @@\n a\n+x\n b\n@@ -9,2 +10,2 @@\n c\n c\n";
+        let blocks = membership_hunk_new_blocks(patch);
+        // The second hunk carries no change and anchors nothing.
+        assert_eq!(blocks, vec![vec!["a", "x", "b"]]);
+    }
+
+    #[test]
+    fn duplicate_block_placements_are_counted() {
+        let content = "a\nx\nb\nq\na\nx\nb\n";
+        let block = vec!["a".to_string(), "x".to_string(), "b".to_string()];
+        assert_eq!(membership_block_occurrences(content, &block), 2);
+        let unique = vec!["q".to_string()];
+        assert_eq!(membership_block_occurrences(content, &unique), 1);
+    }
+
+    #[test]
+    fn unowned_is_subtraction_with_clamp() {
+        assert_eq!(membership_unowned((5, 2), (3, 1)), ((2, 1), false));
+        // Over-attribution clamps at zero and flags it — the breach checker's
+        // input in the broken state.
+        assert_eq!(membership_unowned((5, 2), (7, 1)), ((0, 1), true));
+    }
+
+    #[test]
+    fn evidence_relative_removal_does_not_double_book() {
+        // The dependency fixture's live fire (expected=1 got=2): a candidate
+        // whose modification patch rewrites an earlier claimant's line on an
+        // untracked 1-line file. Universe (1,0); the candidate contributes
+        // present lines only, so buckets conserve.
+        let universe = (1usize, 0usize);
+        let single = (1usize, 0usize); // added lines only — removed axis excluded
+        let (unowned, clamped) = membership_unowned(universe, single);
+        assert!(!clamped);
+        assert_eq!(unowned, (0, 0));
+        assert_eq!(
+            membership_conservation_breach(universe, single, (0, 0), (0, 0), unowned),
+            None
+        );
+    }
+
+    #[test]
+    fn conservation_holds_when_buckets_sum_to_universe() {
+        assert_eq!(
+            membership_conservation_breach((10, 4), (3, 1), (2, 0), (1, 1), (4, 2)),
+            None
+        );
+    }
+
+    #[test]
+    fn subtraction_then_check_composes_to_conservation() {
+        // The healthy pipeline: unowned computed by subtraction always
+        // satisfies the checker when nothing over-attributed.
+        let universe = (9, 3);
+        let (single, joint, ambiguous) = ((4, 1), (2, 0), (1, 1));
+        let attributed = (
+            single.0 + joint.0 + ambiguous.0,
+            single.1 + joint.1 + ambiguous.1,
+        );
+        let (unowned, clamped) = membership_unowned(universe, attributed);
+        assert!(!clamped);
+        assert_eq!(
+            membership_conservation_breach(universe, single, joint, ambiguous, unowned),
+            None
+        );
+    }
+
+    #[test]
+    fn conservation_breach_reports_deliberate_violation() {
+        // The tripwire's PROVENANCE check (soak-vs-tripwire,
+        // docs/developing-bram.md): correct operation reads zero
+        // indefinitely, so the emit path is proven by deliberately feeding
+        // the pure checker buckets that do not sum to the universe and
+        // asserting it reports — not by waiting for a fire.
+        // Buckets sum to (11, 4) against a (10, 4) universe: expected
+        // total 14, got total 15 — the checker must report both.
+        assert_eq!(
+            membership_conservation_breach((10, 4), (3, 1), (2, 0), (1, 1), (5, 2)),
+            Some((14, 15))
         );
     }
 }
@@ -54548,6 +55309,15 @@ fn route_request<R: tauri::Runtime>(
                     attr_started.elapsed().as_millis()
                 ),
             );
+            // issue-273-membership-engine-observe (attribution-model.md §4,
+            // Migration step 1): the HEAD-diff membership engine runs beside
+            // the replay on every serve, OBSERVE-ONLY — its partition feeds
+            // only the [claim-interval] membership traces (op=membership,
+            // op=membership-diverges, op=membership-conservation-broken).
+            // Nothing in this payload reads it; the replay above stays the
+            // authority for every consumer until the observation earns the
+            // step-2+ flips.
+            membership_engine_observe(app, &owners_by_path, &joint_owners_by_path);
         }
         // #286: the ids the currently live inflight claim covers, so an
         // agent reading the board mid-turn can see which ids it still

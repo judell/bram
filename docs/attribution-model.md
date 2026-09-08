@@ -234,6 +234,23 @@ Every one of these is downstream of the same structural choice: computing
 present-tense facts by integrating history, then correcting the integral's
 drift term by term.
 
+### 2.7 Replay cost scales with captured content — the budget receipt
+
+2026-09-08, ~/budget: the replay's open-interval `git diff <boundary-tree>`
+(boundary tree against the working tree) renders every untracked file
+captured at the boundary as a full-content deletion — the tracked-only
+working-tree side of a plain diff inverts the snapshot's deliberately
+captured untracked content into phantom deletions. In budget, 167 untracked
+files ≈ 315,000 phantom diff lines parsed per replay,
+`op=attribute paths=0 runs=0 spawns=8 ms=10230`, and three concurrent
+Worklist serves each paying full price.
+
+**Property failed:** R's cost scales with the *captured* content of the
+boundary trees, not with the work being attributed — a board with zero
+attributable paths still pays for every byte a boundary happened to
+snapshot. Membership's universe (`git diff HEAD` plus untracked names)
+never contains this bulk.
+
 ## 3. The status-quo model, stated precisely
 
 **Universe:** the ordered chain of boundary trees `refs/bram/claims/*` (per
@@ -478,6 +495,13 @@ observe → display → gate → retire sequence.
    probes; emits the conservation tripwire and an `op=membership-diverges`
    comparison line against the replay's runs. Observe-only; no consumer
    flips. (Criteria 1, 7.)
+
+   *Status: landed observe-only as `issue-273-membership-engine-observe` —
+   `membership_engine_observe` runs on every board serve beside the replay,
+   feeding only the `op=membership` / `op=membership-diverges` /
+   `op=membership-conservation-broken` traces (registered in
+   `trace-vocabulary.md`); the board payload, pane, gate, and staging all
+   still read the replay.*
 2. **Board payload flip**: `attribution`, `attributionTotals`,
    `totals_by_path`, `willCommit` (`lib.rs:54242`–`54381`) and `jointWith`
    (`lib.rs:54383`) source from membership; the reserved `unowned_by_path`

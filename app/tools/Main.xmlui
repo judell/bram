@@ -873,13 +873,16 @@
         verticalAlignment="center">
         <!-- Bold the chip whose stream the Transcript is currently showing
              (App-scope transcriptAgentId): fontWeight-Button theme var per
-             https://www.xmlui.org/docs/reference/components/Button#styling,
-             applied via a Theme wrapper — same pattern as the TextArea
-             placeholder-size override in MessageAgentComposer.xmlui. Weight
-             only, orthogonal to the running-state variant/themeColor
-             bindings below, so a later three-state rekey of those composes
-             without touching this. -->
-        <Theme fontWeight-Button="{transcriptAgentId === '' ? 'bold' : '$fontWeight-medium'}">
+             https://www.xmlui.org/docs/reference/components/Button#styling.
+             bold-chip-static-theme-values: the first attempt bound a DYNAMIC
+             expression as the Theme var's value (mixing a raw 'bold' with a
+             '$token' string) and was never observed working — theme vars are
+             not reliably reactive and expression-produced token strings are
+             not reliably resolved. So: two when=-branched wrappers with
+             STATIC literal values; reactivity rides when= remounting, the
+             guaranteed path. Weight only, orthogonal to the running-state
+             variant/themeColor bindings below. -->
+        <Theme when="{transcriptAgentId === ''}" fontWeight-Button="$fontWeight-bold">
           <Button
             label="Main"
             size="xs"
@@ -887,6 +890,13 @@
             tooltip="{window.__bramMainChipTooltip ? window.__bramMainChipTooltip(footerAgents.value) : 'Show the main conversation in the Transcript tab'}"
             onClick="transcriptAgentId = ''; window.__bramSetVisibleRange(null); navigate('/transcript')" />
         </Theme>
+        <Button
+          when="{transcriptAgentId !== ''}"
+          label="Main"
+          size="xs"
+          variant="outlined"
+          tooltip="{window.__bramMainChipTooltip ? window.__bramMainChipTooltip(footerAgents.value) : 'Show the main conversation in the Transcript tab'}"
+          onClick="transcriptAgentId = ''; window.__bramSetVisibleRange(null); navigate('/transcript')" />
         <!-- One continuous reverse-chron read: newest chip leftmost (after
              Main), then the dropdown continues newest→oldest top-down. Each
              chip pairs its label with a ghost ✕ that appends the agentId to
@@ -902,10 +912,10 @@
                  (filled, accent) instead of the quiet outlined+secondary a
                  finished chip keeps — Button's own themeColor/variant
                  props, no new component. -->
-            <!-- Same fontWeight-Button bolding as the Main chip above,
-                 keyed to this chip's own agentId; weight only, composes
-                 with the finished-keyed variant/themeColor untouched. -->
-            <Theme fontWeight-Button="{transcriptAgentId === $item.agentId ? 'bold' : '$fontWeight-medium'}">
+            <!-- Same static-value bolding as the Main chip above, keyed to
+                 this chip's own agentId (see bold-chip-static-theme-values
+                 comment there for why the dynamic form failed). -->
+            <Theme when="{transcriptAgentId === $item.agentId}" fontWeight-Button="$fontWeight-bold">
               <Button
                 label="{window.__bramAgentChipLabel($item)}"
                 size="xs"
@@ -914,6 +924,14 @@
                 tooltip="{(window.__bramAgentChipTooltip || window.__bramAgentChipLabel)($item)}"
                 onClick="transcriptAgentId = $item.agentId; window.__bramSetVisibleRange(null); navigate('/transcript')" />
             </Theme>
+            <Button
+              when="{transcriptAgentId !== $item.agentId}"
+              label="{window.__bramAgentChipLabel($item)}"
+              size="xs"
+              variant="{($item.state || ($item.finished ? 'finished' : 'running')) === 'running' ? 'solid' : 'outlined'}"
+              themeColor="{($item.state || ($item.finished ? 'finished' : 'running')) === 'finished' ? 'secondary' : 'primary'}"
+              tooltip="{(window.__bramAgentChipTooltip || window.__bramAgentChipLabel)($item)}"
+              onClick="transcriptAgentId = $item.agentId; window.__bramSetVisibleRange(null); navigate('/transcript')" />
             <Button
               label="✕"
               size="xs"

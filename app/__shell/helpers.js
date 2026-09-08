@@ -4085,28 +4085,34 @@ window.__bramStartChoiceNeeded = function (items, sel, claim) {
   return (window.__bramSelectionSharedFilePaths(list, chosen, claim) || []).length > 0;
 };
 
-// The choice state. Deliberately NOT preselected when the choice applies —
-// the field case was a default taken unread. The setter returns its value
-// so the markup's onDidChange stays a single call that also assigns the
-// gate bar's reactive var; reset fires on selection change so a stale
-// choice from an earlier selection cannot silently narrow (or foreclose)
-// a new one.
-window.__bramW2StartMode = "";
+// The choice state. Defaults to "one" — the SAFE, non-foreclosing option —
+// because no-preselection proved unenforceable on first field contact
+// (start-choice-safe-default-commit-language, 2026-09-08 synth: RadioGroup
+// auto-selects its first Option, so the together choice arrived preselected
+// and armed — the foreclosing default, taken unread, the exact failure the
+// radio exists to prevent). With the safe default, choosing the combined
+// commit is the deliberate act, and no withhold-until-choice machinery is
+// needed. The setter returns its value so the markup's onDidChange stays a
+// single call that also assigns the gate bar's reactive var; reset fires on
+// selection change so a stale combined-commit choice from an earlier
+// selection cannot silently foreclose a new one.
+window.__bramW2StartMode = "one";
 window.__bramW2SetStartMode = function (m) {
-  window.__bramW2StartMode = m || "";
+  window.__bramW2StartMode = m || "one";
   return window.__bramW2StartMode;
 };
 window.__bramW2ResetStartMode = function () {
-  window.__bramW2StartMode = "";
-  return "";
+  window.__bramW2StartMode = "one";
+  return "one";
 };
 
-// Start button readiness and label under the choice: when the choice is
-// needed and unmade, Start withholds (the radio is the way forward); mode
-// "one" narrows the click to the first selected id and says so.
-window.__bramStartGateReady = function (items, sel, claim, mode) {
-  if (!window.__bramStartChoiceNeeded(items, sel, claim)) return true;
-  return mode === "together" || mode === "one";
+// The combined-commit option's label, count-aware and execution-neutral:
+// "start" here means ONE AUTHORIZATION CLICK, never parallel execution
+// (which is the agent's business and provider-dependent), so the label
+// hangs on the consequence — commit granularity — per Jon's field review.
+window.__bramStartAllLabel = function (sel) {
+  var n = (sel || []).length;
+  return (n === 2 ? "Start both now" : "Start all " + n + " now") + " — one combined commit";
 };
 window.__bramStartButtonLabel = function (items, sel, claim, mode) {
   var n = (sel || []).length;

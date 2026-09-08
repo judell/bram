@@ -1,4 +1,4 @@
-<Component name="WorklistGateBar" var.gateSent="{[]}" var.startMode="{''}">
+<Component name="WorklistGateBar" var.gateSent="{[]}" var.startMode="{'one'}">
   <!-- issue-278: the Worklist gate, in the Footer.
        The gate row cannot be pinned where it lived - `position: sticky` cannot
        escape its containing block, and `dock` needs a bounded parent height
@@ -105,10 +105,13 @@
        old passive caption rendered beside an armed Start and was read past
        ("i would not have wanted to start two items that could not be
        committed separately"), so the foreclosure is now a CHOICE in the
-       click path, mirroring the commit side's radio. No preselection: Start
-       withholds until the choice is made. "One at a time" narrows each
-       Start click to the first selected item (its own claim/boundary);
-       the rest stay ticked for the next click. Self-retiring with #269
+       click path, mirroring the commit side's radio. The safe option (one at a
+       time) is the preselected default — no-preselection proved
+       unenforceable (RadioGroup auto-selects its first Option; field
+       receipt in start-choice-safe-default-commit-language) — so choosing
+       the combined commit is the deliberate act. "One at a time" narrows
+       each Start click to the first selected item (its own
+       claim/boundary); the rest stay ticked for the next click. Self-retiring with #269
        (per-item claims empty the condition) — see the item draft. -->
   <HStack
     when="{(gateSel.value || []).length >= 2 &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; window.__bramStartChoiceNeeded(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)}"
@@ -118,8 +121,8 @@
     <RadioGroup
       initialValue="{startMode}"
       onDidChange="(v) => { startMode = window.__bramW2SetStartMode(v) }">
-      <Option value="together" label="Start together — shared-file edits commit together (separable later only via the agent's park/drop/re-propose)" />
-      <Option value="one" label="Start one at a time — each click starts the next; per-item commits stay possible" />
+      <Option value="one" label="Start one at a time — separate commits" />
+      <Option value="together" label="{window.__bramStartAllLabel(gateSel.value)}" />
     </RadioGroup>
   </HStack>
   <!-- gate-withholds-futile-joint-commit-offer, commit side: when Commit is
@@ -251,7 +254,7 @@
     <Button
       label="{window.__bramStartButtonLabel(gateWorklist.value.items, gateSel.value, gateClaim.value, startMode)}"
       size="sm"
-      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; window.__bramStartGateReady(gateWorklist.value.items, gateSel.value, gateClaim.value, startMode)}"
+      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
       onClick="window.__bramGateAct('start', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode, gateClaim.value)" />
     <Button
       label="{'Start &amp; commit ' + (gateSel.value || []).length}"

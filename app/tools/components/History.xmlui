@@ -10,7 +10,19 @@
     key: 'history:' + h.id,
     type: 'worklist-history',
     source: h.title || ''
-  }))}">
+  }))}"
+  var.deepLinkedGroup="{$queryParams.entry ? (((historyList.value || []).find(h => h.id === $queryParams.entry)) || null) : null}">
+
+  <!-- issue-67: CommitDetail's "Worklist history" link deep-links here as
+       /history?entry=<item id> — h.id is the worklist item id (the group
+       id every history row is keyed by; recent_worklist_history_groups /
+       lib.rs groups per item, not per snapshot timestamp), so it's the one
+       addressable unit History already exposes. Var default covers landing
+       here fresh (mount-time read of $queryParams, per
+       https://www.xmlui.org/docs/howto/deep-link-to-a-tab-or-section); the
+       ChangeListener below covers historyList finishing its async load
+       after mount, and a second Open while already on this tab — same
+       belt-and-suspenders shape as Worklist.xmlui's expand param. -->
 
   <!-- issue-230: reverse-chron browse of worklist history as a simplified
        inline-expander table (matching Commits/Sessions), not the old cards.
@@ -29,6 +41,13 @@
   <ChangeListener
     listenTo="{historyIndexedEvt.value &amp;&amp; historyIndexedEvt.value.tick}"
     onDidChange="() => historyList.refetch()" />
+  <!-- issue-67: same shape as ResultList's own combined listenTo key
+       (data length + query) — one composite string so either historyList
+       finishing its load OR $queryParams.entry changing (a second Open
+       while already mounted) re-derives deepLinkedGroup. -->
+  <ChangeListener
+    listenTo="{($queryParams.entry || '') + '|' + (historyList.value ? historyList.value.length : 0)}"
+    onDidChange="deepLinkedGroup = ($queryParams.entry ? (((historyList.value || []).find(h => h.id === $queryParams.entry)) || null) : null)" />
   <!-- The needle/filter/rows chain lives in ROOT var. attributes: element-
        declared <variable>s went stale against the root searchQuery (the
        Commits DEBUG receipt, 2026-08-16). Filtering is filterHistoryList
@@ -97,4 +116,20 @@
       fontSize="$fontSize-sm"
       value="No worklist history yet." />
   </VStack>
+
+  <!-- issue-67: opens the deep-linked entry directly, independent of
+       ResultList's own row-click modal — ResultList's selectedHit is
+       internal to that component (var.selectedHit, ResultList.xmlui), with
+       no prop to preselect a row from outside it, so this owns its own
+       ModalDialog rather than reaching into ResultList's. Same detail
+       component + props ResultList itself uses for a worklist-history hit
+       (group="{selectedHit.extra}" there); maxWidth/height match too. -->
+  <Theme maxWidth-ModalDialog="95vw">
+    <ModalDialog
+      when="{!!deepLinkedGroup}"
+      onClose="deepLinkedGroup = null"
+      title="{deepLinkedGroup ? deepLinkedGroup.title : ''}">
+      <HistoryDetail when="{deepLinkedGroup}" group="{deepLinkedGroup.extra}" height="70vh" />
+    </ModalDialog>
+  </Theme>
 </Component>

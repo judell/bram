@@ -20,6 +20,26 @@
          gates on turns.value. -->
     <Text when="{commit.inProgress &amp;&amp; !commit.loaded}" color="$textColor-secondary" value="Loading…" />
 
+    <!-- issue-67: /__commit lazily joins the commit to any worklist-history
+         record that cites its full SHA (git_commit_detail, lib.rs). Read
+         straight off commit.value rather than through FindableList's row
+         data — __bramCommitBlockRows forwards only the head block's own
+         known fields, and this doesn't need find-in-commit's search spine.
+         One link per committed item id (History addresses an entry by the
+         worklist item's id, the group id — not by this record's own
+         timestamp — see History.xmlui's entry query param), via nested
+         Items: https://www.xmlui.org/docs/reference/components/Items.
+         Absent for most commits — only gate commits carry a trail. -->
+    <VStack when="{commit.value &amp;&amp; commit.value.historyEntries &amp;&amp; commit.value.historyEntries.length > 0}" gap="$space-1">
+      <Items data="{commit.value.historyEntries}">
+        <Items data="{$item.itemIds || []}">
+          <Link noIndicator onClick="navigate('/history', { queryParams: { entry: $item } })">
+            <Text value="{'Worklist history: ' + $item}" fontSize="$fontSize-sm" />
+          </Link>
+        </Items>
+      </Items>
+    </VStack>
+
     <!-- Mounts only once commit.value is present; data (raw block objects) is
          baked from the loaded commit here in CommitDetail's scope, not inside a
          frozen row template (the first-click-stuck-Loading trap). Search state

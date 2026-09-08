@@ -255,7 +255,14 @@
               <!-- issues-blank-bram-cell-starts-item: an open issue with no
                    lifecycle state offers the next step instead of a dead dash —
                    deep-links the Worklist's new-item composer with this issue
-                   preselected. Closed issues keep the plain dash. -->
+                   preselected. Closed issues keep the plain dash.
+                   issues-bram-column-committed-means-committed fold-in: the
+                   label leads with "+" so it reads as the ACTION it is —
+                   bare "new item" sat in a column of state words (proposed,
+                   committed, referenced) and read as one (field misread,
+                   2026-09-08: a dropped item's issue showing "new item" was
+                   reported as a stale state). "+ new item" mirrors this
+                   view's own "+ New issue" button vocabulary. -->
               <Link
                 when="{!$item.bramState &amp;&amp; $item.state === 'OPEN'}"
                 noIndicator
@@ -263,7 +270,7 @@
                 tooltip="Start a worklist item for this issue"
                 onClick="navigate('/worklist2', { queryParams: { newIssue: $item.number } })">
                 <Text fontSize="$fontSize-sm" color="$textColor-secondary" maxLines="1"
-                  value="new item" />
+                  value="+ new item" />
               </Link>
               <Text
                 when="{!$item.bramState &amp;&amp; $item.state !== 'OPEN'}"

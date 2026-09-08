@@ -13341,16 +13341,26 @@ fn rebuild_commits_list_cache<R: tauri::Runtime>(app: &AppHandle<R>, conn: &rusq
 // link? By the two existing conventions only — the `issue-<N>-` id prefix
 // and `closesIssues` — so refs-only work deliberately does not register
 // (nothing claimed to close the issue).
+//
+// The `issue-<N>-` id-prefix rule alone, with no `closesIssues` half —
+// factored out so issues-bram-column-committed-means-committed's
+// history_committed_issue_map can apply the same rule to a bare committed
+// id that has no item value to read closesIssues from (the item was
+// pruned from the board snapshot by the time it's read back).
+fn issue_number_from_id_prefix(id: &str) -> Option<u64> {
+    let rest = id.strip_prefix("issue-")?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() || !rest[digits.len()..].starts_with('-') {
+        return None;
+    }
+    digits.parse::<u64>().ok()
+}
+
 fn item_linked_issues(item: &serde_json::Value) -> Vec<u64> {
     let mut out = Vec::new();
     if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-        if let Some(rest) = id.strip_prefix("issue-") {
-            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if !digits.is_empty() && rest[digits.len()..].starts_with('-') {
-                if let Ok(n) = digits.parse::<u64>() {
-                    out.push(n);
-                }
-            }
+        if let Some(n) = issue_number_from_id_prefix(id) {
+            out.push(n);
         }
     }
     if let Some(arr) = item.get("closesIssues").and_then(|v| v.as_array()) {
@@ -13568,9 +13578,99 @@ fn bram_issue_lifecycle_map<R: tauri::Runtime>(
     map
 }
 
-// Tier 3: has any worklist-history entry linked this issue? The directory
-// is append-only and large (4.6k files in this repo), so the scan caches
-// per process and rebuilds only when the file count moves.
+// issues-bram-column-committed-means-committed: a history `.json` is a
+// BOARD SNAPSHOT written on every worklist change — propose, iterate,
+// drop, and commit alike — so "which issues does this snapshot's `items`
+// link?" is the wrong question for tier 3; a proposed-then-dropped item's
+// issue would brand "committed" forever (field case: #264). The sibling
+// `.md` changelog states what the record actually DID: a
+// "## Items committed" section listing each committed id's backticked
+// name. Pure parser, no AppHandle needed — the directory walk lives in
+// the caller. Section runs until the next `## ` heading or EOF; an absent
+// section (propose/iterate/drop records) yields an empty Vec.
+fn history_committed_item_ids(md: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_section = false;
+    for line in md.lines() {
+        if let Some(heading) = line.strip_prefix("## ") {
+            in_section = heading.trim() == "Items committed";
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        if let Some(rest) = line.trim_start().strip_prefix("- `") {
+            if let Some(end) = rest.find('`') {
+                out.push(rest[..end].to_string());
+            }
+        }
+    }
+    out
+}
+
+// Pure core of tier 3, split out from history_committed_issue_map so it's
+// testable without an AppHandle (the file's established idiom — see
+// app_tree_hash_tests). For each snapshot whose sibling .md names any
+// committed ids: items present in the snapshot link via item_linked_issues
+// (covers closesIssues); a committed id absent from the snapshot — the
+// ordinary case, since worklist-commit prunes an item the moment it lands —
+// still links via the bare issue-<N>- prefix rule, mirroring the id-prefix
+// half of item_linked_issues.
+fn history_committed_issue_map_from_dir(dir: &Path) -> std::collections::HashMap<u64, String> {
+    let mut map = std::collections::HashMap::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return map;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.extension().map(|x| x != "json").unwrap_or(true) {
+            continue;
+        }
+        let md_path = p.with_extension("md");
+        let Ok(md_text) = std::fs::read_to_string(&md_path) else {
+            continue;
+        };
+        let committed_ids = history_committed_item_ids(&md_text);
+        if committed_ids.is_empty() {
+            continue;
+        }
+        let committed: HashSet<&str> = committed_ids.iter().map(|s| s.as_str()).collect();
+        let Ok(text) = std::fs::read_to_string(&p) else {
+            continue;
+        };
+        let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let mut matched: HashSet<&str> = Default::default();
+        if let Some(items) = doc.get("items").and_then(|v| v.as_array()) {
+            for item in items {
+                let Some(id) = item.get("id").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if committed.contains(id) {
+                    matched.insert(id);
+                    for n in item_linked_issues(item) {
+                        map.insert(n, "committed".to_string());
+                    }
+                }
+            }
+        }
+        for id in &committed {
+            if matched.contains(id) {
+                continue;
+            }
+            if let Some(n) = issue_number_from_id_prefix(id) {
+                map.insert(n, "committed".to_string());
+            }
+        }
+    }
+    map
+}
+
+// Tier 3: has any worklist-history entry actually COMMITTED an item
+// linking this issue? The directory is append-only and large (4.6k files
+// in this repo), so the scan caches per process and rebuilds only when the
+// file count moves — cache shape unchanged by the committed-ids fix above.
 fn history_committed_issue_map<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> std::collections::HashMap<u64, String> {
@@ -13579,41 +13679,124 @@ fn history_committed_issue_map<R: tauri::Runtime>(
     let Some(dir) = project_resource_path(app, "worklist-history") else {
         return Default::default();
     };
-    let files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+    let file_count = std::fs::read_dir(&dir)
         .map(|entries| {
             entries
                 .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
-                .collect()
+                .filter(|e| e.path().extension().map(|x| x == "json").unwrap_or(false))
+                .count()
         })
-        .unwrap_or_default();
+        .unwrap_or(0);
     let cache = CACHE.get_or_init(|| Mutex::new((usize::MAX, Default::default())));
     if let Ok(g) = cache.lock() {
-        if g.0 == files.len() {
+        if g.0 == file_count {
             return g.1.clone();
         }
     }
-    let mut map = std::collections::HashMap::new();
-    for p in &files {
-        let Ok(text) = std::fs::read_to_string(p) else {
-            continue;
-        };
-        let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
-            continue;
-        };
-        if let Some(items) = doc.get("items").and_then(|v| v.as_array()) {
-            for item in items {
-                for n in item_linked_issues(item) {
-                    map.insert(n, "committed".to_string());
-                }
-            }
-        }
-    }
+    let map = history_committed_issue_map_from_dir(&dir);
     if let Ok(mut g) = cache.lock() {
-        *g = (files.len(), map.clone());
+        *g = (file_count, map.clone());
     }
     map
+}
+
+#[cfg(test)]
+mod history_committed_tests {
+    use super::{history_committed_issue_map_from_dir, history_committed_item_ids};
+    use std::io::Write;
+
+    const COMMIT_RECORD_MD: &str = "# Worklist change @ 2026-09-08T20:00:46Z (1788897646626)\n\n**Summary:** 1 committed\n\n## Items committed\n\n- `dismiss-click-evidence-before-guard` (was applied, ``)\n  - **Before:** ...\n  - **After:** ...\n  - **Commit:** https://github.com/judell/bram/commit/4dba1de9812ceb09c8668b7d9e166c49e710436a\n";
+
+    const PROPOSED_RECORD_MD: &str = "# Worklist change @ 2026-09-08T22:02:08Z (1788904928094)\n\n**Summary:** 1 proposed\n\n## Items proposed\n\n- `issues-bram-column-committed-means-committed` (proposed, ``)\n  - **Before:** ...\n  - **After:** ...\n";
+
+    const DROPPED_RECORD_MD: &str = "# Worklist change @ 2026-09-08T21:00:00Z (1788901234567)\n\n**Summary:** 1 dropped\n\n## Items dropped\n\n- `issue-264-mode-true-marks-decision-and-substrate` (was proposed, ``)\n  - **Before:** ...\n  - **After:** ...\n";
+
+    #[test]
+    fn parser_yields_ids_only_from_a_commit_record() {
+        assert_eq!(
+            history_committed_item_ids(COMMIT_RECORD_MD),
+            vec!["dismiss-click-evidence-before-guard".to_string()]
+        );
+    }
+
+    #[test]
+    fn parser_yields_nothing_for_a_proposed_only_record() {
+        assert!(history_committed_item_ids(PROPOSED_RECORD_MD).is_empty());
+    }
+
+    #[test]
+    fn parser_yields_nothing_for_a_dropped_record() {
+        assert!(history_committed_item_ids(DROPPED_RECORD_MD).is_empty());
+    }
+
+    // Field case (#264): a snapshot whose only worklist-history record for
+    // `issue-999-x` is a PROPOSED changelog must not link 999 as committed —
+    // this is the exact shape of the bug (a proposed-then-dropped item's
+    // issue branded "committed" forever by the old items-array scan).
+    #[test]
+    fn map_yields_no_entry_for_an_issue_only_ever_proposed() {
+        let dir = std::env::temp_dir().join(format!(
+            "bram-history-committed-map-test-proposed-only-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let proposed_json = serde_json::json!({
+            "description": "",
+            "items": [{"id": "issue-999-x", "status": "proposed"}],
+            "version": 1
+        });
+        std::fs::File::create(dir.join("1000000000000.json"))
+            .unwrap()
+            .write_all(proposed_json.to_string().as_bytes())
+            .unwrap();
+        std::fs::write(
+            dir.join("1000000000000.md"),
+            "# Worklist change\n\n**Summary:** 1 proposed\n\n## Items proposed\n\n- `issue-999-x` (proposed, ``)\n",
+        )
+        .unwrap();
+
+        let map = history_committed_issue_map_from_dir(&dir);
+        assert_eq!(map.get(&999), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A commit record naming that same item DOES link it — even though
+    // worklist-commit has already pruned the item from the snapshot by the
+    // time this record's .json is read back, so the fallback bare
+    // issue-<N>- prefix rule (not the snapshot-item closesIssues path) is
+    // what has to carry it.
+    #[test]
+    fn map_links_issue_from_a_commit_record_even_when_pruned_from_the_snapshot() {
+        let dir = std::env::temp_dir().join(format!(
+            "bram-history-committed-map-test-committed-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let committed_json = serde_json::json!({
+            "description": "",
+            "items": [],
+            "version": 2
+        });
+        std::fs::File::create(dir.join("1000000001000.json"))
+            .unwrap()
+            .write_all(committed_json.to_string().as_bytes())
+            .unwrap();
+        std::fs::write(
+            dir.join("1000000001000.md"),
+            "# Worklist change\n\n**Summary:** 1 committed\n\n## Items committed\n\n- `issue-999-x` (was applied, ``)\n",
+        )
+        .unwrap();
+
+        let map = history_committed_issue_map_from_dir(&dir);
+        assert_eq!(map.get(&999), Some(&"committed".to_string()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 // Annotate the served issues list with the Bram column; any parse trouble
@@ -15412,13 +15595,103 @@ fn git_commit_detail<R: tauri::Runtime>(app: &AppHandle<R>, sha: &str) -> Result
         .unwrap_or_default()
         .trim_end_matches('\n')
         .to_string();
-    let detail = serde_json::json!({
+    let mut detail = serde_json::json!({
         "sha": sha,
         "stats": { "additions": total_add, "deletions": total_del },
         "files": files_json,
         "message": message,
     });
+    // issue-67: the `.md → commit` join already exists (every gate commit's
+    // history entry carries a `**Commit:** .../commit/<sha>` line); this adds
+    // the reverse `commit → .md` join, lazily, on the click that asks for it.
+    let history_entries = history_entries_citing_commit(app, sha);
+    if !history_entries.is_empty() {
+        detail["historyEntries"] = serde_json::Value::Array(history_entries);
+    }
     serde_json::to_vec(&detail).map_err(|e| e.to_string())
+}
+
+// issue-67: does this history record's changelog cite the given commit? A
+// plain substring match on the full 40-hex SHA — it can't false-positive
+// against anything else that would appear in one of these files. Pure and
+// unit-tested; the directory walk lives in the caller.
+fn history_md_cites_commit(md_text: &str, sha: &str) -> bool {
+    sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()) && md_text.contains(sha)
+}
+
+// issue-67: which worklist-history record(s), if any, cite this commit's
+// full SHA? Scans every `.md` in `resources/worklist-history/` — lazy,
+// per-detail-request only (never from the commits LIST path, per #323's
+// cost-lives-on-the-click-that-asks discipline). ~2,400 small files is
+// milliseconds of grep-shaped work; a cache can be added if that changes.
+// Each hit also carries the committed item ids the SAME record's
+// "## Items committed" section names (history_committed_item_ids, the
+// parser issues-bram-column-committed-means-committed introduces below) —
+// History addresses an entry by worklist item id (the group id), not by
+// this record's own timestamp, so the pane needs the item id to deep-link
+// correctly. `itemIds` is empty only for a malformed/pre-format record; the
+// pane still renders the record's key/file, just with no working link.
+fn history_entries_citing_commit<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    sha: &str,
+) -> Vec<serde_json::Value> {
+    let Some(dir) = project_resource_path(app, "worklist-history") else {
+        return Vec::new();
+    };
+    let Ok(read_dir) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut hits: Vec<(String, Vec<String>)> = read_dir
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|x| x == "md").unwrap_or(false))
+        .filter_map(|p| {
+            let text = std::fs::read_to_string(&p).ok()?;
+            if !history_md_cites_commit(&text, sha) {
+                return None;
+            }
+            let key = p.file_stem().and_then(|s| s.to_str())?.to_string();
+            Some((key, history_committed_item_ids(&text)))
+        })
+        .collect();
+    hits.sort_by(|a, b| a.0.cmp(&b.0));
+    hits.into_iter()
+        .map(|(key, item_ids)| {
+            serde_json::json!({
+                "key": key,
+                "file": format!("worklist-history/{}.md", key),
+                "itemIds": item_ids,
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod commit_history_join_tests {
+    use super::history_md_cites_commit;
+
+    const SHA: &str = "4dba1de9812ceb09c8668b7d9e166c49e710436a";
+
+    #[test]
+    fn hits_when_the_full_sha_appears_in_a_commit_line() {
+        let md = "- **Commit:** https://github.com/judell/bram/commit/4dba1de9812ceb09c8668b7d9e166c49e710436a\n";
+        assert!(history_md_cites_commit(md, SHA));
+    }
+
+    #[test]
+    fn misses_when_the_sha_is_absent() {
+        let md = "- **Commit:** https://github.com/judell/bram/commit/deadbeefcafef00dfeed1234deadbeefcafef00\n";
+        assert!(!history_md_cites_commit(md, SHA));
+    }
+
+    #[test]
+    fn misses_an_empty_or_malformed_sha() {
+        assert!(!history_md_cites_commit("anything", ""));
+        assert!(!history_md_cites_commit(
+            "anything",
+            "not-hex-and-wrong-length"
+        ));
+    }
 }
 
 fn bram_app_root_candidates(

@@ -1719,11 +1719,20 @@ window.__bramGateCloseComment = function (itemId, issueNumber, text, closesIssue
 // Flat rows for the gate line: selected items' closesIssues with their
 // current effective tick state (absent map entry = default all-ticked,
 // same rule as __bramInlineCloseState).
-window.__bramGateCloseItems = function (items, sel) {
+// closes-decision-belongs-to-the-commit-gate: the ticks render only for
+// COMMITTABLE selected items. The field case (2026-09-07 screenshot): a
+// Start-3 of three proposed items rendered close ticks with comment boxes —
+// consent controls for commits that did not exist yet. Deliberate trade,
+// documented in conventions.md: a one-click Start & commit of pure plans no
+// longer offers ticks either (that flow commits sight-unseen; predicting
+// closure there is the same prematurity), so its commit queues no closes —
+// close later from a normal commit gate or the forge.
+window.__bramGateCloseItems = function (items, sel, claim) {
   var out = [];
   var chosen = sel || [];
   (items || []).forEach(function (it) {
     if (!it || chosen.indexOf(it.id) < 0) return;
+    if (!window.__bramSelectionAllCommittable(items, [it.id], claim)) return;
     var closes = it.closesIssues || [];
     if (!closes.length) return;
     var st = window.__bramInlineCloseState(window.__bramW2CloseMap, it);
@@ -3420,20 +3429,25 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, attribu
   if (!item) return "";
   // issue-266: the close declaration belongs on the status line for
   // scannability, never buried in the expanded body.
-  var closes = "";
+  // closes-decision-belongs-to-the-commit-gate: before an item is
+  // committable, closesIssues is an ASSOCIATION ("for #N"), not a claim —
+  // a proposed row reading "closes #N" is a prediction dressed as a
+  // promise (Walt's confusion; and issue-273's authored close had to be
+  // hand-deleted the night its fix was withdrawn). The "closes" wording is
+  // reserved for the committable state, where the gate can actually offer
+  // the tick.
+  var closesList = "";
   var ci = item.closesIssues;
   if (ci && ci.length) {
-    closes =
-      "closes " +
-      ci
-        .map(function (c) {
-          return "#" + (c && c.number != null ? c.number : c);
-        })
-        .join(", ");
+    closesList = ci
+      .map(function (c) {
+        return "#" + (c && c.number != null ? c.number : c);
+      })
+      .join(", ");
   }
-  var withCloses = function (base) {
-    if (!base) return base;
-    return closes ? base + " · " + closes : base;
+  var withCloses = function (base, asClaim) {
+    if (!base || !closesList) return base;
+    return base + " · " + (asClaim ? "closes " : "for ") + closesList;
   };
   var kind = window.__bramItemInflightKind(claim, item.id, "", "", 0);
   if (kind) {
@@ -3528,9 +3542,12 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, attribu
       // (74,978 → 329 → 427), each a different accounting defect in the
       // replay-based residue. The host no longer serves unattributedResidue;
       // the redesign is the drawing-board item.
+      // The one committable branch: here (and only here) the close reads as
+      // the claim it is — the gate is about to offer the tick.
       return withCloses(
         "Will commit +" + takesAdded + " −" + takesRemoved +
           partialFlag + sharedFlag,
+        true,
       );
     }
     // Not committable: every changed path is claimed by another begun item.
@@ -11317,28 +11334,48 @@ window.__bramRunningSubagentCount = function (roster) {
 // "CLAUDE · subagent: <description> · july5 · id …". The viewport lives
 // HERE rather than in chip styling so dropdown-overflow agents get the
 // same selection indicator as chip agents.
-window.__bramFooterSessionLine = function (session, agentId, roster) {
+//
+// Returned as {pre, bold, post} segments so the viewport NAME — "Main" or
+// the subagent's description — renders bold while everything around it
+// (provider, "subagent:" label, model, session meta) stays regular. The
+// name is the tie between the chip strip and the stream being viewed; the
+// chrome around it is not. The "subagent: " label and " (Model)" suffix
+// deliberately sit outside the bold segment. Main.xmlui renders the three
+// segments as adjacent Texts; __bramFooterSessionLine joins them, so the
+// string and segmented forms can never disagree.
+window.__bramFooterSessionLineParts = function (session, agentId, roster) {
   var meta = window.__bramSessionMetaLine(session) || "";
   var agents = (roster && roster.agents) || [];
   var mainModel = roster && roster.mainModel;
   // Zero-subagent sessions still get the plain meta line unless we have
   // the main model to report; a bare "Main" is footer noise.
-  if (!agentId && agents.length === 0 && !mainModel) return meta;
-  var view = "Main";
+  if (!agentId && agents.length === 0 && !mainModel) return { pre: meta, bold: "", post: "" };
+  var viewPre = "";
+  var viewBold = "Main";
+  var viewPost = "";
   if (agentId) {
     var match = null;
     for (var i = 0; i < agents.length; i++) {
       if (agents[i].agentId === agentId) { match = agents[i]; break; }
     }
-    view = "subagent: " + ((match && (match.description || match.agentType)) || agentId);
-    if (match && match.model) view += " (" + window.__bramPrettyModel(match.model) + ")";
+    viewPre = "subagent: ";
+    viewBold = (match && (match.description || match.agentType)) || agentId;
+    if (match && match.model) viewPost = " (" + window.__bramPrettyModel(match.model) + ")";
   } else if (mainModel) {
-    view = "Main (" + window.__bramPrettyModel(mainModel) + ")";
+    viewPost = " (" + window.__bramPrettyModel(mainModel) + ")";
   }
-  if (!meta) return view;
+  if (!meta) return { pre: viewPre, bold: viewBold, post: viewPost };
   var sp = meta.indexOf(" ");
-  if (sp < 0) return meta + " · " + view;
-  return meta.slice(0, sp) + " · " + view + " ·" + meta.slice(sp);
+  if (sp < 0) return { pre: meta + " · " + viewPre, bold: viewBold, post: viewPost };
+  return {
+    pre: meta.slice(0, sp) + " · " + viewPre,
+    bold: viewBold,
+    post: viewPost + " ·" + meta.slice(sp),
+  };
+};
+window.__bramFooterSessionLine = function (session, agentId, roster) {
+  var p = window.__bramFooterSessionLineParts(session, agentId, roster);
+  return p.pre + p.bold + p.post;
 };
 
 // One-line header for a subagent view (Transcript header + inline peek),

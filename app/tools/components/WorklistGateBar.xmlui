@@ -134,11 +134,11 @@
        Fresh rows per evaluation are fine: the checkbox's state lives in
        the map, so a remount re-reads the truth. -->
   <HStack
-    when="{(window.__bramGateCloseItems(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value) || []).length > 0}"
+    when="{(window.__bramGateCloseItems(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value) || []).length > 0}"
     horizontalAlignment="center"
     gap="$space-3"
     paddingTop="$space-1">
-    <Items data="{window.__bramGateCloseItems(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value)}">
+    <Items data="{window.__bramGateCloseItems(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)}">
       <HStack gap="$space-1" verticalAlignment="center">
         <Checkbox
           initialValue="{$item.close}"

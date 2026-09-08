@@ -374,6 +374,21 @@ when metadata (`files`, `closesIssues`, etc.) shifts.
   Set conservatively: only when the commit truly closes the issue, not
   when it merely cross-references (`see #N`, `related to #N`, partial
   multi-step work). Omit or use `[]` to skip the dialog.
+  **Timing (closes-decision-belongs-to-the-commit-gate):** before the
+  item is committable, `closesIssues` is an *association*, and the pane
+  renders it as "for #N" — the "closes #N" wording and the gate's tick
+  boxes appear only once the item is committable, because whether a
+  commit truly closes an issue is a commit-time judgment, not a
+  proposal-time prediction (live case: an item authored with
+  `closes #273` whose fix was withdrawn the same evening; the claim had
+  to be hand-deleted). Before requesting commit approval, re-verify the
+  claim against what the work actually became, and **remove**
+  `closesIssues` when the work no longer resolves the issue — that
+  removal is a documented duty, not an improvisation. Consequence of
+  the same rule: a one-click **Start & commit** of pure plans offers no
+  close ticks (nothing is committable at click time), so such commits
+  queue no closes — close afterwards from the forge, or via a normal
+  commit gate on a follow-up item.
 - `begunAtMs` is **host-written, never authored by an agent**. The host
   stamps it when it first records an `approved` authorization covering
   the item, and never clears or moves it while the item lives — a
@@ -1770,10 +1785,13 @@ follow-up.)
 
 Issue-derived items (e.g. "Propose a worklist item to address #N
 ...") default to pairing the `issue-<N>-...` id with `closesIssues`
-for that same issue. Omit only when the change is explicitly
-investigative, partial, or not intended to resolve. If you discover
-an approved/applied item is missing `closesIssues`, iterate the
-metadata before asking for commit approval.
+for that same issue — understood as the *association* until the item
+is committable (the pane renders "for #N"; the close claim and its
+tick belong to the commit gate). Omit only when the change is
+explicitly investigative, partial, or not intended to resolve. If you
+discover an approved/applied item is missing `closesIssues`, iterate
+the metadata before asking for commit approval — and symmetrically,
+remove it when the work turned out not to resolve the issue.
 
 Don't regex `#N` from item prose — false positives on
 cross-references. Use conversational context to judge whether the

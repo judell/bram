@@ -23968,6 +23968,50 @@ struct SearchIndexStatus {
     progress: Option<(String, usize, usize)>,
 }
 
+// issue-316: the shared not-ready check for /__search and /__search/doc.
+// None = index ready (at least one completed cycle), proceed. Some = the 503
+// refusal, reason "initial-scan" when work is visibly in flight, "holding"
+// otherwise (the deliberate unmanaged-project hold, untouched by this).
+// Pure so the held-vs-scanning-vs-ready decision is testable without an
+// AppHandle: the live synth can only reach the ready states easily (an
+// auto-Setup launch releases the hold within seconds by seeding the
+// worklist-authorization file), so the held branch's coverage is this test
+// rather than a fixture race.
+fn search_not_ready_reason(st: &SearchIndexStatus) -> Option<&'static str> {
+    if st.last_cycle_ms != 0 {
+        return None;
+    }
+    Some(if st.progress.is_some() || !st.active_buckets.is_empty() {
+        "initial-scan"
+    } else {
+        "holding"
+    })
+}
+
+fn search_not_ready_refusal<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Option<(u16, &'static str, Vec<u8>)> {
+    let st = search_index_status_snapshot();
+    let reason = search_not_ready_reason(&st)?;
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "search-index",
+            &format!("op=refuse-not-ready reason={}", reason),
+        );
+    }
+    let body = serde_json::json!({
+        "error": "search index not ready",
+        "reason": reason,
+        "hint": "no index cycle has completed for this project yet — this refusal means 'no index', never 'no history'; retry after the first cycle, or check /__search-index-status",
+    });
+    Some((
+        503,
+        "application/json; charset=utf-8",
+        serde_json::to_vec(&body).unwrap_or_default(),
+    ))
+}
+
 fn search_index_status_cell() -> &'static Mutex<SearchIndexStatus> {
     static CELL: OnceLock<Mutex<SearchIndexStatus>> = OnceLock::new();
     CELL.get_or_init(|| Mutex::new(SearchIndexStatus::default()))
@@ -52150,6 +52194,10 @@ fn route_request<R: tauri::Runtime>(
     // (the `file` column). Backs commit/issue/history expansion; sessions use
     // /__turns instead.
     if path == "__search/doc" {
+        // issue-316: same not-ready refusal as /__search.
+        if let Some(resp) = search_not_ready_refusal(app) {
+            return resp;
+        }
         let mut key = String::new();
         for pair in query.split('&') {
             if let Some(v) = pair.strip_prefix("key=") {
@@ -52210,6 +52258,17 @@ fn route_request<R: tauri::Runtime>(
 
     // issue-230 unified search: query route over the FTS5 index.
     if path == "__search" {
+        // issue-316: a held (never-scanned) index refuses loudly instead of
+        // returning `[]` — byte-identical to a genuine no-match, it produced
+        // the confidently-wrong "no prior art exists" read (#311's field
+        // case). last_cycle_ms==0 is authoritative for "no cycle has ever
+        // completed" (#251 created it for exactly this distinction); a
+        // COMPLETED scan over zero documents keeps returning `[]`, which is
+        // then a genuine empty. A jq array pipeline breaks loudly on this
+        // body — the desired failure mode.
+        if let Some(resp) = search_not_ready_refusal(app) {
+            return resp;
+        }
         let mut q = String::new();
         let mut limit = 50usize;
         let mut types: Vec<String> = Vec::new();
@@ -61844,5 +61903,28 @@ mod claim_attribution_tests {
         assert!(runs[0].get("itemId").is_none());
         assert_eq!(runs[1]["itemId"], "b");
         assert!(runs[1].get("itemIds").is_none());
+    }
+}
+
+#[cfg(test)]
+mod search_not_ready_tests {
+    use super::{search_not_ready_reason, SearchIndexStatus};
+
+    // issue-316: the held branch, covered here because a live fixture
+    // auto-releases the hold (Setup seeds the auth file within seconds).
+    #[test]
+    fn held_and_scanning_and_ready_are_distinguished() {
+        let mut st = SearchIndexStatus::default();
+        assert_eq!(search_not_ready_reason(&st), Some("holding"));
+        st.active_buckets = vec!["claude".into()];
+        assert_eq!(search_not_ready_reason(&st), Some("initial-scan"));
+        st.active_buckets.clear();
+        st.progress = Some(("commits".into(), 1, 10));
+        assert_eq!(search_not_ready_reason(&st), Some("initial-scan"));
+        // A completed cycle — even over zero documents — is ready: [] is
+        // then the genuine empty (verified live: 200 [] with total=0).
+        st.last_cycle_ms = 1;
+        st.progress = None;
+        assert_eq!(search_not_ready_reason(&st), None);
     }
 }

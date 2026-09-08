@@ -400,7 +400,19 @@
          load-bearing on a real zero (FTS5 keyword/phrase — a miss is not
          proof of absence) and firing it falsely teaches the reader to
          distrust it in the case it exists for. -->
-    <VStack when="{ready &amp;&amp; displayed.length === 0 &amp;&amp; latchedQuery === query.trim() &amp;&amp; totalHits === 0}" gap="$space-0_5">
+    <!-- issue-316: the THIRD absence kind, and the one that lied loudest —
+         a never-scanned index. /__search now refuses (503) in this state
+         rather than returning [], and this banner names it in the pane
+         whether or not a query has fired. Keyed on lastCycleMs (== 0 means
+         no cycle has ever completed, #251's own field), the same source the
+         coverage line reads. -->
+    <VStack when="{searchIndexStatus.value &amp;&amp; !searchIndexStatus.value.lastCycleMs}" gap="$space-0_5">
+      <Text color="$textColor-secondary" value="The index hasn't scanned this project yet." />
+      <Text fontSize="$fontSize-xs" color="$textColor-secondary"
+        value="Results will appear after the first index cycle completes. Until then an empty answer means 'no index', never 'no history' — searches are refused rather than returning nothing." />
+    </VStack>
+
+    <VStack when="{ready &amp;&amp; displayed.length === 0 &amp;&amp; latchedQuery === query.trim() &amp;&amp; totalHits === 0 &amp;&amp; searchIndexStatus.value &amp;&amp; searchIndexStatus.value.lastCycleMs}" gap="$space-0_5">
       <Text color="$textColor-secondary" value="No matches." />
       <Text fontSize="$fontSize-xs" color="$textColor-secondary"
         value="Search matches exact keywords and phrases (quote for a phrase), not meanings — no match means no term matched, not that the item is missing from the index. A trailing * widens the last word to a prefix." />

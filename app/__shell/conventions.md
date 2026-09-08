@@ -2135,7 +2135,12 @@ curl -4 -sS "http://127.0.0.1:61455/__search?q=<urlencoded>&limit=20&types=commi
 
 **Caveats.** FTS5 is keyword/phrase, not semantic — a miss means "nothing
 matched those terms," not proof of absence (the same trap as event-shaped
-logs). Scope is the current project. The issues bucket refreshes ~every 45s;
+logs). And a miss is only a miss on a scanned index: a project whose first
+index cycle has not completed now gets a **503 refusal** from `/__search`
+(`{"error":"search index not ready","reason":"holding|initial-scan",…}`)
+instead of an empty `[]` — treat that as "no index yet," never as absence
+of history (#316; the old byte-identical `[]` produced a confidently wrong
+"no prior art exists" in the field, #311). Scope is the current project. The issues bucket refreshes ~every 45s;
 a just-created issue may not be indexed for a beat.
 
 **Commit diffs are indexed.** Each `commit:` doc carries the commit's patch

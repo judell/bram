@@ -1,4 +1,4 @@
-<Component name="WorklistGateBar" var.gateSent="{[]}">
+<Component name="WorklistGateBar" var.gateSent="{[]}" var.startMode="{''}">
   <!-- issue-278: the Worklist gate, in the Footer.
        The gate row cannot be pinned where it lived - `position: sticky` cannot
        escape its containing block, and `dock` needs a bounded parent height
@@ -91,6 +91,52 @@
        a `var.` declared on an element scopes to its CHILDREN, so a `when`
        on that element referencing it fails silently and the control never
        renders (caught live, first render after the move). -->
+  <!-- gate-withholds-futile-joint-commit-offer: a stale one-at-a-time
+       choice from an earlier selection must not silently narrow a new one
+       — the field case was precisely a default taken unread. Reset on any
+       selection change; the setter/reset helpers return the value so the
+       handlers stay single-call. -->
+  <ChangeListener
+    listenTo="{(gateSel.value || []).join(',')}"
+    onDidChange="() => { startMode = window.__bramW2ResetStartMode() }" />
+  <!-- gate-withholds-futile-joint-commit-offer, Start side: starting a
+       shared file together in ONE click writes one claim and one capture
+       boundary — a permanent foreclosure of per-item commits (#356). The
+       old passive caption rendered beside an armed Start and was read past
+       ("i would not have wanted to start two items that could not be
+       committed separately"), so the foreclosure is now a CHOICE in the
+       click path, mirroring the commit side's radio. No preselection: Start
+       withholds until the choice is made. "One at a time" narrows each
+       Start click to the first selected item (its own claim/boundary);
+       the rest stay ticked for the next click. Self-retiring with #269
+       (per-item claims empty the condition) — see the item draft. -->
+  <HStack
+    when="{(gateSel.value || []).length >= 2 &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; window.__bramStartChoiceNeeded(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)}"
+    horizontalAlignment="center"
+    paddingHorizontal="$space-8"
+    paddingTop="$space-1">
+    <RadioGroup
+      initialValue="{startMode}"
+      onDidChange="(v) => { startMode = window.__bramW2SetStartMode(v) }">
+      <Option value="together" label="Start together — shared-file edits will only commit together" />
+      <Option value="one" label="Start one at a time — each click starts the next; per-item commits stay possible" />
+    </RadioGroup>
+  </HStack>
+  <!-- gate-withholds-futile-joint-commit-offer, commit side: when Commit is
+       withheld because a still-begun same-click partner is unselected, say
+       so as an instruction — the host would refuse this selection every
+       time (op=refuse-joint-interval), so the missing button must read as
+       guidance, not regression (the __bramItemShareBlockers precedent). -->
+  <HStack
+    when="{(window.__bramSelectionJointMissing(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value) || []).length > 0}"
+    horizontalAlignment="center"
+    paddingHorizontal="$space-8"
+    paddingTop="$space-1">
+    <Text
+      fontSize="$fontSize-sm"
+      color="$textColor-secondary"
+      value="{'Committable together with ' + window.__bramNameList(window.__bramSelectionJointMissing(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)) + ' — select both.'}" />
+  </HStack>
   <!-- avoid-futile-joint-commit: shareJointShared reads the host-computed
        `jointWith` field (/__worklist per-item, same change) via
        __bramSelectionJointShared -- true when a selected item was approved
@@ -203,9 +249,9 @@
          So this is deliberately a bounded signal that points, not a complete
          one that describes. -->
     <Button
-      label="{'Start ' + (gateSel.value || []).length}"
+      label="{window.__bramStartButtonLabel(gateWorklist.value.items, gateSel.value, gateClaim.value, startMode)}"
       size="sm"
-      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
+      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; window.__bramStartGateReady(gateWorklist.value.items, gateSel.value, gateClaim.value, startMode)}"
       onClick="window.__bramGateAct('start', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode, gateClaim.value)" />
     <Button
       label="{'Start &amp; commit ' + (gateSel.value || []).length}"

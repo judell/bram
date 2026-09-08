@@ -1881,6 +1881,21 @@ window.__bramGateAct = function (kind, items, sel, shareMode, claim) {
   // Selection is literal user intent. Shared-file handling may change how the
   // agent prepares the commit, but never which ids this action authorizes.
   var ids0 = sel || [];
+  // gate-withholds-futile-joint-commit-offer, Start side: under the
+  // one-at-a-time choice, each click starts only the FIRST selected item —
+  // its own claim and capture boundary — so per-item commits stay possible
+  // on the shared file. The rest stay ticked; the next click starts the
+  // next. This is the one sanctioned narrowing of the selection-is-intent
+  // rule above, and it is itself the user's explicit choice via the radio.
+  var startNarrowed = false;
+  if (
+    kind === "start" &&
+    window.__bramW2StartMode === "one" &&
+    window.__bramStartChoiceNeeded(items, ids0, claim)
+  ) {
+    ids0 = [ids0[0]];
+    startNarrowed = true;
+  }
   // issue-343: the trace comes FIRST — the old order (guard, then trace)
   // made a click with an empty selection a perfectly silent no-op, which is
   // exactly the evidence signature Andrew reported: no click line, no
@@ -1891,6 +1906,7 @@ window.__bramGateAct = function (kind, items, sel, shareMode, claim) {
     count: ids0.length,
     op: ids0.length ? "act" : "empty-selection",
     store: (window.__bramW2Selection || []).length,
+    startMode: startNarrowed ? "one" : undefined,
   });
   if (!ids0.length) return;
   var text = String(window.__bramMessageAgentText || "");
@@ -2829,6 +2845,14 @@ window.__bramSelectionAllCommittable = function (items, sel, claim) {
   var list = items || [];
   var picked = list.filter(function (i) { return chosen.indexOf(i.id) !== -1; });
   if (picked.length !== chosen.length) return false;
+  // gate-withholds-futile-joint-commit-offer: the issue-327 rationale below
+  // (entangled is committable via interval staging) has exactly one
+  // exception, and the host enforces it — a JOINT run cannot be staged, so
+  // a selection missing a still-begun jointWith partner is refused every
+  // time. Don't offer the guaranteed 409; the gate note names the partner.
+  if ((window.__bramSelectionJointMissing(items, sel, claim) || []).length) {
+    return false;
+  }
   for (var i = 0; i < picked.length; i++) {
     var it = picked[i];
     // #336: no `applied` short-circuit. Exclusivity is what makes the Commit
@@ -4012,6 +4036,84 @@ window.__bramSelectionJointShared = function (items, sel) {
     if (it && it.jointWith && it.jointWith.length) return true;
   }
   return false;
+};
+
+// gate-withholds-futile-joint-commit-offer: the still-begun jointWith
+// partners a selection is MISSING — the ids whose absence makes a commit of
+// this selection a guaranteed host refusal (op=refuse-joint-interval, #356:
+// a joint run cannot be interval-staged, so a request not covering the
+// whole joint set 409s every time; field case 2026-09-08, "Then we should
+// not offer it!"). A pruned partner does not block — ghosts fall through to
+// whole-file staging host-side. Keys on EVIDENCE (jointWith), so #269's
+// per-item claims retire this check by making the field empty for new
+// records — no policy unwind (the item draft's sunset note).
+window.__bramSelectionJointMissing = function (items, sel, claim) {
+  var chosen = sel || [];
+  var list = items || [];
+  var byId = {};
+  for (var i = 0; i < list.length; i++) if (list[i]) byId[list[i].id] = list[i];
+  var missing = [];
+  for (var s = 0; s < chosen.length; s++) {
+    var it = byId[chosen[s]];
+    var jw = (it && it.jointWith) || [];
+    for (var j = 0; j < jw.length; j++) {
+      var partner = byId[jw[j]];
+      if (!partner) continue;
+      if (!window.__bramWorklist2Begun(partner, claim)) continue;
+      if (chosen.indexOf(jw[j]) !== -1) continue;
+      if (missing.indexOf(jw[j]) === -1) missing.push(jw[j]);
+    }
+  }
+  return missing;
+};
+
+// gate-withholds-futile-joint-commit-offer, Start side: does this Start
+// selection need the together/one-at-a-time choice? Only a wholly
+// not-yet-begun plural selection sharing declared files — once anything
+// began, the boundary story is already written, and a disjoint selection
+// forecloses nothing.
+window.__bramStartChoiceNeeded = function (items, sel, claim) {
+  var chosen = sel || [];
+  if (chosen.length < 2) return false;
+  var list = items || [];
+  for (var i = 0; i < list.length; i++) {
+    var it = list[i];
+    if (it && chosen.indexOf(it.id) !== -1 && window.__bramWorklist2Begun(it, claim)) {
+      return false;
+    }
+  }
+  return (window.__bramSelectionSharedFilePaths(list, chosen, claim) || []).length > 0;
+};
+
+// The choice state. Deliberately NOT preselected when the choice applies —
+// the field case was a default taken unread. The setter returns its value
+// so the markup's onDidChange stays a single call that also assigns the
+// gate bar's reactive var; reset fires on selection change so a stale
+// choice from an earlier selection cannot silently narrow (or foreclose)
+// a new one.
+window.__bramW2StartMode = "";
+window.__bramW2SetStartMode = function (m) {
+  window.__bramW2StartMode = m || "";
+  return window.__bramW2StartMode;
+};
+window.__bramW2ResetStartMode = function () {
+  window.__bramW2StartMode = "";
+  return "";
+};
+
+// Start button readiness and label under the choice: when the choice is
+// needed and unmade, Start withholds (the radio is the way forward); mode
+// "one" narrows the click to the first selected id and says so.
+window.__bramStartGateReady = function (items, sel, claim, mode) {
+  if (!window.__bramStartChoiceNeeded(items, sel, claim)) return true;
+  return mode === "together" || mode === "one";
+};
+window.__bramStartButtonLabel = function (items, sel, claim, mode) {
+  var n = (sel || []).length;
+  if (mode === "one" && window.__bramStartChoiceNeeded(items, sel, claim)) {
+    return "Start 1 of " + n;
+  }
+  return "Start " + n;
 };
 
 // Names offending items instead of counting them. A bare count collides with

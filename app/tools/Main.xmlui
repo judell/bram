@@ -980,8 +980,9 @@
       <!-- Session info with the transcript viewport (Main / subagent)
            reported after the provider token — selection lives here, not
            in chip styling, so dropdown-overflow agents indicate the same
-           way. Falls back to the plain meta line until a rebuilt
-           helpers.js provides __bramFooterSessionLine. -->
+           way. helpers.js and this markup hot-serve together from disk,
+           so the parts helper is bound directly (the old
+           rebuilt-helpers fallback predated the disk-serving proof). -->
       <!-- switch-to-transcript-on-action: the bottom compound — new-below
            chip FIRST (most salient) in a fixed-width slot so the rest of
            the line never jitters as the chip appears, disappears, or its
@@ -1013,11 +1014,32 @@
             tooltip="New transcript content — jump to the live edge"
             onClick="window.__bramUnseenJump(); navigate('/transcript')" />
         </HStack>
-        <Text
-          fontSize="$fontSize-sm"
-          color="$textColor-secondary"
-          maxLines="1"
-          value="{(window.__bramFooterSessionLine || window.__bramSessionMetaLine)(window.__bramCurrentSessionOf(footerSessions.value), transcriptAgentId, footerAgents.value)}" />
+        <!-- Three segments, bold viewport name in the middle — "Main" or
+             the subagent's description carries the tie to the chip strip,
+             so IT gets the weight, not the chrome around it (Jon,
+             2026-09-07: "I want Main and Reinstate debounce probe to be
+             bold in the bottom row"). Segmentation lives in
+             __bramFooterSessionLineParts; gap=0 so only the segments' own
+             spaces separate them. fontWeight is a Text styling prop:
+             https://docs.xmlui.org/components/Text -->
+        <HStack gap="0" verticalAlignment="center">
+          <Text
+            fontSize="$fontSize-sm"
+            color="$textColor-secondary"
+            maxLines="1"
+            value="{window.__bramFooterSessionLineParts(window.__bramCurrentSessionOf(footerSessions.value), transcriptAgentId, footerAgents.value).pre}" />
+          <Text
+            fontSize="$fontSize-sm"
+            color="$textColor-secondary"
+            fontWeight="$fontWeight-bold"
+            maxLines="1"
+            value="{window.__bramFooterSessionLineParts(window.__bramCurrentSessionOf(footerSessions.value), transcriptAgentId, footerAgents.value).bold}" />
+          <Text
+            fontSize="$fontSize-sm"
+            color="$textColor-secondary"
+            maxLines="1"
+            value="{window.__bramFooterSessionLineParts(window.__bramCurrentSessionOf(footerSessions.value), transcriptAgentId, footerAgents.value).post}" />
+        </HStack>
         <SpaceFiller />
         <Text
           when="{footerIndexStatus.value &amp;&amp; window.__bramFooterIndexLabel(footerIndexStatus.value)}"

@@ -35338,6 +35338,12 @@ fn format_worklist_payload_text<R: tauri::Runtime>(
                         fb = feedback_content_by_ref(app, fref).unwrap_or_default();
                     }
                 }
+                // fanned-feedback-images-dedupe: extend now, dedupe after the
+                // loop — the gate's fan-out writes byte-identical drafts per
+                // selected item, so the same [Image: source: …] marker
+                // extracts once per item and a two-item refine rendered its
+                // screenshot twice (both projects, 2026-09-08). The text one
+                // line down already has the fanned dedupe; images get it too.
                 fb_images.extend(st_extract_image_paths(&fb));
                 let fb_clean = st_strip_image_paths(&fb);
                 let fb_compact = fb_clean.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -35345,6 +35351,14 @@ fn format_worklist_payload_text<R: tauri::Runtime>(
                     pairs.push((label, fb_compact));
                 }
             }
+        }
+        // fanned-feedback-images-dedupe: exact-duplicate paths collapse,
+        // order-preserving, first occurrence wins — the image analogue of the
+        // fanned-text rule below. Distinct images across items keep rendering
+        // individually.
+        {
+            let mut seen: std::collections::HashSet<String> = Default::default();
+            fb_images.retain(|p| seen.insert(p.clone()));
         }
         // Identical non-empty feedback across a plural payload is the gate's
         // one triage message fanned out, not N authored texts — show it once.

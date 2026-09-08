@@ -147,7 +147,7 @@
          Container). This is a VStack, so moving the body there would silently
          do nothing. -->
     onMount="window.__bramRegisterTranscriptScroll(() => { atBottom = window.__bramFollowTransition(false, 'footer-arrow-up', $props.agentId); transcriptList.scrollToTop(); }, () => { window.__bramClearTranscriptFind('footer-arrow-down'); atBottom = window.__bramFollowTransition(true, 'footer-arrow-down', $props.agentId); window.__bramBottomJumpRetry(transcriptList, 'footer-arrow-down', $props.agentId, events.length); }); window.__bramTranscriptMount()"
-    onUnmount="window.__bramTranscriptUnmount(atBottom, events.length)"
+    onUnmount="window.__bramTranscriptUnmount(atBottom, events.length, $props.agentId)"
     var.events="{window.__bramTranscriptEventsFromTurns($props.agentId ? subagentTurns.value : turnsEvt.value, null)}"
     var.eventsVersion="{($props.agentId ? (subagentTurns.value &amp;&amp; subagentTurns.value.total) : (turnsEvt.value &amp;&amp; turnsEvt.value.revision)) || events.length}"
     var.expanded="{[]}"
@@ -155,7 +155,7 @@
     var.repinArmed="{false}"
     var.settleArmed="{false}"
     var.mountReturnState="{window.__bramVisibleRange || null}"
-    var.mountFollow="{!mountReturnState || mountReturnState.atBottom !== false}"
+    var.mountFollow="{window.__bramMountFollow(mountReturnState, $props.agentId)}"
     var.mountPinArmed="{true}"
     var.mountPinTicks="{0}"
     var.findText="{''}"
@@ -163,17 +163,16 @@
     var.findCursor="{0}"
     var.findPlan="{null}"
     var.currentSession="{((transcriptSessions.value || []).find(s => s.current)) || ((transcriptSessions.value || [])[0])}">
-    <!-- transcript-stream-switch-lands-at-bottom: switching agentId (Main <->
-         a subagent chip) swaps this List's `data` binding in place while the
-         Transcript component instance survives -- nothing else scrolls, so
-         the viewport keeps the PREVIOUS stream's offset. A stream switch is a
-         deliberate navigation (same family as the footer down-arrow), so it
-         enters FOLLOWING and lands at the new stream's live edge.
-         __bramStreamSwitchJump keeps re-pinning as content renders, which
-         covers the async subagentTurns fetch on first switch to an agent. -->
-    <ChangeListener
-      listenTo="{$props.agentId}"
-      onDidChange="() => { atBottom = window.__bramStreamSwitchJump(transcriptList, $props.agentId, events.length) }" />
+    <!-- transcript-stream-switch-mount-keyed: a chip switch REMOUNTS this
+         component (transcript-mount-pin/-restore fire per switch), so
+         98b9f84's ChangeListener on $props.agentId never fired — zero
+         cause=stream-switch traces in the field. The stream-switch landing
+         now lives in the MOUNT decision: __bramTranscriptUnmount stashes
+         which stream saved the return state, and mountFollow
+         (__bramMountFollow) forces the follow branch when the mounting
+         stream differs — the pin machinery below already owns
+         retry-until-landed. Same-stream returns keep today's read-position
+         restore. -->
     <!-- transcript-find-in-page-v2: inline find row, no UDC — the FindBar
          factoring is parked (stash@{0}) on the xmlui #3584 emitEvent-in-UDC
          silent-failure family. The pane's scroller is the App's

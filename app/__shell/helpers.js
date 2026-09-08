@@ -4240,14 +4240,41 @@ window.__bramStartConsequence = function (items, sel, claim) {
 // recommends: that hook is exposed only by container components (App, Page,
 // Form, NestedApp, Container). The Transcript's root is a VStack, so the
 // advice does not apply and following it would have silently done nothing.
-window.__bramTranscriptUnmount = function (atBottom, total) {
+window.__bramTranscriptUnmount = function (atBottom, total, agentId) {
   window.__bramSetTranscriptMounted(false);
   window.__bramSetVisibleRange(
     Object.assign({}, window.__bramVisibleRange || {}, {
       atBottom: atBottom,
       total: total,
+      // transcript-stream-switch-mount-keyed: WHICH stream saved this
+      // return state. A chip switch REMOUNTS the Transcript, and the mount
+      // restore previously applied one stream's reading position to
+      // another (2026-09-08 21:10: switch away from Main mid-history,
+      // transcript-mount-restore index=3 onto the subagent stream).
+      stream: String(agentId || ""),
     }),
   );
+};
+
+// transcript-stream-switch-mount-keyed: the mount decision, stream-keyed.
+// Same stream that saved the state -> honor it (restore a reading
+// position, or follow if it left following). DIFFERENT stream -> always
+// follow: a switch is a deliberate navigation to another stream's live
+// edge, and the saved position belongs to the stream that saved it. This
+// replaces 98b9f84's ChangeListener on $props.agentId, which was dead on
+// arrival - the remount means no prop transition ever fires (zero
+// cause=stream-switch traces in the field, ever).
+window.__bramMountFollow = function (state, agentId) {
+  if (!state) return true;
+  if (String(state.stream || "") !== String(agentId || "")) {
+    window.__bramIframeTrace("follow-state", {
+      op: "stream-switch-mount",
+      from: String(state.stream || "") || "main",
+      to: String(agentId || "") || "main",
+    });
+    return true;
+  }
+  return state.atBottom !== false;
 };
 
 window.__bramOverlapIndex = function (items, claim) {
@@ -9675,25 +9702,12 @@ window.__bramBottomJumpRetry = function (listRef, cause, agentId, total) {
   setTimeout(step, 50);
 };
 
-// transcript-stream-switch-lands-at-bottom: switching the Transcript between
-// Main and a subagent stream sets $props.agentId and (when already on
-// /transcript) the List swaps its `data` binding in place -- the component
-// instance survives, so nothing else touches scroll and the viewport keeps
-// the PREVIOUS stream's offset. A stream switch is a deliberate navigation
-// (same family as the footer down-arrow), so it should enter FOLLOWING and
-// land at the new stream's live edge. This packages the same two calls the
-// footer-arrow-down callback makes (Transcript.xmlui onMount, around
-// __bramRegisterTranscriptScroll) into one function so the ChangeListener's
-// attribute handler stays a single call: __bramFollowTransition arms
-// FOLLOWING and returns the value to assign to `atBottom`; __bramBottomJumpRetry
-// then keeps re-pinning to the live edge as the newly selected stream's
-// content renders, which covers the async `subagentTurns` fetch on first
-// switch to a given agent.
-window.__bramStreamSwitchJump = function (listRef, agentId, total) {
-  var atBottom = window.__bramFollowTransition(true, "stream-switch", agentId);
-  window.__bramBottomJumpRetry(listRef, "stream-switch", agentId, total);
-  return atBottom;
-};
+// (98b9f84's __bramStreamSwitchJump lived here and is retired: its premise
+// — that the Transcript instance survives a chip switch and only `data`
+// swaps — was wrong. The switch REMOUNTS the component, so the ChangeListener
+// it served never fired (zero cause=stream-switch traces, ever). The
+// stream-switch landing now rides the mount decision: __bramMountFollow,
+// keyed by the stream that saved the return state.)
 
 // Did a bottom-promise actually land?
 //

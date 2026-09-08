@@ -9647,6 +9647,26 @@ window.__bramBottomJumpRetry = function (listRef, cause, agentId, total) {
   setTimeout(step, 50);
 };
 
+// transcript-stream-switch-lands-at-bottom: switching the Transcript between
+// Main and a subagent stream sets $props.agentId and (when already on
+// /transcript) the List swaps its `data` binding in place -- the component
+// instance survives, so nothing else touches scroll and the viewport keeps
+// the PREVIOUS stream's offset. A stream switch is a deliberate navigation
+// (same family as the footer down-arrow), so it should enter FOLLOWING and
+// land at the new stream's live edge. This packages the same two calls the
+// footer-arrow-down callback makes (Transcript.xmlui onMount, around
+// __bramRegisterTranscriptScroll) into one function so the ChangeListener's
+// attribute handler stays a single call: __bramFollowTransition arms
+// FOLLOWING and returns the value to assign to `atBottom`; __bramBottomJumpRetry
+// then keeps re-pinning to the live edge as the newly selected stream's
+// content renders, which covers the async `subagentTurns` fetch on first
+// switch to a given agent.
+window.__bramStreamSwitchJump = function (listRef, agentId, total) {
+  var atBottom = window.__bramFollowTransition(true, "stream-switch", agentId);
+  window.__bramBottomJumpRetry(listRef, "stream-switch", agentId, total);
+  return atBottom;
+};
+
 // Did a bottom-promise actually land?
 //
 // This check was inert from the day it was written: it read

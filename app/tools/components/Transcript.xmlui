@@ -163,6 +163,17 @@
     var.findCursor="{0}"
     var.findPlan="{null}"
     var.currentSession="{((transcriptSessions.value || []).find(s => s.current)) || ((transcriptSessions.value || [])[0])}">
+    <!-- transcript-stream-switch-lands-at-bottom: switching agentId (Main <->
+         a subagent chip) swaps this List's `data` binding in place while the
+         Transcript component instance survives -- nothing else scrolls, so
+         the viewport keeps the PREVIOUS stream's offset. A stream switch is a
+         deliberate navigation (same family as the footer down-arrow), so it
+         enters FOLLOWING and lands at the new stream's live edge.
+         __bramStreamSwitchJump keeps re-pinning as content renders, which
+         covers the async subagentTurns fetch on first switch to an agent. -->
+    <ChangeListener
+      listenTo="{$props.agentId}"
+      onDidChange="() => { atBottom = window.__bramStreamSwitchJump(transcriptList, $props.agentId, events.length) }" />
     <!-- transcript-find-in-page-v2: inline find row, no UDC — the FindBar
          factoring is parked (stash@{0}) on the xmlui #3584 emitEvent-in-UDC
          silent-failure family. The pane's scroller is the App's

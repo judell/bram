@@ -20147,9 +20147,38 @@ fn open_devtools(window: tauri::WebviewWindow) {
 // C1-isolated target pane cannot call them), so the H5 close-authority
 // contract survives — this restores the user's clicked-button close without
 // recreating the agent-reachable /__issue/close channel removed in that work.
+// push-and-forge-actions-off-main-thread: both issue_close_manual and
+// git_push make network-shaped forge calls; a single shared mutex is
+// enough because they are the only two forge-network commands and each
+// one's body already reaches into the same issue-close-queue file
+// (git_push's finish_git_push flushes it, issue_close_manual writes to
+// it directly) — one cell serializes both against each other, not just
+// each against itself, so a manual close can't race a push's own flush
+// of the same queue.
+fn forge_action_cell() -> &'static Mutex<()> {
+    static CELL: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(()))
+}
+
+// push-and-forge-actions-off-main-thread: sync #[tauri::command]s run on
+// the main thread, so a single-issue close network round trip beachballed
+// the window. spawn_blocking moves the unchanged body onto a blocking-pool
+// thread per https://tauri.app/develop/calling-rust/#async-commands; the
+// JS side still awaits one Result-shaped promise, so window.gitPush's
+// close caller is unaffected.
 #[tauri::command]
-fn issue_close_manual(app: AppHandle, number: u64, comment: Option<String>) -> Result<(), String> {
-    gh_issue_close(&app, number, comment.as_deref().unwrap_or("")).map(|_| ())
+async fn issue_close_manual(
+    app: AppHandle,
+    number: u64,
+    comment: Option<String>,
+) -> Result<(), String> {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = forge_action_cell().lock();
+        gh_issue_close(&app, number, comment.as_deref().unwrap_or("")).map(|_| ())
+    })
+    .await
+    .map_err(|e| format!("issue_close_manual task panicked: {}", e))?
 }
 
 // issue-237: when a push fails with queued issue-closes waiting, say so in
@@ -20171,9 +20200,25 @@ fn describe_stranded_closes<R: tauri::Runtime>(app: &AppHandle<R>) -> String {
     )
 }
 
+// push-and-forge-actions-off-main-thread: the network `git push`, the
+// non-fast-forward auto-rebase retry, and finish_git_push's commits-cache
+// rebuild + queued-issue-close flush all ran on the main thread as a sync
+// #[tauri::command], beachballing the window for the whole sequence.
+// spawn_blocking moves the unchanged body (git_push_inner +
+// describe_stranded_closes) onto a blocking-pool thread per
+// https://tauri.app/develop/calling-rust/#async-commands; forge_action_cell
+// (above) queues a second click behind the first instead of racing two
+// `git`/forge invocations. The JS contract is unchanged: window.gitPush
+// still awaits the same Result<(), String>-shaped promise.
 #[tauri::command]
-fn git_push(app: AppHandle, branch: Option<String>) -> Result<(), String> {
-    git_push_inner(&app, branch).map_err(|e| format!("{}{}", e, describe_stranded_closes(&app)))
+async fn git_push(app: AppHandle, branch: Option<String>) -> Result<(), String> {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = forge_action_cell().lock();
+        git_push_inner(&app, branch).map_err(|e| format!("{}{}", e, describe_stranded_closes(&app)))
+    })
+    .await
+    .map_err(|e| format!("git_push task panicked: {}", e))?
 }
 
 fn git_push_inner(app: &AppHandle, branch: Option<String>) -> Result<(), String> {
@@ -40990,7 +41035,7 @@ fn diff_residual_lines(patch: &str) -> ResidualLines {
     let mut in_hunk = false;
     let mut hunk_plus = 0usize;
     let mut hunk_minus = 0usize;
-    let mut close_hunk = |plus: &mut usize, minus: &mut usize, flag: &mut bool| {
+    let close_hunk = |plus: &mut usize, minus: &mut usize, flag: &mut bool| {
         if *minus > 0 && *plus == 0 {
             *flag = true;
         }

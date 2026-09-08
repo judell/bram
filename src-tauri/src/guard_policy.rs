@@ -1835,6 +1835,27 @@ fn body_is_signed(body: &str, cwd: &Path) -> bool {
     false
 }
 
+/// The `crossboundary-unsigned` deny text, shared by the Claude and Codex
+/// deny sites so they cannot drift (issue-365). The abstract template alone
+/// left a field agent guessing at its own repo's locator (`~/budget`, five
+/// blind retries) even though `body_is_signed` had already computed the
+/// exact expectation and discarded it — this appends that expectation (or,
+/// for a genuinely remoteless checkout, states that any host/path-shaped
+/// locator is accepted) so the deny teaches instead of only refusing.
+fn crossboundary_unsigned_message(cwd: &Path) -> String {
+    let expectation = match expected_repo_locator(cwd) {
+        Some(want) => format!(
+            "This checkout's origin is {want} — the signature's locator must be exactly that."
+        ),
+        None => {
+            "No origin remote found here; any host/path-shaped locator is accepted.".to_string()
+        }
+    };
+    format!(
+        "This agent-authored forge artifact lacks the full repository-qualified signature.\nOpen the first line with:\n    <owner>'s <Agent> (<thread>, <model>, <os>, <machine>) speaking from the <Project> project (<origin-host>/<path>):\n{expectation}\nSee conventions.md, 'Signing agent-authored forge artifacts' — every artifact, every comment, not just the first in a thread."
+    )
+}
+
 fn crossboundary_signature_verdict(command: &str, cwd: &Path) -> (&'static str, &'static str) {
     if command.is_empty() {
         return ("skip", "no-command");
@@ -2639,14 +2660,15 @@ fn bash_branch(payload: &Value) -> ShadowVerdict {
         );
     }
     if cb_verdict == "unsigned" {
-        // python:1916-1934
+        // python:1916-1934, message built by crossboundary_unsigned_message
+        // (issue-365) so it names this checkout's expected locator.
         return deny_msg(
             "crossboundary-unsigned",
             "-",
             "Bash",
             &preview,
             &cwd_s,
-            "This agent-authored forge artifact lacks the full repository-qualified signature.\nOpen the first line with:\n    <owner>'s <Agent> (<thread>, <model>, <os>, <machine>) speaking from the <Project> project (<origin-host>/<path>):\nSee conventions.md, 'Signing agent-authored forge artifacts' — every artifact, every comment, not just the first in a thread.",
+            &crossboundary_unsigned_message(&cwd),
         );
     }
     let (sha_verdict, sha_detail) = forge_sha_verdict(&command, &cwd);
@@ -4292,10 +4314,9 @@ Use --body-file - (stdin) or --body-file <path> instead.\nDetected: <match>",
         );
     }
     if cb_verdict == "unsigned" {
-        return codex_deny(
-            "This agent-authored forge artifact lacks the full repository-qualified signature.\nOpen the first line with:\n    <owner>'s <Agent> (<thread>, <model>, <os>, <machine>) speaking from the <Project> project (<origin-host>/<path>):\nSee conventions.md, 'Signing agent-authored forge artifacts' — every artifact, every comment, not just the first in a thread.",
-            "-",
-        );
+        // Same split as the Claude site — shared builder (issue-365) so the
+        // two deny sites cannot drift on the locator-teaching line.
+        return codex_deny(&crossboundary_unsigned_message(cwd), "-");
     }
     let (sha_verdict, sha_detail) = forge_sha_verdict(&command, cwd);
     if sha_verdict == "bad" {
@@ -6192,7 +6213,7 @@ mod guard_policy_tests {
         assert_eq!(v.reason, "crossboundary-unsigned");
         assert_eq!(
             body_of(&v),
-            "This agent-authored forge artifact lacks the full repository-qualified signature.\nOpen the first line with:\n    <owner>'s <Agent> (<thread>, <model>, <os>, <machine>) speaking from the <Project> project (<origin-host>/<path>):\nSee conventions.md, 'Signing agent-authored forge artifacts' — every artifact, every comment, not just the first in a thread."
+            "This agent-authored forge artifact lacks the full repository-qualified signature.\nOpen the first line with:\n    <owner>'s <Agent> (<thread>, <model>, <os>, <machine>) speaking from the <Project> project (<origin-host>/<path>):\nNo origin remote found here; any host/path-shaped locator is accepted.\nSee conventions.md, 'Signing agent-authored forge artifacts' — every artifact, every comment, not just the first in a thread."
         );
 
         let at = '@';
@@ -6219,6 +6240,59 @@ mod guard_policy_tests {
             body_of(&v).lines().last().unwrap(),
             format!("Detected: ;gh issue comment 5 --body {at}x")
         );
+    }
+
+    #[test]
+    fn message_parity_crossboundary_unsigned_names_expected_locator() {
+        // issue-365: the deny used to show only the abstract template even
+        // when expected_repo_locator(cwd) had computed an exact expectation
+        // — the field cost was five blind signature retries in ~/budget. The
+        // deny now names the checkout's own origin so there's something to
+        // converge on.
+        let td = scratch("signature-deny-with-origin");
+        std::fs::create_dir_all(td.join(".git").join("refs")).unwrap();
+        std::fs::create_dir_all(td.join(".git").join("objects")).unwrap();
+        std::fs::write(td.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(
+            td.join(".git").join("config"),
+            "[core]\n\trepositoryformatversion = 0\n\tbare = false\n[remote \"origin\"]\n\turl = https://github.com/judell/budget.git\n",
+        )
+        .unwrap();
+
+        let v = claude_decide(serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh issue comment 5 --body 'plain unsigned text'"},
+            "cwd": td.to_string_lossy(),
+        }));
+        assert_eq!(v.reason, "crossboundary-unsigned");
+        assert!(
+            body_of(&v).contains(
+                "This checkout's origin is github.com/judell/budget — the signature's locator must be exactly that."
+            ),
+            "body: {}",
+            body_of(&v)
+        );
+        let _ = std::fs::remove_dir_all(&td);
+    }
+
+    #[test]
+    fn message_parity_crossboundary_unsigned_remoteless() {
+        // issue-365, the other axis: a genuinely remoteless checkout states
+        // the acceptance rule explicitly instead of leaving it implicit.
+        let td = scratch("signature-deny-no-origin");
+        let v = claude_decide(serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh issue comment 5 --body 'plain unsigned text'"},
+            "cwd": td.to_string_lossy(),
+        }));
+        assert_eq!(v.reason, "crossboundary-unsigned");
+        assert!(
+            body_of(&v)
+                .contains("No origin remote found here; any host/path-shaped locator is accepted."),
+            "body: {}",
+            body_of(&v)
+        );
+        let _ = std::fs::remove_dir_all(&td);
     }
 
     #[test]

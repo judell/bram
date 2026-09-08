@@ -119,6 +119,16 @@ forge-agnostic the way issues already are.
 > emitted activity marker), the `all=true` clear-on-reply-only refinement, the
 > exact-comment link-out, and GitLab todos are their own follow-ups.
 
+> **Landed (needs-you-rows-name-who-replied):** the notification row's detail
+> names the replier, classified by the signature convention from the same
+> latest-comment fetch the verification already makes — a signed opener reads
+> "Walt's Claude replied · GitHub notification (state_change)." (their agent),
+> an unsigned body "ludwa6 replied · …" (the human typing), and a bare state
+> change with no comment keeps the reason-only form rather than asserting an
+> author nothing verified. Person-vs-agent is the judgment the reader is
+> making; the sweep rows already named their actors, this closed the one
+> anonymous source.
+
 ## The surface
 
 A new pane tab (XMLUI), four lanes, and per item:

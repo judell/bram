@@ -47545,6 +47545,71 @@ fn local_machine_identity() -> (&'static str, &'static str) {
 //   signed, no machine, os differs  → elsewhere (three-slot fallback)
 //   signed, no machine, os matches / two-slot → own side (honest default
 //   for historical forms; never surface on a guess)
+// needs-you-rows-name-who-replied: the who-phrase for a notification row's
+// detail, classified by the signature convention — a first line carrying the
+// canonical signature is the owner's agent speaking ("Walt's Claude
+// replied"), an unsigned body is the human typing ("ludwa6 replied"). The
+// speaker label for the signed case is the validated line's prefix before
+// the parenthetical, since AgentSignature deliberately keeps no owner slot.
+// Never guesses past that split: an empty author (a bare state change with
+// no comment) yields None and the caller keeps its reason-only detail.
+fn needs_you_replier_phrase(author: &str, first_line: &str) -> Option<String> {
+    let author = author.trim();
+    if author.is_empty() {
+        return None;
+    }
+    let line = first_line
+        .trim()
+        .trim_start_matches(|ch: char| matches!(ch, '_' | '*' | '>' | '#' | '-' | ' '));
+    if guard_policy::parse_agent_signature(line).is_some() {
+        if let Some((speaker, _)) = line.split_once(" (") {
+            return Some(format!("{} replied", speaker.trim()));
+        }
+    }
+    Some(format!("{} replied", author))
+}
+
+#[cfg(test)]
+mod needs_you_replier_tests {
+    use super::needs_you_replier_phrase;
+
+    #[test]
+    fn signed_first_line_names_the_agent() {
+        let line = "Walt's Claude (main thread, Opus 5) speaking from the garden_tour project (github.com/ludwa6/garden_tour):";
+        assert_eq!(
+            needs_you_replier_phrase("ludwa6", line).as_deref(),
+            Some("Walt's Claude replied")
+        );
+    }
+
+    #[test]
+    fn versioned_signature_also_names_the_agent() {
+        let line = "Jon's Claude (Bram 0.6.6, main thread, Fable 5, macOS, Tuck) speaking from the Bram project (github.com/judell/bram):";
+        assert_eq!(
+            needs_you_replier_phrase("judell", line).as_deref(),
+            Some("Jon's Claude replied")
+        );
+    }
+
+    #[test]
+    fn unsigned_body_names_the_human() {
+        assert_eq!(
+            needs_you_replier_phrase(
+                "ludwa6",
+                "The gate toggle settles it. Please close this one."
+            )
+            .as_deref(),
+            Some("ludwa6 replied")
+        );
+    }
+
+    #[test]
+    fn empty_author_stays_anonymous() {
+        assert_eq!(needs_you_replier_phrase("", "anything"), None);
+        assert_eq!(needs_you_replier_phrase("  ", ""), None);
+    }
+}
+
 // Returns Some((os-or-"", model)) when the move is foreign.
 // awaiting-cross-project-agent-moves: the same-machine, DIFFERENT-PROJECT
 // variant (#356 arrived invisibly: the budget agent filed it from this very
@@ -48002,6 +48067,12 @@ fn forge_awaiting_items_fetch<R: tauri::Runtime>(
         // comments; comment-shaped reasons REQUIRE a confirmed other-author,
         // because all=true would otherwise admit every read thread ever.
         let mut verified = asked;
+        // See needs_you_replier_phrase above: the same verification call now
+        // also takes the comment body's first line, so the row can NAME the
+        // replier instead of discarding the author it just fetched (the
+        // pre-change detail was reason-only — "I need to know who replied
+        // in order to judge what to do"). One call, one extra jq field.
+        let mut replier: Option<String> = None;
         let comments_url = format!(
             "{}/comments?per_page=100",
             subj_url.replace("/pulls/", "/issues/")
@@ -48013,16 +48084,21 @@ fn forge_awaiting_items_fetch<R: tauri::Runtime>(
                     "api",
                     comments_url.as_str(),
                     "--jq",
-                    ".[-1].user.login // \"\"",
+                    ".[-1] | ((.user.login // \"\") + \"\\n\" + ((.body // \"\") | split(\"\\n\")[0]))",
                 ],
                 "gh last comment author",
             ) {
-                let author = String::from_utf8_lossy(&cout).trim().to_string();
+                let raw = String::from_utf8_lossy(&cout).to_string();
+                let (author, first_line) = match raw.split_once('\n') {
+                    Some((a, b)) => (a.trim().to_string(), b.trim().to_string()),
+                    None => (raw.trim().to_string(), String::new()),
+                };
                 if !author.is_empty() {
                     if author.eq_ignore_ascii_case(login.as_str()) {
                         continue;
                     }
                     verified = true;
+                    replier = needs_you_replier_phrase(&author, &first_line);
                 }
             }
         }
@@ -48075,7 +48151,14 @@ fn forge_awaiting_items_fetch<R: tauri::Runtime>(
                 // the thread's updated_at.
                 "activityAt": updated,
                 "title": headline,
-                "detail": format!("GitHub notification (reason: {}).", reason),
+                // The who leads when the verification fetch produced one;
+                // the reason stays (it carries the whose-court explanation).
+                // A bare state change with no comment keeps the reason-only
+                // form rather than asserting an author nothing verified.
+                "detail": match &replier {
+                    Some(who) => format!("{} · GitHub notification ({}).", who, reason),
+                    None => format!("GitHub notification (reason: {}).", reason),
+                },
                 "link": "/issues",
                 // The thread's web page: replying is the act that clears the
                 // item, and GitHub is where replying happens — so Open goes

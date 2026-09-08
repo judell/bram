@@ -154,6 +154,20 @@
        step, and the endpoint labels and thumb tooltips read it so they
        track the thumbs while dateFilter waits for the release. -->
 
+  <!-- issue-256-remeasure-debounce-latency, measured 2026-09-08: a Phase 1
+       probe stood here — a41a27a's op=drag/op=commit pair rebuilt as a
+       standalone listener duo on dateDraft, tracing a bare
+       debounceWaitInMs=120 ChangeListener on the vendored 0.14.26 bundle
+       without touching the real commit path. a41a27a's ~890-1006ms
+       drag→commit delay is GONE: end-of-burst gaps measured 43/48/13/64/45ms
+       (one 302ms outlier mid-gesture). The primitive is now over-eager
+       rather than laggy — it also fired mid-burst, under the 120ms wait,
+       which a trailing debounce cannot do, so it behaves more like a short
+       throttle than a debounce. Nothing here depends on it either way: the
+       commit path above rides the Slider's own didCommit (#3768). Probe
+       removed per the item's Ending A; receipts on judell/bram#256. -->
+
+
   <!-- search-date-filter-forensics (observe-only): the 2026-08-14 iterate
        reported the max thumb not constraining results, with auto-expand
        suspected. Candidate mechanism: a bucket refetch flips the reset

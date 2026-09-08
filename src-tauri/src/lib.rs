@@ -40799,25 +40799,6 @@ fn interval_stage_commit<R: tauri::Runtime>(
     item_files: &std::collections::HashMap<String, Vec<String>>,
 ) -> Result<(String, Vec<String>), String> {
     let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
-    // Combined interval patch: each requested id's own hunks across its files.
-    let mut patch = String::new();
-    let mut committed: Vec<String> = Vec::new();
-    for id in ids {
-        for path in item_files.get(id).cloned().unwrap_or_default() {
-            let d = claim_interval_diff(app, id, &path);
-            if let Some(p) = d.get("patch").and_then(|v| v.as_str()) {
-                if !p.trim().is_empty() {
-                    patch.push_str(p);
-                    if !committed.contains(&path) {
-                        committed.push(path);
-                    }
-                }
-            }
-        }
-    }
-    if patch.trim().is_empty() {
-        return Err("no-interval".to_string());
-    }
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let idx = std::env::temp_dir().join(format!(
         "bram-commit-index-{}-{}",
@@ -40845,6 +40826,46 @@ fn interval_stage_commit<R: tauri::Runtime>(
     if let Err(e) = git_idx(&["read-tree", "HEAD"]) {
         cleanup();
         return Err(format!("scratch index seed failed: {}", e));
+    }
+    let pfile_chk = pfile.to_string_lossy().to_string();
+    // Combined interval patch: each requested id's own hunks across its files.
+    // A per-path chunk ALREADY IN HEAD (reverse-applies cleanly against the
+    // HEAD-seeded index) is skipped rather than accumulated — issue-364's
+    // resume case: an item retained after a partial commit still has its
+    // intervals on record, and re-deriving the committed patch would fail the
+    // order-independence gate below with a misleading "defined relative to
+    // another item's work". With every chunk already applied, the honest
+    // answer is the no-interval refusal (nothing interval-attributed remains
+    // to stage).
+    let mut patch = String::new();
+    let mut committed: Vec<String> = Vec::new();
+    for id in ids {
+        for path in item_files.get(id).cloned().unwrap_or_default() {
+            let d = claim_interval_diff(app, id, &path);
+            if let Some(p) = d.get("patch").and_then(|v| v.as_str()) {
+                if !p.trim().is_empty() {
+                    if std::fs::write(&pfile, p).is_ok()
+                        && git_idx(&["apply", "--cached", "--check", "--reverse", &pfile_chk])
+                            .is_ok()
+                    {
+                        append_bram_trace_line(
+                            app,
+                            "worklist-commit",
+                            &format!("op=interval-already-applied path={}", path),
+                        );
+                        continue;
+                    }
+                    patch.push_str(p);
+                    if !committed.contains(&path) {
+                        committed.push(path);
+                    }
+                }
+            }
+        }
+    }
+    if patch.trim().is_empty() {
+        cleanup();
+        return Err("no-interval".to_string());
     }
     if let Err(e) = std::fs::write(&pfile, &patch) {
         cleanup();
@@ -40933,6 +40954,254 @@ fn interval_stage_commit<R: tauri::Runtime>(
         );
     }
     Ok((sha, committed))
+}
+
+// issue-364 residual disclosure: after an interval-staged commit, the
+// requested items' declared files may still carry worktree diffs vs the
+// fresh HEAD. Lines attributed to another begun item are the NORMAL
+// interval-staging outcome (the neighbour's work staying put); lines owned
+// by nobody — or by the requested item itself, or jointly with it — mean
+// the requested item's work is probably incomplete: it was edited in
+// unclaimed time, no interval captured it, and the old behavior (plain
+// success + unconditional prune) orphaned it with its owner erased
+// (field case: 10fdd12, then bcb2a7e absorbing the orphan). These two
+// pure functions classify the residue; the route discloses it in the
+// response and withholds the prune for items with unowned residue.
+
+// The residual content of a `git diff HEAD -- <path>` patch, resolved to
+// worktree coordinates by walking each hunk's BODY: `added` holds the
+// worktree line number of every `+` line (the changed content attribution
+// can actually place — the first cut classified the header's whole new-side
+// range and its context lines, unowned by construction, misread benign
+// neighbour residue as unowned in the live acceptance run), and
+// `pure_deletion_hunk` marks any hunk that removes lines without adding —
+// deleted content has no worktree line to attribute, so it classifies
+// unowned. Deletions paired with additions (ordinary modifications) ride
+// their `+` lines.
+struct ResidualLines {
+    added: Vec<usize>,
+    pure_deletion_hunk: bool,
+}
+
+fn diff_residual_lines(patch: &str) -> ResidualLines {
+    let mut added: Vec<usize> = Vec::new();
+    let mut pure_deletion_hunk = false;
+    let mut new_line = 0usize;
+    let mut in_hunk = false;
+    let mut hunk_plus = 0usize;
+    let mut hunk_minus = 0usize;
+    let mut close_hunk = |plus: &mut usize, minus: &mut usize, flag: &mut bool| {
+        if *minus > 0 && *plus == 0 {
+            *flag = true;
+        }
+        *plus = 0;
+        *minus = 0;
+    };
+    for line in patch.lines() {
+        if let Some(rest) = line.strip_prefix("@@ ") {
+            if in_hunk {
+                close_hunk(&mut hunk_plus, &mut hunk_minus, &mut pure_deletion_hunk);
+            }
+            in_hunk = true;
+            new_line = rest
+                .split_whitespace()
+                .find(|t| t.starts_with('+'))
+                .map(|t| {
+                    let spec = &t[1..];
+                    spec.split_once(',')
+                        .map(|(s, _)| s)
+                        .unwrap_or(spec)
+                        .parse()
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0);
+            continue;
+        }
+        if !in_hunk {
+            continue;
+        }
+        if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        }
+        if let Some(_) = line.strip_prefix('+') {
+            added.push(new_line);
+            new_line += 1;
+            hunk_plus += 1;
+        } else if line.starts_with('-') {
+            hunk_minus += 1;
+        } else if line.starts_with("diff ") || line.starts_with("index ") {
+            close_hunk(&mut hunk_plus, &mut hunk_minus, &mut pure_deletion_hunk);
+            in_hunk = false;
+        } else {
+            // Context line (or "\ No newline at end of file", which does
+            // not advance either side — but misadvancing by one on the
+            // final line of a hunk cannot add a phantom `+`).
+            if !line.starts_with('\\') {
+                new_line += 1;
+            }
+        }
+    }
+    if in_hunk {
+        close_hunk(&mut hunk_plus, &mut hunk_minus, &mut pure_deletion_hunk);
+    }
+    ResidualLines {
+        added,
+        pure_deletion_hunk,
+    }
+}
+
+// Classify one path's residual `+` lines against its attribution runs.
+// Returns "unowned" when ANY residual line is not accounted to a begun
+// item outside the request — the withholding condition — else the
+// comma-joined owner ids (the benign neighbours whose work is staying).
+// Fail-safe direction: a line covered by no run, a pure-deletion hunk,
+// a run owned by a requested or non-begun item, and a joint run with any
+// requested/non-begun member all classify as unowned; the cost of a
+// false positive is an item left on the board with a Commit offer.
+fn residual_owner_label(
+    residual: &ResidualLines,
+    runs: &[serde_json::Value],
+    begun_outside: &std::collections::HashSet<String>,
+) -> String {
+    if residual.pure_deletion_hunk {
+        return "unowned".to_string();
+    }
+    let mut owners: std::collections::BTreeSet<String> = Default::default();
+    'line: for &l in &residual.added {
+        for run in runs {
+            let s = run.get("startLine").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let e = run.get("endLine").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            if l < s || l > e {
+                continue;
+            }
+            if let Some(owner) = run.get("itemId").and_then(|v| v.as_str()) {
+                if begun_outside.contains(owner) {
+                    owners.insert(owner.to_string());
+                    continue 'line;
+                }
+                return "unowned".to_string();
+            }
+            if let Some(members) = run.get("itemIds").and_then(|v| v.as_array()) {
+                let member_ids: Vec<&str> = members.iter().filter_map(|m| m.as_str()).collect();
+                if !member_ids.is_empty() && member_ids.iter().all(|m| begun_outside.contains(*m)) {
+                    for m in member_ids {
+                        owners.insert(m.to_string());
+                    }
+                    continue 'line;
+                }
+                return "unowned".to_string();
+            }
+        }
+        return "unowned".to_string();
+    }
+    owners.into_iter().collect::<Vec<_>>().join(",")
+}
+
+#[cfg(test)]
+mod residual_disclosure_tests {
+    use super::{diff_residual_lines, residual_owner_label, ResidualLines};
+
+    fn begun(ids: &[&str]) -> std::collections::HashSet<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn lines(added: &[usize]) -> ResidualLines {
+        ResidualLines {
+            added: added.to_vec(),
+            pure_deletion_hunk: false,
+        }
+    }
+
+    #[test]
+    fn body_walk_counts_only_plus_lines_not_context() {
+        // The live acceptance run's failure mode: a one-line modification
+        // with context lines around it. Only line 2 is a `+`.
+        let patch = "@@ -1,5 +1,5 @@\n shared-1\n-shared-2\n+shared-2 (n)\n shared-3\n shared-4\n";
+        let r = diff_residual_lines(patch);
+        assert_eq!(r.added, vec![2]);
+        assert!(!r.pure_deletion_hunk);
+    }
+
+    #[test]
+    fn multi_hunk_line_numbers_track_headers() {
+        let patch =
+            "@@ -1,3 +1,4 @@\n a\n+new-two\n b\n c\n@@ -10,2 +11,3 @@\n j\n+new-twelve\n k\n";
+        assert_eq!(diff_residual_lines(patch).added, vec![2, 12]);
+    }
+
+    #[test]
+    fn pure_deletion_hunk_is_flagged() {
+        let patch = "@@ -5,4 +5,3 @@\n a\n-gone\n b\n c\n";
+        let r = diff_residual_lines(patch);
+        assert!(r.added.is_empty());
+        assert!(r.pure_deletion_hunk);
+    }
+
+    #[test]
+    fn residue_fully_owned_by_outside_begun_item_is_benign() {
+        let runs = vec![serde_json::json!({"startLine": 10, "endLine": 20, "itemId": "n"})];
+        assert_eq!(
+            residual_owner_label(&lines(&[12, 13, 14]), &runs, &begun(&["n"])),
+            "n"
+        );
+    }
+
+    #[test]
+    fn uncovered_line_is_unowned() {
+        let runs = vec![serde_json::json!({"startLine": 10, "endLine": 20, "itemId": "n"})];
+        assert_eq!(
+            residual_owner_label(&lines(&[19, 22]), &runs, &begun(&["n"])),
+            "unowned"
+        );
+    }
+
+    #[test]
+    fn no_runs_at_all_is_unowned() {
+        assert_eq!(
+            residual_owner_label(&lines(&[1, 2]), &[], &begun(&["n"])),
+            "unowned"
+        );
+    }
+
+    #[test]
+    fn requested_or_nonbegun_owner_is_unowned() {
+        // The owner is NOT in begun_outside (it is the requested item, or
+        // never begun): its residue means the request's own work stayed
+        // behind — the exact 10fdd12 shape.
+        let runs = vec![serde_json::json!({"startLine": 1, "endLine": 9, "itemId": "x"})];
+        assert_eq!(
+            residual_owner_label(&lines(&[2, 3]), &runs, &begun(&["n"])),
+            "unowned"
+        );
+    }
+
+    #[test]
+    fn deletion_only_residue_is_unowned() {
+        let runs = vec![serde_json::json!({"startLine": 1, "endLine": 99, "itemId": "n"})];
+        let r = ResidualLines {
+            added: vec![],
+            pure_deletion_hunk: true,
+        };
+        assert_eq!(residual_owner_label(&r, &runs, &begun(&["n"])), "unowned");
+    }
+
+    #[test]
+    fn joint_run_all_outside_begun_is_benign_and_names_members() {
+        let runs = vec![serde_json::json!({"startLine": 1, "endLine": 9, "itemIds": ["a", "b"]})];
+        assert_eq!(
+            residual_owner_label(&lines(&[2, 3]), &runs, &begun(&["a", "b"])),
+            "a,b"
+        );
+    }
+
+    #[test]
+    fn joint_run_with_requested_member_is_unowned() {
+        let runs = vec![serde_json::json!({"startLine": 1, "endLine": 9, "itemIds": ["a", "x"]})];
+        assert_eq!(
+            residual_owner_label(&lines(&[2, 3]), &runs, &begun(&["a"])),
+            "unowned"
+        );
+    }
 }
 
 // issue-327 independence: is a claimant's work committable WITHOUT its
@@ -56362,8 +56631,24 @@ fn handle_worklist_commit<R: tauri::Runtime>(
     // The 409 survives only as the fallback when there is genuinely no interval
     // to stage (work predating capture) — the honest baseline.
     let mut needs_interval_stage = false;
+    // Hoisted from the scan block (issue-364): the residual-disclosure pass
+    // after an interval-staged commit reuses these. The runs stay valid
+    // across the commit because interval staging never touches the worktree
+    // the replay is positioned against.
+    let (runs_by_path, _, _, _unowned_by_path) = claim_attribution_runs(app);
+    let begun_outside: std::collections::HashSet<String> = items
+        .iter()
+        .filter_map(|it| {
+            let id = it.get("id").and_then(|v| v.as_str())?;
+            if ids.iter().any(|r| r == id) {
+                return None;
+            }
+            let begun = it.get("status").and_then(|v| v.as_str()) == Some("applied")
+                || it.get("begunAtMs").and_then(|v| v.as_i64()).unwrap_or(0) > 0;
+            begun.then(|| id.to_string())
+        })
+        .collect();
     {
-        let (runs_by_path, _, _, _unowned_by_path) = claim_attribution_runs(app);
         let requested: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
         'scan: for path in &files {
             let Some(runs) = runs_by_path.get(path) else {
@@ -56707,35 +56992,117 @@ fn handle_worklist_commit<R: tauri::Runtime>(
     }
     emit_replayable_signal(app, "git-status-changed");
 
-    let prune_body = serde_json::json!({
-        "op": "prune",
-        "ids": ids,
-    });
-    let prune_bytes = serde_json::to_vec(&prune_body).unwrap_or_default();
-    let (status, _content_type, body) = handle_worklist_mutate(app, &prune_bytes);
-    if !(200..300).contains(&status) {
-        let parsed: serde_json::Value = serde_json::from_slice(&body)
-            .unwrap_or_else(|_| serde_json::json!({ "raw": String::from_utf8_lossy(&body) }));
-        return (
-            status,
-            "application/json; charset=utf-8",
-            serde_json::json!({
+    // issue-364 residual disclosure: only an interval-staged commit can leave
+    // residue in the requested items' declared files (whole-file staging
+    // commits their entire diff). Diff each declared path against the fresh
+    // HEAD, classify leftovers by attribution, and disclose. A path with
+    // UNOWNED residue means the requesting item's work is probably
+    // incomplete — edited in unclaimed time, so no interval carried it into
+    // the commit — and pruning would orphan it (10fdd12) for a neighbour's
+    // whole-file stage to absorb (bcb2a7e). Such items are RETAINED:
+    // disclosed in the response, auth and claim released exactly as the
+    // prune would have, item left begun-with-changes where the pane's
+    // widened Commit offer is the resume channel.
+    let mut residual_paths: Vec<serde_json::Value> = Vec::new();
+    let mut retained: Vec<String> = Vec::new();
+    if needs_interval_stage {
+        let mut seen: std::collections::BTreeSet<String> = Default::default();
+        for id in &ids {
+            for path in item_files_map.get(id).cloned().unwrap_or_default() {
+                if !seen.insert(path.clone()) {
+                    continue;
+                }
+                let patch = git_run(app, &["diff", "HEAD", "--", &path]).unwrap_or_default();
+                if patch.trim().is_empty() {
+                    continue;
+                }
+                let residual = diff_residual_lines(&patch);
+                let empty_runs: Vec<serde_json::Value> = Vec::new();
+                let runs = runs_by_path.get(&path).unwrap_or(&empty_runs);
+                let owner = residual_owner_label(&residual, runs, &begun_outside);
+                append_bram_trace_line(
+                    app,
+                    "worklist-commit",
+                    &format!("op=residual-disclosed path={} owner={}", path, owner),
+                );
+                if owner == "unowned" {
+                    for rid in &ids {
+                        if item_files_map
+                            .get(rid)
+                            .map_or(false, |fs| fs.contains(&path))
+                            && !retained.contains(rid)
+                        {
+                            retained.push(rid.clone());
+                        }
+                    }
+                }
+                residual_paths.push(serde_json::json!({ "path": path, "owner": owner }));
+            }
+        }
+    }
+    if !retained.is_empty() {
+        append_bram_trace_line(
+            app,
+            "worklist-commit",
+            &format!("op=prune-withheld ids=[{}]", retained.join(",")),
+        );
+        // The approval is spent (its commit ran) and the claim must not
+        // outlive the turn — release both exactly as the prune path would,
+        // leaving only the item row behind.
+        retire_worklist_authorization(app, Some(&retained));
+        let _ = shrink_inflight_claim_sentinel(app, &retained);
+        append_bram_trace_line(
+            app,
+            "inflight-sentinel",
+            &format!("op=clear-on-residual-withhold ids={}", retained.join(",")),
+        );
+    }
+    let prune_ids: Vec<String> = ids
+        .iter()
+        .filter(|i| !retained.contains(i))
+        .cloned()
+        .collect();
+    let mut response = serde_json::json!({ "ok": true, "sha": sha, "queuedCloses": queued_closes });
+    if !residual_paths.is_empty() {
+        response["residualPaths"] = serde_json::Value::Array(residual_paths);
+    }
+    if !retained.is_empty() {
+        response["retained"] = serde_json::json!(retained);
+    }
+    if !prune_ids.is_empty() {
+        let prune_body = serde_json::json!({
+            "op": "prune",
+            "ids": prune_ids,
+        });
+        let prune_bytes = serde_json::to_vec(&prune_body).unwrap_or_default();
+        let (status, _content_type, body) = handle_worklist_mutate(app, &prune_bytes);
+        if !(200..300).contains(&status) {
+            let parsed: serde_json::Value = serde_json::from_slice(&body)
+                .unwrap_or_else(|_| serde_json::json!({ "raw": String::from_utf8_lossy(&body) }));
+            let mut err = serde_json::json!({
                 "error": "commit created but prune failed",
                 "sha": sha,
                 "queuedCloses": queued_closes,
                 "prune": parsed,
-            })
-            .to_string()
-            .into_bytes(),
-        );
+            });
+            if let Some(rp) = response.get("residualPaths") {
+                err["residualPaths"] = rp.clone();
+            }
+            if let Some(r) = response.get("retained") {
+                err["retained"] = r.clone();
+            }
+            return (
+                status,
+                "application/json; charset=utf-8",
+                err.to_string().into_bytes(),
+            );
+        }
     }
 
     (
         200,
         "application/json; charset=utf-8",
-        serde_json::json!({ "ok": true, "sha": sha, "queuedCloses": queued_closes })
-            .to_string()
-            .into_bytes(),
+        response.to_string().into_bytes(),
     )
 }
 

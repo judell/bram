@@ -1844,6 +1844,27 @@ so narrating from it reports intent as outcome (#354's field failure: the
 user deliberately declined, the host honoured it, and the report claimed
 a close was queued anyway).
 
+**A partial landing is disclosed, not silent — narrate `residualPaths`
+and `retained` when they appear** (judell/bram#364). An interval-staged
+commit stages only the lines the requested item's claim intervals
+attribute; work the item legitimately owns that was edited in *unclaimed
+time* (no claim live — e.g. a redo requested after the item had already
+advanced) has no interval and stays in the worktree. The success body
+then carries `residualPaths: [{path, owner}]` for each declared path
+with leftover diffs — `owner` naming the begun neighbour whose staying
+work accounts for them (normal, nothing to do) or `"unowned"` — and
+`retained: [ids]` for requested items with unowned residue, which the
+host does **not** prune: the row stays on the board with its changes,
+where the pane's Commit offer is the resume channel (a fresh gate
+click). On seeing `retained`, report the partial landing — what
+committed, what remains committable — instead of announcing completion,
+and do not re-POST: the approval is already consumed and the claim
+released. Field history: before this disclosure existed, the orphaned
+half of such a commit was silently absorbed under a neighbour's id
+([10fdd12](https://github.com/judell/bram/commit/10fdd128d47efd4dc46afcef97a473985e8b2777)
+then
+[bcb2a7e](https://github.com/judell/bram/commit/bcb2a7e3d4942afdd5cef862a71475cc2ba9b52e)).
+
 
 ## Bram shell mechanics
 

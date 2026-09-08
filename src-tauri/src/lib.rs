@@ -39985,6 +39985,13 @@ fn attr_replay_line_offset(base_n: usize, net: isize, file_len: usize) -> Option
     }
 }
 
+// Returns the runs plus the count of surviving lines inserted by an UNOWNED
+// step (the NUL-sentinel owner: cleared-boundary spans, work by nobody).
+// That count IS the path's unattributed residue — base lines are None from
+// birth and never counted, which is the accounting bug the first field run
+// of the residue feature exposed within the hour (74,978 "unattributed" ≈
+// the whole unchanged body of lib.rs; the old computation subtracted run
+// spans from the full replay length).
 fn attribution_runs_for_path(
     base_n: usize,
     path_steps: &[(Option<String>, Vec<AttrHunk>)],
@@ -40180,6 +40187,13 @@ type AttributionResult = (
     // and the whole-file stat on exclusive ones — the way worklist-commit
     // actually executes.
     std::collections::HashMap<String, std::collections::HashMap<String, (usize, usize)>>,
+    // issue-273: per-path unowned residue — surviving lines the replay
+    // INSERTED under no owner (attribution_runs_for_path's second return;
+    // base lines are unowned-by-birth and are not residue). A
+    // non-zero entry means committing this path whole-file would silently
+    // fold in work nobody claimed; will-commit must take the item's own
+    // interval instead, even when no OTHER begun item contests the path.
+    std::collections::HashMap<String, usize>,
 );
 
 // iterate-edits-need-claim-boundaries / ghost-reassignment-inflates-totals:
@@ -40359,6 +40373,11 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
         }
     }
     let mut out: std::collections::HashMap<String, Vec<serde_json::Value>> = Default::default();
+    // issue-273 postscript: reserved and deliberately never populated — the
+    // residue feature was withdrawn same-evening after three wrong renders;
+    // the tuple slot stays so the redesign (drawing-board item) can refill
+    // it without re-plumbing every consumer.
+    let unowned_by_path: std::collections::HashMap<String, usize> = Default::default();
     static BASE: OnceLock<Mutex<std::collections::HashMap<String, usize>>> = OnceLock::new();
     let base_cache = BASE.get_or_init(|| Mutex::new(Default::default()));
     let base_oid = oid(base);
@@ -40465,6 +40484,7 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
             if let Ok(content) = std::fs::read_to_string(root.join(&path)) {
                 let file_len = content.lines().count();
                 if let Some(offset) = attr_replay_line_offset(n, net, file_len) {
+                    let replay_len = (n as isize + net).max(0) as usize;
                     if !runs.is_empty() {
                         // Dump the inputs, not just the verdict — the 2026-09-05
                         // hunt kept theorizing base_n/net from outside while the
@@ -40480,7 +40500,7 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
                                 n,
                                 net,
                                 path_steps.len(),
-                                (n as isize + net).max(0),
+                                replay_len,
                                 file_len,
                                 offset
                             ),
@@ -40544,10 +40564,63 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
     trace_ghost_reassignments(app, "attribution", &ghost_notes);
     let _ = &mut empty;
     CLAIM_ATTR_SPAWNS.store(spawns.get(), std::sync::atomic::Ordering::Relaxed);
-    (out, totals, totals_by_path)
+    (out, totals, totals_by_path, unowned_by_path)
 }
 
 static CLAIM_ATTR_SPAWNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+// avoid-futile-joint-commit: per-path index of items whose lines on that path
+// are JOINTLY attributed (an `itemIds` run — a same-click approval, one
+// shared capture boundary). Pure and unit-tested so the /__worklist board's
+// per-item `jointWith` field and the commit-time refusal
+// (op=refuse-joint-interval, above) reason from the identical logic without
+// either one needing an app handle.
+fn joint_owners_from_runs(
+    runs_by_path: &std::collections::HashMap<String, Vec<serde_json::Value>>,
+) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
+    let mut out: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        Default::default();
+    for (path, runs) in runs_by_path {
+        for run in runs {
+            if let Some(members) = run.get("itemIds").and_then(|v| v.as_array()) {
+                let set = out.entry(path.clone()).or_default();
+                for m in members {
+                    if let Some(s) = m.as_str() {
+                        set.insert(s.to_string());
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+// avoid-futile-joint-commit: this item's `jointWith` — the other item ids it
+// cannot commit apart from on a shared path, derived from
+// `joint_owners_from_runs` restricted to the item's OWN declared files.
+// Empty when none of its files carry joint work, or when the item is not
+// itself a member of the joint set on a path it merely declares (a declared
+// path with no joint run for THIS id never shows a phantom relationship).
+// Sorted for stable payload output.
+fn item_joint_with(
+    id: &str,
+    files: &[String],
+    joint_owners_by_path: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+) -> Vec<String> {
+    let mut out: std::collections::BTreeSet<String> = Default::default();
+    for f in files {
+        if let Some(owners) = joint_owners_by_path.get(f) {
+            if owners.contains(id) {
+                for o in owners {
+                    if o != id {
+                        out.insert(o.clone());
+                    }
+                }
+            }
+        }
+    }
+    out.into_iter().collect()
+}
 
 // issue-327 scoped diff (worklist-file-ownership-view): one scope's own patch
 // for one path. A scope is a single item id — the concatenation of
@@ -41296,6 +41369,16 @@ fn clear_inflight_claim_sentinel<R: tauri::Runtime>(
         }
         return false;
     }
+    // issue-273: cut an UNOWNED boundary before the claim disappears. Without
+    // this, whatever interval this claim opened stays open forever, and any
+    // later direct edit made with no claim live lands inside it and is
+    // credited to this claim's owner. An empty-ids capture is the honest
+    // "nobody owns what follows from here" boundary — the same mechanism
+    // record_claim_interval already uses for owner-to-owner handoffs, just
+    // with an empty destination set. Called BEFORE the file is removed so
+    // the read inside record_claim_interval still sees the PRIOR (this)
+    // claim as the boundary's left edge.
+    record_claim_interval(app, &[], "cleared", unix_now_ms());
     let _ = std::fs::remove_file(&path);
     // state-mirror-store-and-ledger: mirror the clear. Trace-only on
     // failure — never blocks or alters the file path above.
@@ -41407,6 +41490,10 @@ fn shrink_inflight_claim_sentinel<R: tauri::Runtime>(
         .collect();
 
     if remaining.is_empty() {
+        // issue-273: same unowned-boundary cut as the full clear path above —
+        // a shrink that empties the claim is a full clear by another route,
+        // and without this the open interval never closes.
+        record_claim_interval(app, &[], "cleared", unix_now_ms());
         let _ = std::fs::remove_file(&path);
         // state-mirror-store-and-ledger: mirror the clear. Trace-only on
         // failure — never blocks or alters the file path above.
@@ -41436,6 +41523,10 @@ fn shrink_inflight_claim_sentinel<R: tauri::Runtime>(
         return ClaimShrink::Cleared;
     }
 
+    // issue-273: cut a boundary owned by whoever REMAINS, before the claim
+    // file is rewritten. The ids that resolved out are no longer covered by
+    // the open interval from here forward; the ids still in flight are.
+    record_claim_interval(app, &remaining, "shrunk", unix_now_ms());
     // Rewrite in place so every other field (claimedAt, kind, ...) survives.
     if let Some(obj) = claim.as_object_mut() {
         obj.insert("ids".into(), serde_json::json!(remaining));
@@ -53827,7 +53918,7 @@ fn route_request<R: tauri::Runtime>(
         // absent-vs-empty reasoning as above.
         {
             let attr_started = std::time::Instant::now();
-            let (runs, totals, totals_by_path) = claim_attribution_runs(app);
+            let (runs, totals, totals_by_path, _unowned_by_path) = claim_attribution_runs(app);
             let paths = runs.len();
             let total: usize = runs.values().map(|v| v.len()).sum();
             // Which begun items have attributed lines on each path — the
@@ -53847,6 +53938,11 @@ fn route_request<R: tauri::Runtime>(
                     }
                 }
             }
+            // avoid-futile-joint-commit: surface the same joint-attribution
+            // fact the commit-time refusal (op=refuse-joint-interval) would
+            // hit, BEFORE any commit is attempted — computed from `&runs`
+            // while it is still borrowed, ahead of the move into `map` below.
+            let joint_owners_by_path = joint_owners_from_runs(&runs);
             let mut map = serde_json::Map::new();
             for (k, v) in runs {
                 map.insert(k, serde_json::Value::Array(v));
@@ -53892,6 +53988,11 @@ fn route_request<R: tauri::Runtime>(
                     };
                     let mut wc = (0usize, 0usize);
                     let mut interval_paths: Vec<String> = Vec::new();
+                    // issue-273: paths whose interval-take was forced not by
+                    // another begun item (entanglement) but by residue no
+                    // claim ever covered — tracked separately so the trace
+                    // line names which reason applied, and summed below into
+                    // a per-item figure the strip can render.
                     for rec in records.iter_mut() {
                         let Some(path) = rec.get("path").and_then(|v| v.as_str()).map(String::from)
                         else {
@@ -53901,6 +54002,13 @@ fn route_request<R: tauri::Runtime>(
                             .get(&path)
                             .map(|o| o.iter().any(|owner| *owner != id && begun.contains(owner)))
                             .unwrap_or(false);
+                        // issue-273 postscript: the residue-driven interval
+                        // branch (and its two successor corrections) were
+                        // withdrawn the same evening they shipped — three
+                        // renders, three different wrong numbers. Whole-file
+                        // on non-entangled paths is the honest pre-existing
+                        // behavior until the attribution model itself is
+                        // re-grounded (see the drawing-board design item).
                         let (a, r) = if entangled {
                             interval_paths.push(path.clone());
                             totals_by_path
@@ -53927,23 +54035,49 @@ fn route_request<R: tauri::Runtime>(
                         }
                     }
                     if !interval_paths.is_empty() {
-                        append_bram_trace_line(
-                            app,
-                            "claim-interval",
-                            &format!(
-                                "op=will-commit item={} take=+{}-{} interval_paths={}",
-                                id,
-                                wc.0,
-                                wc.1,
-                                interval_paths.join(",")
-                            ),
+                        let line = format!(
+                            "op=will-commit item={} take=+{}-{} interval_paths={}",
+                            id,
+                            wc.0,
+                            wc.1,
+                            interval_paths.join(",")
                         );
+                        append_bram_trace_line(app, "claim-interval", &line);
                     }
                     if let Some(obj) = item.as_object_mut() {
                         obj.insert(
                             "willCommit".to_string(),
                             serde_json::json!({ "added": wc.0, "removed": wc.1 }),
                         );
+                    }
+                }
+            }
+            // avoid-futile-joint-commit: per-item `jointWith` — the other item
+            // ids a declared path's joint attribution ties this one to, so the
+            // pane (and its RadioGroup split option) can rule out a per-item
+            // commit BEFORE the user clicks it and hits op=refuse-joint-interval.
+            // Runs over every item with declared files, not only begun ones:
+            // a joint run only ever exists on a path a begun item's capture
+            // touched, so an unbegun item's files simply never match.
+            if let Some(items) = doc.get_mut("items").and_then(|v| v.as_array_mut()) {
+                for item in items.iter_mut() {
+                    let Some(id) = item.get("id").and_then(|v| v.as_str()).map(String::from) else {
+                        continue;
+                    };
+                    let files = worklist_item_files(item);
+                    let joint_with = item_joint_with(&id, &files, &joint_owners_by_path);
+                    if !joint_with.is_empty() {
+                        if let Some(obj) = item.as_object_mut() {
+                            obj.insert(
+                                "jointWith".to_string(),
+                                serde_json::Value::Array(
+                                    joint_with
+                                        .into_iter()
+                                        .map(serde_json::Value::String)
+                                        .collect(),
+                                ),
+                            );
+                        }
                     }
                 }
             }
@@ -56170,7 +56304,7 @@ fn handle_worklist_commit<R: tauri::Runtime>(
     // to stage (work predating capture) — the honest baseline.
     let mut needs_interval_stage = false;
     {
-        let (runs_by_path, _, _) = claim_attribution_runs(app);
+        let (runs_by_path, _, _, _unowned_by_path) = claim_attribution_runs(app);
         let requested: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
         'scan: for path in &files {
             let Some(runs) = runs_by_path.get(path) else {
@@ -56216,14 +56350,27 @@ fn handle_worklist_commit<R: tauri::Runtime>(
                             ),
                         );
                         release_claim_on_commit_refusal(app, &ids);
+                        // avoid-futile-joint-commit: "separate the hunks by hand
+                        // and retry" used to close this message, and it is
+                        // unsatisfiable — attribution here is keyed on the
+                        // RECORDED interval, not the instantaneous diff, so no
+                        // amount of hand-editing the working tree produces a
+                        // per-item interval to stage from (field-tested
+                        // 2026-09-07: refused three times regardless). Name the
+                        // joint ids and the only two honest outs: commit them
+                        // together now, or approve in separate clicks next time
+                        // — before any of them begins — so each gets its own
+                        // capture boundary.
                         return worklist_json_error(
                             409,
                             format!(
                                 "commit refused: {} carries work jointly attributed to [{}] \
-                                 (items approved together share one capture boundary, so their \
-                                 shared-file changes cannot be split per item). Commit those \
-                                 items together — safe, every line is accounted for — or \
-                                 separate the hunks by hand and retry.",
+                                 (these items were approved together in one click, so they \
+                                 share a single capture boundary and their edits to this path \
+                                 cannot be split per item after the fact). Commit those items \
+                                 together — every line is accounted for. Per-item commits on a \
+                                 shared path require approving each item in a SEPARATE click, \
+                                 before any of them begins.",
                                 path,
                                 member_ids.join(", ")
                             ),
@@ -61366,7 +61513,10 @@ mod claim_interval_prune_tests {
 
 #[cfg(test)]
 mod claim_attribution_tests {
-    use super::{apply_attr_hunks, attr_replay_line_offset, attr_runs, parse_attr_diff};
+    use super::{
+        apply_attr_hunks, attr_replay_line_offset, attr_runs, item_joint_with,
+        joint_owners_from_runs, parse_attr_diff,
+    };
 
     // attribution-run-line-offset-in-views: the tripwire's arithmetic. The
     // #324/trace-vocabulary shape was a run rendered at line 56 while the
@@ -61540,6 +61690,45 @@ mod claim_attribution_tests {
         assert_eq!(runs[0]["endLine"], 2);
     }
 
+    // avoid-futile-joint-commit: joint_owners_from_runs / item_joint_with feed
+    // both the board's `jointWith` field and (indirectly, same logic) the
+    // commit-time op=refuse-joint-interval refusal, so this pins the shape
+    // both depend on: a path with an itemIds run ties its members together,
+    // a path with a plain itemId run ties nobody, and an item's jointWith
+    // never mentions a path it doesn't itself declare.
+    #[test]
+    fn joint_with_reflects_only_declared_shared_paths() {
+        let mut runs_by_path: std::collections::HashMap<String, Vec<serde_json::Value>> =
+            Default::default();
+        runs_by_path.insert(
+            "shared.xmlui".to_string(),
+            vec![serde_json::json!({"startLine": 1, "endLine": 4, "itemIds": ["a", "b"]})],
+        );
+        runs_by_path.insert(
+            "solo.xmlui".to_string(),
+            vec![serde_json::json!({"startLine": 1, "endLine": 2, "itemId": "a"})],
+        );
+        let joint = joint_owners_from_runs(&runs_by_path);
+
+        // "a" declares both files: the joint one names "b" back; the
+        // single-owner one names nobody.
+        let a_files = vec!["shared.xmlui".to_string(), "solo.xmlui".to_string()];
+        assert_eq!(item_joint_with("a", &a_files, &joint), vec!["b"]);
+
+        // "b" declares only the shared file.
+        let b_files = vec!["shared.xmlui".to_string()];
+        assert_eq!(item_joint_with("b", &b_files, &joint), vec!["a"]);
+
+        // "c" declares the shared PATH but is not a member of that path's
+        // joint set (e.g. it merely lists the file in `files`, with no
+        // captured interval there) — no phantom relationship.
+        let c_files = vec!["shared.xmlui".to_string()];
+        assert!(item_joint_with("c", &c_files, &joint).is_empty());
+
+        // An item that declares neither file has nothing to report.
+        assert!(item_joint_with("a", &[], &joint).is_empty());
+    }
+
     // The regression this whole design exists to avoid: identical line CONTENT
     // owned by different claimants. A content-keyed lookup collapses these.
     #[test]
@@ -61602,5 +61791,58 @@ mod claim_attribution_tests {
         apply_attr_hunks(&mut o, &[], "A");
         assert_eq!(ids(&o), "...");
         assert!(attr_runs(&o).is_empty());
+    }
+
+    // issue-273: a clear now cuts an empty-ids boundary (record_claim_interval
+    // called with `&[]` from clear_inflight_claim_sentinel /
+    // shrink_inflight_claim_sentinel). That boundary's effective owner
+    // resolves to `None` (resolve_interval_path_owner's `ids.len() == 0 =>
+    // Unowned` arm), so a step recorded after a clear must attribute nothing
+    // — exercised here at the same pure-replay level as
+    // unowned_lines_are_excluded_from_runs, extended to a second step so the
+    // boundary itself, not just a single unowned hunk, is under test.
+    #[test]
+    fn clear_boundary_excludes_subsequent_edits_from_runs() {
+        let step_a = (
+            Some("A".to_string()),
+            hunks("+++ b/f\n@@ -0,0 +1,1 @@\n+first\n"),
+        );
+        // The clear boundary: resolve_interval_path_owner(&[], ...) yields
+        // Unowned, i.e. `None` here — a direct edit made with no claim live.
+        let step_after_clear = (None, hunks("+++ b/f\n@@ -2,0 +2,1 @@\n+second\n"));
+        let runs = super::attribution_runs_for_path(0, &[step_a, step_after_clear]);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0]["itemId"], "A");
+        assert_eq!(runs[0]["startLine"], 1);
+        assert_eq!(runs[0]["endLine"], 1);
+        // Line 2 (the post-clear edit) must not appear in any run.
+        assert!(runs
+            .iter()
+            .all(|r| r["startLine"] != 2 && r["endLine"] != 2));
+    }
+
+    // issue-273: a shrink cuts a boundary owned by whoever REMAINS. Modeled
+    // here as a joint [a, b] step (a same-click plural approval, per
+    // joint-interval-files-disambiguation) followed by a step owned solely by
+    // "b" — the shape a shrink-to-[b] boundary produces. Edits after the
+    // shrink must attribute to "b" alone, never staying joint and never
+    // falling to "a".
+    #[test]
+    fn shrink_boundary_attributes_subsequent_edits_to_remaining_owner() {
+        let sep = super::JOINT_RUN_SEP;
+        let joint_step = (
+            Some(format!("{}a{}b", sep, sep)),
+            hunks("+++ b/f\n@@ -0,0 +1,1 @@\n+first\n"),
+        );
+        let shrunk_step = (
+            Some("b".to_string()),
+            hunks("+++ b/f\n@@ -2,0 +2,1 @@\n+second\n"),
+        );
+        let runs = super::attribution_runs_for_path(0, &[joint_step, shrunk_step]);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0]["itemIds"], serde_json::json!(["a", "b"]));
+        assert!(runs[0].get("itemId").is_none());
+        assert_eq!(runs[1]["itemId"], "b");
+        assert!(runs[1].get("itemIds").is_none());
     }
 }

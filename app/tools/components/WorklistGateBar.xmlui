@@ -91,18 +91,38 @@
        a `var.` declared on an element scopes to its CHILDREN, so a `when`
        on that element referencing it fails silently and the control never
        renders (caught live, first render after the move). -->
+  <!-- avoid-futile-joint-commit: shareJointShared reads the host-computed
+       `jointWith` field (/__worklist per-item, same change) via
+       __bramSelectionJointShared -- true when a selected item was approved
+       together with another in one click and their shared-path edits carry
+       a single capture boundary. Unlike shareChoiceEntangled (a declared-
+       files prediction), this is the field-tested fact that the split
+       option is UNAVAILABLE, not merely consequential: a split commit
+       attempt on these items is refused host-side (409
+       op=refuse-joint-interval, src-tauri/src/lib.rs) every time, so the
+       Option is disabled here rather than left clickable and silently
+       failing later. `enabled` per
+       https://www.xmlui.org/docs/reference/components/Option#enabled
+       (and confirmed on RadioGroup's own `enabled`,
+       https://www.xmlui.org/docs/reference/components/RadioGroup#enabled).
+       shareInitial forces the group's own selection off "split" when the
+       selection is joint-shared, so a `together`/`split` preference saved
+       from an earlier, non-joint selection can't silently carry an
+       unusable choice into this one. -->
   <HStack
     var.shareChoiceEntangled="{window.__bramSelectionSharesFiles(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)}"
-    var.shareSplitLabel="{shareChoiceEntangled ? 'A commit each — the agent will separate them' : 'A commit each — selected items land separately'}"
+    var.shareJointShared="{window.__bramSelectionJointShared(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value)}"
+    var.shareSplitLabel="{shareJointShared ? 'A commit each — not available: these items were started together' : (shareChoiceEntangled ? 'A commit each — the agent will separate them' : 'A commit each — selected items land separately')}"
+    var.shareInitial="{shareJointShared ? 'together' : window.__bramW2ShareMode}"
     when="{(gateSel.value || []).length >= 2 &amp;&amp; window.__bramSelectionAllCommittable(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)}"
     horizontalAlignment="center"
     paddingHorizontal="$space-8"
     paddingTop="$space-1">
     <RadioGroup
-      initialValue="{window.__bramW2ShareMode}"
+      initialValue="{shareInitial}"
       onDidChange="(v) => window.__bramW2SetShareMode(v)">
       <Option value="together" label="One commit — selected items land together" />
-      <Option value="split" label="{shareSplitLabel}" />
+      <Option value="split" label="{shareSplitLabel}" enabled="{!shareJointShared}" />
     </RadioGroup>
   </HStack>
   <!-- issue-328: close consent AT THE GATE. When the selection carries

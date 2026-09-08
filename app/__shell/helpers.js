@@ -3523,6 +3523,11 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, attribu
           ? " · " + changedCount + " of " + (cs.total || 0)
           : "";
       var sharedFlag = split.shared.length ? " · shared" : "";
+      // issue-273 postscript: the "(N unattributed)" flag was withdrawn the
+      // evening it shipped — three renders, three different wrong numbers
+      // (74,978 → 329 → 427), each a different accounting defect in the
+      // replay-based residue. The host no longer serves unattributedResidue;
+      // the redesign is the drawing-board item.
       return withCloses(
         "Will commit +" + takesAdded + " −" + takesRemoved +
           partialFlag + sharedFlag,
@@ -3814,6 +3819,51 @@ window.__bramSelectionSharesFiles = function (items, sel, claim) {
   return window.__bramSelectionSharedFileCount(items, sel, claim) > 0;
 };
 
+// avoid-futile-joint-commit: the actual path names behind
+// __bramSelectionSharedFileCount's number, for the pre-Start explainer,
+// which names the file(s) the permanent-consequence sentence is about
+// rather than only counting them. Same declared-index, same >=2-selected-
+// claimants test; sorted for a stable reading.
+window.__bramSelectionSharedFilePaths = function (items, sel, claim) {
+  var chosen = sel || [];
+  if (chosen.length < 2) return [];
+  var index = window.__bramOverlapIndex(items, claim) || [];
+  var out = [];
+  for (var i = 0; i < index.length; i++) {
+    var ids = index[i].claimants || [];
+    var hits = 0;
+    for (var c = 0; c < ids.length; c++) {
+      if (chosen.indexOf(ids[c]) !== -1) hits++;
+    }
+    if (hits >= 2) out.push(index[i].path);
+  }
+  out.sort();
+  return out;
+};
+
+// avoid-futile-joint-commit: true once the selection already carries a JOINT
+// capture boundary on a shared path -- read from the host-computed
+// `jointWith` field (see /__worklist's per-item jointWith, same change) on
+// any selected item, rather than predicted from declared files the way
+// __bramSelectionSharesFiles is. A non-empty jointWith on a selected item
+// means that item was approved together with another in one click and its
+// shared-path edits can only be committed jointly (see op=refuse-joint-
+// interval) -- true regardless of whether the OTHER member of that joint
+// set is also part of the current selection, because the foreclosure is a
+// property of the item's history, not of who else is ticked right now.
+window.__bramSelectionJointShared = function (items, sel) {
+  var chosen = sel || [];
+  if (!chosen.length) return false;
+  var list = items || [];
+  var byId = {};
+  for (var i = 0; i < list.length; i++) if (list[i]) byId[list[i].id] = list[i];
+  for (var s = 0; s < chosen.length; s++) {
+    var it = byId[chosen[s]];
+    if (it && it.jointWith && it.jointWith.length) return true;
+  }
+  return false;
+};
+
 // Names offending items instead of counting them. A bare count collides with
 // the ordinal reading -- "1 already has changes" parses just as easily as
 // "item number 1" -- and a count cannot be acted on, while a name can be
@@ -3883,12 +3933,24 @@ window.__bramStartConsequence = function (items, sel, claim) {
 
   // All unbegun: Start is lit, and the consequence of clicking it is the
   // one thing worth saying -- and only when the items share files.
+  //
+  // avoid-futile-joint-commit: this used to say "you can later choose to
+  // commit together or ask the agent to separate them" -- a false promise.
+  // Starting a shared file TOGETHER, in one click, writes one claim and one
+  // capture boundary, so the shared lines land as a JOINT interval with no
+  // per-item interval to separate later (field-tested 2026-09-07: a
+  // same-click approval on Main.xmlui refused a per-item commit three
+  // times, "separate the hunks by hand" included, because there was no
+  // hand-separable interval to find). The permanent consequence is named
+  // instead, with the actual out: start them in separate clicks.
   if (!begun.length) {
     if (!n) return "";
+    var sharedPaths = window.__bramSelectionSharedFilePaths(items, sel, claim);
+    var what = sharedPaths.length === 1 ? sharedPaths[0] : n + " files";
     return (
-      "These share " + (n === 1 ? "a file" : n + " files") +
-      ". Started together, their edits mix. You can later choose to commit " +
-      "together or ask the agent to separate them."
+      "These share " + what + " -- started together in one click they can " +
+      "only be committed together afterward. Start them in separate clicks " +
+      "to keep per-item commits possible."
     );
   }
 
@@ -3990,7 +4052,23 @@ window.__bramStartConsequence = function (items, sel, claim) {
 
   // All begun, all committable: the radio group carries the granularity
   // choice; the line only flags that shared edits are already mixed.
+  //
+  // avoid-futile-joint-commit: "you can commit together or ask the agent to
+  // separate them" is only true when there is a per-item interval to
+  // separate FROM. When the selection is jointly attributed (host-reported
+  // via jointWith -- these items were approved together in one click and
+  // share a single capture boundary), separation was never available, and
+  // the radio group's split Option is disabled for exactly this reason (see
+  // WorklistGateBar.xmlui). Say so instead of repeating the false promise.
   if (!n) return "";
+  if (window.__bramSelectionJointShared(items, sel)) {
+    return (
+      "These share " + (n === 1 ? "a file" : n + " files") + ". " +
+      (begun.length === 2 ? "Both" : "All") +
+      " were started together in one click, so their shared-file edits can " +
+      "only be committed together -- there is no separating them now."
+    );
+  }
   return (
     "These share " + (n === 1 ? "a file" : n + " files") + ". " +
     (begun.length === 2 ? "Both" : "All") +

@@ -12,6 +12,9 @@ Bram runs agents mindfully.
 
 Anyone who uses Claude Code and/or Codex.
 
+<img width="1078" height="1034" alt="v0 6 6" src="https://github.com/user-attachments/assets/cac26927-a65a-4e11-b72c-78be758fd19c" />
+
+
 ## Demo
 
 This storyboard shows Bram and XMLUI co-evolving on August 26, 2026. In the ~/xmlui repo we burn down a set of issues and stress-test Bram's ability to manage file entanglement across items being handled by parallel subagents. In the ~/bram repo we burn down issues raised in response to findings from ~/xmlui. Real work happened on both sides while each helped improve the other.

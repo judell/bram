@@ -158,6 +158,26 @@
       </HStack>
     </Items>
   </HStack>
+  <!-- issue-345: report-only close/don't-close contradiction warning, beside
+       the close-consent ticks it disagrees with. Reactive on BOTH the
+       composer text (gateText, the same PushSource mirror the footer
+       composer publishes into) and the tick state (window.__bramW2CloseMap,
+       read fresh through __bramGateCloseItems inside the detector on every
+       evaluation) -- so typing over the contradiction or unticking the box
+       clears the row with no extra wiring. Warn, never block: nothing here
+       disables a button; per the issue's own framing the guard makes the
+       conflict visible and lets the user reconcile it, it never decides. -->
+  <HStack
+    when="{(window.__bramGateCloseContradiction(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value, gateText.value) || []).length > 0}"
+    horizontalAlignment="center"
+    gap="$space-2"
+    paddingHorizontal="$space-2"
+    paddingTop="$space-1">
+    <Text
+      fontSize="$fontSize-sm"
+      color="$color-warn-700"
+      value="{window.__bramGateCloseContradictionMessage(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value, gateText.value)}" />
+  </HStack>
   <HStack
     when="{(gateSel.value || []).length > 0}"
     verticalAlignment="center"
@@ -186,18 +206,18 @@
       label="{'Start ' + (gateSel.value || []).length}"
       size="sm"
       enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
-      onClick="window.__bramGateAct('start', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode)" />
+      onClick="window.__bramGateAct('start', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode, gateClaim.value)" />
     <Button
       label="{'Start &amp; commit ' + (gateSel.value || []).length}"
       size="sm"
       enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; (gateSel.value || []).length === 1 &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
       tooltip="One click: start, then commit when done. One item at a time — see #272"
-      onClick="window.__bramGateAct('start-commit', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode)" />
+      onClick="window.__bramGateAct('start-commit', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode, gateClaim.value)" />
     <Button
       label="{'Commit ' + (gateSel.value || []).length}"
       size="sm"
       enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
-      onClick="window.__bramGateAct('commit', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode)" />
+      onClick="window.__bramGateAct('commit', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode, gateClaim.value)" />
     <!-- switch-to-transcript-on-action: Refine retired. It was never an
          authorization — the other gate buttons write auth records; Refine
          wrote none, it was conversation squatting among the signatures from
@@ -211,6 +231,6 @@
       label="{'Drop ' + (gateSel.value || []).length}"
       size="sm"
       enabled="{!window.__bramInflightBlocker(gateClaim.value)}"
-      onClick="window.__bramGateAct('drop', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode)" />
+      onClick="window.__bramGateAct('drop', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode, gateClaim.value)" />
   </HStack>
 </Component>

@@ -1752,6 +1752,95 @@ window.__bramGateCloseItems = function (items, sel, claim) {
   return out;
 };
 
+// issue-345: report-only close/don't-close contradiction guard. A commit's
+// free-text feedback can say "do NOT close" while a closes-tick sits ticked
+// right below it, and nothing used to flag it (Walt's #328 receipt: the tick
+// won silently, the issue closed on push). This is a PURE detector -- no DOM,
+// no window state read -- so it is unit-testable with plain `node` outside
+// the pane; the two wrappers below are the only code that touch window state.
+//
+// Rules, deliberately conservative (fires rarely and correctly beats crying
+// wolf -- the issue's own framing):
+//   - Scans free text only. Lines starting with `close-issue:` (the tick's
+//     own appended payload, built by __bramBuildCloseIssueLines) are dropped
+//     before scanning, so the tick's own line -- or a comment inside it --
+//     can never self-trigger the guard.
+//   - Whitespace-insensitive: newlines and repeated spaces collapse to one
+//     space before matching, so a wrapped line still reads as one phrase.
+//   - Phrases: "do not close" / "don't close" / "dont close" / "no close",
+//     matched case-insensitively against a lowercased copy.
+//   - Number-scoped first: a phrase with a `#N` or bare `N` within a small
+//     character window contradicts ONLY if N is ticked -- "do not close the
+//     other one (#6)" beside a ticked #5 warns nothing.
+//   - An unnumbered phrase binds to the single ticked issue when exactly one
+//     is ticked; with multiple ticks it returns the sentinel `[0]` -- a
+//     generic warning naming no issue (0 is never a real issue number).
+// Returns [] for no contradiction, or an array of contradicted issue numbers
+// (a numbered contradiction always wins over a same-text generic one -- the
+// two shapes are never mixed in one result).
+window.__bramCloseContradiction = function (text, tickedIssueNumbers) {
+  var ticked = (tickedIssueNumbers || [])
+    .map(Number)
+    .filter(function (n) { return n > 0; });
+  if (!ticked.length) return [];
+  var raw = String(text || "");
+  var kept = raw.split("\n").filter(function (line) {
+    return !/^\s*close-issue\s*:/i.test(line);
+  });
+  var norm = kept.join(" ").toLowerCase().replace(/\s+/g, " ");
+  var phraseRe = /\b(?:do not close|don't close|dont close|no close)\b/g;
+  var matches = [];
+  var m;
+  while ((m = phraseRe.exec(norm))) matches.push(m);
+  if (!matches.length) return [];
+  var WINDOW = 32; // chars of context scanned each side for an adjacent number
+  var contradicted = {};
+  var anyUnnumbered = false;
+  matches.forEach(function (match) {
+    var start = Math.max(0, match.index - WINDOW);
+    var end = Math.min(norm.length, match.index + match[0].length + WINDOW);
+    var context = norm.slice(start, end);
+    var nm = /#?(\d+)/.exec(context);
+    if (nm) {
+      var n = Number(nm[1]);
+      if (ticked.indexOf(n) >= 0) contradicted[n] = true;
+      // else: names an issue that isn't ticked -- not a contradiction.
+    } else {
+      anyUnnumbered = true;
+    }
+  });
+  var numbered = Object.keys(contradicted).map(Number);
+  if (numbered.length) return numbered;
+  if (anyUnnumbered) return ticked.length === 1 ? [ticked[0]] : [0];
+  return [];
+};
+
+// Gate-side wrapper: ticked issue numbers come from the SAME
+// __bramGateCloseItems filter the UI ticks render from, so this can never
+// disagree with what the tick row actually shows, then feeds the pure
+// detector above.
+window.__bramGateCloseContradiction = function (items, sel, claim, text) {
+  var closeItems = window.__bramGateCloseItems(items, sel, claim) || [];
+  var ticked = closeItems
+    .filter(function (r) { return r.close; })
+    .map(function (r) { return r.number; });
+  if (!ticked.length) return [];
+  return window.__bramCloseContradiction(text, ticked);
+};
+
+// The warning row's copy. `0` in the numbers array is the generic-warning
+// sentinel from __bramCloseContradiction; anything else names issues.
+window.__bramGateCloseContradictionMessage = function (items, sel, claim, text) {
+  var nums = window.__bramGateCloseContradiction(items, sel, claim, text);
+  if (!nums.length) return "";
+  if (nums.length === 1 && nums[0] === 0) {
+    return "Your message says don't close, but a closes tick below is set.";
+  }
+  var list = nums.map(function (n) { return "#" + n; }).join(", ");
+  return "Your message says don't close, but " + list +
+    (nums.length > 1 ? " are ticked to close." : " is ticked to close.");
+};
+
 // Ported verbatim from the five inline gate handlers. The differences between
 // them are real and easy to lose, so they are spelled out rather than folded:
 //   start          kind=approved
@@ -1760,7 +1849,7 @@ window.__bramGateCloseItems = function (items, sel, claim) {
 //   drop           kind=drop
 //   iterate        a DIFFERENT call entirely (__bramWorklist2BatchIterate),
 //                  taking the raw feedback string rather than a fanned map
-window.__bramGateAct = function (kind, items, sel, shareMode) {
+window.__bramGateAct = function (kind, items, sel, shareMode, claim) {
   // Selection is literal user intent. Shared-file handling may change how the
   // agent prepares the commit, but never which ids this action authorizes.
   var ids0 = sel || [];
@@ -1777,6 +1866,22 @@ window.__bramGateAct = function (kind, items, sel, shareMode) {
   });
   if (!ids0.length) return;
   var text = String(window.__bramMessageAgentText || "");
+  // issue-345: this trace is the soak evidence that the user SAW the
+  // don't-close warning and submitted the commit anyway -- fires only when
+  // the detector still returns a contradiction for THIS submission (i.e.
+  // the warning row was showing at click time), and only on the two gate
+  // kinds that can carry a close consent. No line when the warning never
+  // showed.
+  if (kind === "commit" || kind === "start-commit") {
+    var contradiction = window.__bramGateCloseContradiction(items, ids0, claim, text);
+    if (contradiction.length) {
+      window.__bramIframeTrace("gate-close", {
+        op: "contradiction-ack",
+        kind: kind,
+        issues: contradiction,
+      });
+    }
+  }
   var body = window.__bramWithStagedImageMarkers(text, "feedback");
   if (kind === "commit" || kind === "start-commit") {
     body = window.__bramWithShareMode(body, shareMode || "together", items, ids0, null);

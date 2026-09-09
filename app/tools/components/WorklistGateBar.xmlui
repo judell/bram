@@ -237,6 +237,26 @@
        (helpers.js, bramSubscribeGateCaution). Same warn styling as the
        close-contradiction row above. -->
   <PushSource id="gateCaution" subscribe="{window.bramSubscribeGateCaution()}" />
+  <!-- issue-368-addressed-turn-context, rung 2: when the RUNNING turn is
+       addressed to an id in the selection (an approved:/iterate:/drop: turn
+       naming it, per the host's turn-context events), the commit-emitting
+       buttons are withheld outright rather than confirmed — the turn
+       literally names the item whose files it may still be editing, so
+       "edits may still be landing" is a fact, not a guess. Selections
+       outside the addressed set keep the coarse caution above. The context
+       clears on turn end (host detectors), so the row unlocks itself. -->
+  <PushSource id="gateTurnCtx" subscribe="{window.bramSubscribeTurnContext()}" />
+  <HStack
+    when="{!!window.__bramAddressedBlockMessage(gateSel.value, gateTurnCtx.value)}"
+    horizontalAlignment="center"
+    gap="$space-2"
+    paddingHorizontal="$space-2"
+    paddingTop="$space-1">
+    <Text
+      fontSize="$fontSize-sm"
+      color="$color-warn-700"
+      value="{window.__bramAddressedBlockMessage(gateSel.value, gateTurnCtx.value)}" />
+  </HStack>
   <HStack
     when="{!!gateCaution.value}"
     horizontalAlignment="center"
@@ -280,13 +300,13 @@
     <Button
       label="{'Start &amp; commit ' + (gateSel.value || []).length}"
       size="sm"
-      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; (gateSel.value || []).length === 1 &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
+      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value) &amp;&amp; (gateSel.value || []).length === 1 &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
       tooltip="One click: start, then commit when done. One item at a time — see #272"
       onClick="window.__bramGateAct('start-commit', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode, gateClaim.value)" />
     <Button
       label="{'Commit ' + (gateSel.value || []).length}"
       size="sm"
-      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
+      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value) &amp;&amp; window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
       onClick="window.__bramGateAct('commit', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode, gateClaim.value)" />
     <!-- switch-to-transcript-on-action: Refine retired. It was never an
          authorization — the other gate buttons write auth records; Refine

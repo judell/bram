@@ -17396,6 +17396,93 @@ fn record_prefixed_inflight_sentinel<R: tauri::Runtime>(
     }
 }
 
+// --- issue-368-addressed-turn-context ---------------------------------------
+// The active turn's addressed worklist ids, stamped where the host already
+// parses gate payloads (the toTurn write path) and cleared when the JSONL
+// turn-end detectors fire. One fact, two consumers: the gate bar
+// hard-withholds Commit on ids the running turn is addressed to (rung 2 of
+// the #368 ladder — when the turn names the id being committed, "edits may
+// still be landing" is not a guess), and the guards emit an observe-only
+// would-deny breadcrumb when a general turn edits a covered path — the soak
+// that decides whether the #368 policy (general turns do issue work and
+// proposals; item-file mutation requires an addressed turn) hardens to a
+// deny. Sidecar plus event: the sidecar is the guard-readable channel (the
+// direct-edit-grant pattern), the replayable event is the pane's. The file
+// exists only while an ADDRESSED turn is in flight — absent means a general
+// turn, a terminal-typed turn, or a pre-368 build, which the guard reads as
+// ctx=none and the gate as unblocked.
+const TURN_CONTEXT_REL: &str = "resources/.turn-context.json";
+
+fn emit_turn_context<R: tauri::Runtime>(app: &AppHandle<R>, ids: &[String], kind: &str) {
+    let payload = serde_json::json!({
+        "schema": 1,
+        "addressedIds": ids,
+        "kind": kind,
+        "atMs": unix_now_ms(),
+    });
+    if let Some(root) = project_root(Some(app)) {
+        let path = root.join(TURN_CONTEXT_REL);
+        if ids.is_empty() {
+            let _ = std::fs::remove_file(&path);
+        } else if let Ok(text) = serde_json::to_string(&payload) {
+            let _ = std::fs::write(&path, text);
+        }
+    }
+    emit_replayable_payload(app, "turn-context-changed", &payload);
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "turn-context",
+            &format!("op=set kind={} ids={}", kind, ids.len()),
+        );
+    }
+}
+
+/// Stamp the submitted turn's addressing. Prefix parse mirrors
+/// record_prefixed_inflight_sentinel's tolerance: a malformed payload is a
+/// general turn, never an error.
+fn record_turn_context<R: tauri::Runtime>(app: &AppHandle<R>, turn_text: &str) {
+    let trimmed = turn_text.trim_start();
+    for (prefix, kind) in [
+        ("approved:", "approved"),
+        ("iterate:", "iterate"),
+        ("drop:", "drop"),
+    ] {
+        let Some(rest) = trimmed.strip_prefix(prefix) else {
+            continue;
+        };
+        let ids: Vec<String> = serde_json::from_str::<serde_json::Value>(rest.trim())
+            .ok()
+            .and_then(|v| {
+                v.get("items").and_then(|i| i.as_array()).map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|it| it.get("id").and_then(|x| x.as_str()))
+                        .map(String::from)
+                        .collect()
+                })
+            })
+            .unwrap_or_default();
+        emit_turn_context(app, &ids, kind);
+        return;
+    }
+    emit_turn_context(app, &[], "general");
+}
+
+// Mirrors cleanup_stale_inflight_claim: a context surviving a crash or kill
+// would otherwise pin the gate's withhold and skew the guard soak.
+fn cleanup_stale_turn_context<R: tauri::Runtime>(app: &AppHandle<R>) {
+    if let Some(root) = project_root(Some(app)) {
+        let path = root.join(TURN_CONTEXT_REL);
+        if path.exists() {
+            let _ = std::fs::remove_file(&path);
+            if bram_trace_enabled() {
+                append_bram_trace_line(app, "turn-context", "op=clear reason=startup-stale");
+            }
+        }
+    }
+}
+
 /// Detect a `skip-worklist:` prefix on the toTurn write path. When
 /// present, write a fresh `direct-edit` authorization record so the
 /// Claude and Codex worklist-guard hooks let tracked-file edits
@@ -17568,6 +17655,7 @@ fn write_pty_turn_intent<R: tauri::Runtime>(
     record_iterate_inflight_sentinel(app, data);
     record_skip_worklist_authorization(app, data);
     record_proposing_intent(app, data);
+    record_turn_context(app, data);
     // Envelope switch (docs/turn-transport-redesign.md step 6): substantial
     // or image-bearing sends are persisted as an outbound-turn envelope and
     // the PTY carries only a compact frame. Inline sends get the whitespace
@@ -44194,6 +44282,8 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
                     // turn end is one of the flag's clear triggers,
                     // independent of whether an inflight claim exists.
                     clear_proposing_flag(app, "turn-finished");
+                    // issue-368: the addressed-turn window ends with the turn.
+                    emit_turn_context(app, &[], "turn-end");
                 }
             }
             JsonlCompletionProvider::Codex => {
@@ -44206,6 +44296,8 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
                 }
                 agent_status_emit_finished(app, provider_label, None, None, "jsonl-end-turn");
                 clear_proposing_flag(app, "turn-finished");
+                // issue-368: the addressed-turn window ends with the turn.
+                emit_turn_context(app, &[], "turn-end");
             }
         }
     }
@@ -61810,6 +61902,7 @@ pub fn run() {
             // Remove any stale inflight sentinel from a prior session
             // that didn't complete cleanly. Refs #84.
             cleanup_stale_inflight_claim(app.handle());
+            cleanup_stale_turn_context(app.handle());
             // Remove any stale Codex lifecycle intent/result files from a
             // prior session. Refs #130.
             cleanup_stale_worklist_intent(app.handle());

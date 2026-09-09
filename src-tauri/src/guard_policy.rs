@@ -2238,6 +2238,16 @@ fn worklist_version_from_text(text: &str) -> (bool, i64) {
 }
 
 fn worklist_covered_files(project_root: &Path) -> HashSet<String> {
+    worklist_covered_files_filtered(project_root, None)
+}
+
+// issue-368-addressed-turn-context: the same walk, optionally restricted to
+// named item ids — the would-deny observer asks whether a path is covered by
+// the items the ACTIVE TURN is addressed to, not by the whole board.
+fn worklist_covered_files_filtered(
+    project_root: &Path,
+    only_ids: Option<&HashSet<String>>,
+) -> HashSet<String> {
     let mut covered = HashSet::new();
     let Ok(text) = std::fs::read_to_string(project_root.join(WORKLIST_REL)) else {
         return covered;
@@ -2257,6 +2267,12 @@ fn worklist_covered_files(project_root: &Path) -> HashSet<String> {
         if st != "proposed" && st != "applied" {
             continue;
         }
+        if let Some(only) = only_ids {
+            let id = o.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            if !only.contains(id) {
+                continue;
+            }
+        }
         if let Some(f) = o.get("file").and_then(|v| v.as_str()) {
             covered.insert(f.to_string());
         }
@@ -2269,6 +2285,67 @@ fn worklist_covered_files(project_root: &Path) -> HashSet<String> {
         }
     }
     covered
+}
+
+// --- issue-368-addressed-turn-context (observe-only) -------------------------
+// The host stamps `resources/.turn-context.json` while an ADDRESSED turn
+// (approved:/iterate:/drop: payload naming ids) is in flight, and removes it
+// at turn end or for general turns. When a file-mutating call is allowed
+// purely by worklist coverage but the active turn does not address a covering
+// item, this emits a `would-deny` breadcrumb into hook-events.log and allows
+// unchanged — the soak evidence for the #368 policy question (should general
+// turns be denied item-file mutation?). ctx=none cannot distinguish a
+// terminal-typed general turn from a pre-368 host, so the vocabulary reads it
+// as the weaker signal; ctx=addressed fires only when the addressed items'
+// own declared files do not cover the target.
+const TURN_CONTEXT_REL: &str = "resources/.turn-context.json";
+
+fn turn_context_addressed_ids(project_root: &Path) -> Option<Vec<String>> {
+    let text = std::fs::read_to_string(project_root.join(TURN_CONTEXT_REL)).ok()?;
+    let doc: Value = serde_json::from_str(&text).ok()?;
+    Some(
+        doc.get("addressedIds")?
+            .as_array()?
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(String::from)
+            .collect(),
+    )
+}
+
+fn trace_would_deny_unaddressed(project_root: &Path, provider: &str, tool: &str, rel: &str) {
+    // A live grant is an authorized general-turn edit, not the observed class.
+    let bypassed = if provider.starts_with("codex") {
+        codex_fresh_bypass(project_root, rel)
+    } else {
+        fresh_bypass(project_root, rel)
+    };
+    if bypassed {
+        return;
+    }
+    let ctx = match turn_context_addressed_ids(project_root) {
+        None => "none",
+        Some(ids) => {
+            let set: HashSet<String> = ids.into_iter().collect();
+            if set.is_empty() {
+                "empty"
+            } else {
+                let addressed_cov = worklist_covered_files_filtered(project_root, Some(&set));
+                let (ok, _) = coverage_verdict(&addressed_cov, rel);
+                if ok {
+                    return;
+                }
+                "addressed"
+            }
+        }
+    };
+    crate::guard::append_breadcrumb(
+        project_root,
+        provider,
+        "would-deny",
+        tool,
+        &format!("target={} ctx={} reason=general-turn-item-edit", rel, ctx),
+    );
 }
 
 // --- authorization record ----------------------------------------------------
@@ -2875,6 +2952,9 @@ fn mcp_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
         }
         let (is_covered, _) = coverage_verdict(&covered, &rel);
         if is_lifecycle_path(&rel) || is_covered || fresh_bypass(&project_root, &rel) {
+            if is_covered && !is_lifecycle_path(&rel) {
+                trace_would_deny_unaddressed(&project_root, "claude-rs", tool_name, &rel);
+            }
             continue;
         }
         violations.push(rel);
@@ -3091,6 +3171,7 @@ fn write_edit_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
     // coverage verdict's own copy is only consulted for the allow leg.
     let (is_covered, _worktree) = coverage_verdict(&covered, &rel);
     if is_covered {
+        trace_would_deny_unaddressed(&project_root, "claude-rs", tool_name, &rel);
         return allow("covered-by-worklist-item", rel);
     }
     let session_root = resolve_session_root(payload);
@@ -4250,6 +4331,9 @@ verify coverage.",
         }
         let (is_covered, worktree) = coverage_verdict(covered, &rel);
         if is_covered || codex_fresh_bypass(cwd, &rel) {
+            if is_covered {
+                trace_would_deny_unaddressed(cwd, "codex-rs", "apply_patch", &rel);
+            }
             continue;
         }
         if denied_worktree.is_none() {
@@ -4484,6 +4568,9 @@ shape whose resulting content the guard can inspect.",
         }
         let (is_covered, worktree) = coverage_verdict(covered, &rel);
         if is_covered || codex_fresh_bypass(cwd, &rel) {
+            if is_covered {
+                trace_would_deny_unaddressed(cwd, "codex-rs", tool_name, &rel);
+            }
             continue;
         }
         if denied_worktree.is_none() {

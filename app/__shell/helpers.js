@@ -9357,6 +9357,65 @@ window.bramSubscribeW2Selection = (function () {
   };
 })();
 
+// issue-368-addressed-turn-context: the active turn's addressed worklist ids,
+// pushed by the host on every toTurn submit (approved:/iterate:/drop: turns
+// carry their items' ids; general turns clear to empty) and cleared again at
+// turn end. Rung 2 of the #368 ladder: when the running turn NAMES the id
+// being committed, "edits may still be landing" is not a guess, so the gate
+// hard-withholds instead of confirming. The context's own set→clear lifecycle
+// IS the active window (no separate turn-phase test — the turn-end detectors
+// drive the clear), with a 30-minute staleness floor so a missed clear cannot
+// pin a row indefinitely.
+(function () {
+  var subscribers = new Set();
+  var factory = null;
+  var notify = function () {
+    subscribers.forEach(function (fn) {
+      try { fn(); } catch (e) { console.error("[bramSubscribeTurnContext] subscriber threw:", e); }
+    });
+  };
+  window.__bramTurnContext = { addressedIds: [], atMs: 0 };
+  window.__bramSetTurnContextFromEvent = function (payload) {
+    window.__bramTurnContext = {
+      addressedIds: (payload && payload.addressedIds) || [],
+      atMs: (payload && payload.atMs) || 0,
+    };
+    notify();
+  };
+  var liveIds = function (ctx) {
+    var c = ctx || window.__bramTurnContext || {};
+    var ids = c.addressedIds || [];
+    if (!ids.length) return [];
+    if (Date.now() - (c.atMs || 0) > 30 * 60 * 1000) return [];
+    return ids;
+  };
+  window.__bramSelectionAddressedBlocked = function (sel, ctx) {
+    var ids = liveIds(ctx);
+    if (!ids.length) return false;
+    return (sel || []).some(function (id) { return ids.indexOf(id) !== -1; });
+  };
+  window.__bramAddressedBlockMessage = function (sel, ctx) {
+    var ids = liveIds(ctx);
+    var hit = (sel || []).filter(function (id) { return ids.indexOf(id) !== -1; });
+    if (!hit.length) return "";
+    return "This turn is working on " + hit.join(", ") +
+      " — the commit unlocks when it finishes.";
+  };
+  window.bramSubscribeTurnContext = function () {
+    if (factory) return factory;
+    factory = function (emit) {
+      var fire = function () { emit(window.__bramTurnContext || null); };
+      subscribers.add(fire);
+      fire();
+      return function () { subscribers.delete(fire); };
+    };
+    return factory;
+  };
+})();
+window.subscribeTauriEvent("__bramNativeTurnContextUnsub", "turn-context-changed", function (e) {
+  window.__bramSetTurnContextFromEvent((e && e.payload) || null);
+});
+
 // transcript-new-below-badge: pane-wide unseen-below counter. The echo guard
 // made READING stable, which removed the yank's accidental "agent responded"
 // signal; this counter feeds the footer status-line chip that replaces it on

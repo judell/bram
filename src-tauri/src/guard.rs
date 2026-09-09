@@ -552,7 +552,7 @@ fn authority_menu_hook(
 // run to end-of-line: Codex reasons are prose with spaces, so every
 // fixed-width field must precede them for lines to stay
 // whitespace-splittable.
-fn append_breadcrumb(root: &Path, provider: &str, event: &str, tool: &str, tail: &str) {
+pub(crate) fn append_breadcrumb(root: &Path, provider: &str, event: &str, tool: &str, tail: &str) {
     let resources = root.join("resources");
     if !resources.is_dir() {
         return;

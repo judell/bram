@@ -1901,14 +1901,36 @@ window.__bramGateAct = function (kind, items, sel, shareMode, claim) {
   // exactly the evidence signature Andrew reported: no click line, no
   // publish, no auth write, three times. The guard stays; it just can no
   // longer hide.
+  // issue-368-commit-caution-while-agent-working: commit-emitting kinds
+  // consult the live turn state before acting. `cautioned` rides the click
+  // trace (computed before it, per the trace-comes-first rule above) so the
+  // soak can count how often the guard fired and what the user chose.
+  var cautioned;
+  if (kind === "commit" || kind === "start-commit") {
+    if (!window.__bramAgentTurnActive()) {
+      cautioned = "not-needed";
+    } else if (window.__bramGateCautionArmed(kind)) {
+      cautioned = "bypassed";
+    } else {
+      cautioned = "shown";
+    }
+  }
   window.__bramIframeTrace("click", {
     target: "gatebar-" + kind,
     count: ids0.length,
     op: ids0.length ? "act" : "empty-selection",
     store: (window.__bramW2Selection || []).length,
     startMode: startNarrowed ? "one" : undefined,
+    cautioned: cautioned,
   });
   if (!ids0.length) return;
+  if (cautioned === "shown") {
+    window.__bramGateCautionSet(kind, ids0.length);
+    return;
+  }
+  if (cautioned === "bypassed") {
+    window.__bramGateCautionClear("bypassed");
+  }
   var text = String(window.__bramMessageAgentText || "");
   // issue-345: this trace is the soak evidence that the user SAW the
   // don't-close warning and submitted the commit anyway -- fires only when
@@ -4103,6 +4125,11 @@ window.__bramW2SetStartMode = function (m) {
 };
 window.__bramW2ResetStartMode = function () {
   window.__bramW2StartMode = "one";
+  // issue-368: a selection change also disarms any pending commit caution —
+  // a first click's arm must not carry over to green-light a different
+  // selection's commit. Folded here (rather than a second statement in the
+  // gate bar's ChangeListener) so the markup handler stays a single call.
+  if (window.__bramGateCautionClear) window.__bramGateCautionClear("selection-changed");
   return "one";
 };
 
@@ -7359,6 +7386,15 @@ window.subscribeTauriEvent("__bramNativeToolbarPtyMenuUnsub",
   };
   window.bramSubscribeAgentStatus = makeFactory(dedupSubs);
   window.bramSubscribeAgentStatusRaw = makeFactory(rawSubs);
+  // issue-368: is the main agent's turn currently in flight? Claim-keyed
+  // gate locking cannot see execution outside a gate bracket (a follow-up
+  // chat turn, a resumed session after an instance restart) — the Working
+  // state is the only live signal that edits may still be landing, so the
+  // gate consults it before a commit-emitting click acts.
+  window.__bramAgentTurnActive = function () {
+    ensureSubscribed();
+    return !!(lastValue && lastValue.state === "working");
+  };
 })();
 
 // Host suspicious-silence + parent terminal-visibility join. The Rust host
@@ -9249,6 +9285,70 @@ window.bramSubscribeW2Selection = (function () {
     };
     factory = function (emit) {
       var fire = function () { emit((window.__bramW2Selection || []).slice()); };
+      subscribers.add(fire);
+      fire();
+      return function () { subscribers.delete(fire); };
+    };
+    return factory;
+  };
+})();
+
+// issue-368-commit-caution-while-agent-working: a commit-emitting gate click
+// taken while the agent's turn is in flight would stage whatever is mid-edit
+// on disk — a torn state committed under the items' ids (#368's field case:
+// Commit 2 lit beside "Codex: Working…"). Claims cannot lock this window
+// (execution without a claim is the bug's very shape), so the click path
+// itself asks: the first click arms a caution row and does not act; a second
+// click within the arm window proceeds. The arm clears on selection change
+// (see __bramW2ResetStartMode), when the agent's turn ends (the honest
+// all-clear), and by TTL so a forgotten first click cannot green-light a
+// commit minutes later. Interim guard only — the structural fix is the
+// executing-window serialization in docs/per-item-claims.md §3.
+(function () {
+  var subscribers = new Set();
+  var factory = null;
+  var watching = false;
+  var notify = function () {
+    subscribers.forEach(function (fn) {
+      try { fn(); } catch (e) { console.error("[bramSubscribeGateCaution] subscriber threw:", e); }
+    });
+  };
+  var watchTurnEnd = function () {
+    if (watching) return;
+    watching = true;
+    window.bramSubscribeAgentStatus()(function (status) {
+      if (window.__bramW2CommitCaution && !(status && status.state === "working")) {
+        window.__bramGateCautionClear("turn-ended");
+      }
+    });
+  };
+  window.__bramW2CommitCaution = null;
+  window.__bramGateCautionSet = function (kind, count) {
+    window.__bramW2CommitCaution = { kind: kind, count: count || 0, atMs: Date.now() };
+    watchTurnEnd();
+    notify();
+    return window.__bramW2CommitCaution;
+  };
+  window.__bramGateCautionClear = function (reason) {
+    if (!window.__bramW2CommitCaution) return null;
+    window.__bramW2CommitCaution = null;
+    notify();
+    return reason || null;
+  };
+  window.__bramGateCautionArmed = function (kind) {
+    var c = window.__bramW2CommitCaution;
+    return !!(c && c.kind === kind && Date.now() - c.atMs < 30000);
+  };
+  window.__bramGateCautionMessage = function (caution) {
+    if (!caution) return "";
+    var label = caution.kind === "start-commit" ? "Start & commit" : "Commit";
+    return "The agent is mid-turn — its edits may still be landing. Click " +
+      label + " again to commit anyway, or wait for the turn to finish.";
+  };
+  window.bramSubscribeGateCaution = function () {
+    if (factory) return factory;
+    factory = function (emit) {
+      var fire = function () { emit(window.__bramW2CommitCaution || null); };
       subscribers.add(fire);
       fire();
       return function () { subscribers.delete(fire); };

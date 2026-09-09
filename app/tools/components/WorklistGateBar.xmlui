@@ -227,6 +227,27 @@
       color="$color-warn-700"
       value="{window.__bramGateCloseContradictionMessage(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value, gateText.value)}" />
   </HStack>
+  <!-- issue-368-commit-caution-while-agent-working: a commit-emitting click
+       taken while the agent's turn is in flight is withheld once — this row
+       says why, and the same button clicked again proceeds. Ask, never
+       block: claims cannot lock this window (execution without a claim is
+       #368's very shape), disabling would wedge legitimate unrelated
+       commits behind long turns (#348's deadlock class), so the click path
+       asks instead. The arm clears on selection change, turn end, or TTL
+       (helpers.js, bramSubscribeGateCaution). Same warn styling as the
+       close-contradiction row above. -->
+  <PushSource id="gateCaution" subscribe="{window.bramSubscribeGateCaution()}" />
+  <HStack
+    when="{!!gateCaution.value}"
+    horizontalAlignment="center"
+    gap="$space-2"
+    paddingHorizontal="$space-2"
+    paddingTop="$space-1">
+    <Text
+      fontSize="$fontSize-sm"
+      color="$color-warn-700"
+      value="{window.__bramGateCautionMessage(gateCaution.value)}" />
+  </HStack>
   <HStack
     when="{(gateSel.value || []).length > 0}"
     verticalAlignment="center"

@@ -185,6 +185,13 @@ Start only on unclaimed items).
   rules, the multi-id generalization in conventions §Serializing) dissolves
   structurally: ending a claim to unlock a decision stops being a required
   agent duty because idle claims never lock the decision in the first place.
+  The inverse — **under-locking** — has its own receipt: #368 (2026-09-08,
+  xmlui): after a legitimate turn-end clear and an instance restart, the
+  agent kept landing edits under ordinary turns, which never claim, while
+  Commit sat lit beside "Codex: Working…" — execution the claim-keyed gate
+  structurally cannot see. The executing window closes both directions;
+  until it ships, the interim caution-confirm
+  (issue-368-commit-caution-while-agent-working) guards the commit click.
 
 ## 4. What the ceremonies become
 

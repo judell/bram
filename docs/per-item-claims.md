@@ -264,6 +264,20 @@ flip (attribution-model.md §6's migration steps 2–5) having landed:
    the single-slot file becomes a map with a legacy-read shim. Independently
    shippable and independently valuable (it alone closes the displacement
    half of #269). Trace: `op=auth-add` / retirement per id.
+
+   *Status: the LIFECYCLE half of steps 1–2 landed as
+   `separate-authorization-from-claim`, ahead of the rest and independent of
+   the membership flip because it touches neither attribution nor capture
+   boundaries. Authorization is now the durable half; the claim is execution
+   state the host retires at turn end (`op=clear-at-turn-end`) and
+   re-establishes at the next turn's start from a still-live authorization
+   (`op=rearm-at-turn-start`). That makes "an agent finishes and forgets"
+   unrepresentable rather than detectable — the stalled-claim surface built
+   for it was retired in the same run. What remains of these steps is the
+   STORE shape: both records are still single-slot, so two items still
+   cannot be independently in flight; the executing WINDOW is still
+   turn-granular rather than per-item, which is what the parallel-dispatch
+   case needs and what step 3's boundaries provide.*
 2. **Keyed claim store.** `.inflight-claim.json` map; clear/shrink become
    key removal; spinner and row-locking rework onto the executing-window
    distinction (§3). The displacement tripwire retires, replaced per §3.

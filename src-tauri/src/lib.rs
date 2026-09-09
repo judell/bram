@@ -7418,11 +7418,52 @@ fn update_turn_state<R: tauri::Runtime, F>(
         }
     }
     if let Some((prev, next, emitted)) = transition {
+        // separate-authorization-from-claim: claim = authorization AND a turn
+        // in flight. Entering `working` with a live approved authorization
+        // re-establishes the claim, so a multi-turn apply keeps its work
+        // attributed (each turn gets its own window and capture boundary)
+        // and the gate is locked exactly while something is running — never
+        // between turns, which is where the wedge used to live.
+        if prev.phase != "working" && next.phase == "working" {
+            rearm_claim_for_live_authorization(app);
+        }
         trace_turn_state_transition(app, &prev, &next, emitted);
     }
     if let Some(payload) = emit_payload {
         emit_replayable_payload(app, "turn-state-changed", &payload);
     }
+}
+
+// separate-authorization-from-claim: re-establish the execution claim at the
+// start of a turn when an authorization is still live. Deliberately narrow:
+// only `approved` (drop/iterate claims are single-turn by nature), only when
+// nothing is claimed already, and only for authorizations that
+// worklist_active_authorization_summary still considers live — it screens
+// consumed, interrupted (the Escape path) and past-TTL records, so a
+// cancelled approval can never re-arm itself.
+fn rearm_claim_for_live_authorization<R: tauri::Runtime>(app: &AppHandle<R>) {
+    if inflight_claim_ids_and_claimed_at(app).is_some() {
+        return;
+    }
+    let Some((kind, _age_ms, ids)) = worklist_active_authorization_summary(app) else {
+        return;
+    };
+    if kind != "approved" || ids.is_empty() {
+        return;
+    }
+    let mut sorted: Vec<String> = ids.into_iter().collect();
+    sorted.sort();
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "inflight-sentinel",
+            &format!(
+                "op=rearm-at-turn-start ids={}",
+                serde_json::to_string(&sorted).unwrap_or_else(|_| "[]".to_string())
+            ),
+        );
+    }
+    write_inflight_claim_sentinel(app, &sorted, "approved");
 }
 
 fn turn_state_note_pty_activity() {
@@ -44316,6 +44357,18 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
     }
 
     let Some((claimed_ids, claimed_at)) = inflight_claim_ids_and_claimed_at(app) else {
+        // separate-authorization-from-claim: no claim, but this JSONL says a
+        // turn is IN FLIGHT (a non-final assistant record) and an
+        // authorization may still be live — the second turn of a multi-turn
+        // apply, after the first turn's end retired the claim. Re-arm here as
+        // well as on the phase transition: the phase reaches `working` from
+        // PTY activity, while this is the authoritative record of the agent
+        // actually producing output, and it is the signal a JSONL-only
+        // reproduction can reach. The re-arm is a no-op unless an
+        // authorization is genuinely live and nothing is claimed.
+        if !decision.detected {
+            rearm_claim_for_live_authorization(app);
+        }
         if bram_trace_enabled() {
             append_bram_trace_line(
                 app,
@@ -44495,15 +44548,30 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
     }
     // Soft path: approved claims outlive turns — see inflight_claim_kind
     // (the rung-8 receipt: cleared 51s into a multi-turn apply).
-    if inflight_claim_kind(app).as_deref() == Some("approved") {
-        if bram_trace_enabled() {
-            append_bram_trace_line(
-                app,
-                "inflight-sentinel",
-                "op=skip-clear source=jsonl-turn-end reason=approved-claim-live",
-            );
-        }
-        return;
+    // separate-authorization-from-claim: the claim is EXECUTION state, so the
+    // turn ending is its natural terminus — including for `approved`, which
+    // used to be preserved here (`op=skip-clear reason=approved-claim-live`).
+    // Preserving it was the source of the wedge: nothing but an agent
+    // remembering an out-of-band call stood between a finished turn and a
+    // locked board, and by Bram's own rules every sanctioned ending retires
+    // the claim anyway, so a turn ending with one live is always a violation.
+    //
+    // What made preserving it look necessary — issue-286's legitimate
+    // multi-turn apply — is handled by re-arming at the NEXT turn's start
+    // from the surviving authorization (see rearm_claim_for_live_authorization).
+    // Authorization is the durable half and is untouched here: `advance` and
+    // `worklist-commit` read the auth record, not the claim, so a later turn
+    // completes the lifecycle exactly as before.
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "inflight-sentinel",
+            &format!(
+                "op=clear-at-turn-end kind={} ids={}",
+                inflight_claim_kind(app).as_deref().unwrap_or(""),
+                serde_json::to_string(&claimed_ids).unwrap_or_else(|_| "[]".to_string())
+            ),
+        );
     }
     clear_inflight_claim_sentinel(app, &claimed_ids);
 }
@@ -51018,6 +51086,21 @@ fn stranded_approval_row<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::V
     }
 }
 
+// When THIS process started. Stamped at startup (note_process_start) rather
+// than lazily on first use: the lazy form stamped on the first call that got
+// past the claim check, which under the old lifecycle only happened in a
+// genuinely stranded state, but since separate-authorization-from-claim
+// "approved authorization, no claim" is the ORDINARY between-turns state.
+// The first call then landed moments AFTER an approval, making
+// `issued >= process_start` false, so the has-the-agent-worked exemption
+// below never applied and every pause between turns of a multi-turn apply
+// reported as "agent not notified" (caught driving the synth, 2026-09-09).
+static PROCESS_START_MS: OnceLock<i64> = OnceLock::new();
+
+pub(crate) fn note_process_start() {
+    let _ = PROCESS_START_MS.get_or_init(unix_now_ms);
+}
+
 fn stranded_approval_ids<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> Option<(std::collections::HashSet<String>, i64)> {
@@ -51038,7 +51121,6 @@ fn stranded_approval_ids<R: tauri::Runtime>(
     //   click built died with the old process — the fresh agent's boot
     //   activity says nothing about delivery. (PROCESS_START is stamped on
     //   the first call, which is the startup check.)
-    static PROCESS_START_MS: OnceLock<i64> = OnceLock::new();
     let process_start = *PROCESS_START_MS.get_or_init(unix_now_ms);
     let latest_activity = turn_state_cell()
         .lock()
@@ -62149,6 +62231,7 @@ pub fn run() {
             }
             // Remove any stale inflight sentinel from a prior session
             // that didn't complete cleanly. Refs #84.
+            note_process_start();
             cleanup_stale_inflight_claim(app.handle());
             cleanup_stale_turn_context(app.handle());
             // Remove any stale Codex lifecycle intent/result files from a

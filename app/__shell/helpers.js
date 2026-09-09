@@ -2817,7 +2817,15 @@ window.__bramWorklist2StripTooltip = function (item, claim, items, attributionTo
 window.__bramItemNeedsStart = function (item, claim) {
   if (!item) return false;
   if ((item.status || "proposed") === "applied") return false;
-  if (item.activeAuthorization === "approved") return false;
+  // separate-authorization-from-claim: gate on EXECUTION, not authorization.
+  // This used to return false whenever an approved authorization was live,
+  // which was right while a live authorization IMPLIED work in flight. Since
+  // the claim now ends with the turn, "authorized" and "running" are
+  // different facts, and the gap between them — agent stopped mid-apply,
+  // authorization still live — is exactly when the user needs Start most.
+  // Found driving the synth: "I have to talk to the agent; there is no UI to
+  // resume." Start is that UI. A live CLAIM still hides it, because then
+  // something really is running.
   return !window.__bramItemInflightKind(claim, item.id, "", "", 0);
 };
 
@@ -2845,6 +2853,15 @@ window.__bramSelectionAllNeedStart = function (items, sel, claim) {
     // dependent, and a hardcoded `true` here produced a Drop-only dead-end
     // row when the flag was off — 0.5.3 gate run, Phase 9. The setting was
     // retired in that same run; committable is unconditional again.)
+    // separate-authorization-from-claim: one row this exclusion must NOT
+    // cover. A `proposed` item whose approved authorization is still live and
+    // unconsumed was never declared finished — `advance` and
+    // `worklist-commit` both consume it — so its on-disk work is PARTIAL and
+    // Start is the resume path, even though the partial work is committable.
+    // The rows this exclusion was written for (2026-08-22, 2026-08-24) are
+    // the opposite case: work finished, Start noise beside Commit. The live
+    // authorization is what tells them apart.
+    if (i.activeAuthorization === "approved") return true;
     return !window.__bramSelectionAllCommittable(list, [i.id], claim);
   });
 };
@@ -4177,12 +4194,50 @@ window.__bramStartAllLabel = function (sel) {
   var n = (sel || []).length;
   return (n === 2 ? "Start both now" : "Start all " + n + " now") + " — one combined commit";
 };
+// separate-authorization-from-claim: one click, two meanings. On a fresh item
+// it starts work; on an item whose agent stopped mid-apply — authorization
+// still live, nothing running — it picks the work back up, and calling that
+// "Start" invites the reading that nothing has happened yet. "Resume" rather
+// than "Restart" (Jon): the on-disk work is kept and the agent continues from
+// it, where "restart" implies starting over.
+// separate-authorization-from-claim: the row's third activity state.
+// Running has a spinner; finished-and-advanced has neither; this is the one
+// in between — the agent stopped with the item unfinished and its
+// authorization still live. It reuses the subagent chips' vocabulary for
+// exactly this condition ("Stopped, awaiting background work — not
+// finished", __bramAgentChipTooltip), because it is the same fact about a
+// different surface: paused, not done. `advance` and `worklist-commit` both
+// consume the authorization, so a live one is what says "never declared
+// finished".
+window.__bramItemPaused = function (item, claim) {
+  if (!item) return false;
+  if ((item.status || "proposed") === "applied") return false;
+  if (item.activeAuthorization !== "approved") return false;
+  return !window.__bramItemInflightKind(claim, item.id, "", "", 0);
+};
+
+window.__bramStartVerb = function (items, sel, claim) {
+  var chosen = sel || [];
+  if (!chosen.length) return "Start";
+  var list = items || [];
+  var picked = list.filter(function (i) { return chosen.indexOf(i.id) !== -1; });
+  if (picked.length !== chosen.length) return "Start";
+  var resuming = picked.every(function (i) {
+    return (
+      i.activeAuthorization === "approved" &&
+      !window.__bramItemInflightKind(claim, i.id, "", "", 0)
+    );
+  });
+  return resuming ? "Resume" : "Start";
+};
+
 window.__bramStartButtonLabel = function (items, sel, claim, mode) {
   var n = (sel || []).length;
+  var verb = window.__bramStartVerb(items, sel, claim);
   if (mode === "one" && window.__bramStartChoiceNeeded(items, sel, claim)) {
-    return "Start 1 of " + n;
+    return verb + " 1 of " + n;
   }
-  return "Start " + n;
+  return verb + " " + n;
 };
 
 // Names offending items instead of counting them. A bare count collides with

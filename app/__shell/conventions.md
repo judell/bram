@@ -565,56 +565,47 @@ round-trip. Its return value is dead weight for an apply — the bodies are
 the proposal you authored. So an apply-approve is one call: edit from the
 proposal, then `mutate op:"advance"`.
 
-**The third outcome: approved, investigated, nothing to apply.** An approve
-gate has three endings, not two. Besides "work applied" and "work applied and
-committed", there is the case where the first step of the approved item
-falsifies its own premise — the investigation shows the change is unnecessary,
-or the hypothesis it rested on is wrong. This is a normal ending, not a
-failure, and it has its own handling:
+**The claim ends with your turn — the host retires it** (separate-authorization-
+from-claim). Authorization and execution used to be one record: the claim both
+said "this work is authorized" (which must survive across turns) and "this work
+is executing" (which must not). Because it had to survive, it outlived the turn,
+and the only thing between a finished turn and a locked board was an agent
+remembering an out-of-band call. So the two were split by role:
 
-- **Do not `mutate op:"advance"`.** Advancing asserts the work is on disk. It
-  is not, and marking the item `applied` produces a row with nothing to
-  commit.
-- **Retire the claim explicitly.** The host set the inflight sentinel at
-  approval time and nothing on this path clears it, so the spinner runs and —
-  because row selection is locked while a claim is live — the user cannot even
-  click Drop to resolve it. Call
-  `POST /__worklist/end` with `{"ids": [...]}` naming the approved ids.
-  Both the method and the body are required; a `GET` returns `POST only` and
-  an empty body returns `{"error":"ids[] required"}`.
-- **Report the finding in chat and recommend Drop**, exactly as the
-  *investigation reveals nothing to commit* guidance above prescribes for the
-  `advance` case. This extends that rule to cover the claim.
+- **Authorization is durable.** The record `mutate op:"advance"` and
+  `worklist-commit` consume is unchanged, survives across turns, and still
+  retires incrementally by resolved ids. Forgetting a lifecycle call no longer
+  strands anything: the item simply stays where it is, visible and actionable.
+- **The claim is execution state.** The host writes it while a turn runs and
+  retires it when the turn ends (`op=clear-at-turn-end`), re-establishing it at
+  the next turn's start whenever an authorization is still live
+  (`op=rearm-at-turn-start`) — so a legitimate multi-turn apply keeps every
+  turn's work attributed, and the gate is locked exactly while something is
+  running.
 
-Live case, 2026-08-24: `issue-275-transcript-row-remount-churn` was approved to
-apply, its first step disproved the item's own hypothesis, no files changed,
-and no lifecycle call was correct to make. The claim stayed live and locked the
-row until it was unwound by hand.
+**What this means for how you end a turn.** You no longer owe a claim-retiring
+call. Three endings that used to require one are now ordinary:
 
-The same rule covers a subtler ending: **a turn that ends by asking the user
-a decision must not leave a claim live.** Holding the claim "while you
-decide" locks the row, so the two buttons that ARE the answer (Approve /
-Drop) are unavailable, the spinner implies work that is not happening, and
-the only remaining channel — a verbal reply in chat — is advertised nowhere
-on the surface. Call `POST /__worklist/end` before ending the turn; the
-row unlocks and the decision gets ordinary affordances. (Live case,
-2026-08-26: `issue-262-cross-project-direct-edit-auth`'s apply surfaced a
-premise conflict with the issue's recorded disposition; the orchestrator
-held the claim across the question and the user was left asking "nobody is
-working but we are still spinning" with no visible way to respond.)
+- **Approved, investigated, nothing to apply.** Do NOT `mutate op:"advance"` —
+  advancing asserts work is on disk and it is not. Report the finding in chat
+  and recommend **Drop**; the claim retires itself when your turn ends. (Live
+  case, 2026-08-24: `issue-275-transcript-row-remount-churn`, whose first step
+  disproved its own hypothesis and whose claim then locked the row until it was
+  unwound by hand.)
+- **Ending a turn to ask the user a decision.** Just ask. The row unlocks when
+  your turn ends, so the buttons that ARE the answer are available. (Live case,
+  2026-08-26: `issue-262-cross-project-direct-edit-auth`, where the user was
+  left asking "nobody is working but we are still spinning".)
+- **The user takes over the commit.** "I'll commit" is ordinary — Commit is a
+  button. End your turn; the claim goes with it, and `worklist-commit` still
+  retires claims by the ids it resolves whichever approval carried the click.
+  (issue-348.)
 
-And an apply-and-commit gate has a FOURTH ending in the same family
-(issue-348, where it ran the spinner for minutes with rows locked): **the
-user takes over the commit.** "I'll commit" is an ordinary thing to say —
-Commit is a button — but the claim set at approval expects the agent's
-`worklist-commit` to retire it, and a turn that ends on the user's
-announcement leaves the claim live, which locks row selection and thereby
-bars the user from the very Commit they announced. When the user says they
-will commit (or you end the turn handing them that choice), call
-`POST /__worklist/end` with the approved ids before ending the turn — the
-row unlocks, the pane's Commit works, and the host is already resilient
-from there: `worklist-commit` retires claims by the ids it resolves,
-whichever approval carried the click.
+`POST /__worklist/end` survives as an **explicit early release** — use it to
+unlock the board mid-turn when you know you are done holding it — but it is no
+longer an obligation, and forgetting it is no longer a failure mode. Both the
+method and the body are required; a `GET` returns `POST only` and an empty body
+returns `{"error":"ids[] required"}`.
 
 **Apply-and-commit gate: skip `advance` — edit if needed, then
 `worklist-commit`.** `gate: "apply-and-commit"` is no longer only the

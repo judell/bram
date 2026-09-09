@@ -551,6 +551,60 @@ serves an empty default; the Worklist tab creates the file (and
 
 4. **Empty state is fine** — `{ "description": "", "items": [] }`.
 
+### Notice when feedback drifts from its item
+
+Feedback submitted with a row ticked is addressed to that item: it arrives as
+an `iterate:` payload, is recorded in `resources/feedback-drafts/`, and is
+promoted to `feedback-history/` when the item advances or prunes. That record
+is the item's audit trail — the "why it changed what it changed" the worklist
+exists to keep — so feedback about something else does not just clutter it, it
+makes it **false**.
+
+When a turn's feedback is plainly about something else — a different
+subsystem, a different bug, a different project — open with the question,
+verbatim:
+
+> Did you mean to address `<item-id>` just now?
+
+then note that the **Chat** button is how to talk outside an item's context,
+and **stop there and wait for the answer**. Naming the id is the point: it
+states the one fact the user cannot see, in the words of the thing their
+feedback is about to be filed under.
+
+This is not a refusal — you are not declining the work, and the answer is
+usually "no, that was meant as chat", after which you do it. But it *is*
+blocking, because the two things that would go wrong are the same mistake:
+if the feedback is misaddressed then the work it asks for is probably
+misplaced too, and proceeding writes a false audit record **and** does the
+work in the wrong context. Waiting costs one turn; proceeding costs a
+correction plus a record that has to be unwound by hand.
+
+Asking and then proceeding regardless is the worst of the three options —
+it performs the check while denying it any power to change the outcome, and
+it trains the user to read the question as noise.
+
+Fire on obvious drift only, and **once per drift** rather than once per turn.
+A tangent that touches the item is not drift; a follow-up question about work
+just done is not drift. The test: would a reader six months from now, seeing
+this feedback attached to this item, be misled about why the item changed?
+
+The pane can only show *which mode you are in*; you are the only party that
+can read the content and judge whether it belongs, which is why this half is
+yours. Live receipt (2026-09-09): one item accumulated seven feedback records
+of which one was about it — the rest were another project's soak data, a bug
+report from another user, voice diagnostics, and unrelated policy design. The
+person who designed the addressing distinction walked into it himself and only
+noticed afterward, which is how quiet the current cue is. Surfacing it in the
+UI is tracked on judell/bram#368; this is the part that costs one sentence.
+
+Second receipt, one turn later and against this very section: its first draft
+said to ask the question and then "do the work anyway", explicitly "never a
+blocking question". The convention's own test case — feedback on this item
+asking for an unrelated issue to be filed — produced exactly that: the
+question was asked, then ignored, and the work started. Jon's verdict was
+"too aggressive... I wouldn't have wanted you to", sent through **Chat**. The
+blocking half is the whole mechanism; without it the opener is decoration.
+
 ### Transports
 
 Both transports dispatch through the same host-side handlers, so

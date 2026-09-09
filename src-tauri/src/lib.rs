@@ -58246,6 +58246,16 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         }
     }
 
+    // issue-366: HEAD before either staging path runs, for the universal
+    // no-op-commit backstop below. A commit that does not move HEAD created
+    // nothing; recording the prior sha as the item's commit (and pruning the
+    // item, and possibly queuing a close bound to a stranger's commit) is the
+    // misattribution family's quietest member. Both staging paths converge on
+    // the check, so no future path can reintroduce the lie.
+    let head_before = git_run(app, &["rev-parse", "HEAD"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
     // issue-327: interval-staged commit (entangled subset) or whole-file
     // commit (the default). Both produce `sha` + `committed_paths` and
     // converge on the shared post-commit tail below.
@@ -58345,7 +58355,24 @@ fn handle_worklist_commit<R: tauri::Runtime>(
             return worklist_json_error(400, e);
         }
         if staged_after.is_empty() {
-            return worklist_json_error(400, "no staged changes for approved files");
+            // issue-366: an empty stage is a no-op commit in waiting — the
+            // item's declared files carry no changes (parked, or already
+            // committed). Refuse before git commit, releasing the claim so the
+            // row does not strand; nothing is pruned, queued, or recorded.
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "worklist-commit",
+                    "op=refuse-empty-commit stage=whole-file",
+                );
+            }
+            release_claim_on_commit_refusal(app, &ids);
+            return worklist_json_error(
+                409,
+                "commit refused: this item's declared files carry no changes to commit \
+                 (its work may be parked or already committed)."
+                    .to_string(),
+            );
         }
 
         let mut commit_args = vec![
@@ -58432,6 +58459,45 @@ fn handle_worklist_commit<R: tauri::Runtime>(
                 &format!("op=committed sha={}", &sha[..sha.len().min(7)]),
             );
         }
+    }
+
+    // issue-366: the universal backstop. Two no-op shapes are equally the
+    // lie — HEAD unmoved (the field case: the prior sha recorded as this
+    // item's commit), and a NEW commit whose tree equals the prior HEAD's (an
+    // interval `commit-tree` over an empty patch mints a fresh sha with no
+    // content). Both are caught by asking git whether the commit actually
+    // changed anything: `diff --quiet head_before sha` exits 0 when the trees
+    // match. Refuse rather than prune/queue/record; release the claim so the
+    // row recovers. (Skipped only for a first-ever commit, where head_before
+    // is empty and any commit is genuine content.)
+    let empty_commit = !head_before.is_empty()
+        && (sha == head_before || git_run(app, &["diff", "--quiet", &head_before, &sha]).is_ok());
+    if empty_commit {
+        // A new-but-empty commit (sha moved, tree unchanged) can only come
+        // from the interval path's commit-tree/update-ref — the whole-file
+        // path's own is_empty guard fires first — and that path never touched
+        // the worktree or index, so moving the ref back to head_before cleanly
+        // discards the empty commit and leaves no staged residue.
+        if sha != head_before {
+            let _ = git_run_owned(
+                app,
+                &[
+                    "update-ref".to_string(),
+                    "HEAD".to_string(),
+                    head_before.clone(),
+                ],
+            );
+        }
+        if bram_trace_enabled() {
+            append_bram_trace_line(app, "worklist-commit", "op=refuse-empty-commit");
+        }
+        release_claim_on_commit_refusal(app, &ids);
+        return worklist_json_error(
+            409,
+            "commit refused: the commit would create no new revision — this item's declared \
+             files carry no changes to commit (its work may be parked or already committed)."
+                .to_string(),
+        );
     }
 
     // guard-helper-coverage-on-markup-refs: report-only check that a

@@ -84,33 +84,21 @@ agent pane's Worklist, Transcript, and Queue views.
 
 On the *Worklist* tab, create Worklist items in conversation ("Hey agent, let's do x") or with the *+ New item* button, which can also cite an open issue. Either way the agent proposes an item: a short plan with Before and After notes, naming the files it expects to alter.
 
-Each item's row tells you where things stand. A fresh proposal says "No changes yet". Once the agent alters files, the row counts them ("2 of 3 planned"), tallies added and removed lines, and shows the diff. Your past feedback on the item collects in its Feedback section.
-
-To act, tick one or more items and use the buttons beside the message box. One action, and one message, covers every item you selected. Buttons dim rather than disappear as you tick items, so the row of actions holds still — a dimmed button means it doesn't apply to the current selection, not that it's gone.
+To act, tick one or more items and use the buttons above the message box. One action, and one message, covers every item you selected. Buttons dim rather than disappear as you tick items, so the row of actions holds still — a dimmed button means it doesn't apply to the current selection, not that it's gone.
 
 - *Start* accepts a proposal and authorizes the agent to alter files.
 
-- *Commit* commits an item's altered files to git. Once a started item has changes of its own on disk, you can commit them directly — there's no separate step to mark the item ready first. The one exception: if every file an item changed is also claimed by another started item, it can't commit on its own, because that would land the other item's work under its name.
-
-- *Start & commit* does both in one step. For now it only works on a single, freshly-proposed item (#272).
-
-- *Refine* sends your message as feedback so the agent can revise a proposal or rework altered files.
+- *Commit* commits an item's altered files to git.
 
 - *Drop* retires items you don't want. A dropped item isn't lost: you can resurrect it from the History tab, or ask the agent to file an issue first so the idea survives in GitHub.
 
-When two started items both touch the same file, a Shared files table lists the shared path, what's on disk, and which items claim it — each claimant rendered as the same badge its row carries, so you can match them at a glance. Committing one of those items normally takes the whole shared file with it; when that's about to happen, a radio option lets you ask the agent to split the changes into separate commits instead.
+When two started items both touch the same file, a Shared files table lists the shared path, what's on disk, and which items claim it.
 
-The previous Worklist design remains available for now. Turn on *Show legacy Worklist* in Settings to show it as OldWorklist.
+On the *Issues* tab, use `+ New issue` to ask Bram to file a GitHub issue.
 
-On the *Issues* tab, use `+ New issue` to ask Bram to file a GitHub issue. 
+On the *Queue* tab, park thoughts that arrive while the agent is busy. Bram keeps them with the repo across reloads and restarts.
 
-On the *Queue* tab, park thoughts that arrive while the agent is busy. Bram
-keeps them with the repo across reloads and restarts. Edit or delete them
-freely, choose whether each should become an ordinary *Message* or feedback
-that *Iterates* a selected Worklist item, then use *Send* when it becomes
-ready. Queued messages are never sent automatically.
-
-Every item moves from proposal, to altered files, to a commit, and hooks hold the agent to that order: no file alterations without an approved item, no commit without your approval. Between those steps you can dwell as long as you like to:
+Every item moves from proposal, to altered files, to a commit or drop, and hooks hold the agent to that order: no file alterations without an approved item, no commit without your approval. Between those steps you can dwell as long as you like to:
 
 - discuss and refine a proposal
 
@@ -118,9 +106,7 @@ Every item moves from proposal, to altered files, to a commit, and hooks hold th
 
 - create, refine, and close issues
 
-- organize commits
-
-By default every change request flows through the Worklist. That's overkill for small things so, when messaging the agent from Bram's footer, you can use the *skip worklist* button instead of *send*. When messaging the agent from a Worklist item, you can prefix your message with *skip-worklist:* or end it with "just do it" (the only verbal opt-out phrase).
+When there is a selected item in the Worklist are selected, a message to the agent addresses that item. Otherwise it's open-ended chat. For small things that you want to commit immediately you can end your message with "just do it" to bypass the Worklist.
 
 
 ### Workflow conventions

@@ -414,8 +414,27 @@
        single wrapping stream read as a run-on paragraph in the done state.
        wrapContent still guards each row on narrow windows (update-banner-wrap;
        https://www.xmlui.org/docs/reference/components/Stack#wrapcontent). -->
-  <VStack
+  <!-- pin-update-banner-above-scroll: the banner used to be the first
+       SCROLLING child, so any tab scrolled off the top hid it — and the
+       Transcript, which mounts at its live edge, hid it every launch. A
+       pending update was invisible on the one tab you are most likely to
+       be sitting on, and you could not even reach it to dismiss.
+       StickySection (NOT StickyBox: react-sticky-el writes an inline
+       top: 0 that no class-based prop can override, so the offset below
+       would be ignored and the banner would pin BEHIND the header) with
+       top="$height-AppHeader" — the theme var the header's height is set
+       from, correct on first paint with no measuring.
+       https://www.xmlui.org/docs/howto/pin-sticky-content-below-the-appheader
+       `when` sits on the section, not the inner stack: an always-present
+       section with hidden content would pin an empty strip. The section
+       carries the wash too, so nothing scrolling underneath shows through
+       the pinned band. -->
+  <StickySection
     when="{appInfo.value &amp;&amp; appInfo.value.has_update &amp;&amp; appInfo.value.latest !== updateBannerDismissedVersion}"
+    stickTo="top"
+    top="$height-AppHeader"
+    backgroundColor="$color-warn-100">
+  <VStack
     backgroundColor="$color-warn-100"
     padding="$space-2"
     gap="$space-1">
@@ -484,6 +503,7 @@
       </Text>
     </HStack>
   </VStack>
+  </StickySection>
 
   <!-- project-identity-chip: two Brams side by side are otherwise
        pixel-identical inside the pane, and the OS title bar (the only

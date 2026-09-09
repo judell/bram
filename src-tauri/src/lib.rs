@@ -49107,6 +49107,87 @@ mod cross_machine_agent_tests {
     }
 }
 
+// awaiting-open-links-to-comment: a row raised by a comment should Open AT
+// that comment, not at the top of a thread you then scroll. The notification
+// path carries the comment's API URL (…/repos/<o>/<r>/issues/comments/<id>);
+// the web permalink is the thread page plus `#issuecomment-<id>`.
+//
+// None means "no anchor — keep the thread URL", and it is the honest answer
+// in three cases: a marker that is a timestamp rather than a comment (the
+// local sweep's shape), a thread with no comments at all, and — the one
+// worth naming — a PR *review* comment (…/pulls/comments/<id>), whose web
+// anchor is a different form (`#discussion_r<id>`). Emitting
+// `#issuecomment-<id>` for a review comment would produce a link that loads
+// the page and silently scrolls nowhere, which is worse than the thread top.
+fn comment_permalink(thread_web_url: &str, comment_api_url: &str) -> Option<String> {
+    if thread_web_url.is_empty() {
+        return None;
+    }
+    let (_, id) = comment_api_url.split_once("/issues/comments/")?;
+    let id = id.trim_end_matches('/');
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(format!("{}#issuecomment-{}", thread_web_url, id))
+}
+
+#[cfg(test)]
+mod comment_permalink_tests {
+    use super::comment_permalink;
+
+    #[test]
+    fn anchors_issue_comments_and_declines_everything_else() {
+        assert_eq!(
+            comment_permalink(
+                "https://github.com/judell/bram/issues/338",
+                "https://api.github.com/repos/judell/bram/issues/comments/5467031547"
+            )
+            .as_deref(),
+            Some("https://github.com/judell/bram/issues/338#issuecomment-5467031547")
+        );
+        // A PR conversation comment is still an issue comment, and the
+        // anchor is correct on the pull page.
+        assert_eq!(
+            comment_permalink(
+                "https://github.com/judell/bram/pull/12",
+                "https://api.github.com/repos/judell/bram/issues/comments/77"
+            )
+            .as_deref(),
+            Some("https://github.com/judell/bram/pull/12#issuecomment-77")
+        );
+        // PR review comment: different anchor form, so decline rather than
+        // emit a link that scrolls nowhere.
+        assert_eq!(
+            comment_permalink(
+                "https://github.com/judell/bram/pull/12",
+                "https://api.github.com/repos/judell/bram/pulls/comments/999"
+            ),
+            None
+        );
+        // The local sweep's marker shape is a timestamp, not a comment URL.
+        assert_eq!(
+            comment_permalink(
+                "https://github.com/judell/bram/issues/338",
+                "2026-09-08T01:02:03Z"
+            ),
+            None
+        );
+        // Nothing to anchor onto.
+        assert_eq!(
+            comment_permalink("", "https://api.github.com/repos/o/r/issues/comments/1"),
+            None
+        );
+        // Non-numeric tail: not an id we recognize.
+        assert_eq!(
+            comment_permalink(
+                "https://github.com/judell/bram/issues/338",
+                "https://api.github.com/repos/o/r/issues/comments/abc"
+            ),
+            None
+        );
+    }
+}
+
 fn local_issue_sweep_items<R: tauri::Runtime>(
     app: &AppHandle<R>,
     skip_numbers: &std::collections::HashSet<u64>,
@@ -49200,6 +49281,27 @@ fn local_issue_sweep_items<R: tauri::Runtime>(
         }
         let title = rec.get("title").and_then(|v| v.as_str()).unwrap_or("");
         let url = rec.get("url").and_then(|v| v.as_str()).unwrap_or("");
+        // awaiting-open-links-to-comment: on this path no parsing is needed —
+        // `gh issue list --json comments` already hands back each comment's
+        // web permalink (…/issues/<n>#issuecomment-<id>), so Open lands on the
+        // reply that raised the row. Latest-by-createdAt, mirroring the
+        // cross-machine body pick below. A fresh issue has no comments and
+        // keeps the thread URL, which is exactly where its body is.
+        let comment_url = rec
+            .get("comments")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| {
+                arr.iter()
+                    .filter_map(|c| Some((c.get("createdAt")?.as_str()?, c.get("url")?.as_str()?)))
+                    .max_by(|a, b| a.0.cmp(b.0))
+                    .map(|(_, u)| u)
+            })
+            .unwrap_or("");
+        let external_url = if comment_url.is_empty() {
+            url
+        } else {
+            comment_url
+        };
         let marker = rec
             .get("latestCommentAt")
             .or_else(|| rec.get("activityAt"))
@@ -49250,7 +49352,7 @@ fn local_issue_sweep_items<R: tauri::Runtime>(
                 "title": headline,
                 "detail": detail,
                 "link": "/issues",
-                "externalUrl": url,
+                "externalUrl": external_url,
                 "court": "user",
                 "blocking": fresh_issue,
                 "verified": true,
@@ -49460,6 +49562,14 @@ fn forge_awaiting_items_fetch<R: tauri::Runtime>(
             }
             _ => format!("New reply on {} \u{2014} {}", numbered, title),
         };
+        // awaiting-open-links-to-comment: the thread's web page, then the
+        // comment anchor when a comment raised the row. Computed BEFORE the
+        // marker binding below, which consumes latest_comment_url.
+        let thread_web_url = subj_url
+            .replace("api.github.com/repos/", "github.com/")
+            .replace("/pulls/", "/pull/");
+        let external_url =
+            comment_permalink(&thread_web_url, &latest_comment_url).unwrap_or(thread_web_url);
         let marker = if latest_comment_url.is_empty() {
             updated.clone()
         } else {
@@ -49488,10 +49598,10 @@ fn forge_awaiting_items_fetch<R: tauri::Runtime>(
                 // item, and GitHub is where replying happens — so Open goes
                 // there, not to the in-app Issues tab. Derived from the API
                 // subject url; empty subj_url leaves it empty and the pane
-                // falls back to the local link.
-                "externalUrl": subj_url
-                    .replace("api.github.com/repos/", "github.com/")
-                    .replace("/pulls/", "/pull/"),
+                // falls back to the local link. Since
+                // awaiting-open-links-to-comment it carries the
+                // #issuecomment- anchor when a comment raised the row.
+                "externalUrl": external_url,
                 "court": "user",
                 "blocking": blocking,
                 "verified": verified,

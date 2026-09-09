@@ -4118,6 +4118,26 @@ window.__bramStartChoiceNeeded = function (items, sel, claim) {
 // single call that also assigns the gate bar's reactive var; reset fires on
 // selection change so a stale combined-commit choice from an earlier
 // selection cannot silently foreclose a new one.
+// first-run-lands-on-transcript: decide the one-shot first-run redirect.
+// The repo-startup greeting lives in the Transcript projection; a new
+// repo's pane lands on the empty Worklist, so the introduction goes unseen
+// (field case: the tau-extractor-sandbox first launch, 2026-09-09). This
+// helper only decides — Main.xmlui's ChangeListener performs the
+// navigate — and consumes its single shot on the first firstRun-true
+// evaluation, so a later enhanceStatus refetch can never redirect again.
+window.__bramFirstRunLandingDone = false;
+window.__bramFirstRunLanding = function (enhance) {
+  if (window.__bramFirstRunLandingDone) return false;
+  // Two spellings of "this launch is the introduction": firstRun covers the
+  // manual-Setup path; startupGreetingVisible covers the auto-Setup path,
+  // where Setup completes before the pane's first fetch and firstRun already
+  // reads false (the scratch-launch finding, 2026-09-09).
+  if (!enhance || !(enhance.firstRun || enhance.startupGreetingVisible)) return false;
+  window.__bramFirstRunLandingDone = true;
+  window.__bramIframeTrace("first-run-landing", { op: "navigate", target: "/transcript" });
+  return true;
+};
+
 window.__bramW2StartMode = "one";
 window.__bramW2SetStartMode = function (m) {
   window.__bramW2StartMode = m || "one";

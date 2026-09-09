@@ -38989,6 +38989,13 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
     let body = serde_json::json!({
         "projectRoot": root.as_ref().map(|p| p.to_string_lossy().to_string()),
         "firstRun": first_run,
+        // first-run-lands-on-transcript: `firstRun` reads false on the
+        // AUTO-setup path (Setup runs before the pane's first fetch — proven
+        // on a scratch launch, 2026-09-09), so the pane's first-run landing
+        // keys on the greeting itself: true while THIS process is projecting
+        // the repo-startup greeting into the transcript stream.
+        "startupGreetingVisible": REPO_STARTUP_GREETING_VISIBLE
+            .load(std::sync::atomic::Ordering::Acquire),
         "nestedUnder": nested_under,
         "nestedUnderIgnoredHome": nested_under_ignored_home,
         "strayHomeScaffold": stray_home_scaffold,

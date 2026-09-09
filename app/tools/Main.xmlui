@@ -49,6 +49,19 @@
     listenTo="{rightPaneSizeEvt.value}"
     onDidChange="() => { const s = rightPaneSizeEvt.value || null; rightPaneSize = s ? (s.width + ' × ' + s.height) : '(measuring…)'; }" />
   <DataSource id="enhanceStatus" url="/__enhance/status" />
+  <!-- first-run-lands-on-transcript: in a brand-new repo the repo-startup
+       greeting is projected into the Transcript stream, but the default
+       route is the (empty) Worklist — Bram's one introductory message
+       rendered on a tab a first-time user has no reason to visit. One-shot
+       redirect: the helper consumes the shot on the first firstRun-true
+       evaluation regardless of route (so a later refetch can never yank a
+       user who has since navigated), and the redirect itself fires only
+       from the default landing. Every non-first launch is untouched. The
+       bare-name navigate inside an arrow body is sanctioned engine-action
+       precedent (the '/' redirect at the follow-output listener below). -->
+  <ChangeListener
+    listenTo="{enhanceStatus.value &amp;&amp; (enhanceStatus.value.firstRun || enhanceStatus.value.startupGreetingVisible)}"
+    onDidChange="() => { if (window.__bramFirstRunLanding(enhanceStatus.value) &amp;&amp; ($pathname === '/' || $pathname === '/worklist2')) navigate('/transcript') }" />
   <DataSource id="rpInfo" url="/__right-pane-info" />
   <!-- issue-221-skill-launcher: project skills from .claude/skills/*/SKILL.md.
        Refetched on open and when enhance-status-changed fires. -->

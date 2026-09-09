@@ -435,6 +435,18 @@
           <Theme size-Spinner="14px">
             <Spinner when="{window.__bramItemWorkingKind(inflightClaim.value, $item.id, agentStatus.value)}" />
           </Theme>
+          <!-- separate-authorization-from-claim: the paused marker, in the
+               same slot as the spinner because it answers the same question
+               — is anything happening on this row? Running spins, paused
+               shows this, done shows neither. The glyph matches what the
+               subagent chips already use for "stopped but not finished"
+               (⏸ / icon.circle-pause), so one vocabulary covers both
+               surfaces rather than each inventing its own. -->
+          <Icon
+            when="{window.__bramItemPaused($item, inflightClaim.value)}"
+            name="circle-pause"
+            size="sm"
+            tooltip="Stopped, not finished — its authorization is still live, so Resume picks the work back up." />
           <!-- Badge's text prop is `value` (not `label` — the
                ExpandableItem doc's summary example is wrong, filed
                upstream as xmlui-org/xmlui#3814). Contrast matched to

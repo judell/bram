@@ -41936,19 +41936,29 @@ fn membership_engine_observe<R: tauri::Runtime>(
 ) {
     let started = std::time::Instant::now();
     let spawns = std::cell::Cell::new(0usize);
-    let trace_cost =
-        |app: &AppHandle<R>, paths: usize, spawns: usize, started: std::time::Instant| {
-            append_bram_trace_line(
-                app,
-                "claim-interval",
-                &format!(
-                    "op=membership paths={} ms={} spawns={}",
-                    paths,
-                    started.elapsed().as_millis(),
-                    spawns
-                ),
-            );
-        };
+    // `ambiguous` counts paths whose partition holds a non-zero ambiguous
+    // bucket this serve — the positive channel for the fourth first-class
+    // state, which is otherwise trace-invisible while conservation holds
+    // (the ambiguous-duplicate acceptance run's finding, recorded on #273:
+    // ambiguity classifies the bucket, not the owner set, so neither the
+    // divergence line nor the tripwire can attest it in the healthy state).
+    let trace_cost = |app: &AppHandle<R>,
+                      paths: usize,
+                      spawns: usize,
+                      ambiguous: usize,
+                      started: std::time::Instant| {
+        append_bram_trace_line(
+            app,
+            "claim-interval",
+            &format!(
+                "op=membership paths={} ms={} spawns={} ambiguous={}",
+                paths,
+                started.elapsed().as_millis(),
+                spawns,
+                ambiguous
+            ),
+        );
+    };
     let Some(root) = project_root(Some(app)) else {
         return;
     };
@@ -41982,7 +41992,7 @@ fn membership_engine_observe<R: tauri::Runtime>(
         }
     }
     if begun_files.is_empty() {
-        trace_cost(app, 0, spawns.get(), started);
+        trace_cost(app, 0, spawns.get(), 0, started);
         return;
     }
     let begun_ids: std::collections::HashSet<String> =
@@ -42061,7 +42071,7 @@ fn membership_engine_observe<R: tauri::Runtime>(
         }
     }
     if universe.is_empty() {
-        trace_cost(app, 0, spawns.get(), started);
+        trace_cost(app, 0, spawns.get(), 0, started);
         return;
     }
     // Scratch state for the probes. idx_head is HEAD alone (the
@@ -42106,7 +42116,7 @@ fn membership_engine_observe<R: tauri::Runtime>(
         // incapable of blocking a board serve. The cost line still lands so
         // the absence of partition traces is attributable.
         cleanup();
-        trace_cost(app, 0, spawns.get(), started);
+        trace_cost(app, 0, spawns.get(), 0, started);
         return;
     }
     let pfile_s = pfile.to_string_lossy().to_string();
@@ -42288,7 +42298,8 @@ fn membership_engine_observe<R: tauri::Runtime>(
             );
         }
     }
-    trace_cost(app, per_path.len(), spawns.get(), started);
+    let ambiguous_paths = per_path.values().filter(|m| m.ambiguous != (0, 0)).count();
+    trace_cost(app, per_path.len(), spawns.get(), ambiguous_paths, started);
 }
 
 #[cfg(test)]

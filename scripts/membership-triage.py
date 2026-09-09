@@ -228,6 +228,9 @@ def triage_repo(repo: Path, since: str | None) -> dict[str, Any]:
                     "paths": int(kv.get("paths", "0") or 0),
                     "ms": int(kv.get("ms", "0") or 0),
                     "spawns": int(kv.get("spawns", "0") or 0),
+                    # Absent on lines predating membership-ambiguous-trace-channel;
+                    # 0 keeps old logs contributing nothing rather than skewing.
+                    "ambiguous": int(kv.get("ambiguous", "0") or 0),
                     "divergences": pending_divergences,
                 }
             )
@@ -236,7 +239,14 @@ def triage_repo(repo: Path, since: str | None) -> dict[str, Any]:
 
     membership_ms = sorted(s["ms"] for s in serves)
     replay_ms = sorted(collect_replay_costs(repo, since))
+    ambiguous_serves = sum(1 for s in serves if s["ambiguous"] > 0)
+    ambiguous_paths_total = sum(s["ambiguous"] for s in serves)
     shapes = sorted({d["shape"] for d in divergences.values()})
+    if ambiguous_serves:
+        # The ambiguous STATE has its own positive channel on the cost line;
+        # without this it would be invisible to "shapes sampled" whenever
+        # conservation holds and the owner sets agree.
+        shapes = sorted({*shapes, "ambiguous-state"})
     return {
         "repo": str(repo),
         "traceFiles": len(trace_files(repo)),
@@ -247,6 +257,8 @@ def triage_repo(repo: Path, since: str | None) -> dict[str, Any]:
         "conservationFires": len(conservation),
         "conservationFireTimestamps": [c["ts"] for c in conservation],
         "conservationStreak": serves_since_breach,
+        "ambiguousServes": ambiguous_serves,
+        "ambiguousPathsTotal": ambiguous_paths_total,
         "shapesSampled": shapes,
         "membershipMs": {
             "p50": percentile(membership_ms, 0.50),
@@ -272,13 +284,15 @@ def render_markdown(reports: list[dict[str, Any]], since: str | None) -> str:
     out.append("")
     out.append(
         "| repo | serves | clean serves | divergence lines | unique | "
-        "conservation fires | streak | membership ms p50/p90/max | replay ms p50/p90/max | shapes |"
+        "conservation fires | streak | ambiguous serves/paths | "
+        "membership ms p50/p90/max | replay ms p50/p90/max | shapes |"
     )
-    out.append("|---|---|---|---|---|---|---|---|---|---|")
+    out.append("|---|---|---|---|---|---|---|---|---|---|---|")
     for rep in reports:
         m, r = rep["membershipMs"], rep["replayMs"]
         out.append(
             "| {repo} | {serves} | {clean} | {lines} | {uniq} | {fires} | {streak} | "
+            "{aserves}/{apaths} | "
             "{mp50}/{mp90}/{mmax} | {rp50}/{rp90}/{rmax} | {shapes} |".format(
                 repo=Path(rep["repo"]).name,
                 serves=rep["serves"],
@@ -287,6 +301,8 @@ def render_markdown(reports: list[dict[str, Any]], since: str | None) -> str:
                 uniq=rep["uniqueDivergences"],
                 fires=rep["conservationFires"],
                 streak=rep["conservationStreak"],
+                aserves=rep["ambiguousServes"],
+                apaths=rep["ambiguousPathsTotal"],
                 mp50=m["p50"], mp90=m["p90"], mmax=m["max"],
                 rp50=r["p50"], rp90=r["p90"], rmax=r["max"],
                 shapes=", ".join(rep["shapesSampled"]) or "-",

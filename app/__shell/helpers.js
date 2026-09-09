@@ -3792,6 +3792,17 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, attribu
       "Approved — agent not yet notified · tell the agent to proceed, or Refine with a note",
     );
   }
+  // stalled-claim-visible-and-releasable: the host marks a live approved
+  // claim whose agent ended its turn without retiring it. "With the agent"
+  // is precisely the lie in that state — nobody is working, and the spinner
+  // beside it implies otherwise. Name what happened, and point at the button
+  // this row now carries (the gate bar cannot help: a live claim locks row
+  // selection, which is where its buttons live).
+  if (item.stalledClaim) {
+    return withCloses(
+      "The agent stopped without finishing this item · Release to unlock the board",
+    );
+  }
   return withCloses("With the agent · nothing to do");
 };
 
@@ -12542,6 +12553,42 @@ function __bramDescribeLoadDone() {
 // Fire-and-forget POSTs — progress rides the self-update-changed Tauri event
 // into the selfUpdate DataSource refetch, so no response handling here beyond
 // tracing a refusal (409 while an update runs, or no release info).
+// stalled-claim-visible-and-releasable: the user-facing half of
+// POST /__worklist/end. The route has existed since the iterate-unwind work,
+// but only an agent or a hand-built curl could reach it — which is exactly
+// the gap this closes: the person watching a dead spinner had no way to act
+// on it, and the documented recoveries (curl, the agent that already left,
+// restart Bram) are all engineer-only.
+//
+// Releasing retires the CLAIM and nothing else: the item stays on the board,
+// its changes on disk are untouched, and the row goes back to offering
+// whatever it honestly can — Commit, when the work is actually there. One id
+// per click, which the route's incremental retirement already supports, so
+// releasing one stalled row never disturbs a sibling that is genuinely live.
+window.__bramReleaseStalledClaim = function (id) {
+  var one = String(id || "");
+  if (!one) return;
+  window.__bramIframeTrace("stalled-claim", { op: "release-click", id: one });
+  window
+    .fetch("/__worklist/end", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: [one] }),
+    })
+    .then(function (r) { return r.json().catch(function () { return {}; }); })
+    .then(function (j) {
+      window.__bramIframeTrace("stalled-claim", {
+        op: "release-done",
+        id: one,
+        cleared: !!(j && j.cleared),
+        remaining: (j && j.remaining) || [],
+      });
+    })
+    .catch(function (e) {
+      window.__bramIframeTrace("stalled-claim", { op: "release-error", id: one, error: String(e) });
+    });
+};
+
 window.__bramStartSelfUpdate = function () {
   window
     .fetch("/__self-update", { method: "POST" })

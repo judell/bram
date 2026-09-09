@@ -514,6 +514,20 @@
             overflowMode="flow"
             tooltipMarkdown="{window.__bramWorklist2StripTooltip($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items, worklist.value &amp;&amp; worklist.value.attributionTotals)}"
             value="{window.__bramWorklist2Strip($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items, worklist.value &amp;&amp; worklist.value.attribution, worklist.value &amp;&amp; worklist.value.attributionTotals)}" />
+          <!-- stalled-claim-visible-and-releasable: the way out lives ON the
+               row, not in the gate bar, because a live claim locks row
+               selection — the buttons that would otherwise act on this item
+               are exactly the ones the stall disables. Offered, never
+               automatic: the host deliberately keeps approved claims across
+               turns (#286), so the judgement that this one is dead stays the
+               user's. -->
+          <Button
+            when="{$item.stalledClaim}"
+            label="Release"
+            size="xs"
+            variant="outlined"
+            tooltip="The agent stopped without finishing this item. Release unlocks the board — your changes on disk are untouched and the item stays."
+            onClick="window.__bramReleaseStalledClaim($item.id)" />
           <!-- issue-278: the row backlink is GONE, on live evidence.
                It was redundant and, worse, it put a SECOND meaning of "shared"
                on a line that already had one. Live board, 2026-08-24:

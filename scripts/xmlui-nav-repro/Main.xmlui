@@ -1,0 +1,17 @@
+<App layout="horizontal">
+  <NavPanel>
+    <NavLink label="One" to="/one" />
+    <NavLink label="Two" to="/two" />
+  </NavPanel>
+  <Pages fallbackPath="/one">
+    <Page url="/one">
+      <Text>PAGE ONE</Text>
+    </Page>
+    <Page url="/two">
+      <Text>PAGE TWO</Text>
+      <DataSource id="rows" url="/query" method="POST" dataType="sql"
+        body="{{ sql: 'SELECT 1 AS n', params: [] }}" />
+      <Text>rows={rows.value ? rows.value.length : 'nil'}</Text>
+    </Page>
+  </Pages>
+</App>

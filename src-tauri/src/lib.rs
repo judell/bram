@@ -44496,14 +44496,6 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
     // Soft path: approved claims outlive turns — see inflight_claim_kind
     // (the rung-8 receipt: cleared 51s into a multi-turn apply).
     if inflight_claim_kind(app).as_deref() == Some("approved") {
-        // stalled-claim-visible-and-releasable: declining to clear is right
-        // (#286: a legitimate apply sat pending for minutes while a test
-        // suite ran), but it is also the moment the claim becomes
-        // SUSPECT — the agent's turn provably ended and the lifecycle call
-        // never came. Stamp it so the board can offer the user a way out
-        // after a grace. Recording only; nothing is cleared here or later
-        // without an explicit user click.
-        note_turn_end_under_live_claim(claimed_at);
         if bram_trace_enabled() {
             append_bram_trace_line(
                 app,
@@ -44514,126 +44506,6 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
         return;
     }
     clear_inflight_claim_sentinel(app, &claimed_ids);
-}
-
-// --- stalled-claim-visible-and-releasable -----------------------------------
-// A live `approved` claim whose agent ended its turn without retiring it. The
-// spinner alone cannot say this: mid-work and abandoned render identically,
-// and the documented recoveries (a curl call, the agent that already left, or
-// restarting Bram) are all engineer-only — the failure lands hardest on the
-// user least equipped to read conventions.md.
-//
-// The signal is deliberately the JSONL turn-end detection, NOT pty silence and
-// NOT a large `pending_ms`. #286's false positive was an agent still INSIDE
-// its turn; here the turn provably ended, which is the sharp form of the same
-// question. Subsequent turns do not reset the stamp: an agent that keeps
-// talking while a claim rots is more stalled, not less (the live 2026-09-09
-// case ran through several turn boundaries).
-//
-// The stamp is process-local and validated against the claim's own
-// `claimedAt`, so a NEW claim can never inherit an old stamp, and a relaunch
-// starts clean (startup cleanup removes the claim file anyway).
-//
-// Not a duplicate of the Turn-completion monitor beside it: that cell is
-// last-write-wins across every poll INCLUDING skips, so a detect is promptly
-// overwritten by the next `no-active-sentinel` line — it answers "what did
-// the detector last do?", which is a different question from "did a turn end
-// under the claim that is live right now?". This stamp only ever records the
-// latter, and nothing overwrites it until the claim itself changes.
-static STALLED_CLAIM_AT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
-static STALLED_TURN_ENDED_AT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
-
-// Long enough that an agent finishing a lifecycle call in its next breath is
-// never labelled, short enough that a person staring at a dead spinner gets an
-// answer while still looking at it.
-const STALLED_CLAIM_GRACE_MS: i64 = 75_000;
-
-fn note_turn_end_under_live_claim(claimed_at: i64) {
-    STALLED_CLAIM_AT.store(claimed_at, std::sync::atomic::Ordering::Relaxed);
-    STALLED_TURN_ENDED_AT.store(unix_now_ms(), std::sync::atomic::Ordering::Relaxed);
-}
-
-// Pure decision half, unit-tested: given the live claim's stamp and now, is it
-// stalled? Returns the age of the stall.
-fn stalled_claim_age_ms(
-    claimed_at: i64,
-    noted_for: i64,
-    turn_ended_at: i64,
-    now_ms: i64,
-    grace_ms: i64,
-) -> Option<i64> {
-    if noted_for == 0 || turn_ended_at == 0 || noted_for != claimed_at {
-        return None;
-    }
-    let age = now_ms.saturating_sub(turn_ended_at);
-    (age >= grace_ms).then_some(age)
-}
-
-// One line per stalled claim, not per board serve (the board rebuilds on
-// every event, and this condition persists by definition until the user acts).
-fn trace_stalled_claim_once<R: tauri::Runtime>(app: &AppHandle<R>, ids: &[String], age_ms: i64) {
-    static TRACED: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
-    let key = format!(
-        "{}|{}",
-        STALLED_TURN_ENDED_AT.load(std::sync::atomic::Ordering::Relaxed),
-        ids.join(",")
-    );
-    let fresh = TRACED
-        .get_or_init(|| Mutex::new(Default::default()))
-        .lock()
-        .map(|mut s| s.insert(key))
-        .unwrap_or(false);
-    if fresh {
-        append_bram_trace_line(
-            app,
-            "inflight-sentinel",
-            &format!("op=stalled-claim ids={:?} age_ms={}", ids, age_ms),
-        );
-    }
-}
-
-fn stalled_claim_ids<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<(Vec<String>, i64)> {
-    let (ids, claimed_at) = inflight_claim_ids_and_claimed_at(app)?;
-    if ids.is_empty() {
-        return None;
-    }
-    let age = stalled_claim_age_ms(
-        claimed_at,
-        STALLED_CLAIM_AT.load(std::sync::atomic::Ordering::Relaxed),
-        STALLED_TURN_ENDED_AT.load(std::sync::atomic::Ordering::Relaxed),
-        unix_now_ms(),
-        STALLED_CLAIM_GRACE_MS,
-    )?;
-    Some((ids, age))
-}
-
-#[cfg(test)]
-mod stalled_claim_tests {
-    use super::{stalled_claim_age_ms, STALLED_CLAIM_GRACE_MS};
-
-    #[test]
-    fn stalls_only_after_grace_and_only_for_the_stamped_claim() {
-        let claimed = 1_000_000i64;
-        let ended = 1_000_500i64;
-        let g = STALLED_CLAIM_GRACE_MS;
-        // Inside the grace: the agent may still be finishing its call.
-        assert_eq!(
-            stalled_claim_age_ms(claimed, claimed, ended, ended + g - 1, g),
-            None
-        );
-        // Past it: stalled, and the age is measured from the turn end.
-        assert_eq!(
-            stalled_claim_age_ms(claimed, claimed, ended, ended + g, g),
-            Some(g)
-        );
-        // A DIFFERENT claim is live now — the old stamp must not touch it.
-        assert_eq!(
-            stalled_claim_age_ms(2_000_000, claimed, ended, ended + g * 10, g),
-            None
-        );
-        // Never stamped (no turn end seen under this claim).
-        assert_eq!(stalled_claim_age_ms(claimed, 0, 0, ended + g * 10, g), None);
-    }
 }
 
 // Startup cleanup. Removes any stale inflight sentinel from a prior
@@ -46542,7 +46414,6 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
                         "seen": if completion_monitor.seen_at_ms > 0 { format_iso_utc_ms(completion_monitor.seen_at_ms) } else { String::new() },
                     },
                     stranded_approval_row(app),
-                    stalled_claim_row(app),
                     port_row,
                     loopback_row
                 ]
@@ -51147,31 +51018,6 @@ fn stranded_approval_row<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::V
     }
 }
 
-// The mirror of the row above, for the complementary shape: #350 is an
-// authorization with no claim (the turn never arrived); this is a claim with
-// no agent (the turn arrived, ended, and never retired it).
-fn stalled_claim_row<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
-    match stalled_claim_ids(app) {
-        Some((ids, age_ms)) => serde_json::json!({
-            "signal": "Stalled claim",
-            "level": "warn",
-            "state": format!("{} claimed, agent stopped", ids.join(", ")),
-            "detail": format!(
-                "An approved claim has stayed live for {}s after its agent's turn ended without a lifecycle call, so the row spins with selection locked. Approved claims deliberately outlive turns (#286), so Bram never clears this on its own — click Release on the row to unlock the board. The item and its on-disk changes are untouched.",
-                age_ms / 1000
-            ),
-            "seen": "",
-        }),
-        None => serde_json::json!({
-            "signal": "Stalled claim",
-            "level": "none",
-            "state": "none",
-            "detail": "No approved claim is live past a detected turn end.",
-            "seen": "",
-        }),
-    }
-}
-
 fn stranded_approval_ids<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> Option<(std::collections::HashSet<String>, i64)> {
@@ -55598,32 +55444,6 @@ fn route_request<R: tauri::Runtime>(
                     }
                 }
             }
-        }
-        // stalled-claim-visible-and-releasable: a live approved claim whose
-        // agent ended its turn without retiring it. Independent of the
-        // authorization block above on purpose — incremental retirement can
-        // consume the record while the claim lives on, and the spinner is
-        // keyed to the CLAIM, so that is what the user needs explained.
-        if let Some((stalled_ids, stalled_age_ms)) = stalled_claim_ids(app) {
-            if let Some(items) = doc.get_mut("items").and_then(|v| v.as_array_mut()) {
-                for item in items {
-                    let id = item
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    if !id.is_empty() && stalled_ids.contains(&id) {
-                        if let Some(obj) = item.as_object_mut() {
-                            obj.insert("stalledClaim".to_string(), serde_json::Value::Bool(true));
-                            obj.insert(
-                                "stalledClaimAgeMs".to_string(),
-                                serde_json::Value::from(stalled_age_ms),
-                            );
-                        }
-                    }
-                }
-            }
-            trace_stalled_claim_once(app, &stalled_ids, stalled_age_ms);
         }
         // worklist2-dim-sent-feedback: per-item feedback history from the
         // lossless iterate refs in resources/feedback-drafts/ (filenames

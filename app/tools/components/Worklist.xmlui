@@ -69,6 +69,15 @@
        read /__inflight and refetch on its push event — the same payload
        and idiom as the old tab's #265 indicators, so the two tabs cannot
        tell different stories about what is in flight. -->
+  <!-- stalled-claim-visible-and-releasable: the row's activity surfaces (the
+       spinner and the strip's progress labels) assert that work is
+       HAPPENING, which a claim alone cannot know. This is the signal the
+       footer already reads, made reactive here so those two surfaces stop
+       contradicting the status line beside them. -->
+  <PushSource
+    id="agentStatus"
+    initial="{null}"
+    subscribe="{window.bramSubscribeAgentStatus()}" />
   <DataSource id="inflightClaim" url="/__inflight" />
   <PushSource
     id="inflightClaimEvt"
@@ -424,7 +433,7 @@
                carried out, host state, never inferred agent activity.
                A plural (batch) claim lights all its rows. -->
           <Theme size-Spinner="14px">
-            <Spinner when="{window.__bramItemInflightKind(inflightClaim.value, $item.id, '', '', 0)}" />
+            <Spinner when="{window.__bramItemWorkingKind(inflightClaim.value, $item.id, agentStatus.value)}" />
           </Theme>
           <!-- Badge's text prop is `value` (not `label` — the
                ExpandableItem doc's summary example is wrong, filed
@@ -513,21 +522,7 @@
             color="$textColor-secondary"
             overflowMode="flow"
             tooltipMarkdown="{window.__bramWorklist2StripTooltip($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items, worklist.value &amp;&amp; worklist.value.attributionTotals)}"
-            value="{window.__bramWorklist2Strip($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items, worklist.value &amp;&amp; worklist.value.attribution, worklist.value &amp;&amp; worklist.value.attributionTotals)}" />
-          <!-- stalled-claim-visible-and-releasable: the way out lives ON the
-               row, not in the gate bar, because a live claim locks row
-               selection — the buttons that would otherwise act on this item
-               are exactly the ones the stall disables. Offered, never
-               automatic: the host deliberately keeps approved claims across
-               turns (#286), so the judgement that this one is dead stays the
-               user's. -->
-          <Button
-            when="{$item.stalledClaim}"
-            label="Release"
-            size="xs"
-            variant="outlined"
-            tooltip="The agent stopped without finishing this item. Release unlocks the board — your changes on disk are untouched and the item stays."
-            onClick="window.__bramReleaseStalledClaim($item.id)" />
+            value="{window.__bramWorklist2Strip($item, inflightClaim.value, worklist.value &amp;&amp; worklist.value.items, worklist.value &amp;&amp; worklist.value.attribution, worklist.value &amp;&amp; worklist.value.attributionTotals, agentStatus.value)}" />
           <!-- issue-278: the row backlink is GONE, on live evidence.
                It was redundant and, worse, it put a SECOND meaning of "shared"
                on a line that already had one. Live board, 2026-08-24:

@@ -2606,14 +2606,23 @@ window.__bramChipShouldPulse = function (status) {
 
 // Round 2 (Jon, from the field): COMPOSE the facts, don't choose one —
 // "Selected in Worklist: a, b · Proposing a new item…" when both hold.
-window.__bramFooterContextLine = function (claim, proposing, sel) {
+window.__bramFooterContextLine = function (claim, proposing, sel, agentStatus) {
   var parts = [];
   var ids = (claim && claim.ids) || [];
   var selection = sel || [];
   if (ids.length) {
+    // The parenthesised verb asserts work in flight, so it needs the same
+    // evidence the row surfaces now require: a claim names WHO is claimed,
+    // agent status says whether anything is happening. Without it this line
+    // read "(Committing…)" inches from its own status line reading
+    // "Finished" — the third surface caught telling the same lie in one
+    // sitting. The claimed ids still show; only the claim about activity
+    // drops.
     parts.push(
       "Selected in Worklist: " + ids.join(", ") +
-        " (" + window.__bramClaimVerb(claim.kind, claim.statusLabel) + "…)"
+        (window.__bramAgentWorking(agentStatus)
+          ? " (" + window.__bramClaimVerb(claim.kind, claim.statusLabel) + "…)"
+          : "")
     );
   } else if (selection.length) {
     parts.push("Selected in Worklist: " + selection.join(", "));
@@ -3604,7 +3613,7 @@ window.__bramSharedWithPlanned = function (file, items, claim) {
   return out;
 };
 
-window.__bramWorklist2Strip = function (item, claim, items, attribution, attributionTotals) {
+window.__bramWorklist2Strip = function (item, claim, items, attribution, attributionTotals, agentStatus) {
   if (!item) return "";
   // issue-266: the close declaration belongs on the status line for
   // scannability, never buried in the expanded body.
@@ -3630,6 +3639,12 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, attribu
   };
   var kind = window.__bramItemInflightKind(claim, item.id, "", "", 0);
   if (kind) {
+    // Every label below asserts that work is HAPPENING, so they are gated
+    // on an agent actually working. A live claim with no working agent
+    // falls through to the ordinary description of the item — honest at
+    // every instant, where the old code claimed progress beside a footer
+    // reading "Finished".
+    if (window.__bramAgentWorking(agentStatus)) {
     // worklist-advance-verify-window (#286): a live claim covering this item
     // (which is also what makes it begun, by construction — see
     // `__bramWorklist2Begun`'s last branch) plus a change summary showing
@@ -3658,6 +3673,7 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, attribu
     return withCloses(
       window.__bramClaimVerb(kind, (claim && claim.statusLabel) || "") + "…",
     );
+    }
   }
   // worklist2-plan-vs-activity: activity counts render only for items
   // that have BEGUN (applied, or covered by a live claim — host facts,
@@ -3790,17 +3806,6 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, attribu
   if (item.strandedApproval) {
     return withCloses(
       "Approved — agent not yet notified · tell the agent to proceed, or Refine with a note",
-    );
-  }
-  // stalled-claim-visible-and-releasable: the host marks a live approved
-  // claim whose agent ended its turn without retiring it. "With the agent"
-  // is precisely the lie in that state — nobody is working, and the spinner
-  // beside it implies otherwise. Name what happened, and point at the button
-  // this row now carries (the gate bar cannot help: a live claim locks row
-  // selection, which is where its buttons live).
-  if (item.stalledClaim) {
-    return withCloses(
-      "The agent stopped without finishing this item · Release to unlock the board",
     );
   }
   return withCloses("With the agent · nothing to do");
@@ -12553,40 +12558,25 @@ function __bramDescribeLoadDone() {
 // Fire-and-forget POSTs — progress rides the self-update-changed Tauri event
 // into the selfUpdate DataSource refetch, so no response handling here beyond
 // tracing a refusal (409 while an update runs, or no release info).
-// stalled-claim-visible-and-releasable: the user-facing half of
-// POST /__worklist/end. The route has existed since the iterate-unwind work,
-// but only an agent or a hand-built curl could reach it — which is exactly
-// the gap this closes: the person watching a dead spinner had no way to act
-// on it, and the documented recoveries (curl, the agent that already left,
-// restart Bram) are all engineer-only.
+// A claim records that an item was AUTHORIZED; it has never been evidence
+// that anyone is WORKING. The footer knows the difference — it reads agent
+// status and says "Finished" the instant a turn ends — while the row kept
+// asserting "Changes in progress" with a spinner off the claim file alone.
+// Two surfaces, one truth, visibly disagreeing; on a synth the contradiction
+// is there from launch (Jon).
 //
-// Releasing retires the CLAIM and nothing else: the item stays on the board,
-// its changes on disk are untouched, and the row goes back to offering
-// whatever it honestly can — Commit, when the work is actually there. One id
-// per click, which the route's incremental retirement already supports, so
-// releasing one stalled row never disturbs a sibling that is genuinely live.
-window.__bramReleaseStalledClaim = function (id) {
-  var one = String(id || "");
-  if (!one) return;
-  window.__bramIframeTrace("stalled-claim", { op: "release-click", id: one });
-  window
-    .fetch("/__worklist/end", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ids: [one] }),
-    })
-    .then(function (r) { return r.json().catch(function () { return {}; }); })
-    .then(function (j) {
-      window.__bramIframeTrace("stalled-claim", {
-        op: "release-done",
-        id: one,
-        cleared: !!(j && j.cleared),
-        remaining: (j && j.remaining) || [],
-      });
-    })
-    .catch(function (e) {
-      window.__bramIframeTrace("stalled-claim", { op: "release-error", id: one, error: String(e) });
-    });
+// So both row surfaces ask this instead. No evidence of work — idle,
+// finished, or no status yet — is NOT working: the honest default, because
+// the absence of a working agent is exactly the case the old predicate got
+// wrong. The claim still decides WHICH item is claimed; agent status decides
+// whether to say anything is happening.
+window.__bramAgentWorking = function (agentStatus) {
+  return !!(agentStatus && agentStatus.state === "working");
+};
+
+window.__bramItemWorkingKind = function (claim, itemId, agentStatus) {
+  if (!window.__bramAgentWorking(agentStatus)) return "";
+  return window.__bramItemInflightKind(claim, itemId, "", "", 0);
 };
 
 window.__bramStartSelfUpdate = function () {

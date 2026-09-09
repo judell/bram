@@ -860,12 +860,12 @@
           <PushSource id="footerProposing" initial="{null}" subscribe="{window.bramSubscribeTauriEvent('proposing-changed', false)}" />
           <HStack width="*" verticalAlignment="center" var.footerProposingFlag="{!!(footerProposing.value &amp;&amp; footerProposing.value.payload &amp;&amp; footerProposing.value.payload.proposing)}">
             <Text
-              when="{!!window.__bramFooterContextLine(headerInflightClaim.value, footerProposingFlag, footerSel.value)}"
+              when="{!!window.__bramFooterContextLine(headerInflightClaim.value, footerProposingFlag, footerSel.value, mainAgentStatus.value)}"
               width="100%"
               fontSize="$fontSize-md"
               fontStyle="italic"
               color="$color-primary-600"
-              value="{window.__bramFooterContextLine(headerInflightClaim.value, footerProposingFlag, footerSel.value)}" />
+              value="{window.__bramFooterContextLine(headerInflightClaim.value, footerProposingFlag, footerSel.value, mainAgentStatus.value)}" />
           </HStack>
         </HStack>
         <!-- switch-to-transcript-on-action: the indexing status moved to the

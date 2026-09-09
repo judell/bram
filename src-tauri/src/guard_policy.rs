@@ -2313,6 +2313,44 @@ fn turn_context_addressed_ids(project_root: &Path) -> Option<Vec<String>> {
     )
 }
 
+// would-deny-keys-on-authorization: the durable grant the eventual rule
+// should key on. Mirrors the host's own liveness test
+// (worklist_active_authorization_summary): an `approved` record that is
+// unconsumed, uninterrupted, and inside the TTL. Read fresh each call — the
+// guard is a short-lived process and the record changes under it.
+fn live_authorization_ids(project_root: &Path) -> Option<HashSet<String>> {
+    let text = std::fs::read_to_string(project_root.join(AUTH_REL)).ok()?;
+    let doc: Value = serde_json::from_str(&text).ok()?;
+    if doc.get("kind").and_then(|v| v.as_str()) != Some("approved") {
+        return None;
+    }
+    if doc.get("consumedAtMs").and_then(|v| v.as_f64()).is_some() {
+        return None;
+    }
+    if doc
+        .get("interruptedAtMs")
+        .and_then(|v| v.as_f64())
+        .is_some()
+    {
+        return None;
+    }
+    let issued = doc
+        .get("issuedAtMs")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    if issued <= 0.0 || now_ms() - issued > crate::WORKLIST_AUTH_TTL_MS as f64 {
+        return None;
+    }
+    let ids: HashSet<String> = doc
+        .get("ids")?
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(String::from)
+        .collect();
+    (!ids.is_empty()).then_some(ids)
+}
+
 fn trace_would_deny_unaddressed(project_root: &Path, provider: &str, tool: &str, rel: &str) {
     // A live grant is an authorized general-turn edit, not the observed class.
     let bypassed = if provider.starts_with("codex") {
@@ -2322,6 +2360,23 @@ fn trace_would_deny_unaddressed(project_root: &Path, provider: &str, tool: &str,
     };
     if bypassed {
         return;
+    }
+    // would-deny-keys-on-authorization: the decision input is AUTHORIZATION,
+    // not turn addressing. Addressing was only ever a proxy for "the user
+    // asked for this"; the authorization is the actual grant, and it is what
+    // #368's rule should refuse against. Keying on addressing made this fire
+    // on two ordinary states — a legitimate resume (since the claim now ends
+    // with the turn, a multi-turn apply's later turns are general turns) and
+    // a "just do it" edit whose 1h grant had aged out. 48 fires in one
+    // morning in tau-extractor-sandbox, several of them Jon's own deliberate
+    // direct commits: inflated by construction, and a soak that cannot be
+    // read is worse than none because it looks like evidence.
+    if let Some(auth_ids) = live_authorization_ids(project_root) {
+        let auth_cov = worklist_covered_files_filtered(project_root, Some(&auth_ids));
+        let (covered_by_auth, _) = coverage_verdict(&auth_cov, rel);
+        if covered_by_auth {
+            return;
+        }
     }
     let ctx = match turn_context_addressed_ids(project_root) {
         None => "none",
@@ -2344,7 +2399,12 @@ fn trace_would_deny_unaddressed(project_root: &Path, provider: &str, tool: &str,
         provider,
         "would-deny",
         tool,
-        &format!("target={} ctx={} reason=general-turn-item-edit", rel, ctx),
+        // `auth=` is the decision input; `ctx=` stays for diagnosis so the two
+        // suppression reasons remain distinguishable when reading a soak.
+        &format!(
+            "target={} auth=none ctx={} reason=general-turn-item-edit",
+            rel, ctx
+        ),
     );
 }
 

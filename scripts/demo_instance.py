@@ -55,7 +55,21 @@ STARTERS = (
     "unattributed",
     "many-claimants",
     "expired-authorization",
+    "ambiguous-duplicate",
 )
+
+# The ambiguous-duplicate fixture's stanza pair. Geometry is load-bearing:
+# with git's default 3-line hunk context, the claim-era edit below produces
+# two hunks whose new-side block (context + added lines) is the same 7-line
+# all-original sequence. Draft stanzas sit at positions 2 and 5 of 6 so that
+# BEFORE the edit no phase-aligned 7-line window is all-original (the
+# evidence must not reverse-apply against HEAD — that would read as already
+# committed), while AFTER the edit the 18-line periodic file contains the
+# block at two non-overlapping placements (lines 2-8 and 11-17) — the
+# identical-context duplicate the membership engine must declare ambiguous
+# rather than resolve by coin flip (docs/attribution-model.md §4).
+_AMBIG_ORIGINAL = "alpha\nvalue: original\nomega\n"
+_AMBIG_DRAFT = "alpha\nvalue: draft\nomega\n"
 
 _LAUNCHED_PROCESSES: dict[int, subprocess.Popen[bytes]] = {}
 
@@ -89,6 +103,14 @@ def starter_seed(starter: str, prefix: str) -> tuple[str, str]:
         "expired-authorization": (
             f"demo/{prefix}.txt",
             "authorization: waiting\n",
+        ),
+        "ambiguous-duplicate": (
+            f"demo/{prefix}.txt",
+            _AMBIG_ORIGINAL
+            + _AMBIG_DRAFT
+            + _AMBIG_ORIGINAL * 2
+            + _AMBIG_DRAFT
+            + _AMBIG_ORIGINAL,
         ),
     }
     try:
@@ -422,6 +444,20 @@ class StarterBuilder:
             self.item(item_id, path, "The shared value is at baseline.", f"Contribute {item_id}.")
         self.boundary(ids)
         self.file(path, "shared: " + ", ".join(ids) + "\n")
+        self.boundary([])
+
+    def starter_ambiguous_duplicate(self, prefix: str) -> None:
+        path = f"demo/{prefix}.txt"
+        item_id = f"{prefix}-align"
+        self.item(
+            item_id,
+            path,
+            "Stanzas 2 and 5 read `value: draft`; the other four read `value: original`.",
+            "Align stanzas 2 and 5 to `value: original`, leaving six byte-identical stanzas "
+            "whose duplicate placements the attribution engines must not guess between.",
+        )
+        self.boundary([item_id])
+        self.file(path, _AMBIG_ORIGINAL * 6)
         self.boundary([])
 
     def starter_expired_authorization(self, prefix: str) -> None:

@@ -589,8 +589,10 @@ different location. The useful verbs are:
 | `launch` / `stop` | start the real binary or stop only its recorded PID |
 
 The starter names are `disjoint-entanglement`, `dependency`,
-`supersession`, `unattributed`, `many-claimants`, and
-`expired-authorization`. For example, a focused board is:
+`supersession`, `unattributed`, `many-claimants`,
+`expired-authorization`, and `ambiguous-duplicate` (identical-context
+duplicate placements — the one membership shape no wild board reliably
+produces; see `docs/attribution-model.md` §4). For example, a focused board is:
 
 ```sh
 scripts/demo-instance.sh new ordering \

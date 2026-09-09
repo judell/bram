@@ -17995,6 +17995,12 @@ fn session_path_for_id<R: tauri::Runtime>(
     provider: SessionProvider,
     id: &str,
 ) -> Option<std::path::PathBuf> {
+    // L3 (docs/security.md): a caller-supplied id joins into a filename.
+    // Legitimate ids are UUID / rollout basenames; separator or traversal
+    // shapes can only be an escape attempt, so they resolve to nothing.
+    if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") {
+        return None;
+    }
     match provider {
         SessionProvider::Claude => {
             let path = claude_sessions_dir(app).ok()?.join(format!("{}.jsonl", id));
@@ -54749,7 +54755,21 @@ fn route_request<R: tauri::Runtime>(
         if number == 0 {
             return (400, "text/plain; charset=utf-8", b"missing number".to_vec());
         }
-        return match gh_issue_comment(app, number, &body) {
+        let result = gh_issue_comment(app, number, &body);
+        // M7 (docs/security.md): forge writes from the pane leave the same
+        // durable trail commits do. Metadata only, best-effort, `ok` records
+        // the forge outcome. (The Origin screen for this route runs in the
+        // dispatch, where the request headers are in scope.)
+        append_audit_record(
+            app,
+            serde_json::json!({
+                "kind": "issue-comment",
+                "number": number,
+                "bodyBytes": body.len(),
+                "ok": result.is_ok(),
+            }),
+        );
+        return match result {
             Ok(bytes) => (200, "application/json; charset=utf-8", bytes),
             Err(e) => {
                 eprintln!("[http /__issue/comment number={}] {}", number, e);
@@ -56147,6 +56167,13 @@ fn route_request<R: tauri::Runtime>(
                 ts = percent_decode(v);
                 break;
             }
+        }
+        // L2 (docs/security.md): `ts` is a caller string joined into a
+        // filename — percent-decoded, so `..%2F` walked out of the history
+        // dir and read any `.json` on disk. A snapshot stamp is unix
+        // milliseconds; digits are the whole legitimate alphabet.
+        if ts.is_empty() || !ts.bytes().all(|b| b.is_ascii_digit()) {
+            return (400, "text/plain; charset=utf-8", b"bad ts".to_vec());
         }
         let Some(dir) = worklist_history_dir(app) else {
             return (404, "text/plain; charset=utf-8", Vec::new());
@@ -61196,6 +61223,20 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
         } else {
             handle_self_update_relaunch(app)
         }
+    } else if path == "__issue/comment" && !issue_comment_origin_allowed(request_origin.as_deref())
+    {
+        // M7 (docs/security.md): /__issue/comment is a forge WRITE posting as
+        // the user; a browser page that learned the port must not drive it.
+        // Refuse when a FOREIGN Origin is present — no-Origin callers (the
+        // pane's own fetches, which the H6 soak showed send no Origin, and
+        // curl) and the shell origin itself pass. This is exactly H6's
+        // accepted-residual boundary, enforced with its soaked platform-aware
+        // SHELL_ORIGIN rather than a fresh predicate.
+        (
+            403,
+            "text/plain; charset=utf-8",
+            b"forbidden: cross-origin caller".to_vec(),
+        )
     } else if path == "query" {
         // issue-355: the dataType="sql" receiving end. Unprefixed on
         // purpose — target markup calls it with a relative URL, matching
@@ -61413,9 +61454,33 @@ fn cors_allowed_origin(request_origin: Option<&str>) -> Option<&'static str> {
     }
 }
 
+// M7 (docs/security.md): the write-route screen built on the same boundary.
+// CORS stops a foreign page READING responses; it does not stop the request
+// itself, and /__issue/comment has an external side effect. So the request is
+// refused outright when a foreign Origin is present. No-Origin callers pass —
+// the pane's own fetches send no Origin (H6 soak receipt) and a same-user
+// local process is the accepted residual. Pure for unit testing.
+fn issue_comment_origin_allowed(request_origin: Option<&str>) -> bool {
+    match request_origin {
+        None => true,
+        Some(o) => o == SHELL_ORIGIN,
+    }
+}
+
 #[cfg(test)]
 mod cors_origin_tests {
-    use super::{cors_allowed_origin, SHELL_ORIGIN};
+    use super::{cors_allowed_origin, issue_comment_origin_allowed, SHELL_ORIGIN};
+
+    #[test]
+    fn issue_comment_screen_passes_no_origin_and_shell_only() {
+        // M7: no-Origin (pane fetches, curl) and the shell origin pass; any
+        // foreign Origin — another page, the display-only target pane — is
+        // refused before the forge write runs.
+        assert!(issue_comment_origin_allowed(None));
+        assert!(issue_comment_origin_allowed(Some(SHELL_ORIGIN)));
+        assert!(!issue_comment_origin_allowed(Some("https://evil.example")));
+        assert!(!issue_comment_origin_allowed(Some("bramapp://localhost")));
+    }
 
     #[test]
     fn only_the_shell_origin_is_granted() {

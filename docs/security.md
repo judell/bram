@@ -1,6 +1,8 @@
 # Bram security assessment and action plan
 
-Status: original assessment 2026-07-10; **verified re-review 2026-07-24**.
+Status: original assessment 2026-07-10; **verified re-review 2026-07-24**;
+**long-tail cleanup + Rust-guard truth pass 2026-09-09** (M7/L2/L3 fixed;
+M1 mooted and M5/L4 resolved by the Rust guard migration — see rows).
 Source: a six-agent read-only audit, one agent per trust boundary, each citing
 `file:line` evidence against the real `src-tauri/src/lib.rs`, the provider
 guards, `app/__shell/helpers.js`, and the XMLUI surfaces. The 2026-07-24
@@ -88,9 +90,18 @@ worklist has any covered files at all (`if covered or fresh_bypass(...)`),
 because mapping arbitrary shell commands to paths is too fragile to be worth
 the false denials. So the shell gate bites only against an effectively empty
 worklist — measured over 2026-07-20..23, it logged 332 read-only allows, 104
-`covered-by-worklist-item`, and zero denials. This resolves the Claude half of
-M5's open question as documentation; whether to make it per-file is a design
-change, tracked there.
+`covered-by-worklist-item`, and zero denials. Both halves of M5's open
+question now resolve as documentation: the 2026-09-09 read of the Rust
+source (`codex_bash_branch`, `guard_policy.rs`) confirmed the Codex Bash
+gate carries the identical any-coverage semantics. Whether to make either
+per-file is a design change nobody has claimed.
+
+**Since retire-python-hooks-rust-only, the guards are compiled Rust** — the
+policy in `src-tauri/src/guard_policy.rs`, dispatch and breadcrumbs in
+`src-tauri/src/guard.rs`, invoked via the `~/.bram/bram-guard` link. The
+Python script paths this section previously cited are historical; a
+lingering script is surfaced by the Status tab and pruned by Setup once no
+settings source references it (#173/#227).
 
 Matcher shape is its own hazard. Single literal tool names are the only shape
 that behaves identically under every semantics Claude Code has implemented
@@ -125,13 +136,13 @@ day, **M** = half to two days, **L** = more than two days.
 
 | # | Finding | Status |
 |---|---------|--------|
-| M1 | Guard fails **open** when Python is missing; Setup surfaces `python: missing` (`lib.rs:28122`) but does not hard-block. | **OPEN (partial).** Make Setup refuse to manage a repo when `python3` is absent. Effort S. #119. |
+| M1 | Guard fails **open** when Python is missing; Setup surfaces `python: missing` but does not hard-block. | **MOOT** (2026-09-09) — the guards are compiled Rust (`bram-guard`, retire-python-hooks-rust-only); no interpreter exists anywhere in the hook path, so the failure mode cannot occur. The principle (an inert guard makes the worklist advisory) lives on in #119's self-test ask. |
 | M2 | Terminal I/O previews leak secrets. | **DONE** (`issue-114-secret-safe-observability`) — previews pass through the `loomweave-scanner`-backed host redactor before escaping/truncation. |
 | M3 | PTY child inherits the full host env (`ANTHROPIC_API_KEY`/`GITHUB_TOKEN`); the agent can `echo` them. | **WON'T-DO (reframed).** An opt-in env-stripping feature was built, tested, and dropped: an agent whose job is running the shell re-sources profile-exported secrets (`~/.bashrc`) through its per-command tool shells, which Bram doesn't control, and the agent's own required auth must stay. The mitigation is **environment hygiene** — keep secrets out of the ambient env (keychain, per-project `.env`, native tool auth like `gh`/`codex`/`supabase login`) — which is guidance, not code. |
 | M4 | No durable, always-on record of commit/approval; a successful commit emits no trace line and the auth record is consumed-on-read. | **LEAN VERSION SHIPPED** (#229). Always-on, append-only JSONL ledger (`resources/audit-ledger.jsonl`, untracked) written at the authorization and commit chokepoints — metadata only (decision, item ids, source, sha, branch, staged paths), credential-redacted, best-effort (ungated by traces, but not fail-closed and not tamper-evident). Full version — hash chaining / tamper evidence, push + issue-close events, `/__audit` route, Status surface — remains deferred under #229. |
-| M5 | Codex Bash gate path-blindness. | **NEEDS CONFIRMATION.** The Codex guard now has both `covered_paths` (`codex-worklist-guard.py:202`) and `_BASH_WRITE_PATTERNS` (`:306`); whether it intersects write targets with covered paths (vs. "any coverage passes") is unverified. #119. |
+| M5 | Codex Bash gate path-blindness. | **CONFIRMED — parity, resolved as documentation** (2026-09-09, from the Rust source). `codex_bash_branch` (`guard_policy.rs`) allows on any coverage (`!covered.is_empty() \|\| codex_fresh_bypass(cwd, "*")`) — the same documented semantics as the Claude Bash gate (see *Gate granularity* above) — while `apply_patch` and the MCP paths intersect the specific target with covered paths (`coverage_verdict`). Making either Bash gate per-file remains an unclaimed design change, not a defect. |
 | M6 | `open_url` opened any `file://` in its default app. | **DONE** — `open_url` enforces a URL allowlist; `file://` is not permitted (`lib.rs:14205`). |
-| M7 | `/__issue/comment` posts directly with only the frontend `enabled` binding as the gate. | **OPEN.** Route has no independent host auth check (`lib.rs:33200`). (The close path was resolved by H5.) Effort S. #121. |
+| M7 | `/__issue/comment` posts directly with only the frontend `enabled` binding as the gate. | **DONE** (2026-09-09, security-long-tail-cleanup) — the dispatch refuses the route when a foreign `Origin` header is present (`issue_comment_origin_allowed`, reusing H6's soaked platform-aware `SHELL_ORIGIN`), closing the browser vector; and every comment posted through the route writes an audit-ledger record (`kind=issue-comment`, number, byte count, forge outcome). No-Origin same-user local process remains H6's accepted residual; a per-session token was already rejected there as low-value. Synth-validated on a demo instance: foreign and `bramapp://` Origins 403 before any forge call; no-Origin passes the screen and ledgers. (The close path was resolved by H5.) |
 | M8 | Inspector-tap fields forwarded unsanitized. | **DONE** (`issue-114-secret-safe-observability`) — fields pass through `__bramTraceSafeValue` before IPC; host redacts again before persistence. |
 | M9 | `drop` auth lingered with no TTL. | **DONE** — the auth record (drop included) is rejected once past `WORKLIST_AUTH_TTL_MS` (`lib.rs:137`, `34490`), via the H4 work. |
 
@@ -140,28 +151,28 @@ day, **M** = half to two days, **L** = more than two days.
 | # | Finding | Status |
 |---|---------|--------|
 | L1 | Unbounded trace retention. | **DONE** (`issue-114-secret-safe-observability`) — raw archives past a configurable window stream through the redactor into `.log.gz`, retained indefinitely; failures preserve the raw file. |
-| L2 | `/__worklist-history/snapshot` joins a caller `ts` into a filename (constrained to `.json`). | **OPEN (low).** Reject `..`/separators in the `ts` param. #110. |
-| L3 | `session_path_for_id` joins a caller id into a path (constrained by `.jsonl` + `.exists()`, feeds a reload not an HTTP body). | **OPEN (low, latent).** #110. |
-| L4 | No `mcp__*` matcher in `.claude/settings.json` PreToolUse. | **OPEN (latent).** Add the matcher before any filesystem MCP server is introduced. #119. |
+| L2 | `/__worklist-history/snapshot` joins a caller `ts` into a filename (constrained to `.json`). | **DONE** (2026-09-09) — `ts` must be ASCII digits (it is a unix-ms stamp); anything else 400s before the join. The pre-fix behavior was a real traversal: a decoded `../` walked out of the history dir and read any `.json` on disk (demonstrated on a demo instance). |
+| L3 | `session_path_for_id` joins a caller id into a path (constrained by `.jsonl` + `.exists()`, feeds a reload not an HTTP body). | **DONE** (2026-09-09) — ids containing `/`, `\`, or `..` resolve to nothing, both providers. |
+| L4 | No `mcp__*` matcher in `.claude/settings.json` PreToolUse. | **DONE** — verified in the Rust registration: `CLAUDE_GUARD_MATCHERS = ["Write", "Edit", "Bash", "mcp__.*"]` (`lib.rs`), seeded by Setup. |
 | L5 | Guard doc/path drift to `app/__shell/*-guard.py`. | **DONE** — canonical paths moved to `app/provider-hooks/` and docs updated (`#217`, `96636b3`). |
 | L6 | Tool Descriptions default-on with just an API key. | **DONE** (`issue-114-secret-safe-observability`) — explicit `ai.describeCommands` opt-in; material redacted before the request; trace records `redactions=N` only. |
 
 ## Live plan (what remains, ranked)
 
 The Phase 0/1 quick wins, the root fix, H6 (CORS), and the #114 secrets-
-hygiene work have all landed (C1/C2/C3/H1/H2/H3/H6/M2/M6/M8/L1/L5/L6);
-M3 was reframed as won't-do and M4 (auditability)'s lean version shipped
-under #229 (always-on JSONL ledger; hash-chained/tamper-evident version
-remains deferred). The remaining work, in priority order:
+hygiene work all landed (C1/C2/C3/H1/H2/H3/H6/M2/M6/M8/L1/L5/L6); M3 was
+reframed as won't-do; M4 (auditability)'s lean version shipped under #229.
+The 2026-09-09 long-tail cleanup finished the rest of the ranked plan:
+M7/L2/L3 fixed (this pass), M1 mooted and M5/L4 resolved by the Rust guard
+migration. What genuinely remains:
 
-1. **Confirm M5** (Codex path intersection) and **close M1** (Setup hard-fail on
-   missing Python). (#119)
-2. **M7** — an independent host check on `/__issue/comment`. (#121)
-3. **Auditability (full version)** — hash-chained/tamper-evident ledger,
+1. **The #119 self-test diagnostic** — a route or action exercising guard
+   allow and deny cases without touching project files, so guard health is
+   probed rather than presumed (the H3 regression's lesson).
+2. **Auditability (full version)** — hash-chained/tamper-evident ledger,
    push + issue-close events, `/__audit` route, Status surface, when
    shared-use or demonstrability warrants it. (#229)
-4. **Cleanups:** L2/L3 path-param guards, L4 `mcp__*` matcher, and per-command
-   trust-boundary docs in `docs/apis.md`. (#110, #119, #113)
+3. **Docs:** per-command trust-boundary notes in `docs/apis.md`. (#113)
 
 ## Per-issue map
 
@@ -170,8 +181,9 @@ remains deferred). The remaining work, in priority order:
   landed and mutate/commit each independently re-verify the auth record. Direct
   concerns resolved; residual coverage risk is delegated to #119. **Effectively
   satisfied.**
-- **#110 — filesystem containment.** Both arbitrary-read routes contained (C2,
-  C3). Residual is L2/L3 only. **Effectively satisfied (Low residual).**
+- **#110 — filesystem containment (closed).** Both arbitrary-read routes
+  contained (C2, C3); the L2/L3 path-param residuals landed 2026-09-09.
+  **Satisfied.**
 - **#111 / #114 — secrets hygiene and auditability (both closed).**
   Secrets-hygiene tranche complete (M2, M8, L1, L6, + a Tool-Descriptions
   billing warning). M3 (env stripping) reframed as won't-do — the mitigation is
@@ -186,12 +198,14 @@ remains deferred). The remaining work, in priority order:
   accepted residual. Remaining: per-command trust-boundary documentation in
   `docs/apis.md`. **Low.**
 - **#118 — commit/push/issue-close gating (closed).** H5 resolved.
-- **#119 — guard coverage across agents.** H3 and L5 landed. Residual: M1
-  (fail-open without Python), M5 (confirm Codex path intersection), L4 (mcp
-  matcher), and the self-test diagnostic. Note: the issue body still lists
-  pre-#217 guard paths. **Medium.**
+- **#119 — host-enforced authorization (retitled; absorbed #121).** H3 and
+  L5 landed; the 2026-09-09 pass resolved every enumerable residual — M1
+  moot (Rust guards, no interpreter), M5 confirmed at parity from
+  `guard_policy.rs`, L4 verified in `CLAUDE_GUARD_MATCHERS`, and M7 (the
+  folded #121 half) fixed. Remaining: the self-test diagnostic only.
+  **Low.**
 - **#120 — inflight/interrupt fail-closed (closed).** H4 and M9 resolved.
-- **#121 — UI affordances must not be policy authority.** `/__issue/close`
-  removed (H5); `open_url` allowlisted (M6). Residual is M7 (`/__issue/comment`
-  gated only by frontend state). Same-origin/loopback exposure now concentrated
-  in H6. **Effectively satisfied (M7 residual).**
+- **#121 — UI affordances must not be policy authority (closed, folded into
+  #119).** `/__issue/close` removed (H5); `open_url` allowlisted (M6); M7
+  (`/__issue/comment`) fixed 2026-09-09 with the H6-pattern Origin screen
+  plus an audit-ledger record per posted comment. **Satisfied.**

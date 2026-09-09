@@ -590,9 +590,11 @@ different location. The useful verbs are:
 
 The starter names are `disjoint-entanglement`, `dependency`,
 `supersession`, `unattributed`, `many-claimants`,
-`expired-authorization`, and `ambiguous-duplicate` (identical-context
+`expired-authorization`, `ambiguous-duplicate` (identical-context
 duplicate placements — the one membership shape no wild board reliably
-produces; see `docs/attribution-model.md` §4). For example, a focused board is:
+produces; see `docs/attribution-model.md` §4), and `reedit-own-lines`
+(one item's file created then re-edited across two claim windows —
+judell/bram#367's double-count shape, kept as its regression fixture). For example, a focused board is:
 
 ```sh
 scripts/demo-instance.sh new ordering \

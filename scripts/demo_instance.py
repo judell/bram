@@ -56,6 +56,7 @@ STARTERS = (
     "many-claimants",
     "expired-authorization",
     "ambiguous-duplicate",
+    "reedit-own-lines",
 )
 
 # The ambiguous-duplicate fixture's stanza pair. Geometry is load-bearing:
@@ -111,6 +112,10 @@ def starter_seed(starter: str, prefix: str) -> tuple[str, str]:
             + _AMBIG_ORIGINAL * 2
             + _AMBIG_DRAFT
             + _AMBIG_ORIGINAL,
+        ),
+        "reedit-own-lines": (
+            f"demo/{prefix}.txt",
+            "reedit: the created sibling arrives under two claim windows\n",
         ),
     }
     try:
@@ -458,6 +463,28 @@ class StarterBuilder:
         )
         self.boundary([item_id])
         self.file(path, _AMBIG_ORIGINAL * 6)
+        self.boundary([])
+
+    def starter_reedit_own_lines(self, prefix: str) -> None:
+        # judell/bram#367's shape: one item, two claim windows, a file
+        # created in the first window and every line re-edited in the second.
+        # The concatenated evidence counted each re-touched line once per
+        # window (10) while the universe holds 5 - the conservation
+        # tripwire's third catch. Post-fix, net normalization reads 5.
+        path = f"demo/{prefix}-created.txt"
+        item_id = f"{prefix}-author"
+        self.item(
+            item_id,
+            path,
+            "The created file does not exist yet.",
+            "Create five lines under one claim window, then re-edit all five "
+            "under a second window of the same item.",
+        )
+        self.boundary([item_id])
+        self.file(path, "".join(f"line {n}: first pass\n" for n in range(1, 6)))
+        self.boundary([])
+        self.boundary([item_id])
+        self.file(path, "".join(f"line {n}: second pass\n" for n in range(1, 6)))
         self.boundary([])
 
     def starter_expired_authorization(self, prefix: str) -> None:

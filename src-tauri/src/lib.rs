@@ -41832,6 +41832,85 @@ fn membership_joint_patches(
     grouped.into_iter().collect()
 }
 
+// Net-normalization for a concatenated multi-interval candidate (#367). An
+// item whose evidence spans several of its own intervals counts a re-edited
+// line once per interval that touched it — interval 1 adds it, interval 2's
+// modification adds it again — while the HEAD-relative universe counts it
+// once, so `single` exceeds the universe and the conservation tripwire
+// fires (its third catch, 2026-09-08: got−expected equalled the re-touched
+// lines in every field episode, exactly 2x when every line was re-edited).
+// The net form reverse-applies the evidence OUT of the present state (the
+// membership probe has already proven it reverse-applies) and re-diffs the
+// present against that base, so each surviving line counts once. Fail-open:
+// None falls back to the raw concatenated patch — observe-only code must
+// never block a serve, and an over-count is exactly what the tripwire
+// exists to report. Single-diff candidates never come here.
+fn membership_net_patch(
+    root: &Path,
+    idx_now: &Path,
+    now_tree: &str,
+    patch: &str,
+    path: &str,
+    spawns: &std::cell::Cell<usize>,
+) -> Option<String> {
+    if now_tree.is_empty() {
+        return None;
+    }
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tag = format!(
+        "{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let idx_tmp = std::env::temp_dir().join(format!("bram-membership-net-{}", tag));
+    let pfile = std::env::temp_dir().join(format!("bram-membership-net-{}.patch", tag));
+    let cleanup = || {
+        let _ = std::fs::remove_file(&idx_tmp);
+        let _ = std::fs::remove_file(&pfile);
+    };
+    if std::fs::copy(idx_now, &idx_tmp).is_err() || std::fs::write(&pfile, patch).is_err() {
+        cleanup();
+        return None;
+    }
+    let git = |idx: Option<&Path>, args: &[&str]| -> Option<std::process::Output> {
+        spawns.set(spawns.get() + 1);
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(root).args(args);
+        if let Some(idx) = idx {
+            cmd.env("GIT_INDEX_FILE", idx);
+        }
+        cmd.output().ok()
+    };
+    let pfile_s = pfile.to_string_lossy().to_string();
+    let applied = git(
+        Some(&idx_tmp),
+        &["apply", "--cached", "--reverse", &pfile_s],
+    )
+    .map(|o| o.status.success())
+    .unwrap_or(false);
+    if !applied {
+        cleanup();
+        return None;
+    }
+    let base_tree = git(Some(&idx_tmp), &["write-tree"]).and_then(|o| {
+        o.status
+            .success()
+            .then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    });
+    let net = base_tree
+        .as_deref()
+        .filter(|t| !t.is_empty())
+        .and_then(|t| {
+            git(None, &["diff", t, now_tree, "--", path]).and_then(|o| {
+                o.status
+                    .success()
+                    .then(|| String::from_utf8_lossy(&o.stdout).into_owned())
+            })
+        });
+    cleanup();
+    net.filter(|s| !s.trim().is_empty())
+}
+
 // One path's membership partition while the engine accumulates. Counts are
 // (added, removed); `owners` is the id set membership attributes on the path
 // (single + joint + ambiguous candidates alike), the coarse unit the
@@ -42040,6 +42119,21 @@ fn membership_engine_observe<R: tauri::Runtime>(
             &["apply", "--cached", "--check", "--reverse", &pfile_s],
         )
     };
+    // Present-state tree of the declared paths, the fixed side of #367's
+    // net re-diff. Empty on failure, which makes membership_net_patch bail
+    // and every candidate fall back to its raw patch.
+    let now_tree = {
+        spawns.set(spawns.get() + 1);
+        std::process::Command::new("git")
+            .current_dir(&root)
+            .env("GIT_INDEX_FILE", &idx_now)
+            .args(["write-tree"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    };
     let declared = worklist_declared_files(app);
     let mut content_cache: std::collections::HashMap<String, Option<String>> = Default::default();
     let mut per_path: std::collections::BTreeMap<String, MembershipPathBuckets> =
@@ -42079,6 +42173,16 @@ fn membership_engine_observe<R: tauri::Runtime>(
             if !probe(&idx_now, &patch) {
                 continue;
             }
+            // A concatenated multi-interval candidate counts a line the item
+            // re-edited across its own intervals once per touching interval;
+            // count its NET effect instead (#367). The ambiguity check below
+            // reads the same normalized patch.
+            let patch = if patch.matches("diff --git").count() > 1 {
+                membership_net_patch(&root, &idx_now, &now_tree, &patch, path, &spawns)
+                    .unwrap_or(patch)
+            } else {
+                patch
+            };
             let fp = membership_patch_footprint(&patch);
             // PRESENT lines only. A candidate's `removed` count is measured
             // against its own evidence baseline (the boundary tree), not
@@ -42193,6 +42297,62 @@ mod membership_engine_tests {
         membership_block_occurrences, membership_conservation_breach, membership_hunk_new_blocks,
         membership_patch_footprint, membership_unowned,
     };
+
+    #[test]
+    fn concatenated_reedit_patch_counts_net_once() {
+        // #367's deliberate violation: create-then-re-edit evidence across
+        // two intervals sums to 10 added lines while the file holds 5; the
+        // net form counts each surviving line once. Real git, temp repo.
+        use std::process::Command;
+        let root = std::env::temp_dir().join(format!(
+            "bram-net-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str], idx: Option<&std::path::Path>| -> std::process::Output {
+            let mut cmd = Command::new("git");
+            cmd.current_dir(&root).args(args);
+            if let Some(idx) = idx {
+                cmd.env("GIT_INDEX_FILE", idx);
+            }
+            cmd.output().unwrap()
+        };
+        assert!(git(&["init", "-q"], None).status.success());
+        let first: String = (1..=5).map(|n| format!("line {n}: first\n")).collect();
+        let second: String = (1..=5).map(|n| format!("line {n}: second\n")).collect();
+        let idx1 = root.join("idx1");
+        let idx2 = root.join("idx2");
+        std::fs::write(root.join("f.txt"), &first).unwrap();
+        assert!(git(&["add", "f.txt"], Some(&idx1)).status.success());
+        let t1 = String::from_utf8_lossy(&git(&["write-tree"], Some(&idx1)).stdout)
+            .trim()
+            .to_string();
+        std::fs::write(root.join("f.txt"), &second).unwrap();
+        assert!(git(&["add", "f.txt"], Some(&idx2)).status.success());
+        let t2 = String::from_utf8_lossy(&git(&["write-tree"], Some(&idx2)).stdout)
+            .trim()
+            .to_string();
+        const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+        let d1 =
+            String::from_utf8_lossy(&git(&["diff", EMPTY_TREE, &t1], None).stdout).into_owned();
+        let d2 = String::from_utf8_lossy(&git(&["diff", &t1, &t2], None).stdout).into_owned();
+        let concat = format!("{d1}{d2}");
+        assert_eq!(
+            super::membership_patch_footprint(&concat).added_lines.len(),
+            10,
+            "the raw concatenated evidence double-counts re-edited lines"
+        );
+        let spawns = std::cell::Cell::new(0usize);
+        let net = super::membership_net_patch(&root, &idx2, &t2, &concat, "f.txt", &spawns)
+            .expect("net normalization should succeed");
+        assert_eq!(super::membership_patch_footprint(&net).added_lines.len(), 5);
+        assert!(spawns.get() > 0, "net normalization spawns are counted");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn footprint_maps_plus_lines_to_new_side_numbers() {

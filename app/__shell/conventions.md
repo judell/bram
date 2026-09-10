@@ -237,6 +237,28 @@ explain the finding in chat, recommend Drop on the resulting TO
 COMMIT row. The user's Drop click works equally well on `proposed`
 and `applied` items. No special undo path needed.
 
+**Write the finding into the draft before reporting it in chat.**
+Chat does not outlive the turn — the draft attached to the row does.
+"Nothing came of it" collapses three situations with opposite right
+answers, and only the agent can tell them apart: the agent never got
+to it (**Start again**), the agent worked it and found nothing to
+change (**Drop**), or the agent found the item's premise **false**
+(**Drop**, and the draft's own claims are now wrong and must say so).
+Before summarizing in chat, record in
+`resources/worklist-drafts/<id>.md` which of the three this is: the
+premise that failed, what was verified, and what would make the item
+actionable again.
+
+Live case, 2026-09-09: `footer-model-label-stale-after-switch`'s draft
+asserted `footerAgents` refetches on "exactly two signals"; applying it
+found a third trigger at `Main.xmlui:227-229`, and the rest of the
+chain verified clean. The row was correctly dropped — but only because
+the agent said so in chat. Jon's question was the whole item: "how
+could I ever have known that that would be the right thing to do
+here?" He couldn't have — the draft still asserted the disproved
+premise. This is the agent half only; the pane surfacing a recorded
+finding is tracked separately as judell/bram#378.
+
 **Drop removes the item, not the bytes — and orphaned changes are
 misattributed, not merely unattributed.** Every surface in the pane reasons
 about changed files *through items*: the overlap index walks `item.files`,

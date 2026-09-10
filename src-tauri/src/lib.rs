@@ -30683,6 +30683,71 @@ fn st_tag_value(text: &str, tag: &str) -> String {
 // completion report must never wear the "You" badge. Detected here so
 // every consumer of the parse (Transcript, dock lastExchange, Sessions)
 // sees a system-role notification turn instead.
+// issue-377: Claude Code writes a slash command into the session as USER
+// records carrying its own framing -- `<command-name>` / `<command-message>` /
+// `<command-args>`, then a second record holding `<local-command-stdout>`.
+// Rendered verbatim they appear as "You" bubbles full of angle brackets and
+// ANSI residue (`[1m` ... `[22m`, SGR codes whose ESC was stripped upstream),
+// and the Transcript is what other sessions and the /__search index read.
+//
+// Reclassified here, beside the task-notification path, for the same reason
+// and into the same shape: role "system" + notification, which the pane
+// renders as a quiet note that is never attributed to the user, and which
+// __bramProjectedLastExchange skips when computing the last exchange -- also
+// correct, since a slash command is not a user turn.
+//
+// Only matched at the START of a record, so a user who legitimately types
+// `<command-name>` in prose is untouched.
+fn st_command_frame_value(text: &str, tag: &str) -> Option<String> {
+    let open = format!("<{}>", tag);
+    let close = format!("</{}>", tag);
+    let start = text.find(&open)? + open.len();
+    let end = text[start..].find(&close)? + start;
+    Some(text[start..end].trim().to_string())
+}
+
+fn st_slash_command_turn(text: &str) -> Option<serde_json::Value> {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with("<command-name>") {
+        return None;
+    }
+    let name = st_command_frame_value(trimmed, "command-name")?;
+    if name.is_empty() {
+        return None;
+    }
+    let args = st_command_frame_value(trimmed, "command-args").unwrap_or_default();
+    let display = if args.is_empty() {
+        name
+    } else {
+        format!("{} {}", name, args)
+    };
+    Some(serde_json::json!({
+        "role": "system",
+        "notification": true,
+        "command": true,
+        "text": display,
+        "entries": [ { "kind": "text", "text": display } ],
+        "images": [],
+    }))
+}
+
+// The stdout half. Deliberately OPAQUE: two observed forms differ entirely --
+// "Set model to <b>Opus 5 (1M context) (default)</b> and saved as your default
+// for new sessions" versus "Kept model as <b>Opus 5</b>" -- so it is stripped
+// of ANSI and passed through, never parsed. A parser would silently mis-render
+// the next variant of provider-internal text that carries no stability
+// contract.
+fn st_command_stdout_text(text: &str) -> Option<String> {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with("<local-command-stdout>") {
+        return None;
+    }
+    let raw = st_command_frame_value(trimmed, "local-command-stdout")?;
+    let cleaned = String::from_utf8_lossy(&strip_ansi(raw.as_bytes())).to_string();
+    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    Some(collapsed)
+}
+
 fn st_notification_turn(text_joined: &str) -> Option<serde_json::Value> {
     let tn = text_joined.trim_start();
     if !tn.starts_with("<task-notification>") && !tn.starts_with("[SYSTEM NOTIFICATION") {
@@ -31388,6 +31453,42 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
         if role == "user" {
             if let Some(nturn) = st_notification_turn(&text_joined) {
                 turns.push(nturn);
+                continue;
+            }
+            // issue-377: the stdout record folds into the command it belongs
+            // to, so one slash command renders as ONE entry rather than two.
+            if let Some(out) = st_command_stdout_text(&text_joined) {
+                let folded = turns
+                    .last_mut()
+                    .filter(|t| t.get("command").and_then(|v| v.as_bool()) == Some(true))
+                    .map(|t| {
+                        let base = t.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                        let merged = if out.is_empty() {
+                            base.to_string()
+                        } else {
+                            format!("{} \u{2192} {}", base, out)
+                        };
+                        t["text"] = serde_json::Value::String(merged.clone());
+                        t["entries"] = serde_json::json!([ { "kind": "text", "text": merged } ]);
+                    })
+                    .is_some();
+                if folded {
+                    continue;
+                }
+                // Orphaned stdout (its command record scrolled out of the
+                // window): still a system note, never a "You" bubble.
+                turns.push(serde_json::json!({
+                    "role": "system",
+                    "notification": true,
+                    "command": true,
+                    "text": out,
+                    "entries": [ { "kind": "text", "text": out } ],
+                    "images": [],
+                }));
+                continue;
+            }
+            if let Some(cturn) = st_slash_command_turn(&text_joined) {
+                turns.push(cturn);
                 continue;
             }
         }
@@ -63610,6 +63711,60 @@ fn kill_spawned_server_on_close<R: tauri::Runtime>(app: &AppHandle<R>) {
             "server",
             &format!("op=exit-kill pid={} via=window-destroyed", pid),
         );
+    }
+}
+
+#[cfg(test)]
+mod slash_command_turn_tests {
+    use super::{st_command_stdout_text, st_slash_command_turn};
+
+    #[test]
+    fn a_command_frame_becomes_a_system_note_not_a_user_turn() {
+        let raw = "<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args></command-args>";
+        let t = st_slash_command_turn(raw).expect("should reclassify");
+        assert_eq!(t.get("role").and_then(|v| v.as_str()), Some("system"));
+        assert_eq!(t.get("notification").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(t.get("text").and_then(|v| v.as_str()), Some("/model"));
+        let text = t.get("text").and_then(|v| v.as_str()).unwrap();
+        assert!(!text.contains('<'), "no angle brackets survive: {}", text);
+    }
+
+    #[test]
+    fn args_ride_along_when_present() {
+        let raw = "<command-name>/model</command-name><command-args>opus</command-args>";
+        let t = st_slash_command_turn(raw).unwrap();
+        assert_eq!(t.get("text").and_then(|v| v.as_str()), Some("/model opus"));
+    }
+
+    // The whole reason the stdout is treated as opaque: two observed forms
+    // share no sentence structure, so a parser would mis-render the next one.
+    #[test]
+    fn stdout_is_ansi_stripped_and_passed_through_not_parsed() {
+        let set = "<local-command-stdout>Set model to \u{1b}[1mOpus 5 (1M context) (default)\u{1b}[22m and saved as your default for new sessions</local-command-stdout>";
+        let got = st_command_stdout_text(set).expect("should match");
+        assert_eq!(
+            got,
+            "Set model to Opus 5 (1M context) (default) and saved as your default for new sessions"
+        );
+        assert!(!got.contains("[1m"), "ANSI residue survived: {}", got);
+
+        let kept =
+            "<local-command-stdout>Kept model as \u{1b}[1mOpus 5\u{1b}[22m</local-command-stdout>";
+        assert_eq!(
+            st_command_stdout_text(kept).unwrap(),
+            "Kept model as Opus 5"
+        );
+    }
+
+    // Bounded parsing: only a record that STARTS with the frame is claimed.
+    #[test]
+    fn prose_mentioning_the_tags_is_left_alone() {
+        let prose = "I was reading about <command-name>/model</command-name> in the docs";
+        assert!(st_slash_command_turn(prose).is_none());
+        assert!(st_command_stdout_text(prose).is_none());
+        let ordinary = "just a normal message";
+        assert!(st_slash_command_turn(ordinary).is_none());
+        assert!(st_command_stdout_text(ordinary).is_none());
     }
 }
 

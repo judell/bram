@@ -23663,6 +23663,45 @@ struct SessionIndexPassStats {
     redacted: usize,
 }
 
+// intent-refresh-skips-just-indexed-paths: the content pass builds intent
+// itself (`cached_session_intent_text` -> `row.intent`), so a session whose
+// content was just written already carries CURRENT intent. A pending intent
+// refresh for that path would recompute the same text from the same cache and
+// rewrite the whole multi-megabyte document -- measured as a paired release,
+// 15.0 s of content followed 14 s later by 13.9 s of intent on the same file,
+// roughly 40% of what session indexing still costs.
+//
+// Recorded here rather than inferred, because the existing delta gate did NOT
+// withhold that pass and the trace could not say why (the scan line reports
+// `indexed=1` without naming the file). This makes the cause moot: whatever
+// the predicate decides, content-just-written implies intent-just-written.
+//
+// Entries are timestamped and only honoured briefly, so a stale record can
+// never suppress a legitimate later refresh.
+const INTENT_COVERED_WINDOW_MS: i64 = 120_000;
+
+fn recently_indexed_sessions_cell() -> &'static Mutex<std::collections::HashMap<String, i64>> {
+    static CELL: OnceLock<Mutex<std::collections::HashMap<String, i64>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn note_session_content_indexed(path: &str) {
+    if let Ok(mut m) = recently_indexed_sessions_cell().lock() {
+        let now = unix_now_ms();
+        m.insert(path.to_string(), now);
+        m.retain(|_, t| now - *t < INTENT_COVERED_WINDOW_MS);
+    }
+}
+
+fn session_content_covers_intent(path: &str) -> bool {
+    recently_indexed_sessions_cell()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(path).copied())
+        .map(|t| unix_now_ms() - t < INTENT_COVERED_WINDOW_MS)
+        .unwrap_or(false)
+}
+
 // live-session-reindex-treadmill: the ACTIVE session is appended to
 // constantly, and `needs_index` keys on mtime/size, so a few hundred new bytes
 // made Bram re-index the whole file. Measured 2026-09-10: 15 scans, 347.5 s,
@@ -23984,6 +24023,20 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
             search_index::index_doc(&conn, &row, mtime, size).map_err(|e| e.to_string())?;
         write_elapsed += write_started.elapsed();
         stats.indexed += 1;
+        note_session_content_indexed(&row.file);
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "search-index",
+                &format!(
+                    "op=indexed path={} bytes={}",
+                    path.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                    size
+                ),
+            );
+        }
     }
     stats.gate_ms = gate_elapsed.as_millis();
     stats.extract_ms = extract_elapsed.as_millis();
@@ -24117,6 +24170,21 @@ fn run_codex_search_index_pass_filtered<R: tauri::Runtime>(
         search_index::index_doc(&conn, &row, mtime, size).map_err(|e| e.to_string())?;
         write_elapsed += write_started.elapsed();
         stats.indexed += 1;
+        note_session_content_indexed(&row.file);
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "search-index",
+                &format!(
+                    "op=indexed path={} bytes={}",
+                    s.path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                    size
+                ),
+            );
+        }
     }
     stats.gate_ms = gate_elapsed.as_millis();
     stats.extract_ms = extract_elapsed.as_millis();
@@ -25033,6 +25101,33 @@ fn run_session_intent_refresh<R: tauri::Runtime>(app: &AppHandle<R>) -> usize {
         })
         .cloned()
         .collect();
+    // intent-refresh-skips-just-indexed-paths: a session whose CONTENT was just
+    // written already carries current intent -- the content pass builds it with
+    // `cached_session_intent_text` and stores it as `row.intent`. Refreshing
+    // intent for that path would recompute the same text from the same cache
+    // and rewrite the whole multi-megabyte document. Measured as a paired
+    // release: 15.0 s of content, then 13.9 s of intent on the same file 14 s
+    // later.
+    //
+    // This runs BEFORE the delta filter below on purpose. The delta gate should
+    // already have withheld that pass and did not, and the trace could not say
+    // why; subtracting content-covered paths makes the cause irrelevant rather
+    // than depending on a diagnosis that was never completed.
+    if !refresh.all_sessions {
+        let before = paths.len();
+        paths.retain(|p| !session_content_covers_intent(p));
+        if before != paths.len() && bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "search-index",
+                &format!(
+                    "op=skip-intent-covered covered={} kept={}",
+                    before - paths.len(),
+                    paths.len()
+                ),
+            );
+        }
+    }
     // live-session-reindex-treadmill: an intent refresh passes `force_paths`,
     // which bypasses the delta gate by design -- so caching a tool description
     // bought a FULL FTS5 rewrite of the live session. Measured after the gate

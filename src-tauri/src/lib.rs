@@ -55642,6 +55642,12 @@ fn route_request<R: tauri::Runtime>(
                         }
                     }
                 }
+                // issue-374: a declared directory becomes the changed paths
+                // under it before anything downstream reads the list.
+                let file_paths: Vec<String> = match change_index.as_ref() {
+                    Some(idx) => worklist_expand_declared_paths(idx, &file_paths),
+                    None => file_paths,
+                };
                 // count-changed-files-rung1: change activity on EVERY item,
                 // whatever its status — the evidence-first rows render disk
                 // truth, not bookkeeping state.
@@ -57501,6 +57507,61 @@ fn worklist_change_index<R: tauri::Runtime>(
         idx.diff_by_path.insert(path.to_string(), body);
     }
     Some(idx)
+}
+
+// issue-374: a declared entry naming a DIRECTORY never matches an exact key,
+// because these maps are keyed by the file paths git reports. Detect that from
+// the INDEX, never from the filesystem: `root.join(p).is_dir()` is wrong in the
+// motivating case, where the entire point of the item is that the directory was
+// removed (a `SampleRun/` entry with 77 deletions under it rendered "nothing to
+// do" while the commit gate would have staged all 77).
+//
+// An entry is a directory entry when it is not an exact key AND at least one key
+// sits beneath it. Purely index-derived, so it is correct whether the directory
+// still exists or not, and it cannot change behaviour for any entry that already
+// matched exactly. The pathspec passed to git already expanded the directory, so
+// the children are present — only the lookup could not reach them.
+fn worklist_index_children<'a>(idx: &'a WorklistChangeIndex, p: &str) -> Vec<&'a str> {
+    if idx.status_by_path.contains_key(p) {
+        return Vec::new();
+    }
+    let prefix = if p.ends_with('/') {
+        p.to_string()
+    } else {
+        format!("{}/", p)
+    };
+    let mut kids: Vec<&str> = idx
+        .status_by_path
+        .keys()
+        .filter(|k| k.starts_with(prefix.as_str()))
+        .map(|k| k.as_str())
+        .collect();
+    kids.sort_unstable();
+    kids
+}
+
+// issue-374: expand declared DIRECTORY entries into the changed paths beneath
+// them, ONCE, at the single point where an item's path list is derived. Doing
+// it here rather than inside the projection means every downstream consumer
+// sees real files: the change summary, the per-file diff selection, and the
+// shared-with column that makes entanglement visible per path.
+//
+// A first attempt rolled a directory up into one synthetic row instead. It
+// produced correct totals and a row that could not be opened, because the
+// per-row expansion is diff-driven and a directory has no diff body — the
+// display still understated itself, which was the original bug in miniature.
+// Expansion also restores the shared-with cell per child, which a roll-up hid.
+fn worklist_expand_declared_paths(idx: &WorklistChangeIndex, declared: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for p in declared {
+        let kids = worklist_index_children(idx, p);
+        if kids.is_empty() {
+            out.push(p.clone());
+        } else {
+            out.extend(kids.into_iter().map(|k| k.to_string()));
+        }
+    }
+    out
 }
 
 // Pure projection of one item's declared paths out of the shared index.
@@ -63410,7 +63471,9 @@ fn kill_spawned_server_on_close<R: tauri::Runtime>(app: &AppHandle<R>) {
 
 #[cfg(test)]
 mod worklist_change_projection_tests {
-    use super::{worklist_change_activity_for, WorklistChangeIndex};
+    use super::{
+        worklist_change_activity_for, worklist_expand_declared_paths, WorklistChangeIndex,
+    };
     use std::collections::HashMap;
 
     fn idx(pairs: &[(&str, &str, i64, i64, i64)]) -> WorklistChangeIndex {
@@ -63501,6 +63564,97 @@ mod worklist_change_projection_tests {
     fn an_empty_file_list_projects_to_none() {
         let i = idx(&[("x.rs", "modified", 1, 1, 1)]);
         assert!(worklist_change_activity_for(&i, &[]).is_none());
+    }
+
+    // issue-374: declared directories. Expansion happens once, where an
+    // item's path list is derived, so the projection itself needs no
+    // directory logic — these assert the expansion and then the numbers it
+    // produces downstream.
+    #[test]
+    fn a_declared_directory_expands_to_its_deleted_children() {
+        let i = idx(&[
+            ("SampleRun/README.md", "deleted", 0, 40, 1),
+            ("SampleRun/reports/a.json", "deleted", 0, 900, 1),
+            ("SampleRun/reports/b.json", "deleted", 0, 60, 1),
+            ("elsewhere.rs", "modified", 5, 5, 5),
+        ]);
+        let paths = worklist_expand_declared_paths(&i, &["SampleRun/".to_string()]);
+        assert_eq!(
+            paths,
+            vec![
+                "SampleRun/README.md".to_string(),
+                "SampleRun/reports/a.json".to_string(),
+                "SampleRun/reports/b.json".to_string(),
+            ],
+            "sorted, and the neighbour is not swept in"
+        );
+        let (rows, sum) = worklist_change_activity_for(&i, &paths).unwrap();
+        assert_eq!(field(&sum, "changed"), 3);
+        assert_eq!(field(&sum, "total"), 3, "numerator and denominator agree");
+        assert_eq!(field(&sum, "removed"), 1000);
+        assert_eq!(field(&sum, "hunks"), 3, "neighbour hunks excluded");
+        assert_eq!(
+            rows.as_array().unwrap().len(),
+            3,
+            "one openable row per file"
+        );
+    }
+
+    // Detection is index-derived, never `is_dir()`: the motivating case is a
+    // directory that no longer exists. No trailing slash here either - this
+    // repo's own committed item declared `docs/pty-menu-specimens` without one.
+    #[test]
+    fn a_directory_entry_without_a_trailing_slash_expands() {
+        let i = idx(&[
+            ("docs/specimens/one.md", "new", 0, 0, 0),
+            ("docs/specimens/two.md", "modified", 7, 3, 2),
+        ]);
+        let paths = worklist_expand_declared_paths(&i, &["docs/specimens".to_string()]);
+        assert_eq!(paths.len(), 2);
+        let (_, sum) = worklist_change_activity_for(&i, &paths).unwrap();
+        assert_eq!(field(&sum, "removed"), 3);
+        assert_eq!(field(&sum, "changed"), 2);
+    }
+
+    // A mixed list keeps its non-directory entries in place.
+    #[test]
+    fn expansion_leaves_ordinary_entries_alone() {
+        let i = idx(&[
+            ("pkg/a.rs", "new", 0, 0, 0),
+            ("pkg/b.rs", "new", 0, 0, 0),
+            ("top.rs", "modified", 2, 2, 1),
+        ]);
+        let declared = vec!["top.rs".to_string(), "pkg".to_string()];
+        let paths = worklist_expand_declared_paths(&i, &declared);
+        assert_eq!(
+            paths,
+            vec![
+                "top.rs".to_string(),
+                "pkg/a.rs".to_string(),
+                "pkg/b.rs".to_string()
+            ]
+        );
+        let (_, sum) = worklist_change_activity_for(&i, &paths).unwrap();
+        assert_eq!(field(&sum, "total"), 3, "denominator counts real files");
+        assert_eq!(
+            field(&sum, "hunks"),
+            3,
+            "1 + one edit site per untracked child"
+        );
+    }
+
+    // Regression guard: an exact match must never be treated as a directory,
+    // or a file whose name prefixes another would start absorbing it.
+    #[test]
+    fn an_exact_match_is_never_expanded() {
+        let i = idx(&[
+            ("src/lib.rs", "modified", 10, 2, 3),
+            ("src/lib.rs/nested", "modified", 500, 500, 50),
+        ]);
+        let paths = worklist_expand_declared_paths(&i, &["src/lib.rs".to_string()]);
+        assert_eq!(paths, vec!["src/lib.rs".to_string()], "exact key wins");
+        let (_, sum) = worklist_change_activity_for(&i, &paths).unwrap();
+        assert_eq!(field(&sum, "added"), 10, "child not absorbed");
     }
 }
 

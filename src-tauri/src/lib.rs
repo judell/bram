@@ -34683,6 +34683,68 @@ fn maybe_would_notice<R: tauri::Runtime>(app: &AppHandle<R>) {
 
 // Record a send at injection time (called from write_pty_turn_intent with
 // the exact PTY payload).
+// issue-372: the strand grace is not a clock. Every call site of
+// `update_send_ledger` requires either a user Escape or an agent JSONL write
+// (`lib.rs` Esc thread, the live-session parse, the incremental turns
+// projection), so a send lost while the agent is SILENT is never reported --
+// not late, never. Measured on a second instance: needle absent at t+2.3s,
+// no verdict at 60s, 120s or 300s, with zero `/__turns` fetches and zero
+// projection runs in the window.
+//
+// On polling, because this codebase is right to be suspicious of it: the
+// convention forbids polling for FRESHNESS. This is not freshness. It is the
+// absence of an event, which by construction cannot be pushed -- a detector
+// for silence cannot be driven by activity. The sweep body itself is not new;
+// it is exactly what the Escape thread already does, given a trigger that
+// does not require a keystroke.
+//
+// Shape follows `schedule_held_menu_poll`: an atomic guard so pollers cannot
+// stack, and the loop EXITS when its condition clears, so the cost at rest is
+// zero. The tick only needs to be small against the 120s grace it enables.
+static SEND_LEDGER_SWEEP_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+const SEND_LEDGER_SWEEP_TICK_SECS: u64 = 5;
+
+// An entry nobody has resolved yet. `resolved_at_ms` is stamped by every
+// terminal transition (landed / stranded), and a retry resets it to 0 along
+// with `state`, so this is the one field that means "still in flight".
+fn send_ledger_has_unresolved() -> bool {
+    send_ledger_cell()
+        .lock()
+        .map(|l| l.iter().any(|e| e.resolved_at_ms == 0))
+        .unwrap_or(false)
+}
+
+fn schedule_send_ledger_sweep<R: tauri::Runtime>(app: &AppHandle<R>) {
+    use std::sync::atomic::Ordering;
+    if SEND_LEDGER_SWEEP_ACTIVE.swap(true, Ordering::AcqRel) {
+        // A sweeper is already running; the guard keeps duplicates out.
+        return;
+    }
+    let app_handle = app.clone();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(SEND_LEDGER_SWEEP_TICK_SECS));
+            if !send_ledger_has_unresolved() {
+                break;
+            }
+            // Same body as the Escape-triggered sweep: resolve the live
+            // session, read it, let the ledger judge. `None` for the escape
+            // timestamp -- no Esc happened, so nothing here may classify a
+            // strand as user-caused.
+            if let Ok(Some(path)) = active_session_path(&app_handle) {
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    update_send_ledger(&app_handle, &text, None);
+                }
+            }
+        }
+        SEND_LEDGER_SWEEP_ACTIVE.store(false, Ordering::Release);
+        if bram_trace_enabled() {
+            append_bram_trace_line(&app_handle, "send-ledger", "op=sweep-exit");
+        }
+    });
+}
+
 fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
     let now = unix_now_ms();
     let session_path = active_session_path(app).ok().flatten();
@@ -34798,6 +34860,9 @@ fn record_outbound_send<R: tauri::Runtime>(app: &AppHandle<R>, payload: &str) {
             ledger.drain(0..drop_n);
         }
     }
+    // issue-372: this send is now unresolved, so the sweep has something to
+    // do. Idempotent -- the guard makes a second call a no-op.
+    schedule_send_ledger_sweep(app);
     emit_replayable_signal(app, "send-ledger-changed");
 }
 

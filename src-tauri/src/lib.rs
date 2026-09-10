@@ -23663,6 +23663,43 @@ struct SessionIndexPassStats {
     redacted: usize,
 }
 
+// live-session-reindex-treadmill: the ACTIVE session is appended to
+// constantly, and `needs_index` keys on mtime/size, so a few hundred new bytes
+// made Bram re-index the whole file. Measured 2026-09-10: 15 scans, 347.5 s,
+// mean 23.2 s -- 13.5% of wall clock -- all of it one file, while the other 18
+// sessions were skipped. The phase timers say why a smarter READ would not
+// help: extract_ms=17 against write_ms=14369. The cost is FTS5 re-tokenizing
+// ~2.4 MB, so the only lever is writing less often (here) or writing less
+// (chunking, deliberately a separate item).
+//
+// Safe because of an asymmetry: the file re-indexed most aggressively is the
+// one whose content the agent already has in context. The index exists to
+// retrieve PAST sessions.
+//
+// The constants are a cost/freshness tuning trade, not a verdict threshold:
+// being wrong is cheap and self-correcting, because the staleness bound
+// guarantees convergence no matter how the delta rules behave.
+const SESSION_REINDEX_MIN_BYTES: i64 = 32 * 1024;
+const SESSION_REINDEX_MIN_PCT: f64 = 0.05;
+const SESSION_REINDEX_MAX_STALE_SECS: i64 = 300;
+
+/// Should a session file that `needs_index` already called changed be
+/// re-indexed NOW? Pure so the policy is testable without a database.
+fn session_reindex_due(prev_size: i64, new_size: i64, age_secs: i64) -> bool {
+    // Shrunk or replaced (compaction, rollover): never withhold, the stored
+    // row no longer describes this file.
+    if new_size < prev_size {
+        return true;
+    }
+    if age_secs >= SESSION_REINDEX_MAX_STALE_SECS {
+        return true;
+    }
+    let grew = new_size - prev_size;
+    let threshold =
+        SESSION_REINDEX_MIN_BYTES.max((prev_size as f64 * SESSION_REINDEX_MIN_PCT) as i64);
+    grew >= threshold
+}
+
 fn format_session_index_scan(bucket: &str, stats: SessionIndexPassStats, total_ms: u128) -> String {
     format!(
         "op=scan bucket={} files={} indexed={} skipped={} rows={} indexed_bytes={} \
@@ -23866,7 +23903,40 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
         let gate_started = std::time::Instant::now();
         let needs_index =
             forced || search_index::needs_index(&conn, &path_str, mtime, size).unwrap_or(true);
+        // live-session-reindex-treadmill: `changed` is not `changed enough`.
+        // An append of a few hundred bytes to a multi-megabyte session costs a
+        // full FTS5 rewrite, so withhold until the growth is worth it or the
+        // staleness bound expires. Never applies to a forced pass.
+        let mut live_delta_skip: Option<(i64, i64)> = None;
+        if needs_index && !forced {
+            if let Ok(Some((prev_size, indexed_at))) = search_index::indexed_meta(&conn, &path_str)
+            {
+                let age = (unix_now_ms() / 1000) - indexed_at;
+                if !session_reindex_due(prev_size, size, age) {
+                    live_delta_skip = Some((size - prev_size, age));
+                }
+            }
+        }
         gate_elapsed += gate_started.elapsed();
+        if let Some((grew, age)) = live_delta_skip {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "search-index",
+                    &format!(
+                        "op=skip-live-delta path={} grew_bytes={} size={} age_s={}",
+                        path.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default(),
+                        grew,
+                        size,
+                        age
+                    ),
+                );
+            }
+            stats.skipped += 1;
+            continue;
+        }
         if !needs_index {
             stats.skipped += 1;
             continue;
@@ -23973,7 +24043,41 @@ fn run_codex_search_index_pass_filtered<R: tauri::Runtime>(
         let gate_started = std::time::Instant::now();
         let needs_index =
             forced || search_index::needs_index(&conn, &path_str, mtime, size).unwrap_or(true);
+        // live-session-reindex-treadmill: `changed` is not `changed enough`.
+        // An append of a few hundred bytes to a multi-megabyte session costs a
+        // full FTS5 rewrite, so withhold until the growth is worth it or the
+        // staleness bound expires. Never applies to a forced pass.
+        let mut live_delta_skip: Option<(i64, i64)> = None;
+        if needs_index && !forced {
+            if let Ok(Some((prev_size, indexed_at))) = search_index::indexed_meta(&conn, &path_str)
+            {
+                let age = (unix_now_ms() / 1000) - indexed_at;
+                if !session_reindex_due(prev_size, size, age) {
+                    live_delta_skip = Some((size - prev_size, age));
+                }
+            }
+        }
         gate_elapsed += gate_started.elapsed();
+        if let Some((grew, age)) = live_delta_skip {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "search-index",
+                    &format!(
+                        "op=skip-live-delta path={} grew_bytes={} size={} age_s={}",
+                        s.path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default(),
+                        grew,
+                        size,
+                        age
+                    ),
+                );
+            }
+            stats.skipped += 1;
+            continue;
+        }
         if !needs_index {
             stats.skipped += 1;
             continue;
@@ -24929,6 +25033,45 @@ fn run_session_intent_refresh<R: tauri::Runtime>(app: &AppHandle<R>) -> usize {
         })
         .cloned()
         .collect();
+    // live-session-reindex-treadmill: an intent refresh passes `force_paths`,
+    // which bypasses the delta gate by design -- so caching a tool description
+    // bought a FULL FTS5 rewrite of the live session. Measured after the gate
+    // landed: `claude` fell to 0.6 s total while `claude-intent` still cost
+    // 55.4 s across two passes, all of it the same 33 MB file.
+    //
+    // The urgency is not earned. `intent` is documented as "weighted below
+    // primary content", so its freshness can ride the same staleness bound the
+    // content does: drop paths the gate would withhold, and the next natural
+    // pass (or the bound expiring) indexes content and intent together. An
+    // explicit all-sessions refresh is still honoured.
+    if !refresh.all_sessions {
+        if let Some(db) = search_index_db_path(app) {
+            if let Ok(conn) = search_index::open(&db.to_string_lossy()) {
+                let now_s = unix_now_ms() / 1000;
+                let before = paths.len();
+                paths.retain(|p| {
+                    let size = std::fs::metadata(p).map(|m| m.len() as i64).unwrap_or(0);
+                    match search_index::indexed_meta(&conn, p) {
+                        Ok(Some((prev_size, indexed_at))) => {
+                            session_reindex_due(prev_size, size, now_s - indexed_at)
+                        }
+                        _ => true,
+                    }
+                });
+                if before != paths.len() && bram_trace_enabled() {
+                    append_bram_trace_line(
+                        app,
+                        "search-index",
+                        &format!(
+                            "op=skip-intent-refresh withheld={} kept={}",
+                            before - paths.len(),
+                            paths.len()
+                        ),
+                    );
+                }
+            }
+        }
+    }
     let claude_paths: HashSet<String> = paths.difference(&codex_paths).cloned().collect();
     if refresh.all_sessions || !claude_paths.is_empty() {
         indexed += run_and_trace_session_index_pass(app, "claude-intent", |app| {
@@ -63882,6 +64025,47 @@ mod slash_command_turn_tests {
         let ordinary = "just a normal message";
         assert!(st_slash_command_turn(ordinary).is_none());
         assert!(st_command_stdout_text(ordinary).is_none());
+    }
+}
+
+#[cfg(test)]
+mod session_reindex_gate_tests {
+    use super::session_reindex_due;
+
+    // The measured shape: 2.38 MB session, a few hundred bytes appended, and
+    // the old behaviour paid a ~15s full FTS5 rewrite for it.
+    #[test]
+    fn a_small_append_to_a_large_session_is_withheld() {
+        assert!(!session_reindex_due(2_380_815, 2_381_505, 10));
+    }
+
+    #[test]
+    fn substantial_growth_is_indexed() {
+        // 5% of 2.38 MB is ~119 KB.
+        assert!(session_reindex_due(2_380_815, 2_380_815 + 200_000, 10));
+    }
+
+    // Small sessions must not be held hostage to the percentage rule: the byte
+    // floor is what makes a young session update at a sane cadence.
+    #[test]
+    fn the_byte_floor_governs_small_sessions() {
+        assert!(!session_reindex_due(10_000, 11_000, 10));
+        assert!(session_reindex_due(10_000, 10_000 + 40_000, 10));
+    }
+
+    // The convergence guarantee. Whatever the delta rules do, staleness is
+    // bounded -- which is what makes withholding defensible at all.
+    #[test]
+    fn the_staleness_bound_always_wins() {
+        assert!(session_reindex_due(2_380_815, 2_380_816, 300));
+        assert!(session_reindex_due(2_380_815, 2_380_815, 10_000));
+    }
+
+    // Compaction or rollover replaces the file; the stored row no longer
+    // describes it, so withholding would serve stale content indefinitely.
+    #[test]
+    fn a_shrunken_file_is_never_withheld() {
+        assert!(session_reindex_due(2_380_815, 900_000, 0));
     }
 }
 

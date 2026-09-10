@@ -130,6 +130,18 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// The stored size and index time for a path, for callers that need to reason
+/// about HOW MUCH a file grew rather than merely whether it changed.
+/// `needs_index` answers the boolean; the live-session gate needs the delta.
+pub fn indexed_meta(conn: &Connection, path: &str) -> Result<Option<(i64, i64)>> {
+    conn.query_row(
+        "SELECT size, indexed_at FROM indexed_files WHERE path = ?1",
+        params![path],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()
+}
+
 /// Cheap check (no file read) — has this file changed since it was last
 /// indexed? True when unseen or when mtime/size differ.
 pub fn needs_index(conn: &Connection, path: &str, mtime: i64, size: i64) -> Result<bool> {

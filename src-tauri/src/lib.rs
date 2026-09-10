@@ -24089,9 +24089,22 @@ fn git_show_patch_stream<R: tauri::Runtime>(
 /// Patches are fetched only for shas that need indexing — batched `git show`
 /// after the cheap header-only gate — so steady-state passes (zero new
 /// commits) pay no diff cost. Returns (seen, indexed, skipped, rows).
+/// What one index pass did. Was an anonymous 4-tuple until issue-379's
+/// follow-up needed a fifth field; naming it stops the next addition from
+/// being another positional element nobody can read at the call site.
+struct IndexPassOutcome {
+    seen: usize,
+    indexed: usize,
+    skipped: usize,
+    rows: i64,
+    /// Credential spans masked before these rows were stored. Reported on the
+    /// scan line so a reader can tell "nothing matched" from "no field here".
+    redacted: usize,
+}
+
 fn run_commit_index_pass<R: tauri::Runtime>(
     app: &AppHandle<R>,
-) -> Result<(usize, usize, usize, i64), String> {
+) -> Result<IndexPassOutcome, String> {
     let db = search_index_db_path(app).ok_or("no index db path")?;
     let conn = search_index::open(&db.to_string_lossy()).map_err(|e| e.to_string())?;
     let remote_url = git_run(app, &["remote", "get-url", "origin"])
@@ -24108,6 +24121,7 @@ fn run_commit_index_pass<R: tauri::Runtime>(
     let depth_arg = format!("-n{}", project_search_commit_depth(app));
     let log_out = git_run(app, &["log", &depth_arg, format]).map_err(|e| e.to_string())?;
     let (mut seen, mut indexed, mut skipped) = (0usize, 0usize, 0usize);
+    let mut redacted = 0usize;
     // Gate first, collect what needs indexing: (sha, token, author, body).
     let mut pending: Vec<(String, i64, String, String)> = Vec::new();
     for record in log_out.split('\x1e') {
@@ -24188,7 +24202,7 @@ fn run_commit_index_pass<R: tauri::Runtime>(
                 tool_ids: None,
                 extra: String::new(),
             };
-            search_index::index_doc(&conn, &row, *token, COMMIT_DIFF_SCHEMA)
+            redacted += search_index::index_doc(&conn, &row, *token, COMMIT_DIFF_SCHEMA)
                 .map_err(|e| e.to_string())?;
             indexed += 1;
         }
@@ -24225,7 +24239,13 @@ fn run_commit_index_pass<R: tauri::Runtime>(
         emit_replayable_signal(app, "git-status-changed");
     }
     let rows = search_index::row_count(&conn).unwrap_or(0);
-    Ok((seen, indexed, skipped, rows))
+    Ok(IndexPassOutcome {
+        seen,
+        indexed,
+        skipped,
+        rows,
+        redacted,
+    })
 }
 
 /// One pass over the forge's issues — index each issue keyed by
@@ -24235,18 +24255,23 @@ fn run_commit_index_pass<R: tauri::Runtime>(
 /// advanced (or are new). GitHub only; GitLab's probe returns `None` and is
 /// skipped until it grows a list-all path. Returns (seen, indexed, skipped,
 /// rows).
-fn run_issue_index_pass<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-) -> Result<(usize, usize, usize, i64), String> {
+fn run_issue_index_pass<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<IndexPassOutcome, String> {
     let db = search_index_db_path(app).ok_or("no index db path")?;
     let conn = search_index::open(&db.to_string_lossy()).map_err(|e| e.to_string())?;
     let root = project_root(Some(app)).ok_or("no project root")?;
     let adapter = forge_adapter(app);
     let Some(probe) = adapter.issues_change_probe(&root)? else {
         // GitLab: not indexed yet (probe returned None).
-        return Ok((0, 0, 0, search_index::row_count(&conn).unwrap_or(0)));
+        return Ok(IndexPassOutcome {
+            seen: 0,
+            indexed: 0,
+            skipped: 0,
+            rows: search_index::row_count(&conn).unwrap_or(0),
+            redacted: 0,
+        });
     };
     let (mut seen, mut indexed, mut skipped) = (0usize, 0usize, 0usize);
+    let mut redacted = 0usize;
     // issue-252: the probe is the source of truth for the newest issue that
     // exists; the post-rebuild reconciliation below verifies the cached list
     // reached it.
@@ -24312,7 +24337,7 @@ fn run_issue_index_pass<R: tauri::Runtime>(
             tool_ids: None,
             extra,
         };
-        search_index::index_doc(&conn, &row, token, 0).map_err(|e| e.to_string())?;
+        redacted += search_index::index_doc(&conn, &row, token, 0).map_err(|e| e.to_string())?;
         indexed += 1;
         if report_progress && bram_trace_enabled() {
             append_bram_trace_line(
@@ -24403,7 +24428,13 @@ fn run_issue_index_pass<R: tauri::Runtime>(
         }
     }
     let rows = search_index::row_count(&conn).unwrap_or(0);
-    Ok((seen, indexed, skipped, rows))
+    Ok(IndexPassOutcome {
+        seen,
+        indexed,
+        skipped,
+        rows,
+        redacted,
+    })
 }
 
 /// One pass over `resources/worklist-history/<ts>.json` (+ sibling `.md`
@@ -24434,7 +24465,7 @@ const HISTORY_GROUP_SCHEMA: i64 = 1;
 
 fn run_history_index_pass<R: tauri::Runtime>(
     app: &AppHandle<R>,
-) -> Result<(usize, usize, usize, i64), String> {
+) -> Result<IndexPassOutcome, String> {
     let db = search_index_db_path(app).ok_or("no index db path")?;
     let conn = search_index::open(&db.to_string_lossy()).map_err(|e| e.to_string())?;
 
@@ -24453,7 +24484,13 @@ fn run_history_index_pass<R: tauri::Runtime>(
         })
         .unwrap_or(0);
     if HISTORY_LAST_MAXMTIME.load(std::sync::atomic::Ordering::Relaxed) == newest {
-        return Ok((0, 0, 0, search_index::row_count(&conn).unwrap_or(0)));
+        return Ok(IndexPassOutcome {
+            seen: 0,
+            indexed: 0,
+            skipped: 0,
+            rows: search_index::row_count(&conn).unwrap_or(0),
+            redacted: 0,
+        });
     }
 
     // Index one row per item-id GROUP (matching the History tab) instead of one
@@ -24463,6 +24500,7 @@ fn run_history_index_pass<R: tauri::Runtime>(
     let groups = recent_worklist_history_groups(app, usize::MAX, false);
     let seen = groups.len();
     let (mut indexed, mut skipped) = (0usize, 0usize);
+    let mut redacted = 0usize;
     for g in groups {
         let key = format!("history:{}", g.id);
         let token = g.latest_ts;
@@ -24503,7 +24541,7 @@ fn run_history_index_pass<R: tauri::Runtime>(
             // Search expander renders it directly (no recency-limited re-fetch).
             extra: serde_json::to_string(&g).unwrap_or_default(),
         };
-        search_index::index_doc(&conn, &row, token, HISTORY_GROUP_SCHEMA)
+        redacted += search_index::index_doc(&conn, &row, token, HISTORY_GROUP_SCHEMA)
             .map_err(|e| e.to_string())?;
         indexed += 1;
     }
@@ -24516,7 +24554,13 @@ fn run_history_index_pass<R: tauri::Runtime>(
         emit_replayable_signal(app, "worklist-history-changed");
     }
     let rows = search_index::row_count(&conn).unwrap_or(0);
-    Ok((seen, indexed, skipped, rows))
+    Ok(IndexPassOutcome {
+        seen,
+        indexed,
+        skipped,
+        rows,
+        redacted,
+    })
 }
 
 /// Run one bucket pass and trace its outcome. The pass runs even when tracing
@@ -24658,7 +24702,7 @@ fn search_index_current_total<R: tauri::Runtime>(app: &AppHandle<R>) -> i64 {
 fn run_and_trace_index_pass<R, F>(app: &AppHandle<R>, bucket: &str, pass: F) -> usize
 where
     R: tauri::Runtime,
-    F: Fn(&AppHandle<R>) -> Result<(usize, usize, usize, i64), String>,
+    F: Fn(&AppHandle<R>) -> Result<IndexPassOutcome, String>,
 {
     let started = std::time::Instant::now();
     let result = pass(app);
@@ -24669,21 +24713,23 @@ where
         search_index_set_progress(app, None);
     }
     let indexed = match &result {
-        Ok((_, indexed, _, _)) => *indexed,
+        Ok(o) => o.indexed,
         Err(_) => 0,
     };
     if bram_trace_enabled() {
         match result {
-            Ok((files, idx, skipped, rows)) => append_bram_trace_line(
+            Ok(o) => append_bram_trace_line(
                 app,
                 "search-index",
                 &format!(
-                    "op=scan bucket={} files={} indexed={} skipped={} rows={} ms={}",
+                    "op=scan bucket={} files={} indexed={} skipped={} rows={} \
+                     redacted={} ms={}",
                     bucket,
-                    files,
-                    idx,
-                    skipped,
-                    rows,
+                    o.seen,
+                    o.indexed,
+                    o.skipped,
+                    o.rows,
+                    o.redacted,
                     started.elapsed().as_millis()
                 ),
             ),

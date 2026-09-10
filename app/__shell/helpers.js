@@ -3809,10 +3809,27 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, attribu
   // then the bare word "Green-lit" (a fact, naming no action). The strip's job
   // is the history the icon cannot carry PLUS the button that acts on it.
   if (window.__bramItemNeedsStart(item, claim)) {
+    // issue-378: the tail used to read "· Start again", which asserts one
+    // action where three are possible -- and is wrong in two of them. An
+    // approved turn that produced nothing is either work the agent never got
+    // to (Start again), work it did and found nothing to change (Drop), or an
+    // item whose PREMISE it disproved (Drop, and the draft's own claims are
+    // now wrong). The pane sees identical evidence in all three: an
+    // authorization was issued, no diff appeared.
+    //
+    // Live case: footer-model-label-stale-after-switch was the third kind, and
+    // the strip told the user to Start again. Jon: "how could I ever have known
+    // that that would be the right thing to do here?" He could not.
+    //
+    // So name the ambiguity and point at where the answer is. Since bc8e666 the
+    // agent is REQUIRED to record which of the three it was in the draft before
+    // reporting in chat, so the draft is not a guess -- it is the designated
+    // home for exactly this. The fact half (Green-lit <age>, nothing came of
+    // it) is unchanged; only the action tail moves.
     var age = window.__bramGreenLitAge(item);
     return withCloses(
       "Green-lit" + (age ? " " + age : "") +
-        ", nothing came of it · Start again",
+        ", nothing came of it · the reason is in the draft — Start again, or Drop",
     );
   }
   // issue-350-stranded-approval-reconciliation: the host marks an approved

@@ -58705,6 +58705,35 @@ fn handle_worklist_commit<R: tauri::Runtime>(
                     skipped_unmatched.push(file.clone());
                     continue;
                 }
+                // issue-373: a path git refuses to stage because .gitignore
+                // excludes it is a CLIENT error — the user fixes it by
+                // correcting the item's `files` list — not a server fault.
+                // Returning 500 made the documented curl (`--retry 3
+                // --retry-delay 1`) silently re-POST the refusal three more
+                // times, because curl retries 5xx and not 4xx. Measured
+                // 2026-09-09: four POSTs at 1.00s spacing for one request,
+                // while a sibling 409 refusal the same session got exactly
+                // one. Joins the route's existing 4xx refusal family
+                // (refuse-empty-commit, refuse-joint-interval,
+                // refuse-entangled).
+                if e.contains("ignored by one of your .gitignore")
+                    || e.contains("Use -f if you really want to add them")
+                {
+                    if bram_trace_enabled() {
+                        append_bram_trace_line(
+                            app,
+                            "worklist-commit",
+                            &format!("op=refuse-ignored-path path={}", file),
+                        );
+                    }
+                    return worklist_json_error(
+                        409,
+                        format!(
+                            "this item declares `{}`, which git will not stage because .gitignore excludes it. Correct the item's files list and retry; nothing was committed.",
+                            file
+                        ),
+                    );
+                }
                 return worklist_json_error(500, format!("git add failed: {}", e.trim()));
             }
         }

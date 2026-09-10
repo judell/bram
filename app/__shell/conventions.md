@@ -857,6 +857,17 @@ Flag rationale:
   `localhost` may try `::1` first and fail with `curl: (7)`.
 - `-sS` (not `-s`): `-s` swallows `Failed to connect`, so a stale-port
   race surfaces as `(no output)` instead of `curl: (7)`.
+- `--retry 3 --retry-delay 1` **retries 5xx responses, not just connection
+  failures** — and it cannot be narrowed, because `--retry-connrefused` (which
+  covers the stale-port race above) is inert without `--retry N`, and curl has
+  no flag for "retry connection errors but not server errors". So on any 5xx
+  the transport re-POSTs three more times, beneath the agent, silently. Read
+  the *single-shot per approval, never re-POST* rule below as a rule for the
+  AGENT, not as a guarantee the transport upholds: measured 2026-09-09, one
+  refused commit produced four POSTs at 1.00 s spacing. The remedy is on the
+  server side — refusal-shaped failures return 4xx, which curl does not retry
+  (#373) — so a 5xx from a Bram route is now genuinely a server fault, and
+  seeing one repeat four times is expected rather than a second bug.
 
 If the port keeps refusing after fresh re-reads, treat it as a
 stale-port / restarting-server diagnostic — don't continue without

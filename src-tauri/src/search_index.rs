@@ -8,6 +8,7 @@
 //! prior art's `quick_search_fts(id, source_type, all_text)` gating index
 //! (jonudell/xmlui-mastodon) to the #230 common schema.
 
+use crate::redact_sensitive_text;
 use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Result};
 
@@ -31,7 +32,12 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Result};
 // column for already-cached Haiku descriptions plus a `session_tools` routing
 // table for targeted refreshes. Each bump forces a rebuild that back-indexes
 // all sessions with the wider coverage.
-const SCHEMA_VERSION: i64 = 12;
+// issue-379: bumped 12 -> 13 to force the DROP-and-rebuild path in
+// `ensure_schema`. A redactor that only covers NEW rows leaves the leak in
+// place -- credentials indexed before this change are already stored in the
+// FTS table and retrievable in full via /__search/doc. Reusing the existing
+// version-mismatch rebuild purges them with no migration code.
+const SCHEMA_VERSION: i64 = 13;
 
 /// A row to index. `content` is the searchable text; `file` is the source
 /// file's absolute path (the reindex key); the rest are the #230 common-schema
@@ -144,7 +150,30 @@ pub fn needs_index(conn: &Connection, path: &str, mtime: i64, size: i64) -> Resu
 /// doc key: a session file path, `commit:<sha>`, or `issue:<number>`). Deletes
 /// the key's prior row (by stored rowid) before inserting, then records the
 /// change token (`mtime`) + `size` so the next pass can skip it unchanged.
-pub fn index_doc(conn: &Connection, row: &IndexRow, mtime: i64, size: i64) -> Result<()> {
+/// Store one document, **redacting credential spans first**.
+///
+/// issue-379: `bram-trace.log` has been redacted since #114; this index is the
+/// surface whose whole purpose is feeding prior text back to a future agent,
+/// and it had no equivalent. Worse than the on-disk transcript it draws from:
+/// `content` is not merely indexed but STORED, and `/__search/doc` serves it
+/// back whole, so an unredacted credential is copied into a SECOND artifact.
+///
+/// Redacting here -- at the single sink -- rather than at the four-and-growing
+/// `IndexRow` construction sites is deliberate: call sites multiply and one
+/// will eventually forget, which is exactly how the trace path and this path
+/// came to disagree. `intent` is covered too; it is derived from the same
+/// source text and is equally retrievable.
+///
+/// Returns the number of spans masked, so a scan can report it.
+///
+/// Carries the same caveat the trace redactor does: defense in depth, not a
+/// guarantee for arbitrary content. It also makes the index deliberately
+/// LOSSY -- a masked span stops being findable, which is the intent, but the
+/// index is therefore not a faithful transcript.
+pub fn index_doc(conn: &Connection, row: &IndexRow, mtime: i64, size: i64) -> Result<usize> {
+    let (safe_content, content_hits) = redact_sensitive_text(&row.content);
+    let (safe_intent, intent_hits) = redact_sensitive_text(&row.intent);
+    let redacted = content_hits + intent_hits;
     let tx = conn.unchecked_transaction()?;
     let existing: Option<i64> = tx
         .query_row(
@@ -164,8 +193,8 @@ pub fn index_doc(conn: &Connection, row: &IndexRow, mtime: i64, size: i64) -> Re
             row.source,
             row.date,
             row.link,
-            row.content,
-            row.intent,
+            safe_content,
+            safe_intent,
             row.file,
             row.extra
         ],
@@ -192,7 +221,8 @@ pub fn index_doc(conn: &Connection, row: &IndexRow, mtime: i64, size: i64) -> Re
             }
         }
     }
-    tx.commit()
+    tx.commit()?;
+    Ok(redacted)
 }
 
 /// Resolve cached-description tool ids to the session documents that contain
@@ -581,6 +611,44 @@ mod tests {
             tool_ids: None,
             extra: String::new(),
         }
+    }
+
+    // issue-379: the boundary this module exists on the wrong side of until
+    // now. A credential reaching agent-visible text must not be searchable and
+    // must not be retrievable in full from the stored `content`.
+    #[test]
+    fn a_credential_is_masked_before_it_is_stored_or_indexed() {
+        let conn = open_in_memory().unwrap();
+        let secret = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let content = format!("export ANTHROPIC_API_KEY={secret}\nand some ordinary prose");
+        let r = row("session", "/s/leak.jsonl", "leak", &content);
+
+        let masked = index_doc(&conn, &r, 1, 1).unwrap();
+        assert!(masked > 0, "the redactor must report what it masked");
+
+        // Stored content: /__search/doc serves this back verbatim, so the
+        // secret must not survive here -- this is the second on-disk artifact
+        // the issue is really about.
+        let stored = get_doc(&conn, "/s/leak.jsonl").unwrap().unwrap();
+        assert!(
+            !stored.contains(secret),
+            "credential survived into stored content: {stored}"
+        );
+        assert!(
+            stored.contains("ordinary prose"),
+            "redaction must not eat the surrounding text: {stored}"
+        );
+
+        // And it must not be findable by keyword, which is the incidental
+        // retrieval path: nobody has to go looking for it.
+        // Searched by a dash-free fragment: FTS5 treats `-` as syntax, so the
+        // raw token is not a valid query and would fail for the wrong reason.
+        let hits = query(&conn, "AAAAAAAAAAAAAAAAAAAAAAAA", 5, &[]).unwrap();
+        assert!(hits.is_empty(), "credential was searchable: {hits:?}");
+        // Control: the surrounding text IS still findable, so the assertion
+        // above cannot pass merely because indexing failed.
+        let ok = query(&conn, "ordinary prose", 5, &[]).unwrap();
+        assert!(!ok.is_empty(), "the document must still be indexed");
     }
 
     fn seed(conn: &Connection) {

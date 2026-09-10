@@ -2745,7 +2745,7 @@ fn private_key_span(bytes: &[u8], start: usize, header_end: usize) -> (usize, us
 // structural expansion around those findings: complete PEM blocks, generic
 // Authorization values, and secret-shaped assignment values. The explicit Tool
 // Descriptions opt-in remains the primary boundary for external processing.
-fn redact_sensitive_text(data: &str) -> (String, usize) {
+pub(crate) fn redact_sensitive_text(data: &str) -> (String, usize) {
     let bytes = data.as_bytes();
     if bytes.is_empty() {
         return (String::new(), 0);
@@ -23658,13 +23658,16 @@ struct SessionIndexPassStats {
     intent_ms: u128,
     write_ms: u128,
     count_ms: u128,
+    // issue-379: credential spans masked before this bucket's rows were
+    // stored. Non-zero is greppable evidence the boundary is live.
+    redacted: usize,
 }
 
 fn format_session_index_scan(bucket: &str, stats: SessionIndexPassStats, total_ms: u128) -> String {
     format!(
         "op=scan bucket={} files={} indexed={} skipped={} rows={} indexed_bytes={} \
          intent_descriptions={} intent_bytes={} forced={} open_ms={} discover_ms={} \
-         gate_ms={} extract_ms={} intent_ms={} write_ms={} count_ms={} ms={}",
+         gate_ms={} extract_ms={} intent_ms={} write_ms={} count_ms={} redacted={} ms={}",
         bucket,
         stats.files,
         stats.indexed,
@@ -23681,6 +23684,7 @@ fn format_session_index_scan(bucket: &str, stats: SessionIndexPassStats, total_m
         stats.intent_ms,
         stats.write_ms,
         stats.count_ms,
+        stats.redacted,
         total_ms
     )
 }
@@ -23742,6 +23746,7 @@ mod search_index_phase_timing_tests {
                 intent_ms: 2,
                 write_ms: 13,
                 count_ms: 1,
+                redacted: 2,
             },
             65,
         );
@@ -23750,7 +23755,7 @@ mod search_index_phase_timing_tests {
             "op=scan bucket=codex files=246 indexed=1 skipped=245 rows=2805 \
              indexed_bytes=1048576 intent_descriptions=3 intent_bytes=144 forced=1 \
              open_ms=2 discover_ms=7 gate_ms=11 extract_ms=31 intent_ms=2 \
-             write_ms=13 count_ms=1 ms=65"
+             write_ms=13 count_ms=1 redacted=2 ms=65"
         );
     }
 
@@ -23905,7 +23910,8 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
         };
         // Index even empty-content sessions so the next pass skips them.
         let write_started = std::time::Instant::now();
-        search_index::index_doc(&conn, &row, mtime, size).map_err(|e| e.to_string())?;
+        stats.redacted +=
+            search_index::index_doc(&conn, &row, mtime, size).map_err(|e| e.to_string())?;
         write_elapsed += write_started.elapsed();
         stats.indexed += 1;
     }

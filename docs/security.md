@@ -66,6 +66,44 @@ roots. All now fixed.
    matcher, which is why the coverage matrix below quotes the registration
    rather than the code that would run if it were reached.
 
+## Redaction at the sink
+
+Any surface that **persists agent-visible text redacts at its own sink**, not
+at its callers.
+
+This is written down because the absence of it is what produced judell/bram#379.
+`bram-trace.log` has been redacted since #114. The unified search index arrived
+later (#230) and did not inherit the redactor, so a credential that reached
+agent-visible text was written into the FTS table unredacted — and the index is
+worse than the transcript it draws from on two counts: `content` is *stored*,
+not merely tokenized, so `/__search/doc` serves it back whole (a **second**
+on-disk artifact), and retrieval is **incidental** — a later session searching
+for a nearby error message pulls the credential into context, possibly on a
+different provider. Search-first is seeded guidance, so agents are actively told
+to query it.
+
+The rule is therefore about the *sink*, not the caller. `search_index::index_doc`
+redacts `content` and `intent` at the single insert, so every bucket — session,
+commit, issue, worklist-history — inherits it and a new `IndexRow` construction
+site cannot forget. Redacting at the four-and-growing call sites would fix
+today's callers and none of tomorrow's, which is precisely how the trace path
+and the index path came to disagree.
+
+Two limits, stated so neither is quietly upgraded:
+
+- **Defense in depth, not a guarantee.** The same caveat the trace redactor
+  carries (`app/__shell/conventions.md`) applies unchanged. Applying it to a
+  security-shaped surface does not make that surface safe to leak into.
+- **Redaction is lossy for search.** A masked span stops being findable — the
+  intent — but the index is therefore not a faithful transcript, and anything
+  reasoning from it must not assume it is.
+
+Purging what predates the fix is not optional: a redactor covering only new
+rows leaves the credential in the DB. `SCHEMA_VERSION` is bumped for that, and
+`ensure_schema` DROPs and rebuilds on a version mismatch, so the existing path
+does the purge with no migration code. The scan trace carries `redacted=<n>`,
+so a non-zero value is greppable evidence the boundary is live.
+
 ## Guard coverage
 
 What each agent's PreToolUse guard actually gates. Registration is the

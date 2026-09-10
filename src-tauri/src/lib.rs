@@ -3305,6 +3305,112 @@ fn remember_tauri_event(event_name: &str, payload: serde_json::Value) {
     }
 }
 
+// issue-375-coalesce-worklist-changed-emits: one gate click legitimately
+// fires `worklist-changed` three times -- the authorization-record write,
+// the `begunAtMs` stamp, and the (already-debounced) watcher once
+// worklist.json lands -- and each was a full `/__worklist` refetch. All
+// three call sites are individually correct, so the fix lives here at the
+// delivery layer instead of pruning any of them: emissions of this one
+// event within a short window collapse into a single delivered signal.
+//
+// Trailing edge, not leading. The LAST emit in a burst is the one that
+// means "everything has landed" -- the watcher's emit fires only after
+// worklist.json is actually written. A leading-edge coalesce would deliver
+// on the first (authorization) emit and return before the file lands, so
+// the pane would refetch stale data and then sit on it, which is worse
+// than the stall being fixed. So every emission bumps a generation counter
+// and resets the window; when a deferred delivery's sleep ends, it only
+// fires if no later emission bumped the generation again meanwhile.
+const WORKLIST_CHANGED_COALESCE_WINDOW_MS: u64 = 300;
+
+struct WorklistChangedCoalesce {
+    generation: u64,
+    pending: u64,
+}
+
+fn worklist_changed_coalesce_cell() -> &'static Mutex<WorklistChangedCoalesce> {
+    static CELL: OnceLock<Mutex<WorklistChangedCoalesce>> = OnceLock::new();
+    CELL.get_or_init(|| {
+        Mutex::new(WorklistChangedCoalesce {
+            generation: 0,
+            pending: 0,
+        })
+    })
+}
+
+// Pure decision logic, factored out so the trailing-edge rule is unit
+// testable without a real sleep: a deferred delivery scheduled under
+// `scheduled_generation` should fire only if `latest_generation` (read
+// after the window elapsed) is still the same -- i.e. nothing re-armed the
+// window in the meantime. A later emit bumping the generation means that
+// emit's own deferred delivery is the one that should land instead.
+fn worklist_changed_coalesce_should_deliver(
+    scheduled_generation: u64,
+    latest_generation: u64,
+) -> bool {
+    scheduled_generation == latest_generation
+}
+
+fn schedule_coalesced_worklist_changed<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let scheduled_generation = match worklist_changed_coalesce_cell().lock() {
+        Ok(mut state) => {
+            state.generation += 1;
+            state.pending += 1;
+            state.generation
+        }
+        Err(_) => return,
+    };
+    let app_handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(
+            WORKLIST_CHANGED_COALESCE_WINDOW_MS,
+        ));
+        let Ok(mut state) = worklist_changed_coalesce_cell().lock() else {
+            return;
+        };
+        if !worklist_changed_coalesce_should_deliver(scheduled_generation, state.generation) {
+            // A later emit reset the window; that emit's own deferred
+            // delivery will fire instead of this one.
+            return;
+        }
+        let count = state.pending;
+        state.pending = 0;
+        drop(state);
+        if count > 1 && bram_trace_enabled() {
+            append_bram_trace_line(
+                &app_handle,
+                "emit-coalesce",
+                &format!(
+                    "op=coalesced kind=worklist-changed count={} window_ms={}",
+                    count, WORKLIST_CHANGED_COALESCE_WINDOW_MS
+                ),
+            );
+        }
+        let _ = app_handle.emit("worklist-changed", ());
+    });
+}
+
+#[cfg(test)]
+mod worklist_changed_coalesce_tests {
+    use super::worklist_changed_coalesce_should_deliver;
+
+    #[test]
+    fn delivers_when_no_later_emit_reset_the_window() {
+        assert!(worklist_changed_coalesce_should_deliver(1, 1));
+        assert!(worklist_changed_coalesce_should_deliver(3, 3));
+    }
+
+    #[test]
+    fn stands_down_when_a_later_emit_bumped_the_generation() {
+        // Models the authorization-write emit's deferred delivery waking up
+        // after the later begunAtMs-stamp (or watcher) emit already reset
+        // the window -- the earlier thread must stand down so only the
+        // trailing, most-landed emit delivers.
+        assert!(!worklist_changed_coalesce_should_deliver(1, 2));
+        assert!(!worklist_changed_coalesce_should_deliver(2, 5));
+    }
+}
+
 fn emit_replayable_signal<R: tauri::Runtime>(app: &AppHandle<R>, event_name: &str) {
     trace_emit_signal(app, event_name);
     remember_tauri_event(event_name, serde_json::Value::Null);
@@ -3318,6 +3424,15 @@ fn emit_replayable_signal<R: tauri::Runtime>(app: &AppHandle<R>, event_name: &st
             "event-remember",
             &format!("kind={} payload_size=4 source=signal", event_name),
         );
+    }
+    // issue-375: worklist-changed is the one signal known to burst three
+    // emits per gate click; coalesce its delivery (trailing edge) instead
+    // of delivering every raw emit. Every other signal -- notably
+    // inflight-claim-changed, which drives felt spinner latency -- keeps
+    // delivering immediately and unconditionally.
+    if event_name == "worklist-changed" {
+        schedule_coalesced_worklist_changed(app);
+        return;
     }
     let _ = app.emit(event_name, ());
 }

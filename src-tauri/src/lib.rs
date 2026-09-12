@@ -41603,6 +41603,40 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| r.to_string())
     };
+    // attribution-stops-re-deriving-what-it-stored: the boundary's tree OID,
+    // taken from the record instead of re-derived by a subprocess.
+    //
+    // `record_claim_interval` already writes `tree` (from `capture_claim_tree`'s
+    // write-tree), and `update-ref <refname> <tree>` points the ref DIRECTLY at
+    // that tree object -- so `rev-parse <ref>^{tree}` was an identity returning
+    // a value sitting in the same JSON this loop is iterating. Two spawns per
+    // interval, on every board build, paid BEFORE the cache could be consulted
+    // and therefore on hits too. Measured: 2,000 intervals => 4,000 spawns =>
+    // ~21.8 s of attribution and a ~30 s board build, linear in interval count
+    // (judell/bram#369).
+    //
+    // Keying on the record's own tree is also STRONGER than the `^{tree}` peel
+    // it replaces, not a relaxation. That peel exists because a reused
+    // `refs/bram/claims/<at_ms>` name would otherwise serve a prior tree's
+    // cached diff (#324). The stored tree is the tree this boundary MEANT, so a
+    // later ref overwrite cannot alias it at all.
+    //
+    // The refs stay: they are the GC anchors keeping these trees reachable, and
+    // `record_claim_interval` refuses to record a boundary it could not ref for
+    // exactly that reason. Falls back to the old derivation for any record
+    // predating the `tree` field, so this is not a flag day.
+    let tree_of = |rec: &serde_json::Value| -> String {
+        rec.get("tree")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                rec.get("ref")
+                    .and_then(|v| v.as_str())
+                    .map(|r| oid(r))
+                    .unwrap_or_default()
+            })
+    };
     static CACHE: OnceLock<
         Mutex<std::collections::HashMap<String, std::collections::HashMap<String, Vec<AttrHunk>>>>,
     > = OnceLock::new();
@@ -41619,9 +41653,12 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
         std::collections::HashMap<String, Vec<AttrHunk>>,
     )> = Vec::new();
     for (i, rec) in arr.iter().enumerate() {
-        let Some(a) = rec.get("ref").and_then(|v| v.as_str()) else {
+        // A record with no ref names no reachable tree: skip it. (The ref is no
+        // longer used for the diff -- see tree_of above -- but its presence is
+        // still what makes the boundary meaningful.)
+        if rec.get("ref").and_then(|v| v.as_str()).is_none() {
             continue;
-        };
+        }
         let ids: Vec<String> = rec
             .get("ids")
             .and_then(|v| v.as_array())
@@ -41632,17 +41669,19 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
                     .collect()
             })
             .unwrap_or_default();
-        let next = arr
-            .get(i + 1)
-            .and_then(|r| r.get("ref"))
-            .and_then(|v| v.as_str());
-        let parsed = match next {
-            Some(b) => {
-                let key = format!("{}..{}", oid(a), oid(b));
+        // `a` is still read above as the existence check (a record with no ref
+        // names no tree and is skipped); the DIFF now runs on tree OIDs, so the
+        // key and the diff move together. Keying on the tree while still
+        // diffing ref names would be the #324 bug in new dress.
+        let a_tree = tree_of(rec);
+        let next_tree = arr.get(i + 1).map(&tree_of);
+        let parsed = match next_tree {
+            Some(b_tree) => {
+                let key = format!("{}..{}", a_tree, b_tree);
                 if let Some(hit) = cache.lock().ok().and_then(|c| c.get(&key).cloned()) {
                     hit
                 } else {
-                    let out = git(&["diff", a, b]).unwrap_or_default();
+                    let out = git(&["diff", &a_tree, &b_tree]).unwrap_or_default();
                     let parsed = parse_attr_diff(&out);
                     if let Ok(mut c) = cache.lock() {
                         c.insert(key, parsed.clone());
@@ -41651,11 +41690,11 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
                 }
             }
             // The OPEN interval: never cached, it changes with every edit.
-            None => parse_attr_diff(&git(&["diff", a]).unwrap_or_default()),
+            None => parse_attr_diff(&git(&["diff", &a_tree]).unwrap_or_default()),
         };
         steps.push((ids, parsed));
     }
-    let base = arr[0].get("ref").and_then(|v| v.as_str()).unwrap_or("");
+    let base_tree = tree_of(&arr[0]);
     let mut paths: std::collections::HashSet<String> = Default::default();
     for (_, m) in &steps {
         for k in m.keys() {
@@ -41670,7 +41709,7 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
     let unowned_by_path: std::collections::HashMap<String, usize> = Default::default();
     static BASE: OnceLock<Mutex<std::collections::HashMap<String, usize>>> = OnceLock::new();
     let base_cache = BASE.get_or_init(|| Mutex::new(Default::default()));
-    let base_oid = oid(base);
+    let base_oid = base_tree;
     for path in paths {
         // Key by the base tree's OID, not the ref name (attribution-run-line-
         // offset-in-views): a reused ref name would otherwise serve a stale

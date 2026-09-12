@@ -1755,11 +1755,10 @@ pub(crate) fn expected_repo_locator(cwd: &Path) -> Option<String> {
 pub(crate) struct AgentSignature<'a> {
     // The thread slot ("main thread" | "subagent") is validated by the parser
     // but not stored: no consumer reads it yet. Re-add the field when one does.
-    // The version slot ("Bram 0.6.5", added 2026-09-07) is likewise parsed
-    // and validated but has no in-crate reader yet — the Awaiting You display
-    // consumer is deferred to a follow-up item (parallel-dispatch re-scope,
-    // 2026-09-07).
-    #[allow(dead_code)]
+    // The version slot ("Bram 0.6.5", added 2026-09-07) went unread for four
+    // days; `signature_version_verdict` now compares it against the guard's own
+    // compiled version, so a slot that is present and WRONG is denied rather
+    // than published. The Awaiting You display consumer is still a follow-up.
     pub(crate) version: Option<&'a str>,
     pub(crate) model: &'a str,
     pub(crate) os: Option<&'a str>,
@@ -1876,6 +1875,83 @@ fn crossboundary_signature_verdict(command: &str, cwd: &Path) -> (&'static str, 
             }
         }
     }
+}
+
+/// guard-checks-the-signature-version: compare the version slot the signature
+/// parser has been returning since 2026-09-07 against the build this guard was
+/// compiled into. Nothing read it until now, so a signature whose version is
+/// present and WRONG passed every existing check.
+///
+/// The value goes stale in exactly the sessions where it matters most.
+/// `.claude/bram-conventions.md` carries the `<!-- bram vX.Y.Z -->` marker and is
+/// `@`-imported at session start, so an agent signing from what it can already
+/// see quotes the version that was true when it booted. The longer a session has
+/// been working the likelier its slot is a lie, and long sessions are the ones
+/// filing substantive issues — the failure selects for the reports whose triage
+/// the slot exists to serve (#343, #362).
+///
+/// Measured, on the whole population of signed artifacts since the slot shipped
+/// (49 of them, 4 days): one wrong. tau#1, signed `Bram 0.6.7` and filed
+/// **10h26m after that project's own on-disk marker had been rewritten to
+/// 0.6.8**. Both live sources were correct; the stale value was in context. It
+/// was caught by a person reading the line, which is the only mechanism there
+/// was.
+///
+/// Compared against `env!("CARGO_PKG_VERSION")` rather than a loopback call to
+/// `/__app-info`: `~/.bram/bram-guard` points at the binary built beside the app
+/// and is re-ensured on a ticker, so the guard's own compiled version IS the
+/// running build's. No port lookup, nothing to fail while the route is busy.
+///
+/// The slot stays OPTIONAL — `version: None` is allowed exactly as before. This
+/// catches present-and-wrong, which is strictly narrower than requiring one, and
+/// leaves the soft rollout and older threads alone.
+fn signature_version_verdict(command: &str, cwd: &Path) -> (&'static str, String) {
+    let skip = || ("skip", String::new());
+    if command.is_empty() {
+        return skip();
+    }
+    let masked = mask_heredoc_bodies(command); // #363, as the sibling checks do
+    let command = masked.as_str();
+    if !is_forge_write(command) {
+        return skip();
+    }
+    let Some(body) = crossboundary_body(command, cwd).0 else {
+        // Unreadable/stdin bodies are the unparsed case, already handled (and
+        // denied) by the signature check ahead of this one.
+        return skip();
+    };
+    for line in body.split('\n') {
+        if line.trim().is_empty() {
+            continue;
+        }
+        // An unparsable first line is the unsigned case, denied ahead of this.
+        let Some(sig) = parse_agent_signature(line) else {
+            return skip();
+        };
+        return match sig.version {
+            Some(v) if v != env!("CARGO_PKG_VERSION") => ("mismatch", v.to_string()),
+            _ => ("ok", String::new()),
+        };
+    }
+    skip()
+}
+
+/// The stale-version deny text, shared by the Claude and Codex deny sites so
+/// they cannot drift — the same discipline issue-365 imposed on the unsigned
+/// message.
+fn stale_signature_version_message(signed: &str) -> String {
+    format!(
+        "This forge write is signed \"Bram {}\" but the running build is {}.\n\
+A wrong version is worse than an absent one: it looks like provenance and \
+sends triage at the wrong build (judell/bram#343, #362).\n\
+The stale value is almost certainly the `<!-- bram vX.Y.Z -->` marker in the \
+copy of `.claude/bram-conventions.md` that was `@`-imported when this session \
+started, which is older than the build you are running.\n\
+Re-read `GET /__app-info` on the loopback port for the live version, fix the \
+signature, and retry.",
+        signed,
+        env!("CARGO_PKG_VERSION")
+    )
 }
 
 /// `\b[0-9a-f]{40}\b`
@@ -2806,6 +2882,20 @@ fn bash_branch(payload: &Value) -> ShadowVerdict {
             &preview,
             &cwd_s,
             &crossboundary_unsigned_message(&cwd),
+        );
+    }
+    // guard-checks-the-signature-version: only reachable once the body parsed
+    // AND the signature is well-formed, so "signed but stale" is a distinct
+    // verdict from unsigned rather than a subset of it.
+    let (ver_verdict, ver_signed) = signature_version_verdict(&command, &cwd);
+    if ver_verdict == "mismatch" {
+        return deny_msg(
+            format!("crossboundary-stale-version:{}", ver_signed),
+            "-",
+            "Bash",
+            &preview,
+            &cwd_s,
+            &stale_signature_version_message(&ver_signed),
         );
     }
     let (sha_verdict, sha_detail) = forge_sha_verdict(&command, &cwd);
@@ -4462,6 +4552,12 @@ Use --body-file - (stdin) or --body-file <path> instead.\nDetected: <match>",
         // two deny sites cannot drift on the locator-teaching line.
         return codex_deny(&crossboundary_unsigned_message(cwd), "-");
     }
+    // Same placement as the Claude site, shared message builder so the two
+    // cannot drift.
+    let (ver_verdict, ver_signed) = signature_version_verdict(&command, cwd);
+    if ver_verdict == "mismatch" {
+        return codex_deny(&stale_signature_version_message(&ver_signed), "-");
+    }
     let (sha_verdict, sha_detail) = forge_sha_verdict(&command, cwd);
     if sha_verdict == "bad" {
         return codex_deny(
@@ -5378,6 +5474,84 @@ mod guard_policy_tests {
             verdict(&format!("gh issue comment 5 --body \"{}\"", versioned)),
             "signed"
         );
+
+        // guard-checks-the-signature-version: the version slot is checked
+        // SEPARATELY from signedness, so a stale one is still "signed" here —
+        // signature_version_verdict is what denies it.
+        assert_eq!(
+            verdict(&format!("gh issue comment 5 --body \"{}\"", versioned)),
+            "signed"
+        );
+
+        let _ = std::fs::remove_dir_all(&td);
+    }
+
+    // guard-checks-the-signature-version: the three cases the item's
+    // acceptance names — present-and-wrong denied, correct allowed, absent
+    // allowed. The live failure this reproduces is tau#1, signed "Bram 0.6.7"
+    // and filed 10h26m after that project's own marker said 0.6.8.
+    #[test]
+    fn signature_version_mismatch_is_denied_but_absence_is_not() {
+        let td = scratch("sigver");
+        let current = env!("CARGO_PKG_VERSION");
+        let sig = |v: &str| {
+            format!(
+                "Jon's Claude (Bram {}, main thread, Opus 5, macOS, Tuck) speaking from the Bram project (github.com/judell/bram):\n\nBody.",
+                v
+            )
+        };
+        let v = |cmd: &str| signature_version_verdict(cmd, &td);
+
+        // Present and WRONG -> denied, and the detail carries the SIGNED
+        // version (not the running one) so the trace names what was claimed.
+        let stale = v(&format!(
+            "gh issue comment 5 --repo judell/bram --body \"{}\"",
+            sig("0.6.7-not-a-real-build")
+        ));
+        assert_eq!(stale.0, "mismatch");
+        assert_eq!(stale.1, "0.6.7-not-a-real-build");
+
+        // Present and correct -> allowed.
+        assert_eq!(
+            v(&format!(
+                "gh issue comment 5 --repo judell/bram --body \"{}\"",
+                sig(current)
+            ))
+            .0,
+            "ok"
+        );
+
+        // ABSENT -> allowed. The soft rollout is deliberate; this check is
+        // strictly narrower than requiring a version slot, and older threads
+        // remain valid text.
+        let unversioned = "Jon's Claude (main thread, Opus 5) speaking from the Bram project (github.com/judell/bram):\n\nBody.";
+        assert_eq!(
+            v(&format!(
+                "gh issue comment 5 --repo judell/bram --body \"{}\"",
+                unversioned
+            ))
+            .0,
+            "ok"
+        );
+
+        // Not a forge write, and an unsigned body, are both somebody else's
+        // verdict — this check must not claim them.
+        assert_eq!(v("ls -la").0, "skip");
+        assert_eq!(
+            v("gh issue comment 5 --body \"no signature here\"").0,
+            "skip"
+        );
+        assert_eq!(
+            v("gh issue comment 5 --body-file /nope/missing.md").0,
+            "skip"
+        );
+
+        // The deny text names both versions, so the agent does not have to
+        // guess which one the guard thinks is right.
+        let msg = stale_signature_version_message("0.6.7");
+        assert!(msg.contains("0.6.7"), "{msg}");
+        assert!(msg.contains(current), "{msg}");
+        assert!(msg.contains("/__app-info"), "{msg}");
 
         let _ = std::fs::remove_dir_all(&td);
     }
@@ -6345,6 +6519,73 @@ mod guard_policy_tests {
             "Blocked: mechanical worklist state changes must go through `POST /__worklist/mutate`, not a direct edit to `resources/worklist.json`.\n  - Direct worklist edits are for proposing items or refining their prose during iterate.\n  - Use mutate for `prune` and `advance` after a verified `drop:` / `approved:` turn.\n  - Removed item ids: \"a\" (status=proposed)\n  - Status changes: \"b\" (proposed->applied)\n  - Example: curl -4 -sS -X POST -d '{\"op\":\"prune\",\"ids\":[\"item-id\"]}' http://127.0.0.1:$(cat resources/.bram-port)/__worklist/mutate"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // guard-checks-the-signature-version: this is the test that matters, and it
+    // is deliberately at the DENY SITE rather than at signature_version_verdict.
+    // xmlui-org/xmlui-mcp#33 is this project's standing lesson: the
+    // subagent-lifecycle check was tested at the wrong layer, keyed on a field
+    // its payloads never carried, and was therefore inert from the day it
+    // shipped without a single test failing. An enforcement claim needs a FIRE
+    // behind it, not an inspection — so this drives claude_decide end to end and
+    // asserts the traced reason and the agent-facing body.
+    #[test]
+    fn stale_signature_version_is_denied_at_the_deny_site() {
+        let current = env!("CARGO_PKG_VERSION");
+        let sig = |v: &str| {
+            format!(
+                "Jon's Claude (Bram {}, main thread, Opus 5, macOS, Tuck) speaking from the Bram project (github.com/judell/bram):\n\nBody.",
+                v
+            )
+        };
+
+        // The live shape: a version that is real but behind. tau#1 signed
+        // "Bram 0.6.7" 10h26m after its own marker said 0.6.8.
+        let v = claude_decide(serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": format!("gh issue comment 5 --body \"{}\"", sig("0.0.1-stale"))},
+            "cwd": "/",
+        }));
+        assert_eq!(v.reason, "crossboundary-stale-version:0.0.1-stale");
+        let body = body_of(&v);
+        assert!(body.contains("0.0.1-stale"), "{body}");
+        assert!(body.contains(current), "{body}");
+        assert!(body.contains("/__app-info"), "{body}");
+
+        // The correct version is NOT denied for this reason — proving the
+        // tripwire discriminates rather than firing on every signed write.
+        let v = claude_decide(serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": format!("gh issue comment 5 --body \"{}\"", sig(current))},
+            "cwd": "/",
+        }));
+        assert_ne!(v.reason, "crossboundary-stale-version");
+        assert!(
+            !v.reason.starts_with("crossboundary-stale-version"),
+            "{}",
+            v.reason
+        );
+
+        // Absent slot: allowed, so the soft rollout survives.
+        let v = claude_decide(serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh issue comment 5 --body \"Jon's Claude (main thread, Opus 5) speaking from the Bram project (github.com/judell/bram):\n\nBody.\""},
+            "cwd": "/",
+        }));
+        assert!(
+            !v.reason.starts_with("crossboundary-stale-version"),
+            "{}",
+            v.reason
+        );
+
+        // Unsigned still reports UNSIGNED, not stale — the two denials must not
+        // collapse, which is #331's lesson about naming the right failure.
+        let v = claude_decide(serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh issue comment 5 --body 'plain unsigned text'"},
+            "cwd": "/",
+        }));
+        assert_eq!(v.reason, "crossboundary-unsigned");
     }
 
     #[test]

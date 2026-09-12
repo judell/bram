@@ -1297,6 +1297,18 @@ effort at the wrong target):
   Windows, MSYS `/c/...` spellings are accepted.
 - `crossboundary-unsigned` — the body was read and lacks the
   signature.
+- `crossboundary-stale-version:<signed>` — the body IS signed, and its
+  version slot names a build other than the one running
+  (guard-checks-the-signature-version). The deny names both versions.
+  This is the one signature failure you can commit while doing
+  everything else right: `.claude/bram-conventions.md` carries the
+  `<!-- bram vX.Y.Z -->` marker and is `@`-imported at session start, so
+  a long-running session signs from a copy that was true when it booted.
+  The remedy is the one the convention already states — read
+  `GET /__app-info` for the live version rather than trusting the
+  imported copy. A signature with **no** version slot is still allowed;
+  this checks only a slot that is present and wrong, so the soft rollout
+  and older threads are untouched.
 
 
 ## Working across project boundaries

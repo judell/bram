@@ -1,5 +1,4 @@
 <Component name="Issues"
-  var.issuesExpanded="{false}"
   var.searchQuery="{getLastSearchQuery()}"
   var.searchNeedle="{searchQuery.trim().toLowerCase()}"
   var.showNewIssueHint="{false}"
@@ -37,7 +36,7 @@
           || (issuesSearchFts.value || []).some(hit => hit.key === 'issue:' + i.number))
       : sortedIssues
   }"
-  var.pageIssues="{filteredIssues.slice(0, searchNeedle ? 999 : (issuesExpanded ? 999 : 20))}"
+  var.pageIssues="{filteredIssues}"
   var.issueRows="{pageIssues.map(i => Object.assign({}, i, {
     key: 'issue:' + i.number,
     type: 'issue',
@@ -57,7 +56,6 @@
   <DataSource
     id="issuesFirstPage"
     url="/__issues"
-    queryParams="{{ limit: 20 }}"
     onLoaded="(data) => {
       const currentSig = ((data || []).map(i => i && i.number).filter(Boolean).sort()).join(',');
       if (newIssueSubmitting &amp;&amp; newIssueStartSig &amp;&amp; currentSig !== newIssueStartSig) {
@@ -338,15 +336,6 @@
           </VStack>
         </property>
       </ResultList>
-      <HStack
-        when="{!searchNeedle &amp;&amp; issuesSource &amp;&amp; issuesSource.length > 20}"
-        padding="$space-2"
-        horizontalAlignment="center">
-        <Link onClick="issuesExpanded = !issuesExpanded" noIndicator>
-          <Text fontSize="$fontSize-sm"
-            value="{issuesExpanded ? 'Show fewer' : 'More (' + (issuesSource.length - 20) + ' more)'}" />
-        </Link>
-      </HStack>
     </VStack>
     <Text when="{searchNeedle &amp;&amp; !issuesFull.inProgress &amp;&amp; filteredIssues.length === 0}"
       color="$textColor-secondary" fontSize="$fontSize-sm" value="No matching issues." />

@@ -47267,6 +47267,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
                         "seen": if completion_monitor.seen_at_ms > 0 { format_iso_utc_ms(completion_monitor.seen_at_ms) } else { String::new() },
                     },
                     stranded_approval_row(app),
+                    stranded_claim_row(app),
                     port_row,
                     loopback_row
                 ]
@@ -51944,6 +51945,117 @@ fn trace_stranded_approval<R: tauri::Runtime>(
     }
 }
 
+// stranded-claim-is-detected-not-endured (rung 1: OBSERVE ONLY).
+//
+// The inverse of #350's stranded approval, and the half nobody watched. That
+// one fires on "approval live, no claim"; this one on "claim live, no agent" -
+// which is the condition that HANGS THE BOARD, because a live claim disables
+// every gate button and all row selection.
+//
+// Why this is needed at all: everything that clears a claim today is a
+// DETECTOR - cooperative agent calls, /__worklist/end, JSONL end_turn /
+// task_complete, PTY silence, cancel paths, startup cleanup. Six mechanisms,
+// each of which must NOTICE something to fire. None establishes a bound, so if
+// every one misses (dead agent, provider switch mid-turn, a TUI that never goes
+// quiet, a JSONL that never lands) the claim is immortal until restart. This
+// does not fix that; it makes the condition observable so rung 2 can act on a
+// predicate that has been soaked rather than assumed.
+//
+// QUIET, not "activity since the claim". The obvious predicate - mirroring the
+// approval detector's "no agent activity since it was issued" - is WRONG here
+// and would miss the reported case. The field shape was: the agent ran, the
+// agent finished, and the claim lingered for two hours. Activity therefore
+// exists after the claim was written. What marks it stranded is that the
+// activity STOPPED, so the measure is silence since the later of (claim
+// written, last activity).
+//
+// 60s rather than the approval detector's 30s, because the two measure
+// different quantities: that one measures the AGE of a record that should have
+// been consumed, this one measures SILENCE, and an agent can legitimately be
+// quiet for a stretch mid-turn on a long tool call. Erring long costs
+// detection latency; erring short would put false positives into the very soak
+// that has to decide whether rung 2 is safe.
+const STRANDED_CLAIM_QUIET_MS: i64 = 60_000;
+
+fn stranded_claim_ids<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<(Vec<String>, i64, i64)> {
+    let (ids, claimed_at) = inflight_claim_ids_and_claimed_at(app)?;
+    if ids.is_empty() {
+        return None;
+    }
+    let now = unix_now_ms();
+    let age_ms = now.saturating_sub(claimed_at);
+    let latest_activity = turn_state_cell()
+        .lock()
+        .map(|g| g.last_pty_activity_at_ms.max(g.last_jsonl_activity_at_ms))
+        .unwrap_or(0);
+    // From the LATER of the two: a claim written during a silence still has to
+    // serve its own quiet period before it counts as stranded.
+    let quiet_ms = now.saturating_sub(latest_activity.max(claimed_at));
+    if quiet_ms < STRANDED_CLAIM_QUIET_MS {
+        return None;
+    }
+    trace_stranded_claim(app, &ids, age_ms, quiet_ms, claimed_at);
+    Some((ids, age_ms, quiet_ms))
+}
+
+// One line per stranded claim (keyed by its claim time), not per evaluation:
+// the board serve and the Status build both run constantly while the condition
+// persists until something acts on it. Same dedup shape as
+// trace_stranded_approval.
+fn trace_stranded_claim<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    ids: &[String],
+    age_ms: i64,
+    quiet_ms: i64,
+    claimed_at: i64,
+) {
+    static TRACED: OnceLock<Mutex<std::collections::HashSet<i64>>> = OnceLock::new();
+    let fresh = TRACED
+        .get_or_init(|| Mutex::new(Default::default()))
+        .lock()
+        .map(|mut s| s.insert(claimed_at))
+        .unwrap_or(false);
+    if fresh {
+        let mut sorted: Vec<&String> = ids.iter().collect();
+        sorted.sort();
+        append_bram_trace_line(
+            app,
+            "inflight-sentinel",
+            &format!(
+                "op=stranded ids={:?} age_ms={} quiet_ms={}",
+                sorted, age_ms, quiet_ms
+            ),
+        );
+    }
+}
+
+fn stranded_claim_row<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
+    match stranded_claim_ids(app) {
+        Some((ids, age_ms, quiet_ms)) => {
+            let mut sorted = ids;
+            sorted.sort();
+            serde_json::json!({
+                "signal": "Stranded claim",
+                "level": "warn",
+                "state": format!("{} claimed, agent quiet", sorted.join(", ")),
+                "detail": format!(
+                    "An inflight claim ({}s old) has had no agent activity for {}s, so every gate button and all row selection are disabled with nothing running. Recovery: send any message — the turn it starts ends, and the turn ending clears the claim. Observe-only for now; see stranded-claim-is-detected-not-endured.",
+                    age_ms / 1000,
+                    quiet_ms / 1000
+                ),
+                "seen": "",
+            })
+        }
+        None => serde_json::json!({
+            "signal": "Stranded claim",
+            "level": "none",
+            "state": "none",
+            "detail": "No inflight claim is being held while the agent is quiet (the signature that locks the board with nothing running).",
+            "seen": "",
+        }),
+    }
+}
+
 // issue-284 / issue-285: an Iterate turn's real text lives in
 // resources/feedback-drafts/<feedbackRef>.md — the toTurn payload carries
 // only the reference, so an opt-out phrase typed into iterate feedback was
@@ -56277,6 +56389,13 @@ fn route_request<R: tauri::Runtime>(
         // a live, unconsumed authorization so the tab can show that state
         // (an approved-but-not-advanced row otherwise renders identically
         // to a never-approved one).
+        // stranded-claim-is-detected-not-endured (observe only): evaluated
+        // here as well as on the Status build, because the Status tab is not
+        // necessarily open when a board hangs. The worklist serve IS the moment
+        // the pane is looking at the board, which is precisely when a stranded
+        // claim matters. The value is discarded; the point is the deduped trace
+        // line inside, so the soak accumulates without anyone watching a tab.
+        let _ = stranded_claim_ids(app);
         if let Some((kind, age_ms, covered)) = worklist_active_authorization_summary(app) {
             // issue-350-stranded-approval-reconciliation: an approved record
             // with no claim and no agent activity since issue is an approval

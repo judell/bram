@@ -8641,6 +8641,11 @@ fn format_elapsed_text(ms: i64) -> String {
 struct ClaudeTurnStats {
     user_ts_ms: i64,
     is_working: bool,
+    // How many background-work notification records the backward scan passed
+    // over before reaching the real boundary. Observe-only: it feeds one trace
+    // line so a later `skip-stale-jsonl-end` can be told apart from a genuine
+    // one, which today's log cannot do.
+    notifications_skipped: u32,
 }
 
 static CLAUDE_TURN_STATS_CACHE: OnceLock<Mutex<Option<ClaudeTurnStats>>> = OnceLock::new();
@@ -9069,19 +9074,83 @@ fn start_claude_turn_stats_poll<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                     ),
                 );
             }
+            // Boundary observer (claude-turn-boundary): one line per distinct
+            // (turn, skipped) state, never per poll. Its purpose is
+            // attribution -- today a `[jsonl-turn-end] op=skip-stale-jsonl-end`
+            // is ambiguous between a genuine new turn and a notification that
+            // had been adopted as the boundary, and the three fires in the
+            // 2026-09-12 log were only resolved by hand-matching timestamps
+            // against the session JSONL. With this, a notification-adjacent
+            // stale-end names itself.
+            if bram_trace_enabled() {
+                let seen = next
+                    .as_ref()
+                    .filter(|s| s.notifications_skipped > 0)
+                    .map(|s| (s.user_ts_ms, s.notifications_skipped));
+                let was = guard
+                    .as_ref()
+                    .filter(|s| s.notifications_skipped > 0)
+                    .map(|s| (s.user_ts_ms, s.notifications_skipped));
+                if let Some((turn, skipped)) = seen {
+                    if was != seen {
+                        append_bram_trace_line(
+                            &app_handle,
+                            "claude-turn-boundary",
+                            &format!(
+                                "op=skip-notification turn={} skipped={} note=completion-report-is-not-a-turn-boundary",
+                                turn, skipped
+                            ),
+                        );
+                    }
+                }
+            }
             *guard = next;
         }
     });
 }
 
 // Walk the latest session JSONL tail backwards to find the most recent
-// real user message (NOT a tool_result), then sum output_tokens across
+// real user message (NOT a tool_result, and NOT a background-work
+// notification), then sum output_tokens across
 // all assistant messages after that boundary. Marks the turn as
 // "working" unless the most recent assistant record after the boundary
 // reports stop_reason "end_turn".
 //
 // Returns None when no real user message is found in the tail (e.g.
 // session not yet started, or tail too short to contain one).
+// The text a `user` JSONL record carries, whether its content is a bare string
+// or a content-block array. Non-text blocks (tool_result, image) contribute
+// nothing, matching how the transcript parse joins its text entries.
+fn claude_jsonl_user_text(entry: &serde_json::Value) -> Option<String> {
+    match entry.get("message").and_then(|m| m.get("content")) {
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        Some(serde_json::Value::Array(blocks)) => Some(
+            blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(|v| v.as_str()) == Some("text"))
+                .filter_map(|b| b.get("text").and_then(|v| v.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        ),
+        _ => None,
+    }
+}
+
+// A `user` record that is a background-work notification, not a turn boundary.
+// Background command and subagent completions arrive as user-role records whose
+// content is a `<task-notification>` envelope -- STRING content with `isMeta`
+// unset, so every "is this a real user message" test that inspected only array
+// content accepted them (97 of 97 observed records in this project are exactly
+// that shape). Adopting one as the turn boundary moves `user_ts_ms` forward
+// mid-turn, which makes `saw_assistant_after_user` false (status pins
+// "working") and makes the turn's own `end_turn` look stale to
+// `claude_jsonl_end_is_stale`, vetoing the sentinel clear.
+fn claude_jsonl_record_is_notification(entry: &serde_json::Value) -> bool {
+    claude_jsonl_user_text(entry)
+        .map(|t| st_is_notification_text(&t))
+        .unwrap_or(false)
+}
+
 fn compute_claude_turn_stats(tail: &[u8]) -> Option<ClaudeTurnStats> {
     // Parse JSONL lines newest-first. Looking for: the most recent real
     // user message (turn boundary), stop_reason of latest assistant
@@ -9091,6 +9160,7 @@ fn compute_claude_turn_stats(tail: &[u8]) -> Option<ClaudeTurnStats> {
     let mut user_ts_ms: Option<i64> = None;
     let mut latest_assistant_stop: Option<String> = None;
     let mut saw_assistant_after_user = false;
+    let mut notifications_skipped: u32 = 0;
     for line in lines.iter().rev() {
         let Ok(rec) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -9108,6 +9178,12 @@ fn compute_claude_turn_stats(tail: &[u8]) -> Option<ClaudeTurnStats> {
                     .map(|t| t == "tool_result")
                     .unwrap_or(false);
                 if is_tool_result {
+                    continue;
+                }
+                // A completion report is not something the user said, so it is
+                // not where a turn starts. Keep scanning for the real boundary.
+                if claude_jsonl_record_is_notification(&rec) {
+                    notifications_skipped = notifications_skipped.saturating_add(1);
                     continue;
                 }
                 let ts = rec
@@ -9139,6 +9215,7 @@ fn compute_claude_turn_stats(tail: &[u8]) -> Option<ClaudeTurnStats> {
     Some(ClaudeTurnStats {
         user_ts_ms,
         is_working,
+        notifications_skipped,
     })
 }
 
@@ -31239,11 +31316,22 @@ fn st_command_stdout_text(text: &str) -> Option<String> {
     Some(collapsed)
 }
 
+// The notification envelope test, factored out of `st_notification_turn` so
+// the transcript parse and the JSONL turn-boundary tests below share ONE rule.
+// They did not, and the divergence is this item's bug: the parse correctly
+// refused to call a completion report a user turn while
+// `compute_claude_turn_stats` happily adopted the same record as a turn
+// boundary.
+fn st_is_notification_text(text: &str) -> bool {
+    let tn = text.trim_start();
+    tn.starts_with("<task-notification>") || tn.starts_with("[SYSTEM NOTIFICATION")
+}
+
 fn st_notification_turn(text_joined: &str) -> Option<serde_json::Value> {
-    let tn = text_joined.trim_start();
-    if !tn.starts_with("<task-notification>") && !tn.starts_with("[SYSTEM NOTIFICATION") {
+    if !st_is_notification_text(text_joined) {
         return None;
     }
+    let tn = text_joined.trim_start();
     let summary = st_tag_value(tn, "summary");
     let display = if summary.is_empty() {
         st_cap_chars(tn, 300)
@@ -44588,6 +44676,13 @@ fn claude_jsonl_completion_decision_at(content: &str) -> (JsonlCompletionDecisio
 // boundary. Content is a plain string, or an array with a text block and no
 // tool_result block.
 fn claude_jsonl_is_genuine_user_message(entry: &serde_json::Value) -> bool {
+    // Background-work notifications ride user records with STRING content and
+    // no isMeta flag, so the string arm below would otherwise accept them --
+    // the same blind spot `compute_claude_turn_stats` had. Shared predicate so
+    // the two cannot drift apart again.
+    if claude_jsonl_record_is_notification(entry) {
+        return false;
+    }
     // isMeta records are CLI machinery, not human input. The 2026-07-20
     // audit of 33 would-end fires found 9 false fires, all the same class:
     // Read-tool image results write an `isMeta:true` companion user record
@@ -44770,6 +44865,154 @@ fn claude_jsonl_end_is_stale(
 fn claude_turn_is_done(content: &str, turn_user_ts_ms: Option<i64>) -> bool {
     let (decision, deciding_ts_ms) = claude_jsonl_completion_decision_at(content);
     decision.detected && !claude_jsonl_end_is_stale(deciding_ts_ms, turn_user_ts_ms)
+}
+
+#[cfg(test)]
+mod notification_turn_boundary_tests {
+    use super::{
+        claude_jsonl_is_genuine_user_message, claude_turn_is_done, compute_claude_turn_stats,
+        st_notification_turn,
+    };
+
+    // The three shapes observed in this project's session JSONLs. All 97
+    // records are STRING content starting at offset 0 -- no multi-block
+    // arrays, no leading system-reminder, no isMeta.
+    const COMPLETED: &str = "<task-notification>\n<task-id>b3t79nfg9</task-id>\n<tool-use-id>toolu_x</tool-use-id>\n<status>completed</status>\n<summary>Background command \"Build to validate the new route code\" completed (exit 0)</summary>\n</task-notification>";
+    const STOPPED: &str = "<task-notification>\n<task-id>b1lqebmjp</task-id>\n<tool-use-id>toolu_y</tool-use-id>\n<status>stopped</status>\n<summary>Background command \"Restart the issue watcher\" was stopped</summary>\n</task-notification>";
+    // The resumed-session variant: several task-ids, an __orphan_summary__
+    // pseudo-id, and a summary that names no single command.
+    const ORPHAN_SUMMARY: &str = "<task-notification>\n<task-id>b3tu15jt8</task-id>\n<task-id>baqw40m3a</task-id>\n<task-id>__orphan_summary__:shell</task-id>\n<status>stopped</status>\n<summary>2 background shell command task(s) from the previous session have no completion record.</summary>\n</task-notification>";
+
+    #[test]
+    fn every_observed_shape_becomes_a_system_note_not_a_user_turn() {
+        for raw in [COMPLETED, STOPPED, ORPHAN_SUMMARY] {
+            let t = st_notification_turn(raw).expect("should reclassify");
+            assert_eq!(t.get("role").and_then(|v| v.as_str()), Some("system"));
+            assert_eq!(t.get("notification").and_then(|v| v.as_bool()), Some(true));
+            let text = t.get("text").and_then(|v| v.as_str()).unwrap();
+            assert!(
+                !text.contains('<'),
+                "the summary, not the envelope, reaches the pane: {}",
+                text
+            );
+        }
+        // The status rides along for consumers that distinguish them.
+        assert_eq!(
+            st_notification_turn(COMPLETED)
+                .unwrap()
+                .get("status")
+                .and_then(|v| v.as_str()),
+            Some("completed")
+        );
+        assert_eq!(
+            st_notification_turn(STOPPED)
+                .unwrap()
+                .get("status")
+                .and_then(|v| v.as_str()),
+            Some("stopped")
+        );
+    }
+
+    // Bounded: only a record that STARTS with the envelope is claimed, so a
+    // user who types the tag in prose still gets a "You" turn.
+    #[test]
+    fn prose_mentioning_the_envelope_is_left_alone() {
+        assert!(st_notification_turn("I was reading about <task-notification> records").is_none());
+    }
+
+    fn notification_record(ts: &str, body: &str) -> String {
+        format!(
+            r#"{{"type":"user","timestamp":"{}","message":{{"role":"user","content":{}}}}}"#,
+            ts,
+            serde_json::Value::String(body.to_string())
+        )
+    }
+
+    // The item's bug, as a fixture: a background command completes AFTER the
+    // agent ended its turn. Before the fix the reverse scan stopped on the
+    // notification, so user_ts_ms jumped to 18:49:00, saw_assistant_after_user
+    // was false, and the ended turn reported is_working -- which then made the
+    // real end_turn look stale and vetoed the sentinel clear.
+    fn ended_turn_then_notification() -> String {
+        format!(
+            "{}\n{}\n{}\n",
+            r#"{"type":"user","timestamp":"2026-08-22T18:48:00.000Z","message":{"role":"user","content":[{"type":"text","text":"do the thing"}]}}"#,
+            r#"{"type":"assistant","timestamp":"2026-08-22T18:48:30.000Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}"#,
+            notification_record("2026-08-22T18:49:00.000Z", COMPLETED),
+        )
+    }
+
+    const TURN_START_MS: i64 = 1787424480000; // 2026-08-22T18:48:00.000Z
+
+    #[test]
+    fn a_completion_report_is_not_the_turn_boundary() {
+        let content = ended_turn_then_notification();
+        let stats = compute_claude_turn_stats(content.as_bytes()).expect("turn stats");
+        assert_eq!(
+            stats.user_ts_ms, TURN_START_MS,
+            "the boundary stays at what the user actually said"
+        );
+        assert!(!stats.is_working, "the turn ended and stays ended");
+        assert_eq!(stats.notifications_skipped, 1);
+    }
+
+    // The consequence the user feels: the sentinel clear is no longer vetoed.
+    #[test]
+    fn the_ended_turn_is_still_done_with_a_notification_after_it() {
+        let content = ended_turn_then_notification();
+        let stats = compute_claude_turn_stats(content.as_bytes()).expect("turn stats");
+        assert!(claude_turn_is_done(&content, Some(stats.user_ts_ms)));
+    }
+
+    #[test]
+    fn several_notifications_in_a_row_all_skip() {
+        let content = format!(
+            "{}\n{}\n{}\n{}\n",
+            r#"{"type":"user","timestamp":"2026-08-22T18:48:00.000Z","message":{"role":"user","content":[{"type":"text","text":"do the thing"}]}}"#,
+            r#"{"type":"assistant","timestamp":"2026-08-22T18:48:30.000Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}"#,
+            notification_record("2026-08-22T18:49:00.000Z", COMPLETED),
+            notification_record("2026-08-22T18:49:30.000Z", ORPHAN_SUMMARY),
+        );
+        let stats = compute_claude_turn_stats(content.as_bytes()).expect("turn stats");
+        assert_eq!(stats.user_ts_ms, TURN_START_MS);
+        assert!(!stats.is_working);
+        assert_eq!(stats.notifications_skipped, 2);
+    }
+
+    // A real message after the notification IS the boundary -- the skip must
+    // not swallow the turn that follows a completion report.
+    #[test]
+    fn a_real_message_after_a_notification_still_starts_a_turn() {
+        let content = format!(
+            "{}\n{}\n{}\n{}\n",
+            r#"{"type":"user","timestamp":"2026-08-22T18:48:00.000Z","message":{"role":"user","content":[{"type":"text","text":"do the thing"}]}}"#,
+            r#"{"type":"assistant","timestamp":"2026-08-22T18:48:30.000Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}"#,
+            notification_record("2026-08-22T18:49:00.000Z", COMPLETED),
+            r#"{"type":"user","timestamp":"2026-08-22T18:50:00.000Z","message":{"role":"user","content":"and now the next thing"}}"#,
+        );
+        let stats = compute_claude_turn_stats(content.as_bytes()).expect("turn stats");
+        assert_eq!(stats.user_ts_ms, 1787424600000); // 18:50:00
+        assert!(stats.is_working, "a new turn with no assistant yet");
+        assert_eq!(
+            stats.notifications_skipped, 0,
+            "the scan stops at the boundary before reaching the notification"
+        );
+    }
+
+    // The observe-only would-end evidence shares the predicate, so it stops
+    // counting completion reports as user records.
+    #[test]
+    fn the_would_end_evidence_shares_the_rule() {
+        let rec: serde_json::Value =
+            serde_json::from_str(&notification_record("2026-08-22T18:49:00.000Z", COMPLETED))
+                .unwrap();
+        assert!(!claude_jsonl_is_genuine_user_message(&rec));
+        let typed: serde_json::Value = serde_json::from_str(
+            r#"{"type":"user","message":{"role":"user","content":"a typed message"}}"#,
+        )
+        .unwrap();
+        assert!(claude_jsonl_is_genuine_user_message(&typed));
+    }
 }
 
 #[cfg(test)]

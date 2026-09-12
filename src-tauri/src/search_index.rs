@@ -12,8 +12,25 @@ use crate::redact_sensitive_text;
 use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Result};
 
-/// Bump when the on-disk schema shape changes. The index is a rebuildable
-/// cache, so a version mismatch just drops and recreates — no migration.
+/// **The FTS table's shape, or the semantics of the content stored in it.
+/// Bumping this REBUILDS THE WHOLE INDEX — measured at ~50 minutes over 440 MB
+/// of session JSONL, with Search, History, Commits and Issues all serving from
+/// a partly-empty index throughout.**
+///
+/// Bump it when `search_index`'s columns change, or when the MEANING of what is
+/// stored there changes and old rows must be purged (#379's redaction is the
+/// type case: not a shape change, and still correctly a rebuild).
+///
+/// Do NOT bump it for a change confined to `indexed_files` or `session_tools`.
+/// Those are ordinary tables; `BOOKKEEPING_VERSION` exists so that case costs
+/// nothing (schema-version-stops-being-the-only-knob). Before this split there
+/// was one knob, so the destructive path was not a choice — this comment is
+/// most of the point of the change.
+///
+/// The cost is tokenization, not reading: across eight real indexing passes,
+/// extraction ran 23-66 ms against FTS writes of 17.9-73.5 s, roughly 1000:1.
+/// That is why the FTS table has no cheap path and a content-preserving copy
+/// would not help.
 // Bumped to force a full rebuild when stored row values change but the per-doc
 // change token (mtime) doesn't — so unchanged docs re-index instead of keeping
 // stale values. v3: session/history `link` → internal tab routes. v4: history
@@ -98,25 +115,63 @@ pub fn open_in_memory() -> Result<Connection> {
     Ok(conn)
 }
 
-/// Ensure the schema exists at the current version. On a version mismatch,
-/// drop and recreate.
+/// The ordinary bookkeeping tables' shape: `indexed_files` and `session_tools`.
 ///
-/// search-index-leaves-the-cache-directory: this used to justify itself with
-/// "the index is a rebuildable cache". It is still rebuildable, but it no
-/// longer lives in a cache directory and the rebuild is no longer cheap --
-/// measured 2026-09-10 at ~3 minutes per session file and ~50 minutes for a
-/// full cold build, during which Search, History, Commits and Issues are all
-/// serving from a partly-empty index. So a `SCHEMA_VERSION` bump is a decision
-/// with a user-visible price, not a free reset. Drop-and-recreate remains the
-/// deliberate trade -- migrating an FTS5 index is a much larger change -- but
-/// bump the version because the schema genuinely changed, not incidentally.
+/// schema-version-stops-being-the-only-knob. Bumping THIS runs a hand-written
+/// `ALTER` and touches nothing else -- no rebuild, no re-index, the FTS table
+/// never opened. That is possible because these two are ordinary tables and
+/// SQLite adapts those in place (`ADD COLUMN`, `DROP COLUMN` since 3.35,
+/// `RENAME COLUMN` since 3.25; the bundled engine is well past both). An
+/// `ALTER` preserves every row INCLUDING the `mtime`/`size` change tokens, so
+/// nothing looks stale afterwards and nothing re-indexes.
+///
+/// Two approaches that look cheaper and are not, recorded so they are not
+/// re-attempted: dropping just one of the three tables is wrong because they
+/// are coupled (`indexed_files.rowid_ref` points into `search_index`, and
+/// `session_tools` is filled only while a session row is written), and
+/// dropping plus re-deriving from `search_index` loses the change tokens --
+/// `commit:<sha>` and `issue:<n>` rows have no file to stat, so every doc then
+/// looks changed and the full re-index happens anyway. `ALTER` sidesteps both
+/// by never dropping.
+///
+/// When you bump this, add the matching arm to `apply_bookkeeping_migration`
+/// in the same change.
+const BOOKKEEPING_VERSION: i64 = 1;
+
+const BOOKKEEPING_VERSION_KEY: &str = "bookkeeping_version";
+
+/// Ensure the schema exists at the current version.
+///
+/// `SCHEMA_VERSION` means **the FTS table's shape, or the semantics of the
+/// content stored in it** -- and it is the only rebuild trigger. Bumping it
+/// drops and recreates everything, which is NOT a free reset: measured
+/// 2026-09-10, ~50 minutes over 440 MB of session JSONL, during which Search,
+/// History, Commits and Issues all serve from a partly-empty index. The cost is
+/// tokenization rather than reading -- across eight real passes, extraction ran
+/// 23-66 ms against FTS writes of 17.9-73.5 s, roughly 1000:1 -- which is why
+/// there is no cheaper path for the FTS table and why a content-preserving copy
+/// would not help either.
+///
+/// So bump `SCHEMA_VERSION` when the FTS table's columns change, or when the
+/// MEANING of what is stored in it changes and old rows must be purged (#379's
+/// redaction is the type case: not a shape change, and still correctly a
+/// rebuild). Do NOT bump it for a change confined to `indexed_files` or
+/// `session_tools` -- those are ordinary tables, and `BOOKKEEPING_VERSION`
+/// above exists so that case costs nothing.
+///
+/// search-index-leaves-the-cache-directory established the price above; this
+/// split (schema-version-stops-being-the-only-knob) is what stops the price
+/// being paid by default, because a single knob meant the destructive path was
+/// not a choice.
 fn ensure_schema(conn: &Connection) -> Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version != SCHEMA_VERSION {
+    let rebuilding = version != SCHEMA_VERSION;
+    if rebuilding {
         conn.execute_batch(
             "DROP TABLE IF EXISTS search_index; \
              DROP TABLE IF EXISTS indexed_files; \
-             DROP TABLE IF EXISTS session_tools;",
+             DROP TABLE IF EXISTS session_tools; \
+             DROP TABLE IF EXISTS schema_meta;",
         )?;
     }
     // `file` is UNINDEXED: stored (so we could show/debug it) but not
@@ -132,12 +187,277 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
            tool_id TEXT NOT NULL, session_path TEXT NOT NULL, \
            PRIMARY KEY(tool_id, session_path)); \
          CREATE INDEX IF NOT EXISTS session_tools_path \
-           ON session_tools(session_path);",
+           ON session_tools(session_path); \
+         CREATE TABLE IF NOT EXISTS schema_meta( \
+           key TEXT PRIMARY KEY, value INTEGER);",
     )?;
-    if version != SCHEMA_VERSION {
+    if rebuilding {
         conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
     }
+    migrate_bookkeeping(conn, rebuilding);
     Ok(())
+}
+
+/// Bring the ordinary tables to `BOOKKEEPING_VERSION` without touching the FTS
+/// table.
+///
+/// The FIRST deployment of this code must not wipe a working index -- the same
+/// trap `search-index-leaves-the-cache-directory` names, and the riskiest thing
+/// here. An index built before `schema_meta` existed has no stored bookkeeping
+/// version, and the correct reading is "current", not "unknown": the ordinary
+/// tables have not changed shape since they were created, so an existing DB at
+/// the live `SCHEMA_VERSION` is by definition already at bookkeeping version 1.
+/// That case therefore SEEDS and alters nothing.
+/// NOTHING HERE MAY FAIL AN INDEX OPEN.
+///
+/// This path introduced a WRITE on open where a current-version index
+/// previously did none, and the index sets no `busy_timeout`, so a second
+/// instance on the same project could return `SQLITE_BUSY`. Propagating that
+/// would make `ensure_schema` fail, `open()` fail, and every caller doing
+/// `if let Ok(conn)` silently skip its pass — a new and silent failure surface
+/// in exchange for bookkeeping that is, by construction, optional.
+///
+/// So every error here is logged and swallowed. The cost of a failed seed or
+/// migration is that it is retried on the next open; the cost of a failed open
+/// is a dead index. The FTS table is untouched by anything in here, which is
+/// what makes swallowing correct rather than merely convenient.
+fn migrate_bookkeeping(conn: &Connection, freshly_built: bool) {
+    if let Err(e) = migrate_bookkeeping_inner(conn, freshly_built) {
+        eprintln!(
+            "[search-index] op=bookkeeping-failed detail={} (index opened anyway; retried next open)",
+            e
+        );
+    }
+}
+
+fn migrate_bookkeeping_inner(conn: &Connection, freshly_built: bool) -> Result<()> {
+    let stored: Option<i64> = conn
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key = ?1",
+            params![BOOKKEEPING_VERSION_KEY],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(from) = stored else {
+        set_bookkeeping_version(conn, BOOKKEEPING_VERSION)?;
+        if !freshly_built {
+            // Worth one line: it happens exactly once per existing index, and
+            // its absence during an upgrade would mean the seed did not run.
+            eprintln!(
+                "[search-index] op=bookkeeping-seeded version={} (existing index adopted, nothing altered)",
+                BOOKKEEPING_VERSION
+            );
+        }
+        return Ok(());
+    };
+    if from == BOOKKEEPING_VERSION {
+        return Ok(());
+    }
+    if from > BOOKKEEPING_VERSION {
+        // A newer build wrote this index and an older one opened it. Altering
+        // backwards is not defined, and the FTS table is untouched either way,
+        // so say so and leave it alone rather than guess.
+        eprintln!(
+            "[search-index] op=bookkeeping-ahead stored={} expected={}",
+            from, BOOKKEEPING_VERSION
+        );
+        return Ok(());
+    }
+    for step in from..BOOKKEEPING_VERSION {
+        apply_bookkeeping_migration(conn, step)?;
+    }
+    set_bookkeeping_version(conn, BOOKKEEPING_VERSION)?;
+    eprintln!(
+        "[search-index] op=bookkeeping-migrated from={} to={}",
+        from, BOOKKEEPING_VERSION
+    );
+    Ok(())
+}
+
+/// One arm per version step, added in the same change that bumps
+/// `BOOKKEEPING_VERSION`. Each arm is an `ALTER` on `indexed_files` or
+/// `session_tools` and must not touch `search_index` -- if a change needs the
+/// FTS table, it is a `SCHEMA_VERSION` bump instead and belongs nowhere near
+/// here.
+///
+/// There are no arms yet: no bump in 13 schema versions has been confined to
+/// the bookkeeping tables. This exists so the next one can be.
+fn apply_bookkeeping_migration(conn: &Connection, step: i64) -> Result<()> {
+    match step {
+        // The shape an arm takes:
+        //   1 => conn.execute_batch("ALTER TABLE indexed_files ADD COLUMN bucket TEXT")?,
+        other => {
+            // A gap in this match is a programming error (someone bumped the
+            // constant without adding the arm), not a data condition, so it is
+            // loud. It is not fatal: the tables still work at their old shape,
+            // and failing the whole index open would be a far worse outcome
+            // than a missing column.
+            let _ = conn;
+            eprintln!("[search-index] op=bookkeeping-migration-missing step={other}");
+        }
+    }
+    Ok(())
+}
+
+fn set_bookkeeping_version(conn: &Connection, version: i64) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?1, ?2)",
+        params![BOOKKEEPING_VERSION_KEY, version],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod schema_version_split_tests {
+    use super::*;
+
+    fn stored_bookkeeping(conn: &Connection) -> Option<i64> {
+        conn.query_row(
+            "SELECT value FROM schema_meta WHERE key = ?1",
+            params![BOOKKEEPING_VERSION_KEY],
+            |r| r.get(0),
+        )
+        .optional()
+        .unwrap()
+    }
+
+    fn row_count(conn: &Connection) -> i64 {
+        conn.query_row("SELECT count(*) FROM search_index", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    fn seed_a_row(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO search_index(type, source, date, link, content, intent, file, extra) \
+             VALUES ('session','s','d','l','hello world','','/tmp/s.jsonl','')",
+            [],
+        )
+        .unwrap();
+        let rowid = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO indexed_files(path, mtime, size, rowid_ref, indexed_at) \
+             VALUES ('/tmp/s.jsonl', 111, 222, ?1, 333)",
+            params![rowid],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn fresh_index_is_stamped_with_both_versions() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let fts: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fts, SCHEMA_VERSION);
+        assert_eq!(stored_bookkeeping(&conn), Some(BOOKKEEPING_VERSION));
+    }
+
+    // THE test. An index built before schema_meta existed must be ADOPTED, not
+    // rebuilt: its rows and, critically, its mtime/size change tokens survive,
+    // so nothing re-indexes afterwards. Getting this wrong would make the
+    // change that prevents needless rebuilds cause one immediately.
+    #[test]
+    fn upgrading_an_existing_index_adopts_it_without_wiping() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        seed_a_row(&conn);
+        assert_eq!(row_count(&conn), 1);
+
+        // Simulate the pre-upgrade world: the bookkeeping table did not exist.
+        conn.execute_batch("DROP TABLE schema_meta;").unwrap();
+
+        ensure_schema(&conn).unwrap();
+
+        assert_eq!(row_count(&conn), 1, "the FTS row must survive the upgrade");
+        assert_eq!(stored_bookkeeping(&conn), Some(BOOKKEEPING_VERSION));
+        // The change tokens are the half whose loss would silently force a
+        // full re-index on the next pass.
+        let (mtime, size): (i64, i64) = conn
+            .query_row(
+                "SELECT mtime, size FROM indexed_files WHERE path = '/tmp/s.jsonl'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((mtime, size), (111, 222));
+    }
+
+    // A SCHEMA_VERSION mismatch is still a full rebuild — the one case that has
+    // ever actually happened, and the one with no cheap path.
+    #[test]
+    fn an_fts_version_mismatch_still_rebuilds() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        seed_a_row(&conn);
+        assert_eq!(row_count(&conn), 1);
+
+        conn.execute_batch(&format!("PRAGMA user_version = {};", SCHEMA_VERSION - 1))
+            .unwrap();
+        ensure_schema(&conn).unwrap();
+
+        assert_eq!(row_count(&conn), 0, "an FTS bump must purge");
+        assert_eq!(stored_bookkeeping(&conn), Some(BOOKKEEPING_VERSION));
+    }
+
+    // Re-opening is a no-op: no repeated seeding, no repeated migration.
+    #[test]
+    fn reopening_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        seed_a_row(&conn);
+        for _ in 0..3 {
+            ensure_schema(&conn).unwrap();
+        }
+        assert_eq!(row_count(&conn), 1);
+        assert_eq!(stored_bookkeeping(&conn), Some(BOOKKEEPING_VERSION));
+    }
+
+    // The safety property, fired rather than asserted: a bookkeeping write that
+    // FAILS must not fail the index open. A `schema_meta` whose CHECK rejects
+    // our value makes the seed error deterministically; the index must still
+    // open and still hold its rows.
+    #[test]
+    fn a_failing_bookkeeping_write_does_not_fail_the_open() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        seed_a_row(&conn);
+        conn.execute_batch(
+            "DROP TABLE schema_meta; \
+             CREATE TABLE schema_meta(key TEXT PRIMARY KEY, \
+               value INTEGER NOT NULL CHECK(value < 0));",
+        )
+        .unwrap();
+
+        // Must not return Err, and must not lose anything.
+        ensure_schema(&conn).unwrap();
+
+        assert_eq!(row_count(&conn), 1);
+        assert_eq!(stored_bookkeeping(&conn), None, "the seed did fail");
+        let (mtime, size): (i64, i64) = conn
+            .query_row(
+                "SELECT mtime, size FROM indexed_files WHERE path = '/tmp/s.jsonl'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((mtime, size), (111, 222));
+    }
+
+    // An index written by a NEWER build must not be altered backwards, and the
+    // FTS table must be left alone either way.
+    #[test]
+    fn a_newer_bookkeeping_version_is_left_alone() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        seed_a_row(&conn);
+        set_bookkeeping_version(&conn, BOOKKEEPING_VERSION + 5).unwrap();
+
+        ensure_schema(&conn).unwrap();
+
+        assert_eq!(stored_bookkeeping(&conn), Some(BOOKKEEPING_VERSION + 5));
+        assert_eq!(row_count(&conn), 1);
+    }
 }
 
 /// The stored size and index time for a path, for callers that need to reason

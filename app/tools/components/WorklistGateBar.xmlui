@@ -1,4 +1,4 @@
-<Component name="WorklistGateBar" var.gateSent="{[]}" var.startMode="{'one'}">
+<Component name="WorklistGateBar" var.gateSent="{[]}" var.startMode="{'one'}" var.gateLockTick="{0}">
   <!-- issue-278: the Worklist gate, in the Footer.
        The gate row cannot be pinned where it lived - `position: sticky` cannot
        escape its containing block, and `dock` needs a bounded parent height
@@ -267,6 +267,43 @@
       fontSize="$fontSize-sm"
       color="$color-warn-700"
       value="{window.__bramGateCautionMessage(gateCaution.value)}" />
+  </HStack>
+  <!-- locked-board-names-its-own-exit: the escape, stated where the dead
+       buttons are. Deliberately NOT gated on a selection, unlike the button
+       band below - while a claim is live no row can be ticked, so a
+       selection-gated message is invisible in exactly the state it exists for.
+       The gate bar sits in the footer directly above the composer, so the
+       sentence and the thing it points at are adjacent.
+       Silent while an agent is working: that is the system behaving, the
+       footer's agent status already shows it, and a second line saying so is
+       the noise the predecessor was reverted for. -->
+  <PushSource id="gateAgent" initial="{null}" subscribe="{window.bramSubscribeAgentStatus()}" />
+  <!-- The tick exists because the predicate is TIME-based and its other two
+       inputs go quiet in exactly the shape that matters. Falsified by synth,
+       2026-09-12: a claim written while the agent was idle sat for 90s+
+       un-reaped (no turn ran, so no turn-end detector fired) with the
+       predicate true from t+30s, and neither gateClaim nor gateAgent changed
+       once in that window - so the binding never re-evaluated and the line
+       never appeared. The earlier reasoning (the agent finishing supplies the
+       event) covers the trap where an agent ran; it does NOT cover a claim
+       whose agent never runs, which is a real trap shape and not #350's
+       stranded-approval case, because here a claim exists.
+       Enabled only while potentially stranded, so a healthy board runs no
+       timer at all. -->
+  <Timer
+    interval="5000"
+    enabled="{!!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramAgentWorking(gateAgent.value)}"
+    onTick="gateLockTick = gateLockTick + 1" />
+  <HStack
+    when="{!!window.__bramGateStrandedExitLine(gateClaim.value, gateAgent.value, gateLockTick)}"
+    horizontalAlignment="center"
+    gap="$space-2"
+    paddingHorizontal="$space-2"
+    paddingTop="$space-1">
+    <Text
+      fontSize="$fontSize-sm"
+      color="$textColor-secondary"
+      value="{window.__bramGateStrandedExitLine(gateClaim.value, gateAgent.value, gateLockTick)}" />
   </HStack>
   <HStack
     when="{(gateSel.value || []).length > 0}"

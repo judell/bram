@@ -3630,6 +3630,53 @@ window.__bramSharedWithPlanned = function (file, items, claim) {
   return out;
 };
 
+// locked-board-names-its-own-exit: ONE line, and it names the door rather than
+// describing the wall.
+//
+// The predecessor item (679c5c2) twice proposed saying WHY a row was locked, and
+// both were reverted: a caption that reports a state narrates a condition that
+// should not occur and leaves the reader exactly where it found them. This says
+// what to DO, and it is true -- the exit exists and is never locked. Only five
+// things read __bramInflightBlocker (four gate buttons plus row selection); the
+// composer is not one of them, so with nothing selected (which IS the locked
+// state) __bramComposerEnterSubmit falls through to plain chat. Sending anything
+// at all starts a turn, and the turn ending clears the claim. The act of asking
+// unsticks it.
+//
+// The reported experience this answers: "everything is locked ... there's
+// nothing I can do here because I have no buttons and there's nothing to select
+// or deselect", followed by a minute of waiting and then a silent self-clear.
+//
+// GRACE, borrowed rather than invented. Between the host writing a claim at
+// approval time and the agent's first output, agentStatus legitimately reads
+// not-working. Without a grace this fires on every normal approval and teaches
+// the reader to ignore it. #350 already solved the same race in the other
+// direction (approval live, no claim) with 30s; match it.
+//
+// THE TICK. This predicate is time-based, so it needs a dependency that
+// changes, and the third parameter is that dependency -- read by nobody, passed
+// so the binding re-evaluates (the gate bar drives it from a Timer that runs
+// only while a claim is live with no agent working).
+//
+// The first cut argued no timer was needed, on the grounds that the trap's own
+// shape supplies the event: an agent works, then finishes, and that agentStatus
+// push re-evaluates the binding exactly when the condition becomes true. That
+// is correct for the trap where an agent RAN, and it was falsified by synth
+// (2026-09-12) for the one where it never does. A claim written while the agent
+// was idle sat 90s+ un-reaped -- no turn, so no turn-end detector -- with the
+// predicate true from t+30s, while neither the claim nor agentStatus changed
+// once. The binding never re-evaluated; the line never appeared. That is a real
+// trap shape, and NOT #350's stranded-approval case, because here a claim
+// exists. A hint that does not render during a trap is not a hint.
+window.__bramGateStrandedExitLine = function (claim, agentStatus, _tick) {
+  if (!window.__bramInflightBlocker(claim)) return "";
+  if (window.__bramAgentWorking(agentStatus)) return "";
+  var at = claim && claim.claimedAt;
+  if (typeof at !== "number") return "";
+  if (Date.now() - at < 30000) return "";
+  return "The agent has finished \u2014 send a message to continue.";
+};
+
 window.__bramWorklist2Strip = function (item, claim, items, attribution, attributionTotals, agentStatus) {
   if (!item) return "";
   // issue-266: the close declaration belongs on the status line for

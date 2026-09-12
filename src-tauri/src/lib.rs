@@ -44128,19 +44128,32 @@ fn emit_or_defer_tools_pane_reload<R: tauri::Runtime>(app: &AppHandle<R>, force:
 // without the caller having to know who's claimed. No-op if the
 // sentinel is absent or has no ids. Refs #91 follow-up.
 fn clear_active_sentinel<R: tauri::Runtime>(app: &AppHandle<R>) {
+    // claim-lock-bounded-and-explained (the id under-names this; ids are
+    // immutable, see judell/bram#276): this used to short-circuit on an
+    // `approved` claim, asserting that approved claims outlive turns. That rule
+    // was RETIRED by separate-authorization-from-claim (`debcbbf`) — the claim
+    // is execution state and the turn ending is its terminus; authorization is
+    // the half that endures. The sibling turn-end site was converted; this one,
+    // which the pty-silence path rides, was missed.
+    //
+    // What that costs is ATTRIBUTION, not a dimmed row. `record_claim_interval`
+    // runs on claim write and on claim clear — the clear deliberately before the
+    // file is removed, so the boundary's left edge is the prior claim. The
+    // claim's lifetime IS the attribution interval that `claim_interval_diff`
+    // reads to decide which hunks belong to which item, and that interval
+    // staging then commits on. A claim preserved across agent silence widens the
+    // window in which changes are credited to that item.
+    //
+    // Field receipt: a claim lived from 17:23:42 (`skip-clear ...
+    // approved-claim-live`, this path refusing) to 19:26:31 (`clear-at-turn-end`
+    // finally arriving). Any edit landing in those two hours would have been
+    // attributed to that item and committable under its id.
+    //
+    // Clearing here restores what `debcbbf` intended: re-armed at turn start,
+    // cleared at turn end, never spanning agent silence. The re-arm is
+    // deliberately untouched — it is what keeps a legitimate multi-turn apply
+    // attributed (#286).
     if let Some((ids, _claimed_at)) = inflight_claim_ids_and_claimed_at(app) {
-        // Soft path (pty-silence rides this fn): approved claims outlive
-        // turns — see inflight_claim_kind.
-        if inflight_claim_kind(app).as_deref() == Some("approved") {
-            if bram_trace_enabled() {
-                append_bram_trace_line(
-                    app,
-                    "inflight-sentinel",
-                    "op=skip-clear source=pty-silence reason=approved-claim-live",
-                );
-            }
-            return;
-        }
         clear_inflight_claim_sentinel(app, &ids);
     }
 }

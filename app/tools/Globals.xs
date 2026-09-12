@@ -339,6 +339,16 @@ function compactAge(iso) {
   return Math.floor(days / 365) + 'y';
 }
 
+// issues-age-duration-sort: AGE is ordered by the same activity timestamp
+// shown by compactAge, not by its short display label ("12m", "3h", ...).
+// Invalid or missing timestamps stay explicit so the caller can place them
+// after dated issues in either direction.
+function issueActivitySortValue(issue) {
+  const iso = issue && (issue.activityAt || issue.updatedAt || issue.createdAt);
+  const t = Date.parse(iso || '');
+  return Number.isFinite(t) ? t : null;
+}
+
 // diffview-uniform-patch-cap: one cap for every DiffView reader surface.
 // 256 KB matches search_index.rs PATCH_MAX_TOTAL, the per-commit patch cap
 // the indexer already uses, so there is one number and one rationale.

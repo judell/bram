@@ -9,13 +9,16 @@
   var.newIssueTurnEnded="{false}"
   var.lastIssuesSig="{''}"
   var.issueRefreshTick="{0}"
-  var.sortField="updatedAt"
+  var.sortField="activityAt"
   var.sortDir="desc"
   var.stateFilter="open"
   var.issuesSource="{(issuesFull.value &amp;&amp; issuesFull.value.length > 0) ? issuesFull.value : (issuesFirstPage.value || [])}"
   var.sortedIssues="{(issuesSource || []).filter(i => stateFilter === 'both' || (stateFilter === 'open') === (i.state === 'OPEN')).sort(function(a, b) {
-    const av = sortField === 'number' ? Number(a.number || 0) : (a[sortField] || '');
-    const bv = sortField === 'number' ? Number(b.number || 0) : (b[sortField] || '');
+    // AGE is an elapsed-time ordering: compare the activity timestamp that
+    // compactAge renders, never the compact duration string itself.
+    const av = sortField === 'number' ? Number(a.number || 0) : (sortField === 'activityAt' ? issueActivitySortValue(a) : (a[sortField] || ''));
+    const bv = sortField === 'number' ? Number(b.number || 0) : (sortField === 'activityAt' ? issueActivitySortValue(b) : (b[sortField] || ''));
+    if (sortField === 'activityAt' &amp;&amp; (av === null) !== (bv === null)) return av === null ? 1 : -1;
     if (av < bv) return sortDir === 'asc' ? -1 : 1;
     if (av > bv) return sortDir === 'asc' ? 1 : -1;
     return 0;
@@ -210,9 +213,9 @@
             value="{window.sortLabel('TITLE', sortField, sortDir, 'number')}" />
         </Link>
         <Link width="90px" noIndicator
-          onClick="const r = window.toggleSort(sortField, sortDir, 'updatedAt', 'desc'); sortField = r.field; sortDir = r.dir">
+          onClick="const r = window.toggleSort(sortField, sortDir, 'activityAt', 'desc'); sortField = r.field; sortDir = r.dir">
           <Text fontWeight="$fontWeight-bold" fontSize="$fontSize-sm" color="$textColor-secondary"
-            value="{window.sortLabel('AGE', sortField, sortDir, 'updatedAt')}" />
+            value="{window.sortLabel('AGE', sortField, sortDir, 'activityAt')}" />
         </Link>
       </HStack>
       <!-- browse-tabs-adopt-searchresults: rows render through the shared

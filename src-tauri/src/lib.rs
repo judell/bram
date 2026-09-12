@@ -42981,6 +42981,56 @@ fn membership_engine_observe<R: tauri::Runtime>(
     replay_owners_by_path: &std::collections::HashMap<String, std::collections::HashSet<String>>,
     replay_joint_by_path: &std::collections::HashMap<String, std::collections::HashSet<String>>,
 ) {
+    // membership-observer-leaves-the-serve-path: sample, do not run every serve.
+    //
+    // This engine is OBSERVE-ONLY -- nothing in the payload reads its partition
+    // -- and after `9f595ac` removed the replay's redundant key derivation it
+    // became the dominant cost of a board build: measured 204 ms / 44 spawns at
+    // 20 intervals, 1,318 ms / 200 at 200, and 9,035 ms / 1,730 at 2,000. Seconds
+    // of user-facing latency per serve, producing evidence no consumer reads,
+    // on exactly the boards that have been worked hardest.
+    //
+    // SAMPLED HERE rather than moved to a background tick, and the code decides
+    // that rather than taste: this function consumes `replay_owners_by_path` and
+    // `replay_joint_by_path`, both computed by the serve's attribution replay. Off
+    // the request path it would have to recompute that replay -- the very work
+    // `9f595ac` just made cheap -- so relocation would reintroduce the cost it was
+    // meant to remove.
+    //
+    // Sampling is safe for what this observes because the conditions are STATE,
+    // not events: a divergence or a conservation breach is a function of (board,
+    // worktree, intervals) and persists while that state does. The tau fire
+    // repeated identically across eleven serves in a six-hour window, and the
+    // synthetic reproduction fires on every serve while its condition holds. A
+    // 60s sample observes any state that lasts a minute, and still yields ~1,400
+    // observations a day -- far more than an adjudicator can read, which is the
+    // actual bottleneck (one evening's adjudication resolved all 69 of tau's
+    // divergences).
+    //
+    // The skip is TRACED. "Did not run" and "ran and found nothing" must not look
+    // alike -- the tripwire-versus-dead-instrument trap this project has already
+    // been bitten by.
+    const MEMBERSHIP_OBSERVE_INTERVAL_MS: i64 = 60_000;
+    static LAST_OBSERVE_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+    {
+        let now = unix_now_ms();
+        let last = LAST_OBSERVE_MS.load(std::sync::atomic::Ordering::Relaxed);
+        // last == 0 is process start: always observe once, so a short-lived
+        // process still contributes and a fresh launch is never silent.
+        if last != 0 && now.saturating_sub(last) < MEMBERSHIP_OBSERVE_INTERVAL_MS {
+            append_bram_trace_line(
+                app,
+                "claim-interval",
+                &format!(
+                    "op=membership-skipped reason=sampled since_ms={} interval_ms={}",
+                    now.saturating_sub(last),
+                    MEMBERSHIP_OBSERVE_INTERVAL_MS
+                ),
+            );
+            return;
+        }
+        LAST_OBSERVE_MS.store(now, std::sync::atomic::Ordering::Relaxed);
+    }
     let started = std::time::Instant::now();
     let spawns = std::cell::Cell::new(0usize);
     // `ambiguous` counts paths whose partition holds a non-zero ambiguous

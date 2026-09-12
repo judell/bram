@@ -99,7 +99,17 @@ pub fn open_in_memory() -> Result<Connection> {
 }
 
 /// Ensure the schema exists at the current version. On a version mismatch,
-/// drop and recreate (the index is a rebuildable cache).
+/// drop and recreate.
+///
+/// search-index-leaves-the-cache-directory: this used to justify itself with
+/// "the index is a rebuildable cache". It is still rebuildable, but it no
+/// longer lives in a cache directory and the rebuild is no longer cheap --
+/// measured 2026-09-10 at ~3 minutes per session file and ~50 minutes for a
+/// full cold build, during which Search, History, Commits and Issues are all
+/// serving from a partly-empty index. So a `SCHEMA_VERSION` bump is a decision
+/// with a user-visible price, not a free reset. Drop-and-recreate remains the
+/// deliberate trade -- migrating an FTS5 index is a much larger change -- but
+/// bump the version because the schema genuinely changed, not incidentally.
 fn ensure_schema(conn: &Connection) -> Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version != SCHEMA_VERSION {

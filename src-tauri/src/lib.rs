@@ -22724,14 +22724,215 @@ fn session_meta<R: tauri::Runtime>(
 // shared FTS5 index in search_index.rs.
 // ---------------------------------------------------------------------------
 
-/// The rebuildable index cache for the current project:
-/// `<app_cache_dir>/search-index/<project-key>.db`.
+/// The search index for the current project:
+/// `<app_local_data_dir>/search-index/<project-key>.db`.
+///
+/// search-index-leaves-the-cache-directory: this used to live under
+/// `app_cache_dir()`, which on macOS is `~/Library/Caches` -- a directory whose
+/// contract is *may vanish*. The OS purges it under disk pressure and cleanup
+/// utilities treat it as fair game. That was a fair trade while the index was
+/// cheap to rebuild. Measured 2026-09-10 it is not: 19 session files totalling
+/// 440 MB of JSONL, ~3 minutes per session, ~50 minutes for a full cold build.
+/// And the index is DB-first for four surfaces, not one -- Search, History
+/// (worklist-history rows), Commits (commit rows) and Issues (served cache-first
+/// from `extra`) -- so losing it degrades all of them until each bucket refills.
+/// Durable application data is the honest location for something that expensive.
+///
+/// This does NOT address the other wipe trigger: a `SCHEMA_VERSION` bump still
+/// drops and recreates by design (see `ensure_schema` in search_index.rs).
+///
+/// `app_local_data_dir()` and NOT `app_data_dir()`, which is a distinction with
+/// no consequence on the machine this was developed on and a large one on
+/// Windows. Per `dirs` (which tauri resolves through), `data_dir` and
+/// `data_local_dir` are the same directory on macOS and Linux, but on Windows
+/// `data_dir` is `%APPDATA%` -- Roaming -- while `data_local_dir` is
+/// `%LOCALAPPDATA%`. A roaming profile copies `%APPDATA%` to and from a domain
+/// server at logon and logoff, so putting a multi-hundred-megabyte FTS index
+/// there would turn every login into a file transfer of a machine-local,
+/// rebuildable database. Local app data is where a large per-machine cache-like
+/// artifact belongs even when it is not disposable.
 fn search_index_db_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
-    let cache = app.path().app_cache_dir().ok()?;
+    let data = app.path().app_local_data_dir().ok()?;
     let root = project_root(Some(app))?;
-    let dir = cache.join("search-index");
+    let dir = data.join("search-index");
     let _ = std::fs::create_dir_all(&dir);
-    Some(dir.join(format!("{}.db", encode_path_for_filename(&root))))
+    let db = dir.join(format!("{}.db", encode_path_for_filename(&root)));
+    migrate_search_index_from_cache(app, &db);
+    Some(db)
+}
+
+// search-index-leaves-the-cache-directory: one-shot relocation of an index
+// that already exists at the old cache path. A user who updates Bram daily
+// should keep the index they already built rather than pay ~50 minutes to
+// rebuild it in a new place -- the relocation is not the user's problem.
+//
+// Best-effort by design: the data really is reconstructible, just expensively,
+// so any failure here leaves the old file alone and falls back to a normal
+// cold build. `search_index_db_path` is called on nearly every index and search
+// operation, so the work is behind a `Once` rather than a stat per call.
+static SEARCH_INDEX_CACHE_MIGRATION: std::sync::Once = std::sync::Once::new();
+
+fn migrate_search_index_from_cache<R: tauri::Runtime>(app: &AppHandle<R>, new_db: &Path) {
+    SEARCH_INDEX_CACHE_MIGRATION.call_once(|| {
+        // Already relocated (or freshly built here): nothing to do.
+        if new_db.exists() {
+            return;
+        }
+        let Ok(cache) = app.path().app_cache_dir() else {
+            return;
+        };
+        let Some(root) = project_root(Some(app)) else {
+            return;
+        };
+        let old_db = cache
+            .join("search-index")
+            .join(format!("{}.db", encode_path_for_filename(&root)));
+        if !old_db.exists() {
+            return;
+        }
+        let bytes = std::fs::metadata(&old_db).map(|m| m.len()).unwrap_or(0);
+
+        match move_index_files(&old_db, new_db) {
+            Ok(moved_sidecars) => append_bram_trace_line(
+                app,
+                "search-index",
+                &format!(
+                    "op=cache-migrated bytes={} sidecars={} from={} to={}",
+                    bytes,
+                    moved_sidecars,
+                    old_db.display(),
+                    new_db.display()
+                ),
+            ),
+            Err(part) => append_bram_trace_line(
+                app,
+                "search-index",
+                &format!(
+                    "op=cache-migrate-failed part={} from={} to={}",
+                    part,
+                    old_db.display(),
+                    new_db.display()
+                ),
+            ),
+        }
+    });
+}
+
+/// The file-moving half of the cache migration, split from the `AppHandle`
+/// plumbing so the part that can lose data is directly testable.
+///
+/// Moves the database and its `-wal` / `-shm` sidecars. The sidecars are not
+/// optional politeness: a database separated from its write-ahead log loses
+/// whatever the log had not checkpointed, which for an index is the most recent
+/// work -- exactly what the move exists to preserve.
+///
+/// Returns the number of sidecars moved, or the name of the part that failed.
+fn move_index_files(old_db: &Path, new_db: &Path) -> Result<u32, String> {
+    let mut moved_sidecars = 0u32;
+    for suffix in ["", "-wal", "-shm"] {
+        let from = PathBuf::from(format!("{}{}", old_db.display(), suffix));
+        if !from.exists() {
+            continue;
+        }
+        let to = PathBuf::from(format!("{}{}", new_db.display(), suffix));
+        // `rename` fails across filesystems. Cache and data dirs are normally
+        // on the same volume, so the copy path is the unusual one, but falling
+        // back beats refusing to migrate.
+        let ok = std::fs::rename(&from, &to).is_ok()
+            || (std::fs::copy(&from, &to).is_ok() && std::fs::remove_file(&from).is_ok());
+        if !ok {
+            return Err(if suffix.is_empty() {
+                "db".to_string()
+            } else {
+                suffix.trim_start_matches('-').to_string()
+            });
+        }
+        if !suffix.is_empty() {
+            moved_sidecars += 1;
+        }
+    }
+    Ok(moved_sidecars)
+}
+
+#[cfg(test)]
+mod search_index_cache_migration_tests {
+    use super::move_index_files;
+    use std::path::PathBuf;
+
+    // A scratch pair of directories standing in for app_cache_dir and
+    // app_local_data_dir, cleaned up on drop.
+    struct Dirs {
+        root: PathBuf,
+    }
+
+    impl Dirs {
+        fn new(tag: &str) -> Self {
+            let root = std::env::temp_dir().join(format!("bram-index-migration-{tag}"));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(root.join("cache")).unwrap();
+            std::fs::create_dir_all(root.join("data")).unwrap();
+            Self { root }
+        }
+        fn old(&self) -> PathBuf {
+            self.root.join("cache").join("p.db")
+        }
+        fn new_(&self) -> PathBuf {
+            self.root.join("data").join("p.db")
+        }
+    }
+
+    impl Drop for Dirs {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn write(p: &PathBuf, body: &str) {
+        std::fs::write(p, body).unwrap();
+    }
+
+    #[test]
+    fn moves_database_and_both_sidecars() {
+        let d = Dirs::new("both");
+        write(&d.old(), "index");
+        write(&PathBuf::from(format!("{}-wal", d.old().display())), "wal");
+        write(&PathBuf::from(format!("{}-shm", d.old().display())), "shm");
+
+        assert_eq!(move_index_files(&d.old(), &d.new_()), Ok(2));
+
+        // The index is at the new path with its contents intact...
+        assert_eq!(std::fs::read_to_string(d.new_()).unwrap(), "index");
+        assert_eq!(
+            std::fs::read_to_string(format!("{}-wal", d.new_().display())).unwrap(),
+            "wal"
+        );
+        // ...and nothing is left behind to be found by a later migration.
+        assert!(!d.old().exists());
+        assert!(!PathBuf::from(format!("{}-wal", d.old().display())).exists());
+        assert!(!PathBuf::from(format!("{}-shm", d.old().display())).exists());
+    }
+
+    #[test]
+    fn moves_a_bare_database_with_no_sidecars() {
+        // The ordinary case: a cleanly-closed index has checkpointed its wal
+        // away, so only the .db exists.
+        let d = Dirs::new("bare");
+        write(&d.old(), "index");
+
+        assert_eq!(move_index_files(&d.old(), &d.new_()), Ok(0));
+        assert_eq!(std::fs::read_to_string(d.new_()).unwrap(), "index");
+        assert!(!d.old().exists());
+    }
+
+    #[test]
+    fn missing_source_is_not_an_error() {
+        // The caller gates on the old db existing, but a sidecar vanishing
+        // between that check and the move must not be treated as failure --
+        // the fallback for a failure is a ~50 minute rebuild.
+        let d = Dirs::new("missing");
+        assert_eq!(move_index_files(&d.old(), &d.new_()), Ok(0));
+        assert!(!d.new_().exists());
+    }
 }
 
 // state-mirror-store-and-ledger: the phase-A shadow db for worklist

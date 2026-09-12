@@ -42695,6 +42695,94 @@ fn membership_unowned(
 // a deliberate-violation unit test rather than a wait for fires — a
 // tripwire's zero and a dead instrument's zero are identical in a grep
 // (docs/developing-bram.md, soak-vs-tripwire).
+// membership-conservation-breach-is-diagnosable: the breach line's
+// `contributors=` field — each candidate's added-line contribution to this
+// path, largest first, so the over-claimer is named on sight.
+//
+// The first real fire (tau-extractor, 2026-09-10, eleven identical lines)
+// read `universe=4,1 single=101,0` and named nobody: someone attributed 101
+// added lines where the universe held 4, and the trace could not say who.
+// Reconstructing it took a separate archaeology pass over git history. A
+// tripwire that cannot be acted on when it fires is a tripwire that gets
+// muted, so the identity rides the line.
+//
+// Bounded to the top few: a path with many begun declarers should not be able
+// to produce an unbounded trace line, and the largest contributors are what a
+// reader needs.
+fn membership_contributors_note(contributors: &[(String, usize)]) -> String {
+    let mut sorted: Vec<&(String, usize)> = contributors.iter().collect();
+    sorted.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let shown: Vec<String> = sorted
+        .iter()
+        .take(3)
+        .map(|(who, n)| format!("{}:{}", who, n))
+        .collect();
+    if shown.is_empty() {
+        return "-".to_string();
+    }
+    let mut note = shown.join(",");
+    if sorted.len() > 3 {
+        note.push_str(&format!(",+{}", sorted.len() - 3));
+    }
+    note
+}
+
+#[cfg(test)]
+mod membership_breach_diagnosis_tests {
+    use super::*;
+
+    fn c(pairs: &[(&str, usize)]) -> Vec<(String, usize)> {
+        pairs.iter().map(|(a, b)| (a.to_string(), *b)).collect()
+    }
+
+    // The tau fire, reconstructed: universe held 4 added + 1 removed, and a
+    // single candidate contributed 101. The breach must report it, and the
+    // note must NAME the candidate — the thing the original line could not do.
+    #[test]
+    fn the_tau_fire_is_reported_and_now_names_its_over_claimer() {
+        let universe = (4usize, 1usize);
+        let single = (101usize, 0usize);
+        let breach = membership_conservation_breach(
+            universe,
+            single,
+            (0, 0),
+            (0, 0),
+            (0, 1), // unowned, clamped at zero on the added axis
+        );
+        assert_eq!(breach, Some((5, 102)), "expected=5 got=102");
+        assert_eq!(
+            membership_contributors_note(&c(&[("issue-1-run-logs-travel-and-a-logs-page", 101)])),
+            "issue-1-run-logs-travel-and-a-logs-page:101"
+        );
+    }
+
+    #[test]
+    fn contributors_are_largest_first_and_bounded() {
+        let note =
+            membership_contributors_note(&c(&[("a", 3), ("b", 40), ("c", 7), ("d", 1), ("e", 99)]));
+        assert_eq!(note, "e:99,b:40,c:7,+2", "largest first, capped at three");
+    }
+
+    #[test]
+    fn a_joint_candidate_is_labelled_by_its_member_set() {
+        assert_eq!(
+            membership_contributors_note(&c(&[("alpha+beta", 12)])),
+            "alpha+beta:12"
+        );
+    }
+
+    // Conservation holding must stay silent, and an empty note must not read
+    // as a contributor named "".
+    #[test]
+    fn a_balanced_partition_reports_nothing() {
+        assert_eq!(
+            membership_conservation_breach((4, 1), (3, 0), (0, 0), (0, 0), (1, 1)),
+            None
+        );
+        assert_eq!(membership_contributors_note(&[]), "-");
+    }
+}
+
 fn membership_conservation_breach(
     universe: (usize, usize),
     single: (usize, usize),
@@ -42874,6 +42962,12 @@ struct MembershipPathBuckets {
     joint: (usize, usize),
     ambiguous: (usize, usize),
     owners: std::collections::BTreeSet<String>,
+    // membership-conservation-breach-is-diagnosable: what each candidate
+    // contributed, so the tripwire can name the over-claimer instead of only
+    // reporting that someone over-claimed. Counts alone cost a full
+    // archaeology pass on the first real fire (tau, `expected=5 got=102`)
+    // and still did not identify which candidate produced the 101.
+    contributors: Vec<(String, usize)>,
 }
 
 // The engine driver. Observe-only: its entire output is three trace ops —
@@ -43183,6 +43277,9 @@ fn membership_engine_observe<R: tauri::Runtime>(
             };
             bucket.0 += counts.0;
             bucket.1 += counts.1;
+            if counts.0 > 0 {
+                buckets.contributors.push((members.join("+"), counts.0));
+            }
             buckets.owners.extend(members);
         }
     }
@@ -43207,7 +43304,8 @@ fn membership_engine_observe<R: tauri::Runtime>(
                 "claim-interval",
                 &format!(
                     "op=membership-conservation-broken path={} expected={} got={} \
-                     universe={},{} single={},{} joint={},{} ambiguous={},{} unowned={},{}",
+                     universe={},{} single={},{} joint={},{} ambiguous={},{} unowned={},{} \
+                     contributors={}",
                     path,
                     expected,
                     got,
@@ -43220,7 +43318,8 @@ fn membership_engine_observe<R: tauri::Runtime>(
                     m.ambiguous.0,
                     m.ambiguous.1,
                     unowned.0,
-                    unowned.1
+                    unowned.1,
+                    membership_contributors_note(&m.contributors)
                 ),
             );
         }

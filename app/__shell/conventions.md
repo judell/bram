@@ -294,17 +294,39 @@ This is also the strongest argument for not editing outside an authorized
 item: unauthorized edits do not merely skip an audit trail, they are credited
 to someone else.
 
-### Placeholder items (droppable reminders)
+### Reminder items (placeholders you can drop)
 
 One shape of item carries no diff yet and is still legitimate: a
-**placeholder** for an action that is already decided but gated on an
-external condition — an upstream merge, a release being cut, another
-agent's verdict — that will resolve after this session ends. Chat
-context dies with the session; the placeholder is what carries the
-reminder across. Live precedents:
+**reminder** — also called a placeholder — for an action that is
+already decided but gated on an external condition — an upstream
+merge, a release being cut, another agent's verdict — that will
+resolve after this session ends. Chat context dies with the session;
+the reminder is what carries it across. Live precedents:
 `file-upstream-null-expr-crash-after-3763` and
 `revendor-after-xmlui-release` (bram), `watch-for-3764-merge` (xmlui).
 
+- **Name.** A reminder item's id **begins with `reminder-`**
+  (`reminder-revendor-after-xmlui-release`). After the prefix the
+  ordinary id rules apply — a bare descriptive slug, or `issue-<N>-`
+  style content when the reminder is issue-derived. When the gate is a
+  **date**, put the date at the end of the id
+  (`reminder-rerun-census-after-2026-09-19`): it is the one fact a
+  reader needs before opening the draft.
+
+  This rule is **mechanical on purpose**, and that is the whole reason
+  it exists as a name rather than as prose. A reminder is the one item
+  shape whose entire job is to be remembered after the session that
+  wrote it is gone, so surfaces have to be able to find it without
+  reading English — the Awaiting You inbox keys on exactly this prefix.
+  A convention only a human can evaluate cannot drive a surface.
+
+  Item ids are immutable (see *Choosing an id*), so this cannot be
+  applied retroactively: a reminder written before the rule keeps its
+  name, and the only conversion is for the user to Drop it and for the
+  agent to re-propose it verbatim under a `reminder-` id. That costs two
+  clicks and leaves an honest drop → re-propose history. Don't push it —
+  but do say plainly what the old name costs, which is that
+  prefix-keyed surfaces will not see that row.
 - **Shape.** `Before` states the awaited condition plus enough
   self-contained context that no conversation history is needed to act
   on it. `After` states the action Approve green-lights, and says
@@ -316,7 +338,7 @@ reminder across. Live precedents:
   condition was mooted or the action superseded — an expected, honorable
   ending for this kind, not a failure.
 - **Boundary.** This does not reopen the door to investigation items. A
-  placeholder records a *decided future action*; an open question is
+  reminder records a *decided future action*; an open question is
   still chat's job.
 
 ### Schema and draft layout
@@ -936,6 +958,11 @@ id is for human scanning (Worklist tab, `git log`, chat),
 `closesIssues` drives the close-on-commit dialog. Pair them when
 both apply.
 
+A **reminder** item — no diff, gated on a condition that resolves after
+this session — takes the `reminder-` prefix instead, and that one is
+read by machines as well as people. See *Reminder items (placeholders
+you can drop)*.
+
 Item ids are **immutable**. Renaming is not supported: removing an
 existing id from `worklist.json` reads as an unauthorized prune and the
 host reverts the write, while any draft file you already moved stays
@@ -943,7 +970,9 @@ moved — leaving the row with `_draftMissing` and no prose until someone
 restores the filename by hand. The rollback is silent; your write
 returns success, so nothing tells you it failed. If an id turns out to
 under-name its item, keep the id and say so in the draft. Tracked in
-judell/bram#276.
+judell/bram#276. This is also why the `reminder-` rule governs new
+items only; the conversion path for an existing one is Drop plus
+re-propose, never a rename.
 
 #### Keep the `files` list current as understanding evolves
 
@@ -1437,7 +1466,8 @@ with search*.
 ### Carry gated follow-ups, and don't edit across the boundary
 
 Actions gated on the other side (a merge, a release, a verdict) become
-**placeholder items** — see *Placeholder items (droppable reminders)*.
+**reminder items**, `reminder-` prefix and all — see *Reminder items
+(placeholders you can drop)*.
 
 Act only in the repo whose session you're in. The thread is the
 transport, not a shortcut for reaching across and editing the other

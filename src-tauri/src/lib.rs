@@ -31761,6 +31761,23 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
             // at its chronological position) so interrupting messages
             // appear in every display surface. Refs #reads-first iterate
             // test: "did not see my iteration as a You: last message".
+            //
+            // DO NOT narrow this to human-authored queued commands. A
+            // background-work notification delivered while the agent is
+            // mid-turn arrives as this same shape, distinguished only by
+            // `commandMode: "task-notification"` and by carrying no `origin`
+            // — so gating on `origin.kind == "human"` (which the human case
+            // does carry, and which the neighbouring test fixture asserts)
+            // would leave `role` unset, drop the record at the
+            // `let Some(role) = role else { continue }` below, and silently
+            // erase completion reports from the Transcript.
+            //
+            // Correct rendering of those notifications is a COMPOSITION of
+            // this branch with the reclassification further down (search
+            // `st_notification_turn`, gated on `role == "user"`): this branch
+            // makes the record a user turn, that one turns it into a system
+            // note. Neither is sufficient alone. Pinned by
+            // `task_notification_attachment_is_a_system_note`.
             if let Some(att) = r.get("attachment") {
                 if att.get("type").and_then(|v| v.as_str()) == Some("queued_command") {
                     if let Some(prompt) = att.get("prompt").and_then(|v| v.as_str()) {
@@ -32029,6 +32046,14 @@ fn st_parse_lines_to_turns(jsonl_text: &str) -> Vec<serde_json::Value> {
 
         // Task notifications ride user records (and queued_command
         // attachments); reclassify before any user-turn handling.
+        //
+        // The `queued_command` half depends on the attachment branch above
+        // having set `role = "user"` first — the two compose, and the pair is
+        // what keeps a completion report from wearing a "You" badge. Loosening
+        // the `role == "user"` gate here, or narrowing that branch there,
+        // breaks it from opposite ends and in different ways: this side
+        // regresses to judell/bram#201 (notification rendered as a user turn),
+        // that side makes the notification disappear entirely.
         if role == "user" {
             if let Some(nturn) = st_notification_turn(&text_joined) {
                 turns.push(nturn);
@@ -49612,6 +49637,46 @@ mod session_turn_tests {
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0]["role"], "user");
         assert!(turns[0]["text"].as_str().unwrap().starts_with("iterate:"));
+    }
+
+    // The other outcome for the same record type, and the discriminator
+    // between them. Captured live on 2026-09-12 from Claude Code CLI 2.1.236:
+    // a background command that completes while the agent is MID-TURN is
+    // queued, and its notification is delivered as a `queued_command`
+    // attachment rather than as a `user` record. (Arriving while the agent is
+    // IDLE, the same notification is written as a plain `user` record — that
+    // path is covered by `notification_turn_boundary_tests`.)
+    //
+    // Correct handling is a composition: the attachment branch makes it a user
+    // turn, then `st_notification_turn` reclassifies it to a system note. The
+    // test above asserts a `queued_command` attachment MUST become a user turn;
+    // read alone it teaches the opposite of the rule notifications need. This
+    // is the assertion that records the difference, so narrowing either branch
+    // fails here instead of silently erasing completion reports from the
+    // Transcript or regressing them to "You" bubbles (judell/bram#201).
+    //
+    // Note what the fixture does NOT have: an `origin` field. The human case
+    // above carries `origin.kind: "human"`; this one carries nothing, which is
+    // exactly why gating the attachment branch on origin is the tempting and
+    // destructive edit.
+    #[test]
+    fn task_notification_attachment_is_a_system_note() {
+        let content = r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"<task-notification>\n<task-id>b1wzgu9du</task-id>\n<tool-use-id>toolu_01MwhuW2mAWt4AQRA3uGWWa9</tool-use-id>\n<status>completed</status>\n<summary>Background command \"Background probe\" completed (exit code 0)</summary>\n</task-notification>","commandMode":"task-notification"}}"#;
+        let turns = st_parse_lines_to_turns(content);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0]["role"], "system", "never attributed to the user");
+        assert_eq!(turns[0]["notification"], true);
+        assert_eq!(turns[0]["status"], "completed");
+        let text = turns[0]["text"].as_str().unwrap();
+        assert_eq!(
+            text,
+            "Background command \"Background probe\" completed (exit code 0)"
+        );
+        assert!(
+            !text.contains('<'),
+            "the summary reaches the pane, not the envelope: {}",
+            text
+        );
     }
 
     #[test]

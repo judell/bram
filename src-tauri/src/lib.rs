@@ -51057,6 +51057,60 @@ fn handle_needs_you_dismiss<R: tauri::Runtime>(
     )
 }
 
+// reminder-items-in-loose-ends: a worklist item whose id begins with
+// `reminder-` is a decided future action gated on a condition that resolves
+// after the session that wrote it (conventions.md, "Reminder items
+// (placeholders you can drop)"). It is `proposed` and never begun, so the
+// `waiting` test in the worklist source correctly excludes it -- and that
+// exclusion left the one item shape whose whole job is to be remembered
+// invisible to the surface that answers "what is waiting on me?", visible only
+// on the Worklist tab mixed into active work.
+//
+// One lane, no date logic. The id carries the condition and a person reads it:
+// `...-after-2026-09-19` says when, `...-after-table-sort-fix-releases` says
+// what. Loose ends is already where carried-but-not-blocking lives, which is
+// every reminder, due or not. Consequence, accepted rather than overlooked:
+// nothing promotes a reminder on its due date, so a dated one surfaces when
+// someone looks, not on the day. Date-parsing was considered and rejected --
+// it bought one lane transition for a parser plus a host-side notion of "due".
+//
+// The prefix is the whole interface. A convention only a human can evaluate
+// cannot drive a surface, which is why the naming rule is mechanical.
+fn needs_you_reminder_row(
+    item: &serde_json::Value,
+    claimed: &std::collections::HashSet<String>,
+) -> Option<(NeedsYouLane, serde_json::Value)> {
+    let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    if !id.starts_with("reminder-") {
+        return None;
+    }
+    let status = item
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("proposed");
+    // A begun or applied reminder is ordinary work now -- the worklist source
+    // owns it and titles it honestly. A claimed one is with the agent, not
+    // awaiting you (the same gate the worklist source applies).
+    if status != "proposed" || item.get("begunAtMs").is_some() || claimed.contains(id) {
+        return None;
+    }
+    Some((
+        owner_state_lane(true, false, true),
+        serde_json::json!({
+            "source": "bram-local",
+            "id": id,
+            "title": format!("Reminder \u{201c}{}\u{201d}", id),
+            // The host cannot evaluate the condition, so it points at the
+            // draft rather than restating something it does not know.
+            "detail": "A decided action waiting on a condition only you can check \u{2014} the draft says which. Start it when the condition is met, or Drop it if it was mooted.",
+            "link": format!("/worklist2?expand={}", id),
+            "court": "user",
+            "blocking": false,
+            "verified": true,
+        }),
+    ))
+}
+
 fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str, Vec<u8>) {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -51091,6 +51145,13 @@ fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str,
             .unwrap_or("")
             .to_string();
         if id.is_empty() {
+            continue;
+        }
+        // A not-yet-begun reminder takes the loose-ends path; anything else
+        // (including a reminder that HAS begun) falls through to the ordinary
+        // waiting test below.
+        if let Some(row) = needs_you_reminder_row(&item, &claimed) {
+            classified.push(row);
             continue;
         }
         let status = item
@@ -51315,6 +51376,100 @@ fn serve_needs_you<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str,
 #[cfg(test)]
 mod needs_you_tests {
     use super::*;
+
+    fn reminder_item(id: &str, extra: serde_json::Value) -> serde_json::Value {
+        let mut v = serde_json::json!({"id": id, "status": "proposed"});
+        if let (Some(obj), Some(add)) = (v.as_object_mut(), extra.as_object()) {
+            for (k, val) in add {
+                obj.insert(k.clone(), val.clone());
+            }
+        }
+        v
+    }
+
+    // reminder-items-in-loose-ends: the prefix IS the interface, so the test
+    // that matters is that an ordinary proposed item and a reminder differ by
+    // nothing except the id.
+    #[test]
+    fn a_reminder_reaches_loose_ends_where_ordinary_proposed_work_does_not() {
+        let claimed = std::collections::HashSet::new();
+        let reminder = reminder_item(
+            "reminder-revendor-after-xmlui-release",
+            serde_json::json!({}),
+        );
+        let (lane, row) =
+            needs_you_reminder_row(&reminder, &claimed).expect("reminder should reach a lane");
+        assert_eq!(needs_you_lane_key(lane), "looseEnds");
+        assert_eq!(row["court"], "user");
+        assert_eq!(row["blocking"], false);
+        assert_eq!(row["verified"], true);
+        assert_eq!(
+            row["link"],
+            "/worklist2?expand=reminder-revendor-after-xmlui-release"
+        );
+        assert!(
+            row["title"]
+                .as_str()
+                .unwrap()
+                .contains("reminder-revendor-after-xmlui-release"),
+            "the id carries the condition, so it must be in the title"
+        );
+
+        // Same shape, no prefix: not a reminder, and the ordinary waiting test
+        // (not this function) decides its fate.
+        let ordinary = reminder_item("revendor-after-xmlui-release", serde_json::json!({}));
+        assert!(needs_you_reminder_row(&ordinary, &claimed).is_none());
+    }
+
+    // Once work has begun, a reminder is ordinary work and the worklist source
+    // owns it -- titling it "ready to commit" rather than "Reminder".
+    #[test]
+    fn a_begun_reminder_falls_through_to_the_ordinary_path() {
+        let claimed = std::collections::HashSet::new();
+        let begun = reminder_item(
+            "reminder-rerun-census-after-2026-09-19",
+            serde_json::json!({"begunAtMs": 1_789_000_000_000i64}),
+        );
+        assert!(needs_you_reminder_row(&begun, &claimed).is_none());
+
+        let applied = reminder_item(
+            "reminder-rerun-census-after-2026-09-19",
+            serde_json::json!({"status": "applied"}),
+        );
+        assert!(needs_you_reminder_row(&applied, &claimed).is_none());
+    }
+
+    // Same gate the worklist source applies: an item under the live claim is
+    // with the agent, not awaiting you.
+    #[test]
+    fn a_claimed_reminder_is_with_the_agent() {
+        let mut claimed = std::collections::HashSet::new();
+        claimed.insert("reminder-revendor-after-xmlui-release".to_string());
+        let reminder = reminder_item(
+            "reminder-revendor-after-xmlui-release",
+            serde_json::json!({}),
+        );
+        assert!(needs_you_reminder_row(&reminder, &claimed).is_none());
+    }
+
+    // No date logic anywhere: a dated and an undated reminder are treated
+    // identically, and a date that has passed changes nothing. This is the
+    // simplification the design chose; if it ever stops being true, this test
+    // is where the change announces itself.
+    #[test]
+    fn dates_in_the_id_are_signage_not_logic() {
+        let claimed = std::collections::HashSet::new();
+        for id in [
+            "reminder-rerun-census-after-2026-09-19",
+            "reminder-rerun-census-after-1999-01-01",
+            "reminder-revendor-after-xmlui-release",
+        ] {
+            let (lane, _) =
+                needs_you_reminder_row(&reminder_item(id, serde_json::json!({})), &claimed)
+                    .unwrap_or_else(|| panic!("{} should reach a lane", id));
+            assert_eq!(needs_you_lane_key(lane), "looseEnds", "{}", id);
+        }
+    }
 
     // issue-320: the failure-path fix. With NO active provider, the banner
     // predicate must reflect the project's need (either provider), not false.

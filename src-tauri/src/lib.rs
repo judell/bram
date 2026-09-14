@@ -39535,16 +39535,43 @@ fn extract_marker_block<'a>(disk: &'a str, start: &str, end: &str) -> Option<&'a
     Some(&disk[start_idx..end_idx])
 }
 
+// issue-303: pure predicate so it's unit-testable without an AppHandle.
+// True exactly when `disk` still carries the worklist-gate intro sentences
+// the source repo's AGENTS.md hand-authors (the same substrings that used
+// to be hardcoded past in codex_agents_block_current's `is_source_repo`
+// branch, and that codex_agents_has_marker widens for in
+// compute_seed_currency_checks).
+fn agents_md_has_worklist_gate_intro(disk: &str) -> bool {
+    disk.contains("This repo is driven through Bram") && disk.contains("resources/worklist.json")
+}
+
+// issue-303: pure predicate, same reasoning as
+// agents_md_has_worklist_gate_intro above but for the source repo's
+// CLAUDE.md, which carries a live `@app/__shell/conventions.md` import
+// instead of AGENTS.md's prose.
+fn claude_md_has_source_repo_import(disk: &str) -> bool {
+    disk.contains("@app/__shell/conventions.md")
+}
+
 fn codex_agents_block_current<R: tauri::Runtime>(
     app: &AppHandle<R>,
     agents_path: &Path,
     is_source_repo: bool,
 ) -> bool {
-    // Source repo carries AGENTS.md as the canonical content, not as a
-    // Bram-installed marker block. Setup doesn't rewrite it, so it can't
-    // go stale relative to the bundle.
+    // issue-303: the source repo's AGENTS.md is hand-authored prose, never
+    // the ENHANCE_MARKER-wrapped block Setup installs elsewhere, so there is
+    // no seeded byte sequence to diff against here -- that part of the
+    // shortcut below was real. But returning `true` unconditionally was not
+    // a check, it was a bypass: it reported "current" without ever reading
+    // the file. The only currency question that genuinely applies to
+    // hand-authored content is whether the sentences introducing the
+    // worklist gate -- the same substrings codex_agents_has_marker widens
+    // for in enhance_status -- are still present verbatim. Perform that
+    // real, unbypassed read instead.
     if is_source_repo {
-        return true;
+        return std::fs::read_to_string(agents_path)
+            .map(|s| agents_md_has_worklist_gate_intro(&s))
+            .unwrap_or(false);
     }
     let Some((bundle_bytes, _)) = serve_app_file(Some(app), ENHANCE_CODEX_BUNDLE_REL) else {
         return false;
@@ -39566,6 +39593,218 @@ fn codex_agents_block_current<R: tauri::Runtime>(
     extract_marker_block(&disk, ENHANCE_MARKER_START, ENHANCE_MARKER_END)
         .map(|slice| slice == expected)
         .unwrap_or(false)
+}
+
+// issue-303: the five per-file marker/currency checks that used to
+// special-case is_source_repo inside enhance_status, one bypass apiece.
+// The source repo IS the origin of these seeded files, so "your copy is
+// stale" is never actionable there -- there is nothing to re-seed from.
+// That argues against ever raising the needs-setup banner over one of
+// these (see the single, explicit exemption in enhance_status), but it
+// does NOT argue against checking: drift between app/__shell/conventions.md
+// and an installed .claude/bram-conventions.md, or between AGENTS.md and
+// the worklist-gate intro it's expected to carry, is a real condition a
+// developer working on Bram itself wants to know about. Pretending
+// currency unconditionally is how that drift stays unnoticed. So every
+// field below now performs its real, unbypassed test in every project,
+// including the source repo -- widening a marker match only where the
+// source file's shape is genuinely different (CLAUDE.md's live @-import,
+// AGENTS.md's hand-authored intro prose), never merely to suppress a
+// result. This one struct is shared by enhance_status (which feeds the
+// needs-setup verdict) and source_repo_status_rows (which reports these
+// same results as plain facts on the Status tab's "Source repo" section).
+struct SeedCurrencyChecks {
+    claude_md_has_marker: bool,
+    sidecar_exists: bool,
+    claude_sidecar_current: bool,
+    codex_agents_has_marker: bool,
+    codex_agents_current: bool,
+}
+
+fn compute_seed_currency_checks<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    proj: &Path,
+    is_source_repo: bool,
+) -> SeedCurrencyChecks {
+    let claude_md = proj.join("CLAUDE.md");
+    let sidecar = proj.join(ENHANCE_SIDECAR_REL);
+    let sidecar_legacy = proj.join(ENHANCE_SIDECAR_LEGACY_REL);
+    let codex_agents = proj.join(ENHANCE_CODEX_AGENTS_REL);
+    // CLAUDE.md: the source repo's own CLAUDE.md legitimately differs in
+    // shape from a seeded project's -- it carries a live
+    // `@app/__shell/conventions.md` import rather than the Setup-managed
+    // marker block, because it IS the file that import points at. Widening
+    // the match here tests for the genuinely different thing this file
+    // actually contains, not a way to dodge a mismatch.
+    let claude_md_has_marker = std::fs::read_to_string(&claude_md)
+        .map(|s| {
+            s.contains(ENHANCE_MARKER_START)
+                || s.contains(ENHANCE_LEGACY_MARKER_START)
+                || (is_source_repo && claude_md_has_source_repo_import(&s))
+        })
+        .unwrap_or(false);
+    // Sidecar existence and currency: no is_source_repo bypass at all. The
+    // source repo has no installed .claude/bram-conventions.md by design
+    // (the bundle at app/__shell/conventions.md IS the canonical text, not
+    // a seeded copy of it), so the honest, unbypassed answer there is
+    // "absent" / "not current" -- a real, checked fact, not a suppressed
+    // one. A stray sidecar that somehow appears (or drifts) is now
+    // genuinely detected instead of hidden behind an unconditional `true`.
+    let sidecar_exists = sidecar.exists() || sidecar_legacy.exists();
+    let claude_sidecar_current = sidecar.exists() && sidecar_matches_seeded(app, &sidecar);
+    // AGENTS.md: same genuine-shape reasoning as CLAUDE.md above -- the
+    // source repo's AGENTS.md really does carry this hand-authored prose,
+    // never a Setup-managed marker block.
+    let codex_agents_has_marker = std::fs::read_to_string(&codex_agents)
+        .map(|s| {
+            s.contains(ENHANCE_MARKER_START)
+                || s.contains(ENHANCE_LEGACY_MARKER_START)
+                || (is_source_repo && agents_md_has_worklist_gate_intro(&s))
+        })
+        .unwrap_or(false);
+    let codex_agents_current = codex_agents_block_current(app, &codex_agents, is_source_repo);
+    SeedCurrencyChecks {
+        claude_md_has_marker,
+        sidecar_exists,
+        claude_sidecar_current,
+        codex_agents_has_marker,
+        codex_agents_current,
+    }
+}
+
+// issue-303: reports the SeedCurrencyChecks results for the Status tab's
+// "Source repo" section -- coordination_status includes this section only
+// when is_source_repo is true. Every detail below is a statement of what
+// was found, never a remedy: Setup does not write CLAUDE.md, the sidecar,
+// or AGENTS.md's marker block in the source repo (run_enhance skips those
+// writes unconditionally), so there is no "run Setup to fix this" to offer
+// here the way the same signals' Agent Coordination rows offer it
+// elsewhere. That's also why a mismatch here never raises the needs-setup
+// banner (see the exemption note in enhance_status) even though it's
+// faithfully reported.
+fn source_repo_status_rows<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    proj: &Path,
+) -> Vec<serde_json::Value> {
+    use serde_json::json;
+    let checks = compute_seed_currency_checks(app, proj, true);
+    let claude_md = proj.join("CLAUDE.md");
+    let sidecar = proj.join(ENHANCE_SIDECAR_REL);
+    let codex_agents = proj.join(ENHANCE_CODEX_AGENTS_REL);
+    vec![
+        json!({
+            "signal": "CLAUDE.md (@-import)",
+            "level": if checks.claude_md_has_marker { "ok" } else { "warn" },
+            "state": if checks.claude_md_has_marker { "present" } else { "absent" },
+            "detail": if checks.claude_md_has_marker {
+                format!("CLAUDE.md references @{}", ENHANCE_SOURCE_BUNDLE_REL)
+            } else {
+                format!(
+                    "CLAUDE.md does not reference @{} — the conventions import is missing",
+                    ENHANCE_SOURCE_BUNDLE_REL
+                )
+            },
+            "seen": file_modified_iso(&claude_md),
+        }),
+        json!({
+            "signal": ENHANCE_SIDECAR_REL,
+            "level": if checks.sidecar_exists { "warn" } else { "none" },
+            "state": if checks.sidecar_exists { "present" } else { "absent" },
+            "detail": if checks.sidecar_exists {
+                format!(
+                    "A {} exists alongside the canonical {} — the source repo does not seed a sidecar copy of itself, so this is unexpected",
+                    ENHANCE_SIDECAR_REL, ENHANCE_SOURCE_BUNDLE_REL
+                )
+            } else {
+                format!(
+                    "No {} on disk, as expected — the bundle at {} is the canonical text, not a seeded copy of it",
+                    ENHANCE_SIDECAR_REL, ENHANCE_SOURCE_BUNDLE_REL
+                )
+            },
+            "seen": file_modified_iso(&sidecar),
+        }),
+        json!({
+            "signal": format!("{} currency", ENHANCE_SIDECAR_REL),
+            "level": "none",
+            "state": if !checks.sidecar_exists {
+                "n/a"
+            } else if checks.claude_sidecar_current {
+                "current"
+            } else {
+                "stale"
+            },
+            "detail": if !checks.sidecar_exists {
+                "No sidecar file present to compare bytes against".to_string()
+            } else if checks.claude_sidecar_current {
+                "Byte-matches the seeded bundle".to_string()
+            } else {
+                "Present but differs from the seeded bundle bytes".to_string()
+            },
+            "seen": file_modified_iso(&sidecar),
+        }),
+        json!({
+            "signal": "AGENTS.md (worklist intro)",
+            "level": if checks.codex_agents_has_marker { "ok" } else { "warn" },
+            "state": if checks.codex_agents_has_marker { "present" } else { "absent" },
+            "detail": if checks.codex_agents_has_marker {
+                "AGENTS.md contains the \"driven through Bram\" / resources/worklist.json intro sentences".to_string()
+            } else {
+                "AGENTS.md does not contain the expected worklist-gate intro sentences".to_string()
+            },
+            "seen": file_modified_iso(&codex_agents),
+        }),
+        json!({
+            "signal": "AGENTS.md currency",
+            "level": if checks.codex_agents_current { "ok" } else { "warn" },
+            "state": if checks.codex_agents_current { "current" } else { "stale" },
+            "detail": if checks.codex_agents_current {
+                "Worklist-gate intro sentences match what app/__shell/conventions.md describes".to_string()
+            } else {
+                "Worklist-gate intro sentences differ from what app/__shell/conventions.md describes".to_string()
+            },
+            "seen": file_modified_iso(&codex_agents),
+        }),
+    ]
+}
+
+#[cfg(test)]
+mod seed_currency_check_tests {
+    use super::{agents_md_has_worklist_gate_intro, claude_md_has_source_repo_import};
+
+    // issue-303: these two predicates are what replaced the old
+    // `is_source_repo { return true }` bypasses in codex_agents_block_current
+    // and the CLAUDE.md / AGENTS.md marker-widening arms of
+    // compute_seed_currency_checks. Before this change nothing exercised
+    // that logic at all -- the source-repo path was a hardcoded constant, not
+    // a check, so there was nothing to test. Now there is.
+
+    #[test]
+    fn agents_md_intro_present_when_both_substrings_are_present() {
+        let disk = "intro\n\nThis repo is driven through Bram. Read resources/worklist.json.\n";
+        assert!(agents_md_has_worklist_gate_intro(disk));
+    }
+
+    #[test]
+    fn agents_md_intro_absent_when_either_substring_is_missing() {
+        assert!(!agents_md_has_worklist_gate_intro(
+            "This repo is driven through Bram, but no worklist path here."
+        ));
+        assert!(!agents_md_has_worklist_gate_intro(
+            "See resources/worklist.json for the gate."
+        ));
+        assert!(!agents_md_has_worklist_gate_intro(""));
+    }
+
+    #[test]
+    fn claude_md_import_present_only_when_the_at_import_is_present() {
+        assert!(claude_md_has_source_repo_import(
+            "# Bram\n\n@app/__shell/conventions.md\n"
+        ));
+        assert!(!claude_md_has_source_repo_import(
+            "# Bram\n\napp/__shell/conventions.md (no @-import)\n"
+        ));
+        assert!(!claude_md_has_source_repo_import(""));
+    }
 }
 
 fn codex_instr_block_current(config_path: &Path) -> bool {
@@ -39794,24 +40033,16 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
     let worklist_auth = proj.join(WORKLIST_AUTH_REL);
     let active_provider = current_provider(app);
     let is_source_repo = proj.join(ENHANCE_SOURCE_BUNDLE_REL).exists();
-    let claude_md_has_marker = std::fs::read_to_string(&claude_md)
-        .map(|s| {
-            s.contains(ENHANCE_MARKER_START)
-                || s.contains(ENHANCE_LEGACY_MARKER_START)
-                || (is_source_repo && s.contains("@app/__shell/conventions.md"))
-        })
-        .unwrap_or(false);
-    // Source repo treats the bundle itself as the canonical sidecar.
-    // Legacy .claude/xmlui-desktop-conventions.md also counts as installed
-    // until Setup migrates it to the new path.
-    let sidecar_exists =
-        sidecar.exists() || proj.join(ENHANCE_SIDECAR_LEGACY_REL).exists() || is_source_repo;
+    // issue-303: every branch below now runs its real, unbypassed check —
+    // see compute_seed_currency_checks for the reasoning on each field.
+    let seed_checks = compute_seed_currency_checks(app, &proj, is_source_repo);
+    let claude_md_has_marker = seed_checks.claude_md_has_marker;
+    let sidecar_exists = seed_checks.sidecar_exists;
     // Whole-file currency check, parallel to `codex_agents_current` on the
     // Codex side. Without this, a stale sidecar (bundle bumped after Setup
     // last ran) leaves `claude_installed` true and the Setup banner hidden,
     // even though Agent Coordination correctly flags the row as stale.
-    let claude_sidecar_current =
-        is_source_repo || (sidecar.exists() && sidecar_matches_seeded(app, &sidecar));
+    let claude_sidecar_current = seed_checks.claude_sidecar_current;
     // retire-python-hooks-rust-only: registration currency is the whole
     // Claude hook story — there are no installed scripts to compare, only
     // the bram-guard link (whose absence makes the expected commands None,
@@ -39826,16 +40057,8 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         "guard claude-permission-menu",
         expected_menu_command,
     );
-    let codex_agents_has_marker = std::fs::read_to_string(&codex_agents)
-        .map(|s| {
-            s.contains(ENHANCE_MARKER_START)
-                || s.contains(ENHANCE_LEGACY_MARKER_START)
-                || (is_source_repo
-                    && s.contains("This repo is driven through Bram")
-                    && s.contains("resources/worklist.json"))
-        })
-        .unwrap_or(false);
-    let codex_agents_current = codex_agents_block_current(app, &codex_agents, is_source_repo);
+    let codex_agents_has_marker = seed_checks.codex_agents_has_marker;
+    let codex_agents_current = seed_checks.codex_agents_current;
     let codex_config_path = home_dir().map(|h| h.join(ENHANCE_CODEX_CONFIG_REL));
     let codex_hook_block_current = codex_config_path
         .as_ref()
@@ -39846,21 +40069,39 @@ fn enhance_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, Stri
         .map(|p| codex_instr_block_current(p))
         .unwrap_or(false);
     let core_installed = worklist_auth.exists();
-    let claude_installed = claude_md_has_marker
-        && sidecar_exists
-        && claude_sidecar_current
-        && hook_registered
-        && menu_hook_registered;
-    let codex_installed = core_installed
-        && codex_agents_has_marker
-        && codex_agents_current
-        && codex_hook_block_current
-        && codex_instr_current;
+    // The two "doc currency" halves -- the seeded files whose staleness has
+    // nothing to remedy in the source repo (see the exemption below) --
+    // kept separate from hook registration, which IS actionable there.
+    let claude_docs_current = claude_md_has_marker && sidecar_exists && claude_sidecar_current;
+    let codex_docs_current = codex_agents_has_marker && codex_agents_current;
+    let claude_installed = claude_docs_current && hook_registered && menu_hook_registered;
+    let codex_installed =
+        core_installed && codex_docs_current && codex_hook_block_current && codex_instr_current;
     let codex_install_stale_only = core_installed
         && codex_agents_has_marker
         && (!codex_hook_block_current || !codex_agents_current || !codex_instr_current);
-    let claude_needs_setup = !core_installed || !claude_installed;
-    let codex_needs_setup = !core_installed || !codex_installed;
+    // issue-303: the ONE place is_source_repo affects the needs-setup
+    // verdict. The source repo IS the origin of the seeded doc files (the
+    // conventions sidecar, the CLAUDE.md / AGENTS.md marker blocks) -- there
+    // is nothing to re-seed those FROM, so a doc-currency mismatch there is
+    // never actionable and must not raise the Setup banner. That does NOT
+    // extend to hook registration (core_installed, the PreToolUse /
+    // permission-menu hooks, the Codex developer-instructions block):
+    // run_enhance writes those in the source repo exactly as it does
+    // everywhere else (its "idempotent installs" run unconditionally), so a
+    // missing or stale hook there is exactly as actionable as anywhere else
+    // and must still raise the banner. Every check feeding claude_docs_current
+    // / codex_docs_current still runs for real and reports its true result —
+    // see the Status tab's "Source repo" section — this only decides whether
+    // that result gates the banner.
+    let claude_needs_setup = !core_installed
+        || !hook_registered
+        || !menu_hook_registered
+        || (!is_source_repo && !claude_docs_current);
+    let codex_needs_setup = !core_installed
+        || !codex_hook_block_current
+        || !codex_instr_current
+        || (!is_source_repo && !codex_docs_current);
     let provider_needs_setup =
         provider_needs_setup_for(active_provider, claude_needs_setup, codex_needs_setup);
     let active_provider_json = match active_provider {
@@ -47125,6 +47366,11 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
         .and_then(|v| v.get("modifiedIso").and_then(|p| p.as_str()))
         .unwrap_or("");
     let project_root_path = project_root(Some(app));
+    // issue-303: gates whether the "Source repo" section is appended below.
+    let is_source_repo = project_root_path
+        .as_ref()
+        .map(|p| p.join(ENHANCE_SOURCE_BUNDLE_REL).exists())
+        .unwrap_or(false);
     // retire-python-hooks-rust-only: hook health is the bram-guard link plus
     // the two registrations. No interpreter row — hooks have no runtime
     // dependency beyond the link itself.
@@ -47621,7 +47867,7 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
     let guard_warn = trace["guardBlocks"].as_i64().unwrap_or(0) > 0;
     let _ = (orphan_auth, orphan_auth_detail);
 
-    let rows = serde_json::json!({
+    let mut rows = serde_json::json!({
         "generatedAt": format_iso_utc_ms(now),
         "raw": {
             "worklist": worklist,
@@ -47785,6 +48031,20 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
             }
         ]
     });
+
+    // issue-303: only the source repo gets this section -- everywhere else
+    // these paths are Setup-managed, and their currency is already covered
+    // by the Agent Coordination section above.
+    if is_source_repo {
+        if let Some(proj) = project_root_path.as_ref() {
+            if let Some(sections) = rows.get_mut("sections").and_then(|v| v.as_array_mut()) {
+                sections.push(serde_json::json!({
+                    "title": "Source repo",
+                    "rows": source_repo_status_rows(app, proj)
+                }));
+            }
+        }
+    }
 
     serde_json::to_vec(&rows).map_err(|e| e.to_string())
 }

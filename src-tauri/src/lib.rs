@@ -33290,10 +33290,40 @@ struct SendLedgerEntry {
 }
 
 const SEND_LEDGER_CAP: usize = 50;
-// Grace before an unlanded send is called stranded. Deliberately generous
-// while the ledger continues to soak; tighten only after false-strand risk
-// is better characterized.
-const SEND_LEDGER_STRAND_GRACE_MS: i64 = 120_000;
+// Grace before an unlanded send is called stranded. Was 120_000, deliberately
+// generous while the ledger soaked and false-strand risk was uncharacterized
+// (issue #372 ask 1's self-scheduled sweep, a040828, is what made this
+// soak observable at all). That characterization now exists (#372 ask 3):
+// `scripts/notification-boundary-census.py` is the precedent for deriving a
+// constant like this from the rotated trace archives rather than guessing,
+// and this bound was derived the same way.
+//
+// 341 `settled_after_ms` measurements were pulled from
+// `resources/bram-traces/bram-trace-*.log.gz` over 2026-08-29..2026-09-14,
+// almost all on `op=would-notice-retracted` lines — sends the ledger would
+// have called stranded had the bound been shorter than 120s. Distribution
+// (ms): p50 917 | p75 2,763 | p90 9,430 | p95 23,293 | p99 48,884 |
+// p99.5 54,810 | max 451,893 | mean 5,405.
+//
+// Exceedance by candidate bound (how many of the 341/342 samples would have
+// been falsely stranded at that bound):
+//   30s  -> 14/342 (4.09%)
+//   60s  ->  2/342 (0.58%)
+//   120s ->  1/342 (0.29%)
+//   180s ->  1/342 (0.29%)
+//
+// The curve is flat from 60s to 180s: 120s buys exactly one fewer false
+// strand than 60s (the single 452s outlier), at the cost of a full extra
+// minute of time-to-verdict on every genuine strand. 60s halves
+// time-to-verdict for one additional false strand across two weeks of real
+// use — worth it. Re-derive rather than re-guess when the archive grows:
+// re-run the same extraction and recompute the exceedance table above
+// before moving this number again.
+//
+// This is a JUDGMENT CALL, not a computed optimum — the user may override
+// it at the commit gate. Kept as a single named constant for exactly that
+// reason: changing it is a one-line edit.
+const SEND_LEDGER_STRAND_GRACE_MS: i64 = 60_000;
 
 fn send_ledger_cell() -> &'static Mutex<Vec<SendLedgerEntry>> {
     static CELL: OnceLock<Mutex<Vec<SendLedgerEntry>>> = OnceLock::new();
@@ -33600,6 +33630,33 @@ fn send_ledger_payload_in_tail(preview: &str) -> bool {
 
 fn send_ledger_payload_in_tail_detail(preview: &str) -> (bool, &'static str) {
     send_ledger_payload_in_composer_of(&pty_tail_snippet(400), preview)
+}
+
+// issue-372 ask 2, step A: the /__send-ledger row shape, pulled out of the
+// route handler so it is a pure, unit-testable function. `payloadInTail` /
+// `payloadInTailBasis` are computed live on every call rather than only at
+// strand-verdict time — this is observation only, it does not touch strand
+// logic — and it is what makes the predicate samplable over time from
+// outside: scripts/send-ledger-settle-probe.py polls this route to measure
+// how long after injection the predicate first flips true, a question the
+// rotated trace archives can never answer (they only ever recorded this
+// value at the 60s/120s verdict, never at T+200ms).
+fn send_ledger_entry_to_json(e: &SendLedgerEntry) -> serde_json::Value {
+    let (payload_in_tail, payload_in_tail_basis) = send_ledger_payload_in_tail_detail(&e.preview);
+    serde_json::json!({
+        "id": e.id,
+        "kind": e.kind,
+        "state": e.state,
+        "cause": e.cause,
+        "viaQueue": e.via_queue,
+        "mode": e.mode,
+        "preview": e.preview,
+        "injectedAtMs": e.injected_at_ms,
+        "resolvedAtMs": e.resolved_at_ms,
+        "retried": e.retried,
+        "payloadInTail": payload_in_tail,
+        "payloadInTailBasis": payload_in_tail_basis,
+    })
 }
 
 #[cfg(test)]
@@ -49823,6 +49880,43 @@ mod session_turn_tests {
     }
 
     #[test]
+    fn send_ledger_entry_to_json_carries_payload_in_tail() {
+        // issue-372 ask 2, step A: the /__send-ledger row must expose the
+        // live-computed predicate under payloadInTail/payloadInTailBasis
+        // alongside the existing fields, so the settle probe can sample it
+        // from outside. preview left empty means the predicate short-circuits
+        // to (false, "empty-preview") regardless of PTY state, which keeps
+        // this test deterministic without touching the real terminal tail.
+        let entry = super::SendLedgerEntry {
+            id: "42-turn".to_string(),
+            kind: "framed",
+            match_text: String::new(),
+            preview: String::new(),
+            mode: "turn".to_string(),
+            injected_at_ms: 1000,
+            jsonl_offset_at_inject: 0,
+            session_path_at_inject: String::new(),
+            state: "injected",
+            resolved_at_ms: 0,
+            via_queue: false,
+            cause: "",
+            payload: String::new(),
+            retried: false,
+            menu_at_inject: false,
+            ms_since_pty_out_at_inject: -1,
+            nudged: false,
+            would_notice_at_ms: 0,
+            turn_open_at_inject: false,
+            last_unresolved_reason: "",
+        };
+        let json = super::send_ledger_entry_to_json(&entry);
+        assert_eq!(json["id"], "42-turn");
+        assert_eq!(json["injectedAtMs"], 1000);
+        assert_eq!(json["payloadInTail"], false);
+        assert_eq!(json["payloadInTailBasis"], "empty-preview");
+    }
+
+    #[test]
     fn send_ledger_awaiting_turn_decision_table() {
         assert!(super::send_ledger_awaiting_turn_for_entry(
             "injected", "", false, 0, 999, "idle"
@@ -56968,25 +57062,7 @@ fn route_request<R: tauri::Runtime>(
     if path == "__send-ledger" {
         let entries: Vec<serde_json::Value> = send_ledger_cell()
             .lock()
-            .map(|ledger| {
-                ledger
-                    .iter()
-                    .map(|e| {
-                        serde_json::json!({
-                            "id": e.id,
-                            "kind": e.kind,
-                            "state": e.state,
-                            "cause": e.cause,
-                            "viaQueue": e.via_queue,
-                            "mode": e.mode,
-                            "preview": e.preview,
-                            "injectedAtMs": e.injected_at_ms,
-                            "resolvedAtMs": e.resolved_at_ms,
-                            "retried": e.retried,
-                        })
-                    })
-                    .collect()
-            })
+            .map(|ledger| ledger.iter().map(send_ledger_entry_to_json).collect())
             .unwrap_or_default();
         let body = serde_json::json!({
             "entries": entries,

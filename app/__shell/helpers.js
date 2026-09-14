@@ -2062,15 +2062,20 @@ window.__bramOpenSkillsLauncher = function (skillsList, skillsDialog) {
 // are honored on read for migration from pre-sticky-expansion sessions; they
 // are never written back. After the first save in the new shape, the legacy
 // keys disappear.
+//
+// issue-271-storage-classification-rule: SESSION storage, not localStorage.
+// This is FOCUS -- which rows are expanded and what's half-typed in their
+// feedback boxes describes where the user was, not a decision they made.
+// Persisting it across restarts reopened the pane at whatever density and
+// draft state was left behind, the same failure worklist2 row-expansion
+// already had (6fa9fd8) before this key was audited too. No migration: the
+// old value under localStorage's "bram" bucket is simply never read again.
 window.__bramReadWorklistUiStateObject = function () {
-  var raw = __bramReadLS("bram.worklistUiState", "");
+  var raw;
+  try { raw = sessionStorage.getItem("bram.worklistUiState"); } catch (e) { raw = null; }
   if (!raw) return {};
   var saved;
-  if (typeof raw === "object") {
-    saved = raw;
-  } else {
-    try { saved = JSON.parse(raw); } catch (e) { saved = null; }
-  }
+  try { saved = JSON.parse(raw); } catch (e) { saved = null; }
   return (saved && typeof saved === "object") ? saved : {};
 };
 
@@ -2122,15 +2127,17 @@ window.__bramPersistWorklistUiState = function (state) {
     expandedCount: ids.length,
     draftCount: Object.keys(prunedDrafts).length,
   });
-  __bramWriteLS("bram.worklistUiState", JSON.stringify({
-    expandedItemIds: ids,
-    feedbackDraftsById: prunedDrafts,
-  }));
+  try {
+    sessionStorage.setItem("bram.worklistUiState", JSON.stringify({
+      expandedItemIds: ids,
+      feedbackDraftsById: prunedDrafts,
+    }));
+  } catch (e) {}
 };
 
 window.__bramClearWorklistUiState = function () {
   window.__bramIframeTrace("worklist-ui-state-clear", {});
-  __bramWriteLS("bram.worklistUiState", "");
+  try { sessionStorage.removeItem("bram.worklistUiState"); } catch (e) {}
 };
 
 window.__bramRestoreWorklistSubmittedMessage = function () {
@@ -2163,6 +2170,9 @@ window.__bramSetWorklistSubmittedKind = function (kind) {
   return kind || null;
 };
 
+// issue-271-storage-classification-rule: DECISION, correctly in localStorage —
+// a pane-layout preference (splitter position) the user would be annoyed to
+// re-drag every session.
 window.__bramRestoreSplitterSize = function (key, fallback) {
   var raw = __bramReadLS("bram.splitter." + key, "");
   var s = String(raw || "").trim();
@@ -13283,9 +13293,15 @@ window.__bramCloseIssue = function (number, comment, onDone, onError) {
 // explicitly clears it (or the JSONL stops resolving to the same id).
 // Two separate keys mirror the in-memory pendingDeletes / pendingRenames
 // vars in Sessions.xmlui.
+//
+// issue-271-storage-classification-rule: SESSION storage, not localStorage.
+// These name an IN-FLIGHT operation (focus), not a decision -- surviving an
+// app restart means replaying an intent (dim this row, expect a rename)
+// whose triggering action and context are gone. No migration: the old
+// values under the plain localStorage keys are simply never read again.
 window.loadPendingSessionDeletes = function () {
   try {
-    var raw = localStorage.getItem("session-pending-deletes");
+    var raw = sessionStorage.getItem("session-pending-deletes");
     if (!raw) return [];
     var v = JSON.parse(raw);
     return Array.isArray(v) ? v : [];
@@ -13293,17 +13309,17 @@ window.loadPendingSessionDeletes = function () {
 };
 window.savePendingSessionDeletes = function (ids) {
   try {
-    localStorage.setItem("session-pending-deletes", JSON.stringify(ids || []));
+    sessionStorage.setItem("session-pending-deletes", JSON.stringify(ids || []));
   } catch (e) {}
 };
 window.loadPendingSessionRenames = function () {
   try {
-    var raw = localStorage.getItem("session-pending-renames");
+    var raw = sessionStorage.getItem("session-pending-renames");
     // Clear on read: the dim is meant to signal "reload Bram to see
     // the new title". A fresh iframe boot means the dim's job is done.
     // Sessions renamed later in this iframe lifetime stay dimmed via
     // the in-memory append in Sessions.xmlui's onSuccess handler.
-    localStorage.removeItem("session-pending-renames");
+    sessionStorage.removeItem("session-pending-renames");
     if (!raw) return [];
     var v = JSON.parse(raw);
     return Array.isArray(v) ? v : [];
@@ -13311,7 +13327,7 @@ window.loadPendingSessionRenames = function () {
 };
 window.savePendingSessionRenames = function (ids) {
   try {
-    localStorage.setItem("session-pending-renames", JSON.stringify(ids || []));
+    sessionStorage.setItem("session-pending-renames", JSON.stringify(ids || []));
   } catch (e) {}
 };
 // Route external anchors through openExternal and local-file anchors through
@@ -13863,6 +13879,8 @@ window.__bramSetTipsEnabled = function (on) {
 // Search facet-badge initial state: whether the Search tab opens with all four
 // facets selected (all on, default) or none (all off). Per-user, not a project
 // setting — a personal browse preference must not ride the shared .bram.json.
+// issue-271-storage-classification-rule: DECISION, correctly in localStorage —
+// a browse preference the user would be annoyed to re-set every session.
 window.__bramSearchBadgesInitialAllOn = function () {
   return __bramReadLS('bram.searchBadgesInitialAllOn', '1') !== '0';
 };

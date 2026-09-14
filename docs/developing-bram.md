@@ -185,6 +185,59 @@ hand-rolls something different, the outlier is almost certainly
 where the bug lives — refit to the canonical pattern before adding
 instrumentation.
 
+## Client storage: decision vs. focus
+
+The pane's browser storage splits into two classes, and picking the wrong
+one is a recurring bug shape, not a style nit — file each new persisted key
+under the right one before writing it.
+
+- **decision** (persists across sessions) → `localStorage`. A choice the
+  user would be annoyed to re-make: sort order, a dismissed-forever notice,
+  an opt-in/opt-out toggle.
+- **focus** (dies with the session) → `sessionStorage`. Where the user
+  *was*: scroll position, which row was expanded, an in-progress draft, a
+  pending operation.
+
+**Default to focus when unsure.** The failure modes are asymmetric. A
+wrongly-session-scoped decision costs the user one re-click next launch —
+annoying, self-correcting, over in a second. A wrongly-persisted focus key
+resurrects stale state long after its context is gone, and it does not
+present as a storage mistake — it presents as a bug in whatever surface it
+resurfaces in (a pane that opens pre-expanded to rows nobody asked about, a
+banner that can never be seen again, an operation that appears to silently
+replay). The reader debugging that surface has no reason to suspect
+`localStorage` first.
+
+**The test:** ask whether the value describes what the user is *looking at
+right now* (focus — session) or what the user *decided, once, going
+forward* (decision — persisted). If the answer would still make sense
+read aloud a week later without the session that wrote it ("I want the
+newest-first sort", "I've dismissed this notice") it's a decision. If it
+would sound stale or confusing read aloud later ("row 3 is expanded",
+"there's a pending delete") it's focus.
+
+**Worked example, and why this is written down rather than left to
+intuition:** commit `30033d8` moved `bram.updateBannerDismissedVersion`
+from `localStorage` to `sessionStorage` — the reasoning comment sits at
+`app/__shell/helpers.js` around lines 12047–12061. The X on the update
+banner reads like a dismissal, which is the decision shape, and issue
+#271's own audit table had guessed exactly that. The considered answer was
+the opposite: the X means "not now, this session," and persisting it made
+a single click a permanent, cross-instance forfeiture of the update
+prompt with no undo short of editing storage by hand. A key that looks
+like a decision at a glance can still be focus once you ask what the user
+meant by the click — that's the whole reason to run the test explicitly
+instead of pattern-matching the key's name.
+
+When moving a key between stores, check whether the old value needs
+clearing: `localStorage` and `sessionStorage` are separate stores under
+the same origin, so a stale value left in the old store is never read
+again once every read/write site points at the new one — it is inert
+clutter, not a shadowing hazard. Commits `6fa9fd8` and `30033d8` both
+relied on exactly this and did no migration; do the same unless a
+specific read site still reaches into the old store (grep for it — don't
+assume).
+
 ## Push over polling
 
 Do NOT add `pollIntervalInSeconds` to XMLUI DataSources for

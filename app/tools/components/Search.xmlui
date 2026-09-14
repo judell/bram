@@ -48,6 +48,9 @@
        client-side — no refetch. Persisted across sessions via XMLUI's
        readLocalStorage/writeLocalStorage pair (dot-path key nests under the
        'bram' localStorage entry, same as the splitter keys).
+       issue-271-storage-classification-rule: DECISION, correctly in
+       localStorage — a sort preference the user would be annoyed to
+       re-pick every session.
        https://docs.xmlui.org/globals#readlocalstorage -->
   <variable name="sortOrder" value="{readLocalStorage('bram.searchSortOrder', 'relevance')}" />
 
@@ -385,7 +388,9 @@
           </HStack>
         </Link>
         <!-- Sort control rides the pinned pills row: it reorders the same
-             result set the pills scope. https://docs.xmlui.org/components/Select -->
+             result set the pills scope. https://docs.xmlui.org/components/Select
+             issue-271-storage-classification-rule: DECISION — persisted to
+             localStorage below, same key/reasoning as the declaration above. -->
         <Text fontSize="$fontSize-xs" color="$textColor-secondary" value="sort by:" />
         <Select
           width="9rem"

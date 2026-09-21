@@ -12369,23 +12369,66 @@ window.__bramCloseQueueRows = function (queue) {
 // hand-edit of resources/.worklist-issue-close.json is caught separately
 // by the file watcher and traced via=file-edit, so either way the removal
 // is on the record.
-window.__bramWithdrawIssueClose = function (ds, issue, commitSha) {
+// Withdraw a queued issue-close, then refresh the surfaces that RENDER the
+// claim -- which are not the surface that holds the data.
+//
+// The "Push will close #N" banner and the per-row "closes #N on push" badge
+// both read `pendingCloses`, which the host attaches to each COMMIT row
+// (attach_pending_closes, lib.rs) -- not to the close-queue payload. An
+// earlier version of this helper refetched only the queue, so a withdrawal
+// emptied /__issue-close-queue while both visible claims stayed put
+// indefinitely (observed 2026-09-21, still asserting "Push will close #382"
+// 37s after the record was gone).
+//
+// That is not a cosmetic staleness: those strings state what the user's next
+// Push will do to a forge, read at the moment they decide whether to push. So
+// both DataSources are refetched, and the one that actually feeds the claim is
+// `commitsDs`.
+//
+// Refetching on a FAILED withdrawal is deliberate, not an oversight: a refetch
+// re-reads the host, so a record that is still queued simply re-renders as
+// still queued. Re-syncing is always the safe direction here; skipping it
+// would be what risks showing a stale claim.
+window.__bramWithdrawIssueClose = function (queueDs, commitsDs, issue, commitSha) {
   var hasFetch = typeof window.fetch === "function";
   window.__bramIframeTrace("close-queue-withdraw-click", { issue: issue, op: hasFetch ? "act" : "no-fetch" });
   if (!hasFetch) {
     window.logToHost({ kind: "close-queue-withdraw", phase: "no-fetch", issue: issue });
     return;
   }
+  var refetchBoth = function () {
+    if (queueDs && typeof queueDs.refetch === "function") queueDs.refetch();
+    if (commitsDs && typeof commitsDs.refetch === "function") commitsDs.refetch();
+  };
   window
     .fetch("/__issue-close-queue/withdraw", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ issue: issue, commitSha: commitSha }),
     })
-    .then(function () {
-      if (ds && typeof ds.refetch === "function") ds.refetch();
+    .then(function (r) {
+      var status = r && r.status;
+      return r
+        .json()
+        .catch(function () {
+          return {};
+        })
+        .then(function (body) {
+          // The outcome on the record: a no-matching-record answer is a
+          // legitimate 200, so status alone cannot tell success from no-op.
+          window.__bramIframeTrace("close-queue-withdraw-result", {
+            issue: issue,
+            status: status,
+            ok: !!(body && body.ok),
+            reason: (body && body.reason) || "",
+          });
+          refetchBoth();
+        });
     })
-    .catch(function () {});
+    .catch(function () {
+      window.__bramIframeTrace("close-queue-withdraw-result", { issue: issue, status: 0, ok: false, reason: "network" });
+      refetchBoth();
+    });
 };
 
 window.__bramSendLedgerNotice = function (payload, dismissedKey) {

@@ -142,7 +142,7 @@
           variant="ghost"
           size="xs"
           tooltip="Cancel this queued close — it will not fire on your next Push"
-          onClick="window.__bramWithdrawIssueClose(closeQueue, $item.issue, $item.commitSha)" />
+          onClick="window.__bramWithdrawIssueClose(closeQueue, commits, $item.issue, $item.commitSha)" />
       </HStack>
     </Items>
 

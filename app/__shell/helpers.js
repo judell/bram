@@ -12339,6 +12339,55 @@ window.__bramCloseQueueBanner = function (queue, commits) {
   );
 };
 
+// issue-382-withdraw-queued-close: companion to __bramCloseQueueBanner
+// above -- same "queue" DataSource value, but per-record fields instead of
+// one collapsed sentence, so the markup can render a row with a Withdraw
+// control per pending close. Every pending record is included, not just
+// the "phase 2" ones the banner singles out: consent can be taken back at
+// any point before the close actually fires, whether the commit has
+// reached the default branch yet or not.
+window.__bramCloseQueueRows = function (queue) {
+  var pending = (queue && queue.pending) || [];
+  return pending.map(function (p) {
+    var t = p.createdAtMs ? new Date(p.createdAtMs).toLocaleTimeString() : "";
+    var shortSha = (p.commitSha || "").slice(0, 7);
+    return {
+      issue: p.issue,
+      commitSha: p.commitSha,
+      shortSha: shortSha,
+      createdAtMs: p.createdAtMs || 0,
+      label: "#" + p.issue + " (" + shortSha + ")" + (t ? " — pending since " + t : ""),
+    };
+  });
+};
+
+// issue-382-withdraw-queued-close: pane-initiated withdraw of a pending
+// close, modelled on __bramDismissForgeItem above (POST, then refetch the
+// moment the response lands rather than waiting on a push-event listener
+// — the same synchronous-feedback fix #338 made for Awaiting You
+// dismissals). The host traces and audits this removal as via=pane; a
+// hand-edit of resources/.worklist-issue-close.json is caught separately
+// by the file watcher and traced via=file-edit, so either way the removal
+// is on the record.
+window.__bramWithdrawIssueClose = function (ds, issue, commitSha) {
+  var hasFetch = typeof window.fetch === "function";
+  window.__bramIframeTrace("close-queue-withdraw-click", { issue: issue, op: hasFetch ? "act" : "no-fetch" });
+  if (!hasFetch) {
+    window.logToHost({ kind: "close-queue-withdraw", phase: "no-fetch", issue: issue });
+    return;
+  }
+  window
+    .fetch("/__issue-close-queue/withdraw", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ issue: issue, commitSha: commitSha }),
+    })
+    .then(function () {
+      if (ds && typeof ds.refetch === "function") ds.refetch();
+    })
+    .catch(function () {});
+};
+
 window.__bramSendLedgerNotice = function (payload, dismissedKey) {
   var entries = (payload && payload.entries) || [];
   var nowMs = (payload && payload.nowMs) || Date.now();

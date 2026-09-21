@@ -125,6 +125,26 @@
       fontSize="$fontSize-sm"
       color="$textColor-secondary"
       value="{window.__bramCloseQueueBanner(closeQueue.value, commits.value)}" />
+    <!-- issue-382-withdraw-queued-close: a Withdraw control per pending
+         close, beside the banner sentence above. The banner covers only
+         "phase 2" (commit already on origin, waiting on default-branch
+         visibility); this covers every pending record, since consent can
+         be taken back whether or not the commit has been pushed yet. The
+         host traces and audits every removal (via=pane here; a hand-edit
+         of the underlying file is caught and traced separately, via=file-
+         edit, by the watcher). See docs/apis.md and
+         docs/trace-vocabulary.md, `issue-close-queue` op=withdrawn. -->
+    <Items data="{window.__bramCloseQueueRows(closeQueue.value)}">
+      <HStack gap="$space-2" verticalAlignment="center">
+        <Text fontSize="$fontSize-sm" color="$textColor-secondary" value="{$item.label}" />
+        <Button
+          label="Withdraw"
+          variant="ghost"
+          size="xs"
+          tooltip="Cancel this queued close — it will not fire on your next Push"
+          onClick="window.__bramWithdrawIssueClose(closeQueue, $item.issue, $item.commitSha)" />
+      </HStack>
+    </Items>
 
     <VStack gap="$space-1" when="{commits.value &amp;&amp; commits.value.length > 0}">
       <!-- browse-tabs-adopt-searchresults: rows render through the shared

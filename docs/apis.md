@@ -372,11 +372,34 @@ commit gate records ticked issues into `.worklist-issue-close.json`, and
 origin after the next push. Issue *creation* is still user-driven via the
 agent's own shell — there's no `/__issue/create` endpoint.
 
+`/__issue-close-queue` (GET) serves the pending records from that same
+file as `{ pending: [{ issue, commitSha, createdAtMs }, …] }` — the
+post-push half of the publish story (#329), read by the Commits tab's
+`closeQueue` DataSource. `/__issue-close-queue/withdraw` (POST, below,
+issue-382-withdraw-queued-close) is the one write route in this section
+that is **not** origin-gated the way `/__issue/comment` is. `/__issue/comment`
+refuses a foreign `Origin` (M7, docs/security.md); the withdraw route has
+no such gate, and adding one would not have made it agent-blocked anyway —
+the Origin check at the POST dispatch table (`lib.rs`, near the
+`__issue/comment` branch) refuses only a FOREIGN Origin, while its own
+comment records that no-Origin callers — the pane's own fetches, and
+curl — pass unchecked. So the withdraw route's actual barrier is layered,
+not absolute: it is simply unlisted in the agent's `settings.json`
+allowlist (an agent's curl call prompts the user rather than running
+silently), and every removal is traced and audit-recorded with its
+source (`via=pane` for the route, `via=file-edit` for a hand-edit of the
+queue file caught by the file watcher — see `docs/trace-vocabulary.md`,
+`issue-close-queue` `op=withdrawn`). Symmetric with the close side: the
+agent has no way to queue a close either, and must not have a silent way
+to unqueue one.
+
 | Surface | Kind | Query / params | Response | Consumer |
 | --- | --- | --- | --- | --- |
 | `/__issues` | HTTP GET | — | `[{ number, title, state, … }, …]` | agent pane iframe |
 | `/__issue` | HTTP GET | `n=<number>` | `{ number, title, body, state, comments: [...] }` | agent pane iframe |
 | `/__issue/comment` | HTTP GET | `number=<n>&body=<urlencoded>` | `gh issue comment` JSON on success, 400 if `number` missing | agent pane iframe |
+| `/__issue-close-queue` | HTTP GET | — | `{ pending: [{ issue, commitSha, createdAtMs }, …] }` | agent pane iframe (Commits tab `closeQueue` DataSource) |
+| `/__issue-close-queue/withdraw` | HTTP POST | body `{ issue: <n>, commitSha: "<sha>" }` | `{ ok: true }` on removal; `{ ok: false, reason: "no matching record" }` (200, not an error) when nothing matched; 400 `{ error: "issue and commitSha required" }`; 500 `{ error: "..." }` on a write failure | agent pane iframe (Commits tab Withdraw button); not in the agent's allowlist — see prose above |
 
 ## 8. Context
 

@@ -54491,6 +54491,274 @@ fn issue_close_queue_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+// issue-382-withdraw-queued-close: unlike read_pending_issue_closes (which
+// collapses "file missing" and "parse failed mid-write" to the same empty
+// Vec), the watcher's disappearance detector needs the distinction. A
+// missing file is a legitimate empty queue (every record withdrawn or
+// flushed); a parse failure is very likely a read racing an in-flight
+// write and must NOT be read as "everything just got withdrawn". None
+// here means "skip this round, a later settled event will catch up".
+fn read_pending_issue_closes_settled(path: &Path) -> Option<Vec<PendingIssueClose>> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => serde_json::from_str::<Vec<PendingIssueClose>>(&s).ok(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Vec::new()),
+        Err(_) => None,
+    }
+}
+
+// issue-382-withdraw-queued-close: the withdraw predicate, pure over the
+// records vector so it's testable without touching a file (mirrors the
+// enqueue/dedupe shape of enqueue_pending_issue_close_path above). Removes
+// every record matching (issue, commit_sha) -- always at most one given
+// the enqueue path's own dedupe -- and reports whether anything was
+// removed, so the caller can distinguish "withdrawn" from "nothing to
+// withdraw" instead of silently no-op'ing on a stale or mistyped request.
+fn withdraw_pending_issue_close(
+    records: Vec<PendingIssueClose>,
+    issue: u64,
+    commit_sha: &str,
+) -> (Vec<PendingIssueClose>, bool) {
+    let before = records.len();
+    let remaining: Vec<PendingIssueClose> = records
+        .into_iter()
+        .filter(|r| !(r.issue == issue && r.commit_sha == commit_sha))
+        .collect();
+    let removed = remaining.len() < before;
+    (remaining, removed)
+}
+
+fn withdraw_pending_issue_close_path(
+    path: &Path,
+    issue: u64,
+    commit_sha: &str,
+) -> Result<bool, String> {
+    let records = read_pending_issue_closes(path);
+    let (remaining, removed) = withdraw_pending_issue_close(records, issue, commit_sha);
+    if removed {
+        write_pending_issue_closes(path, &remaining)?;
+    }
+    Ok(removed)
+}
+
+// issue-382-withdraw-queued-close: pairs the POST route just removed, so
+// the watcher's disappearance detector -- which sees the same file event a
+// beat later, from its own independent watch on resources/ -- can
+// recognize its own removal and skip logging a redundant via=file-edit
+// line for it. Consumed on read (HashSet::remove), so a pair is only ever
+// suppressed once; a SECOND disappearance of the same (issue, sha) -- which
+// cannot happen without a re-enqueue in between -- would trace honestly.
+fn issue_close_queue_route_withdrawals() -> &'static Mutex<std::collections::HashSet<(u64, String)>>
+{
+    static SET: OnceLock<Mutex<std::collections::HashSet<(u64, String)>>> = OnceLock::new();
+    SET.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+// issue-382-withdraw-queued-close: pure diff of two (issue, commit_sha)
+// sets -- everything in `last_known` that `current` no longer has. Split
+// out from detect_issue_close_queue_withdrawals below so it's testable
+// without an AppHandle.
+fn issue_close_queue_vanished_pairs(
+    last_known: &std::collections::HashSet<(u64, String)>,
+    current: &std::collections::HashSet<(u64, String)>,
+) -> Vec<(u64, String)> {
+    last_known.difference(current).cloned().collect()
+}
+
+// issue-382-withdraw-queued-close: of the pairs that vanished, which ones
+// need a via=file-edit trace? A pair the withdraw route already removed
+// (and traced+audited via=pane) is registered in `route_marked` and gets
+// consumed here silently -- this is the double-log guard, factored out as
+// a pure function over a plain set so it's testable without touching the
+// process-global issue_close_queue_route_withdrawals() Mutex.
+fn issue_close_queue_classify_vanished(
+    vanished: Vec<(u64, String)>,
+    route_marked: &mut std::collections::HashSet<(u64, String)>,
+) -> Vec<(u64, String)> {
+    vanished
+        .into_iter()
+        .filter(|pair| !route_marked.remove(pair))
+        .collect()
+}
+
+// issue-382-withdraw-queued-close: diff the current on-disk close queue
+// against the last-known set. Anything that vanished either came through
+// the withdraw route below (already traced+audited there; the marker in
+// issue_close_queue_route_withdrawals lets this be consumed silently so it
+// isn't logged twice) or vanished some other way -- a hand-edit of
+// resources/.worklist-issue-close.json, the escape hatch judell/bram#382
+// documents as the only lever available before this route existed. The
+// second case gets the identical trace+audit shape as a route withdrawal,
+// tagged via=file-edit, so the removal is on the record instead of merely
+// absent -- an empty queue used to log nothing at all, indistinguishable
+// from a close that was never queued.
+fn detect_issue_close_queue_withdrawals<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    path: &Path,
+    last_known: &mut std::collections::HashSet<(u64, String)>,
+) {
+    let Some(records) = read_pending_issue_closes_settled(path) else {
+        return;
+    };
+    let current: std::collections::HashSet<(u64, String)> = records
+        .into_iter()
+        .map(|r| (r.issue, r.commit_sha))
+        .collect();
+    if last_known.is_empty() && current.is_empty() {
+        return;
+    }
+    let vanished = issue_close_queue_vanished_pairs(last_known, &current);
+    let unattributed = issue_close_queue_classify_vanished(
+        vanished,
+        &mut issue_close_queue_route_withdrawals()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()),
+    );
+    for (issue, sha) in unattributed {
+        eprintln!(
+            "[issue-close-queue] op=withdrawn issue={} sha={} via=file-edit",
+            issue, sha
+        );
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "issue-close-queue",
+                &format!("op=withdrawn issue={} sha={} via=file-edit", issue, sha),
+            );
+        }
+        append_audit_record(
+            app,
+            serde_json::json!({
+                "kind": "issue-close-withdrawn",
+                "issue": issue,
+                "commit": sha,
+                "via": "file-edit",
+            }),
+        );
+    }
+    *last_known = current;
+}
+
+// issue-382-withdraw-queued-close: the pane-initiated removal of a pending
+// close, modelled on handle_needs_you_dismiss above -- the established
+// shape for a pane-initiated removal (read the recorded state, rewrite it
+// minus the target, trace, done).
+//
+// Not agent-reachable in any strong sense -- it is simply unlisted in the
+// agent's settings.json allowlist, so a curl call prompts the user rather
+// than running silently. It is deliberately NOT origin-gated: the Origin
+// check at the POST dispatch table above (__issue/comment) refuses only a
+// FOREIGN Origin, and its own comment records that no-Origin callers -- the
+// pane's own fetches AND curl -- pass. An agent's curl is a no-Origin
+// caller, so origin gating cannot make this route agent-blocked and this
+// code does not claim that it does. The honest barrier is the trace: every
+// withdrawal is logged with its source (via=pane here; via=file-edit from
+// the watcher when a record vanishes without this route having run), so a
+// withdrawal the user did not perform is on the record rather than
+// inferred from an absence.
+fn handle_issue_close_queue_withdraw<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    body: &[u8],
+) -> (u16, &'static str, Vec<u8>) {
+    let parsed: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                400,
+                "application/json; charset=utf-8",
+                br#"{"error":"invalid json"}"#.to_vec(),
+            )
+        }
+    };
+    let issue = parsed.get("issue").and_then(|v| v.as_u64());
+    let commit_sha = parsed
+        .get("commitSha")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let (Some(issue), false) = (issue, commit_sha.is_empty()) else {
+        return (
+            400,
+            "application/json; charset=utf-8",
+            br#"{"error":"issue and commitSha required"}"#.to_vec(),
+        );
+    };
+    let Some(path) = issue_close_queue_file(app) else {
+        return (
+            500,
+            "application/json; charset=utf-8",
+            br#"{"error":"no project root"}"#.to_vec(),
+        );
+    };
+    // Register BEFORE the write, not after it. The watcher fires on the write
+    // itself, so a marker installed afterwards leaves a window -- however
+    // small -- in which the watcher diffs the file, finds no marker, and
+    // attributes this route's own removal to a hand edit. That is a wrong
+    // `via=` in an audit record whose entire job is saying who withdrew
+    // consent, so the ordering is load-bearing rather than defensive.
+    // Backed out below on any path that does not actually remove a record, so
+    // a failed or no-op call cannot leave a marker that silently swallows a
+    // later genuine hand edit of the same pair.
+    issue_close_queue_route_withdrawals()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert((issue, commit_sha.to_string()));
+    let unregister = || {
+        issue_close_queue_route_withdrawals()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&(issue, commit_sha.to_string()));
+    };
+    let removed = {
+        let _guard = issue_close_queue_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match withdraw_pending_issue_close_path(&path, issue, commit_sha) {
+            Ok(removed) => removed,
+            Err(e) => {
+                unregister();
+                return (
+                    500,
+                    "application/json; charset=utf-8",
+                    serde_json::json!({ "error": e }).to_string().into_bytes(),
+                );
+            }
+        }
+    };
+    if !removed {
+        // Honest non-500: the request was well-formed but named a record
+        // that isn't (any longer, or never was) in the queue -- a stale
+        // pane render racing a push-driven flush, a double-click, or a
+        // mistyped curl. Distinguishable from success rather than
+        // pretending the removal happened.
+        unregister();
+        return (
+            200,
+            "application/json; charset=utf-8",
+            br#"{"ok":false,"reason":"no matching record"}"#.to_vec(),
+        );
+    }
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "issue-close-queue",
+            &format!("op=withdrawn issue={} sha={} via=pane", issue, commit_sha),
+        );
+    }
+    append_audit_record(
+        app,
+        serde_json::json!({
+            "kind": "issue-close-withdrawn",
+            "issue": issue,
+            "commit": commit_sha,
+            "via": "pane",
+        }),
+    );
+    (
+        200,
+        "application/json; charset=utf-8",
+        br#"{"ok":true}"#.to_vec(),
+    )
+}
+
 // Enqueue a close intent, deduped by (issue, commit_sha). A later record for
 // the same pair updates the comment (the dialog's last word wins) but never
 // duplicates.
@@ -55125,9 +55393,12 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>, trigger: &s
 #[cfg(test)]
 mod close_on_push_tests {
     use super::{
-        close_issue_pr_comment, enqueue_pending_issue_close_path, parse_close_issue_selections,
-        read_pending_issue_closes, PendingIssueClose,
+        close_issue_pr_comment, enqueue_pending_issue_close_path,
+        issue_close_queue_classify_vanished, issue_close_queue_vanished_pairs,
+        parse_close_issue_selections, read_pending_issue_closes, read_pending_issue_closes_settled,
+        withdraw_pending_issue_close, withdraw_pending_issue_close_path, PendingIssueClose,
     };
+    use std::collections::HashSet;
 
     // issue-282: same shape as close_issue_commit_comment's tests, for the
     // closed-via-PR path's comment format.
@@ -55197,6 +55468,151 @@ mod close_on_push_tests {
         let same_sha = recs.iter().find(|r| r.commit_sha == "abc123").unwrap();
         assert_eq!(same_sha.comment.as_deref(), Some("final"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn rec(issue: u64, sha: &str) -> PendingIssueClose {
+        PendingIssueClose {
+            patch_id: None,
+            issue,
+            commit_sha: sha.to_string(),
+            comment: None,
+            created_at_ms: 0,
+        }
+    }
+
+    // issue-382-withdraw-queued-close: the withdraw predicate removes
+    // exactly the matching (issue, sha) pair and reports it removed --
+    // leaving an unrelated same-issue-different-sha record untouched.
+    #[test]
+    fn withdraw_removes_only_the_matching_issue_and_sha() {
+        let records = vec![rec(7, "abc123"), rec(7, "def456"), rec(9, "abc123")];
+        let (remaining, removed) = withdraw_pending_issue_close(records, 7, "abc123");
+        assert!(removed);
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining
+            .iter()
+            .any(|r| r.issue == 7 && r.commit_sha == "def456"));
+        assert!(remaining
+            .iter()
+            .any(|r| r.issue == 9 && r.commit_sha == "abc123"));
+    }
+
+    // A request naming a pair that isn't queued must not be silently
+    // treated as a success -- the caller (the HTTP route) needs to tell
+    // the difference so it can return a clear non-500 "nothing matched"
+    // instead of pretending a removal happened.
+    #[test]
+    fn withdraw_reports_false_when_nothing_matches() {
+        let records = vec![rec(7, "abc123")];
+        let (remaining, removed) = withdraw_pending_issue_close(records.clone(), 7, "zzz999");
+        assert!(!removed);
+        assert_eq!(remaining, records);
+    }
+
+    #[test]
+    fn withdraw_path_writes_the_file_only_when_something_was_removed() {
+        let dir = std::env::temp_dir().join(format!("bram-close-withdraw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".worklist-issue-close.json");
+        enqueue_pending_issue_close_path(&path, rec(7, "abc123")).unwrap();
+        enqueue_pending_issue_close_path(&path, rec(9, "def456")).unwrap();
+
+        let removed = withdraw_pending_issue_close_path(&path, 7, "abc123").unwrap();
+        assert!(removed);
+        let recs = read_pending_issue_closes(&path);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].issue, 9);
+
+        // Withdrawing again is a well-formed no-op, not an error.
+        let removed_again = withdraw_pending_issue_close_path(&path, 7, "abc123").unwrap();
+        assert!(!removed_again);
+        assert_eq!(read_pending_issue_closes(&path).len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // issue-382-withdraw-queued-close: the settled reader distinguishes a
+    // genuinely missing file (a legitimate empty queue -- Some(vec![])) from
+    // an unparseable one (a torn read racing an in-flight write -- None).
+    // The watcher's disappearance detector depends on this: collapsing both
+    // to the same "empty" reading would turn a torn read into a spurious
+    // mass "withdrawal" trace for every record that happened to be pending.
+    #[test]
+    fn settled_reader_distinguishes_missing_file_from_torn_write() {
+        let dir = std::env::temp_dir().join(format!("bram-close-settled-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let missing = dir.join("nope.json");
+        assert_eq!(
+            read_pending_issue_closes_settled(&missing),
+            Some(Vec::new())
+        );
+
+        let garbled = dir.join("garbled.json");
+        std::fs::write(&garbled, b"{\"issue\": 7, not json").unwrap();
+        assert_eq!(read_pending_issue_closes_settled(&garbled), None);
+
+        let valid = dir.join("valid.json");
+        std::fs::write(
+            &valid,
+            serde_json::to_string(&vec![rec(7, "abc123")]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            read_pending_issue_closes_settled(&valid),
+            Some(vec![rec(7, "abc123")])
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // issue-382-withdraw-queued-close: the pure diff the watcher's
+    // detector runs on every close-queue file event -- everything present
+    // before that the current read no longer has.
+    #[test]
+    fn vanished_pairs_is_the_set_difference() {
+        let last_known: HashSet<(u64, String)> =
+            [(7, "abc123".to_string()), (9, "def456".to_string())]
+                .into_iter()
+                .collect();
+        let current: HashSet<(u64, String)> = [(9, "def456".to_string())].into_iter().collect();
+        let vanished = issue_close_queue_vanished_pairs(&last_known, &current);
+        assert_eq!(vanished, vec![(7, "abc123".to_string())]);
+    }
+
+    #[test]
+    fn vanished_pairs_is_empty_when_nothing_left() {
+        let same: HashSet<(u64, String)> = [(7, "abc123".to_string())].into_iter().collect();
+        assert!(issue_close_queue_vanished_pairs(&same, &same).is_empty());
+    }
+
+    // issue-382-withdraw-queued-close: the double-log guard. A pair the
+    // route already removed (and traced via=pane) is registered in the
+    // marked set and must be classified out -- and consumed, so a repeat
+    // check doesn't re-suppress a genuinely later disappearance of the
+    // same pair.
+    #[test]
+    fn classify_vanished_consumes_route_marked_pairs_and_reports_the_rest() {
+        let mut route_marked: HashSet<(u64, String)> =
+            [(7, "abc123".to_string())].into_iter().collect();
+        let vanished = vec![(7, "abc123".to_string()), (9, "def456".to_string())];
+        let unattributed = issue_close_queue_classify_vanished(vanished, &mut route_marked);
+        // Only the pair NOT pre-registered by the route needs a
+        // via=file-edit trace.
+        assert_eq!(unattributed, vec![(9, "def456".to_string())]);
+        // Consumed: the route-marked set no longer carries the pair the
+        // route accounted for.
+        assert!(route_marked.is_empty());
+    }
+
+    #[test]
+    fn classify_vanished_reports_everything_when_route_marked_nothing() {
+        let mut route_marked: HashSet<(u64, String)> = HashSet::new();
+        let vanished = vec![(7, "abc123".to_string())];
+        let unattributed = issue_close_queue_classify_vanished(vanished, &mut route_marked);
+        assert_eq!(unattributed, vec![(7, "abc123".to_string())]);
     }
 }
 
@@ -63600,6 +64016,18 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             let _ = request.as_reader().read_to_end(&mut buf);
             handle_needs_you_dismiss(app, &buf)
         }
+    } else if path == "__issue-close-queue/withdraw" {
+        // issue-382-withdraw-queued-close: pane-initiated removal of a
+        // pending close. See handle_issue_close_queue_withdraw for the
+        // route's constraints (not origin-gated; unlisted in the agent
+        // allowlist; every removal traced with its source).
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            let mut buf = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut buf);
+            handle_issue_close_queue_withdraw(app, &buf)
+        }
     } else if path == "__git/pull-rebase" {
         if method != "POST" {
             (405, "text/plain; charset=utf-8", b"POST only".to_vec())
@@ -64627,6 +65055,25 @@ pub fn run() {
                         );
                     }
                 }
+                // issue-382-withdraw-queued-close: baseline the close queue's
+                // (issue, commitSha) set at watcher startup so the first
+                // observed event never reads as a mass withdrawal. Every
+                // later disappearance relative to this set is either the
+                // route's own removal (registered in
+                // issue_close_queue_route_withdrawals and consumed silently
+                // here) or an unattributed hand-edit of
+                // .worklist-issue-close.json -- the escape hatch #382 names --
+                // logged via=file-edit so it lands in the audit trail instead
+                // of vanishing invisibly.
+                let close_queue_path = issue_close_queue_file(&app_handle);
+                let mut close_queue_known: std::collections::HashSet<(u64, String)> =
+                    close_queue_path
+                        .as_ref()
+                        .and_then(|p| read_pending_issue_closes_settled(p))
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|r| (r.issue, r.commit_sha))
+                        .collect();
                 // issue-342: honor the project's .gitignore directory entries,
                 // not just the hardcoded noise dirs. The freeze cause is always
                 // a high-frequency write stream into a gitignored SCRATCH DIR
@@ -65185,6 +65632,30 @@ pub fn run() {
                     {
                         trace_dispatch("intent-drain", &[]);
                         drain_worklist_intent(&app_handle);
+                    }
+
+                    // issue-382-withdraw-queued-close: any event touching
+                    // .worklist-issue-close.json is a chance the pending set
+                    // shrank. Checked on every event kind (a hand-edit may
+                    // arrive as Modify OR, via some editors' atomic-rename
+                    // save, Remove+Create) -- detect_issue_close_queue_withdrawals
+                    // itself is the idempotent, order-independent part: it
+                    // diffs against the last-known set and only fires when
+                    // something is actually gone.
+                    let is_close_queue_event = event.paths.iter().any(|p| {
+                        p.file_name().and_then(|n| n.to_str())
+                            == Some(".worklist-issue-close.json")
+                            && p.components().any(|c| c.as_os_str() == "resources")
+                    });
+                    if is_close_queue_event {
+                        if let Some(ref cq_path) = close_queue_path {
+                            trace_dispatch("close-queue-withdraw-check", &[]);
+                            detect_issue_close_queue_withdrawals(
+                                &app_handle,
+                                cq_path,
+                                &mut close_queue_known,
+                            );
+                        }
                     }
 
                     // Git state changes often happen entirely under .git

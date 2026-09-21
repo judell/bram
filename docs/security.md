@@ -116,7 +116,7 @@ still reads as coverage.
 | registration | `CLAUDE_GUARD_MATCHERS` (`lib.rs`) → project `settings.local.json` | `~/.codex/config.toml`, matcher `^(apply_patch\|Bash\|Write\|Edit\|mcp__.*)$` |
 | matchers | `Write`, `Edit`, `Bash`, `mcp__.*` | as above |
 | shell surface | `bash_writes()` → coverage | `bash_writes()` → coverage |
-| MCP surface | `mcp_is_mutation()` + `mcp_paths()` → coverage | same |
+| MCP surface | `mcp_is_mutation()` + `mcp_candidate_paths()` → coverage | same |
 | cross-boundary signature | `Bash`, forge writes to a non-origin repo | same |
 | on guard crash | **fail closed** (exit 2) | fail closed |
 | gate granularity | see below | see below |
@@ -133,6 +133,93 @@ question now resolve as documentation: the 2026-09-09 read of the Rust
 source (`codex_bash_branch`, `guard_policy.rs`) confirmed the Codex Bash
 gate carries the identical any-coverage semantics. Whether to make either
 per-file is a design change nobody has claimed.
+
+**MCP path discovery is structural, not a key list (judell/bram#384).**
+Through 0.6.7 the MCP branch paired a name-based mutation check
+(`mcp_is_mutation()`, a substring denylist of write verbs against the tool
+name) with `mcp_paths()` — thirteen hardcoded key names
+(`path`, `file_path`, `source`, `destination`, …), matched only at the top
+level of `tool_input`. Both were enumerations standing in for a property, and
+both failed in opposite directions: a write-verb-named external connector
+with no path key at all (`tabs_create_mcp`, Gmail `create_draft`, Calendar
+`create_event`/`delete_event`, Drive `create_file`) was denied fail-closed
+with `mcp-unrecognized-input` even though it cannot touch a repo file — every
+occurrence of that deny reason in this project's entire trace history was one
+of exactly these connector shapes, never a genuine filesystem write; and,
+in the other direction, a real filesystem write tool whose path sat under an
+unlisted key (`output_path`, `notebook_path`) or nested inside an object was
+invisible to the key list and reached coverage with no path extracted at all.
+
+`mcp_candidate_paths()` replaces the key list with a structural test: recurse
+into every string value in `tool_input`, any key, any depth, including
+array elements, and resolve each one as a whole path (never a substring — a
+prose sentence containing a path-shaped fragment does not qualify, and
+whitespace anywhere in the string rules it out on its own). A string is a
+candidate when the resolved path lands inside the project root and either
+already exists or has an existing parent directory (admitting a legitimate
+file *creation*, whose target does not exist yet) — with one added
+narrowing: the not-yet-existing leg also requires the relative path to
+contain a separator. Without that narrowing the parent-exists test is nearly
+vacuous, since a bare single-segment token's filesystem parent is always the
+call's own cwd, which trivially exists — so an email address, a calendar
+summary, or an opaque connector id would otherwise qualify as "creatable"
+purely by not yet being a file, reopening the same false-positive class
+against realistic connector payloads.
+
+**That narrowing costs one case, and it is a regression rather than a
+limitation — recorded because a guard screening less than it did the day
+before should never be a footnote.** A write-verb MCP tool CREATING a new file
+at the repository ROOT, with the target given as a bare filename and no
+directory part — `{"path": "NEWFILE.md"}` — is no longer coverage-checked.
+Before judell/bram#384 it was, because `path` is one of the thirteen keys the
+retired `MCP_PATH_KEYS` matched. Overwriting an *existing* root file is still
+caught, by the `exists` leg; it is specifically creation that slips, and only
+at the root (`app/NEWFILE.md` resolves normally, having a separator).
+
+Accepted deliberately, on three grounds. The gap is narrower than the defect it
+buys: filesystem MCP servers conventionally pass absolute paths or `dir/file`,
+so a bare root-level target is the uncommon shape, while the false positives
+removed were hitting real connector traffic (eight `Google_Drive__create_file`
+denials in this project's recorded history alone). It is observable rather than
+silent — every such call emits the `mcp-write-verb-no-candidate-paths`
+breadcrumb below, so an occurrence leaves evidence where the old design left
+none. And the obvious repairs are worse: an extension heuristic on bare tokens
+re-accretes the guesswork this change removed, and reusing the old key list as
+a hint for bare tokens fails immediately, since `to` and `from` were among its
+thirteen keys and would make every Gmail recipient a candidate path.
+
+If a real occurrence ever appears in the breadcrumbs, that is the receipt for
+revisiting it — not before. `mcp_is_mutation()`'s write-verb
+denylist is unchanged; it still separates reads from writes, which the
+structural test does not attempt to replace.
+
+Candidates found plus a write-verb name still requires per-candidate
+coverage, exactly as before. Zero candidates now means the call is out of
+scope regardless of name — the fix — rather than the old fail-closed deny
+gated on a bypass/opt-out check first. **The one accepted loosening**: a
+tool that writes a repo file whose path is not present anywhere in its own
+input (an ambient or session-remembered target, indistinguishable at this
+point from a harmless connector call) is now allowed where it was
+previously denied. It is not silent: a write-verb-named call with zero
+candidates emits a `mcp-write-verb-no-candidate-paths` breadcrumb to
+`resources/bram-traces/hook-events.log`
+(`trace_mcp_write_verb_no_candidates`), so if a server of that shape ever
+appears the evidence exists before the damage does. Zero fires is the
+expected, healthy reading of that line, not a sign the instrument is dead —
+see "Distinguish soak observers from tripwires" in
+`docs/developing-bram.md`.
+
+**Known limit, left deliberately unfixed.** `mcp_is_mutation()`'s verb
+denylist is still an enumeration, and its false negatives survive this
+change: a genuine write tool whose name carries none of the listed verbs
+(`store_document`, `persist_*`) bypasses coverage even when it structurally
+names a repo path, because the branch never classifies it as a mutation in
+the first place. Closing that gap means deciding whether naming a repo path
+should require coverage regardless of verb — which over-denies ordinary
+reads that happen to take a path argument — a larger policy question than
+this fix, left for a future pass with a trace line at the point it would
+show (the classification test in `mcp_branch` / `codex_mcp_branch`, before
+`mcp_candidate_paths()` is ever called).
 
 **Since retire-python-hooks-rust-only, the guards are compiled Rust** — the
 policy in `src-tauri/src/guard_policy.rs`, dispatch and breadcrumbs in

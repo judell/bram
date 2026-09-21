@@ -255,22 +255,14 @@ const MCP_WRITE_TOKENS: &[&str] = &[
     "truncate", "mkdir", "rmdir", "modify", "replace", "save", "set_",
 ];
 
-// Order is load-bearing: mcp_paths returns values in this key order.
-const MCP_PATH_KEYS: &[&str] = &[
-    "path",
-    "file_path",
-    "filepath",
-    "filename",
-    "source",
-    "src",
-    "destination",
-    "dest",
-    "dst",
-    "target",
-    "target_path",
-    "to",
-    "from",
-];
+// judell/bram#384 retired the sibling `MCP_PATH_KEYS` enumeration (thirteen
+// hardcoded key names, top-level only) that used to stand in for "does this
+// call name a repo path". See `mcp_candidate_paths` below for the structural
+// replacement -- it is a property test over every string in `tool_input`,
+// not a membership test against a list, so there is no key list to keep here
+// at all. `MCP_WRITE_TOKENS` above is untouched: it still separates reads
+// from writes, which the structural test is not trying to replace (see the
+// known-limit note at `mcp_candidate_paths`).
 
 const WORKLIST_LIFECYCLE_ROUTES: &[&str] = &[
     "/__worklist/resolve",
@@ -2209,27 +2201,132 @@ fn mcp_is_mutation(tool_name: &str) -> bool {
     MCP_WRITE_TOKENS.iter().any(|t| name.contains(t))
 }
 
-fn mcp_paths(tool_input: &Value) -> Vec<String> {
-    let Some(obj) = tool_input.as_object() else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for key in MCP_PATH_KEYS {
-        match obj.get(*key) {
-            Some(Value::String(s)) if !s.is_empty() => out.push(s.clone()),
-            Some(Value::Array(items)) => {
-                for it in items {
-                    if let Some(s) = it.as_str() {
-                        if !s.is_empty() {
-                            out.push(s.to_string());
-                        }
-                    }
-                }
+/// Recursively collect every string value in `value` -- any key, any depth,
+/// including array elements -- for `mcp_candidate_paths` below. Depth-first,
+/// so callers that care about order see first-seen order.
+fn collect_strings(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::String(s) => out.push(s.clone()),
+        Value::Array(items) => {
+            for it in items {
+                collect_strings(it, out);
             }
-            _ => {}
+        }
+        Value::Object(map) => {
+            for v in map.values() {
+                collect_strings(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// judell/bram#384: the structural replacement for `MCP_PATH_KEYS`. The old
+/// extraction asked "does a known key hold a string at the top level of
+/// tool_input" -- an enumeration standing in for a property, wrong in both
+/// directions (false positives on connectors with no path key at all; false
+/// negatives on a real filesystem tool whose path sits under an unlisted key
+/// or nested inside an object). The question that actually matters is
+/// structural and needs no list:
+///
+///   Can this call name a path inside the project root?
+///
+/// So this walks every string value in `tool_input`, any key, any depth, and
+/// resolves each one as a whole path via `normalize`, the caller's own
+/// provider-specific join+abspath pair (`normalize_target` for Claude,
+/// `codex_normalize_target` for Codex -- see their call sites). A string
+/// becomes a *candidate* -- return value is its project-relative path -- only
+/// when all of:
+///
+/// - it contains no whitespace. A sentence like "see src/main.rs for
+///   details" is one string with a path-shaped substring in the middle, not
+///   a path; resolving the WHOLE string (never a substring) as one path is
+///   what keeps prose out, and prose is essentially always multi-word.
+/// - `normalize` places it inside the project root (its provider-specific
+///   join already refuses anything outside root, by returning `None`).
+/// - it exists on disk, OR it is *creatable*: its relative form contains a
+///   `/` and its resolved parent directory exists. The parent leg is what
+///   admits a legitimate file creation, whose target does not exist yet.
+///
+/// The `/`-in-the-relative-path requirement on the creatable leg is a
+/// deliberate narrowing of the literal "exists or has an existing parent"
+/// rule, added because that literal rule is otherwise nearly vacuous: a
+/// bare, slash-free token's filesystem parent is always the call's own cwd,
+/// which trivially exists -- so without this, ANY short single-word string
+/// with no whitespace (an email address, a calendar summary, an opaque
+/// connector id, a version string) would qualify as a "creatable" candidate
+/// purely because it does not yet exist as a file in the cwd. That would
+/// reintroduce false positives for exactly the connector calls this fix
+/// exists to stop denying (verified against the required Gmail / Calendar /
+/// Drive cases -- see the guard_policy_tests module and the item's synth
+/// receipts). An EXISTING single-segment name (`"path": "README.md"`) is
+/// still recognized on the `exists` leg, since existence is real evidence
+/// about the repository, not an artifact of how many components the string
+/// happens to have.
+///
+/// Known residual, named rather than hidden (see `mcp_branch` /
+/// `codex_mcp_branch` for where the two consequences of this function
+/// returning empty are handled): a single top-level bare filename with no
+/// existing sibling of that name (`"NEWFILE.md"` dropped directly in the
+/// project root, never seen before) is not recognized as a creatable
+/// candidate under this narrowing, though it would be under the literal
+/// draft rule. And a short token that coincidentally matches something
+/// that already exists in the repo (an event summary that happens to be
+/// spelled "LICENSE") still resolves as a candidate via the `exists` leg --
+/// rare, but not impossible, and worth knowing about when reading a trace.
+fn mcp_candidate_paths(
+    tool_input: &Value,
+    root: &Path,
+    normalize: impl Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    let mut raw = Vec::new();
+    collect_strings(tool_input, &mut raw);
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for s in raw {
+        if s.is_empty() || s.chars().any(|c| c.is_whitespace()) {
+            continue;
+        }
+        let Some(rel) = normalize(&s) else { continue };
+        if rel.is_empty() {
+            continue;
+        }
+        let abs = root.join(&rel);
+        let exists = abs.exists();
+        let creatable = rel.contains('/') && abs.parent().is_some_and(|p| p.exists());
+        if !exists && !creatable {
+            continue;
+        }
+        if seen.insert(rel.clone()) {
+            out.push(rel);
         }
     }
     out
+}
+
+/// judell/bram#384's one accepted loosening, made observable rather than
+/// silent. `mcp_candidate_paths` returning empty for a write-verb-named tool
+/// now means ALLOW (out of scope) instead of the old fail-closed deny -- and
+/// the near-total majority of such calls are external connectors that
+/// cannot touch a repo file regardless (Gmail, Calendar, Drive: see the
+/// item's synth receipts). The one case this loosens for real is a tool
+/// that DOES write a repo file but whose target is ambient or
+/// session-remembered rather than present anywhere in this call's own
+/// input -- ordinary per-path coverage cannot see it because there is no
+/// path to check. This breadcrumb is that residue's tripwire: per the
+/// observe-first discipline in docs/developing-bram.md, a fire here is the
+/// evidence a server of that shape exists, recorded before it can do any
+/// damage. Zero fires is the expected, healthy reading, not a sign the
+/// instrument is dead -- see "Distinguish soak observers from tripwires" in
+/// that doc.
+fn trace_mcp_write_verb_no_candidates(project_root: &Path, provider: &str, tool: &str) {
+    crate::guard::append_breadcrumb(
+        project_root,
+        provider,
+        "mcp-write-verb-no-candidate-paths",
+        tool,
+        "reason=write-verb-tool-naming-no-repo-path",
+    );
 }
 
 // --- path helpers ------------------------------------------------------------
@@ -3250,43 +3347,32 @@ fn mcp_branch(payload: &Value, tool_name: &str) -> ShadowVerdict {
         return allow("unmanaged-repo", "-");
     };
     let cwd_s = cwd.to_string_lossy().to_string();
-    let candidates = mcp_paths(&ti);
+    let candidates =
+        mcp_candidate_paths(&ti, &project_root, |s| normalize_target(&project_root, s));
     if candidates.is_empty() {
-        // issue-360: a name-classified "mutation" with no extractable path is
-        // usually not a repo mutation at all (external connectors — Drive
-        // create_file, Calendar create_event — carry no path key), but it can
-        // also be a filesystem-shaped tool whose input key MCP_PATH_KEYS
-        // doesn't know. So the default stays fail-closed, and the user's
-        // explicit authorizations are consulted first instead of being
-        // unreachable: the Skip worklist button's wildcard direct-edit grant,
-        // then the "just do it" prose opt-out. Target carries the tool name
-        // so the trace names what was released.
-        if fresh_bypass(&project_root, "*") {
-            return allow("mcp-no-path-bypass", tool_name);
-        }
-        if let Some(msg) = opt_out_clears(&project_root, payload) {
-            return opt_out_allow("opt-out-phrase", tool_name, &msg);
-        }
-        // python:2131-2144. Python's trace target here is the empty string.
-        return deny_msg(
-            "mcp-unrecognized-input",
-            "-",
-            tool_name,
-            "",
-            &cwd_s,
-            &format!(
-                "{tool} blocked: this looks like a mutation, but the guard could not extract any file path from tool_input.\nIf this tool does not modify repository files (an external connector, for example), the user can authorize it by ending their message with \"just do it\" or clicking the Skip worklist button.\nOtherwise propose the change in resources/worklist.json first, or extend MCP_PATH_KEYS (src-tauri/src/guard_policy.rs) to recognize this tool's input shape.",
-                tool = tool_name
-            ),
-        );
+        // judell/bram#384: a write-verb NAME with nothing in tool_input that
+        // structurally resolves to a repo path is out of scope, regardless
+        // of the name -- most such calls are external connectors (Gmail,
+        // Calendar, Drive) that cannot touch a repository file at all (see
+        // the item's synth receipts; every real `mcp-unrecognized-input`
+        // denial in this project's trace history was one of exactly these
+        // three shapes, never a genuine filesystem write). This replaces
+        // #360's fail-closed-with-bypass-first default: there is nothing
+        // here to authorize, because the call cannot name a repo file.
+        //
+        // The one thing this loosens for real: a tool that DOES write a
+        // repo file but whose target is ambient/session-remembered rather
+        // than present anywhere in its own input. That case is
+        // indistinguishable from a harmless connector call at this point,
+        // so it is traced rather than silently allowed -- see
+        // `trace_mcp_write_verb_no_candidates`.
+        trace_mcp_write_verb_no_candidates(&project_root, "claude-rs", tool_name);
+        return allow("mcp-no-candidate-paths", "-");
     }
     let agent_id = str_field(payload, "agent_id");
     let covered = worklist_covered_files(&project_root);
     let mut violations: Vec<String> = Vec::new();
-    for target in &candidates {
-        let Some(rel) = normalize_target(&project_root, target) else {
-            continue;
-        };
+    for rel in candidates.iter().cloned() {
         if rel == WORKLIST_REL {
             // python:2151-2165
             let body = format!(
@@ -4864,31 +4950,19 @@ fn codex_mcp_branch(
     if !mcp_is_mutation(tool_name) {
         return codex_allow("passed-checks", "-");
     }
-    let candidates = mcp_paths(tool_input);
+    let candidates = mcp_candidate_paths(tool_input, cwd, |s| codex_normalize_target(cwd, s));
     if candidates.is_empty() {
-        // issue-360: same shape as the Claude branch above — consult the
-        // wildcard direct-edit grant (Codex's "just do it" and Skip worklist
-        // both land there via the host's toTurn path) before the fail-closed
-        // deny. Codex has no transcript opt-out at PreToolUse by design.
-        if codex_fresh_bypass(cwd, "*") {
-            return codex_allow("mcp-no-path-bypass", tool_name);
-        }
-        return codex_deny(
-            &format!(
-                "{} blocked: looks like a mutation but the guard could not extract \
-any file path from tool_input. If this tool does not modify repository files (an \
-external connector, for example), the user can authorize it by ending their \
-message with \"just do it\" or clicking the Skip worklist button. Otherwise \
-propose the change in resources/worklist.json first, or extend MCP_PATH_KEYS \
-(src-tauri/src/guard_policy.rs) to recognize this MCP tool's input shape.",
-                tool_name
-            ),
-            "-",
-        );
+        // judell/bram#384: same fix as the Claude branch above -- a
+        // write-verb NAME with nothing in tool_input that structurally
+        // resolves to a repo path is out of scope regardless of the name.
+        // This replaces #360's fail-closed-with-bypass-first default (Codex
+        // has no transcript opt-out at PreToolUse by design, so that side
+        // never applied here anyway). See `trace_mcp_write_verb_no_candidates`
+        // for the one residual this accepts and how it stays observable.
+        trace_mcp_write_verb_no_candidates(cwd, "codex-rs", tool_name);
+        return codex_allow("mcp-no-candidate-paths", "-");
     }
-    let touches_worklist = candidates
-        .iter()
-        .any(|t| codex_normalize_target(cwd, t).as_deref() == Some(WORKLIST_REL));
+    let touches_worklist = candidates.iter().any(|rel| rel == WORKLIST_REL);
     if touches_worklist && tool_input.is_object() {
         let Some(new_content) = worklist_new_content_from_tool_input(cwd, tool_input) else {
             return codex_deny(
@@ -4930,10 +5004,7 @@ shape whose resulting content the guard can inspect.",
     }
     let mut violations: Vec<String> = Vec::new();
     let mut denied_worktree: Option<String> = None;
-    for t in &candidates {
-        let Some(rel) = codex_normalize_target(cwd, t) else {
-            continue;
-        };
+    for rel in candidates.iter().cloned() {
         if rel == WORKLIST_REL
             || is_worklist_draft(&rel)
             || is_worklist_citation(&rel)
@@ -5977,25 +6048,125 @@ mod guard_policy_tests {
         let _ = std::fs::remove_dir_all(&td);
     }
 
-    // --- mcp_paths (python lines 1383-1387) ---------------------------------
+    // --- mcp_candidate_paths (judell/bram#384) -------------------------------
+    //
+    // Replaces the retired `mcp_path_extraction` test, which pinned
+    // `MCP_PATH_KEYS`'s top-level-only, thirteen-key extraction -- exactly
+    // the enumeration this item replaces with a structural walk. `norm`
+    // below is `codex_normalize_target`, reused here only because it joins
+    // relative strings against an explicit root instead of the process cwd
+    // (unlike the Claude arm's `normalize_target`), which is what lets this
+    // test use plain relative strings instead of every candidate needing to
+    // be spelled out as an absolute path under `root`.
 
     #[test]
-    fn mcp_path_extraction() {
-        assert_eq!(
-            mcp_paths(&serde_json::json!({"path": "app/x.xmlui"})),
-            vec!["app/x.xmlui"]
-        );
-        assert_eq!(
-            mcp_paths(&serde_json::json!({"source": "a", "destination": "b"})),
-            vec!["a", "b"]
-        );
+    fn mcp_candidate_paths_structural() {
+        let root = scratch("mcp-candidates");
+        std::fs::create_dir_all(root.join("app")).unwrap();
+        std::fs::write(root.join("app/x.xmlui"), "").unwrap();
+        let norm = |s: &str| codex_normalize_target(&root, s);
         let empty: Vec<String> = Vec::new();
-        assert_eq!(mcp_paths(&serde_json::json!({"paths": ["a", "b"]})), empty);
+
+        // Found via a key MCP_PATH_KEYS always recognized (existing file).
         assert_eq!(
-            mcp_paths(&serde_json::json!({"edits": [{"oldText": "x"}]})),
+            mcp_candidate_paths(&serde_json::json!({"path": "app/x.xmlui"}), &root, norm),
+            vec!["app/x.xmlui".to_string()]
+        );
+
+        // Found via a key MCP_PATH_KEYS never knew about, nested one level
+        // inside an object -- the structural fix's whole point (the #6 synth
+        // case in the item: an "output_path"-shaped write tool).
+        assert_eq!(
+            mcp_candidate_paths(
+                &serde_json::json!({"options": {"output_path": "app/x.xmlui"}}),
+                &root,
+                norm
+            ),
+            vec!["app/x.xmlui".to_string()]
+        );
+
+        // Found nested inside an array of objects.
+        assert_eq!(
+            mcp_candidate_paths(
+                &serde_json::json!({"edits": [{"path": "app/x.xmlui", "oldText": "a"}]}),
+                &root,
+                norm
+            ),
+            vec!["app/x.xmlui".to_string()]
+        );
+
+        // Prose containing a path-shaped substring is NOT a candidate: the
+        // whole string is resolved as one path, never a substring, and this
+        // one has spaces (the over-matching guard's primary target).
+        assert_eq!(
+            mcp_candidate_paths(
+                &serde_json::json!({"body": "see app/x.xmlui for details"}),
+                &root,
+                norm
+            ),
             empty
         );
-        assert_eq!(mcp_paths(&serde_json::json!("not-a-dict")), empty);
+
+        // A bare, slash-free token that does not exist is NOT a candidate:
+        // its filesystem parent (the project root) always exists, so
+        // without this narrowing almost any short connector field (an
+        // email address, an id, a one-word title) would qualify as
+        // "creatable" purely by not yet being a file. This is what keeps
+        // realistic Gmail/Calendar/Drive args from becoming false
+        // positives again under the new design.
+        assert_eq!(
+            mcp_candidate_paths(
+                &serde_json::json!({"to": "someone@example.com"}),
+                &root,
+                norm
+            ),
+            empty
+        );
+
+        // The same shape of bare token IS a candidate once it names
+        // something that actually exists -- existence is real evidence
+        // about the repository, not an artifact of how many path segments
+        // the string happens to have.
+        std::fs::write(root.join("NOTES"), "").unwrap();
+        assert_eq!(
+            mcp_candidate_paths(&serde_json::json!({"summary": "NOTES"}), &root, norm),
+            vec!["NOTES".to_string()]
+        );
+
+        // A multi-segment string whose parent doesn't exist (a fabricated
+        // token, such as a base64 blob that happens to contain a stray
+        // '/') is not a candidate: nonsense intermediate directories don't
+        // exist either.
+        assert_eq!(
+            mcp_candidate_paths(
+                &serde_json::json!({"content": "QUJDREVGRw/f9J3ha+kL=="}),
+                &root,
+                norm
+            ),
+            empty
+        );
+
+        // A multi-segment path whose parent DOES exist is a creatable
+        // candidate even though the file itself doesn't exist yet -- the
+        // legitimate file-creation case the parent test exists to admit.
+        assert_eq!(
+            mcp_candidate_paths(
+                &serde_json::json!({"output_path": "app/new.txt"}),
+                &root,
+                norm
+            ),
+            vec!["app/new.txt".to_string()]
+        );
+
+        // Non-object top-level input: still scanned (the bare top-level
+        // string), filtered out here for the same reason as the bare-token
+        // case above.
+        assert_eq!(
+            mcp_candidate_paths(&serde_json::json!("not-a-dict"), &root, norm),
+            empty
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // --- subagent lifecycle gate (python lines 1389-1440) -------------------
@@ -6492,6 +6663,13 @@ mod guard_policy_tests {
             ("allow", "mcp-read-only")
         );
 
+        // judell/bram#384: "contents" is a genuinely unrecognized key (it was
+        // never in the old MCP_PATH_KEYS list either), and its value "x" is a
+        // bare, slash-free token that resolves to zero structural candidates
+        // -- so this is now the accepted residual (allow + observe-only
+        // trace), not a fail-closed deny. Previously this asserted
+        // ("deny", "mcp-unrecognized-input"); the design deliberately
+        // inverts this case, so the assertion changes with it.
         let v = shadow_worklist_decision(
             "claude-rs",
             &serde_json::json!({
@@ -6503,7 +6681,14 @@ mod guard_policy_tests {
         .unwrap();
         assert_eq!(
             (v.decision.as_str(), v.reason.as_str()),
-            ("deny", "mcp-unrecognized-input")
+            ("allow", "mcp-no-candidate-paths")
+        );
+        let events = std::fs::read_to_string(root.join("resources/bram-traces/hook-events.log"))
+            .unwrap_or_default();
+        assert!(
+            events.contains("mcp-write-verb-no-candidate-paths")
+                && events.contains("mcp__filesystem__write_file"),
+            "events: {events}"
         );
 
         let v = shadow_worklist_decision(
@@ -6545,11 +6730,20 @@ mod guard_policy_tests {
         assert!(full_shas("deadbeef").is_empty());
     }
 
-    // issue-360: a name-classified MCP "mutation" with no extractable path
-    // (external connectors — Drive create_file, Calendar create_event) honors
-    // the user's explicit opt-outs; without one, the fail-closed deny stands.
+    // judell/bram#384 supersedes #360's design for this exact case. #360 kept
+    // the fail-closed deny for a name-classified MCP "mutation" with no
+    // extractable path, releasing it only through an explicit grant or
+    // opt-out phrase (the block this test used to exercise, and the very
+    // shape #384's report showed denying `tabs_create_mcp`, Gmail
+    // `create_draft`, Calendar `create_event`/`delete_event`, and 8 real
+    // Google_Drive `create_file` denials in this project's own trace
+    // history). Under the structural design, zero candidate paths means the
+    // call cannot name a repo file at all, so it is out of scope
+    // regardless of name -- no grant or opt-out needed, and none of them
+    // change the verdict any more. The one residual (an ambient/
+    // session-remembered write target) is traced, not silently allowed.
     #[test]
-    fn mcp_zero_path_honors_opt_outs() {
+    fn mcp_zero_candidates_allowed_regardless_of_authorization() {
         let root = scratch("mcp360");
         std::fs::create_dir_all(root.join("resources")).unwrap();
         std::fs::write(root.join(AUTH_REL), "{}").unwrap();
@@ -6560,51 +6754,46 @@ mod guard_policy_tests {
             "cwd": root.to_string_lossy(),
         });
 
-        // No grant, no opt-out: fail-closed.
+        // No grant, no opt-out, no authorization file at all beyond the bare
+        // managed-repo marker: still allowed, because there is nothing here
+        // that could name a repo path.
         let v = shadow_worklist_decision("claude-rs", &payload).unwrap();
         assert_eq!(
             (v.decision.as_str(), v.reason.as_str()),
-            ("deny", "mcp-unrecognized-input")
+            ("allow", "mcp-no-candidate-paths")
+        );
+        let events = std::fs::read_to_string(root.join("resources/bram-traces/hook-events.log"))
+            .unwrap_or_default();
+        assert!(
+            events.contains("mcp-write-verb-no-candidate-paths")
+                && events.contains("mcp__claude_ai_Google_Drive__create_file"),
+            "events: {events}"
         );
 
-        // Fresh wildcard direct-edit grant (Skip worklist): released, and the
-        // trace target names the released tool.
-        write_auth(&root, "direct-edit", &["*"], 0.0);
-        let v = shadow_worklist_decision("claude-rs", &payload).unwrap();
-        assert_eq!(
-            (v.decision.as_str(), v.reason.as_str()),
-            ("allow", "mcp-no-path-bypass")
-        );
-        assert_eq!(v.target, "mcp__claude_ai_Google_Drive__create_file");
-
-        // Stale grant: deny again.
+        // A stale/absent grant changes nothing either -- the allow no longer
+        // routes through the bypass/opt-out machinery at all.
         write_auth(&root, "direct-edit", &["*"], BYPASS_TTL_MS + 60_000.0);
         let v = shadow_worklist_decision("claude-rs", &payload).unwrap();
         assert_eq!(
             (v.decision.as_str(), v.reason.as_str()),
-            ("deny", "mcp-unrecognized-input")
+            ("allow", "mcp-no-candidate-paths")
         );
 
-        // "just do it" prose opt-out: released, with the audit turn key set
-        // (drives the direct-edit breadcrumb dedup).
-        std::fs::write(root.join(AUTH_REL), "{}").unwrap();
-        let tp = transcript(&root, "m360", "create the event, just do it");
+        // Same shape, second connector (Calendar create_event), no
+        // transcript and no "just do it" phrase anywhere -- still allowed.
         let v = shadow_worklist_decision(
             "claude-rs",
             &serde_json::json!({
                 "tool_name": "mcp__claude_ai_Google_Calendar__create_event",
                 "tool_input": {"summary": "lunch"},
                 "cwd": root.to_string_lossy(),
-                "transcript_path": tp,
             }),
         )
         .unwrap();
         assert_eq!(
             (v.decision.as_str(), v.reason.as_str()),
-            ("allow", "opt-out-phrase")
+            ("allow", "mcp-no-candidate-paths")
         );
-        assert_eq!(v.target, "mcp__claude_ai_Google_Calendar__create_event");
-        assert!(v.audit_turn_key.is_some());
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -7013,21 +7202,28 @@ mod guard_policy_tests {
         assert_eq!(v.reason, "subagent-worklist-write");
         assert_eq!(body_of(&v), SUBAGENT_WORKLIST_WRITE_BODY);
 
+        // judell/bram#384 retires this deny site: "blob" is an unrecognized
+        // key holding a bare, slash-free token ("x") that resolves to zero
+        // structural candidates, so this is now the accepted residual --
+        // allow, plus the observe-only trace line -- rather than the old
+        // `mcp-unrecognized-input` fail-closed deny whose message pointed
+        // at input-shape recognition (the wrong lever; see the item). There
+        // is no deny message left to transcribe for this case.
         let v = claude_decide(serde_json::json!({
             "tool_name": "mcp__fs__write_file",
             "tool_input": {"blob": "x"},
             "cwd": root.to_string_lossy(),
         }));
-        assert_eq!(v.reason, "mcp-unrecognized-input");
         assert_eq!(
-            body_of(&v),
-            "mcp__fs__write_file blocked: this looks like a mutation, but the guard could not extract any file path from tool_input.\nIf this tool does not modify repository files (an external connector, for example), the user can authorize it by ending their message with \"just do it\" or clicking the Skip worklist button.\nOtherwise propose the change in resources/worklist.json first, or extend MCP_PATH_KEYS (src-tauri/src/guard_policy.rs) to recognize this tool's input shape."
+            (v.decision.as_str(), v.reason.as_str()),
+            ("allow", "mcp-no-candidate-paths")
         );
-        // Python's trace target on this one branch is the empty string.
+        let events = std::fs::read_to_string(root.join("resources/bram-traces/hook-events.log"))
+            .unwrap_or_default();
         assert!(
-            header_of(&v).contains(" target= cwd="),
-            "header: {}",
-            header_of(&v)
+            events.contains("mcp-write-verb-no-candidate-paths")
+                && events.contains("mcp__fs__write_file"),
+            "events: {events}"
         );
 
         let v = claude_decide(serde_json::json!({
@@ -8133,30 +8329,12 @@ resources/worklist.json has no proposed"
             ("allow", "passed-checks")
         );
 
-        let v = decide(
-            &root,
-            "mcp__filesystem__write_file",
-            serde_json::json!({"contents": "x"}),
-        );
-        assert_eq!(v.decision, "deny");
-        assert!(
-            v.reason
-                .starts_with("mcp__filesystem__write_file blocked: looks like a mutation"),
-            "reason: {}",
-            v.reason
-        );
-
-        // issue-360: a fresh wildcard direct-edit grant (snake_case
-        // issued_at_ms — the only spelling the Codex arm reads) releases the
-        // zero-path deny; the trace target names the released tool.
-        std::fs::write(
-            root.join(DIRECT_EDIT_REL),
-            serde_json::json!({
-                "kind": "direct-edit", "paths": ["*"], "issued_at_ms": now_ms()
-            })
-            .to_string(),
-        )
-        .unwrap();
+        // judell/bram#384 retires #360's fail-closed-then-bypass design for
+        // this exact shape: "contents" was never a recognized key, and its
+        // value "x" is a bare, slash-free token resolving to zero structural
+        // candidates, so this call cannot name a repo file at all. It is now
+        // allowed outright -- no direct-edit grant required -- with the
+        // observe-only residue traced.
         let v = decide(
             &root,
             "mcp__filesystem__write_file",
@@ -8164,10 +8342,15 @@ resources/worklist.json has no proposed"
         );
         assert_eq!(
             (v.decision.as_str(), v.reason.as_str()),
-            ("allow", "mcp-no-path-bypass")
+            ("allow", "mcp-no-candidate-paths")
         );
-        assert_eq!(v.target, "mcp__filesystem__write_file");
-        std::fs::remove_file(root.join(DIRECT_EDIT_REL)).unwrap();
+        let events = std::fs::read_to_string(root.join("resources/bram-traces/hook-events.log"))
+            .unwrap_or_default();
+        assert!(
+            events.contains("mcp-write-verb-no-candidate-paths")
+                && events.contains("mcp__filesystem__write_file"),
+            "events: {events}"
+        );
 
         let v = decide(
             &root,

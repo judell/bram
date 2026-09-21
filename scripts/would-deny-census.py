@@ -52,6 +52,49 @@ and prints "found"/"NOT FOUND" for each (see KNOWN_POST_FIX_FIRES below): if
 this script does not recover them, that is a bug in this script, not
 evidence about the predicate.
 
+POPULATION SCOPE (issue-387): historically this script only walked Claude
+session transcripts (`~/.claude/projects/<slug>`, see `session_dir_for`) and
+only counted Edit/Write/MultiEdit tool calls -- so it inherited the same
+blind spot the guard itself had before issue-387: Bash writes (the majority
+channel, 197 Bash vs. 33 Write + 11 Edit calls measured on this repo since
+2026-09-13) were invisible to it, and Codex was never read at all even
+though Codex's own `would-deny` fires are real, observed data being
+silently dropped. Both gaps are narrowed here, each independently, and
+their status is reported explicitly rather than left to infer from a
+missing count:
+
+  - Bash-sourced edits: a Python port of `guard_policy.rs`'s
+    `bash_write_targets` (see the "Bash write-target extraction" section
+    below) is applied to every Bash / `exec_command` call found. It covers
+    the SAME tractable subset the guard extracts from (`>`, `>>`, `tee`,
+    heredoc-adjacent redirects) and NO MORE -- `sed -i`, `rm`, `git`,
+    inline interpreters, and anything expansion-bearing are excluded from
+    BOTH the population and the "unknown target" count, exactly the way
+    this census is narrower than the guard's own `bash_writes` by design
+    (see WHAT THIS SCRIPT DOES NOT DO below). A Bash call whose target
+    could not be determined is counted in a separate
+    `bash_calls_unknown_target` bucket per provider -- NOT silently
+    dropped, and NOT folded into the would-deny population, because
+    "unextractable" and "extracted-but-not-covered" are different findings
+    and pooling them would misrepresent both.
+  - Codex: `~/.codex/sessions/**/*.jsonl` rollouts ARE tractable -- each
+    file opens with a `session_meta` record carrying the project `cwd`,
+    and Bash-equivalent calls are `response_item` records with
+    `payload.type == "function_call"`, `payload.name == "exec_command"`,
+    and a JSON-string `arguments` field carrying `cmd` + `workdir`. Reading
+    them is therefore the documented preference over leaving the gap
+    silent. Claude and Codex populations are computed from the SAME
+    provider-agnostic claim intervals and worklist snapshots but are
+    reported and rated SEPARATELY, never pooled -- their observation
+    windows differ (Codex rollouts predate this repo's Claude-session
+    retention in places, and turn-boundary detection for Codex is a
+    documented, less-validated heuristic; see `scan_codex_sessions`) and a
+    combined total would hide that asymmetry rather than reveal it. Codex's
+    own file-edit MCP tools (`write_file` / `edit_file`) are NOT read here
+    -- only its Bash-equivalent (`exec_command`) calls are, matching this
+    item's Bash-observation scope; widening to Codex's edit tools is a
+    separate, uncatalogued gap, not one this change closes.
+
 WHAT THIS SCRIPT DOES NOT DO: it does not replicate
 `trace_would_deny_unaddressed` field-for-field. That function keys
 specifically on `.worklist-authorization.json`, a file that is overwritten in
@@ -110,6 +153,7 @@ import bisect
 import datetime as dt
 import gzip
 import json
+import os
 import re
 import sys
 from pathlib import Path, PurePosixPath
@@ -125,6 +169,17 @@ FIRE_MATCH_TOLERANCE_S = 5  # Edit-call ts vs would-deny-trace ts are concurrent
 
 ENVELOPE = "<task-notification>"
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit")
+BASH_TOOL_NAME = "Bash"
+CODEX_EXEC_NAMES = ("exec_command",)
+# Codex-side synthetic user-turn wrappers -- not a real user turn boundary.
+# Approximate and best-effort (docstring: "a documented, less-validated
+# heuristic"); Claude's equivalent is the single ENVELOPE/isMeta check above.
+CODEX_SYNTHETIC_USER_PREFIXES = (
+    "<turn_aborted>",
+    "<environment_context>",
+    "<user_instructions>",
+    "# AGENTS.md instructions for",
+)
 
 TRACE_LINE = re.compile(
     r"^\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)Z\]\s\[inflight-sentinel\]\s(op=\S+.*)$"
@@ -173,6 +228,14 @@ def session_dir_for(project_root: Path) -> Path:
     return Path("~/.claude/projects").expanduser() / slug
 
 
+def codex_session_dir() -> Path:
+    """Codex rollouts are not project-sliced on disk the way Claude's are --
+    every project's sessions live together under `~/.codex/sessions/YYYY/MM/DD/`.
+    Filtering to one project happens at read time (`scan_codex_sessions`),
+    by each file's own `session_meta.cwd`, not by directory location."""
+    return Path("~/.codex/sessions").expanduser()
+
+
 def open_log(path: Path):
     if path.suffix == ".gz":
         return gzip.open(path, "rt", errors="replace")
@@ -186,6 +249,260 @@ def parse_field_value(raw: str):
         except json.JSONDecodeError:
             return []
     return raw.strip('"')
+
+
+# --- Bash write-target extraction (issue-387) --------------------------------
+#
+# An independent Python re-implementation of `guard_policy.rs`'s
+# `bash_write_targets` and its helpers -- same tractable subset (`>`, `>>`,
+# `tee`, heredoc-adjacent redirects), same invariant: ambiguity degrades to
+# declining, never to a guessed path. This is NOT a byte-for-byte port (two
+# languages, two parsers); treat a divergence between this and the guard's
+# own behavior as a bug in ONE side to fix, not as evidence about either.
+
+NONREPO_REDIRECT_EXACT = {"/dev/null", "/dev/zero", "/tmp", "/private/tmp"}
+NONREPO_REDIRECT_PREFIXES = ("/tmp/", "/private/tmp/")
+_BOUNDARY_CHARS = set(" \t\n\r\x0b\x0c;&|`(")
+_SEPARATOR_CHARS = ";|&"
+
+
+def _is_nonrepo_redirect_target(t: str) -> bool:
+    return t in NONREPO_REDIRECT_EXACT or t.startswith(NONREPO_REDIRECT_PREFIXES)
+
+
+def _at_boundary(s: str, i: int) -> bool:
+    return i == 0 or s[i - 1] in _BOUNDARY_CHARS
+
+
+def _word_end(s: str, i: int) -> bool:
+    return i >= len(s) or not (s[i].isalnum() or s[i] == "_")
+
+
+def _strip_matching_quotes(s: str) -> str:
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in "'\"":
+        return s[1:-1]
+    return s
+
+
+def _mask_heredoc_bodies(command: str) -> str:
+    """Blank heredoc BODY lines so a `>` or `tee` mentioned inside one (example
+    shell text in a drafted commit message, say) is never misread as a real
+    redirect. Mirrors `guard_policy.rs::mask_heredoc_bodies`: an unterminated
+    heredoc can't be told apart from its command, so ambiguity falls back to
+    the command UNCHANGED rather than guessing where the body ends."""
+    if "<<" not in command:
+        return command
+
+    def introducers(line: str):
+        out = []
+        i, n = 0, len(line)
+        while i + 1 < n:
+            if line[i] == "<" and line[i + 1] == "<":
+                if (i + 2 < n and line[i + 2] == "<") or (i > 0 and line[i - 1] == "<"):
+                    i += 1
+                    continue
+                j = i + 2
+                dash = j < n and line[j] == "-"
+                if dash:
+                    j += 1
+                while j < n and line[j] == " ":
+                    j += 1
+                quote = line[j] if j < n and line[j] in "'\"" else None
+                if quote:
+                    j += 1
+                start = j
+                while j < n and (line[j].isalnum() or line[j] == "_"):
+                    j += 1
+                if j > start:
+                    if quote:
+                        if j < n and line[j] == quote:
+                            j += 1
+                        else:
+                            i += 1
+                            continue  # unterminated quoted tag: not an introducer
+                    tag_end = j - (1 if quote else 0)
+                    out.append((line[start:tag_end], dash))
+                    i = j
+                    continue
+            i += 1
+        return out
+
+    masked_lines = []
+    queue: list[tuple[str, bool]] = []
+    for line in command.split("\n"):
+        if queue:
+            tag, dash = queue[0]
+            candidate = line.lstrip("\t") if dash else line
+            if candidate == tag:
+                queue.pop(0)
+                masked_lines.append(line)
+            else:
+                masked_lines.append(" " * len(line))
+            continue
+        queue.extend(introducers(line))
+        masked_lines.append(line)
+    if queue:
+        return command
+    return "\n".join(masked_lines)
+
+
+def _redirect_targets(command: str) -> list[str]:
+    """Every unquoted `>` / `>>` target. A `>` inside quotes is a comparison
+    operator or JSON/jq syntax, never a redirect -- mirrors
+    `guard_policy.rs::redirect_targets`."""
+    out = []
+    n = len(command)
+    i = 0
+    in_single = in_double = False
+    while i < n:
+        ch = command[i]
+        if in_single:
+            if ch == "'":
+                in_single = False
+            i += 1
+            continue
+        if in_double:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == '"':
+                in_double = False
+            i += 1
+            continue
+        if ch == "'":
+            in_single = True
+            i += 1
+        elif ch == '"':
+            in_double = True
+            i += 1
+        elif ch == "\\":
+            i += 2
+        elif ch == ">":
+            boundary_ok = _at_boundary(command, i)
+            j = i
+            while j < n and command[j] == ">":
+                j += 1
+            if boundary_ok:
+                k = j
+                while k < n and command[k].isspace():
+                    k += 1
+                if k < n and command[k] not in (">", "&"):
+                    if command[k] in "'\"":
+                        q = command[k]
+                        e = k + 1
+                        buf = []
+                        while e < n and command[e] != q:
+                            buf.append(command[e])
+                            e += 1
+                        out.append("".join(buf))
+                        i = e + 1 if e < n else e
+                        continue
+                    e = k
+                    while e < n and not command[e].isspace() and command[e] not in (">", "&"):
+                        e += 1
+                    out.append(_strip_matching_quotes(command[k:e]))
+                    i = e
+                    continue
+            i = j
+        else:
+            i += 1
+    return out
+
+
+def _tee_targets(command: str) -> list[str]:
+    """`tee`'s positional file arguments, skipping flags (`-a`, ...) and the
+    lone `-` stdin/stdout marker. Mirrors `guard_policy.rs::tee_targets`."""
+    out = []
+    n = len(command)
+    i = 0
+    while i < n:
+        if not _at_boundary(command, i):
+            i += 1
+            continue
+        if command[i : i + 3] != "tee" or not _word_end(command, i + 3):
+            i += 1
+            continue
+        p = i + 3
+        while True:
+            while p < n and command[p].isspace():
+                p += 1
+            if p >= n or command[p] in ";&|`()\n":
+                break
+            if command[p] in "'\"":
+                q = command[p]
+                start = p + 1
+                e = start
+                while e < n and command[e] != q:
+                    e += 1
+                tok = command[start:e]
+                p = e + 1 if e < n else e
+                if tok:
+                    out.append(tok)
+                continue
+            start = p
+            while p < n and not command[p].isspace() and command[p] not in ";&|`()":
+                p += 1
+            tok = command[start:p]
+            if not tok:
+                break
+            if tok != "-" and not tok.startswith("-"):
+                out.append(tok)
+        i = p if p > i + 3 else i + 4
+    return out
+
+
+def _bash_target_is_untrustworthy(token: str) -> bool:
+    """`$VAR` / `` `cmd` `` could resolve to any path at all -- reporting the
+    literal token would be exactly the guessed-path the invariant forbids."""
+    return "$" in token or "`" in token
+
+
+def _tractable_target_token(raw: str) -> str | None:
+    """Neither scanner above stops at a bare `;`/`|`/`&` with no preceding
+    space (`> out.txt;`, `>out.txt|wc`), so a target immediately followed by
+    a separator reads the separator as part of the path. An unescaped
+    separator outside quotes always ends a shell word, so cutting there is
+    not a guess."""
+    idxs = [raw.find(c) for c in _SEPARATOR_CHARS]
+    idxs = [x for x in idxs if x != -1]
+    end = min(idxs) if idxs else len(raw)
+    trimmed = raw[:end].strip()
+    return trimmed or None
+
+
+def bash_write_targets(command: str):
+    """("paths", [rel, ...]) | ("unknown", None). Mirrors
+    `guard_policy.rs::bash_write_targets`'s decline-over-guess invariant."""
+    masked = _mask_heredoc_bodies(command)
+    out: list[str] = []
+    saw_untrustworthy = False
+    for raw in _redirect_targets(masked) + _tee_targets(masked):
+        t = _tractable_target_token(raw)
+        if t is None:
+            continue
+        if _bash_target_is_untrustworthy(t):
+            saw_untrustworthy = True
+            continue
+        if t not in out:
+            out.append(t)
+    if saw_untrustworthy or not out:
+        return ("unknown", None)
+    return ("paths", out)
+
+
+def bash_call_is_candidate_write(command: str) -> bool:
+    """Narrower than the guard's own `bash_writes`: this census only asks
+    "does this command contain one of the tractable redirect/tee shapes",
+    not the guard's full write-pattern set (`sed -i`, `rm`, `git`,
+    `python -c`, ...). A command with none of those shapes is excluded from
+    BOTH the population and the unknown-target count -- see the module
+    docstring's "Bash-sourced edits" paragraph."""
+    masked = _mask_heredoc_bodies(command)
+    for raw in _redirect_targets(masked):
+        t = _tractable_target_token(raw) or raw
+        if not _is_nonrepo_redirect_target(t):
+            return True
+    return bool(_tee_targets(masked))
 
 
 # --- claim intervals ---------------------------------------------------------
@@ -452,17 +769,42 @@ def record_text(rec: dict):
     return None
 
 
-def scan_sessions(session_dir: Path, project_root: Path, since_ms: float | None):
+def _resolve_bash_target(raw: str, call_cwd: str, root_prefix: str, project_root_s: str):
+    """Join an extracted (still request-relative) token against the command's
+    actual cwd, then check it against the project root the same way
+    `scan_sessions`/`normalize_target` do for Edit/Write file_paths. Returns
+    the project-relative path, or None when it falls outside the project."""
+    abs_p = raw if os.path.isabs(raw) else os.path.normpath(os.path.join(call_cwd, raw))
+    abs_p = os.path.normpath(abs_p)
+    if abs_p == project_root_s:
+        return ""
+    if abs_p.startswith(root_prefix):
+        return abs_p[len(root_prefix):]
+    return None
+
+
+def scan_sessions(session_dir: Path, project_root: Path, since_ms: float | None) -> dict:
     """Per session: chronological edit list [(ts_ms, rel_path, tool)] and
     sorted genuine-user-message timestamps (turn starts). Edits outside
     project_root are dropped (excluded from population -- they can never be
     covered by a worklist item's declared paths) and counted separately.
+
+    issue-387: Bash calls are now scanned alongside Edit/Write/MultiEdit.
+    `bash_call_is_candidate_write` narrows to the same tractable subset
+    `bash_write_targets` extracts from (see that section's docstring for the
+    documented scope limits vs. the guard's own `bash_writes`); a candidate
+    write whose target could not be extracted is counted in
+    `bash_calls_unknown_target`, never silently dropped and never folded
+    into the population.
     """
     root_prefix = str(project_root) + "/"
+    project_root_s = str(project_root)
     edits_by_session: dict[str, list[tuple[float, str, str]]] = {}
     users_by_session: dict[str, list[float]] = {}
     outside_root = 0
     total_edit_calls = 0
+    bash_calls_total = 0
+    bash_calls_unknown_target = 0
 
     for path in sorted(session_dir.glob("*.jsonl")):
         edits, users = [], []
@@ -491,10 +833,28 @@ def scan_sessions(session_dir: Path, project_root: Path, since_ms: float | None)
                         content = rec.get("message", {}).get("content")
                         if not isinstance(content, list):
                             continue
+                        call_cwd = rec.get("cwd") if isinstance(rec.get("cwd"), str) else project_root_s
                         for b in content:
                             if not (isinstance(b, dict) and b.get("type") == "tool_use"):
                                 continue
-                            if b.get("name") not in EDIT_TOOLS:
+                            name = b.get("name")
+                            if name == BASH_TOOL_NAME:
+                                cmd = (b.get("input") or {}).get("command")
+                                if not isinstance(cmd, str) or not bash_call_is_candidate_write(cmd):
+                                    continue
+                                bash_calls_total += 1
+                                kind, paths = bash_write_targets(cmd)
+                                if kind == "unknown":
+                                    bash_calls_unknown_target += 1
+                                    continue
+                                for raw in paths:
+                                    rel = _resolve_bash_target(raw, call_cwd, root_prefix, project_root_s)
+                                    if rel is None:
+                                        outside_root += 1
+                                    else:
+                                        edits.append((ts_ms, rel, "Bash"))
+                                continue
+                            if name not in EDIT_TOOLS:
                                 continue
                             fp = (b.get("input") or {}).get("file_path")
                             if not isinstance(fp, str):
@@ -502,7 +862,7 @@ def scan_sessions(session_dir: Path, project_root: Path, since_ms: float | None)
                             total_edit_calls += 1
                             if fp.startswith(root_prefix):
                                 rel = fp[len(root_prefix):]
-                                edits.append((ts_ms, rel, b.get("name")))
+                                edits.append((ts_ms, rel, name))
                             else:
                                 outside_root += 1
         except OSError:
@@ -514,7 +874,149 @@ def scan_sessions(session_dir: Path, project_root: Path, since_ms: float | None)
         edits_by_session[path.stem] = edits
         users_by_session[path.stem] = users
 
-    return edits_by_session, users_by_session, outside_root, total_edit_calls
+    return {
+        "edits_by_session": edits_by_session,
+        "users_by_session": users_by_session,
+        "outside_root": outside_root,
+        "edit_calls_total": total_edit_calls,
+        "bash_calls_total": bash_calls_total,
+        "bash_calls_unknown_target": bash_calls_unknown_target,
+    }
+
+
+def _codex_message_text(payload: dict) -> str | None:
+    content = payload.get("content")
+    if not isinstance(content, list):
+        return None
+    parts = [b["text"] for b in content if isinstance(b, dict) and isinstance(b.get("text"), str)]
+    return "\n\n".join(parts) if parts else None
+
+
+def scan_codex_sessions(session_dir: Path, project_root: Path, since_ms: float | None) -> dict:
+    """Codex rollout counterpart to `scan_sessions`, for Bash-equivalent
+    (`exec_command`) calls only -- see the module docstring's "Codex"
+    paragraph for what this deliberately does not read (Codex's own
+    write_file/edit_file MCP tools).
+
+    Rollouts are NOT project-sliced on disk the way Claude's session
+    directory is (`session_dir` is `~/.codex/sessions/YYYY/MM/DD/*.jsonl`
+    across every project ever run) -- each file's FIRST record is checked
+    (it is always `session_meta`, carrying the project `cwd` the whole
+    session ran in) and the file is skipped entirely if that doesn't match
+    `project_root`, or if the first record isn't `session_meta` at all (an
+    older or foreign shape this reader declines to guess about rather than
+    scanning speculatively).
+
+    Turn-boundary detection (`users`, for the same-turn-correction /
+    cold-resume split) is a documented approximation, weaker than Claude's:
+    a `response_item` message with role "user" counts as a genuine turn
+    start unless its text starts with a known Codex synthetic-wrapper
+    prefix (`CODEX_SYNTHETIC_USER_PREFIXES` -- turn-abort notices,
+    environment/instructions injections). Codex has no single equivalent of
+    Claude's ENVELOPE/isMeta pair, so this denylist is best-effort, not
+    verified exhaustive; a false turn boundary here can only ever shift a
+    population entry between "cold-resume" and "other", never add or remove
+    it from the population.
+    """
+    root_prefix = str(project_root) + "/"
+    project_root_s = str(project_root)
+    edits_by_session: dict[str, list[tuple[float, str, str]]] = {}
+    users_by_session: dict[str, list[float]] = {}
+    outside_root = 0
+    bash_calls_total = 0
+    bash_calls_unknown_target = 0
+    files_scanned = 0
+    files_matched = 0
+
+    for path in sorted(session_dir.rglob("*.jsonl")):
+        try:
+            with path.open("r", errors="replace") as fh:
+                first_line = fh.readline()
+        except OSError:
+            continue
+        files_scanned += 1
+        try:
+            first_rec = json.loads(first_line) if first_line.strip() else None
+        except json.JSONDecodeError:
+            first_rec = None
+        if not isinstance(first_rec, dict) or first_rec.get("type") != "session_meta":
+            continue
+        meta_cwd = (first_rec.get("payload") or {}).get("cwd")
+        if meta_cwd != project_root_s:
+            continue
+        files_matched += 1
+
+        edits, users = [], []
+        try:
+            with path.open("r", errors="replace") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if rec.get("type") != "response_item":
+                        continue
+                    ts = parse_ts(rec.get("timestamp") or "")
+                    if ts is None:
+                        continue
+                    ts_ms = to_ms(ts)
+                    payload = rec.get("payload") or {}
+                    ptype = payload.get("type")
+                    if ptype == "message" and payload.get("role") == "user":
+                        text = _codex_message_text(payload)
+                        if text is not None and not text.lstrip().startswith(
+                            CODEX_SYNTHETIC_USER_PREFIXES
+                        ):
+                            users.append(ts_ms)
+                        continue
+                    if ptype != "function_call" or payload.get("name") not in CODEX_EXEC_NAMES:
+                        continue
+                    args_raw = payload.get("arguments")
+                    if not isinstance(args_raw, str):
+                        continue
+                    try:
+                        args = json.loads(args_raw)
+                    except json.JSONDecodeError:
+                        continue
+                    cmd = args.get("cmd")
+                    if not isinstance(cmd, str) or not bash_call_is_candidate_write(cmd):
+                        continue
+                    bash_calls_total += 1
+                    kind, paths = bash_write_targets(cmd)
+                    if kind == "unknown":
+                        bash_calls_unknown_target += 1
+                        continue
+                    call_cwd = args.get("workdir")
+                    if not isinstance(call_cwd, str):
+                        call_cwd = project_root_s
+                    for raw in paths:
+                        rel = _resolve_bash_target(raw, call_cwd, root_prefix, project_root_s)
+                        if rel is None:
+                            outside_root += 1
+                        else:
+                            edits.append((ts_ms, rel, "Bash"))
+        except OSError:
+            continue
+        edits.sort(key=lambda e: e[0])
+        users.sort()
+        if since_ms is not None:
+            edits = [e for e in edits if e[0] >= since_ms]
+        edits_by_session[path.stem] = edits
+        users_by_session[path.stem] = users
+
+    return {
+        "edits_by_session": edits_by_session,
+        "users_by_session": users_by_session,
+        "outside_root": outside_root,
+        "edit_calls_total": 0,  # Codex file-edit MCP tools not read; see docstring
+        "bash_calls_total": bash_calls_total,
+        "bash_calls_unknown_target": bash_calls_unknown_target,
+        "files_scanned": files_scanned,
+        "files_matched_project": files_matched,
+    }
 
 
 # --- classification ------------------------------------------------------------
@@ -542,54 +1044,11 @@ def classify(session_edits, idx_in_session, users, rel_path, item_begun_min):
 # --- main ------------------------------------------------------------------
 
 
-def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument(
-        "--project-root", type=Path, default=Path.cwd(),
-        help="project whose sessions, traces, and worklist history to read (default: cwd)",
-    )
-    ap.add_argument("--session-dir", type=Path, help="override the Claude session directory")
-    ap.add_argument("--trace-dir", type=Path, help="override the bram-traces directory")
-    ap.add_argument("--history-dir", type=Path, help="override the worklist-history directory")
-    ap.add_argument("--since", help="ISO date or timestamp; ignore edits before it")
-    ap.add_argument("--json", action="store_true", help="emit JSON instead of text")
-    ap.add_argument(
-        "--samples", type=int, default=5, help="sample pairs to print per class (default 5)"
-    )
-    args = ap.parse_args(argv)
-
-    root = args.project_root.expanduser().resolve()
-    session_dir = (args.session_dir or session_dir_for(root)).expanduser()
-    trace_dir = (args.trace_dir or root / "resources" / "bram-traces").expanduser()
-    history_dir = (args.history_dir or root / "resources" / "worklist-history").expanduser()
-    worklist_path = root / "resources" / "worklist.json"
-
-    since = parse_ts(args.since) if args.since else None
-    if args.since and since is None:
-        print(f"could not parse --since {args.since!r}", file=sys.stderr)
-        return 2
-    since_ms = to_ms(since) if since else None
-
-    for label, path in (("session", session_dir), ("trace", trace_dir), ("history", history_dir)):
-        if not path.is_dir():
-            print(f"{label} directory not found: {path}", file=sys.stderr)
-            return 2
-
-    events, scanned, damaged = read_claim_events(trace_dir)
-    last_ts_ms = events[-1][0] if events else 0.0
-    intervals, anomalies, unmatched_open = build_claim_intervals(events, last_ts_ms)
-
-    snapshots = build_snapshots(history_dir, worklist_path)
-    if not snapshots:
-        print(f"no worklist-history snapshots found under {history_dir}", file=sys.stderr)
-        return 2
-
-    edits_by_session, users_by_session, outside_root, total_edit_calls = scan_sessions(
-        session_dir, root, since_ms
-    )
-
-    boundary_ms = to_ms(parse_ts(COMMIT_BOUNDARY))
-
+def build_population(edits_by_session, users_by_session, snapshots, intervals, last_ts_ms, boundary_ms):
+    """The #368 predicate, applied to one provider's scanned edits. Shared by
+    Claude and Codex so both are asking the identical question of the SAME
+    provider-agnostic claim intervals and worklist snapshots -- only the
+    edit population differs between them."""
     population = []  # each: dict with ts_ms, session, rel_path, item_ids, klass
     considered = 0
     no_snapshot_data = 0
@@ -624,53 +1083,215 @@ def main(argv=None) -> int:
     population.sort(key=lambda p: p["ts_ms"])
     before = [p for p in population if p["ts_ms"] < boundary_ms]
     after = [p for p in population if p["ts_ms"] >= boundary_ms]
-
     class_counts = {"same-turn-correction": 0, "cold-resume": 0, "other": 0}
     for p in population:
         class_counts[p["class"]] += 1
-
     rate_per_1000 = (len(population) / considered * 1000.0) if considered else 0.0
 
-    # Cross-check against the 3 known post-fix would-deny fires.
+    return {
+        "population": population,
+        "considered": considered,
+        "no_snapshot_data": no_snapshot_data,
+        "before": before,
+        "after": after,
+        "class_counts": class_counts,
+        "rate_per_1000": rate_per_1000,
+    }
+
+
+def known_fires_recovered(after_population):
+    """Cross-check against the 3 known post-fix would-deny fires. Claude-only
+    -- no Codex fires have been catalogued to check against (see module
+    docstring)."""
     recovered = []
     for fire_ts_text, fire_path in KNOWN_POST_FIX_FIRES:
         fire_ms = to_ms(parse_ts(fire_ts_text))
         match = None
-        for p in after:
+        for p in after_population:
             if p["path"] == fire_path and abs(p["ts_ms"] - fire_ms) <= FIRE_MATCH_TOLERANCE_S * 1000:
                 match = p
                 break
         recovered.append(
             {"expected": fire_ts_text, "path": fire_path, "found": match["ts"] if match else None}
         )
+    return recovered
+
+
+def provider_result(provider: str, scan: dict, pop: dict, samples_n: int, fires=None) -> dict:
+    r = {
+        "provider": provider,
+        "edit_calls_total": scan["edit_calls_total"],
+        "edit_calls_outside_project_root": scan["outside_root"],
+        "bash_calls_candidate_write": scan["bash_calls_total"],
+        "bash_calls_unknown_target": scan["bash_calls_unknown_target"],
+        "edit_calls_considered": pop["considered"],
+        "edit_calls_no_snapshot_data": pop["no_snapshot_data"],
+        "population_size": len(pop["population"]),
+        "rate_per_1000_edits": round(pop["rate_per_1000"], 3),
+        "classification": pop["class_counts"],
+        "before_b64d81f": len(pop["before"]),
+        "after_b64d81f": len(pop["after"]),
+        "samples": {
+            k: [
+                {"ts": p["ts"], "path": p["path"], "tool": p["tool"], "item_ids": p["item_ids"], "session": p["session"]}
+                for p in pop["population"]
+                if p["class"] == k
+            ][:samples_n]
+            for k in pop["class_counts"]
+        },
+    }
+    if fires is not None:
+        r["known_fires_recovered"] = fires
+    for extra in ("files_scanned", "files_matched_project"):
+        if extra in scan:
+            r[extra] = scan[extra]
+    return r
+
+
+def print_provider_report(r: dict):
+    print(f"--- {r['provider'].upper()} " + "-" * (60 - len(r["provider"])))
+    if "files_scanned" in r:
+        print(f"rollout files scanned            {r['files_scanned']}")
+        print(f"rollout files matching project    {r['files_matched_project']}")
+    print(f"edit calls (Edit/Write/MultiEdit)   {r['edit_calls_total']}")
+    print(f"Bash calls, candidate write         {r['bash_calls_candidate_write']}")
+    print(f"    unknown target (excluded)       {r['bash_calls_unknown_target']}")
+    print(f"  outside project root (excluded)   {r['edit_calls_outside_project_root']}")
+    print(f"  considered                        {r['edit_calls_considered']}")
+    print(f"    no snapshot data (excluded)     {r['edit_calls_no_snapshot_data']}")
+    print()
+    print(f"POPULATION (would-deny predicate true)  {r['population_size']}")
+    print(f"    rate per 1,000 edits considered     {r['rate_per_1000_edits']}")
+    print(f"    before b64d81f (2026-09-09 19:39:39Z)  {r['before_b64d81f']}")
+    print(f"    after  b64d81f                          {r['after_b64d81f']}")
+    print()
+    print("classification:")
+    for k, v in r["classification"].items():
+        print(f"    {k:<22} {v}")
+    print()
+    if "known_fires_recovered" in r:
+        print("known post-fix fires recovered?")
+        for fr in r["known_fires_recovered"]:
+            status = fr["found"] or "NOT FOUND"
+            print(f"    expected {fr['expected']} {fr['path']:<28} -> {status}")
+        print()
+    for k, rows in r["samples"].items():
+        print(f"sample: {k} ({r['classification'][k]} total, showing {len(rows)})")
+        for row in rows:
+            print(
+                f"    {row['ts'][:19]}  [{row['tool']}] {row['path']:<38} item={row['item_ids']} session={row['session']}"
+            )
+        print()
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument(
+        "--project-root", type=Path, default=Path.cwd(),
+        help="project whose sessions, traces, and worklist history to read (default: cwd)",
+    )
+    ap.add_argument("--session-dir", type=Path, help="override the Claude session directory")
+    ap.add_argument(
+        "--codex-session-dir", type=Path, help="override the Codex rollout directory"
+    )
+    ap.add_argument(
+        "--no-codex", action="store_true",
+        help="skip Codex rollouts entirely; report Claude-only (population is stated as such either way)",
+    )
+    ap.add_argument("--trace-dir", type=Path, help="override the bram-traces directory")
+    ap.add_argument("--history-dir", type=Path, help="override the worklist-history directory")
+    ap.add_argument("--since", help="ISO date or timestamp; ignore edits before it")
+    ap.add_argument("--json", action="store_true", help="emit JSON instead of text")
+    ap.add_argument(
+        "--samples", type=int, default=5, help="sample pairs to print per class (default 5)"
+    )
+    args = ap.parse_args(argv)
+
+    root = args.project_root.expanduser().resolve()
+    session_dir = (args.session_dir or session_dir_for(root)).expanduser()
+    codex_session_dir_path = (args.codex_session_dir or codex_session_dir()).expanduser()
+    trace_dir = (args.trace_dir or root / "resources" / "bram-traces").expanduser()
+    history_dir = (args.history_dir or root / "resources" / "worklist-history").expanduser()
+    worklist_path = root / "resources" / "worklist.json"
+
+    since = parse_ts(args.since) if args.since else None
+    if args.since and since is None:
+        print(f"could not parse --since {args.since!r}", file=sys.stderr)
+        return 2
+    since_ms = to_ms(since) if since else None
+
+    for label, path in (("session", session_dir), ("trace", trace_dir), ("history", history_dir)):
+        if not path.is_dir():
+            print(f"{label} directory not found: {path}", file=sys.stderr)
+            return 2
+
+    codex_enabled = not args.no_codex
+    if codex_enabled and not codex_session_dir_path.is_dir():
+        codex_enabled = False
+        codex_skip_reason = f"directory not found: {codex_session_dir_path}"
+    else:
+        codex_skip_reason = None
+
+    events, scanned, damaged = read_claim_events(trace_dir)
+    last_ts_ms = events[-1][0] if events else 0.0
+    intervals, anomalies, unmatched_open = build_claim_intervals(events, last_ts_ms)
+
+    snapshots = build_snapshots(history_dir, worklist_path)
+    if not snapshots:
+        print(f"no worklist-history snapshots found under {history_dir}", file=sys.stderr)
+        return 2
+
+    boundary_ms = to_ms(parse_ts(COMMIT_BOUNDARY))
+
+    claude_scan = scan_sessions(session_dir, root, since_ms)
+    claude_pop = build_population(
+        claude_scan["edits_by_session"], claude_scan["users_by_session"],
+        snapshots, intervals, last_ts_ms, boundary_ms,
+    )
+    claude_result = provider_result(
+        "claude", claude_scan, claude_pop, args.samples,
+        fires=known_fires_recovered(claude_pop["after"]),
+    )
+
+    providers = {"claude": claude_result}
+
+    if codex_enabled:
+        codex_scan = scan_codex_sessions(codex_session_dir_path, root, since_ms)
+        codex_pop = build_population(
+            codex_scan["edits_by_session"], codex_scan["users_by_session"],
+            snapshots, intervals, last_ts_ms, boundary_ms,
+        )
+        providers["codex"] = provider_result("codex", codex_scan, codex_pop, args.samples)
+
+    # POPULATION SCOPE, stated plainly per the module docstring's own rule:
+    # never let a missing count read as completeness. See the docstring's
+    # "Bash-sourced edits" / "Codex" paragraphs for what is and is not read.
+    if codex_enabled:
+        scope_note = (
+            "Claude session transcripts AND Codex rollouts, reported SEPARATELY below "
+            "(not pooled -- their observation windows differ). Both include Bash-sourced "
+            "edits for the tractable subset (>, >>, tee, heredoc redirects); Codex's own "
+            "write_file/edit_file MCP tools are not read."
+        )
+    else:
+        reason = f" ({codex_skip_reason})" if codex_skip_reason else " (--no-codex)"
+        scope_note = (
+            "CLAUDE ONLY" + reason + ". Codex would-deny fires are real, observed data "
+            "that this run is NOT counting -- do not read population_size as complete "
+            "coverage of both providers. Includes Bash-sourced edits for Claude."
+        )
 
     result = {
         "project_root": str(root),
         "since": since.isoformat() if since else None,
+        "population_scope": scope_note,
         "trace_logs_scanned": scanned,
         "trace_logs_damaged": damaged,
         "claim_events": len(events),
         "claim_anomalies": anomalies,
         "claim_ids_unmatched_open": unmatched_open,
         "worklist_snapshots": len(snapshots),
-        "edit_calls_total": total_edit_calls,
-        "edit_calls_outside_project_root": outside_root,
-        "edit_calls_considered": considered,
-        "edit_calls_no_snapshot_data": no_snapshot_data,
-        "population_size": len(population),
-        "rate_per_1000_edits": round(rate_per_1000, 3),
-        "classification": class_counts,
-        "before_b64d81f": len(before),
-        "after_b64d81f": len(after),
-        "known_fires_recovered": recovered,
-        "samples": {
-            k: [
-                {"ts": p["ts"], "path": p["path"], "item_ids": p["item_ids"], "session": p["session"]}
-                for p in population
-                if p["class"] == k
-            ][: args.samples]
-            for k in class_counts
-        },
+        "providers": providers,
     }
 
     if args.json:
@@ -680,6 +1301,7 @@ def main(argv=None) -> int:
     print(f"project              {root}")
     if since:
         print(f"since                {since.isoformat()}")
+    print(f"POPULATION SCOPE:    {scope_note}")
     print(f"trace logs scanned   {scanned} (live + rotated)")
     if damaged:
         print(
@@ -691,31 +1313,8 @@ def main(argv=None) -> int:
     print(f"claim ids unmatched (never closed in observed data): {unmatched_open}")
     print(f"worklist snapshots   {len(snapshots)}")
     print()
-    print(f"edit calls total                 {total_edit_calls}")
-    print(f"  outside project root (excluded) {outside_root}")
-    print(f"  considered                      {considered}")
-    print(f"    no snapshot data (excluded)   {no_snapshot_data}")
-    print()
-    print(f"POPULATION (would-deny predicate true)  {len(population)}")
-    print(f"    rate per 1,000 edits considered     {result['rate_per_1000_edits']}")
-    print(f"    before b64d81f (2026-09-09 19:39:39Z)  {len(before)}")
-    print(f"    after  b64d81f                          {len(after)}")
-    print()
-    print("classification:")
-    for k, v in class_counts.items():
-        print(f"    {k:<22} {v}")
-    print()
-    print("known post-fix fires recovered?")
-    for r in recovered:
-        status = r["found"] or "NOT FOUND"
-        print(f"    expected {r['expected']} {r['path']:<28} -> {status}")
-    print()
-    for k in class_counts:
-        rows = result["samples"][k]
-        print(f"sample: {k} ({class_counts[k]} total, showing {len(rows)})")
-        for row in rows:
-            print(f"    {row['ts'][:19]}  {row['path']:<40} item={row['item_ids']} session={row['session']}")
-        print()
+    for r in providers.values():
+        print_provider_report(r)
 
     return 0
 

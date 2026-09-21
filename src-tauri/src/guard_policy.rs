@@ -1264,6 +1264,154 @@ fn mask_heredoc_bodies(command: &str) -> String {
     masked_lines.join("\n")
 }
 
+// --- Bash write-target extraction (issue-387) --------------------------------
+//
+// `bash_writes` / `codex_bash_writes` already answer "is this command a
+// write"; the functions below answer "to what path", for the tractable
+// subset named in the item: `>`, `>>`, `tee`, and heredoc redirects (the
+// heredoc's own `>` target, not its body). They exist because neither Bash
+// branch calls `trace_would_deny_unaddressed` today -- the guard denies
+// uncovered Bash writes correctly (enforcement is not the gap), but it can
+// only ask "does ANY item cover the worklist", never "does an item cover
+// THIS path", so #368's question is unanswerable for the majority of writes
+// in this repo (197 Bash vs. 33 Write + 11 Edit, tool calls since
+// 2026-09-13).
+//
+// Same invariant `mask_heredoc_bodies` above documents for its neighbouring
+// parser, carried over verbatim: ambiguity degrades to declining, never to a
+// guessed path. A wrong path is a confidently false observation; "could not
+// determine" is not. Command substitution, variable expansion, and `eval`
+// make the general case undecidable, so this does not attempt it -- it
+// extracts the tractable shapes and says "unknown" about everything else.
+
+/// A target token that embeds shell expansion cannot be trusted as the
+/// literal path the shell will actually write -- `$VAR` or `` `cmd` `` might
+/// resolve to any path at all, including one outside the extracted token's
+/// apparent shape. Reporting it as-is would be exactly the "guessed path"
+/// the invariant above forbids.
+fn bash_target_is_untrustworthy(token: &str) -> bool {
+    token.contains('$') || token.contains('`')
+}
+
+/// `redirect_targets`'s unquoted-token scan stops at whitespace, `>`, and
+/// `&`, but not at a bare `;` or `|` -- so a target directly followed by a
+/// separator with no space (`> out.txt;`, `>out.txt|wc`) reads the
+/// separator as part of the path. An unescaped `;`/`|`/`&` outside quotes
+/// always ends a shell word, so cutting the token there is not a guess --
+/// it is what the shell itself would do. Applied uniformly to every
+/// extracted token (quoted targets containing these characters literally
+/// are rare enough, and outside this project's file names entirely, that
+/// the tradeoff favors the common unquoted case).
+fn tractable_target_token(raw: &str) -> Option<String> {
+    let end = raw.find([';', '|', '&']).unwrap_or(raw.len());
+    let trimmed = raw[..end].trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// `tee`'s positional file arguments: everything after the bare word `tee`
+/// up to the next command separator, skipping flags (`-a`, `--append`, ...)
+/// and the lone `-` stdin/stdout marker, which names no file. Quote-aware in
+/// the same style as `redirect_targets` below.
+fn tee_targets(command: &str) -> Vec<String> {
+    let c: Vec<char> = command.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < c.len() {
+        if !at_boundary(&c, i) {
+            i += 1;
+            continue;
+        }
+        let Some(j) = lit(&c, i, "tee") else {
+            i += 1;
+            continue;
+        };
+        if !word_end(&c, j) {
+            i += 1;
+            continue;
+        }
+        let mut p = j;
+        loop {
+            p = ws0(&c, p);
+            if p >= c.len() || matches!(c[p], ';' | '&' | '|' | '`' | '(' | ')' | '\n') {
+                break;
+            }
+            if matches!(c[p], '\'' | '"') {
+                let q = c[p];
+                let start = p + 1;
+                let mut e = start;
+                while e < c.len() && c[e] != q {
+                    e += 1;
+                }
+                let tok: String = c[start..e].iter().collect();
+                p = if e < c.len() { e + 1 } else { e };
+                if !tok.is_empty() {
+                    out.push(tok);
+                }
+                continue;
+            }
+            let start = p;
+            while p < c.len()
+                && !c[p].is_whitespace()
+                && !matches!(c[p], ';' | '&' | '|' | '`' | '(' | ')')
+            {
+                p += 1;
+            }
+            let tok: String = c[start..p].iter().collect();
+            if tok.is_empty() {
+                break;
+            }
+            if tok != "-" && !tok.starts_with('-') {
+                out.push(tok);
+            }
+        }
+        i = if p > j { p } else { j + 1 };
+    }
+    out
+}
+
+/// The outcome of trying to extract Bash write targets from a command that
+/// already classifies as a write. `Unknown` is not an error -- it is the
+/// honest answer for every shape outside the tractable subset (`sed -i`,
+/// `rm`/`mv`/`cp`, `git`, `python -c`, ...) and for any tractable shape whose
+/// target could not be trusted (expansion-bearing).
+enum BashWriteTarget {
+    /// One or more concrete, literal write targets, as written in the
+    /// command -- not yet resolved against a project root.
+    Paths(Vec<String>),
+    /// The command is a write; no target could be safely determined.
+    Unknown,
+}
+
+fn bash_write_targets(command: &str) -> BashWriteTarget {
+    // Heredoc BODY text is masked first so a `>` (or the word `tee`) that
+    // merely appears inside a heredoc's payload -- example shell snippets in
+    // a commit message draft, say -- is never misread as a real redirect.
+    // Same body/command split `mask_heredoc_bodies` already performs for the
+    // signature/SHA scanners; see its own comment above.
+    let masked = mask_heredoc_bodies(command);
+    let mut out: Vec<String> = Vec::new();
+    let mut saw_untrustworthy = false;
+    for raw in redirect_targets(&masked)
+        .into_iter()
+        .chain(tee_targets(&masked))
+    {
+        let Some(t) = tractable_target_token(&raw) else {
+            continue;
+        };
+        if bash_target_is_untrustworthy(&t) {
+            saw_untrustworthy = true;
+            continue;
+        }
+        out.push(t);
+    }
+    if saw_untrustworthy || out.is_empty() {
+        return BashWriteTarget::Unknown;
+    }
+    let mut seen: HashSet<String> = HashSet::new();
+    out.retain(|p| seen.insert(p.clone()));
+    BashWriteTarget::Paths(out)
+}
+
 const FORGE_WRITE_VERBS: &[&str] = &["create", "comment", "note", "edit", "update", "review"];
 
 fn is_forge_write(command: &str) -> bool {
@@ -2484,6 +2632,61 @@ fn trace_would_deny_unaddressed(project_root: &Path, provider: &str, tool: &str,
     );
 }
 
+/// issue-387: refines a Bash branch's coarse "some begun item covers
+/// something, so allow" leg into per-target observation -- the same
+/// refinement `trace_would_deny_unaddressed` already gives the file-tool and
+/// MCP branches. Call this ONLY from the branch that is about to allow for
+/// that coarse reason; the allow itself never changes.
+///
+/// `normalize` resolves one extracted (still request-relative) token against
+/// the command's actual working directory into a project-relative path, or
+/// `None` when the token is outside the project -- callers pass their own
+/// provider's join+normalize pair (`normalize_target` needs a manual cwd
+/// join; `codex_normalize_target` does its own).
+fn trace_bash_would_deny(
+    project_root: &Path,
+    provider: &str,
+    command: &str,
+    covered: &HashSet<String>,
+    normalize: impl Fn(&str) -> Option<String>,
+) {
+    match bash_write_targets(command) {
+        BashWriteTarget::Unknown => {
+            // Distinguishable from `would-deny`: this says "the guard could
+            // not tell", not "the guard would have denied". Without it, a
+            // soak of this signal cannot tell "no fires" from "could not
+            // look" -- the same denominator problem `mask_heredoc_bodies`'s
+            // neighbourhood and the census's damaged-archive counting both
+            // already take seriously.
+            crate::guard::append_breadcrumb(
+                project_root,
+                provider,
+                "would-deny-unknown-target",
+                "Bash",
+                "reason=bash-target-unextractable",
+            );
+        }
+        BashWriteTarget::Paths(paths) => {
+            for raw in paths {
+                let Some(rel) = normalize(&raw) else {
+                    continue;
+                };
+                if is_lifecycle_path(&rel) {
+                    continue;
+                }
+                let (is_covered, _) = coverage_verdict(covered, &rel);
+                if is_covered {
+                    // would-deny-keys-on-authorization: this delegates to the
+                    // SAME function the file-tool and MCP branches call, so
+                    // the decision input stays authorization, not turn
+                    // addressing, exactly as `b64d81f` corrected it.
+                    trace_would_deny_unaddressed(project_root, provider, "Bash", &rel);
+                }
+            }
+        }
+    }
+}
+
 // --- authorization record ----------------------------------------------------
 
 fn now_ms() -> f64 {
@@ -2991,6 +3194,18 @@ fn bash_branch(payload: &Value) -> ShadowVerdict {
     }
     let covered = worklist_covered_files(&project_root);
     if !covered.is_empty() || fresh_bypass(&project_root, "*") {
+        // issue-387: this is the coarse "does ANY item cover the worklist"
+        // allow -- the gap `trace_would_deny_unaddressed` never reaches on
+        // Bash. Refine it into a per-target observation without changing
+        // the allow itself.
+        trace_bash_would_deny(&project_root, "claude-rs", &command, &covered, |raw| {
+            let candidate = if Path::new(raw).is_absolute() {
+                PathBuf::from(raw)
+            } else {
+                cwd.join(raw)
+            };
+            normalize_target(&project_root, &candidate.to_string_lossy())
+        });
         return allow("covered-by-worklist-item", "-");
     }
     if let Some(msg) = opt_out_clears(&project_root, payload) {
@@ -4614,6 +4829,10 @@ and retry. See judell/bram#277.",
         return codex_allow("passed-checks", "-");
     }
     if !covered.is_empty() || codex_fresh_bypass(cwd, "*") {
+        // issue-387: same coarse-allow refinement as the Claude Bash branch.
+        trace_bash_would_deny(cwd, "codex-rs", &command, covered, |raw| {
+            codex_normalize_target(cwd, raw)
+        });
         return codex_allow("passed-checks", "-");
     }
     if push_cmd(&command) && post_commit_push_grace(cwd) {
@@ -5001,6 +5220,87 @@ mod guard_policy_tests {
         assert_eq!(
             redirect_targets("cat > \"my file.txt\""),
             vec!["my file.txt"]
+        );
+    }
+
+    // --- Bash write-target extraction (issue-387) ----------------------------
+
+    fn bash_paths(command: &str) -> Vec<String> {
+        match bash_write_targets(command) {
+            BashWriteTarget::Paths(p) => p,
+            BashWriteTarget::Unknown => panic!("expected Paths for: {command}"),
+        }
+    }
+
+    fn bash_unknown(command: &str) -> bool {
+        matches!(bash_write_targets(command), BashWriteTarget::Unknown)
+    }
+
+    #[test]
+    fn bash_write_targets_redirects() {
+        assert_eq!(bash_paths("echo hi > out.txt"), vec!["out.txt"]);
+        assert_eq!(bash_paths("echo hi >> out.txt"), vec!["out.txt"]);
+        assert_eq!(
+            bash_paths("cat file1 > app/covered.js"),
+            vec!["app/covered.js"]
+        );
+        assert_eq!(bash_paths("echo hi > \"my file.txt\""), vec!["my file.txt"]);
+    }
+
+    #[test]
+    fn bash_write_targets_heredoc_masks_body_but_keeps_intro_target() {
+        // The `>` on the introducer line is a real target; a `>` mentioned
+        // inside the heredoc BODY (e.g. example shell text in a drafted
+        // commit message) must not also be read as one.
+        let cmd = "cat > app/covered.js <<'EOF'\nsee: echo hi > somewhere-else.txt\nEOF\n";
+        assert_eq!(bash_paths(cmd), vec!["app/covered.js"]);
+    }
+
+    #[test]
+    fn bash_write_targets_tee() {
+        assert_eq!(bash_paths("echo hi | tee out.txt"), vec!["out.txt"]);
+        assert_eq!(
+            bash_paths("echo hi | tee -a out.txt"),
+            vec!["out.txt"],
+            "the -a append flag is not a target"
+        );
+        assert_eq!(
+            bash_paths("echo hi | tee a.txt b.txt"),
+            vec!["a.txt", "b.txt"]
+        );
+        assert!(bash_unknown("echo hi | tee -"), "lone '-' names no file");
+    }
+
+    #[test]
+    fn bash_write_targets_unknown_on_expansion() {
+        // A variable or command-substitution target cannot be trusted as the
+        // literal path the shell will write -- decline rather than guess.
+        assert!(bash_unknown("echo hi > \"$OUT\""));
+        assert!(bash_unknown("echo hi > $OUT"));
+        assert!(bash_unknown("echo hi > \"$(mktemp)\""));
+        assert!(bash_unknown("echo hi | tee \"$OUT\""));
+    }
+
+    #[test]
+    fn bash_write_targets_unknown_for_shapes_outside_tractable_subset() {
+        // These classify as writes (via write_patterns_token) but use shapes
+        // this extractor does not attempt -- sed -i, rm, git, python -c.
+        for c in [
+            "sed -i 's/a/b/' file.txt",
+            "rm file.txt",
+            "git commit -am x",
+            "python -c \"open('f','w').write('x')\"",
+        ] {
+            assert!(bash_writes(c), "expected a write: {c}");
+            assert!(bash_unknown(c), "expected Unknown: {c}");
+        }
+    }
+
+    #[test]
+    fn bash_write_targets_dedupes() {
+        assert_eq!(
+            bash_paths("echo a > out.txt; echo b >> out.txt"),
+            vec!["out.txt"]
         );
     }
 

@@ -100,8 +100,28 @@
       <Text fontSize="$fontSize-sm" color="$color-danger-700" width="*">Pull failed: {pullError}</Text>
       <Button label="✕" variant="ghost" size="xs" tooltip="Dismiss" onClick="pullError = null" />
     </HStack>
+    <!-- issue-383: pushError can now be genuinely multi-line (stdout+stderr,
+         a pre-push hook's whole explanation ahead of git's one-line
+         summary) — grow up to a bound, then scroll, rather than clip.
+         `preserveLinebreaks` needs `value=`, not a nested child (Text docs:
+         nesting collapses embedded line breaks before the component ever
+         sees the prop, https://www.xmlui.org/docs/reference/components/Text#preservelinebreaks).
+         The cap-and-scroll wrapper is its own VStack rather than
+         `overflowMode="flow"` on the Text itself: that mode's CSS class
+         (`white-space: normal`) is declared after `.preserveLinebreaks`
+         (`white-space: pre-wrap`) in Text's stylesheet, so combining both
+         props on one Text loses the linebreak preservation the whole fix is
+         for — see https://www.xmlui.org/docs/howto/display-preformatted-text#overflow:-preformatted-text-doesn't-wrap,-so-bound-it-and-scroll,
+         whose bounded-container idiom this mirrors for vertical instead of
+         horizontal overflow. -->
     <HStack when="{pushError}" backgroundColor="$color-danger-100" padding="$space-2" gap="$space-2" verticalAlignment="start">
-      <Text fontSize="$fontSize-sm" color="$color-danger-700" width="*">Push failed: {pushError}</Text>
+      <VStack width="*" maxHeight="240px" overflowY="auto">
+        <Text
+          fontSize="$fontSize-sm"
+          color="$color-danger-700"
+          preserveLinebreaks="true"
+          value="{'Push failed: ' + pushError}" />
+      </VStack>
       <Button label="✕" variant="ghost" size="xs" tooltip="Dismiss" onClick="pushError = null" />
     </HStack>
 

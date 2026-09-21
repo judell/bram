@@ -2892,6 +2892,44 @@ fn bram_trace_preview(data: &str, max: usize) -> String {
     out
 }
 
+// issue-383: redact + escape + bound one captured stream (stdout or
+// stderr) from a `git push` invocation before it lands in the trace.
+// Shares bram_trace_preview's redaction and control-character escaping,
+// but a hook's explanation can run well past bram_trace_preview's 80-char
+// PTY-preview budget, so this uses a larger cap — and marks truncation
+// with an explicit `[truncated]` suffix rather than `...`, matching the
+// search-index `op=diff-truncated` / `[patch truncated]` convention: say
+// what was dropped, never elide silently.
+const GIT_PUSH_TRACE_OUTPUT_MAX_CHARS: usize = 4000;
+
+fn bram_trace_push_output(data: &str) -> String {
+    let (redacted, _) = redact_sensitive_text(data);
+    let mut out = String::with_capacity(GIT_PUSH_TRACE_OUTPUT_MAX_CHARS.min(4096) + 16);
+    out.push('"');
+    let mut truncated = false;
+    for (count, ch) in redacted.chars().enumerate() {
+        if count >= GIT_PUSH_TRACE_OUTPUT_MAX_CHARS {
+            truncated = true;
+            break;
+        }
+        match ch {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\x1b' => out.push_str("\\x1b"),
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    if truncated {
+        out.push_str("[truncated]");
+    }
+    out
+}
+
 #[cfg(test)]
 mod secret_observability_tests {
     use super::{
@@ -20821,6 +20859,119 @@ async fn git_push(app: AppHandle, branch: Option<String>) -> Result<(), String> 
     .map_err(|e| format!("git_push task panicked: {}", e))?
 }
 
+// issue-383: `git_run` (above) discards stdout on failure and returns
+// stderr only — correct for `git_run`'s ~40-odd other callers, several of
+// which pattern-match the returned text (`missing_upstream` / `is_nonff`
+// below, plus callers elsewhere in this file). But a `pre-push` hook
+// writes its entire refusal explanation to stdout while git's own
+// one-line summary lands on stderr — confirmed in a scratch-clone repro,
+// 2026-09-21: a multi-line hook refusal produced 172 bytes on stdout
+// against 51 bytes on stderr (`error: failed to push some refs to
+// '...'`). `git_run`'s stderr-only contract was silently discarding the
+// hook's text before it ever reached Tauri or the pane. This capture is
+// scoped to the `git push` call sites only (`git_run` itself is
+// untouched, so every other caller's error-matching behavior is
+// unaffected).
+struct GitPushOutput {
+    ok: bool,
+    stdout: String,
+    stderr: String,
+    exit_code: Option<i32>,
+}
+
+impl GitPushOutput {
+    // The pane-facing error text: the hook's explanation (stdout) first,
+    // git's own summary (stderr) after — the order a reader needs, and
+    // the order the two streams are naturally produced in. Verbatim, no
+    // parsing, no hook-specific handling.
+    fn combined_for_display(&self) -> String {
+        let stdout = self.stdout.trim_end();
+        if stdout.is_empty() {
+            self.stderr.clone()
+        } else if self.stderr.is_empty() {
+            stdout.to_string()
+        } else {
+            format!("{}\n{}", stdout, self.stderr)
+        }
+    }
+}
+
+// Always returns both streams, whether `git` exited 0 or not — unlike
+// `git_run`, which discards stdout unconditionally and stderr on success.
+// A successful `git push` routinely writes its own summary ("To
+// <remote>\n   abc123..def456  main -> main") to STDERR even on success, so
+// discarding it there too would leave `trace_git_push_result`'s success
+// lines empty of the one thing worth tracing. Callers branch on `.ok`.
+fn git_run_capture_both<R: tauri::Runtime>(app: &AppHandle<R>, args: &[&str]) -> GitPushOutput {
+    let Some(root) = project_root(Some(app)) else {
+        return GitPushOutput {
+            ok: false,
+            stdout: String::new(),
+            stderr: "no project root".to_string(),
+            exit_code: None,
+        };
+    };
+    let out = match std::process::Command::new("git")
+        .current_dir(&root)
+        .args(args)
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => {
+            return GitPushOutput {
+                ok: false,
+                stdout: String::new(),
+                stderr: e.to_string(),
+                exit_code: None,
+            };
+        }
+    };
+    GitPushOutput {
+        ok: out.status.success(),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        exit_code: out.status.code(),
+    }
+}
+
+// issue-383: trace every `git push` invocation this process makes, on
+// success AND failure alike, so the trace can answer "did the push path
+// even run" — the question the issue's filer had to settle by an A/B over
+// two byte-identical trees because nothing recorded it. `stage` names
+// which of the push call sites fired (`initial`, `missing-upstream`,
+// `fast-forward`, `rebase`); a hook refusal shows up here as a non-zero
+// `exit` with the hook's text in `stdout`. Output is bounded and
+// truncation is explicit — see `bram_trace_push_output`.
+fn trace_git_push_result<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    stage: &str,
+    args: &[&str],
+    branch: &str,
+    out: &GitPushOutput,
+) {
+    if !bram_trace_enabled() {
+        return;
+    }
+    let exit_str = out
+        .exit_code
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    append_bram_trace_line(
+        app,
+        "git-push",
+        &format!(
+            "op=push-result stage={} invocation={} branch={} ok={} exit={} stdout={} stderr={}",
+            stage,
+            bram_trace_preview(&format!("git {}", args.join(" ")), 120),
+            branch,
+            out.ok,
+            exit_str,
+            bram_trace_push_output(&out.stdout),
+            bram_trace_push_output(&out.stderr),
+        ),
+    );
+}
+
 fn git_push_inner(app: &AppHandle, branch: Option<String>) -> Result<(), String> {
     // local-repo-no-origin-first-class: belt and braces behind the pane's
     // hidden Push — the friendly sentence instead of git's fatal.
@@ -20839,36 +20990,216 @@ fn git_push_inner(app: &AppHandle, branch: Option<String>) -> Result<(), String>
             ));
         }
     }
-    let stderr = match git_run(app, &["push"]) {
-        Ok(_) => {
-            finish_git_push(app);
-            return Ok(());
-        }
-        Err(e) => e,
-    };
+    let push_args: &[&str] = &["push"];
+    let out = git_run_capture_both(app, push_args);
+    trace_git_push_result(app, "initial", push_args, &current, &out);
+    if out.ok {
+        finish_git_push(app);
+        return Ok(());
+    }
     // issue-237: the upstream-name mismatch (branch created from
     // origin/main, e.g. `git switch -c feature origin/main`) shares the
     // missing-upstream remedy — `push -u origin <current>` pushes to the
     // same-name remote branch and repairs the upstream for future pushes.
     // (git wraps the mismatch message across lines mid-phrase, so match it
     // on a whitespace-normalized copy — caught by the scratch-clone test.)
-    let flat = stderr.split_whitespace().collect::<Vec<&str>>().join(" ");
-    let missing_upstream = stderr.contains("has no upstream branch")
-        || stderr.contains("no upstream branch")
-        || stderr.contains("set the remote as upstream")
-        || flat.contains("does not match the name of your current branch");
-    if missing_upstream {
-        git_run(app, &["push", "-u", "origin", &current])?;
-        finish_git_push(app);
-        return Ok(());
+    //
+    // issue-383: this match is against `out.stderr` alone — the SAME text
+    // `git_run` would have returned before this change — never against the
+    // combined stdout+stderr display text. A hook that happens to print
+    // "fetch first" (or any other matched phrase) to STDOUT must not be
+    // misread as git's own non-fast-forward summary, which only ever
+    // appears on stderr. See `git_push_stderr_is_missing_upstream` /
+    // `git_push_stderr_is_nonff` below.
+    let stderr = &out.stderr;
+    if git_push_stderr_is_missing_upstream(stderr) {
+        let upstream_args: &[&str] = &["push", "-u", "origin", &current];
+        let out2 = git_run_capture_both(app, upstream_args);
+        trace_git_push_result(app, "missing-upstream", upstream_args, &current, &out2);
+        if out2.ok {
+            finish_git_push(app);
+            return Ok(());
+        }
+        return Err(out2.combined_for_display());
     }
-    let is_nonff = stderr.contains("non-fast-forward") || stderr.contains("fetch first");
-    if !is_nonff {
-        return Err(stderr);
+    if !git_push_stderr_is_nonff(stderr) {
+        return Err(out.combined_for_display());
     }
     auto_rebase_and_push(app)
         .map(|_| finish_git_push(app))
         .map_err(|e| format!("non-fast-forward; {}", e))
+}
+
+// issue-237 / issue-383: pure predicates over the STDERR half of a failed
+// `git push`, split out of `git_push_inner` so they're independently
+// testable — including the case a hook has ALSO printed matched-looking
+// phrases to stdout, which these must not see (each only ever receives
+// `out.stderr`, never `out.combined_for_display()`).
+fn git_push_stderr_is_missing_upstream(stderr: &str) -> bool {
+    // (git wraps the mismatch message across lines mid-phrase, so match it
+    // on a whitespace-normalized copy.)
+    let flat = stderr.split_whitespace().collect::<Vec<&str>>().join(" ");
+    stderr.contains("has no upstream branch")
+        || stderr.contains("no upstream branch")
+        || stderr.contains("set the remote as upstream")
+        || flat.contains("does not match the name of your current branch")
+}
+
+fn git_push_stderr_is_nonff(stderr: &str) -> bool {
+    stderr.contains("non-fast-forward") || stderr.contains("fetch first")
+}
+
+#[cfg(test)]
+mod git_push_output_tests {
+    use super::{
+        bram_trace_push_output, git_push_stderr_is_missing_upstream, git_push_stderr_is_nonff,
+        GitPushOutput,
+    };
+
+    // issue-383: the scratch-clone repro's actual shape — a multi-line
+    // pre-push hook refusal on stdout, git's one-line summary on stderr.
+    #[test]
+    fn combined_for_display_puts_stdout_before_stderr() {
+        let out = GitPushOutput {
+            ok: false,
+            stdout: "pre-push hook refused: commit abc123 touches secrets.env\n\
+                      remove it or use --no-verify to override\n"
+                .to_string(),
+            stderr: "error: failed to push some refs to '../remote.git'\n".to_string(),
+            exit_code: Some(1),
+        };
+        let combined = out.combined_for_display();
+        let hook_pos = combined
+            .find("pre-push hook refused")
+            .expect("hook text present");
+        let summary_pos = combined
+            .find("failed to push some refs")
+            .expect("git summary present");
+        assert!(
+            hook_pos < summary_pos,
+            "hook explanation must precede git's summary: {combined:?}"
+        );
+    }
+
+    #[test]
+    fn combined_for_display_stdout_only() {
+        let out = GitPushOutput {
+            ok: false,
+            stdout: "only stdout here".to_string(),
+            stderr: String::new(),
+            exit_code: Some(1),
+        };
+        assert_eq!(out.combined_for_display(), "only stdout here");
+    }
+
+    #[test]
+    fn combined_for_display_stderr_only() {
+        let out = GitPushOutput {
+            ok: false,
+            stdout: String::new(),
+            stderr: "only stderr here".to_string(),
+            exit_code: Some(1),
+        };
+        assert_eq!(out.combined_for_display(), "only stderr here");
+    }
+
+    // issue-383's core safety requirement: a hook that prints a
+    // matched-looking phrase to STDOUT must not flip the non-fast-forward /
+    // missing-upstream detection, which reads stderr only.
+    #[test]
+    fn hook_text_on_stdout_does_not_trigger_nonff_detection() {
+        let out = GitPushOutput {
+            ok: false,
+            stdout: "pre-push hook: please fetch first from the shared mirror before pushing"
+                .to_string(),
+            stderr: "error: failed to push some refs to '../remote.git'".to_string(),
+            exit_code: Some(1),
+        };
+        assert!(
+            !git_push_stderr_is_nonff(&out.stderr),
+            "stderr alone carries no non-fast-forward phrase"
+        );
+        // The phrase IS present in the combined display text — proving the
+        // hook's words survive to the user without being mistaken for git's
+        // own non-fast-forward summary during detection.
+        assert!(out.combined_for_display().contains("fetch first"));
+    }
+
+    #[test]
+    fn hook_text_on_stdout_does_not_trigger_missing_upstream_detection() {
+        let out = GitPushOutput {
+            ok: false,
+            stdout: "pre-push hook: this branch has no upstream branch policy exception"
+                .to_string(),
+            stderr: "error: failed to push some refs to '../remote.git'".to_string(),
+            exit_code: Some(1),
+        };
+        assert!(!git_push_stderr_is_missing_upstream(&out.stderr));
+        assert!(out
+            .combined_for_display()
+            .contains("has no upstream branch policy exception"));
+    }
+
+    #[test]
+    fn genuine_nonff_stderr_still_detected() {
+        assert!(git_push_stderr_is_nonff(
+            "! [rejected] main -> main (non-fast-forward)"
+        ));
+        assert!(git_push_stderr_is_nonff(
+            "! [rejected] main -> main (fetch first)"
+        ));
+    }
+
+    // The predicate is phrase-exact, not a loose heuristic — an unrelated
+    // rejection hint that never says "non-fast-forward" or "fetch first"
+    // must not match, or `git_push_inner` would misroute it into the
+    // auto-rebase path instead of returning it as a plain error.
+    #[test]
+    fn unrelated_rejection_hint_not_misread_as_nonff() {
+        assert!(!git_push_stderr_is_nonff(
+            "hint: Updates were rejected because the tip of your current branch is behind\nhint: its remote counterpart."
+        ));
+    }
+
+    #[test]
+    fn genuine_missing_upstream_stderr_still_detected() {
+        assert!(git_push_stderr_is_missing_upstream(
+            "fatal: The current branch feature has no upstream branch.\nTo push the current branch and set the remote as upstream, use\n\n    git push --set-upstream origin feature\n"
+        ));
+    }
+
+    #[test]
+    fn missing_upstream_matches_wrapped_branch_name_mismatch() {
+        // git wraps this message across lines mid-phrase; the predicate
+        // normalizes whitespace before matching.
+        let stderr = "fatal: The upstream branch of your current branch does\nnot match the name of your current branch.";
+        assert!(git_push_stderr_is_missing_upstream(stderr));
+    }
+
+    #[test]
+    fn trace_push_output_marks_truncation_explicitly() {
+        let long = "x".repeat(5000);
+        let rendered = bram_trace_push_output(&long);
+        assert!(
+            rendered.ends_with("[truncated]"),
+            "truncated output must carry an explicit marker: {}",
+            &rendered[rendered.len().saturating_sub(40)..]
+        );
+    }
+
+    #[test]
+    fn trace_push_output_untruncated_has_no_marker() {
+        let rendered = bram_trace_push_output("short output");
+        assert!(!rendered.contains("[truncated]"));
+        assert_eq!(rendered, "\"short output\"");
+    }
+
+    #[test]
+    fn trace_push_output_escapes_newlines_for_single_line_records() {
+        let rendered = bram_trace_push_output("line one\nline two");
+        assert!(!rendered.contains('\n'));
+        assert!(rendered.contains("\\n"));
+    }
 }
 
 fn finish_git_push<R: tauri::Runtime>(app: &AppHandle<R>) {
@@ -21166,7 +21497,14 @@ fn auto_rebase_and_push<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), Str
                 &format!("op=push path=fast-forward branch={}", branch),
             );
         }
-        return git_run(app, &["push"]).map(|_| ());
+        let push_args: &[&str] = &["push"];
+        let out = git_run_capture_both(app, push_args);
+        trace_git_push_result(app, "fast-forward", push_args, &branch, &out);
+        return if out.ok {
+            Ok(())
+        } else {
+            Err(out.combined_for_display())
+        };
     }
 
     if bram_trace_enabled() {
@@ -21199,7 +21537,16 @@ fn auto_rebase_and_push<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), Str
     let result: Result<(), String> = (|| {
         let upstream = format!("origin/{}", branch);
         match git_run(app, &["rebase", &upstream]) {
-            Ok(_) => git_run(app, &["push"]).map(|_| ()),
+            Ok(_) => {
+                let push_args: &[&str] = &["push"];
+                let out = git_run_capture_both(app, push_args);
+                trace_git_push_result(app, "rebase", push_args, &branch, &out);
+                if out.ok {
+                    Ok(())
+                } else {
+                    Err(out.combined_for_display())
+                }
+            }
             Err(rebase_err) => {
                 let _ = git_run(app, &["rebase", "--abort"]);
                 Err(format!(

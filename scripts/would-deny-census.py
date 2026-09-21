@@ -143,6 +143,85 @@ CLASSIFICATION (the substantive output, and the part to audit, not trust):
     forced into either bucket; a large `other` count is itself a finding
     about the classifier or about a genuine third shape, not a defect to hide.
 
+COLD-RESUME SUB-SPLIT (issue-381): "not corrected in the same turn" is not
+"dangerous" -- cold-resume conflates a benign multi-turn CONTINUATION (the
+user says "keep going", the agent resumes an item whose claim retired at
+the previous turn end) with a dangerous WANDER (a turn editing a file
+belonging to an item it has nothing to do with -- the shape #273
+documents: `notice-banner-component` was green-lit, produced nothing on
+its own declared files, and its row still offered Commit because it was
+the only begun claimant of a file edits made OUTSIDE any authorized item
+had landed in). Only the wander shape argues for revisiting #368's
+"do not deny" conclusion.
+
+A TESTED-AND-REJECTED HYPOTHESIS, recorded so it is not retried: the
+`would-deny` trace line's `ctx=` field looks like the separator (`ctx`
+answers "is this turn ADDRESSED to some item") but is not -- all 58
+`would-deny` lines in this repo read `ctx=none`, because `ctx=addressed`
+only fires when an addressed turn edits a file its OWN items don't
+declare. Both a benign continuation and a dangerous wander happen during
+GENERAL turns, so both read `ctx=none`; `ctx` separates a rarer third
+case, not these two.
+
+The actual separating signal is SESSION CLAIM HISTORY: did the session
+that produced a cold-resume edit ever previously hold a claim naming the
+covering item? A continuation did -- that's what makes it a resume; a
+wander never did. This is deliberately ORTHOGONAL to the same-turn-
+correction/cold-resume split above and to its turn-boundary limitation:
+session-level claim history doesn't depend on where a turn boundary
+falls, so the known risk of that heuristic (a rapid exchange fragmenting
+one working stretch into several turns) cannot leak into this axis.
+
+  - continuation: at some point strictly before this edit, the SAME
+    session held a claim (any kind -- approved/iterate/direct/drop; the
+    question is "was this session ever engaged with this item's claim",
+    not "was that engagement itself an authorization") naming a covering
+    item.
+  - wander: EVERY claim interval opened for a covering item before this
+    edit is confidently attributed (see below) to a DIFFERENT session,
+    with none left ambiguous or unmatched. The only shape that would
+    argue for revisiting #368.
+  - unknown: attribution could not be made with confidence either way --
+    no claim interval for the covering item was found at all in the
+    scanned trace history (predates retention, or a gap), or at least one
+    relevant interval's session could not be pinned to exactly one
+    candidate. NEVER silently folded into continuation or wander: a wrong
+    split here is worse than no split, because it would be used to decide
+    a safety question.
+
+ATTRIBUTING A CLAIM INTERVAL TO A SESSION: `[inflight-sentinel]` lines
+carry no session id -- the sentinel is a host-side, cross-provider file,
+not a per-agent one. What a claim OPEN (`op=write` / `op=rearm-at-turn-
+start`) correlates to, by construction, is a session record at almost
+the same instant: an `approved:`/`iterate:`/`drop:` (or `skip-worklist:`)
+turn is written to the PTY by the SAME `toTurn` call that stamps the
+trace line, so the approving session logs a record within a fraction of
+a second. Measured directly on this repo (2026-09-21): an
+`op=write kind=approved` trace line at 17:01:56.053Z paired with the
+corresponding session's `approved:` user-turn record at 17:01:56.291Z --
+a 238ms gap. So for each claim interval's start timestamp, this script
+looks for every session (Claude or Codex, this project only) with ANY
+recorded activity -- not just edits, every user/assistant/system/
+response_item record, via `activity_ts_by_session` -- within
+`CLAIM_SESSION_TOLERANCE_MS` (30s: roughly two orders of magnitude over
+the measured gap) of that timestamp. Exactly one candidate session ->
+confidently attributed. Zero, or more than one -> left UNATTRIBUTED,
+counted and reported, never guessed at (`attribute_claim_intervals`).
+
+CONFIDENCE, stated plainly: this is a proxy, like the same-turn-
+correction split, and can be wrong the way a proxy usually is -- a
+coincidental session event landing inside the tolerance window, or two
+genuinely different sessions active within 30s of each other (a fast
+provider switch). It has NOT been validated against ground truth of
+which session actually clicked each approval; it is validated only by
+the design of the mechanism it correlates against (`toTurn` writing the
+trace line and the PTY input near-atomically) and by the single measured
+238ms gap above sitting far inside the 30s tolerance. Read the per-class
+samples before trusting the counts -- each cold-resume-derived sample's
+`resume_note` names the actual evidence (which session/timestamp/kind
+was matched, or why attribution failed), so the split is auditable, not
+asserted.
+
 Read-only, standard library only. Prints text or JSON; never writes.
 """
 
@@ -166,6 +245,12 @@ KNOWN_POST_FIX_FIRES = (
     ("2026-09-12T05:06:59Z", "app/__shell/helpers.js"),
 )
 FIRE_MATCH_TOLERANCE_S = 5  # Edit-call ts vs would-deny-trace ts are concurrent, not identical
+
+# issue-381: window for attributing a claim interval's OPEN event to the one
+# session with an activity record near it (see module docstring's "COLD-RESUME
+# SUB-SPLIT" section). Measured gap on this repo was 238ms; this is a
+# deliberately generous ~2-orders-of-magnitude margin, not a tuned value.
+CLAIM_SESSION_TOLERANCE_MS = 30_000
 
 ENVELOPE = "<task-notification>"
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit")
@@ -796,18 +881,28 @@ def scan_sessions(session_dir: Path, project_root: Path, since_ms: float | None)
     write whose target could not be extracted is counted in
     `bash_calls_unknown_target`, never silently dropped and never folded
     into the population.
+
+    issue-381: also collects `activity_ts_by_session` -- EVERY record with a
+    parseable timestamp, regardless of type (user/assistant/system/
+    attachment/...), not just edits or genuine user turns. This is a denser
+    signal than `edits_by_session`/`users_by_session`, used only for
+    attributing a claim interval's OPEN event to the one session active near
+    it (see `attribute_claim_intervals`); it is deliberately NOT filtered by
+    `since_ms` -- attribution needs the session's full footprint even when
+    `--since` scopes the reported population.
     """
     root_prefix = str(project_root) + "/"
     project_root_s = str(project_root)
     edits_by_session: dict[str, list[tuple[float, str, str]]] = {}
     users_by_session: dict[str, list[float]] = {}
+    activity_ts_by_session: dict[str, list[float]] = {}
     outside_root = 0
     total_edit_calls = 0
     bash_calls_total = 0
     bash_calls_unknown_target = 0
 
     for path in sorted(session_dir.glob("*.jsonl")):
-        edits, users = [], []
+        edits, users, activity = [], [], []
         try:
             with path.open("r", errors="replace") as fh:
                 for line in fh:
@@ -822,6 +917,7 @@ def scan_sessions(session_dir: Path, project_root: Path, since_ms: float | None)
                     if ts is None:
                         continue
                     ts_ms = to_ms(ts)
+                    activity.append(ts_ms)
                     rtype = rec.get("type")
                     if rtype == "user":
                         text = record_text(rec)
@@ -869,14 +965,17 @@ def scan_sessions(session_dir: Path, project_root: Path, since_ms: float | None)
             continue
         edits.sort(key=lambda e: e[0])
         users.sort()
+        activity.sort()
         if since_ms is not None:
             edits = [e for e in edits if e[0] >= since_ms]
         edits_by_session[path.stem] = edits
         users_by_session[path.stem] = users
+        activity_ts_by_session[path.stem] = activity
 
     return {
         "edits_by_session": edits_by_session,
         "users_by_session": users_by_session,
+        "activity_ts_by_session": activity_ts_by_session,
         "outside_root": outside_root,
         "edit_calls_total": total_edit_calls,
         "bash_calls_total": bash_calls_total,
@@ -917,11 +1016,16 @@ def scan_codex_sessions(session_dir: Path, project_root: Path, since_ms: float |
     verified exhaustive; a false turn boundary here can only ever shift a
     population entry between "cold-resume" and "other", never add or remove
     it from the population.
+
+    issue-381: also collects `activity_ts_by_session` -- every `response_item`
+    record's timestamp, regardless of type, unfiltered by `since_ms`. Same
+    purpose and caveats as the field of the same name in `scan_sessions`.
     """
     root_prefix = str(project_root) + "/"
     project_root_s = str(project_root)
     edits_by_session: dict[str, list[tuple[float, str, str]]] = {}
     users_by_session: dict[str, list[float]] = {}
+    activity_ts_by_session: dict[str, list[float]] = {}
     outside_root = 0
     bash_calls_total = 0
     bash_calls_unknown_target = 0
@@ -946,7 +1050,7 @@ def scan_codex_sessions(session_dir: Path, project_root: Path, since_ms: float |
             continue
         files_matched += 1
 
-        edits, users = [], []
+        edits, users, activity = [], [], []
         try:
             with path.open("r", errors="replace") as fh:
                 for line in fh:
@@ -963,6 +1067,7 @@ def scan_codex_sessions(session_dir: Path, project_root: Path, since_ms: float |
                     if ts is None:
                         continue
                     ts_ms = to_ms(ts)
+                    activity.append(ts_ms)
                     payload = rec.get("payload") or {}
                     ptype = payload.get("type")
                     if ptype == "message" and payload.get("role") == "user":
@@ -1002,14 +1107,17 @@ def scan_codex_sessions(session_dir: Path, project_root: Path, since_ms: float |
             continue
         edits.sort(key=lambda e: e[0])
         users.sort()
+        activity.sort()
         if since_ms is not None:
             edits = [e for e in edits if e[0] >= since_ms]
         edits_by_session[path.stem] = edits
         users_by_session[path.stem] = users
+        activity_ts_by_session[path.stem] = activity
 
     return {
         "edits_by_session": edits_by_session,
         "users_by_session": users_by_session,
+        "activity_ts_by_session": activity_ts_by_session,
         "outside_root": outside_root,
         "edit_calls_total": 0,  # Codex file-edit MCP tools not read; see docstring
         "bash_calls_total": bash_calls_total,
@@ -1017,6 +1125,52 @@ def scan_codex_sessions(session_dir: Path, project_root: Path, since_ms: float |
         "files_scanned": files_scanned,
         "files_matched_project": files_matched,
     }
+
+
+# --- claim interval -> session attribution (issue-381) ------------------------
+
+
+def attribute_claim_intervals(intervals: dict, activity_index: dict, tolerance_ms: float):
+    """For every claim interval's OPEN (start) timestamp, find which
+    (provider, session_id) in `activity_index` -- {(provider, session):
+    sorted [ts_ms, ...]} -- has any recorded activity within `tolerance_ms`
+    of it. See the module docstring's "ATTRIBUTING A CLAIM INTERVAL TO A
+    SESSION" section for why the start timestamp is the right anchor and why
+    this tolerance is generous relative to the measured real-world gap.
+
+    Returns (attribution, stats):
+      - attribution: {(item_id, interval_index): {"provider":..., "session":...}}
+        for intervals with EXACTLY ONE candidate session in the window.
+        Intervals with zero or multiple candidates are simply absent from
+        this dict -- callers must treat a missing key as "unattributed", not
+        guess.
+      - stats: counts of attributed / no-match (zero candidates) / ambiguous
+        (2+ candidates) intervals, for the report -- so the attribution
+        mechanism's own reliability is visible, not just its output.
+    """
+    attribution: dict[tuple[str, int], dict] = {}
+    stats = {"attributed": 0, "no_match": 0, "ambiguous": 0}
+    keys = list(activity_index.keys())
+    for item_id, ivals in intervals.items():
+        for idx, (start, _end, _kind) in enumerate(ivals):
+            lo, hi = start - tolerance_ms, start + tolerance_ms
+            candidates = []
+            for key in keys:
+                ts_list = activity_index[key]
+                if not ts_list:
+                    continue
+                i = bisect.bisect_left(ts_list, lo)
+                if i < len(ts_list) and ts_list[i] <= hi:
+                    candidates.append(key)
+            if len(candidates) == 1:
+                provider, session = candidates[0]
+                attribution[(item_id, idx)] = {"provider": provider, "session": session}
+                stats["attributed"] += 1
+            elif len(candidates) == 0:
+                stats["no_match"] += 1
+            else:
+                stats["ambiguous"] += 1
+    return attribution, stats
 
 
 # --- classification ------------------------------------------------------------
@@ -1041,14 +1195,83 @@ def classify(session_edits, idx_in_session, users, rel_path, item_begun_min):
     return "other"
 
 
+def classify_cold_resume(entry_provider, entry_session, ts_ms, covering_ids, intervals, attribution):
+    """Refine a base "cold-resume" classification via session claim history
+    (issue-381; see the module docstring's "COLD-RESUME SUB-SPLIT" section).
+
+    Looks at every claim interval opened for any of `covering_ids` strictly
+    before `ts_ms`, and asks whether its attributed session (per
+    `attribute_claim_intervals`) is the SAME (provider, session) that
+    produced this edit.
+
+    Returns (label, note) -- `note` names the actual evidence (which
+    interval/session/kind was decisive, or why none could be) so a reported
+    sample is auditable rather than asserted, per the item's requirement.
+    """
+    own_key = (entry_provider, entry_session)
+    own_evidence = None  # earliest (start, item_id, kind) attributed to own session
+    other_evidence = None  # earliest (start, item_id, kind, other_key)
+    unattributed_n = 0
+    relevant_n = 0
+
+    for item_id in covering_ids:
+        for idx, (start, _end, kind) in enumerate(intervals.get(item_id, ())):
+            if start >= ts_ms:
+                continue
+            relevant_n += 1
+            attr = attribution.get((item_id, idx))
+            if attr is None:
+                unattributed_n += 1
+                continue
+            key = (attr["provider"], attr["session"])
+            if key == own_key:
+                if own_evidence is None or start < own_evidence[0]:
+                    own_evidence = (start, item_id, kind)
+            else:
+                if other_evidence is None or start < other_evidence[0]:
+                    other_evidence = (start, item_id, kind, key)
+
+    def iso(ms):
+        return dt.datetime.fromtimestamp(ms / 1000, tz=dt.timezone.utc).isoformat()[:19]
+
+    if relevant_n == 0:
+        return "unknown", "no prior claim interval recorded for the covering item(s)"
+    if own_evidence is not None:
+        start, item_id, kind = own_evidence
+        return "continuation", f"same session held {item_id} claim from {iso(start)} (kind={kind})"
+    if unattributed_n > 0:
+        return "unknown", (
+            f"{unattributed_n} of {relevant_n} prior claim interval(s) had ambiguous or "
+            "unmatched session attribution"
+        )
+    # unattributed_n == 0 and no own-session match: every relevant interval is
+    # confidently attributed, and all of them belong to a different session.
+    start, item_id, kind, other_key = other_evidence
+    return "wander", (
+        f"{item_id} claim from {iso(start)} (kind={kind}) held by "
+        f"{other_key[0]}/{other_key[1]}, never this session"
+    )
+
+
 # --- main ------------------------------------------------------------------
 
 
-def build_population(edits_by_session, users_by_session, snapshots, intervals, last_ts_ms, boundary_ms):
+def build_population(
+    edits_by_session, users_by_session, snapshots, intervals, last_ts_ms, boundary_ms,
+    provider, attribution,
+):
     """The #368 predicate, applied to one provider's scanned edits. Shared by
     Claude and Codex so both are asking the identical question of the SAME
     provider-agnostic claim intervals and worklist snapshots -- only the
-    edit population differs between them."""
+    edit population differs between them.
+
+    `provider` ("claude"/"codex") and `attribution` (from
+    `attribute_claim_intervals`, itself built from BOTH providers' session
+    activity -- see main()) are issue-381's cold-resume sub-split: any entry
+    whose base class is "cold-resume" is refined via `classify_cold_resume`
+    into continuation/wander/unknown before being recorded. same-turn-
+    correction and other pass through unchanged.
+    """
     population = []  # each: dict with ts_ms, session, rel_path, item_ids, klass
     considered = 0
     no_snapshot_data = 0
@@ -1068,6 +1291,11 @@ def build_population(edits_by_session, users_by_session, snapshots, intervals, l
                 continue  # a claim covering the declaring item was live -- authorized
             item_begun_min = min(info["begunAtMs"] for info in hits.values())
             klass = classify(edits, idx, users, rel_path, item_begun_min)
+            resume_note = None
+            if klass == "cold-resume":
+                klass, resume_note = classify_cold_resume(
+                    provider, session, ts_ms, covering_ids, intervals, attribution
+                )
             population.append(
                 {
                     "ts_ms": ts_ms,
@@ -1077,13 +1305,20 @@ def build_population(edits_by_session, users_by_session, snapshots, intervals, l
                     "tool": tool,
                     "item_ids": sorted(covering_ids),
                     "class": klass,
+                    "resume_note": resume_note,
                 }
             )
 
     population.sort(key=lambda p: p["ts_ms"])
     before = [p for p in population if p["ts_ms"] < boundary_ms]
     after = [p for p in population if p["ts_ms"] >= boundary_ms]
-    class_counts = {"same-turn-correction": 0, "cold-resume": 0, "other": 0}
+    class_counts = {
+        "same-turn-correction": 0,
+        "continuation": 0,
+        "wander": 0,
+        "unknown": 0,
+        "other": 0,
+    }
     for p in population:
         class_counts[p["class"]] += 1
     rate_per_1000 = (len(population) / considered * 1000.0) if considered else 0.0
@@ -1133,7 +1368,11 @@ def provider_result(provider: str, scan: dict, pop: dict, samples_n: int, fires=
         "after_b64d81f": len(pop["after"]),
         "samples": {
             k: [
-                {"ts": p["ts"], "path": p["path"], "tool": p["tool"], "item_ids": p["item_ids"], "session": p["session"]}
+                {
+                    "ts": p["ts"], "path": p["path"], "tool": p["tool"],
+                    "item_ids": p["item_ids"], "session": p["session"],
+                    **({"resume_note": p["resume_note"]} if p.get("resume_note") else {}),
+                }
                 for p in pop["population"]
                 if p["class"] == k
             ][:samples_n]
@@ -1168,6 +1407,10 @@ def print_provider_report(r: dict):
     print("classification:")
     for k, v in r["classification"].items():
         print(f"    {k:<22} {v}")
+    cold_resume_total = (
+        r["classification"]["continuation"] + r["classification"]["wander"] + r["classification"]["unknown"]
+    )
+    print(f"    (cold-resume total)     {cold_resume_total}  [continuation + wander + unknown]")
     print()
     if "known_fires_recovered" in r:
         print("known post-fix fires recovered?")
@@ -1181,6 +1424,8 @@ def print_provider_report(r: dict):
             print(
                 f"    {row['ts'][:19]}  [{row['tool']}] {row['path']:<38} item={row['item_ids']} session={row['session']}"
             )
+            if row.get("resume_note"):
+                print(f"        -> {row['resume_note']}")
         print()
 
 
@@ -1243,10 +1488,30 @@ def main(argv=None) -> int:
 
     boundary_ms = to_ms(parse_ts(COMMIT_BOUNDARY))
 
+    # issue-381: scan BOTH providers' sessions before building either
+    # population -- the claim-interval -> session attribution (below) needs
+    # the full cross-provider activity picture regardless of which
+    # provider's population is being classified.
     claude_scan = scan_sessions(session_dir, root, since_ms)
+    codex_scan = None
+    if codex_enabled:
+        codex_scan = scan_codex_sessions(codex_session_dir_path, root, since_ms)
+
+    activity_index = {
+        ("claude", sid): ts_list for sid, ts_list in claude_scan["activity_ts_by_session"].items()
+    }
+    if codex_scan is not None:
+        activity_index.update(
+            {("codex", sid): ts_list for sid, ts_list in codex_scan["activity_ts_by_session"].items()}
+        )
+    attribution, attribution_stats = attribute_claim_intervals(
+        intervals, activity_index, CLAIM_SESSION_TOLERANCE_MS
+    )
+
     claude_pop = build_population(
         claude_scan["edits_by_session"], claude_scan["users_by_session"],
         snapshots, intervals, last_ts_ms, boundary_ms,
+        "claude", attribution,
     )
     claude_result = provider_result(
         "claude", claude_scan, claude_pop, args.samples,
@@ -1256,10 +1521,10 @@ def main(argv=None) -> int:
     providers = {"claude": claude_result}
 
     if codex_enabled:
-        codex_scan = scan_codex_sessions(codex_session_dir_path, root, since_ms)
         codex_pop = build_population(
             codex_scan["edits_by_session"], codex_scan["users_by_session"],
             snapshots, intervals, last_ts_ms, boundary_ms,
+            "codex", attribution,
         )
         providers["codex"] = provider_result("codex", codex_scan, codex_pop, args.samples)
 
@@ -1291,6 +1556,10 @@ def main(argv=None) -> int:
         "claim_anomalies": anomalies,
         "claim_ids_unmatched_open": unmatched_open,
         "worklist_snapshots": len(snapshots),
+        "claim_session_attribution": {
+            "tolerance_ms": CLAIM_SESSION_TOLERANCE_MS,
+            **attribution_stats,
+        },
         "providers": providers,
     }
 
@@ -1312,6 +1581,12 @@ def main(argv=None) -> int:
     print(f"claim anomalies      {anomalies}")
     print(f"claim ids unmatched (never closed in observed data): {unmatched_open}")
     print(f"worklist snapshots   {len(snapshots)}")
+    print(
+        f"claim interval -> session attribution (tolerance {CLAIM_SESSION_TOLERANCE_MS // 1000}s):"
+        f" attributed={attribution_stats['attributed']}"
+        f" no-match={attribution_stats['no_match']}"
+        f" ambiguous={attribution_stats['ambiguous']}"
+    )
     print()
     for r in providers.values():
         print_provider_report(r)

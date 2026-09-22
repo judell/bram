@@ -44216,7 +44216,7 @@ fn membership_net_patch(
 // (added, removed); `owners` is the id set membership attributes on the path
 // (single + joint + ambiguous candidates alike), the coarse unit the
 // divergence comparison uses.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct MembershipPathBuckets {
     single: (usize, usize),
     joint: (usize, usize),
@@ -44230,67 +44230,26 @@ struct MembershipPathBuckets {
     contributors: Vec<(String, usize)>,
 }
 
-// The engine driver. Observe-only: its entire output is three trace ops —
-// `op=membership` (cost, every run), `op=membership-diverges` (per path
-// where the two models' owner sets disagree), and
-// `op=membership-conservation-broken` (the tripwire). Probes run only over
-// live begun items × their declared paths; the engine never diffs the whole
-// tree and never enumerates untracked content beyond names.
+// The engine driver. Observe-only: nothing in the board payload reads its
+// return value yet (migration step 2 spends it — see call site). Traces
+// three ops — `op=membership` (cost, every run; `cached=` distinguishes a
+// memo hit from a real compute), `op=membership-diverges` (per path where
+// the two models' owner sets disagree), and `op=membership-conservation-
+// broken` (the tripwire). Probes run only over live begun items × their
+// declared paths; the engine never diffs the whole tree and never
+// enumerates untracked content beyond names.
+//
+// membership-affordable-enough-to-be-authoritative: memoized by BOARD
+// STATE (see the state-key comment below) rather than sampled by wall
+// clock — see that item's draft for why sampling is incompatible with a
+// consumer ever reading this. `None` means "nothing to observe" (no
+// project root, or no begun items); `Some` carries the partition, real or
+// a state-keyed memo hit.
 fn membership_engine_observe<R: tauri::Runtime>(
     app: &AppHandle<R>,
     replay_owners_by_path: &std::collections::HashMap<String, std::collections::HashSet<String>>,
     replay_joint_by_path: &std::collections::HashMap<String, std::collections::HashSet<String>>,
-) {
-    // membership-observer-leaves-the-serve-path: sample, do not run every serve.
-    //
-    // This engine is OBSERVE-ONLY -- nothing in the payload reads its partition
-    // -- and after `9f595ac` removed the replay's redundant key derivation it
-    // became the dominant cost of a board build: measured 204 ms / 44 spawns at
-    // 20 intervals, 1,318 ms / 200 at 200, and 9,035 ms / 1,730 at 2,000. Seconds
-    // of user-facing latency per serve, producing evidence no consumer reads,
-    // on exactly the boards that have been worked hardest.
-    //
-    // SAMPLED HERE rather than moved to a background tick, and the code decides
-    // that rather than taste: this function consumes `replay_owners_by_path` and
-    // `replay_joint_by_path`, both computed by the serve's attribution replay. Off
-    // the request path it would have to recompute that replay -- the very work
-    // `9f595ac` just made cheap -- so relocation would reintroduce the cost it was
-    // meant to remove.
-    //
-    // Sampling is safe for what this observes because the conditions are STATE,
-    // not events: a divergence or a conservation breach is a function of (board,
-    // worktree, intervals) and persists while that state does. The tau fire
-    // repeated identically across eleven serves in a six-hour window, and the
-    // synthetic reproduction fires on every serve while its condition holds. A
-    // 60s sample observes any state that lasts a minute, and still yields ~1,400
-    // observations a day -- far more than an adjudicator can read, which is the
-    // actual bottleneck (one evening's adjudication resolved all 69 of tau's
-    // divergences).
-    //
-    // The skip is TRACED. "Did not run" and "ran and found nothing" must not look
-    // alike -- the tripwire-versus-dead-instrument trap this project has already
-    // been bitten by.
-    const MEMBERSHIP_OBSERVE_INTERVAL_MS: i64 = 60_000;
-    static LAST_OBSERVE_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
-    {
-        let now = unix_now_ms();
-        let last = LAST_OBSERVE_MS.load(std::sync::atomic::Ordering::Relaxed);
-        // last == 0 is process start: always observe once, so a short-lived
-        // process still contributes and a fresh launch is never silent.
-        if last != 0 && now.saturating_sub(last) < MEMBERSHIP_OBSERVE_INTERVAL_MS {
-            append_bram_trace_line(
-                app,
-                "claim-interval",
-                &format!(
-                    "op=membership-skipped reason=sampled since_ms={} interval_ms={}",
-                    now.saturating_sub(last),
-                    MEMBERSHIP_OBSERVE_INTERVAL_MS
-                ),
-            );
-            return;
-        }
-        LAST_OBSERVE_MS.store(now, std::sync::atomic::Ordering::Relaxed);
-    }
+) -> Option<std::collections::BTreeMap<String, MembershipPathBuckets>> {
     let started = std::time::Instant::now();
     let spawns = std::cell::Cell::new(0usize);
     // `ambiguous` counts paths whose partition holds a non-zero ambiguous
@@ -44299,25 +44258,35 @@ fn membership_engine_observe<R: tauri::Runtime>(
     // (the ambiguous-duplicate acceptance run's finding, recorded on #273:
     // ambiguity classifies the bucket, not the owner set, so neither the
     // divergence line nor the tripwire can attest it in the healthy state).
+    //
+    // `cached`: false on a real compute (this state was not in the memo, or
+    // this call exited before reaching the memo check at all), true on a
+    // memo hit. Volume note: divergence/breach lines below now fire once
+    // per STATE CHANGE instead of once per 60s sample — an improvement (the
+    // tau breach previously emitted eleven identical lines for one
+    // condition), but it means historical per-day counts of those two ops
+    // are not comparable across this change.
     let trace_cost = |app: &AppHandle<R>,
                       paths: usize,
                       spawns: usize,
                       ambiguous: usize,
-                      started: std::time::Instant| {
+                      started: std::time::Instant,
+                      cached: bool| {
         append_bram_trace_line(
             app,
             "claim-interval",
             &format!(
-                "op=membership paths={} ms={} spawns={} ambiguous={}",
+                "op=membership paths={} ms={} spawns={} ambiguous={} cached={}",
                 paths,
                 started.elapsed().as_millis(),
                 spawns,
-                ambiguous
+                ambiguous,
+                cached
             ),
         );
     };
     let Some(root) = project_root(Some(app)) else {
-        return;
+        return None;
     };
     // Live begun items: on the board (worklist.json is the live set) with
     // status "applied" or a host-stamped begunAtMs — the candidate roster,
@@ -44349,20 +44318,11 @@ fn membership_engine_observe<R: tauri::Runtime>(
         }
     }
     if begun_files.is_empty() {
-        trace_cost(app, 0, spawns.get(), 0, started);
-        return;
+        trace_cost(app, 0, spawns.get(), 0, started, false);
+        return None;
     }
     let begun_ids: std::collections::HashSet<String> =
         begun_files.iter().map(|(id, _)| id.clone()).collect();
-    // Pathspecs: the union of begun items' declared entries (files or
-    // directories — git pathspec semantics match `declared_covers` up to the
-    // worktree-prefix strip). Every git call below is scoped to these.
-    let mut pathspecs: Vec<String> = begun_files
-        .iter()
-        .flat_map(|(_, fs)| fs.iter().cloned())
-        .collect();
-    pathspecs.sort();
-    pathspecs.dedup();
     let git = |args: &[&str]| -> Option<String> {
         spawns.set(spawns.get() + 1);
         let out = std::process::Command::new("git")
@@ -44372,6 +44332,92 @@ fn membership_engine_observe<R: tauri::Runtime>(
             .ok()?;
         Some(String::from_utf8_lossy(&out.stdout).into_owned())
     };
+    // membership-affordable-enough-to-be-authoritative: memoize the
+    // partition by BOARD STATE rather than by wall-clock sample. The
+    // engine's inputs — HEAD, the worktree diff, the begun-item roster, and
+    // the claim-interval record — are a pure function of state that the
+    // serve already knows, so a repeat request against unchanged state is
+    // free. Hashes the FULL diff text and the FULL claim-intervals
+    // contents, not a numstat summary: a numstat-only key would serve a
+    // stale partition when an edit swaps a line without changing the
+    // added/removed counts — a correctness hazard once step 2 makes
+    // consumers read this cached value. Built here, before the expensive
+    // per-path probe loop below, so a hit skips every probe.
+    let state_key = {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let head = git(&["rev-parse", "HEAD"]).unwrap_or_default();
+        let diff = git(&["diff", "HEAD"]).unwrap_or_default();
+        let mut untracked: Vec<String> = git(&["ls-files", "--others", "--exclude-standard"])
+            .unwrap_or_default()
+            .lines()
+            .map(|s| s.to_string())
+            .collect();
+        untracked.sort();
+        let mut roster: Vec<String> = begun_files
+            .iter()
+            .map(|(id, files)| {
+                let mut fs = files.clone();
+                fs.sort();
+                format!("{}\u{1}{}", id, fs.join("\u{1}"))
+            })
+            .collect();
+        roster.sort();
+        let intervals_raw =
+            std::fs::read_to_string(root.join(CLAIM_INTERVALS_REL)).unwrap_or_default();
+        let mut hasher = DefaultHasher::new();
+        head.hash(&mut hasher);
+        diff.hash(&mut hasher);
+        untracked.join("\u{1}").hash(&mut hasher);
+        roster.join("\u{1}").hash(&mut hasher);
+        intervals_raw.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    };
+    // Single-slot process-local memo. Single-slot is deliberate: boards
+    // move forward, so the common case is a run of serves against one
+    // unchanging state. Thrashing between two live states (e.g. two agents
+    // alternating serves against different worktree states) is possible
+    // and merely degrades to a miss each time — same cost as before this
+    // item, never wrong.
+    static MEMBERSHIP_MEMO: std::sync::OnceLock<
+        std::sync::Mutex<
+            Option<(
+                String,
+                std::collections::BTreeMap<String, MembershipPathBuckets>,
+            )>,
+        >,
+    > = std::sync::OnceLock::new();
+    let memo = MEMBERSHIP_MEMO.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(guard) = memo.lock() {
+        if let Some((key, cached)) = guard.as_ref() {
+            if *key == state_key {
+                let cached = cached.clone();
+                let ambiguous_paths = cached.values().filter(|m| m.ambiguous != (0, 0)).count();
+                // CACHE HIT: this state was already observed. A divergence
+                // or conservation-breach line would be a verbatim repeat of
+                // what already ran for this exact state, so emit only the
+                // cost line (real, tiny elapsed — no probes ran this call).
+                trace_cost(
+                    app,
+                    cached.len(),
+                    spawns.get(),
+                    ambiguous_paths,
+                    started,
+                    true,
+                );
+                return Some(cached);
+            }
+        }
+    }
+    // Pathspecs: the union of begun items' declared entries (files or
+    // directories — git pathspec semantics match `declared_covers` up to the
+    // worktree-prefix strip). Every git call below is scoped to these.
+    let mut pathspecs: Vec<String> = begun_files
+        .iter()
+        .flat_map(|(_, fs)| fs.iter().cloned())
+        .collect();
+    pathspecs.sort();
+    pathspecs.dedup();
     // Universe, tracked half: one pathspec-scoped numstat — per concrete
     // changed path, (added, removed) vs HEAD. Never the whole tree.
     let mut universe: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
@@ -44428,8 +44474,8 @@ fn membership_engine_observe<R: tauri::Runtime>(
         }
     }
     if universe.is_empty() {
-        trace_cost(app, 0, spawns.get(), 0, started);
-        return;
+        trace_cost(app, 0, spawns.get(), 0, started, false);
+        return None;
     }
     // Scratch state for the probes. idx_head is HEAD alone (the
     // already-committed screen); idx_now is HEAD plus a pathspec-scoped
@@ -44473,8 +44519,8 @@ fn membership_engine_observe<R: tauri::Runtime>(
         // incapable of blocking a board serve. The cost line still lands so
         // the absence of partition traces is attributable.
         cleanup();
-        trace_cost(app, 0, spawns.get(), 0, started);
-        return;
+        trace_cost(app, 0, spawns.get(), 0, started, false);
+        return None;
     }
     let pfile_s = pfile.to_string_lossy().to_string();
     let probe = |idx: &Path, patch: &str| -> bool {
@@ -44661,7 +44707,18 @@ fn membership_engine_observe<R: tauri::Runtime>(
         }
     }
     let ambiguous_paths = per_path.values().filter(|m| m.ambiguous != (0, 0)).count();
-    trace_cost(app, per_path.len(), spawns.get(), ambiguous_paths, started);
+    trace_cost(
+        app,
+        per_path.len(),
+        spawns.get(),
+        ambiguous_paths,
+        started,
+        false,
+    );
+    if let Ok(mut guard) = memo.lock() {
+        *guard = Some((state_key, per_path.clone()));
+    }
+    Some(per_path)
 }
 
 #[cfg(test)]
@@ -59294,7 +59351,13 @@ fn route_request<R: tauri::Runtime>(
             // Nothing in this payload reads it; the replay above stays the
             // authority for every consumer until the observation earns the
             // step-2+ flips.
-            membership_engine_observe(app, &owners_by_path, &joint_owners_by_path);
+            //
+            // membership-affordable-enough-to-be-authoritative: the engine
+            // now returns its partition (memoized on board state) instead of
+            // discarding it, but this call site still binds and discards —
+            // the partition stays deliberately unread until migration step 2.
+            let _membership =
+                membership_engine_observe(app, &owners_by_path, &joint_owners_by_path);
         }
         // #286: the ids the currently live inflight claim covers, so an
         // agent reading the board mid-turn can see which ids it still

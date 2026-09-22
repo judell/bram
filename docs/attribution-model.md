@@ -484,6 +484,19 @@ shape as the joint refusal Bram already ships.
    a realistic board; the budget set from the current replay's measured
    baseline before the flip, not after.
 
+   *Measured baselines (`membership-affordable-enough-to-be-authoritative`),
+   verbatim:*
+
+   ```
+   replay     (op=attribute)   n=4453  p50=67ms   p90=223ms  p99=623ms   max=6852ms
+   membership (op=membership)  n=974   p50=10ms   p90=429ms  p99=1358ms  max=9984ms
+   ```
+
+   The replay runs on every serve; membership's `n` was collected while it
+   still ran sampled (once per 60s per process), so the two denominators
+   differ and the figures are not a like-for-like sample-count comparison —
+   only the shape (p50 cheap, tail expensive) is the load-bearing fact.
+
 ### Migration sketch, per consuming surface
 
 Sized so implementation items can be cut directly; ordering is the
@@ -496,12 +509,21 @@ observe → display → gate → retire sequence.
    comparison line against the replay's runs. Observe-only; no consumer
    flips. (Criteria 1, 7.)
 
-   *Status: landed observe-only as `issue-273-membership-engine-observe` —
-   `membership_engine_observe` runs on every board serve beside the replay,
-   feeding only the `op=membership` / `op=membership-diverges` /
-   `op=membership-conservation-broken` traces (registered in
-   `trace-vocabulary.md`); the board payload, pane, gate, and staging all
-   still read the replay.*
+   *Status: landed observe-only as `issue-273-membership-engine-observe`,
+   and — as `membership-affordable-enough-to-be-authoritative` — the engine
+   now RETURNS its partition (`Option<BTreeMap<String, MembershipPathBuckets>>`)
+   instead of discarding it, and is memoized on board state (a single
+   process-local slot keyed on HEAD, the full worktree diff, the begun-item
+   roster, and the claim-interval record) rather than sampled by wall
+   clock. `membership_engine_observe` still runs on every board serve
+   beside the replay, still feeding only the `op=membership` /
+   `op=membership-diverges` / `op=membership-conservation-broken` traces
+   (registered in `trace-vocabulary.md`, now with a `cached=` field); the
+   call site binds and discards the returned partition
+   (`let _membership = membership_engine_observe(...)`) — the board
+   payload, pane, gate, and staging all still read the replay, unchanged.
+   Nothing flips yet; this item makes the partition available and
+   affordable for step 2 to spend.*
 2. **Board payload flip**: `attribution`, `attributionTotals`,
    `totals_by_path`, `willCommit` (`lib.rs:54242`–`54381`) and `jointWith`
    (`lib.rs:54383`) source from membership; the reserved `unowned_by_path`

@@ -25898,11 +25898,24 @@ fn search_not_ready_refusal<R: tauri::Runtime>(
             &format!("op=refuse-not-ready reason={}", reason),
         );
     }
-    let body = serde_json::json!({
+    // search-refusal-carries-its-progress: fold in what the caller would
+    // otherwise need a second /__search-index-status round trip to learn.
+    // `progress` is only Some while a bucket pass is actually running — a
+    // "holding" refusal (unmanaged project, nothing active) has none. Omit
+    // phase/done/total entirely rather than emitting zeros: 0/0 reads as
+    // "0 of 0 done", a false claim of measured emptiness, where absence
+    // correctly reads as "not started".
+    let mut body = serde_json::json!({
         "error": "search index not ready",
         "reason": reason,
         "hint": "no index cycle has completed for this project yet — this refusal means 'no index', never 'no history'; retry after the first cycle, or check /__search-index-status",
     });
+    if let Some((bucket, done, total)) = &st.progress {
+        let obj = body.as_object_mut().expect("body is a JSON object");
+        obj.insert("phase".to_string(), serde_json::json!(bucket));
+        obj.insert("done".to_string(), serde_json::json!(done));
+        obj.insert("total".to_string(), serde_json::json!(total));
+    }
     Some((
         503,
         "application/json; charset=utf-8",

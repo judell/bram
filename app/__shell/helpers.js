@@ -13914,6 +13914,33 @@ window.__bramFooterIndexLabel = function (status) {
   return 'Indexed ' + Number(status.total || 0).toLocaleString();
 };
 
+// search-refusal-carries-its-progress: the Search tab's not-ready banner
+// used to render a static "hasn't scanned yet" sentence even though the same
+// /__search-index-status DataSource it already reads carries live
+// {bucket, done, total} progress. Returns the ready-to-render first banner
+// line ("Indexing this project — issues, 50 of 387.") when the host reports
+// in-flight progress, or "" when it doesn't — the empty string lets the
+// markup branch to the static fallback sentence via `when`, with the value
+// attribute itself staying a single function call either way (inline
+// ternary/&&-chains in XMLUI attribute expressions are a named anti-pattern
+// — see docs/developing-bram.md "Failure modes").
+//
+// Bucket names render from the VALUE the host sends, falling back to the
+// raw bucket string when it isn't in the known-label map — never a generic
+// "indexing…" that would swallow an unrecognized bucket (#384's
+// anti-enumeration rule: a hardcoded list standing in for a property is the
+// recurring defect shape here). Reuses the same bucket→plural map the
+// footer indicator already maintains, so a bucket added there is named here
+// too with no separate list to fall out of sync.
+window.__bramIndexProgressLabel = function (status) {
+  if (!status || !status.progress) return '';
+  var p = status.progress;
+  if (!p || !p.bucket) return '';
+  var labels = window.__bramFooterIndexBucketLabels || {};
+  var name = labels[p.bucket] || p.bucket;
+  return 'Indexing this project — ' + name + ', ' + p.done + ' of ' + p.total + '.';
+};
+
 // settings-highlight-deeplink: scroll the setting anchored as
 // data-testid="setting-<key>" into view. Called from Settings when it opens (or
 // is already open and re-targeted) with ?highlight=<key>; the tint itself is

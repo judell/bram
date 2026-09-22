@@ -425,8 +425,20 @@
          whether or not a query has fired. Keyed on lastCycleMs (== 0 means
          no cycle has ever completed, #251's own field), the same source the
          coverage line reads. -->
+    <!-- search-refusal-carries-its-progress: the first line renders the
+         host's live {bucket, done, total} when it has one, instead of a
+         static sentence that was true and useless throughout a multi-minute
+         cold rebuild. window.__bramIndexProgressLabel returns the ready
+         first line or "" — the value/when attributes stay single function
+         calls, never an inline ternary/&&-chain (docs/developing-bram.md
+         "Failure modes"). The second line is #316's load-bearing text and
+         is unchanged. -->
     <VStack when="{searchIndexStatus.value &amp;&amp; !searchIndexStatus.value.lastCycleMs}" gap="$space-0_5">
-      <Text color="$textColor-secondary" value="The index hasn't scanned this project yet." />
+      <Text when="{window.__bramIndexProgressLabel(searchIndexStatus.value) !== ''}"
+        color="$textColor-secondary"
+        value="{window.__bramIndexProgressLabel(searchIndexStatus.value)}" />
+      <Text when="{window.__bramIndexProgressLabel(searchIndexStatus.value) === ''}"
+        color="$textColor-secondary" value="The index hasn't scanned this project yet." />
       <Text fontSize="$fontSize-xs" color="$textColor-secondary"
         value="Results will appear after the first index cycle completes. Until then an empty answer means 'no index', never 'no history' — searches are refused rather than returning nothing." />
     </VStack>

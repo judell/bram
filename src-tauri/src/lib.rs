@@ -16921,6 +16921,22 @@ fn pty_spawn(
     auto_setup_before_launch(&app);
     let configured_startup_policy = configured_startup_policy(&app);
     let startup_policy = startup_policy_for_repo(configured_startup_policy, first_unmanaged_launch);
+    if startup_policy == AgentStartupPolicy::None {
+        // issue-389: leave the shell at its prompt. No launch command, no
+        // current-provider claim, no first command, no switch refresh.
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                &app,
+                "agent-switch",
+                &format!(
+                    "op=autostart policy=none configured_policy={} first_unmanaged={} command=",
+                    configured_startup_policy.as_str(),
+                    first_unmanaged_launch
+                ),
+            );
+        }
+        return Ok(());
+    }
     let last_active = if startup_policy == AgentStartupPolicy::LastActive {
         validated_last_active_session(&app)
     } else {
@@ -18186,6 +18202,7 @@ fn switch_agent(
         "claude" | "claud" => "claude",
         other => return Err(format!("unknown agent provider: {}", other)),
     };
+    refuse_agent_typing_if_policy_none(&app, "switch")?;
     cancel_agent_boot_hold(&app, "provider-switch");
     // Header switching is always "return to that agent", independent of the
     // On Bram launch policy. A pinned codex session outranks `resume --last`:
@@ -18599,6 +18616,7 @@ fn reload_agent_session(
         "claude" | "claud" => "claude",
         other => return Err(format!("unknown agent provider: {}", other)),
     };
+    refuse_agent_typing_if_policy_none(&app, "session-reload")?;
     let session_provider = if provider_key == "codex" {
         SessionProvider::Codex
     } else {
@@ -19086,6 +19104,7 @@ fn create_new_session(
         "claude" | "claud" => "claude",
         other => return Err(format!("unknown agent provider: {}", other)),
     };
+    refuse_agent_typing_if_policy_none(&app, "new-session")?;
     let trimmed = title.trim().to_string();
     if trimmed.is_empty() {
         return Err("session name is required".to_string());
@@ -19351,6 +19370,12 @@ enum AgentStartupPolicy {
     LastActive,
     AgentRecent,
     NewSession,
+    // issue-389: leave the PTY shell alone. Bram types no launch command, and
+    // every host path that would type one (header switch, Sessions-tab
+    // reload, new session) refuses — so a user can run another agent host
+    // (e.g. `herdr agent attach <id>`) in the pane without Bram typing
+    // `claude …` into it later.
+    None,
 }
 
 impl AgentStartupPolicy {
@@ -19359,6 +19384,7 @@ impl AgentStartupPolicy {
             "lastActive" => Some(Self::LastActive),
             "agentRecent" => Some(Self::AgentRecent),
             "newSession" => Some(Self::NewSession),
+            "none" => Some(Self::None),
             _ => None,
         }
     }
@@ -19368,6 +19394,7 @@ impl AgentStartupPolicy {
             Self::LastActive => "lastActive",
             Self::AgentRecent => "agentRecent",
             Self::NewSession => "newSession",
+            Self::None => "none",
         }
     }
 }
@@ -19392,7 +19419,9 @@ fn startup_policy_for_repo(
     configured: AgentStartupPolicy,
     first_unmanaged_launch: bool,
 ) -> AgentStartupPolicy {
-    if first_unmanaged_launch {
+    // An explicit "none" is an opt-out, not a resume preference: the
+    // first-launch fresh-session override must not defeat it.
+    if first_unmanaged_launch && configured != AgentStartupPolicy::None {
         AgentStartupPolicy::NewSession
     } else {
         configured
@@ -19433,13 +19462,40 @@ fn resolve_agent_startup_launch(
             resume: true,
             fallback: false,
         },
-        AgentStartupPolicy::NewSession => AgentStartupLaunch {
+        // Unreachable by construction: the autostart path returns before
+        // resolving a launch when the policy is None. Resolve it like
+        // NewSession so the match stays total without a panic.
+        AgentStartupPolicy::NewSession | AgentStartupPolicy::None => AgentStartupLaunch {
             provider: configured_provider,
             session_id: None,
             resume: false,
             fallback: false,
         },
     }
+}
+
+// issue-389: the host-typed launch paths (header switch, Sessions-tab reload,
+// new session) are inert while the startup policy is "none" — the pane may be
+// running a foreign agent host, and typing `claude …` into it would land as
+// keystrokes in that TUI. Returns the error string the pane surfaces.
+fn refuse_agent_typing_if_policy_none<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    source: &str,
+) -> Result<(), String> {
+    if configured_startup_policy(app) != AgentStartupPolicy::None {
+        return Ok(());
+    }
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "agent-switch",
+            &format!("op=switch-refused reason=policy-none source={}", source),
+        );
+    }
+    Err(
+        "Bram is set not to start an agent (Settings → On Bram launch), so it will not type an agent command into the terminal. Change that setting to let Bram launch agents again."
+            .to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -19468,6 +19524,40 @@ mod agent_startup_policy_tests {
             startup_policy_from_shell(None),
             AgentStartupPolicy::AgentRecent
         );
+    }
+
+    #[test]
+    fn none_policy_round_trips_and_survives_first_unmanaged_launch() {
+        assert_eq!(
+            AgentStartupPolicy::from_str("none"),
+            Some(AgentStartupPolicy::None)
+        );
+        assert_eq!(AgentStartupPolicy::None.as_str(), "none");
+        assert_eq!(
+            startup_policy_from_shell(Some(&shell(r#"{"startupPolicy":"none"}"#))),
+            AgentStartupPolicy::None
+        );
+        // The first-launch fresh-session override must not defeat an opt-out.
+        assert_eq!(
+            startup_policy_for_repo(AgentStartupPolicy::None, true),
+            AgentStartupPolicy::None
+        );
+        assert_eq!(
+            startup_policy_for_repo(AgentStartupPolicy::None, false),
+            AgentStartupPolicy::None
+        );
+    }
+
+    #[test]
+    fn settings_merge_and_view_preserve_none_policy() {
+        let existing = serde_json::json!({ "shell": { "agent": "claude" } });
+        let update = serde_json::json!({ "shell": { "startupPolicy": "none" } });
+        let merged = merge_settings_into_config(existing, &update);
+        assert_eq!(merged["shell"]["startupPolicy"], "none");
+        let config = serde_json::from_value::<ProjectConfig>(merged).unwrap();
+        let view = settings_view_from_config(Some(config));
+        assert_eq!(view["shell"]["startupPolicy"], "none");
+        assert_eq!(view["shell"]["continueLast"], false);
     }
 
     #[test]
@@ -19823,6 +19913,7 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
             // Compatibility for older tools panes during an upgrade. New code
             // reads startupPolicy; old code still sees its familiar boolean.
             "continueLast": startup_policy != AgentStartupPolicy::NewSession.as_str()
+                && startup_policy != AgentStartupPolicy::None.as_str()
         },
         "worklist": { "batchCommitActions": batch },
         "ui": { "showTargetApp": show_target_app, "toolsPaneHotReload": tools_pane_hot_reload },

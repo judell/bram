@@ -2277,7 +2277,7 @@ window.__bramSettingsFormData = function (settings, section) {
   if (section === "shell") {
     var shell = s.shell || {};
     var policy = shell.startupPolicy;
-    if (policy !== "lastActive" && policy !== "agentRecent" && policy !== "newSession") {
+    if (policy !== "lastActive" && policy !== "agentRecent" && policy !== "newSession" && policy !== "none") {
       policy = shell.continueLast === false ? "newSession" : "agentRecent";
     }
     return {

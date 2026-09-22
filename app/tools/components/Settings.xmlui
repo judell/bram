@@ -103,7 +103,8 @@
             data="{[
               { value: 'agentRecent', label: 'Resume selected agent’s most recent session' },
               { value: 'lastActive', label: 'Resume most-recently-active agent’s session' },
-              { value: 'newSession', label: 'Start a new session' }
+              { value: 'newSession', label: 'Start a new session' },
+              { value: 'none', label: 'Do not start an agent (manage the terminal yourself)' }
             ]}">
             <!-- Long labels wrap flush-left instead of centered: the same
                  valueTemplate + width-bound Text as the Worklist's issue

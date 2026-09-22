@@ -22467,7 +22467,33 @@ fn claude_session_title(path: &Path) -> std::io::Result<Option<String>> {
 /// output (greps, file reads, diffs) can be huge and low-signal in bulk; this
 /// bounds index bloat while still covering the head of each result. Mirrors the
 /// commit-diff patch caps (search-index-commit-diffs).
-const SEARCH_TOOL_PART_CAP: usize = 16 * 1024;
+// Measured 2026-09-21 by replaying both extractors over the whole corpus (368
+// files) at 16K/8K/4K/2K/1K/512, scoring each against the receipt that
+// justified indexing tool output at all: bc617f4 added it because
+// "feedback-history" appeared ONLY inside tool results in several sessions, and
+// reported 7 of 8 previously-missing sessions matching afterwards.
+//
+//     cap     indexed   vs 16K   sessions matching "feedback-history"
+//   16384     74.0 MB   100.0%   35
+//    8192     64.8 MB    87.6%   35
+//    4096     56.4 MB    76.2%   35   <- chosen
+//    2048     47.8 MB    64.6%   33   <- regression, loses 2
+//    1024     40.2 MB    54.3%   30
+//     512     34.3 MB    46.3%   23
+//
+// 4K is the knee: a quarter fewer bytes written into FTS with the receipt
+// intact. Below it the identifier-shaped results this cap exists to preserve
+// (a path in an `ls`, a filename in grep output) start getting cut along with
+// the payload-shaped ones (whole-file dumps, long diffs) that are reproducible
+// from the repo anyway.
+//
+// Deliberately NOT paired with a SCHEMA_VERSION bump. Rows already written used
+// 16K and a cap change does not invalidate them -- they are merely larger than
+// they would be now -- so the saving is realized at the next rebuild for
+// whatever reason it happens, rather than by forcing one. A rebuild costs ~10
+// minutes with Search dark (judell/bram#316's honest refusal), and 24% is not
+// worth buying that twice in an evening.
+const SEARCH_TOOL_PART_CAP: usize = 4 * 1024;
 
 /// Truncate `s` to at most `cap` bytes on a char boundary (house style: the
 /// same is_char_boundary walk used elsewhere in this file).

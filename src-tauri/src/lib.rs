@@ -167,12 +167,28 @@ struct PendingIssueClose {
     patch_id: Option<String>,
     created_at_ms: i64,
     // issue-380: the branch this commit was made on, captured at ENQUEUE.
-    // At flush time the only branch available is whatever is checked out
-    // now, which need not be the one the commit is on -- the commit gate
-    // knows the right answer at the moment it matters. Optional for legacy
-    // records, like patch_id above.
+    //
+    // issue-390 CORRECTION. This field's original comment claimed that at
+    // flush time "the only branch available is whatever is checked out now",
+    // and concluded the value had to be captured early. That premise is
+    // false: which branch contains a commit is a property of the REF GRAPH,
+    // not of the checkout, and `git branch -r --contains <sha>` answers it at
+    // any time. See `merge_branches` below.
+    //
+    // The field is KEPT because it answers a different question -- where the
+    // commit was MADE -- which is real provenance and the honest fallback when
+    // the ref lookup fails or the commit has become unreachable. It is no
+    // longer what the banner names.
     #[serde(default)]
     branch: Option<String>,
+    // issue-390: the remote branches that CONTAIN this commit, re-derived by
+    // the flush each time it reaches `deferred-not-on-default`. Remote rather
+    // than local because that verdict is only reached once `gh_commit_visible`
+    // confirms the commit is on origin -- a local-only name would describe a
+    // branch the forge cannot merge. Empty when the lookup found nothing, in
+    // which case the reader falls back to `branch`.
+    #[serde(default)]
+    merge_branches: Vec<String>,
     // issue-380: the flush's own last decision about this record, recorded
     // where it is MADE so the route can serve it without recomputing the
     // predicate (commit_on_origin_default + gh_commit_visible + the #282
@@ -56225,6 +56241,55 @@ fn flush_pending_worklist_push_mirrors<R: tauri::Runtime>(app: &AppHandle<R>) {
 
 // ---- close-on-push-automatic (security H5) ----
 
+// issue-390: which remote branches contain this commit NOW. The queued-close
+// banner's job is to name the branch whose merge closes the issue, and that is
+// a fact about the ref graph rather than about whatever was checked out when
+// the commit was made. The workflow that breaks the enqueue-time capture is
+// the one conventions prescribe for issue-closing work -- commit on the default
+// branch through the gate, then cut a feature branch and reset the default --
+// so the captured value goes stale in exactly the case it was built to serve.
+//
+// `origin/HEAD` and the default branch are excluded: naming them would
+// reproduce the "is on main, not main" contradiction this fixes.
+fn issue_close_containing_remote_branches<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    sha: &str,
+) -> Vec<String> {
+    let Some(root) = project_root(Some(app)) else {
+        return Vec::new();
+    };
+    let default_ref = origin_default_ref(app, &root);
+    let out = match std::process::Command::new("git")
+        .current_dir(&root)
+        .args([
+            "branch",
+            "-r",
+            "--contains",
+            sha,
+            "--format=%(refname:short)",
+        ])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+    let default_short = default_ref
+        .as_deref()
+        .and_then(|r| r.rsplit('/').next())
+        .unwrap_or("")
+        .to_string();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.contains("->"))
+        .filter(|l| {
+            let short = l.rsplit('/').next().unwrap_or(l);
+            *l != "origin/HEAD" && (default_short.is_empty() || short != default_short)
+        })
+        .map(|l| l.to_string())
+        .collect()
+}
+
 fn issue_close_queue_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
     project_resource_path(app, ".worklist-issue-close.json")
 }
@@ -56706,6 +56771,8 @@ fn enqueue_issue_closes_from_auth<R: tauri::Runtime>(
                 patch_id: patch_id.clone(),
                 created_at_ms: unix_now_ms(),
                 branch: (!branch.is_empty()).then(|| branch.clone()),
+                // issue-390: derived by the flush, not at enqueue.
+                merge_branches: Vec::new(),
                 last_reason: None,
             };
             if let Err(e) = enqueue_pending_issue_close_path(&path, record) {
@@ -57022,6 +57089,10 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>, trigger: &s
         }
         if deferred_unmerged && closed_via_pr.is_none() {
             last_reason = Some("deferred-not-on-default");
+            // issue-390: re-derive the containing branches HERE, where the
+            // verdict is reached, so the banner names what will actually
+            // merge rather than what was checked out at enqueue.
+            record.merge_branches = issue_close_containing_remote_branches(app, &record.commit_sha);
             eprintln!(
                 "[issue-close-queue] op=deferred-not-on-default issue={} sha={}",
                 record.issue, record.commit_sha
@@ -57305,6 +57376,7 @@ mod close_on_push_tests {
             comment: c.map(String::from),
             created_at_ms: 0,
             branch: None,
+            merge_branches: Vec::new(),
             last_reason: None,
         };
         enqueue_pending_issue_close_path(&path, rec(None)).unwrap();
@@ -57319,6 +57391,7 @@ mod close_on_push_tests {
                 comment: None,
                 created_at_ms: 0,
                 branch: None,
+                merge_branches: Vec::new(),
                 last_reason: None,
             },
         )
@@ -57338,6 +57411,7 @@ mod close_on_push_tests {
             comment: None,
             created_at_ms: 0,
             branch: None,
+            merge_branches: Vec::new(),
             last_reason: None,
         }
     }
@@ -59593,6 +59667,11 @@ fn route_request<R: tauri::Runtime>(
                     "createdAtMs": r.created_at_ms,
                     "reason": r.last_reason,
                     "branch": r.branch,
+                    // issue-390: the branches that CONTAIN the commit now,
+                    // re-derived by the flush. The pane prefers these over
+                    // `branch` (the enqueue-time capture), which stays as
+                    // provenance and as the fallback when this is empty.
+                    "mergeBranches": r.merge_branches,
                     "defaultBranch": default_branch,
                 })
             })

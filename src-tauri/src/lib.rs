@@ -23903,6 +23903,30 @@ fn codex_message_search_text(record: &serde_json::Value) -> String {
         return String::new();
     };
     match payload.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+        // The shape current Codex rollouts actually use for conversation:
+        // `response_item` / `payload.type == "message"`, with `content[]` parts
+        // carrying `output_text` (assistant) or `input_text` (user). Roles are
+        // NOT filtered -- assistant, user and developer all index, because the
+        // user's own turns are exactly what a later search looks for.
+        //
+        // Measured 2026-09-21 across 40 rollouts since 2026-09-01: 691 of these
+        // (477 assistant, 167 user, 47 developer) and ZERO of the
+        // user_message/agent_message shape below. Without this arm they fell to
+        // `_ => String::new()`, so no word either party said was searchable
+        // while tool traffic indexed normally -- the index looked healthy and
+        // covered none of the conversation.
+        //
+        // `codex_content_text` takes any part carrying a `text` string rather
+        // than matching a list of part types. That is deliberate after
+        // judell/bram#384: the defect being fixed here IS an enumeration that
+        // stopped matching reality, and for an indexer the risk direction is
+        // missing text, never surplus. A part with no `text` (an image) drops
+        // out naturally.
+        "message" => codex_content_text(payload.get("content")),
+        // Kept although they match nothing in rollouts as of 2026-09-21: older
+        // sessions on disk may still carry this flat shape, and deleting a
+        // working arm to tidy the match would trade real archive coverage for
+        // neatness. Presence here is not evidence of coverage.
         "user_message" | "agent_message" => payload
             .get("message")
             .and_then(|v| v.as_str())
@@ -23975,6 +23999,65 @@ mod codex_extract_tests {
         assert_eq!(codex_message_search_text(&msg), "done indexing");
 
         // Encrypted reasoning yields nothing.
+        let reasoning = serde_json::json!({
+            "type": "response_item",
+            "payload": { "type": "reasoning", "summary": [], "encrypted_content": "gAAAAA" }
+        });
+        assert_eq!(codex_message_search_text(&reasoning), "");
+    }
+
+    // codex-conversation-text-is-unindexed. The test above asserts what IS
+    // covered, which is why it stayed green for the whole period in which no
+    // Codex conversation was indexed at all: a test of the covered arms cannot
+    // notice an arm that was never written. This one pins the shape current
+    // rollouts actually emit.
+    #[test]
+    fn search_text_captures_codex_conversation_messages() {
+        // Assistant prose -- the case that exposed this: a tag deliberately
+        // planted in an assistant message could not be found afterwards.
+        let assistant = serde_json::json!({
+            "type": "response_item",
+            "payload": { "type": "message", "role": "assistant",
+                "content": [{ "type": "output_text", "text": "bram-priority-read-2026-09-21" }] }
+        });
+        assert!(codex_message_search_text(&assistant).contains("bram-priority-read-2026-09-21"));
+
+        // The user's own turns index too -- searching for what you asked is at
+        // least as common as searching for what the agent answered.
+        let user = serde_json::json!({
+            "type": "response_item",
+            "payload": { "type": "message", "role": "user",
+                "content": [{ "type": "input_text", "text": "which open issues matter most" }] }
+        });
+        assert!(codex_message_search_text(&user).contains("which open issues matter most"));
+
+        // Multi-part content joins rather than taking only the first part.
+        let multi = serde_json::json!({
+            "type": "response_item",
+            "payload": { "type": "message", "role": "assistant",
+                "content": [
+                    { "type": "output_text", "text": "first part" },
+                    { "type": "output_text", "text": "second part" }
+                ] }
+        });
+        let joined = codex_message_search_text(&multi);
+        assert!(joined.contains("first part") && joined.contains("second part"));
+
+        // A part with no `text` (an image) drops out without swallowing the
+        // parts around it.
+        let mixed = serde_json::json!({
+            "type": "response_item",
+            "payload": { "type": "message", "role": "user",
+                "content": [
+                    { "type": "input_image", "image_url": "file:///tmp/x.png" },
+                    { "type": "input_text", "text": "look at this" }
+                ] }
+        });
+        assert_eq!(codex_message_search_text(&mixed), "look at this");
+
+        // The exclusion the sibling test names must survive this change:
+        // reasoning is still skipped, and it is the largest record class by
+        // count, so including it by accident would be expensive and wrong.
         let reasoning = serde_json::json!({
             "type": "response_item",
             "payload": { "type": "reasoning", "summary": [], "encrypted_content": "gAAAAA" }

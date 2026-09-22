@@ -54,7 +54,18 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Result};
 // place -- credentials indexed before this change are already stored in the
 // FTS table and retrievable in full via /__search/doc. Reusing the existing
 // version-mismatch rebuild purges them with no migration code.
-const SCHEMA_VERSION: i64 = 13;
+// codex-conversation-text-is-unindexed: bumped 13 -> 14 for the same reason in
+// the other direction. `codex_message_search_text` had no arm for the shape
+// current Codex rollouts use for conversation, so every existing session row
+// was written with the prose MISSING -- tool traffic indexed, not one word
+// either party said. Teaching the extractor does not retroactively add text to
+// rows already stored, and the incremental pass is mtime/size-gated, so an
+// unchanged file is never re-read: without this bump the fix would reach only
+// sessions that change afterwards and the whole existing Codex archive would
+// stay unsearchable while the index reported itself healthy. Not a shape
+// change, and still correctly a rebuild -- exactly the case the comment below
+// names.
+const SCHEMA_VERSION: i64 = 14;
 
 /// A row to index. `content` is the searchable text; `file` is the source
 /// file's absolute path (the reindex key); the rest are the #230 common-schema

@@ -14673,13 +14673,32 @@ fn build_enriched_issue<R: tauri::Runtime>(
 ) -> Result<Vec<u8>, String> {
     let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
     let adapter = forge_adapter(app);
-    let mut issue = match adapter.issue_view(&root, number) {
+    let issue = match adapter.issue_view(&root, number) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("{}", e);
             return Ok(b"{}".to_vec());
         }
     };
+    build_enriched_issue_from(app, number, issue)
+}
+
+// index-rebuild-reports-its-progress: split out of build_enriched_issue so a
+// caller that already has full issue detail in hand (the batched cold-rebuild
+// issue-index path in run_issue_index_pass) can enrich it without repeating
+// the `issue_view` network fetch build_enriched_issue used to make
+// unconditionally — that redundant second fetch (one from the index pass's
+// own loop, one from here) was doubling the per-issue network cost on every
+// path, batched or not. `issue` must carry the same fields `issue_view`
+// returns (title/body/state/author/comments/etc.); a batched-list item and a
+// plain `issue_view` result both match that shape by construction.
+fn build_enriched_issue_from<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    number: u64,
+    mut issue: serde_json::Value,
+) -> Result<Vec<u8>, String> {
+    let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
+    let adapter = forge_adapter(app);
     enrich_issue_activity(app, &mut issue, None);
     let cross_refs = adapter.cross_references(&root, number);
     let is_closed = issue.get("state").and_then(|v| v.as_str()) == Some("CLOSED");
@@ -15101,6 +15120,26 @@ trait ForgeAdapter: Sync {
     /// path (GitLab), so the indexer skips it (issue-230-incremental-issue-fetch).
     fn issues_change_probe(&self, root: &Path) -> Result<Option<Vec<(u64, i64)>>, String>;
     fn issue_view(&self, root: &Path, number: u64) -> Result<serde_json::Value, String>;
+    /// Cold-path batched detail fetch (index-rebuild-reports-its-progress):
+    /// full issue detail (title/body/state/author/comments/etc, the SAME
+    /// shape `issue_view` returns for one issue) for up to `limit` issues in
+    /// as few forge calls as possible. Used only when many issues need
+    /// (re)indexing at once — see `ISSUE_BATCH_FETCH_THRESHOLD` at
+    /// `run_issue_index_pass`. `Ok(None)` means "this forge has no batched
+    /// path", NOT "zero issues" — a caller must fall back to per-issue
+    /// `issue_view` rather than treating `None` as an empty result, and an
+    /// implementation must never silently truncate: a partial list here is
+    /// indistinguishable downstream from "the rest of the issues have no
+    /// comments", which is the one failure shape this method exists to rule
+    /// out. Default: unsupported (falls back to the per-issue path).
+    fn issues_list_full(
+        &self,
+        root: &Path,
+        limit: usize,
+    ) -> Result<Option<Vec<serde_json::Value>>, String> {
+        let _ = (root, limit);
+        Ok(None)
+    }
     fn issue_comment(&self, root: &Path, number: u64, body: &str) -> Result<(), String>;
     fn issue_close(&self, root: &Path, number: u64, comment: &str) -> Result<(), String>;
     fn cross_references(&self, root: &Path, number: u64) -> Vec<serde_json::Value> {
@@ -15343,6 +15382,46 @@ impl ForgeAdapter for GitHubForge {
         serde_json::from_slice(&stdout).map_err(|e| format!("[gh issue view {}] parse: {}", n, e))
     }
 
+    // index-rebuild-reports-its-progress: one `gh issue list` call instead of
+    // N `gh issue view` calls. Measured 2026-09-21 on this project: `gh issue
+    // list --state all --limit 400 --json number,title,body,author,comments`
+    // returned all 387 issues' full bodies AND full comment bodies (3.0 MB)
+    // in 15.2s, versus 19m33s for 387 sequential `issue_view` calls at ~3s
+    // each. Same `--json` field set as `issue_view` above (state/createdAt/
+    // updatedAt/labels included too) so a caller can treat each returned
+    // element identically to one `issue_view` result — this is load-bearing
+    // for `build_enriched_issue_from`, which expects that shape.
+    //
+    // `limit` is NOT capped to the measured "400"; it clamps to the
+    // project's own configured issue-list bound (`search_issue_limit_for_root`,
+    // same bound `issues_list`/`issues_change_probe` already use) so a
+    // caller passing the true known issue count is never silently truncated
+    // below what it asked for.
+    fn issues_list_full(
+        &self,
+        root: &Path,
+        limit: usize,
+    ) -> Result<Option<Vec<serde_json::Value>>, String> {
+        let limit = issue_batch_fetch_limit(limit, search_issue_limit_for_root(root)).to_string();
+        let stdout = gh_json_out(
+            root,
+            &[
+                "issue",
+                "list",
+                "--json",
+                "number,title,body,state,author,createdAt,updatedAt,labels,url,comments",
+                "--limit",
+                &limit,
+                "--state",
+                "all",
+            ],
+            "gh issue list (batched detail)",
+        )?;
+        let issues: Vec<serde_json::Value> = serde_json::from_slice(&stdout)
+            .map_err(|e| format!("[gh issue list batched] parse: {}", e))?;
+        Ok(Some(issues))
+    }
+
     fn issue_comment(&self, root: &Path, number: u64, body: &str) -> Result<(), String> {
         let n = number.to_string();
         gh_json_out(
@@ -15456,7 +15535,17 @@ impl ForgeAdapter for GitLabForge {
 
     fn issues_change_probe(&self, _root: &Path) -> Result<Option<Vec<(u64, i64)>>, String> {
         // GitLab issues are not indexed for search yet — None makes the indexer
-        // skip them, preserving the prior ServerFiltered behavior.
+        // skip them, preserving the prior ServerFiltered behavior. Because of
+        // that, `run_issue_index_pass` never reaches the cold-vs-incremental
+        // fetch decision for GitLab at all, so `issues_list_full` below is
+        // moot in practice today; it is left at the trait's default `Ok(None)`
+        // (no override in this impl) rather than given an unmeasured `glab`
+        // batched implementation — `glab issue list`'s flags and comment
+        // shape were never measured against the 2026-09-21 `gh` numbers this
+        // item is based on, and a half-measured batched path is exactly the
+        // "silently returns partial content" failure this mechanism must not
+        // have. When GitLab issues gain a real probe, batching them is a
+        // follow-up, not a byproduct of this change.
         Ok(None)
     }
 
@@ -24456,6 +24545,18 @@ const SESSION_REINDEX_MIN_BYTES: i64 = 32 * 1024;
 const SESSION_REINDEX_MIN_PCT: f64 = 0.05;
 const SESSION_REINDEX_MAX_STALE_SECS: i64 = 300;
 
+// index-rebuild-reports-its-progress: only start emitting per-file session
+// progress once there is a real backlog worth watching, mirroring the commit
+// pass's `report_progress = total_pending > 100` and the issue pass's `> 5`.
+// A session transcript can be multi-megabyte, so even a modest pending count
+// can take real wall-clock time to extract; 10 is picked as roughly where an
+// ordinary incremental catch-up (a handful of just-touched sessions) gives
+// way to something worth narrating (a fresh Setup, a SCHEMA_VERSION rebuild,
+// a multi-day gap since the project was last opened). Not itself measured —
+// unlike ISSUE_BATCH_FETCH_THRESHOLD below, there is no cost crossover to
+// locate, only a noise/silence trade-off.
+const SESSION_PROGRESS_REPORT_THRESHOLD: usize = 10;
+
 /// Should a session file that `needs_index` already called changed be
 /// re-indexed NOW? Pure so the policy is testable without a database.
 fn session_reindex_due(prev_size: i64, new_size: i64, age_secs: i64) -> bool {
@@ -24662,6 +24763,15 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
     let mut gate_elapsed = std::time::Duration::ZERO;
     let mut extract_elapsed = std::time::Duration::ZERO;
     let mut write_elapsed = std::time::Duration::ZERO;
+    // Gate first (index-rebuild-reports-its-progress): a cold rebuild or a
+    // fresh Setup can have hundreds of session files needing a full extract,
+    // and that phase used to report nothing anywhere (the commit and issue
+    // passes already gate-first for exactly this reason — see
+    // search_index_set_progress's two other call sites). Splitting the gate
+    // from the extract/write work below means `report_progress` reflects
+    // actual pending work, not the size of the whole corpus, so an ordinary
+    // warm pass over hundreds of untouched sessions stays quiet.
+    let mut pending: Vec<(PathBuf, i64, i64, String, bool)> = Vec::new();
     for (path, mtime_u, size_u, id) in files_vec {
         let path_str = path.to_string_lossy().to_string();
         let (mtime, size) = (mtime_u as i64, size_u as i64);
@@ -24714,9 +24824,16 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
             stats.skipped += 1;
             continue;
         }
+        pending.push((path, mtime, size, id, forced));
+    }
+    let total_pending = pending.len();
+    let report_progress = total_pending > SESSION_PROGRESS_REPORT_THRESHOLD;
+    let mut done = 0usize;
+    for (path, mtime, size, id, forced) in pending {
         if forced {
             stats.forced += 1;
         }
+        let path_str = path.to_string_lossy().to_string();
         let extract_started = std::time::Instant::now();
         let title = claude_session_title(&path).ok().flatten().unwrap_or(id);
         let extracted = claude_session_search_data(&path);
@@ -24771,6 +24888,23 @@ fn run_search_index_pass_filtered<R: tauri::Runtime>(
                 ),
             );
         }
+        done += 1;
+        if report_progress {
+            search_index_set_progress(app, Some(("session", done, total_pending)));
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "search-index",
+                    &format!(
+                        "op=scan-progress bucket=session done={} total={}",
+                        done, total_pending
+                    ),
+                );
+            }
+        }
+    }
+    if report_progress {
+        search_index_set_progress(app, None);
     }
     stats.gate_ms = gate_elapsed.as_millis();
     stats.extract_ms = extract_elapsed.as_millis();
@@ -24816,6 +24950,9 @@ fn run_codex_search_index_pass_filtered<R: tauri::Runtime>(
     let mut gate_elapsed = std::time::Duration::ZERO;
     let mut extract_elapsed = std::time::Duration::ZERO;
     let mut write_elapsed = std::time::Duration::ZERO;
+    // Gate first (index-rebuild-reports-its-progress): see the matching
+    // comment in run_search_index_pass_filtered — same rationale, same shape.
+    let mut pending: Vec<(SessionRecord, i64, i64, bool)> = Vec::new();
     for s in sessions {
         let path_str = s.path.to_string_lossy().to_string();
         let (mtime, size) = (s.mtime as i64, s.size as i64);
@@ -24869,9 +25006,16 @@ fn run_codex_search_index_pass_filtered<R: tauri::Runtime>(
             stats.skipped += 1;
             continue;
         }
+        pending.push((s, mtime, size, forced));
+    }
+    let total_pending = pending.len();
+    let report_progress = total_pending > SESSION_PROGRESS_REPORT_THRESHOLD;
+    let mut done = 0usize;
+    for (s, mtime, size, forced) in pending {
         if forced {
             stats.forced += 1;
         }
+        let path_str = s.path.to_string_lossy().to_string();
         let extract_started = std::time::Instant::now();
         let extracted = codex_session_search_data(&s.path);
         stats.indexed_bytes = stats
@@ -24919,6 +25063,23 @@ fn run_codex_search_index_pass_filtered<R: tauri::Runtime>(
                 ),
             );
         }
+        done += 1;
+        if report_progress {
+            search_index_set_progress(app, Some(("session", done, total_pending)));
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "search-index",
+                    &format!(
+                        "op=scan-progress bucket=session done={} total={}",
+                        done, total_pending
+                    ),
+                );
+            }
+        }
+    }
+    if report_progress {
+        search_index_set_progress(app, None);
     }
     stats.gate_ms = gate_elapsed.as_millis();
     stats.extract_ms = extract_elapsed.as_millis();
@@ -25154,13 +25315,80 @@ fn run_commit_index_pass<R: tauri::Runtime>(
     })
 }
 
+/// Crossover between the cold batched-fetch path and the per-issue
+/// incremental path in `run_issue_index_pass`
+/// (index-rebuild-reports-its-progress). Measured 2026-09-21 on this
+/// project: a single batched `gh issue list` call fetched all 387 issues'
+/// full bodies and comments (3.0 MB) in 15.2s, versus 19m33s for 387
+/// sequential `gh issue view` calls at ~3s each — batching wins decisively
+/// at that end. At the other end, a single changed issue is faster fetched
+/// directly: one `issue_view` call (~3s) beats a full-corpus list call's
+/// fixed overhead (a network round trip plus parsing every issue's comments
+/// to find the one that changed). The exact crossover point was not
+/// measured — "a few dozen" is the honest bound implied by the two
+/// endpoints above — so this is a judgement call, named so the next
+/// measurement can refine it instead of a future reader re-guessing blind.
+const ISSUE_BATCH_FETCH_THRESHOLD: usize = 20;
+
+/// Pure predicate around `ISSUE_BATCH_FETCH_THRESHOLD` so the crossover is
+/// testable without a database or a forge adapter.
+fn issue_pass_should_batch_fetch(total_pending: usize) -> bool {
+    total_pending > ISSUE_BATCH_FETCH_THRESHOLD
+}
+
+/// The `--limit` to request for a batched issue-detail fetch: at least the
+/// probe's own known issue count, so the batched call never truncates below
+/// what the cheap probe already found (the "silently missing from the
+/// index" failure this item's paging requirement exists to rule out), but
+/// never above the project's configured issue-list bound (the same clamp
+/// `issues_list`/`issues_change_probe` already apply). Pure so the paging
+/// arithmetic is testable without a database or a `gh` process; the
+/// `GitHubForge::issues_list_full` impl applies this same clamp to the
+/// `limit` it's actually called with.
+fn issue_batch_fetch_limit(probe_len: usize, configured_max: usize) -> usize {
+    probe_len.clamp(1, configured_max.max(1))
+}
+
+#[cfg(test)]
+mod issue_batch_fetch_tests {
+    use super::*;
+
+    #[test]
+    fn crossover_is_exclusive_at_the_threshold() {
+        assert!(!issue_pass_should_batch_fetch(0));
+        assert!(!issue_pass_should_batch_fetch(ISSUE_BATCH_FETCH_THRESHOLD));
+        assert!(issue_pass_should_batch_fetch(
+            ISSUE_BATCH_FETCH_THRESHOLD + 1
+        ));
+        // The measured real-world case (387 pending issues) is decisively
+        // over the line.
+        assert!(issue_pass_should_batch_fetch(387));
+    }
+
+    #[test]
+    fn batch_limit_never_truncates_below_the_probes_own_count() {
+        // 387 issues probed, default configured max (500, per
+        // GH_ISSUE_LIST_LIMIT) -- the probe's count passes through untouched.
+        assert_eq!(issue_batch_fetch_limit(387, 500), 387);
+        // A corpus larger than the configured bound is still capped there --
+        // an existing, pre-established limit this item does not change, not
+        // a new truncation.
+        assert_eq!(issue_batch_fetch_limit(2500, 2000), 2000);
+        // A pathological zero-issue probe still requests at least one, since
+        // `gh issue list --limit 0` is not a meaningful call.
+        assert_eq!(issue_batch_fetch_limit(0, 500), 1);
+    }
+}
+
 /// One pass over the forge's issues — index each issue keyed by
 /// `issue:<number>`, change-token = `updatedAt` epoch, so edited issues
-/// reindex. Two-step incremental poll: a cheap `number,updatedAt` probe, then a
-/// full `issue_view` (body + comments) only for issues whose `updatedAt`
-/// advanced (or are new). GitHub only; GitLab's probe returns `None` and is
-/// skipped until it grows a list-all path. Returns (seen, indexed, skipped,
-/// rows).
+/// reindex. Two-step poll: a cheap `number,updatedAt` probe, then full detail
+/// only for issues whose `updatedAt` advanced (or are new) — via one batched
+/// `issues_list_full` call when many issues are pending
+/// (`ISSUE_BATCH_FETCH_THRESHOLD`), else the per-issue `issue_view` path
+/// (index-rebuild-reports-its-progress). GitHub only; GitLab's probe returns
+/// `None` and is skipped until it grows a list-all path. Returns (seen,
+/// indexed, skipped, rows).
 fn run_issue_index_pass<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<IndexPassOutcome, String> {
     let db = search_index_db_path(app).ok_or("no index db path")?;
     let conn = search_index::open(&db.to_string_lossy()).map_err(|e| e.to_string())?;
@@ -25182,10 +25410,11 @@ fn run_issue_index_pass<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<IndexPa
     // exists; the post-rebuild reconciliation below verifies the cached list
     // reached it.
     let probe_newest = probe.iter().map(|(n, _)| *n).max().unwrap_or(0);
-    // Gate first (local SQLite, cheap) so the fetch loop knows its total and
+    let probe_len = probe.len();
+    // Gate first (local SQLite, cheap) so the fetch step knows its total and
     // can report affirmative progress during a cold backfill (issue #250) —
-    // each issue_view is a network call, and a schema reset makes dozens of
-    // them look like a stall otherwise.
+    // each per-issue fetch is a network call, and a schema reset makes
+    // dozens of them look like a stall otherwise.
     let mut pending: Vec<(u64, i64)> = Vec::new();
     for (number, token) in probe {
         seen += 1;
@@ -25198,14 +25427,78 @@ fn run_issue_index_pass<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<IndexPa
     }
     let total_pending = pending.len();
     let report_progress = total_pending > 5;
-    for (fetched, (number, token)) in pending.into_iter().enumerate() {
-        let key = format!("issue:{}", number);
-        if report_progress {
-            search_index_set_progress(app, Some(("issue", fetched, total_pending)));
+
+    // index-rebuild-reports-its-progress, part 2: past
+    // ISSUE_BATCH_FETCH_THRESHOLD pending issues, fetch everything in one
+    // batched call instead of one `issue_view` round trip per issue (see the
+    // constant's comment for the measurement). A handful of changed issues —
+    // the ordinary incremental-poll shape — stays on the per-issue path
+    // below, where a full-corpus list call would be the more expensive
+    // option. `Ok(None)` (forge has no batched path, e.g. GitLab — though
+    // GitLab never reaches here, see the early return above) and `Err(_)`
+    // both fall through to the per-issue path for every pending issue, same
+    // as if the threshold had not been reached; a failed batch is never
+    // silently treated as "no issues".
+    let mut batched_detail: Option<HashMap<u64, serde_json::Value>> = None;
+    if issue_pass_should_batch_fetch(total_pending) {
+        match adapter.issues_list_full(&root, probe_len) {
+            Ok(Some(list)) => {
+                let fetched_count = list.len();
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        app,
+                        "search-index",
+                        &format!(
+                            "op=issue-batch-fetch fetched={} pending={} probe_len={}",
+                            fetched_count, total_pending, probe_len
+                        ),
+                    );
+                }
+                batched_detail = Some(
+                    list.into_iter()
+                        .filter_map(|v| {
+                            let n = v.get("number").and_then(|n| n.as_u64())?;
+                            Some((n, v))
+                        })
+                        .collect(),
+                );
+            }
+            Ok(None) => {}
+            Err(e) => {
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        app,
+                        "search-index",
+                        &format!("op=issue-batch-fetch-error detail={}", e.replace('\n', " ")),
+                    );
+                }
+            }
         }
-        // Changed or new since last pass — fetch full detail for this one issue
-        // (the only network cost beyond the cheap probe).
-        let issue = adapter.issue_view(&root, number)?;
+    }
+
+    // Progress reporting now covers the INDEXING loop, not the fetch: a
+    // batched fetch above already resolved every pending issue's detail in
+    // one shot, so there is no per-item network tick left to report against.
+    let mut done = 0usize;
+    for (number, token) in pending {
+        let key = format!("issue:{}", number);
+        // Full detail for this issue: from the batch when the cold path
+        // fetched one AND it covered this number, else the per-issue network
+        // call — the only path at all when the forge has no batched fetch,
+        // the batch failed, or the threshold wasn't reached.
+        // Whether this issue's detail came from the cold path's one batched
+        // fetch decides, below, whether we also pay for enrichment now.
+        let from_batch;
+        let issue = match batched_detail.as_mut().and_then(|m| m.remove(&number)) {
+            Some(v) => {
+                from_batch = true;
+                v
+            }
+            None => {
+                from_batch = false;
+                adapter.issue_view(&root, number)?
+            }
+        };
         let title = issue.get("title").and_then(|v| v.as_str()).unwrap_or("");
         let body = issue.get("body").and_then(|v| v.as_str()).unwrap_or("");
         let url = issue
@@ -25229,9 +25522,38 @@ fn run_issue_index_pass<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<IndexPa
         }
         // Cache the same enriched payload the /__issue route serves, so the
         // route can read straight from the index with byte-identical output
-        // (the enrichment cost moves here, off the request path).
-        let extra = String::from_utf8(build_enriched_issue(app, number).unwrap_or_default())
-            .unwrap_or_default();
+        // (the enrichment cost moves here, off the request path). Reuses the
+        // detail already fetched above instead of issue_view'ing this number
+        // a second time (build_enriched_issue_from split out of
+        // build_enriched_issue for exactly this).
+        //
+        // ...but NOT on the cold path. Enrichment is two more network calls per
+        // issue -- `cross_references` (the timeline API) and, for a closed
+        // issue, `gh_issue_closed_event_actor` (the events API) -- and neither
+        // contributes a byte to `content`. They populate `crossReferences` and
+        // `closedBy`, which only the Issues tab's detail view reads. Measured
+        // on the 2026-09-22 rebuild: 387 issues, ~2 calls each at ~0.5s, 6m45s
+        // of a 15m30s rebuild spent on display metadata while `/__search` sat
+        // refusing -- because search readiness gates on the whole cycle.
+        //
+        // Storing an empty `extra` is safe rather than lossy: `gh_issue_view`
+        // has always treated an empty blob as a cache miss and fallen through
+        // to a live `build_enriched_issue`, so the first view of each issue
+        // pays its own ~1s enrichment and shows identical content. The cost
+        // moves from "every issue, before anyone can search" to "one issue,
+        // when someone actually opens it".
+        //
+        // The incremental path keeps enriching: a handful of changed issues per
+        // poll is cheap, nothing is waiting on it, and it keeps the cache warm
+        // for the issues most likely to be opened next.
+        let extra = if from_batch {
+            String::new()
+        } else {
+            String::from_utf8(
+                build_enriched_issue_from(app, number, issue.clone()).unwrap_or_default(),
+            )
+            .unwrap_or_default()
+        };
         let row = search_index::IndexRow {
             kind: "issue".to_string(),
             source: format!("#{} {}", number, title),
@@ -25245,16 +25567,19 @@ fn run_issue_index_pass<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<IndexPa
         };
         redacted += search_index::index_doc(&conn, &row, token, 0).map_err(|e| e.to_string())?;
         indexed += 1;
-        if report_progress && bram_trace_enabled() {
-            append_bram_trace_line(
-                app,
-                "search-index",
-                &format!(
-                    "op=scan-progress bucket=issues done={} total={}",
-                    fetched + 1,
-                    total_pending
-                ),
-            );
+        done += 1;
+        if report_progress {
+            search_index_set_progress(app, Some(("issue", done, total_pending)));
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "search-index",
+                    &format!(
+                        "op=scan-progress bucket=issues done={} total={}",
+                        done, total_pending
+                    ),
+                );
+            }
         }
     }
     if report_progress {
@@ -25407,6 +25732,11 @@ fn run_history_index_pass<R: tauri::Runtime>(
     let seen = groups.len();
     let (mut indexed, mut skipped) = (0usize, 0usize);
     let mut redacted = 0usize;
+    // Partition before indexing so `total_pending` is the real denominator, the
+    // way the session/commit/issue passes compute theirs. Reporting over `seen`
+    // instead would count already-indexed groups as work -- "1845 of 1845" on a
+    // pass that does nothing.
+    let mut pending: Vec<(String, i64, _)> = Vec::with_capacity(seen);
     for g in groups {
         let key = format!("history:{}", g.id);
         let token = g.latest_ts;
@@ -25414,6 +25744,18 @@ fn run_history_index_pass<R: tauri::Runtime>(
             skipped += 1;
             continue;
         }
+        pending.push((key, token, g));
+    }
+    let total_pending = pending.len();
+    // History is the cheapest bucket -- 1,845 groups in 7.8s on the 2026-09-21
+    // rebuild, ~4ms each -- so an incremental catch-up needs no narration and
+    // the threshold matches the commit pass's. It reports on the cold path all
+    // the same: "too fast to be worth reporting" is precisely what the bucket
+    // ordering comment claimed about SESSIONS, which then grew into six minutes
+    // of silence. Every pass reports; the threshold decides when, not whether.
+    let report_progress = total_pending > 100;
+    let mut done = 0usize;
+    for (key, token, g) in pending {
         let mut content = format!("{}\n{}\n{}\n", g.title, g.subtitle, g.prose_phase_summary);
         for p in &g.phases {
             if !p.summary.is_empty() {
@@ -25450,6 +25792,23 @@ fn run_history_index_pass<R: tauri::Runtime>(
         redacted += search_index::index_doc(&conn, &row, token, HISTORY_GROUP_SCHEMA)
             .map_err(|e| e.to_string())?;
         indexed += 1;
+        done += 1;
+        if report_progress && done % 100 == 0 {
+            search_index_set_progress(app, Some(("worklist-history", done, total_pending)));
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "search-index",
+                    &format!(
+                        "op=scan-progress bucket=worklist-history done={} total={}",
+                        done, total_pending
+                    ),
+                );
+            }
+        }
+    }
+    if report_progress {
+        search_index_set_progress(app, None);
     }
     HISTORY_LAST_MAXMTIME.store(newest, std::sync::atomic::Ordering::Relaxed);
     if indexed > 0 {
@@ -25658,6 +26017,12 @@ where
 {
     let started = std::time::Instant::now();
     let result = pass(app);
+    // Safety net mirroring run_and_trace_index_pass's: a session pass that
+    // errored out mid-backfill must not leave the footer showing stale
+    // progress forever (index-rebuild-reports-its-progress).
+    if search_index_status_snapshot().progress.is_some() {
+        search_index_set_progress(app, None);
+    }
     let indexed = match &result {
         Ok(stats) => stats.indexed,
         Err(_) => 0,

@@ -3465,6 +3465,26 @@ mod worklist_changed_coalesce_tests {
 }
 
 fn emit_replayable_signal<R: tauri::Runtime>(app: &AppHandle<R>, event_name: &str) {
+    // membership-precomputed-off-the-render-path: the signals that invalidate
+    // the membership state key are hooked HERE, in the one place every emitter
+    // passes through, rather than beside each emit.
+    //
+    // The first implementation hooked four call sites by hand and missed
+    // three -- including the file watcher's own debounced emits, which are
+    // the commonest invalidation of all -- so an ordinary file edit
+    // precomputed nothing and the next serve found a stale partition. That is
+    // the enumeration failure this codebase keeps paying for (#384's MCP path
+    // list, #387's Bash write verbs): a hand-maintained list of call sites
+    // standing in for the property "this signal invalidates the partition".
+    // The property belongs at the chokepoint, where a new emitter inherits it
+    // for free instead of having to remember.
+    //
+    // Cheap by construction: membership_precompute spawns and returns, and its
+    // in-flight guard collapses a burst (worklist-changed alone bursts three
+    // per gate click, #375) into a single run.
+    if matches!(event_name, "worklist-changed" | "git-status-changed") {
+        membership_precompute(app);
+    }
     trace_emit_signal(app, event_name);
     remember_tauri_event(event_name, serde_json::Value::Null);
     // #150 regression instrumentation: every remember is observable, so a
@@ -44228,28 +44248,80 @@ struct MembershipPathBuckets {
     // archaeology pass on the first real fire (tau, `expected=5 got=102`)
     // and still did not identify which candidate produced the 101.
     contributors: Vec<(String, usize)>,
+    // membership-precomputed-off-the-render-path: this path's `git diff
+    // HEAD` line counts (added, removed) — the conservation check's
+    // universe. Stored on the bucket (rather than kept in a sibling map
+    // local to the probe loop, as before the split) so `membership_report`,
+    // which runs off a bare partition with no access to the probe loop's
+    // local state, has everything the check needs.
+    universe: (usize, usize),
 }
 
-// The engine driver. Observe-only: nothing in the board payload reads its
-// return value yet (migration step 2 spends it — see call site). Traces
-// three ops — `op=membership` (cost, every run; `cached=` distinguishes a
-// memo hit from a real compute), `op=membership-diverges` (per path where
-// the two models' owner sets disagree), and `op=membership-conservation-
-// broken` (the tripwire). Probes run only over live begun items × their
+// Two-slot process-local memo: current plus previous. Single-slot (the
+// pre-split shape) has nothing to fall back to on a miss, so a miss had to
+// either compute or return nothing — exactly the tail this item removes from
+// the serve path. The previous slot is what lets a serve answer with
+// SOMETHING (marked stale) instead of ever reaching the probe loop itself.
+#[derive(Default)]
+struct MembershipMemoSlots {
+    current: Option<(
+        String,
+        std::collections::BTreeMap<String, MembershipPathBuckets>,
+    )>,
+    previous: Option<(
+        String,
+        std::collections::BTreeMap<String, MembershipPathBuckets>,
+    )>,
+}
+
+// Dedupe: one `op=membership-unavailable` line per distinct state key, not
+// once per serve — a sustained miss (nobody has triggered a precompute yet,
+// or every trigger raced and collapsed) would otherwise spam identically on
+// every board poll against the same state.
+static MEMBERSHIP_UNAVAILABLE_LAST_KEY: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
+    std::sync::OnceLock::new();
+fn membership_trace_unavailable_once<R: tauri::Runtime>(app: &AppHandle<R>, state_key: &str) {
+    let cell = MEMBERSHIP_UNAVAILABLE_LAST_KEY.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(mut guard) = cell.lock() {
+        if guard.as_deref() == Some(state_key) {
+            return;
+        }
+        *guard = Some(state_key.to_string());
+    }
+    append_bram_trace_line(
+        app,
+        "claim-interval",
+        "op=membership-unavailable reason=no-partition",
+    );
+}
+
+// The engine driver, split along the seam
+// membership-precomputed-off-the-render-path found: everything here is
+// replay-free, so it is safe to run off the request path. Traces
+// `op=membership` (cost, every run; `cached=` distinguishes a memo hit from
+// a real compute, `fresh=` distinguishes a live result — compute or
+// exact-key hit — from a carried-over previous partition) and, on a serve
+// with neither an exact hit nor a previous slot, `op=membership-unavailable
+// reason=no-partition`. Probes run only over live begun items × their
 // declared paths; the engine never diffs the whole tree and never
 // enumerates untracked content beyond names.
 //
-// membership-affordable-enough-to-be-authoritative: memoized by BOARD
-// STATE (see the state-key comment below) rather than sampled by wall
-// clock — see that item's draft for why sampling is incompatible with a
-// consumer ever reading this. `None` means "nothing to observe" (no
-// project root, or no begun items); `Some` carries the partition, real or
-// a state-keyed memo hit.
-fn membership_engine_observe<R: tauri::Runtime>(
+// `allow_compute` is the structural half of the invariant this item exists
+// to establish: when false (the board serve, via `membership_partition`),
+// EVERY branch below that would otherwise reach the probe loop returns
+// first — there is no path from a serve into the expensive section. When
+// true (only `membership_precompute`, always off the request path, always
+// on a background thread), a miss falls through to compute and refresh the
+// memo. This is enforced by control flow, not by a comment: read the
+// `if !allow_compute` branches below, each of which unconditionally
+// returns.
+fn membership_partition_engine<R: tauri::Runtime>(
     app: &AppHandle<R>,
-    replay_owners_by_path: &std::collections::HashMap<String, std::collections::HashSet<String>>,
-    replay_joint_by_path: &std::collections::HashMap<String, std::collections::HashSet<String>>,
-) -> Option<std::collections::BTreeMap<String, MembershipPathBuckets>> {
+    allow_compute: bool,
+) -> Option<(
+    std::collections::BTreeMap<String, MembershipPathBuckets>,
+    bool,
+)> {
     let started = std::time::Instant::now();
     let spawns = std::cell::Cell::new(0usize);
     // `ambiguous` counts paths whose partition holds a non-zero ambiguous
@@ -44261,27 +44333,27 @@ fn membership_engine_observe<R: tauri::Runtime>(
     //
     // `cached`: false on a real compute (this state was not in the memo, or
     // this call exited before reaching the memo check at all), true on a
-    // memo hit. Volume note: divergence/breach lines below now fire once
-    // per STATE CHANGE instead of once per 60s sample — an improvement (the
-    // tau breach previously emitted eleven identical lines for one
-    // condition), but it means historical per-day counts of those two ops
-    // are not comparable across this change.
+    // memo hit (current OR previous). `fresh`: true when the returned
+    // partition is a live answer for THIS state (compute or exact-key hit),
+    // false when it is the carried-over previous partition.
     let trace_cost = |app: &AppHandle<R>,
                       paths: usize,
                       spawns: usize,
                       ambiguous: usize,
                       started: std::time::Instant,
-                      cached: bool| {
+                      cached: bool,
+                      fresh: bool| {
         append_bram_trace_line(
             app,
             "claim-interval",
             &format!(
-                "op=membership paths={} ms={} spawns={} ambiguous={} cached={}",
+                "op=membership paths={} ms={} spawns={} ambiguous={} cached={} fresh={}",
                 paths,
                 started.elapsed().as_millis(),
                 spawns,
                 ambiguous,
-                cached
+                cached,
+                fresh
             ),
         );
     };
@@ -44318,7 +44390,7 @@ fn membership_engine_observe<R: tauri::Runtime>(
         }
     }
     if begun_files.is_empty() {
-        trace_cost(app, 0, spawns.get(), 0, started, false);
+        trace_cost(app, 0, spawns.get(), 0, started, false, false);
         return None;
     }
     let begun_ids: std::collections::HashSet<String> =
@@ -44332,17 +44404,17 @@ fn membership_engine_observe<R: tauri::Runtime>(
             .ok()?;
         Some(String::from_utf8_lossy(&out.stdout).into_owned())
     };
-    // membership-affordable-enough-to-be-authoritative: memoize the
-    // partition by BOARD STATE rather than by wall-clock sample. The
+    // membership-affordable-enough-to-be-authoritative: the state key. The
     // engine's inputs — HEAD, the worktree diff, the begun-item roster, and
     // the claim-interval record — are a pure function of state that the
     // serve already knows, so a repeat request against unchanged state is
     // free. Hashes the FULL diff text and the FULL claim-intervals
     // contents, not a numstat summary: a numstat-only key would serve a
     // stale partition when an edit swaps a line without changing the
-    // added/removed counts — a correctness hazard once step 2 makes
-    // consumers read this cached value. Built here, before the expensive
-    // per-path probe loop below, so a hit skips every probe.
+    // added/removed counts — a correctness hazard given consumers may read
+    // this cached value from step 2 on. Built here, before the expensive
+    // per-path probe loop below, so a hit (current OR previous) skips every
+    // probe.
     let state_key = {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
@@ -44373,42 +44445,67 @@ fn membership_engine_observe<R: tauri::Runtime>(
         intervals_raw.hash(&mut hasher);
         format!("{:016x}", hasher.finish())
     };
-    // Single-slot process-local memo. Single-slot is deliberate: boards
-    // move forward, so the common case is a run of serves against one
-    // unchanging state. Thrashing between two live states (e.g. two agents
-    // alternating serves against different worktree states) is possible
-    // and merely degrades to a miss each time — same cost as before this
-    // item, never wrong.
-    static MEMBERSHIP_MEMO: std::sync::OnceLock<
-        std::sync::Mutex<
-            Option<(
-                String,
-                std::collections::BTreeMap<String, MembershipPathBuckets>,
-            )>,
-        >,
-    > = std::sync::OnceLock::new();
-    let memo = MEMBERSHIP_MEMO.get_or_init(|| std::sync::Mutex::new(None));
-    if let Ok(guard) = memo.lock() {
-        if let Some((key, cached)) = guard.as_ref() {
-            if *key == state_key {
-                let cached = cached.clone();
-                let ambiguous_paths = cached.values().filter(|m| m.ambiguous != (0, 0)).count();
-                // CACHE HIT: this state was already observed. A divergence
-                // or conservation-breach line would be a verbatim repeat of
-                // what already ran for this exact state, so emit only the
-                // cost line (real, tiny elapsed — no probes ran this call).
-                trace_cost(
-                    app,
-                    cached.len(),
-                    spawns.get(),
-                    ambiguous_paths,
-                    started,
-                    true,
-                );
-                return Some(cached);
+    static MEMBERSHIP_MEMO: std::sync::OnceLock<std::sync::Mutex<MembershipMemoSlots>> =
+        std::sync::OnceLock::new();
+    let memo =
+        MEMBERSHIP_MEMO.get_or_init(|| std::sync::Mutex::new(MembershipMemoSlots::default()));
+    match memo.lock() {
+        Ok(guard) => {
+            if let Some((key, cached)) = guard.current.as_ref() {
+                if *key == state_key {
+                    let cached = cached.clone();
+                    let ambiguous_paths = cached.values().filter(|m| m.ambiguous != (0, 0)).count();
+                    // CACHE HIT: this state was already observed. A divergence
+                    // or conservation-breach line would be a verbatim repeat of
+                    // what already ran for this exact state, so `membership_report`
+                    // decides what to emit based on `fresh` — here true.
+                    trace_cost(
+                        app,
+                        cached.len(),
+                        spawns.get(),
+                        ambiguous_paths,
+                        started,
+                        true,
+                        true,
+                    );
+                    return Some((cached, true));
+                }
+            }
+            if !allow_compute {
+                // SERVE PATH, no exact hit: fall back to the previous slot
+                // instead of computing — THE core invariant this item
+                // exists to establish. This branch always returns, which is
+                // what makes the probe loop below unreachable from a serve.
+                return if let Some((_, prev)) = guard.previous.as_ref() {
+                    let prev = prev.clone();
+                    let ambiguous_paths = prev.values().filter(|m| m.ambiguous != (0, 0)).count();
+                    trace_cost(
+                        app,
+                        prev.len(),
+                        spawns.get(),
+                        ambiguous_paths,
+                        started,
+                        true,
+                        false,
+                    );
+                    Some((prev, false))
+                } else {
+                    membership_trace_unavailable_once(app, &state_key);
+                    None
+                };
+            }
+        }
+        Err(_) => {
+            if !allow_compute {
+                // Mutex poisoned: the serve still must not compute.
+                membership_trace_unavailable_once(app, &state_key);
+                return None;
             }
         }
     }
+    // Only `membership_precompute` (allow_compute=true) can reach this
+    // line — every `!allow_compute` branch above returns unconditionally.
+    debug_assert!(allow_compute);
     // Pathspecs: the union of begun items' declared entries (files or
     // directories — git pathspec semantics match `declared_covers` up to the
     // worktree-prefix strip). Every git call below is scoped to these.
@@ -44474,7 +44571,7 @@ fn membership_engine_observe<R: tauri::Runtime>(
         }
     }
     if universe.is_empty() {
-        trace_cost(app, 0, spawns.get(), 0, started, false);
+        trace_cost(app, 0, spawns.get(), 0, started, false, false);
         return None;
     }
     // Scratch state for the probes. idx_head is HEAD alone (the
@@ -44519,7 +44616,7 @@ fn membership_engine_observe<R: tauri::Runtime>(
         // incapable of blocking a board serve. The cost line still lands so
         // the absence of partition traces is attributable.
         cleanup();
-        trace_cost(app, 0, spawns.get(), 0, started, false);
+        trace_cost(app, 0, spawns.get(), 0, started, false, false);
         return None;
     }
     let pfile_s = pfile.to_string_lossy().to_string();
@@ -44640,44 +44737,169 @@ fn membership_engine_observe<R: tauri::Runtime>(
         }
     }
     cleanup();
-    // Per-path finalization: unowned by subtraction, the conservation
-    // tripwire, and the coarse divergence comparison against the replay
-    // (owner id-set inequality, not line-exact — restricted to the
-    // membership universe, since membership makes no claim about paths
-    // with no current diff).
-    for (path, m) in &per_path {
-        let u = universe.get(path).copied().unwrap_or((0, 0));
-        let attributed = (
-            m.single.0 + m.joint.0 + m.ambiguous.0,
-            m.single.1 + m.joint.1 + m.ambiguous.1,
+    // Per-path finalization: stash this path's universe on the bucket so
+    // `membership_report` — which only ever sees the bare partition, never
+    // this function's local `universe` map — has what the conservation
+    // check needs. The check itself, and the divergence comparison, moved
+    // to `membership_report`; this function stays replay-free.
+    for (path, m) in per_path.iter_mut() {
+        m.universe = universe.get(path).copied().unwrap_or((0, 0));
+    }
+    let ambiguous_paths = per_path.values().filter(|m| m.ambiguous != (0, 0)).count();
+    trace_cost(
+        app,
+        per_path.len(),
+        spawns.get(),
+        ambiguous_paths,
+        started,
+        false,
+        true,
+    );
+    if let Ok(mut guard) = memo.lock() {
+        let old_current = guard.current.take();
+        guard.previous = old_current;
+        guard.current = Some((state_key, per_path.clone()));
+    }
+    Some((per_path, true))
+}
+
+// Read-only entry point for the board serve. Delegates to
+// `membership_partition_engine` with `allow_compute=false`, hard-coded here
+// and nowhere else — the serve calls only this function, never the engine
+// directly, so it structurally cannot reach the probe loop. `fresh` in the
+// returned tuple distinguishes a live result from a carried-over previous
+// partition; pass it straight through to `membership_report`.
+fn membership_partition<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Option<(
+    std::collections::BTreeMap<String, MembershipPathBuckets>,
+    bool,
+)> {
+    membership_partition_engine(app, false)
+}
+
+static MEMBERSHIP_PRECOMPUTE_INFLIGHT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+// A state-changing event can arrive while the probe loop is running. Keep
+// that trigger instead of losing it: otherwise the worker can finish with an
+// older state key and, if no later event occurs, the serve path will fall back
+// to the previous partition forever.
+static MEMBERSHIP_PRECOMPUTE_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+// Runs the expensive probe loop on a background thread, filling the memo
+// for the next serve to read. Called after the events that invalidate the
+// state key (worklist-changed, git-status-changed) and once at startup —
+// never from a board serve. Concurrent triggers collapse to one run: a
+// trigger arriving while one is already in flight is dropped rather than
+// queued. That is safe: either the in-flight run already covers the state
+// that would have driven the dropped trigger, or it doesn't and the NEXT
+// trigger (another event fires) will — and in the meantime the board serve
+// degrades no worse than to the previous partition it already tolerates.
+fn membership_precompute<R: tauri::Runtime>(app: &AppHandle<R>) {
+    if MEMBERSHIP_PRECOMPUTE_INFLIGHT
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        MEMBERSHIP_PRECOMPUTE_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        loop {
+            membership_partition_engine(&app, true);
+            // Keep the inflight latch held while consuming coalesced triggers,
+            // so an event racing the final check either becomes this loop's
+            // next pass or, after the latch is released, starts its own worker.
+            if MEMBERSHIP_PRECOMPUTE_PENDING.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                continue;
+            }
+            MEMBERSHIP_PRECOMPUTE_INFLIGHT.store(false, std::sync::atomic::Ordering::SeqCst);
+            // Close the small release/check race: an event arriving between
+            // the swap above and the latch release leaves a pending bit for us
+            // to hand back through the normal spawning path.
+            if MEMBERSHIP_PRECOMPUTE_PENDING.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                membership_precompute(&app);
+            }
+            break;
+        }
+    });
+}
+
+// The conservation check and the divergence comparison, split out of the
+// old membership_engine_observe along the seam
+// membership-precomputed-off-the-render-path found: both are cheap (the
+// first is arithmetic over a partition already in hand, the second a set
+// comparison), so both stay on the serve, called right after
+// `membership_partition`.
+//
+// `fresh` gates the conservation check — this is the load-bearing rule.
+// The check compares `partition`'s buckets against the diff `partition` was
+// computed from. Running it against a STALE partition would compare last
+// state's buckets to THIS state's universe and report a breach that never
+// happened: the exact false alarm this project has spent weeks counting
+// honestly (docs/developing-bram.md, soak-vs-tripwire). So the check runs
+// fresh-only; a stale serve skips it and traces the skip — "did not run"
+// must never look like "ran and found nothing".
+//
+// The divergence comparison is a set-equality check over data already in
+// the buckets, not an arithmetic identity against the partition's own
+// provenance, so it MAY still run when stale — but a stale disagreement
+// carries `stale=true` so nobody adjudicates it as a real one. Fresh lines
+// keep the exact pre-split format, with no added field.
+fn membership_report<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    partition: &std::collections::BTreeMap<String, MembershipPathBuckets>,
+    fresh: bool,
+    replay_owners_by_path: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+    replay_joint_by_path: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+) {
+    if !fresh {
+        append_bram_trace_line(
+            app,
+            "claim-interval",
+            "op=membership-conservation-skipped reason=stale",
         );
-        let (unowned, _clamped) = membership_unowned(u, attributed);
-        if let Some((expected, got)) =
-            membership_conservation_breach(u, m.single, m.joint, m.ambiguous, unowned)
-        {
-            append_bram_trace_line(
-                app,
-                "claim-interval",
-                &format!(
-                    "op=membership-conservation-broken path={} expected={} got={} \
-                     universe={},{} single={},{} joint={},{} ambiguous={},{} unowned={},{} \
-                     contributors={}",
-                    path,
-                    expected,
-                    got,
-                    u.0,
-                    u.1,
-                    m.single.0,
-                    m.single.1,
-                    m.joint.0,
-                    m.joint.1,
-                    m.ambiguous.0,
-                    m.ambiguous.1,
-                    unowned.0,
-                    unowned.1,
-                    membership_contributors_note(&m.contributors)
-                ),
+    }
+    for (path, m) in partition {
+        if fresh {
+            let attributed = (
+                m.single.0 + m.joint.0 + m.ambiguous.0,
+                m.single.1 + m.joint.1 + m.ambiguous.1,
             );
+            let (unowned, _clamped) = membership_unowned(m.universe, attributed);
+            if let Some((expected, got)) =
+                membership_conservation_breach(m.universe, m.single, m.joint, m.ambiguous, unowned)
+            {
+                append_bram_trace_line(
+                    app,
+                    "claim-interval",
+                    &format!(
+                        "op=membership-conservation-broken path={} expected={} got={} \
+                         universe={},{} single={},{} joint={},{} ambiguous={},{} unowned={},{} \
+                         contributors={}",
+                        path,
+                        expected,
+                        got,
+                        m.universe.0,
+                        m.universe.1,
+                        m.single.0,
+                        m.single.1,
+                        m.joint.0,
+                        m.joint.1,
+                        m.ambiguous.0,
+                        m.ambiguous.1,
+                        unowned.0,
+                        unowned.1,
+                        membership_contributors_note(&m.contributors)
+                    ),
+                );
+            }
         }
         let mut replay: std::collections::BTreeSet<String> = replay_owners_by_path
             .get(path)
@@ -44694,31 +44916,24 @@ fn membership_engine_observe<R: tauri::Runtime>(
                     s.iter().cloned().collect::<Vec<_>>().join(",")
                 }
             };
-            append_bram_trace_line(
-                app,
-                "claim-interval",
-                &format!(
+            let line = if fresh {
+                format!(
                     "op=membership-diverges path={} replay={} membership={}",
                     path,
                     join(&replay),
                     join(&m.owners)
-                ),
-            );
+                )
+            } else {
+                format!(
+                    "op=membership-diverges path={} replay={} membership={} stale=true",
+                    path,
+                    join(&replay),
+                    join(&m.owners)
+                )
+            };
+            append_bram_trace_line(app, "claim-interval", &line);
         }
     }
-    let ambiguous_paths = per_path.values().filter(|m| m.ambiguous != (0, 0)).count();
-    trace_cost(
-        app,
-        per_path.len(),
-        spawns.get(),
-        ambiguous_paths,
-        started,
-        false,
-    );
-    if let Ok(mut guard) = memo.lock() {
-        *guard = Some((state_key, per_path.clone()));
-    }
-    Some(per_path)
 }
 
 #[cfg(test)]
@@ -59352,12 +59567,37 @@ fn route_request<R: tauri::Runtime>(
             // authority for every consumer until the observation earns the
             // step-2+ flips.
             //
-            // membership-affordable-enough-to-be-authoritative: the engine
-            // now returns its partition (memoized on board state) instead of
-            // discarding it, but this call site still binds and discards —
-            // the partition stays deliberately unread until migration step 2.
-            let _membership =
-                membership_engine_observe(app, &owners_by_path, &joint_owners_by_path);
+            // membership-precomputed-off-the-render-path: the serve now only
+            // READS the memo (`membership_partition`, `allow_compute=false`)
+            // — the probe loop that fills it runs off the request path, on
+            // `membership_precompute`'s invalidating-event triggers and at
+            // startup. `membership_report` runs the conservation check and
+            // divergence comparison against whatever came back; `fresh`
+            // (true = compute or exact-key hit, false = carried-over
+            // previous partition) gates the conservation check specifically
+            // — see membership_report's header for why a stale check would
+            // manufacture a false breach. `membershipStale` below is the
+            // payload's observation of that same fact — carried for
+            // migration step 2 to read; nothing reads it yet.
+            let membership_stale = match membership_partition(app) {
+                Some((partition, fresh)) => {
+                    membership_report(
+                        app,
+                        &partition,
+                        fresh,
+                        &owners_by_path,
+                        &joint_owners_by_path,
+                    );
+                    !fresh
+                }
+                None => false,
+            };
+            if let Some(obj) = doc.as_object_mut() {
+                obj.insert(
+                    "membershipStale".to_string(),
+                    serde_json::Value::Bool(membership_stale),
+                );
+            }
         }
         // #286: the ids the currently live inflight claim covers, so an
         // agent reading the board mid-turn can see which ids it still
@@ -65938,6 +66178,11 @@ pub fn run() {
             start_codex_session_poll_fallback(app_handle.clone());
             start_claude_turn_stats_poll(app_handle.clone());
             start_git_head_watch(app_handle.clone());
+            // membership-precomputed-off-the-render-path: one attempt at
+            // startup so the first board serve of a session can hit a warm
+            // memo instead of finding nothing and falling through to
+            // op=membership-unavailable.
+            membership_precompute(&app_handle);
             // issue-253: the refs watcher only helps if Bram was running when
             // the push happened, and the reported case is a release script with
             // the app closed. One attempt at startup covers it; the flush's own

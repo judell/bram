@@ -515,15 +515,62 @@ observe → display → gate → retire sequence.
    instead of discarding it, and is memoized on board state (a single
    process-local slot keyed on HEAD, the full worktree diff, the begun-item
    roster, and the claim-interval record) rather than sampled by wall
-   clock. `membership_engine_observe` still runs on every board serve
-   beside the replay, still feeding only the `op=membership` /
-   `op=membership-diverges` / `op=membership-conservation-broken` traces
-   (registered in `trace-vocabulary.md`, now with a `cached=` field); the
-   call site binds and discards the returned partition
-   (`let _membership = membership_engine_observe(...)`) — the board
-   payload, pane, gate, and staging all still read the replay, unchanged.
-   Nothing flips yet; this item makes the partition available and
-   affordable for step 2 to spend.*
+   clock.
+
+   As `membership-precomputed-off-the-render-path`, the engine was then
+   split along its one replay-free seam: `membership_partition_engine`
+   (the probe loop plus the memo — replay-free, so it can run anywhere)
+   versus `membership_report` (the conservation check plus the divergence
+   comparison, which alone touch the replay args, and both stay cheap). The
+   probe loop no longer runs on the request path AT ALL — it is reachable
+   only from `membership_precompute`, which fires on a background thread
+   after the events that invalidate the state key (`worklist-changed`,
+   `git-status-changed`) and once at startup, guarded so concurrent
+   triggers collapse to one run. The board serve calls only
+   `membership_partition` (the read-only entry point,
+   `allow_compute=false` hard-coded at its single call site), which reads
+   the memo — now TWO-SLOT, current plus previous — and never falls
+   through to a compute: an exact-state hit returns `fresh=true`, a miss
+   with a previous slot present returns that partition `fresh=false`, and
+   a miss with nothing to fall back to returns `None` (traced
+   `op=membership-unavailable reason=no-partition`, deduped per state
+   key). `membership_report` runs unconditionally on whatever came back,
+   but the conservation check runs ONLY when `fresh=true` — deliberately:
+   comparing a stale partition's buckets against the CURRENT worktree's
+   universe would compare last state's answer to this state's question and
+   manufacture a breach that never happened, so a stale serve skips the
+   check and traces `op=membership-conservation-skipped reason=stale`
+   instead of running it silently-wrong. The divergence comparison is a
+   set-equality check over data already in hand, not an arithmetic identity
+   against the partition's own provenance, so it still runs when stale —
+   but the line then carries a trailing `stale=true` so a stale
+   disagreement is never adjudicated as a real one; fresh lines keep the
+   exact pre-split format.
+
+   The filer's call, recorded here because the next implementer of step 2
+   inherits it: the conservation alarm stays tied to the RENDER, not to
+   state change — *"I only care when looking at the board."* It would have
+   been just as defensible to run the check the instant the precompute
+   refreshes the memo (a breach is a property of state, and state just
+   changed), but the alarm exists for a person reading rows, so it fires
+   only when there are rows being read — never off a background thread
+   nobody is watching.
+
+   The board payload gained `membershipStale: bool` — true when a serve
+   used the stale fallback — inserted deliberately AHEAD of any reader, so
+   its behavior in real traffic (how often is a serve actually stale?) is
+   observable before step 2 trusts it for anything. `op=membership` gained
+   a `fresh=` field beside `cached=` (registered, with the two new ops and
+   the `stale=true` suffix, in `trace-vocabulary.md`). Nothing reads
+   `membershipStale`, no row's appearance can change, and the replay above
+   still stays the sole authority for the board payload, pane, gate, and
+   staging — this item only makes a non-blocking partition available;
+   step 2 spends it. Step 2 must also honour the rule this item exists to
+   make possible: stale is acceptable for display (the strip may be a beat
+   behind and self-correct on the next serve), never for a gate (the
+   commit gate is an explicit user action with an expectation of work, so
+   it can afford to compute synchronously and refuse rather than act on a
+   partition that might not reflect the paths it is about to stage).*
 2. **Board payload flip**: `attribution`, `attributionTotals`,
    `totals_by_path`, `willCommit` (`lib.rs:54242`–`54381`) and `jointWith`
    (`lib.rs:54383`) source from membership; the reserved `unowned_by_path`

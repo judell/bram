@@ -166,6 +166,21 @@ struct PendingIssueClose {
     #[serde(default)]
     patch_id: Option<String>,
     created_at_ms: i64,
+    // issue-380: the branch this commit was made on, captured at ENQUEUE.
+    // At flush time the only branch available is whatever is checked out
+    // now, which need not be the one the commit is on -- the commit gate
+    // knows the right answer at the moment it matters. Optional for legacy
+    // records, like patch_id above.
+    #[serde(default)]
+    branch: Option<String>,
+    // issue-380: the flush's own last decision about this record, recorded
+    // where it is MADE so the route can serve it without recomputing the
+    // predicate (commit_on_origin_default + gh_commit_visible + the #282
+    // merged-PR probe) in a second place. One of "awaiting-push",
+    // "deferred-not-on-default", "deferred-unknown-default"; None on a
+    // legacy record or an outcome the flush did not classify.
+    #[serde(default)]
+    last_reason: Option<String>,
 }
 
 // Single opt-out phrase (opt-out-single-phrase-and-audit): narrowed from a
@@ -55685,14 +55700,20 @@ fn enqueue_issue_closes_from_auth<R: tauri::Runtime>(
     let mut enqueued: Vec<u64> = Vec::new();
     for (issue, comment) in close_selections_for_ids(auth, committed_ids) {
         {
+            // Hoisted above the record (issue-380): it used to be computed
+            // only for the audit line below, so the queue record -- the thing
+            // the pane actually reads -- never carried the one fact a deferred
+            // close needs to name.
+            let branch = git_current_branch(app).unwrap_or_default();
             let record = PendingIssueClose {
                 issue,
                 commit_sha: commit_sha.to_string(),
                 comment,
                 patch_id: patch_id.clone(),
                 created_at_ms: unix_now_ms(),
+                branch: (!branch.is_empty()).then(|| branch.clone()),
+                last_reason: None,
             };
-            let branch = git_current_branch(app).unwrap_or_default();
             if let Err(e) = enqueue_pending_issue_close_path(&path, record) {
                 eprintln!("[issue-close-queue] enqueue #{} failed: {}", issue, e);
             } else {
@@ -55953,6 +55974,11 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>, trigger: &s
         // #237 §3 named — a branch push would close the issue with the fix
         // on no default branch, and an issue closed as COMPLETED is
         // indistinguishable from work that shipped.
+        // issue-380: the decision this pass reaches, recorded on the record
+        // so /__issue-close-queue can serve it. Set at each of the three
+        // traced deferral points below; left None for an outcome the flush
+        // does not classify, which the pane renders as its generic sentence.
+        let mut last_reason: Option<&'static str> = None;
         let default_check = commit_on_origin_default(app, &record.commit_sha);
         let unknown_default = default_check.is_none();
         let mut visible = default_check.unwrap_or(false);
@@ -55975,6 +56001,7 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>, trigger: &s
             None
         };
         if unknown_default {
+            last_reason = Some("deferred-unknown-default");
             eprintln!(
                 "[issue-close-queue] op=deferred-unknown-default issue={} sha={}",
                 record.issue, record.commit_sha
@@ -56000,6 +56027,7 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>, trigger: &s
             );
         }
         if deferred_unmerged && closed_via_pr.is_none() {
+            last_reason = Some("deferred-not-on-default");
             eprintln!(
                 "[issue-close-queue] op=deferred-not-on-default issue={} sha={}",
                 record.issue, record.commit_sha
@@ -56047,6 +56075,18 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>, trigger: &s
                     };
                 }
                 _ => {
+                    // FIRST writer wins, not last (found by synth, 2026-09-22).
+                    // An unresolvable default branch ALSO falls through to
+                    // this arm -- the commit is not on origin either -- so a
+                    // plain assignment here overwrote `deferred-unknown-default`
+                    // and reported "waiting on a push" for a repo where pushing
+                    // cannot help. The three sites are otherwise mutually
+                    // exclusive (unknown_default is default_check.is_none(),
+                    // deferred_unmerged requires Some(false)), so this is the
+                    // only collision and precedence belongs to the fault.
+                    if last_reason.is_none() {
+                        last_reason = Some("awaiting-push");
+                    }
                     eprintln!(
                         "[issue-close-queue] op=awaiting-push issue={} sha={} (not on origin, no patch-id match; will retry next push)",
                         record.issue, record.commit_sha
@@ -56161,6 +56201,7 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>, trigger: &s
                 }
             }
         } else {
+            record.last_reason = last_reason.map(|r| r.to_string());
             remaining.push(record);
         }
     }
@@ -56269,6 +56310,8 @@ mod close_on_push_tests {
             commit_sha: "abc123".to_string(),
             comment: c.map(String::from),
             created_at_ms: 0,
+            branch: None,
+            last_reason: None,
         };
         enqueue_pending_issue_close_path(&path, rec(None)).unwrap();
         enqueue_pending_issue_close_path(&path, rec(Some("final"))).unwrap();
@@ -56281,6 +56324,8 @@ mod close_on_push_tests {
                 commit_sha: "def456".to_string(),
                 comment: None,
                 created_at_ms: 0,
+                branch: None,
+                last_reason: None,
             },
         )
         .unwrap();
@@ -56298,6 +56343,8 @@ mod close_on_push_tests {
             commit_sha: sha.to_string(),
             comment: None,
             created_at_ms: 0,
+            branch: None,
+            last_reason: None,
         }
     }
 
@@ -58526,6 +58573,13 @@ fn route_request<R: tauri::Runtime>(
     // previously visible only in the trace, leaving "why hasn't it
     // closed?" a guessing game (live demo, 2026-08-20).
     if path == "__issue-close-queue" {
+        // issue-380: the default branch, resolved ONCE per request rather
+        // than per record -- every record in the queue shares it, and the
+        // ladder behind it can reach the forge.
+        let default_branch = project_root(Some(app))
+            .and_then(|root| origin_default_ref(app, &root))
+            .and_then(|r| r.rsplit('/').next().map(|s| s.to_string()))
+            .filter(|s| !s.is_empty());
         let pending: Vec<serde_json::Value> = issue_close_queue_file(app)
             .map(|p| read_pending_issue_closes(&p))
             .unwrap_or_default()
@@ -58535,10 +58589,17 @@ fn route_request<R: tauri::Runtime>(
                 // bounding staleness to roughly one poll interval, an old
                 // timestamp is self-announcing as stuck — the filer's
                 // visibility-over-a-button preference.
+                // issue-380: reason/branch/defaultBranch travel with the
+                // record so the pane stops INFERRING which deferral state
+                // this is from an adjacent DataSource. `reason` is null on a
+                // legacy record or one the flush has not evaluated yet.
                 serde_json::json!({
                     "issue": r.issue,
                     "commitSha": r.commit_sha,
                     "createdAtMs": r.created_at_ms,
+                    "reason": r.last_reason,
+                    "branch": r.branch,
+                    "defaultBranch": default_branch,
                 })
             })
             .collect();

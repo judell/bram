@@ -12329,14 +12329,83 @@ window.__bramCloseQueueBanner = function (queue, commits) {
     });
   });
   if (!phase2.length) return "";
-  var names = phase2.map(function (p) {
-    var t = p.createdAtMs ? new Date(p.createdAtMs).toLocaleTimeString() : "";
-    return "#" + p.issue + (t ? " (pending since " + t + ")" : "");
+  // Group by the decision, not by the record. Several issues closed by ONE
+  // commit share its fate, so rendering a full sentence each would turn the
+  // ordinary "commit closes #1, #2, #3" case into three near-identical
+  // sentences -- a readability regression against the wording this replaces,
+  // which listed the issues once. Distinct reasons still get their own
+  // sentence, which is the case that actually needs the room. Keep the
+  // commit/branch context in the key too: two deferred records can share a
+  // reason while pointing at different branches or commits, and combining
+  // those would make the first row's branch/sha appear to explain all of them.
+  var groups = [];
+  phase2.forEach(function (p) {
+    p = p || {};
+    var k = [p.reason || "", p.branch || "", p.defaultBranch || "", p.commitSha || ""].join("\u0000");
+    var g = groups.filter(function (x) { return x.key === k; })[0];
+    if (!g) { groups.push({ key: k, rows: [p] }); } else { g.rows.push(p); }
   });
-  return (
-    "close queued for " + names.join(", ") +
-    " — completes when the commit reaches the default branch"
-  );
+  return groups
+    .map(function (g) { return window.__bramCloseQueueReason(g.rows); })
+    .join("; ");
+};
+
+// issue-380: one pending close, rendered as the reason the HOST decided
+// rather than a generic sentence the client inferred.
+//
+// The banner used to say "completes when the commit reaches the default
+// branch" for every deferral, whatever was actually holding it. That
+// sentence is true of `deferred-not-on-default` and useless for the other
+// two: `awaiting-push` completes on a push, and `deferred-unknown-default`
+// is a fault that completes on nothing until someone fixes the remote.
+// #282 had already corrected the wording once and a974e6e added
+// pending-since; both corrected what the sentence SAID without changing
+// where it got its facts, which is why the same shape kept recurring.
+//
+// An unrecognized reason renders ITSELF rather than falling through to a
+// generic sentence. A host state with no client case is exactly the defect
+// this issue is about, and a default arm would rebuild it silently.
+window.__bramCloseQueueReason = function (rows) {
+  var list = Array.isArray(rows) ? rows : [rows];
+  var p = list[0] || {};
+  var t = p.createdAtMs ? new Date(p.createdAtMs).toLocaleTimeString() : "";
+  var issues = list.map(function (r) { return "#" + (r && r.issue); }).join(", ");
+  var head = "close queued for " + issues + (t ? " (pending since " + t + ")" : "");
+  var sha = (p.commitSha ? String(p.commitSha) : "").slice(0, 7);
+  var br = p.branch;
+  var def = p.defaultBranch;
+  switch (p.reason) {
+    case "awaiting-push":
+      return head + " — waiting on a push";
+    case "deferred-not-on-default":
+      // The load-bearing case (#380): naming the branch is what ends the
+      // "I pushed and it did not close" investigation, because pushing
+      // again is precisely what will not help.
+      // A legacy record carries no branch; the two clauses that name one
+      // must then both drop out rather than composing into "is not on the
+      // default branch, not main".
+      if (!br) {
+        return (
+          head + " — " + (sha || "the commit") + " has not reached " +
+          (def || "the default branch") + " yet; it closes when it merges"
+        );
+      }
+      return (
+        head + " — " + (sha || "the commit") + " is on " + br +
+        (def ? ", not " + def : "") +
+        "; it closes when that branch merges"
+      );
+    case "deferred-unknown-default":
+      return head + " — cannot determine the default branch for this repo";
+    case null:
+    case undefined:
+    case "":
+      // Legacy record, or one the flush has not evaluated yet. The old
+      // generic sentence is the honest answer here and only here.
+      return head + " — completes when the commit reaches the default branch";
+    default:
+      return head + " — " + p.reason;
+  }
 };
 
 // issue-382-withdraw-queued-close: companion to __bramCloseQueueBanner

@@ -65491,6 +65491,13 @@ pub fn run() {
                 let mut pending_session_emit_since: Option<Instant> = None;
                 let mut pending_session_emit_paths: Vec<std::path::PathBuf> = Vec::new();
                 let mut pending_subagents_emit = false;
+                // issue-385: the stable parent watched above (`watch_target`)
+                // for the dead-watch fix -- recomputed here from the leaf so
+                // the classify step below can name a path under it that is
+                // NOT this project's own leaf ("foreign-claude-session").
+                let claude_sessions_parent: Option<std::path::PathBuf> = claude_sessions_dir
+                    .as_ref()
+                    .and_then(|sd| sd.parent().map(|p| p.to_path_buf()));
                 use std::sync::mpsc::RecvTimeoutError;
                 loop {
                     let res = rx.recv_timeout(Duration::from_millis(100));
@@ -66090,14 +66097,36 @@ pub fn run() {
                     }
                     last_emit = Instant::now();
                     // Classify: any path under a tools_pane_paths root → tools event.
-                    // Otherwise (paths only under proj_root) → right-pane-only event.
-                    // Skip doc-only changes (e.g. conventions.md edits)
-                    // from triggering a tools-pane-reload. They don't run
-                    // code; the rebuild would only churn live UI state.
+                    // Otherwise, right-pane-reload requires a POSITIVE match
+                    // rather than being the catch-all `else` (issue-385): the
+                    // path must be inside the project root and not in an
+                    // ignored directory -- the same predicate as
+                    // `is_git_status_event` above, computed separately here
+                    // so the two dispatches stay conceptually independent
+                    // even though they currently agree.
+                    //
+                    // Before this, ANYTHING watched that fell through every
+                    // other classifier reloaded the preview: another
+                    // project's Claude session transcript (the watcher
+                    // deliberately watches the STABLE PARENT of
+                    // ~/.claude/projects/<slug> for the #212 dead-watch fix,
+                    // and `is_session_event` above only gates on the LEAF, so
+                    // a foreign leaf falls through here), a write under
+                    // ~/.bram (the guard-link re-ensure ticker), or a write
+                    // to the shared `current-agent` hint directory another
+                    // project's provider switch touches. None of those
+                    // belong to this project's preview. Skip doc-only
+                    // changes (e.g. conventions.md edits) from triggering a
+                    // tools-pane-reload. They don't run code; the rebuild
+                    // would only churn live UI state.
                     let is_tools_event = event.paths.iter().any(|p| {
                         let is_doc = p.extension().map_or(false, |e| e == "md");
                         !is_doc && tools_pane_paths.iter().any(|tp| p.starts_with(tp))
                     });
+                    let is_in_project_change = event
+                        .paths
+                        .iter()
+                        .any(|p| p.starts_with(&proj_root_path) && !in_ignored_dir(p));
                     if is_tools_event {
                         trace_dispatch(
                             "tools-pane",
@@ -66106,11 +66135,62 @@ pub fn run() {
                         // Defer the emit; pending_tools_since either starts
                         // the debounce window or resets it on burst writes.
                         pending_tools_since = Some(Instant::now());
-                    } else {
+                    } else if is_in_project_change {
                         trace_dispatch("right-pane", &[]);
                         eprintln!("[watcher] change detected, emitting right-pane-reload");
                         trace_emit_signal(&app_handle, "right-pane-reload");
                         let _ = app_handle.emit("right-pane-reload", ());
+                    } else {
+                        // Name why, since `dispatch_trace_path` (the `path=`
+                        // field on `trace_dispatch`) falls back to a bare
+                        // file name for anything outside proj_root -- the
+                        // reason is the only field that says WHERE a path
+                        // this project didn't create actually came from,
+                        // without leaking a host filesystem path into the
+                        // log. This is what the #385 report could not do
+                        // from inside the affected project: the prior
+                        // `right-pane` dispatch named a path the reporter
+                        // had no reason to recognize.
+                        let skip_reason = event
+                            .paths
+                            .iter()
+                            .find_map(|p| {
+                                if bram_dir.as_ref().map_or(false, |bd| p.starts_with(bd)) {
+                                    Some("bram-dir")
+                                } else if claude_sessions_parent
+                                    .as_ref()
+                                    .map_or(false, |sp| p.starts_with(sp))
+                                {
+                                    // This project's own leaf + `.jsonl` is
+                                    // caught by `is_session_event` above and
+                                    // `continue`s before reaching here, so
+                                    // this is either a foreign project's leaf
+                                    // or a non-.jsonl write inside some leaf.
+                                    Some("foreign-claude-session")
+                                } else if codex_sessions_dir
+                                    .as_ref()
+                                    .map_or(false, |sd| p.starts_with(sd))
+                                {
+                                    Some("codex-session-non-jsonl")
+                                } else if current_agent_dir
+                                    .as_ref()
+                                    .map_or(false, |ah| p.starts_with(ah))
+                                {
+                                    // Shared across every project this
+                                    // machine runs Bram against
+                                    // (app_cache_dir/current-agent/<encoded-cwd>.json,
+                                    // one file per project) -- another
+                                    // project's provider switch writes here
+                                    // too.
+                                    Some("foreign-agent-hint")
+                                } else if p.starts_with(&proj_root_path) {
+                                    Some("ignored-dir")
+                                } else {
+                                    Some("outside-project")
+                                }
+                            })
+                            .unwrap_or("outside-project");
+                        trace_dispatch("skip", &[("reason", skip_reason.to_string())]);
                     }
                 }
             });

@@ -353,11 +353,84 @@ together).
   fourth first-class state alongside single/joint/unowned, rendered as
   such, staged only with both placements' items together. This is H's
   analog of the joint refusal: honest, rare, and shaped like #356's.
-- *Deletions:* first-class, and more natural than in R. A deletion is a
-  region of `git diff HEAD` like any other; membership annotates *edit
-  operations*, not surviving worktree lines, so `residual_owner_label`'s
-  pure-deletion-hunk special case (`lib.rs:41066`) dissolves. An item whose
-  evidence deletes lines owns that deletion.
+- *Deletions:* first-class, and more natural than in R — **implemented**
+  (membership-attributes-deletions, 2026-09-22), not merely aspirational.
+  Earlier text here claimed this unconditionally ("An item whose evidence
+  deletes lines owns that deletion") while the engine hardcoded every
+  candidate's removed count to zero; that gap, and why the naive fix
+  double-books (a modification "removes" a line that never existed vs
+  HEAD when it rewrites an earlier claimant's work — the dependency
+  fixture's `expected=1 got=2` fire), is recorded in the item's worklist
+  draft (`resources/worklist-drafts/membership-attributes-deletions.md`)
+  rather than restated here. The rule that closed the gap:
+
+  > A candidate's removed lines count as HEAD-relative deletions only
+  > when its `base_tree` — present content with the candidate's own
+  > evidence reverse-applied out (`membership_candidate_base`) — carries
+  > the SAME blob for the path as HEAD (`membership_blob_matches_head`,
+  > `git diff --quiet <base_tree> HEAD -- <path>`). Additions are
+  > unaffected: an added line is present in current content by
+  > definition, so it counts regardless of layering. When the blobs
+  > differ, the candidate sat on top of other work (still-live or
+  > already-superseded) and its removed count is baseline-relative, not
+  > HEAD-relative; that removed axis is **not** credited to the
+  > candidate, and falls to unowned by subtraction — the model's honest
+  > degradation, the same family as supersession.
+
+  **The deletion matrix**, five shapes and the rule's answer for each
+  (H = HEAD content; a same-click joint candidate behaves identically to
+  a single one — no special case):
+
+  | # | shape | expected `(added, removed)` |
+  |---|---|---|
+  | 1 | pure deletion — H `[a,b,c]`, X deletes `b` | X owns `(0,1)`; unowned `(0,0)` |
+  | 2 | deletion after a prior rewrite — H `[old]`, A `old→middle` (superseded), B `middle→new` | B owns `(1,0)` — the addition only; the `-old` deletion is **unowned** `(0,1)`; universe `(1,1)` |
+  | 3 | shared deletion — a same-click claim covering X and Y removes `b` | joint owns `(0,1)`; no special case |
+  | 4 | modification — H `[a]`, X `a→a'` | X owns `(1,1)` |
+  | 5 | multi-interval re-edit — X creates `[p,q]`, later deletes `q` | **falsified in practice** — see below |
+
+  Cases 1–4 are proven against real git in temp repos:
+  `membership_deletion_matrix_tests::matrix_1_pure_deletion_owns_the_removed_line`,
+  `matrix_2_deletion_after_prior_rewrite_lands_unowned`,
+  `matrix_3_shared_deletion_is_joint_no_special_case`, and
+  `matrix_4_modification_owns_both_axes` (`lib.rs`). Case 2 is the shape
+  that motivated the review (a reviewer declined to sign off on an
+  earlier, hand-wavier draft of this rule over exactly this
+  counter-example); the fixture confirms the rule produces the
+  conservative answer — nobody is credited with deleting `old`, because
+  no surviving evidence accounts for removing it — with no special-casing
+  needed.
+
+  **Case 5 does not hold**, and the fixture
+  (`matrix_5_multi_interval_create_then_delete_diverges_from_the_matrix`)
+  documents why rather than asserting the case's original expectation.
+  `git apply --cached --reverse` on a patch carrying two `diff --git`
+  sections for the *same* path (one per interval) does not compose them:
+  it reverses only the *last* section and silently drops the earlier
+  one. Proven directly with plain git, independent of any Bram code:
+  concatenating a new-file diff (`+p+q`) with a same-path modification
+  diff (`-q`) and reverse-applying the concatenation lands at the tree
+  from *after* the first diff, not at HEAD. So for a candidate whose own
+  evidence touches one path across more than one interval,
+  `membership_candidate_base`'s `base_tree` is "present state minus only
+  the LAST interval's section," not "present state minus all of the
+  candidate's evidence" — `membership_net_patch`'s own doc comment
+  ("reverse-apply the evidence OUT of the present state," #367) claims
+  more than git actually does whenever a candidate's sections share a
+  path. Measured outcome for case 5: `base_tree` lands at the
+  post-interval-1 tree (not HEAD), `membership_blob_matches_head`
+  correctly reports `false` against that (wrong) base, the net patch
+  degrades to interval 2's own diff (`-q` only, 0 added), and under the
+  rule above X's own counts come out `(0,0)` — its unambiguous `+p`
+  addition goes **unowned**, not to X. This is a pre-existing property
+  of the multi-interval reverse-apply mechanism (#367), not something
+  membership-attributes-deletions introduced or was scoped to fix; it is
+  reported here, unresolved, rather than silently patched around. A real
+  fix needs the reverse-apply to compose per-section (e.g. reversing
+  each interval's own section against the tree the PRIOR section left,
+  in reverse chronological order) rather than relying on one `git apply
+  --reverse` call over the concatenation, and is filed as follow-up
+  work, not done under this item.
 - *Unclaimed-time work:* in the universe (it is in the diff), accounted to
   no candidate's evidence, therefore unowned — visible, countable, and
   consultable by *every* surface including whole-file staging. The bcb2a7e

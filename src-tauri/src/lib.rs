@@ -44404,7 +44404,13 @@ struct MembershipPathBuckets {
     // (docs/attribution-model.md §4, "Per-item counts match the replay
     // where both are right"); a joint entry has no replay counterpart
     // (joint sets are display-only there) and is compared to nothing.
-    per_item: std::collections::BTreeMap<String, (usize, usize)>,
+    // Keyed by the MEMBER LIST, not by a joined string. An earlier shape used
+    // `members.join("+")`, which destroyed the list at construction and made
+    // "ids contain no `+`" a load-bearing, unvalidated convention for anyone
+    // who needed the members back — including this engine's own serializer,
+    // which had to split the key to recover them. Keying by the list removes
+    // the convention rather than relocating it (review, 2026-09-23).
+    per_item: std::collections::BTreeMap<Vec<String>, (usize, usize)>,
     // membership-precomputed-off-the-render-path: this path's `git diff
     // HEAD` line counts (added, removed) — the conservation check's
     // universe. Stored on the bucket (rather than kept in a sibling map
@@ -44931,7 +44937,7 @@ fn membership_partition_engine<R: tauri::Runtime>(
             bucket.0 += counts.0;
             bucket.1 += counts.1;
             if counts.0 > 0 || counts.1 > 0 {
-                let entry = buckets.per_item.entry(members.join("+")).or_insert((0, 0));
+                let entry = buckets.per_item.entry(members.clone()).or_insert((0, 0));
                 entry.0 += counts.0;
                 entry.1 += counts.1;
             }
@@ -45033,6 +45039,77 @@ fn membership_precompute<R: tauri::Runtime>(app: &AppHandle<R>) {
     });
 }
 
+// membership-crosses-the-wire: serialize the partition for the board payload.
+//
+// Shape decisions, made once here rather than left to each consumer:
+//
+// * Every bucket is `{added, removed}` — single, joint, ambiguous, unowned and
+//   universe alike. Uniform rather than a bare number for some and a pair for
+//   others, so no reader has to remember which is which.
+// * `perItem` is an ARRAY of `{members, counts}`, members being an id array.
+//   A first pass kept an object whose KEY was the internal `"a+b"` join and
+//   carried `members` inside the value — which still exported the encoding and
+//   still required splitting it to recover the list. The engine now keys
+//   `per_item` by the member list itself, so nothing joins and nothing splits;
+//   the only surviving join is the human-read `contributors=` trace field.
+// * `byPath` covers the paths in the PARTITION, which is built from the
+//   current `git diff HEAD` universe — so a declared path with no current
+//   changes is ABSENT rather than present-and-zero. Absence means "nothing
+//   changed here", never "not computed"; the partition is whole-board or it is
+//   not served at all (`membership` is null when there is no partition).
+// * Item totals cover only paths the item OWNS lines on — a declared path with
+//   no owned lines contributes nothing, not a zero entry. The distinction is
+//   load-bearing: "declared but owns nothing" is judell/bram#273's opening
+//   report, and a zero entry would render it identically to "owns nothing
+//   because nothing changed".
+// * `membershipStale` (written beside this) scopes the WHOLE partition, not
+//   any path within it. A fallback serves one coherent snapshot; marking parts
+//   of it fresh would assert a mixture that never existed.
+fn membership_payload_json(
+    partition: &std::collections::BTreeMap<String, MembershipPathBuckets>,
+) -> serde_json::Value {
+    let pair = |(a, r): (usize, usize)| serde_json::json!({ "added": a, "removed": r });
+    let mut by_path = serde_json::Map::new();
+    let mut totals: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+    for (path, m) in partition {
+        let attributed = (
+            m.single.0 + m.joint.0 + m.ambiguous.0,
+            m.single.1 + m.joint.1 + m.ambiguous.1,
+        );
+        let (unowned, _clamped) = membership_unowned(m.universe, attributed);
+        // An ARRAY, not an object: an object needs a string key, and the only
+        // string available for a joint take is a flattened member list — which
+        // is exactly the encoding this boundary exists to stop exporting.
+        let mut per_item: Vec<serde_json::Value> = Vec::new();
+        for (members, counts) in &m.per_item {
+            per_item.push(serde_json::json!({
+                "members": members,
+                "counts": pair(*counts),
+            }));
+            if members.len() == 1 {
+                let e = totals.entry(members[0].clone()).or_insert((0, 0));
+                e.0 += counts.0;
+                e.1 += counts.1;
+            }
+        }
+        by_path.insert(
+            path.clone(),
+            serde_json::json!({
+                "owners": m.owners.iter().cloned().collect::<Vec<String>>(),
+                "single": pair(m.single),
+                "joint": pair(m.joint),
+                "ambiguous": pair(m.ambiguous),
+                "unowned": pair(unowned),
+                "universe": pair(m.universe),
+                "perItem": per_item,
+            }),
+        );
+    }
+    let totals_json: serde_json::Map<String, serde_json::Value> =
+        totals.into_iter().map(|(id, c)| (id, pair(c))).collect();
+    serde_json::json!({ "byPath": by_path, "itemTotals": totals_json })
+}
+
 // The conservation check and the divergence comparison, split out of the
 // old membership_engine_observe along the seam
 // membership-precomputed-off-the-render-path found: both are cheap (the
@@ -45101,7 +45178,10 @@ fn membership_report<R: tauri::Runtime>(
                         membership_contributors_note(
                             &m.per_item
                                 .iter()
-                                .map(|(who, counts)| (who.clone(), counts.0))
+                                // Joined for DISPLAY only: this is a human-read
+                                // trace field, the one place a flattened member
+                                // list is the right answer.
+                                .map(|(who, counts)| (who.join("+"), counts.0))
                                 .collect::<Vec<_>>()
                         )
                     ),
@@ -45316,6 +45396,168 @@ mod membership_engine_tests {
 // value the membership flip must produce.  They stay green until the
 // corresponding consumer is flipped; criteria 5–6 are ordinary regression
 // guards for behavior that must remain unchanged.
+#[cfg(test)]
+mod membership_wire_contract_tests {
+    use super::{membership_payload_json, MembershipPathBuckets};
+
+    fn buckets(
+        single: (usize, usize),
+        joint: (usize, usize),
+        ambiguous: (usize, usize),
+        universe: (usize, usize),
+        owners: &[&str],
+        per_item: &[(&[&str], (usize, usize))],
+    ) -> MembershipPathBuckets {
+        MembershipPathBuckets {
+            single,
+            joint,
+            ambiguous,
+            universe,
+            owners: owners.iter().map(|s| s.to_string()).collect(),
+            per_item: per_item
+                .iter()
+                .map(|(m, c)| (m.iter().map(|s| s.to_string()).collect::<Vec<_>>(), *c))
+                .collect(),
+        }
+    }
+
+    fn one(path: &str, b: MembershipPathBuckets) -> serde_json::Value {
+        let mut m = std::collections::BTreeMap::new();
+        m.insert(path.to_string(), b);
+        membership_payload_json(&m)
+    }
+
+    // Every bucket crosses as {added, removed} -- uniform, never a bare number
+    // for some and a pair for others -- and unowned is derived, not stored.
+    #[test]
+    fn every_bucket_crosses_as_an_added_removed_pair() {
+        let v = one(
+            "f.txt",
+            buckets(
+                (3, 1),
+                (2, 0),
+                (1, 0),
+                (10, 4),
+                &["a", "b"],
+                &[(&["a"], (3, 1)), (&["a", "b"], (2, 0)), (&["c"], (1, 0))],
+            ),
+        );
+        let p = &v["byPath"]["f.txt"];
+        for k in ["single", "joint", "ambiguous", "unowned", "universe"] {
+            assert!(p[k]["added"].is_number(), "{k} carries added");
+            assert!(p[k]["removed"].is_number(), "{k} carries removed");
+        }
+        // unowned = universe - (single + joint + ambiguous)
+        assert_eq!(p["unowned"]["added"], serde_json::json!(4));
+        assert_eq!(p["unowned"]["removed"], serde_json::json!(3));
+        assert_eq!(p["owners"], serde_json::json!(["a", "b"]));
+    }
+
+    // THE CONTRACT THIS BOUNDARY EXISTS FOR: no internal joint encoding
+    // crosses, and an id containing '+' survives intact. A `members.join("+")`
+    // key -- the shape this replaced -- makes this case unrecoverable.
+    #[test]
+    fn an_id_containing_a_plus_survives_the_boundary() {
+        let v = one(
+            "f.txt",
+            buckets(
+                (0, 0),
+                (5, 0),
+                (0, 0),
+                (5, 0),
+                &["c++parser", "b"],
+                &[(&["c++parser", "b"], (5, 0))],
+            ),
+        );
+        let entries = v["byPath"]["f.txt"]["perItem"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0]["members"],
+            serde_json::json!(["c++parser", "b"]),
+            "the member list crosses verbatim; nothing is joined or split"
+        );
+        // And no object key anywhere carries the flattened form.
+        assert!(
+            !serde_json::to_string(&v)
+                .unwrap()
+                .contains("\"c++parser+b\""),
+            "no joined key may appear in the payload"
+        );
+    }
+
+    // A singleton take is a one-element members array, not a bare string, so a
+    // reader never branches on shape.
+    #[test]
+    fn singleton_ownership_is_a_one_element_members_array() {
+        let v = one(
+            "f.txt",
+            buckets(
+                (2, 0),
+                (0, 0),
+                (0, 0),
+                (2, 0),
+                &["solo"],
+                &[(&["solo"], (2, 0))],
+            ),
+        );
+        let entries = v["byPath"]["f.txt"]["perItem"].as_array().unwrap();
+        assert_eq!(entries[0]["members"], serde_json::json!(["solo"]));
+        assert_eq!(v["itemTotals"]["solo"]["added"], serde_json::json!(2));
+    }
+
+    // Item totals sum SINGLE-owner takes only; a joint take belongs to no one
+    // item's total, and an item with no owned lines is absent -- not zeroed.
+    #[test]
+    fn item_totals_omit_joint_takes_and_unowned_declarers() {
+        let v = one(
+            "f.txt",
+            buckets(
+                (2, 1),
+                (4, 0),
+                (0, 0),
+                (9, 3),
+                &["a", "b"],
+                &[(&["a"], (2, 1)), (&["a", "b"], (4, 0))],
+            ),
+        );
+        assert_eq!(
+            v["itemTotals"]["a"],
+            serde_json::json!({"added": 2, "removed": 1})
+        );
+        assert!(
+            v["itemTotals"].get("b").is_none(),
+            "b's only take is joint, so it carries no single-owner total"
+        );
+        assert!(
+            v["itemTotals"].get("declared-but-idle").is_none(),
+            "an item that owns nothing is ABSENT, never a zero entry -- a zero \
+             would render 'declared but owns nothing' identically to 'nothing changed'"
+        );
+    }
+
+    // An unowned-only path still serves: the buckets are empty and unowned
+    // carries the whole universe. This is the shape the gate must be able to
+    // see before it can refuse a whole-file absorption.
+    #[test]
+    fn an_unowned_only_path_serves_its_residue() {
+        let v = one("f.txt", buckets((0, 0), (0, 0), (0, 0), (7, 2), &[], &[]));
+        let p = &v["byPath"]["f.txt"];
+        assert_eq!(p["unowned"], serde_json::json!({"added": 7, "removed": 2}));
+        assert_eq!(p["perItem"].as_array().unwrap().len(), 0);
+        assert_eq!(p["owners"], serde_json::json!([]));
+        assert_eq!(v["itemTotals"].as_object().unwrap().len(), 0);
+    }
+
+    // An empty partition still produces a well-formed envelope rather than
+    // null-shaped surprises for the consumer that step 3 will add.
+    #[test]
+    fn an_empty_partition_serves_an_empty_envelope() {
+        let v = membership_payload_json(&std::collections::BTreeMap::new());
+        assert_eq!(v["byPath"].as_object().unwrap().len(), 0);
+        assert_eq!(v["itemTotals"].as_object().unwrap().len(), 0);
+    }
+}
+
 #[cfg(test)]
 mod membership_acceptance_fixture_tests {
     use super::{
@@ -60771,7 +61013,7 @@ fn route_request<R: tauri::Runtime>(
             // manufacture a false breach. `membershipStale` below is the
             // payload's observation of that same fact — carried for
             // migration step 2 to read; nothing reads it yet.
-            let membership_stale = match membership_partition(app) {
+            let (membership_stale, membership_payload) = match membership_partition(app) {
                 Some((partition, fresh)) => {
                     membership_report(
                         app,
@@ -60780,15 +61022,23 @@ fn route_request<R: tauri::Runtime>(
                         &owners_by_path,
                         &joint_owners_by_path,
                     );
-                    !fresh
+                    (!fresh, membership_payload_json(&partition))
                 }
-                None => false,
+                None => (false, serde_json::Value::Null),
             };
             if let Some(obj) = doc.as_object_mut() {
                 obj.insert(
                     "membershipStale".to_string(),
                     serde_json::Value::Bool(membership_stale),
                 );
+                // membership-crosses-the-wire: the partition itself, so the
+                // pane can stop inferring ownership from declared paths.
+                // DELIBERATELY UNREAD — every consumer still sources from the
+                // replay; migration step 3 spends this. Serving it first means
+                // the field can be watched against real boards before anything
+                // depends on it, which is the same observe-then-consume
+                // discipline steps 1a and 1b used.
+                obj.insert("membership".to_string(), membership_payload);
             }
         }
         // #286: the ids the currently live inflight claim covers, so an

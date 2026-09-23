@@ -11668,7 +11668,9 @@ window.__bramTranscriptFindPlan = function (events, needle, cursor) {
     for (var b = 0; b < matchIndicesBuilt.length; b++) {
       var ei = matchIndicesBuilt[b];
       var ev = arr[ei] || {};
-      var isProse = ev.kind === "user" || ev.kind === "text";
+      // transcript-thinking-inline: thoughts render inline now, so they are
+      // prose -- counted and highlighted in their visible text, no preview.
+      var isProse = ev.kind === "user" || ev.kind === "text" || ev.kind === "thinking";
       var preview = isProse ? "" : window.__bramTranscriptFindPreview(ev, terms);
       var surface = isProse ? (ev.text || "") : preview;
       countsBuilt.push(window.__bramCountOccurrences(surface, terms));

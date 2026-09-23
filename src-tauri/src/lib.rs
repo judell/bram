@@ -41814,23 +41814,17 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
             codex_seed.trim_end(),
             ENHANCE_MARKER_END
         );
-        let existing_agents = std::fs::read_to_string(&codex_agents_path).unwrap_or_default();
-        let new_agents = replace_or_append_managed_block(&existing_agents, &codex_block);
         // The Bram marker block is Setup-managed, and enhance_status requires
-        // it to match the bundled instructions exactly. Refresh it on normal
-        // setup so a bundle text change does not leave Codex permanently
-        // marked stale until the user knows to force refresh.
-        let migrate = existing_agents.contains(ENHANCE_LEGACY_MARKER_START);
-        // setup-marker-append-existing-agents-md: a file with no marker at all
-        // gets a pure append — user content is preserved verbatim and the Run
-        // Setup click is the consent — so a first-time install into a
-        // pre-existing AGENTS.md must not be silently skipped (it left the
-        // Setup banner permanently stuck for Codex).
-        let no_marker = !migrate && !existing_agents.contains(ENHANCE_MARKER_START);
-        write_template_if_safe(
+        // it to match the bundled instructions exactly, so AGENTS.md always
+        // refreshes it; a file with no marker gets a pure append
+        // (setup-marker-append-existing-agents-md). issue-396: both now go
+        // through the planner, which never treats an unreadable file as empty
+        // and refuses any write that would change text outside the block.
+        apply_instruction_file_plan(
+            app,
             &codex_agents_path,
-            new_agents.as_bytes(),
-            force || migrate || existing_agents.contains(ENHANCE_MARKER_START) || no_marker,
+            &codex_block,
+            true,
             &mut wrote,
             &mut skipped,
         )?;
@@ -41892,25 +41886,19 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
     // CLAUDE.md marker block — skipped on the source repo.
     let claude_md_path = proj.join("CLAUDE.md");
     if !is_source_repo {
-        let existing = std::fs::read_to_string(&claude_md_path).unwrap_or_default();
         let block = format!(
             "{}\n@{}\n{}",
             ENHANCE_MARKER_START, ENHANCE_SIDECAR_REL, ENHANCE_MARKER_END
         );
-        let new_content = replace_or_append_managed_block(&existing, &block);
-        // Force when legacy markers are on disk — divergence is the
-        // Setup-managed marker rename and the @-import path swap onto the
-        // new sidecar file, not a user edit. Issue #173.
-        let migrate = existing.contains(ENHANCE_LEGACY_MARKER_START);
-        // setup-marker-append-existing-agents-md: same first-time-append rule
-        // as the AGENTS.md arm — no marker on disk means the write is a pure
-        // append that preserves user content, so don't skip it. A present
-        // marker with diverged content still requires force.
-        let no_marker = !migrate && !existing.contains(ENHANCE_MARKER_START);
-        write_template_if_safe(
+        // A diverged existing block (a user edit inside the markers) is left
+        // alone unless Setup runs with force; legacy markers migrate and a
+        // marker-less file gets a pure append (issue #173,
+        // setup-marker-append-existing-agents-md). issue-396: see the planner.
+        apply_instruction_file_plan(
+            app,
             &claude_md_path,
-            new_content.as_bytes(),
-            force || migrate || no_marker,
+            &block,
+            force,
             &mut wrote,
             &mut skipped,
         )?;
@@ -42167,27 +42155,204 @@ fn strip_marker_block(content: &str, start: &str, end: &str) -> String {
     result
 }
 
-fn replace_or_append_managed_block(existing: &str, block: &str) -> String {
+// issue-396-setup-never-shrinks-instruction-files: the managed-block merge,
+// typed so an unterminated start marker can never mean "replace to the end of
+// the file". The old `unwrap_or(existing.len())` did exactly that: a CLAUDE.md
+// mentioning `<!-- bram:start -->` in prose, or holding a legacy start marker
+// whose end was lost, was truncated from the marker on -- the whole file when
+// the marker sat on line 1, which is #396's observed shape.
+#[derive(Debug, PartialEq)]
+enum ManagedBlockMerge {
+    Replaced { content: String, legacy: bool },
+    Appended(String),
+    Unterminated { at: usize },
+}
+
+fn merge_managed_block(existing: &str, block: &str) -> ManagedBlockMerge {
+    for (start, end, legacy) in [
+        (ENHANCE_MARKER_START, ENHANCE_MARKER_END, false),
+        (ENHANCE_LEGACY_MARKER_START, ENHANCE_LEGACY_MARKER_END, true),
+    ] {
+        if let Some(start_idx) = existing.find(start) {
+            let Some(rel_end) = existing[start_idx..].find(end) else {
+                return ManagedBlockMerge::Unterminated { at: start_idx };
+            };
+            let end_offset = start_idx + rel_end + end.len();
+            let mut s = existing.to_string();
+            s.replace_range(start_idx..end_offset, block);
+            return ManagedBlockMerge::Replaced { content: s, legacy };
+        }
+    }
+    if existing.is_empty() {
+        ManagedBlockMerge::Appended(format!("{}\n", block))
+    } else {
+        ManagedBlockMerge::Appended(format!("{}\n\n{}\n", existing.trim_end(), block))
+    }
+}
+
+// The text a Setup write must never change: everything outside the managed
+// block (either marker pair), with only the whitespace that joins it to the
+// block normalized away. An unterminated block has no well-defined outside,
+// so it returns None and the caller refuses.
+fn outside_managed_block(content: &str) -> Option<String> {
     for (start, end) in [
         (ENHANCE_MARKER_START, ENHANCE_MARKER_END),
         (ENHANCE_LEGACY_MARKER_START, ENHANCE_LEGACY_MARKER_END),
     ] {
-        if let Some(start_idx) = existing.find(start) {
-            let tail = &existing[start_idx..];
-            let end_offset = tail
-                .find(end)
-                .map(|i| start_idx + i + end.len())
-                .unwrap_or(existing.len());
-            let mut s = existing.to_string();
-            s.replace_range(start_idx..end_offset, block);
-            return s;
+        if let Some(start_idx) = content.find(start) {
+            let rel_end = content[start_idx..].find(end)?;
+            let before = content[..start_idx].trim_end();
+            let after = content[start_idx + rel_end + end.len()..].trim();
+            return Some(if before.is_empty() || after.is_empty() {
+                format!("{}{}", before, after)
+            } else {
+                format!("{}\n{}", before, after)
+            });
         }
     }
-    if existing.is_empty() {
-        format!("{}\n", block)
-    } else {
-        format!("{}\n\n{}\n", existing.trim_end(), block)
+    Some(content.trim_end().to_string())
+}
+
+// What Setup will do to one instruction file (CLAUDE.md / AGENTS.md). Pure:
+// `existing` is None when the file does not exist, else its raw bytes.
+#[derive(Debug, PartialEq)]
+enum InstructionFilePlan {
+    Write {
+        content: String,
+        outcome: &'static str,
+    },
+    Unchanged,
+    Skip {
+        reason: String,
+    },
+}
+
+fn plan_instruction_file(
+    existing: Option<&[u8]>,
+    block: &str,
+    refresh_existing_block: bool,
+) -> InstructionFilePlan {
+    let Some(bytes) = existing else {
+        return InstructionFilePlan::Write {
+            content: format!("{}\n", block),
+            outcome: "created",
+        };
+    };
+    // A text read that fails is NOT an empty file. The old
+    // `read_to_string(..).unwrap_or_default()` made non-UTF-8 bytes read as ""
+    // while the writer's own byte read succeeded, so real content was
+    // overwritten by the bare block -- #396's candidate cause.
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return InstructionFilePlan::Skip {
+            reason: "not valid UTF-8; left untouched".to_string(),
+        };
+    };
+    let (content, outcome) = match merge_managed_block(text, block) {
+        ManagedBlockMerge::Unterminated { at } => {
+            return InstructionFilePlan::Skip {
+                reason: format!(
+                    "Bram start marker at byte {} has no matching end marker; left untouched",
+                    at
+                ),
+            };
+        }
+        ManagedBlockMerge::Appended(c) => (c, "appended"),
+        ManagedBlockMerge::Replaced {
+            content,
+            legacy: true,
+        } => (content, "migrated"),
+        ManagedBlockMerge::Replaced {
+            content,
+            legacy: false,
+        } => {
+            if content != text && !refresh_existing_block {
+                return InstructionFilePlan::Skip {
+                    reason: "managed block diverged; run Setup with force to refresh".to_string(),
+                };
+            }
+            (content, "refreshed")
+        }
+    };
+    if content == text {
+        return InstructionFilePlan::Unchanged;
     }
+    // The property itself, as a tripwire: whatever route produced `content`,
+    // the user's text outside the block survives byte for byte. Catches the
+    // two routes above and any not yet found.
+    if outside_managed_block(text) != outside_managed_block(&content) {
+        return InstructionFilePlan::Skip {
+            reason: "refused-would-drop-user-content".to_string(),
+        };
+    }
+    InstructionFilePlan::Write { content, outcome }
+}
+
+// Apply a plan: write or skip, report into the Setup result, and trace every
+// decision with byte counts so the next occurrence explains itself.
+fn apply_instruction_file_plan<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    path: &Path,
+    block: &str,
+    refresh_existing_block: bool,
+    wrote: &mut Vec<String>,
+    skipped: &mut Vec<String>,
+) -> Result<(), String> {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let existing = match std::fs::read(path) {
+        Ok(b) => Some(b),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            skipped.push(format!(
+                "{} (read error: {}; left untouched)",
+                path.display(),
+                e
+            ));
+            append_bram_trace_line(
+                app,
+                "setup",
+                &format!(
+                    "op=instruction-file path={} outcome=skipped:read-error",
+                    name
+                ),
+            );
+            return Ok(());
+        }
+    };
+    let before = existing.as_ref().map(|b| b.len()).unwrap_or(0);
+    let plan = plan_instruction_file(existing.as_deref(), block, refresh_existing_block);
+    let (outcome, after) = match &plan {
+        InstructionFilePlan::Write { content, outcome } => {
+            std::fs::write(path, content.as_bytes())
+                .map_err(|e| format!("write {}: {}", path.display(), e))?;
+            wrote.push(path.display().to_string());
+            (outcome.to_string(), content.len())
+        }
+        InstructionFilePlan::Unchanged => ("unchanged".to_string(), before),
+        InstructionFilePlan::Skip { reason } => {
+            skipped.push(format!("{} ({})", path.display(), reason));
+            let tag = if reason.starts_with("refused") {
+                "refused".to_string()
+            } else {
+                format!(
+                    "skipped:{}",
+                    reason.split(';').next().unwrap_or(reason).replace(' ', "-")
+                )
+            };
+            (tag, before)
+        }
+    };
+    append_bram_trace_line(
+        app,
+        "setup",
+        &format!(
+            "op=instruction-file path={} outcome={} bytes_before={} bytes_after={}",
+            name, outcome, before, after
+        ),
+    );
+    Ok(())
 }
 
 // Quote a string as a TOML basic string literal — wraps in double quotes and
@@ -50264,6 +50429,77 @@ fn search_index_status_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_
     rows
 }
 
+// status-untracked-undeclared-hint: untracked files no worklist item
+// declares, and the top three directories holding them (by first path
+// segment; files at the project root group as "(root)"). Pure, so the
+// counting and ranking are testable without a repo.
+const UNTRACKED_UNDECLARED_WARN: usize = 1000;
+
+fn untracked_undeclared_summary(
+    untracked: &[String],
+    declared: &std::collections::HashMap<String, Vec<String>>,
+) -> (usize, Vec<(String, usize)>) {
+    let mut by_dir: std::collections::HashMap<String, usize> = Default::default();
+    let mut count = 0usize;
+    for path in untracked {
+        if declared
+            .values()
+            .flatten()
+            .any(|d| declared_covers(d, path))
+        {
+            continue;
+        }
+        count += 1;
+        let dir = match path.split_once('/') {
+            Some((first, _)) => format!("{}/", first),
+            None => "(root)".to_string(),
+        };
+        *by_dir.entry(dir).or_insert(0) += 1;
+    }
+    let mut top: Vec<(String, usize)> = by_dir.into_iter().collect();
+    top.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    top.truncate(3);
+    (count, top)
+}
+
+fn group_thousands(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn untracked_undeclared_row(count: usize, top: &[(String, usize)]) -> serde_json::Value {
+    let dirs = top
+        .iter()
+        .map(|(d, n)| format!("{} ({})", d, group_thousands(*n)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let warn = count >= UNTRACKED_UNDECLARED_WARN;
+    let detail = if count == 0 {
+        "Every untracked file is covered by a worklist item's declared files".to_string()
+    } else if warn {
+        format!(
+            "{}. Files no item declares are not part of any work; if they are generated (virtualenvs, node_modules, build output), consider adding them to .gitignore",
+            dirs
+        )
+    } else {
+        dirs
+    };
+    serde_json::json!({
+        "signal": "Untracked, undeclared",
+        "level": if warn { "warn" } else if count == 0 { "ok" } else { "none" },
+        "state": format!("{} files", group_thousands(count)),
+        "detail": detail,
+        "seen": "",
+    })
+}
+
 fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String> {
     let now = unix_now_ms();
     let worklist = worklist_doc(app);
@@ -50429,6 +50665,40 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
             stale_applied.push(id.to_string());
         }
     }
+    // status-untracked-undeclared-hint: #395's root condition was project
+    // hygiene -- 28,265 virtualenv files neither tracked nor ignored. Since
+    // the claim capture stopped paying for them, nothing else in Bram would
+    // surface them, so this row does. Names only (`ls-files --others`), no
+    // content reads; the Status tab fetches on its refresh tick, not per
+    // board serve.
+    let untracked_row = {
+        let untracked: Vec<String> = project_root(Some(app))
+            .and_then(|root| {
+                std::process::Command::new("git")
+                    .current_dir(root)
+                    .args([
+                        "ls-files",
+                        "--others",
+                        "--exclude-standard",
+                        "-z",
+                        "--",
+                        ".",
+                    ])
+                    .output()
+                    .ok()
+            })
+            .filter(|o| o.status.success())
+            .map(|o| {
+                o.stdout
+                    .split(|b| *b == 0)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| String::from_utf8_lossy(s).into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (count, top) = untracked_undeclared_summary(&untracked, &worklist_declared_files(app));
+        untracked_undeclared_row(count, &top)
+    };
     let applied_integrity_row = if applied_items.is_empty() {
         serde_json::json!({
             "signal": "Applied integrity",
@@ -50931,7 +51201,8 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
                         "detail": history.iter().filter_map(|h| h.get("summary").and_then(|v| v.as_str())).collect::<Vec<&str>>().join(" | ").if_empty("No worklist history yet"),
                         "seen": last_history.get("iso").and_then(|v| v.as_str()).unwrap_or(""),
                     },
-                    applied_integrity_row
+                    applied_integrity_row,
+                    untracked_row
                 ]
             },
             {
@@ -70488,5 +70759,235 @@ mod host_note_tests {
         assert!(t.contains("will NOT fire on Push"));
         assert!(t.contains("Commits tab"));
         assert!(close_withdrawn_note_text(21, "94f7666", "file-edit").contains("by hand"));
+    }
+}
+
+// status-untracked-undeclared-hint: the Status row's counting and ranking.
+#[cfg(test)]
+mod untracked_undeclared_tests {
+    use super::{group_thousands, untracked_undeclared_row, untracked_undeclared_summary};
+    use std::collections::HashMap;
+
+    fn paths(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    // Declared paths (a directory entry and a worktree twin included) are
+    // excluded; the rest is counted and ranked by top directory. Fails if
+    // declared coverage stops being honoured.
+    #[test]
+    fn declared_paths_are_excluded_and_dirs_ranked() {
+        let mut declared = HashMap::new();
+        declared.insert("a".to_string(), vec!["scaffold/".to_string()]);
+        declared.insert("b".to_string(), vec!["notes.md".to_string()]);
+        let mut untracked = paths(&[
+            "scaffold/x.txt",
+            "scaffold/y/z.txt",
+            "notes.md",
+            ".claude/worktrees/w1/notes.md",
+            "stray.txt",
+        ]);
+        for i in 0..5 {
+            untracked.push(format!("spike-envs/lib/p{}.py", i));
+        }
+        for i in 0..2 {
+            untracked.push(format!("build/out{}.o", i));
+        }
+        let (count, top) = untracked_undeclared_summary(&untracked, &declared);
+        assert_eq!(count, 8);
+        assert_eq!(
+            top,
+            vec![
+                ("spike-envs/".to_string(), 5),
+                ("build/".to_string(), 2),
+                ("(root)".to_string(), 1),
+            ]
+        );
+    }
+
+    // The warning names the remedy only at the threshold, and never below.
+    #[test]
+    fn warns_with_remedy_only_at_threshold() {
+        let top = vec![("spike-envs/".to_string(), 28265)];
+        let row = untracked_undeclared_row(28265, &top);
+        assert_eq!(row["level"], "warn");
+        assert_eq!(row["state"], "28,265 files");
+        assert!(row["detail"].as_str().unwrap().contains(".gitignore"));
+        assert!(row["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("spike-envs/ (28,265)"));
+        let small = untracked_undeclared_row(3, &[("tmp/".to_string(), 3)]);
+        assert_eq!(small["level"], "none");
+        assert!(!small["detail"].as_str().unwrap().contains(".gitignore"));
+        assert_eq!(untracked_undeclared_row(0, &[])["level"], "ok");
+    }
+
+    #[test]
+    fn thousands_grouping() {
+        assert_eq!(group_thousands(0), "0");
+        assert_eq!(group_thousands(999), "999");
+        assert_eq!(group_thousands(1000), "1,000");
+        assert_eq!(group_thousands(28265), "28,265");
+        assert_eq!(group_thousands(1234567), "1,234,567");
+    }
+}
+
+// issue-396-setup-never-shrinks-instruction-files: Setup's plan for an
+// instruction file. Each failure-route test fails on the pre-fix code.
+#[cfg(test)]
+mod instruction_file_plan_tests {
+    use super::{
+        merge_managed_block, outside_managed_block, plan_instruction_file, InstructionFilePlan,
+        ManagedBlockMerge, ENHANCE_LEGACY_MARKER_END, ENHANCE_LEGACY_MARKER_START,
+        ENHANCE_MARKER_END, ENHANCE_MARKER_START,
+    };
+
+    fn block() -> String {
+        format!(
+            "{}\n@.claude/bram-conventions.md\n{}",
+            ENHANCE_MARKER_START, ENHANCE_MARKER_END
+        )
+    }
+
+    const USER: &str = "# Gluejar\n\nProject guidance, 173 lines of it.\n- rule one\n- rule two\n";
+
+    fn written(p: InstructionFilePlan) -> String {
+        match p {
+            InstructionFilePlan::Write { content, .. } => content,
+            other => panic!("expected a write, got {:?}", other),
+        }
+    }
+
+    // Route 1: non-UTF-8 bytes read as "" through read_to_string, so the old
+    // code overwrote the file with the bare block. Now: skipped.
+    #[test]
+    fn non_utf8_file_is_skipped_not_emptied() {
+        let mut bytes = USER.as_bytes().to_vec();
+        bytes.extend_from_slice(&[0xff, 0xfe, b'\n']);
+        match plan_instruction_file(Some(&bytes), &block(), true) {
+            InstructionFilePlan::Skip { reason } => assert!(reason.contains("UTF-8")),
+            other => panic!("non-UTF-8 content must not be written over: {:?}", other),
+        }
+    }
+
+    // Route 2: a start marker on line 1 with no end marker. The old merge
+    // replaced from the marker to end of file -- the whole file, exactly
+    // #396's three-line result. Now: skipped.
+    #[test]
+    fn unterminated_marker_on_line_one_is_skipped() {
+        let existing = format!("{}\n{}", ENHANCE_MARKER_START, USER);
+        assert_eq!(
+            merge_managed_block(&existing, &block()),
+            ManagedBlockMerge::Unterminated { at: 0 }
+        );
+        match plan_instruction_file(Some(existing.as_bytes()), &block(), true) {
+            InstructionFilePlan::Skip { reason } => assert!(reason.contains("no matching end")),
+            other => panic!("must not truncate: {:?}", other),
+        }
+    }
+
+    // The same route mid-file: a CLAUDE.md that mentions the marker in prose.
+    #[test]
+    fn marker_quoted_in_prose_does_not_truncate() {
+        let existing = format!(
+            "{}Bram inserts a `{}` block when Setup runs.\nMore guidance after.\n",
+            USER, ENHANCE_MARKER_START
+        );
+        assert!(matches!(
+            plan_instruction_file(Some(existing.as_bytes()), &block(), true),
+            InstructionFilePlan::Skip { .. }
+        ));
+    }
+
+    // Unterminated LEGACY marker: same protection.
+    #[test]
+    fn unterminated_legacy_marker_is_skipped() {
+        let existing = format!("{}{}\nold\n", USER, ENHANCE_LEGACY_MARKER_START);
+        assert!(matches!(
+            plan_instruction_file(Some(existing.as_bytes()), &block(), true),
+            InstructionFilePlan::Skip { .. }
+        ));
+    }
+
+    // The tripwire itself: user text outside the block is compared, and only
+    // the joining whitespace is normalized.
+    #[test]
+    fn outside_text_comparison_ignores_only_joining_whitespace() {
+        let a = format!("{}\n\n{}\n", USER.trim_end(), block());
+        let b = format!("{}\n{}", USER.trim_end(), block());
+        assert_eq!(outside_managed_block(&a), outside_managed_block(&b));
+        let c = format!("{}\n\n{}\n", "# Gluejar\n", block());
+        assert_ne!(outside_managed_block(&a), outside_managed_block(&c));
+    }
+
+    // Unchanged behaviour: create, append, refresh, force-gated divergence,
+    // legacy migration, and no-op.
+    #[test]
+    fn missing_file_is_created_with_the_block() {
+        assert_eq!(
+            written(plan_instruction_file(None, &block(), false)),
+            format!("{}\n", block())
+        );
+    }
+
+    #[test]
+    fn plain_file_gets_block_appended_and_keeps_its_text() {
+        let out = written(plan_instruction_file(
+            Some(USER.as_bytes()),
+            &block(),
+            false,
+        ));
+        assert!(out.starts_with(USER.trim_end()));
+        assert!(out.ends_with(&format!("{}\n", block())));
+    }
+
+    #[test]
+    fn existing_block_refreshes_in_place_only_when_allowed() {
+        let stale = format!(
+            "{}\n{}\n@old/path.md\n{}\ntrailing notes\n",
+            USER.trim_end(),
+            ENHANCE_MARKER_START,
+            ENHANCE_MARKER_END
+        );
+        let out = written(plan_instruction_file(
+            Some(stale.as_bytes()),
+            &block(),
+            true,
+        ));
+        assert!(out.contains("@.claude/bram-conventions.md"));
+        assert!(out.contains("trailing notes"));
+        assert!(out.starts_with(USER.trim_end()));
+        assert!(matches!(
+            plan_instruction_file(Some(stale.as_bytes()), &block(), false),
+            InstructionFilePlan::Skip { .. }
+        ));
+    }
+
+    #[test]
+    fn legacy_block_migrates_and_keeps_user_text() {
+        let legacy = format!(
+            "{}\n{}\n@old.md\n{}\n",
+            USER.trim_end(),
+            ENHANCE_LEGACY_MARKER_START,
+            ENHANCE_LEGACY_MARKER_END
+        );
+        match plan_instruction_file(Some(legacy.as_bytes()), &block(), false) {
+            InstructionFilePlan::Write { content, outcome } => {
+                assert_eq!(outcome, "migrated");
+                assert!(content.starts_with(USER.trim_end()));
+                assert!(!content.contains(ENHANCE_LEGACY_MARKER_START));
+            }
+            other => panic!("legacy must migrate: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn identical_content_is_unchanged() {
+        let current = format!("{}\n\n{}\n", USER.trim_end(), block());
+        assert_eq!(
+            plan_instruction_file(Some(current.as_bytes()), &block(), true),
+            InstructionFilePlan::Unchanged
+        );
     }
 }

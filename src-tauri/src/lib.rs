@@ -43281,6 +43281,15 @@ fn claim_interval_diff<R: tauri::Runtime>(
     let declared = worklist_declared_files(app);
     let mut ghost_notes: std::collections::BTreeSet<String> = Default::default();
     let mut patch = String::new();
+    // fix-patch-composition-for-repeated-paths: the same per-interval
+    // sections that get concatenated into `patch`, kept individually and in
+    // record order. `git apply --cached --reverse` does not compose when a
+    // patch carries more than one `diff --git a/<path> b/<path>` section for
+    // the same path (docs/attribution-model.md §4, case 5) — it silently
+    // reverses only the last one. Exposing the sections lets a caller that
+    // needs to undo this candidate's work reverse them one at a time instead
+    // of relying on one `git apply` over the concatenation.
+    let mut sections: Vec<String> = Vec::new();
     let mut matched = 0usize;
     let mut spawns = 0usize;
     for (i, rec) in arr.iter().enumerate() {
@@ -43344,6 +43353,7 @@ fn claim_interval_diff<R: tauri::Runtime>(
             if !s.trim().is_empty() {
                 matched += 1;
                 patch.push_str(&s);
+                sections.push(s.into_owned());
             }
         }
     }
@@ -43361,7 +43371,10 @@ fn claim_interval_diff<R: tauri::Runtime>(
     // the diffs this call ran on its behalf (the CLAIM_ATTR_SPAWNS discipline:
     // a cost asserted rather than measured is how a path quietly pays full
     // price). Additive — both prior consumers read only `patch`/`intervals`.
-    serde_json::json!({ "patch": patch, "intervals": matched, "spawns": spawns })
+    // `sections` is additive too (fix-patch-composition-for-repeated-paths):
+    // every existing consumer reads only `patch`/`intervals`/`spawns`, which
+    // stay byte-identical to before.
+    serde_json::json!({ "patch": patch, "intervals": matched, "spawns": spawns, "sections": sections })
 }
 
 // issue-327 interval staging: commit the requested items' OWN hunks by
@@ -44109,7 +44122,7 @@ fn membership_joint_patches(
     declared: &std::collections::HashMap<String, Vec<String>>,
     begun: &std::collections::HashSet<String>,
     spawns: &std::cell::Cell<usize>,
-) -> Vec<(Vec<String>, String)> {
+) -> Vec<(Vec<String>, String, Vec<String>)> {
     let Ok(text) = std::fs::read_to_string(root.join(CLAIM_INTERVALS_REL)) else {
         return Vec::new();
     };
@@ -44119,7 +44132,11 @@ fn membership_joint_patches(
     let Some(arr) = doc.get("intervals").and_then(|v| v.as_array()) else {
         return Vec::new();
     };
-    let mut grouped: std::collections::BTreeMap<Vec<String>, String> = Default::default();
+    // fix-patch-composition-for-repeated-paths: carry each joint group's
+    // per-interval sections alongside its concatenated patch, in record
+    // order — the same additive shape as `claim_interval_diff`'s `sections`.
+    let mut grouped: std::collections::BTreeMap<Vec<String>, (String, Vec<String>)> =
+        Default::default();
     for (i, rec) in arr.iter().enumerate() {
         let Some(a) = rec.get("ref").and_then(|v| v.as_str()) else {
             continue;
@@ -44161,11 +44178,16 @@ fn membership_joint_patches(
         {
             let s = String::from_utf8_lossy(&o.stdout);
             if !s.trim().is_empty() {
-                grouped.entry(members).or_default().push_str(&s);
+                let entry = grouped.entry(members).or_default();
+                entry.0.push_str(&s);
+                entry.1.push(s.into_owned());
             }
         }
     }
-    grouped.into_iter().collect()
+    grouped
+        .into_iter()
+        .map(|(members, (patch, sections))| (members, patch, sections))
+        .collect()
 }
 
 // A candidate's own reverse-applied BASELINE: present content (`idx_now`)
@@ -44177,12 +44199,32 @@ fn membership_joint_patches(
 // (membership-attributes-deletions, docs/attribution-model.md §4) that
 // compares base_tree's blob for a path against HEAD's. Fail-open: `None` on
 // any git failure — observe-only code must never block a serve.
+//
+// fix-patch-composition-for-repeated-paths: `sections` are the candidate's
+// per-interval diffs FOR THIS PATH, in record order (oldest first — the
+// order `claim_interval_diff` / `membership_joint_patches` matched them in,
+// never re-derived from splitting concatenated text on `diff --git`). A
+// single `git apply --cached --reverse` over a concatenation of several
+// sections for the SAME path does not compose: it reverses only the LAST
+// section and silently drops the earlier ones, exit code 0
+// (docs/attribution-model.md §4, case 5). So each section is reverse-applied
+// on its own, newest-interval-first (i.e. walking `sections` backward), each
+// one against the tree the PRIOR reversal produced — which is what "undo
+// this candidate's work" actually means. A candidate that touched the path
+// in exactly one interval takes the same single-`git apply` path as before.
+// Any section that fails to apply aborts the WHOLE derivation and returns
+// `None` — a partially-reversed base is a wrong answer that looks like a
+// right one, which is this defect's entire character, so there is no
+// partial-success return here.
 fn membership_candidate_base(
     root: &Path,
     idx_now: &Path,
-    patch: &str,
+    sections: &[String],
     spawns: &std::cell::Cell<usize>,
 ) -> Option<String> {
+    if sections.is_empty() {
+        return None;
+    }
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let tag = format!(
         "{}-{}",
@@ -44195,7 +44237,7 @@ fn membership_candidate_base(
         let _ = std::fs::remove_file(&idx_tmp);
         let _ = std::fs::remove_file(&pfile);
     };
-    if std::fs::copy(idx_now, &idx_tmp).is_err() || std::fs::write(&pfile, patch).is_err() {
+    if std::fs::copy(idx_now, &idx_tmp).is_err() {
         cleanup();
         return None;
     }
@@ -44209,15 +44251,26 @@ fn membership_candidate_base(
         cmd.output().ok()
     };
     let pfile_s = pfile.to_string_lossy().to_string();
-    let applied = git(
-        Some(&idx_tmp),
-        &["apply", "--cached", "--reverse", &pfile_s],
-    )
-    .map(|o| o.status.success())
-    .unwrap_or(false);
-    if !applied {
-        cleanup();
-        return None;
+    for section in sections.iter().rev() {
+        if std::fs::write(&pfile, section).is_err() {
+            cleanup();
+            return None;
+        }
+        // The intermediate state is asserted after every reversal, not just
+        // at the end: `git apply`'s own exit status IS that assertion — a
+        // section that applies without effect, or to the wrong place, fails
+        // this check rather than being indistinguishable from success the
+        // way the old single-shot concatenated form was.
+        let applied = git(
+            Some(&idx_tmp),
+            &["apply", "--cached", "--reverse", &pfile_s],
+        )
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+        if !applied {
+            cleanup();
+            return None;
+        }
     }
     let base_tree = git(Some(&idx_tmp), &["write-tree"]).and_then(|o| {
         o.status
@@ -44283,14 +44336,14 @@ fn membership_net_patch(
     root: &Path,
     idx_now: &Path,
     now_tree: &str,
-    patch: &str,
+    sections: &[String],
     path: &str,
     spawns: &std::cell::Cell<usize>,
 ) -> Option<String> {
     if now_tree.is_empty() {
         return None;
     }
-    let base_tree = membership_candidate_base(root, idx_now, patch, spawns)?;
+    let base_tree = membership_candidate_base(root, idx_now, sections, spawns)?;
     membership_diff_tree_path(root, &base_tree, now_tree, path, spawns)
 }
 
@@ -44755,8 +44808,14 @@ fn membership_partition_engine<R: tauri::Runtime>(
     for path in universe.keys() {
         let buckets = per_path.entry(path.clone()).or_default();
         // Candidate patches: per single begun declarer via claim_interval_diff
-        // (the reused evidence derivation), plus the joint groups.
-        let mut candidates: Vec<(Vec<String>, String)> = Vec::new();
+        // (the reused evidence derivation), plus the joint groups. Each
+        // candidate carries its concatenated `patch` (probing, footprint,
+        // ambiguity — unchanged) AND its `sections` in record order — the
+        // fix-patch-composition-for-repeated-paths shape that lets
+        // `membership_candidate_base` undo a multi-interval candidate's own
+        // work section-by-section instead of via one `git apply` over the
+        // concatenation.
+        let mut candidates: Vec<(Vec<String>, String, Vec<String>)> = Vec::new();
         for (id, files) in &begun_files {
             if !files.iter().any(|f| declared_covers(f, path)) {
                 continue;
@@ -44766,14 +44825,24 @@ fn membership_partition_engine<R: tauri::Runtime>(
                 .set(spawns.get() + d.get("spawns").and_then(|v| v.as_u64()).unwrap_or(0) as usize);
             if let Some(p) = d.get("patch").and_then(|v| v.as_str()) {
                 if !p.trim().is_empty() {
-                    candidates.push((vec![id.clone()], p.to_string()));
+                    let sections: Vec<String> = d
+                        .get("sections")
+                        .and_then(|v| v.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_str())
+                                .map(String::from)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    candidates.push((vec![id.clone()], p.to_string(), sections));
                 }
             }
         }
         candidates.extend(membership_joint_patches(
             &root, path, &declared, &begun_ids, &spawns,
         ));
-        for (members, patch) in candidates {
+        for (members, patch, sections) in candidates {
             // Already in HEAD → committed content, out of the universe: no
             // membership (counting it would break conservation against a
             // universe that by construction excludes it).
@@ -44788,17 +44857,20 @@ fn membership_partition_engine<R: tauri::Runtime>(
                 continue;
             }
             // The candidate's own reverse-applied baseline — present content
-            // minus this candidate's own work. Computed once, from the RAW
-            // (possibly concatenated) patch, and shared by #367's
-            // net-effect normalization just below and by the
-            // deletion-attribution rule after it (both need the same
-            // reverse-applied tree; see `membership_candidate_base`).
-            let base_tree = membership_candidate_base(&root, &idx_now, &patch, &spawns);
-            // A concatenated multi-interval candidate counts a line the item
-            // re-edited across its own intervals once per touching interval;
-            // count its NET effect instead (#367). The ambiguity check below
-            // reads the same normalized patch.
-            let patch = if patch.matches("diff --git").count() > 1 {
+            // minus this candidate's own work, reversed section-by-section
+            // in record order (fix-patch-composition-for-repeated-paths).
+            // Computed once, shared by #367's net-effect normalization just
+            // below and by the deletion-attribution rule after it (both need
+            // the same reverse-applied tree; see `membership_candidate_base`).
+            let base_tree = membership_candidate_base(&root, &idx_now, &sections, &spawns);
+            // A multi-interval candidate counts a line the item re-edited
+            // across its own intervals once per touching interval; count its
+            // NET effect instead (#367). The ambiguity check below reads the
+            // same normalized patch. Whether a candidate is multi-interval is
+            // read from `sections.len()` — the record, not from counting
+            // `diff --git` occurrences in concatenated text (the same
+            // textual assumption that produced case 5's defect).
+            let patch = if sections.len() > 1 {
                 base_tree
                     .as_deref()
                     .filter(|t| !t.is_empty())
@@ -45127,7 +45199,8 @@ mod membership_engine_tests {
             "the raw concatenated evidence double-counts re-edited lines"
         );
         let spawns = std::cell::Cell::new(0usize);
-        let net = super::membership_net_patch(&root, &idx2, &t2, &concat, "f.txt", &spawns)
+        let sections = vec![d1.clone(), d2.clone()];
+        let net = super::membership_net_patch(&root, &idx2, &t2, &sections, "f.txt", &spawns)
             .expect("net normalization should succeed");
         assert_eq!(super::membership_patch_footprint(&net).added_lines.len(), 5);
         assert!(spawns.get() > 0, "net normalization spawns are counted");
@@ -45427,8 +45500,9 @@ mod membership_deletion_matrix_tests {
         );
 
         let spawns = std::cell::Cell::new(0usize);
-        let base = membership_candidate_base(&root, &idx_now, &patch_x, &spawns)
-            .expect("reverse-apply should produce a base tree");
+        let base =
+            membership_candidate_base(&root, &idx_now, std::slice::from_ref(&patch_x), &spawns)
+                .expect("reverse-apply should produce a base tree");
         assert!(
             membership_blob_matches_head(&root, &base, "f.txt", &spawns),
             "X is the sole contributor: base_tree must equal HEAD for f.txt"
@@ -45512,8 +45586,9 @@ mod membership_deletion_matrix_tests {
         );
 
         let spawns = std::cell::Cell::new(0usize);
-        let base_b = membership_candidate_base(&root, &idx_now, &patch_b, &spawns)
-            .expect("B's reverse-apply should produce a base tree");
+        let base_b =
+            membership_candidate_base(&root, &idx_now, std::slice::from_ref(&patch_b), &spawns)
+                .expect("B's reverse-apply should produce a base tree");
         let head_relative = membership_blob_matches_head(&root, &base_b, "f.txt", &spawns);
         assert!(
             !head_relative,
@@ -45583,8 +45658,9 @@ mod membership_deletion_matrix_tests {
         assert!(probe(&root, &idx_now, &patch_joint, "case3"));
 
         let spawns = std::cell::Cell::new(0usize);
-        let base = membership_candidate_base(&root, &idx_now, &patch_joint, &spawns)
-            .expect("reverse-apply should produce a base tree");
+        let base =
+            membership_candidate_base(&root, &idx_now, std::slice::from_ref(&patch_joint), &spawns)
+                .expect("reverse-apply should produce a base tree");
         assert!(membership_blob_matches_head(&root, &base, "f.txt", &spawns));
         let fp = membership_patch_footprint(&patch_joint);
         let counts = (fp.added_lines.len(), fp.removed);
@@ -45639,8 +45715,9 @@ mod membership_deletion_matrix_tests {
         assert!(probe(&root, &idx_now, &patch_x, "case4"));
 
         let spawns = std::cell::Cell::new(0usize);
-        let base = membership_candidate_base(&root, &idx_now, &patch_x, &spawns)
-            .expect("reverse-apply should produce a base tree");
+        let base =
+            membership_candidate_base(&root, &idx_now, std::slice::from_ref(&patch_x), &spawns)
+                .expect("reverse-apply should produce a base tree");
         assert!(
             membership_blob_matches_head(&root, &base, "f.txt", &spawns),
             "X is the sole contributor: base_tree must equal HEAD"
@@ -45659,62 +45736,37 @@ mod membership_deletion_matrix_tests {
     // Matrix #5 — multi-interval re-edit with deletion: X creates [p,q] in
     // one interval, then deletes q in a later interval of its OWN.
     //
-    // *** THIS CASE FALSIFIES THE MATRIX AS WRITTEN. *** Reported, not
-    // silently reconciled, per the item's own instruction ("a fixture
-    // falsifying [the matrix] is the most valuable possible result of this
-    // task, not a failure").
-    //
-    // The matrix (docs/attribution-model.md §4, worklist draft
-    // `membership-attributes-deletions.md`) expects X owns (1,0): #367's
-    // net normalization collapses the raw concatenated evidence (+p +q -q,
-    // which would double-book as (2,1)) to its true net effect, and since
-    // X is the path's sole contributor, `base_tree` was assumed to equal
-    // HEAD, making the (already-zero) net removed axis HEAD-relative too.
-    //
-    // What real git actually does: `git apply --cached --reverse` on a
-    // patch carrying TWO "diff --git a/f.txt b/f.txt" sections for the
-    // SAME path does not compose them -- it reverses only the LAST section
-    // and silently drops the earlier one. Proven directly with plain git
-    // (no Bram code involved) before trusting this test's assertions:
+    // *** FIXED (fix-patch-composition-for-repeated-paths). *** This case
+    // used to falsify the matrix: `git apply --cached --reverse` on a patch
+    // carrying TWO "diff --git a/f.txt b/f.txt" sections for the SAME path
+    // does not compose them when reverse-applied as one concatenation -- it
+    // reverses only the LAST section and silently drops the earlier one,
+    // exit code 0. Proven directly with plain git (no Bram code involved):
     // concatenating `git diff HEAD t1 -- f.txt` (new-file, +p+q) with
     // `git diff t1 t2 -- f.txt` (-q) and reverse-applying the concatenation
-    // against an index holding t2 succeeds (exit 0) and produces a tree
-    // equal to t1 (f.txt = "p\nq\n"), NOT equal to HEAD (no f.txt at all).
-    // So `membership_candidate_base`'s `base_tree` for a multi-interval
-    // candidate is "present state minus only its LAST interval's section",
-    // not "present state minus ALL of its evidence" -- #367's own doc
-    // comment's claim ("reverse-applies the evidence OUT of the present
-    // state") is stronger than what git actually does whenever a candidate
-    // touches the same path in more than one section. This is a pre-
-    // existing property of `membership_net_patch`'s reverse-apply (this
-    // item only added `membership_candidate_base` as a named extraction of
-    // logic that was already there; the composition behavior is unchanged
-    // and was not in this item's scope to fix -- see the task's "stop and
-    // report" instruction).
+    // against an index holding t2 landed at t1 (f.txt = "p\nq\n"), NOT at
+    // HEAD (no f.txt at all) -- so `membership_candidate_base`'s `base_tree`
+    // for a multi-interval candidate came out "present state minus only its
+    // LAST interval's section," not "present state minus ALL of its
+    // evidence."
     //
-    // Consequence for THIS item's rule: `base_tree`'s blob for f.txt is
-    // t1's ("p\nq\n"), which is NOT HEAD's blob (HEAD has no f.txt), so
-    // `membership_blob_matches_head` correctly (by its own local logic)
-    // reports `false` -- X's evidence reads as "layered", not "sole
-    // contributor", even though X truly is the path's only contributor.
-    // The net patch itself (`base_tree` -> `now_tree`) collapses to
-    // exactly interval 2's own diff ("-q" against context "p", i.e. 0
-    // added, 1 removed) rather than the true "+p" net effect, because half
-    // of X's own evidence (interval 1) never left `base_tree` to begin
-    // with. Under the production rule (additions always count, removals
-    // only when head_relative), X's own counts come out **(0, 0)** --
-    // not (1, 0) -- and by subtraction the universe's one added line ("p")
-    // lands **UNOWNED**, not credited to X. Measured, not asserted: see
-    // the `eprintln!` lines this test emits under `--nocapture`.
-    //
-    // This is reported as-is. The matrix is NOT edited to match this
-    // observation, and the fixture is NOT adjusted to force a (1,0)
-    // result -- both are explicitly forbidden by the task. What follows
-    // asserts the OBSERVED reality, so the suite stays green while the
-    // divergence stays legible in code, not just in a report someone has
-    // to go find.
+    // The fix: `membership_candidate_base` no longer takes one concatenated
+    // patch. It takes the candidate's per-interval SECTIONS, in the record
+    // order they were matched (never re-derived from splitting concatenated
+    // text on "diff --git"), and reverse-applies them one at a time,
+    // newest-interval-first -- each reversal against the tree the PRIOR
+    // reversal produced, which is what "undo this candidate's work" actually
+    // means. Here that is `[d2, d1]`: reversing d2 (t1->t2, i.e. "-q")
+    // restores "p\nq\n"; reversing d1 (HEAD->t1, i.e. "+p+q") on top of that
+    // restores HEAD (no f.txt). `base_tree` now lands at HEAD, so
+    // `membership_blob_matches_head` reports true, X reads as the path's
+    // sole contributor (which it truly is), and the net patch (`base_tree`
+    // -> `now_tree`) is the honest "+p" -- X's own, unambiguous line. Any
+    // section that fails to apply aborts the whole derivation and returns
+    // `None` rather than a partially-reversed base (see
+    // `membership_candidate_base`'s doc comment).
     #[test]
-    fn matrix_5_multi_interval_create_then_delete_diverges_from_the_matrix() {
+    fn matrix_5_multi_interval_create_then_delete_counts_net_once() {
         let root = scratch_repo("case5");
         // HEAD has no f.txt at all -- X creates it fresh, in its first
         // interval.
@@ -45741,6 +45793,7 @@ mod membership_deletion_matrix_tests {
         let d2 = diff(&root, &t1, &t2, "f.txt");
 
         let concat = format!("{d1}{d2}");
+        let sections = vec![d1.clone(), d2.clone()];
         assert!(
             concat.matches("diff --git").count() > 1,
             "concatenated evidence spans two intervals"
@@ -45779,27 +45832,34 @@ mod membership_deletion_matrix_tests {
             "X's full concatenated evidence must account for present content"
         );
 
+        // HEAD's own tree oid (`head` above is the commit, not the tree) --
+        // what `base_tree` must equal once both sections are reversed.
+        let head_tree = rev_parse(&root, "HEAD^{tree}");
+
         let spawns = std::cell::Cell::new(0usize);
-        let base = membership_candidate_base(&root, &idx_now, &concat, &spawns)
-            .expect("reverse-applying the whole concatenated candidate should succeed");
-        eprintln!("case5 base_tree={base} t1(expected-wrong-base)={t1} head_tree(matrix-expected-base)={head}");
-        // THE DIVERGENCE, measured directly: base_tree is t1 (interval 1's
-        // effect still present), not HEAD.
+        let base = membership_candidate_base(&root, &idx_now, &sections, &spawns)
+            .expect("reverse-applying each section in turn should succeed");
+        eprintln!(
+            "case5 base_tree={base} t1(old-wrong-base)={t1} head_tree(expected-base)={head_tree}"
+        );
+        // THE FIX, measured directly: reversing d2 then d1 (newest-interval-
+        // first) lands base_tree at HEAD's tree, not at t1 (the old
+        // single-shot concatenated form's wrong answer).
         assert_eq!(
-            base, t1,
-            "observed: base_tree lands at t1 (only interval 2 reversed), not HEAD"
+            base, head_tree,
+            "fixed: base_tree lands at HEAD's tree -- both sections reversed, not just the last one"
         );
 
         let head_relative = membership_blob_matches_head(&root, &base, "f.txt", &spawns);
-        eprintln!("case5 head_relative={head_relative} (matrix's premise requires true)");
+        eprintln!("case5 head_relative={head_relative} (expected true)");
         assert!(
-            !head_relative,
-            "observed: base_tree's f.txt != HEAD's f.txt (HEAD has none at all), \
-             so the sole-contributor premise the matrix's rule relies on does not hold here"
+            head_relative,
+            "fixed: base_tree's f.txt now equals HEAD's f.txt (both have none) -- \
+             X is correctly recognized as the path's sole contributor"
         );
 
         let net = membership_diff_tree_path(&root, &base, &now_tree, "f.txt", &spawns)
-            .expect("net-normalized patch (interval 2's own diff, since base_tree == t1)");
+            .expect("net-normalized patch (HEAD -> now_tree, X's true net effect)");
         let fp = membership_patch_footprint(&net);
         // The production rule: additions always count; removals only when
         // head_relative.
@@ -45810,17 +45870,17 @@ mod membership_deletion_matrix_tests {
         eprintln!("case5 counts={counts:?} matrix_expected=(1, 0)");
         assert_eq!(
             counts,
-            (0, 0),
-            "observed production-rule outcome for X, NOT the matrix's (1, 0)"
+            (1, 0),
+            "fixed: X owns its own net addition, the matrix's expected answer"
         );
 
         let (unowned, clamped) = membership_unowned(universe, counts);
         assert!(!clamped);
-        eprintln!("case5 unowned={unowned:?} -- X's own \"p\" line goes unowned, not to X");
+        eprintln!("case5 unowned={unowned:?} -- expected (0, 0), nothing left over");
         assert_eq!(
             unowned,
-            (1, 0),
-            "observed: X's unambiguous own addition is NOT attributed to X in this shape"
+            (0, 0),
+            "fixed: X's own addition is credited to X, nothing lands unowned"
         );
 
         let _ = std::fs::remove_dir_all(&root);

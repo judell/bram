@@ -387,7 +387,7 @@ together).
   | 2 | deletion after a prior rewrite — H `[old]`, A `old→middle` (superseded), B `middle→new` | B owns `(1,0)` — the addition only; the `-old` deletion is **unowned** `(0,1)`; universe `(1,1)` |
   | 3 | shared deletion — a same-click claim covering X and Y removes `b` | joint owns `(0,1)`; no special case |
   | 4 | modification — H `[a]`, X `a→a'` | X owns `(1,1)` |
-  | 5 | multi-interval re-edit — X creates `[p,q]`, later deletes `q` | **falsified in practice** — see below |
+  | 5 | multi-interval re-edit — X creates `[p,q]`, later deletes `q` | X owns `(1,0)`; unowned `(0,0)` — see below |
 
   Cases 1–4 are proven against real git in temp repos:
   `membership_deletion_matrix_tests::matrix_1_pure_deletion_owns_the_removed_line`,
@@ -401,36 +401,47 @@ together).
   no surviving evidence accounts for removing it — with no special-casing
   needed.
 
-  **Case 5 does not hold**, and the fixture
-  (`matrix_5_multi_interval_create_then_delete_diverges_from_the_matrix`)
-  documents why rather than asserting the case's original expectation.
-  `git apply --cached --reverse` on a patch carrying two `diff --git`
-  sections for the *same* path (one per interval) does not compose them:
-  it reverses only the *last* section and silently drops the earlier
-  one. Proven directly with plain git, independent of any Bram code:
-  concatenating a new-file diff (`+p+q`) with a same-path modification
-  diff (`-q`) and reverse-applying the concatenation lands at the tree
-  from *after* the first diff, not at HEAD. So for a candidate whose own
-  evidence touches one path across more than one interval,
-  `membership_candidate_base`'s `base_tree` is "present state minus only
-  the LAST interval's section," not "present state minus all of the
-  candidate's evidence" — `membership_net_patch`'s own doc comment
-  ("reverse-apply the evidence OUT of the present state," #367) claims
-  more than git actually does whenever a candidate's sections share a
-  path. Measured outcome for case 5: `base_tree` lands at the
-  post-interval-1 tree (not HEAD), `membership_blob_matches_head`
-  correctly reports `false` against that (wrong) base, the net patch
-  degrades to interval 2's own diff (`-q` only, 0 added), and under the
-  rule above X's own counts come out `(0,0)` — its unambiguous `+p`
-  addition goes **unowned**, not to X. This is a pre-existing property
-  of the multi-interval reverse-apply mechanism (#367), not something
-  membership-attributes-deletions introduced or was scoped to fix; it is
-  reported here, unresolved, rather than silently patched around. A real
-  fix needs the reverse-apply to compose per-section (e.g. reversing
-  each interval's own section against the tree the PRIOR section left,
-  in reverse chronological order) rather than relying on one `git apply
-  --reverse` call over the concatenation, and is filed as follow-up
-  work, not done under this item.
+  **Case 5 is fixed** (fix-patch-composition-for-repeated-paths,
+  2026-09-22). `git apply --cached --reverse` on a patch carrying two
+  `diff --git` sections for the *same* path (one per interval) does not
+  compose them: it reverses only the *last* section and silently drops
+  the earlier one, exit code 0. Proven directly with plain git,
+  independent of any Bram code: concatenating a new-file diff (`+p+q`)
+  with a same-path modification diff (`-q`) and reverse-applying the
+  concatenation lands at the tree from *after* the first diff, not at
+  HEAD. So for a candidate whose own evidence touched one path across
+  more than one interval, `membership_candidate_base`'s `base_tree` used
+  to come out "present state minus only the LAST interval's section,"
+  not "present state minus all of the candidate's evidence" —
+  `membership_net_patch`'s own doc comment ("reverse-apply the evidence
+  OUT of the present state," #367) claimed more than git actually did
+  whenever a candidate's sections shared a path.
+
+  The fix: `claim_interval_diff` and `membership_joint_patches` now
+  expose the per-interval sections that were always being concatenated
+  (in record order — the order intervals were matched in the claim
+  store, never re-derived from splitting concatenated text on
+  `diff --git`, which is the textual assumption that produced this
+  defect in the first place). `membership_candidate_base` takes those
+  sections instead of one concatenated patch and reverse-applies them
+  **one at a time, newest-interval-first**, each reversal against the
+  tree the *prior* reversal produced — which is what "undo this
+  candidate's work" actually means. Any section that fails to apply
+  aborts the whole derivation and returns no base, rather than a
+  partially-reversed one: a wrong answer that looks like a right one is
+  this defect's entire character, so there is no partial-success path.
+  A candidate that touches the path in exactly one interval takes the
+  same single-`git apply` path as before — case 5 is the only one of
+  the five whose outcome moves.
+
+  Measured outcome for case 5 after the fix: `base_tree` lands at
+  HEAD's own tree (both sections reversed, not just the last one),
+  `membership_blob_matches_head` correctly reports `true`, the net
+  patch is the honest `+p` (X's true, unambiguous net effect against
+  HEAD), and X's counts come out the matrix's originally expected
+  `(1,0)` — nothing lands unowned. The regression fixture
+  (`matrix_5_multi_interval_create_then_delete_counts_net_once`,
+  renamed from `..._diverges_from_the_matrix`) asserts exactly this.
 - *Unclaimed-time work:* in the universe (it is in the diff), accounted to
   no candidate's evidence, therefore unowned — visible, countable, and
   consultable by *every* surface including whole-file staging. The bcb2a7e

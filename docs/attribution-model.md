@@ -251,6 +251,33 @@ attributable paths still pays for every byte a boundary happened to
 snapshot. Membership's universe (`git diff HEAD` plus untracked names)
 never contains this bulk.
 
+**Second receipt, and the bound (judell/bram#395, 2026-09-23).** Gluejar: two
+stray virtualenvs (28,265 untracked files) captured into both boundaries,
+198 MB of patch text per serve, `op=attribute paths=0 runs=0 ms=9705`, and
+the Worklist tab visibly failing. Deleting the files made it *worse*
+(17–21 s): the next capture turned the phantom deletions into real
+tree-to-tree deletions in a closed interval. Since
+issue-395-attribution-diffs-scoped-to-declared-paths, both of R's diffs run
+under a pathspec of every item's declared files (plus their
+`.claude/worktrees/*` twins, #309), and an empty declared set skips them
+outright. That is output-equivalent — a path no item declares resolves to
+`Unowned` and never yields a run — so R's cost is now bounded by *declared*
+captured content, not all of it. The property failure above still holds
+for a declared path that is itself large; this bounds the common case, and
+leaves the model comparison where it was.
+
+**The capture side (issue-395-claim-capture-timed).** The boundary snapshot
+itself was the other half of #395: a full `add -A` of 28,200 undeclared
+untracked files took ~14 s on a synchronous Tauri command, freezing the
+window at Start. Boundaries now capture tracked changes everywhere, as
+before, but untracked content only under declared paths, and the command
+runs off the main thread. The one semantic cost is pinned by a test
+(`late_declared_untracked_file_appears_created_in_the_interval`): an untracked
+file that existed undeclared before a boundary, then added to a *running*
+item's `files`, reads as created within that interval. Tracked files are
+exempt, which is why tracked content stays unscoped. A new item declaring
+the file is unaffected, since its own Start cuts a fresh boundary.
+
 ## 3. The status-quo model, stated precisely
 
 **Universe:** the ordered chain of boundary trees `refs/bram/claims/*` (per

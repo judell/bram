@@ -53,6 +53,17 @@
   <ChangeListener
     listenTo="{gitStatusEvt.value &amp;&amp; gitStatusEvt.value.tick}"
     onDidChange="window.__bramRefetchOnLiveEvent(gitStatusEvt.value, commits, gitStatus, closeQueue)" />
+  <!-- close-queue-host-removals-announced-not-withdrawn: a Push fires
+       git-status-changed seconds BEFORE the flush closes anything, so the
+       queue (and the commit rows' pendingCloses) went stale until reload.
+       The host's queue-file watcher now announces every change. -->
+  <PushSource
+    id="closeQueueEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('issue-close-queue-changed', false)}" />
+  <ChangeListener
+    listenTo="{closeQueueEvt.value &amp;&amp; closeQueueEvt.value.tick}"
+    onDidChange="window.__bramRefetchOnLiveEvent(closeQueueEvt.value, closeQueue, commits)" />
   <ChangeListener
     listenTo="{gitStatus.value &amp;&amp; gitStatus.value.branch}"
     onDidChange="() => { commitsExpanded = false; }" />

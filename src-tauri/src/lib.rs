@@ -18078,6 +18078,151 @@ fn clear_proposing_flag<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str) {
     let _ = app.emit("proposing-changed", serde_json::json!({"proposing": false}));
 }
 
+// issue-382-agent-learns-close-was-withdrawn: the pending host note.
+//
+// Some state changes happen entirely on the pane side -- a user withdraws a
+// queued issue close -- and the agent, which may have told the user that
+// close would fire, has no way to observe them: bram-guard returns no
+// additionalContext, and nothing else speaks to the agent between turns. A
+// host note is a one-line correction queued in resources/.host-notes.json and
+// delivered by PREPENDING it, visibly marked `[bram: ...]`, to the next plain
+// user turn, so the correction arrives exactly when the agent next acts and
+// the human sees in the transcript what the agent was told.
+//
+// Only PLAIN message turns carry notes. Structured turns are anchored at
+// their start -- approved:/drop:/iterate:/talk: payloads ride inline and the
+// agent reads the prefix; skip-worklist: must begin the turn -- so a note
+// prepended there would displace the directive. Notes wait for the next plain
+// turn instead. The end of the turn is never touched (the "just do it"
+// opt-out is end-anchored), and the host's own prefix detectors have already
+// run on the raw text before this point.
+//
+// Delivery is confirmed, not assumed: notes are PEEKED before the send and
+// cleared by id only after the PTY write succeeds, so a failed send leaves
+// them pending and a note queued mid-send is not lost.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HostNote {
+    id: String,
+    kind: String,
+    text: String,
+    created_at_ms: i64,
+}
+
+fn host_notes_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn host_notes_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    project_resource_path(app, ".host-notes.json")
+}
+
+fn read_host_notes(path: &Path) -> Vec<HostNote> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<HostNote>>(&s).ok())
+        .unwrap_or_default()
+}
+
+fn write_host_notes(path: &Path, notes: &[HostNote]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let body = serde_json::to_string_pretty(notes).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+}
+
+// A plain message turn: no structured, start-anchored prefix.
+fn turn_accepts_host_notes(turn_text: &str) -> bool {
+    let t = turn_text.trim_start();
+    !["approved:", "drop:", "iterate:", "talk:", "skip-worklist:"]
+        .iter()
+        .any(|p| t.starts_with(p))
+}
+
+fn prepend_host_notes(turn_text: &str, notes: &[HostNote]) -> String {
+    if notes.is_empty() {
+        return turn_text.to_string();
+    }
+    let block: Vec<String> = notes
+        .iter()
+        .map(|n| format!("[bram: {}]", n.text))
+        .collect();
+    format!("{}\n\n{}", block.join("\n"), turn_text.trim_start())
+}
+
+// Remove exactly the delivered ids, keeping anything queued since the peek.
+fn host_notes_without(notes: Vec<HostNote>, delivered: &[String]) -> Vec<HostNote> {
+    notes
+        .into_iter()
+        .filter(|n| !delivered.contains(&n.id))
+        .collect()
+}
+
+fn queue_host_note<R: tauri::Runtime>(app: &AppHandle<R>, kind: &str, text: String) {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let Some(path) = host_notes_file(app) else {
+        return;
+    };
+    let _guard = host_notes_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let mut notes = read_host_notes(&path);
+    let now = unix_now_ms();
+    let id = format!(
+        "{}-{}",
+        now,
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    notes.push(HostNote {
+        id: id.clone(),
+        kind: kind.to_string(),
+        text,
+        created_at_ms: now,
+    });
+    let pending = notes.len();
+    match write_host_notes(&path, &notes) {
+        Ok(()) => append_bram_trace_line(
+            app,
+            "host-note",
+            &format!("op=queued id={} kind={} pending={}", id, kind, pending),
+        ),
+        Err(e) => append_bram_trace_line(
+            app,
+            "host-note",
+            &format!("op=queue-failed kind={} error={}", kind, e),
+        ),
+    }
+}
+
+fn peek_host_notes<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<HostNote> {
+    let Some(path) = host_notes_file(app) else {
+        return Vec::new();
+    };
+    let _guard = host_notes_lock().lock().unwrap_or_else(|p| p.into_inner());
+    read_host_notes(&path)
+}
+
+fn clear_delivered_host_notes<R: tauri::Runtime>(app: &AppHandle<R>, delivered: &[HostNote]) {
+    let Some(path) = host_notes_file(app) else {
+        return;
+    };
+    let ids: Vec<String> = delivered.iter().map(|n| n.id.clone()).collect();
+    let _guard = host_notes_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let remaining = host_notes_without(read_host_notes(&path), &ids);
+    let _ = write_host_notes(&path, &remaining);
+    append_bram_trace_line(
+        app,
+        "host-note",
+        &format!(
+            "op=delivered ids={} remaining={}",
+            ids.join(","),
+            remaining.len()
+        ),
+    );
+}
+
 fn write_pty_turn_intent<R: tauri::Runtime>(
     app: &AppHandle<R>,
     state: &State<'_, AppState>,
@@ -18090,6 +18235,21 @@ fn write_pty_turn_intent<R: tauri::Runtime>(
     record_skip_worklist_authorization(app, data);
     record_proposing_intent(app, data);
     record_turn_context(app, data);
+    // issue-382-agent-learns-close-was-withdrawn: pending host notes ride the
+    // next PLAIN turn, prepended AFTER the detectors above have read the raw
+    // text and BEFORE framing, so an envelope's `text` carries them too.
+    let pending_notes = if turn_accepts_host_notes(data) {
+        peek_host_notes(app)
+    } else {
+        Vec::new()
+    };
+    let with_notes;
+    let data: &str = if pending_notes.is_empty() {
+        data
+    } else {
+        with_notes = prepend_host_notes(data, &pending_notes);
+        &with_notes
+    };
     // Envelope switch (docs/turn-transport-redesign.md step 6): substantial
     // or image-bearing sends are persisted as an outbound-turn envelope and
     // the PTY carries only a compact frame. Inline sends get the whitespace
@@ -18142,7 +18302,11 @@ fn write_pty_turn_intent<R: tauri::Runtime>(
         );
     }
     clear_stale_terminal_input_before_pane_send(app, state);
-    inject_turn_payload(app, state, data)
+    let sent = inject_turn_payload(app, state, data);
+    if sent.is_ok() && !pending_notes.is_empty() {
+        clear_delivered_host_notes(app, &pending_notes);
+    }
+    sent
 }
 
 fn sanitize_pty_turn_payload(data: &str) -> String {
@@ -42366,20 +42530,23 @@ const CLAIM_INTERVALS_REL: &str = "resources/.claim-intervals.json";
 // untracked files entirely and to return empty on a clean tree. A newly
 // CREATED file is one of the commonest shapes of item work, so that omission
 // would make creation unattributable -- exactly the case #273 was filed
-// about. Reading HEAD into a scratch index, `add -A` against it, and
-// `write-tree` captures untracked content, honours .gitignore, and yields the
-// HEAD tree on a clean worktree so no null case is needed.
+// about. Reading HEAD into a scratch index, adding tracked changes and the
+// untracked content under declared paths, then `write-tree`, captures what
+// attribution can use, honours .gitignore, and yields the HEAD tree on a
+// clean worktree so no null case is needed.
 //
 // FAILS OPEN. Every step degrades to "no boundary recorded" and never returns
 // an error into the claim path: a snapshot must be incapable of blocking a
 // worklist transition.
-fn capture_claim_tree(root: &Path) -> Option<String> {
+fn capture_claim_tree(root: &Path, untracked_scope: &[String]) -> Option<ClaimCapture> {
+    let started = std::time::Instant::now();
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let idx = std::env::temp_dir().join(format!(
         "bram-claim-index-{}-{}",
         std::process::id(),
         SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
+    let list = idx.with_extension("untracked");
     let _ = std::fs::remove_file(&idx);
     let run = |args: &[&str]| -> Option<String> {
         let out = std::process::Command::new("git")
@@ -42393,21 +42560,78 @@ fn capture_claim_tree(root: &Path) -> Option<String> {
         }
         Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
     };
-    // warn-when-git-toplevel-above-root: the add is PATHSPEC-SCOPED to the
-    // project subtree ("." relative to root). Unscoped `add -A` operates on
-    // the entire working tree in git >= 2.0 even from a subdirectory, so a
+    // warn-when-git-toplevel-above-root: every add is PATHSPEC-SCOPED to the
+    // project subtree ("." relative to root). Unscoped `add` operates on the
+    // entire working tree in git >= 2.0 even from a subdirectory, so a
     // project nested inside a larger repo hashed everything the enclosing
     // repo could see — live case 2026-09-06: a `~/Downloads` project inside
     // a home-directory repo blocked a Drop route 132 s behind two `git add
     // -A` walks and wrote ~12 GiB of objects into `~/.git` in one evening.
-    // When root == toplevel, "." is the whole repo and nothing changes.
-    // Boundaries stay exact for everything the project can claim; content
-    // outside the root was never attributable anyway.
-    let tree = run(&["read-tree", "HEAD"])
-        .and_then(|_| run(&["add", "-A", "--", "."]))
-        .and_then(|_| run(&["write-tree"]));
+    //
+    // issue-395-claim-capture-timed: TRACKED changes are captured everywhere
+    // (`add -u`, which stats tracked files and hashes only the modified ones),
+    // exactly as before. UNTRACKED content is captured only under
+    // `untracked_scope` -- the board's declared paths -- because an undeclared
+    // untracked file can never resolve to an owner, and capturing it cost
+    // ~14 s and a frozen window for 28,200 virtualenv files in #395's shape.
+    // Tracked files stay whole on purpose: a tracked file with uncommitted
+    // edits that is added to a running item's `files` later must still find
+    // its pre-boundary state in the snapshot, or those older edits would be
+    // credited to the item. Undeclared untracked files do not get that
+    // protection; see the late-declaration test.
+    let read = run(&["read-tree", "HEAD"]).and_then(|_| run(&["add", "-u", "--", "."]));
+    let mut untracked = 0usize;
+    let staged = read.and_then(|_| {
+        if untracked_scope.is_empty() {
+            return Some(());
+        }
+        // `add -A -- <spec>` fails outright when a spec matches nothing -- the
+        // normal state of a declared file not yet created -- so list first
+        // (ls-files tolerates non-matching specs, and walks only their
+        // prefixes), then add exactly that list.
+        let mut args: Vec<&str> = vec!["ls-files", "--others", "--exclude-standard", "-z", "--"];
+        args.extend(untracked_scope.iter().map(|s| s.as_str()));
+        let out = std::process::Command::new("git")
+            .current_dir(root)
+            .env("GIT_INDEX_FILE", &idx)
+            .args(&args)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        untracked = out
+            .stdout
+            .split(|b| *b == 0)
+            .filter(|s| !s.is_empty())
+            .count();
+        if untracked == 0 {
+            return Some(());
+        }
+        std::fs::write(&list, &out.stdout).ok()?;
+        let list_arg = format!("--pathspec-from-file={}", list.display());
+        run(&[
+            "--literal-pathspecs",
+            "add",
+            &list_arg,
+            "--pathspec-file-nul",
+        ])
+        .map(|_| ())
+    });
+    let tree = staged.and_then(|_| run(&["write-tree"]));
     let _ = std::fs::remove_file(&idx);
-    tree.filter(|t| !t.is_empty())
+    let _ = std::fs::remove_file(&list);
+    tree.filter(|t| !t.is_empty()).map(|tree| ClaimCapture {
+        tree,
+        untracked,
+        ms: started.elapsed().as_millis(),
+    })
+}
+
+struct ClaimCapture {
+    tree: String,
+    untracked: usize,
+    ms: u128,
 }
 
 // Record a boundary when this claim's id-set DIFFERS from the live one.
@@ -42443,10 +42667,22 @@ fn record_claim_interval<R: tauri::Runtime>(
         append_bram_trace_line(app, "claim-interval", "op=skip-unchanged-ids");
         return;
     }
-    let Some(tree) = capture_claim_tree(&root) else {
+    let scope = attribution_pathspec(&worklist_declared_files(app));
+    let Some(capture) = capture_claim_tree(&root, &scope) else {
         append_bram_trace_line(app, "claim-interval", "op=capture-failed");
         return;
     };
+    append_bram_trace_line(
+        app,
+        "claim-interval",
+        &format!(
+            "op=captured ms={} untracked={} scoped={}",
+            capture.ms,
+            capture.untracked,
+            scope.len()
+        ),
+    );
+    let tree = capture.tree;
     let refname = format!("refs/bram/claims/{}", at_ms);
     let refd = std::process::Command::new("git")
         .current_dir(&root)
@@ -42972,6 +43208,60 @@ fn trace_ghost_reassignments<R: tauri::Runtime>(
     );
 }
 
+// issue-395-attribution-diffs-scoped-to-declared-paths: the replay's diffs
+// run under a pathspec of every item's declared files. A claim boundary
+// captures non-ignored untracked content (capture_claim_tree -- deliberate,
+// creation must be attributable), so an unscoped `git diff <tree>` reports
+// every snapshot-only path as a deletion: 28,265 virtualenv files, 198 MB of
+// patch text and ~10 s per /__worklist serve in #395, all discarded because
+// only a declared path can resolve to an owner (resolve_interval_path_owner
+// returns Unowned otherwise, which yields no runs). Scoping is therefore
+// output-equivalent on every path that can carry a run.
+//
+// Each declared entry contributes its literal path (a directory entry covers
+// its contents -- plain pathspecs prefix-match directories) plus the
+// worktree twins declared_covers also accepts (#309). Sorted and deduped so
+// the cache key below is independent of declaration order.
+fn attribution_pathspec(declared: &std::collections::HashMap<String, Vec<String>>) -> Vec<String> {
+    let mut set: std::collections::BTreeSet<String> = Default::default();
+    for f in declared.values().flatten() {
+        let f = f.trim_end_matches('/');
+        if f.is_empty() {
+            continue;
+        }
+        set.insert(format!(":(literal){}", f));
+        set.insert(format!(":(glob).claude/worktrees/*/{}", f));
+        set.insert(format!(":(glob).claude/worktrees/*/{}/**", f));
+    }
+    set.into_iter().collect()
+}
+
+// `git diff <a> [<b>] -- <pathspec…>`. An empty pathspec means "diff
+// nothing", never "diff everything": callers skip the spawn instead.
+fn attr_diff_args(a: &str, b: Option<&str>, pathspec: &[String]) -> Vec<String> {
+    let mut args = vec!["diff".to_string(), a.to_string()];
+    if let Some(b) = b {
+        args.push(b.to_string());
+    }
+    if !pathspec.is_empty() {
+        args.push("--".to_string());
+        args.extend(pathspec.iter().cloned());
+    }
+    args
+}
+
+// A closed interval's diff is immutable per tree pair AND pathspec: a pair
+// cached under one declared set must not serve another, or a file added to
+// an item's `files` would never have its history attributed.
+fn attr_interval_cache_key(a: &str, b: &str, pathspec: &[String]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    pathspec.hash(&mut h);
+    format!("{}..{}#{:016x}", a, b, h.finish())
+}
+
+static CLAIM_ATTR_PATHSPEC: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionResult {
     let mut empty: AttributionResult = Default::default();
     let Some(root) = project_root(Some(app)) else {
@@ -43066,6 +43356,18 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
     // its ids attributes to that id; declared by several, the lines carry
     // the joint set; declared by none, unowned — the pre-resolution rule.
     let declared = worklist_declared_files(app);
+    let pathspec = attribution_pathspec(&declared);
+    CLAIM_ATTR_PATHSPEC.store(pathspec.len(), std::sync::atomic::Ordering::Relaxed);
+    if pathspec.is_empty() {
+        // Nothing declared, so nothing can own a line: no diffs to run.
+        CLAIM_ATTR_SPAWNS.store(0, std::sync::atomic::Ordering::Relaxed);
+        return empty;
+    }
+    let diff = |a: &str, b: Option<&str>| -> String {
+        let args = attr_diff_args(a, b, &pathspec);
+        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        git(&refs).unwrap_or_default()
+    };
     let mut steps: Vec<(
         Vec<String>,
         std::collections::HashMap<String, Vec<AttrHunk>>,
@@ -43095,11 +43397,11 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
         let next_tree = arr.get(i + 1).map(&tree_of);
         let parsed = match next_tree {
             Some(b_tree) => {
-                let key = format!("{}..{}", a_tree, b_tree);
+                let key = attr_interval_cache_key(&a_tree, &b_tree, &pathspec);
                 if let Some(hit) = cache.lock().ok().and_then(|c| c.get(&key).cloned()) {
                     hit
                 } else {
-                    let out = git(&["diff", &a_tree, &b_tree]).unwrap_or_default();
+                    let out = diff(&a_tree, Some(&b_tree));
                     let parsed = parse_attr_diff(&out);
                     if let Ok(mut c) = cache.lock() {
                         c.insert(key, parsed.clone());
@@ -43108,7 +43410,7 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
                 }
             }
             // The OPEN interval: never cached, it changes with every edit.
-            None => parse_attr_diff(&git(&["diff", &a_tree]).unwrap_or_default()),
+            None => parse_attr_diff(&diff(&a_tree, None)),
         };
         steps.push((ids, parsed));
     }
@@ -55410,7 +55712,16 @@ fn stamp_worklist_items_begun<R: tauri::Runtime>(app: &AppHandle<R>, ids: &[Stri
     }
 }
 
-#[tauri::command]
+// issue-395-claim-capture-timed: off the main thread. A non-async command
+// runs ON the main thread (https://v2.tauri.app/develop/calling-rust/ --
+// "Commands without the async keyword are executed on the main thread unless
+// defined with #[tauri::command(async)]"), and this one captures the claim
+// boundary, so a slow capture froze the whole window (a ~14 s beachball on
+// #395's shape). Ordering is unchanged: the pane sends the agent's turn only
+// after this command resolves (app/__shell/helpers.js, gate submit ->
+// recordWorklistActionAuthorization(...).then(... toTurn ...)), so the
+// boundary is still recorded before the approved work can begin.
+#[tauri::command(async)]
 fn record_worklist_action_authorization<R: tauri::Runtime>(
     app: AppHandle<R>,
     payload: serde_json::Value,
@@ -57222,6 +57533,14 @@ fn withdraw_pending_issue_close_path(
     Ok(removed)
 }
 
+// close-queue-host-removals-announced-not-withdrawn: pairs the HOST itself
+// removed -- the withdraw route below, and the close-on-push flush for every
+// close it completed or retired. Before this generalization only the route
+// registered, so each completed close vanished from the file unmarked and the
+// detector logged it as a hand-edit withdrawal: six of six closes from
+// 2026-09-21 to 09-23 (#387 #384 #385 #380 #390 #395) each carried a false
+// `op=withdrawn via=file-edit` line and audit record 3-6 s after `op=closed`.
+//
 // issue-382-withdraw-queued-close: pairs the POST route just removed, so
 // the watcher's disappearance detector -- which sees the same file event a
 // beat later, from its own independent watch on resources/ -- can
@@ -57229,8 +57548,7 @@ fn withdraw_pending_issue_close_path(
 // line for it. Consumed on read (HashSet::remove), so a pair is only ever
 // suppressed once; a SECOND disappearance of the same (issue, sha) -- which
 // cannot happen without a re-enqueue in between -- would trace honestly.
-fn issue_close_queue_route_withdrawals() -> &'static Mutex<std::collections::HashSet<(u64, String)>>
-{
+fn issue_close_queue_host_removals() -> &'static Mutex<std::collections::HashSet<(u64, String)>> {
     static SET: OnceLock<Mutex<std::collections::HashSet<(u64, String)>>> = OnceLock::new();
     SET.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
 }
@@ -57246,12 +57564,54 @@ fn issue_close_queue_vanished_pairs(
     last_known.difference(current).cloned().collect()
 }
 
+// issue-382-agent-learns-close-was-withdrawn: the correction the agent
+// receives. It names the issue and commit so the agent can match it to
+// whatever it said at commit time, and states the consequence plainly.
+fn close_withdrawn_note_text(issue: u64, commit_sha: &str, via: &str) -> String {
+    let short: String = commit_sha.chars().take(7).collect();
+    let how = if via == "pane" {
+        "the user withdrew it from the Commits tab"
+    } else {
+        "it was removed from resources/.worklist-issue-close.json by hand"
+    };
+    format!(
+        "the queued close of #{} (commit {}) was withdrawn -- {}; it will NOT fire on Push, and #{} stays open",
+        issue, short, how, issue
+    )
+}
+
+// close-queue-host-removals-announced-not-withdrawn: the flush's marking,
+// pure so it is testable without an AppHandle -- every pair present before
+// the rewrite and absent after is registered as a host removal, and returned
+// so a failed write can back the markers out.
+fn issue_close_queue_mark_host_removals(
+    marked: &mut std::collections::HashSet<(u64, String)>,
+    before: &std::collections::HashSet<(u64, String)>,
+    after: &std::collections::HashSet<(u64, String)>,
+) -> Vec<(u64, String)> {
+    let removed = issue_close_queue_vanished_pairs(before, after);
+    for pair in &removed {
+        marked.insert(pair.clone());
+    }
+    removed
+}
+
+// close-queue-host-removals-announced-not-withdrawn: any add OR remove is a
+// change the pane must see -- an enqueue shows a new "will close" row, a
+// removal clears one.
+fn issue_close_queue_set_changed(
+    last_known: &std::collections::HashSet<(u64, String)>,
+    current: &std::collections::HashSet<(u64, String)>,
+) -> bool {
+    last_known != current
+}
+
 // issue-382-withdraw-queued-close: of the pairs that vanished, which ones
 // need a via=file-edit trace? A pair the withdraw route already removed
 // (and traced+audited via=pane) is registered in `route_marked` and gets
 // consumed here silently -- this is the double-log guard, factored out as
 // a pure function over a plain set so it's testable without touching the
-// process-global issue_close_queue_route_withdrawals() Mutex.
+// process-global issue_close_queue_host_removals() Mutex.
 fn issue_close_queue_classify_vanished(
     vanished: Vec<(u64, String)>,
     route_marked: &mut std::collections::HashSet<(u64, String)>,
@@ -57265,7 +57625,7 @@ fn issue_close_queue_classify_vanished(
 // issue-382-withdraw-queued-close: diff the current on-disk close queue
 // against the last-known set. Anything that vanished either came through
 // the withdraw route below (already traced+audited there; the marker in
-// issue_close_queue_route_withdrawals lets this be consumed silently so it
+// issue_close_queue_host_removals lets this be consumed silently so it
 // isn't logged twice) or vanished some other way -- a hand-edit of
 // resources/.worklist-issue-close.json, the escape hatch judell/bram#382
 // documents as the only lever available before this route existed. The
@@ -57288,10 +57648,16 @@ fn detect_issue_close_queue_withdrawals<R: tauri::Runtime>(
     if last_known.is_empty() && current.is_empty() {
         return;
     }
+    // close-queue-host-removals-announced-not-withdrawn: this watcher sees
+    // every change to the queue file -- enqueue, flush, withdraw route, hand
+    // edit -- so it is the one announcer. The Commits tab refetched the queue
+    // only on git-status-changed, which a Push fires seconds BEFORE the flush
+    // closes anything, so a completed close stayed on screen until reload.
+    let changed = issue_close_queue_set_changed(last_known, &current);
     let vanished = issue_close_queue_vanished_pairs(last_known, &current);
     let unattributed = issue_close_queue_classify_vanished(
         vanished,
-        &mut issue_close_queue_route_withdrawals()
+        &mut issue_close_queue_host_removals()
             .lock()
             .unwrap_or_else(|p| p.into_inner()),
     );
@@ -57307,6 +57673,11 @@ fn detect_issue_close_queue_withdrawals<R: tauri::Runtime>(
                 &format!("op=withdrawn issue={} sha={} via=file-edit", issue, sha),
             );
         }
+        queue_host_note(
+            app,
+            "issue-close-withdrawn",
+            close_withdrawn_note_text(issue, &sha, "file-edit"),
+        );
         append_audit_record(
             app,
             serde_json::json!({
@@ -57318,6 +57689,9 @@ fn detect_issue_close_queue_withdrawals<R: tauri::Runtime>(
         );
     }
     *last_known = current;
+    if changed {
+        emit_replayable_signal(app, "issue-close-queue-changed");
+    }
 }
 
 // issue-382-withdraw-queued-close: the pane-initiated removal of a pending
@@ -57379,12 +57753,12 @@ fn handle_issue_close_queue_withdraw<R: tauri::Runtime>(
     // Backed out below on any path that does not actually remove a record, so
     // a failed or no-op call cannot leave a marker that silently swallows a
     // later genuine hand edit of the same pair.
-    issue_close_queue_route_withdrawals()
+    issue_close_queue_host_removals()
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .insert((issue, commit_sha.to_string()));
     let unregister = || {
-        issue_close_queue_route_withdrawals()
+        issue_close_queue_host_removals()
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&(issue, commit_sha.to_string()));
@@ -57425,6 +57799,11 @@ fn handle_issue_close_queue_withdraw<R: tauri::Runtime>(
             &format!("op=withdrawn issue={} sha={} via=pane", issue, commit_sha),
         );
     }
+    queue_host_note(
+        app,
+        "issue-close-withdrawn",
+        close_withdrawn_note_text(issue, commit_sha, "pane"),
+    );
     append_audit_record(
         app,
         serde_json::json!({
@@ -57748,6 +58127,10 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>, trigger: &s
         return;
     }
     let pending = records.len();
+    let pairs_before: std::collections::HashSet<(u64, String)> = records
+        .iter()
+        .map(|r| (r.issue, r.commit_sha.clone()))
+        .collect();
     eprintln!(
         "[issue-close-queue] op=flush-attempt trigger={} pending={}",
         trigger, pending
@@ -58057,8 +58440,31 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>, trigger: &s
             remaining.push(record);
         }
     }
+    // close-queue-host-removals-announced-not-withdrawn: every pair this
+    // flush drops (closed, closed via PR, retired as already closed) is a
+    // HOST removal, registered BEFORE the write for the same reason the
+    // withdraw route registers first: the watcher fires on the write itself.
+    // Backed out if the write fails, so a stale marker cannot swallow a later
+    // genuine hand edit of the same pair.
+    let pairs_after: std::collections::HashSet<(u64, String)> = remaining
+        .iter()
+        .map(|r| (r.issue, r.commit_sha.clone()))
+        .collect();
+    let host_removed = issue_close_queue_mark_host_removals(
+        &mut issue_close_queue_host_removals()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()),
+        &pairs_before,
+        &pairs_after,
+    );
     if let Err(e) = write_pending_issue_closes(&path, &remaining) {
         eprintln!("[issue-close-queue] write remaining failed: {}", e);
+        let mut marked = issue_close_queue_host_removals()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        for pair in &host_removed {
+            marked.remove(pair);
+        }
     }
     // issue-253: record the outcome of the attempt. `flush-none` is the
     // deferred-forever case — a non-empty queue that closed nothing — which
@@ -58108,7 +58514,8 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>, trigger: &s
 mod close_on_push_tests {
     use super::{
         close_issue_pr_comment, enqueue_pending_issue_close_path,
-        issue_close_queue_classify_vanished, issue_close_queue_vanished_pairs,
+        issue_close_queue_classify_vanished, issue_close_queue_mark_host_removals,
+        issue_close_queue_set_changed, issue_close_queue_vanished_pairs,
         parse_close_issue_selections, read_pending_issue_closes, read_pending_issue_closes_settled,
         withdraw_pending_issue_close, withdraw_pending_issue_close_path, PendingIssueClose,
     };
@@ -58336,6 +58743,55 @@ mod close_on_push_tests {
         let vanished = vec![(7, "abc123".to_string())];
         let unattributed = issue_close_queue_classify_vanished(vanished, &mut route_marked);
         assert_eq!(unattributed, vec![(7, "abc123".to_string())]);
+    }
+
+    // close-queue-host-removals-announced-not-withdrawn: the flush's own
+    // removals of completed closes are host removals, not withdrawals. The
+    // pre-fix shape: #395 closed, vanished unmarked, logged via=file-edit.
+    #[test]
+    fn flush_removals_of_completed_closes_are_not_withdrawals() {
+        let before: HashSet<(u64, String)> =
+            [(395, "ee92681".to_string()), (396, "aaaa".to_string())].into();
+        // 395 closed and left the file; 396 is still awaiting push.
+        let after: HashSet<(u64, String)> = [(396, "aaaa".to_string())].into();
+        let mut marked = HashSet::new();
+        let removed = issue_close_queue_mark_host_removals(&mut marked, &before, &after);
+        assert_eq!(removed, vec![(395, "ee92681".to_string())]);
+        let vanished = issue_close_queue_vanished_pairs(&before, &after);
+        assert!(issue_close_queue_classify_vanished(vanished, &mut marked).is_empty());
+        // Consumed once: a later hand edit of the same pair would trace.
+        assert!(marked.is_empty());
+    }
+
+    // An unmarked disappearance is still a hand edit. Fails if marking
+    // over-reaches to pairs the flush did not remove.
+    #[test]
+    fn unmarked_disappearance_still_classifies_as_file_edit() {
+        let before: HashSet<(u64, String)> =
+            [(395, "ee92681".to_string()), (396, "aaaa".to_string())].into();
+        let flush_after = before.clone(); // flush closed nothing
+        let mut marked = HashSet::new();
+        assert!(
+            issue_close_queue_mark_host_removals(&mut marked, &before, &flush_after).is_empty()
+        );
+        // Then the user hand-deletes 396.
+        let hand_after: HashSet<(u64, String)> = [(395, "ee92681".to_string())].into();
+        let vanished = issue_close_queue_vanished_pairs(&before, &hand_after);
+        assert_eq!(
+            issue_close_queue_classify_vanished(vanished, &mut marked),
+            vec![(396, "aaaa".to_string())]
+        );
+    }
+
+    // Add-only and remove-only both announce. Fails if the emit is gated on
+    // removals alone (an enqueue must show its "will close" row too).
+    #[test]
+    fn set_changed_covers_adds_and_removes() {
+        let a: HashSet<(u64, String)> = [(1, "x".to_string())].into();
+        let ab: HashSet<(u64, String)> = [(1, "x".to_string()), (2, "y".to_string())].into();
+        assert!(issue_close_queue_set_changed(&a, &ab));
+        assert!(issue_close_queue_set_changed(&ab, &a));
+        assert!(!issue_close_queue_set_changed(&ab, &ab.clone()));
     }
 }
 
@@ -61126,10 +61582,11 @@ fn route_request<R: tauri::Runtime>(
                 app,
                 "claim-interval",
                 &format!(
-                    "op=attribute paths={} runs={} spawns={} ms={}",
+                    "op=attribute paths={} runs={} spawns={} pathspec={} ms={}",
                     paths,
                     total,
                     CLAIM_ATTR_SPAWNS.load(std::sync::atomic::Ordering::Relaxed),
+                    CLAIM_ATTR_PATHSPEC.load(std::sync::atomic::Ordering::Relaxed),
                     attr_started.elapsed().as_millis()
                 ),
             );
@@ -67846,7 +68303,7 @@ pub fn run() {
                 // observed event never reads as a mass withdrawal. Every
                 // later disappearance relative to this set is either the
                 // route's own removal (registered in
-                // issue_close_queue_route_withdrawals and consumed silently
+                // issue_close_queue_host_removals and consumed silently
                 // here) or an unattributed hand-edit of
                 // .worklist-issue-close.json -- the escape hatch #382 names --
                 // logged via=file-edit so it lands in the audit trail instead
@@ -69012,7 +69469,8 @@ mod worklist_change_projection_tests {
 
 #[cfg(test)]
 mod claim_interval_tests {
-    use super::capture_claim_tree;
+    use super::{attribution_pathspec, capture_claim_tree};
+    use std::collections::HashMap;
     use std::path::PathBuf;
     use std::process::Command;
 
@@ -69039,6 +69497,19 @@ mod claim_interval_tests {
         d
     }
 
+    fn scope(files: &[&str]) -> Vec<String> {
+        let mut d = HashMap::new();
+        d.insert(
+            "item".to_string(),
+            files.iter().map(|f| f.to_string()).collect::<Vec<_>>(),
+        );
+        attribution_pathspec(&d)
+    }
+
+    fn cap(root: &PathBuf, files: &[&str]) -> Option<String> {
+        capture_claim_tree(root, &scope(files)).map(|c| c.tree)
+    }
+
     // The one property whose violation would corrupt a user's uncommitted
     // work, so it is asserted rather than assumed: capturing must leave the
     // worktree and the index byte-identical.
@@ -69050,7 +69521,10 @@ mod claim_interval_tests {
         let before_status = git(&root, &["status", "--porcelain"]);
         let before_body = std::fs::read_to_string(root.join("tracked.txt")).unwrap();
 
-        assert!(capture_claim_tree(&root).is_some(), "capture must succeed");
+        assert!(
+            cap(&root, &["untracked.txt"]).is_some(),
+            "capture must succeed"
+        );
 
         assert_eq!(before_status, git(&root, &["status", "--porcelain"]));
         assert_eq!(
@@ -69065,11 +69539,11 @@ mod claim_interval_tests {
     #[test]
     fn capture_includes_untracked_and_survives_clean_tree() {
         let root = scratch("untracked");
-        let clean = capture_claim_tree(&root).expect("clean tree still yields a tree");
+        let clean = cap(&root, &["created.txt"]).expect("clean tree still yields a tree");
         assert_eq!(clean, git(&root, &["rev-parse", "HEAD^{tree}"]));
 
         std::fs::write(root.join("created.txt"), "brand new\n").unwrap();
-        let tree = capture_claim_tree(&root).expect("capture");
+        let tree = cap(&root, &["created.txt"]).expect("capture");
         let listed = git(&root, &["ls-tree", "-r", "--name-only", &tree]);
         assert!(
             listed.contains("created.txt"),
@@ -69084,11 +69558,11 @@ mod claim_interval_tests {
     fn interval_between_two_boundaries_isolates_the_second_items_work() {
         let root = scratch("interval");
         std::fs::write(root.join("tracked.txt"), "base\nfrom A\n").unwrap();
-        let a = capture_claim_tree(&root).expect("A");
+        let a = cap(&root, &["tracked.txt", "b-only.txt"]).expect("A");
 
         std::fs::write(root.join("tracked.txt"), "base\nfrom A\nfrom B\n").unwrap();
         std::fs::write(root.join("b-only.txt"), "b\n").unwrap();
-        let b = capture_claim_tree(&root).expect("B");
+        let b = cap(&root, &["tracked.txt", "b-only.txt"]).expect("B");
 
         let names = git(&root, &["diff", "--name-only", &a, &b]);
         assert!(names.contains("b-only.txt"), "B's new file, got: {names}");
@@ -69098,6 +69572,110 @@ mod claim_interval_tests {
             !patch.contains("+from A"),
             "A's work must NOT appear in the A..B interval: {patch}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn listed(root: &PathBuf, tree: &str) -> String {
+        git(root, &["ls-tree", "-r", "--name-only", tree])
+    }
+
+    // issue-395-claim-capture-timed: an undeclared untracked bulk tree stays
+    // out of the boundary; declared untracked content goes in. Fails if the
+    // capture goes back to an unscoped `add -A`.
+    #[test]
+    fn undeclared_untracked_bulk_is_not_captured() {
+        let root = scratch("bulk");
+        for i in 0..200 {
+            let d = root.join(format!("spike-envs/lib/pkg{}", i));
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("mod.py"), "x = 1\n").unwrap();
+        }
+        std::fs::write(root.join("declared.txt"), "mine\n").unwrap();
+        let c = capture_claim_tree(&root, &scope(&["declared.txt"])).expect("capture");
+        let names = listed(&root, &c.tree);
+        assert!(
+            !names.contains("spike-envs/"),
+            "bulk leaked: {}",
+            names.len()
+        );
+        assert!(names.contains("declared.txt"));
+        assert_eq!(c.untracked, 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // An item that creates many files under a declared DIRECTORY gets all of
+    // them. Fails if a directory entry stops covering its contents.
+    #[test]
+    fn declared_directory_is_captured_whole() {
+        let root = scratch("dirdecl");
+        for i in 0..50 {
+            let d = root.join(format!("scaffold/sub{}", i % 5));
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join(format!("f{}.txt", i)), "gen\n").unwrap();
+        }
+        let c = capture_claim_tree(&root, &scope(&["scaffold/"])).expect("capture");
+        assert_eq!(c.untracked, 50);
+        assert_eq!(listed(&root, &c.tree).matches("scaffold/").count(), 50);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Worktree twins of a declared path are captured (#309).
+    #[test]
+    fn worktree_twin_of_declared_path_is_captured() {
+        let root = scratch("twin");
+        let d = root.join(".claude/worktrees/agent-a");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("declared.txt"), "twin\n").unwrap();
+        let tree = cap(&root, &["declared.txt"]).expect("capture");
+        assert!(listed(&root, &tree).contains(".claude/worktrees/agent-a/declared.txt"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // A declared file that does not exist yet -- the normal state before an
+    // item creates it -- must not fail the capture. Fails if the scoped add
+    // is done with `add -A -- <spec>`, which errors on a non-matching spec.
+    #[test]
+    fn declared_but_absent_file_does_not_fail_capture() {
+        let root = scratch("absent");
+        let tree = cap(&root, &["not-yet.txt", "nor-this/"]).expect("capture must succeed");
+        assert_eq!(tree, git(&root, &["rev-parse", "HEAD^{tree}"]));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Late declaration, TRACKED file: edits made before a boundary to a file
+    // no item declared yet are still in the snapshot, so an item that adds the
+    // file to its `files` afterwards is not credited with them. Fails if
+    // tracked content is scoped too (drop the `add -u`).
+    #[test]
+    fn late_declared_tracked_file_keeps_its_pre_boundary_state() {
+        let root = scratch("late-tracked");
+        std::fs::write(root.join("tracked.txt"), "base\nearlier edit\n").unwrap();
+        let a = cap(&root, &["other.txt"]).expect("boundary before declaration");
+        std::fs::write(root.join("tracked.txt"), "base\nearlier edit\nitem edit\n").unwrap();
+        let b = cap(&root, &["tracked.txt"]).expect("boundary after declaration");
+        let patch = git(&root, &["diff", &a, &b, "--", "tracked.txt"]);
+        assert!(patch.contains("+item edit"));
+        assert!(
+            !patch.contains("+earlier edit"),
+            "pre-boundary edit credited to the interval: {patch}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Late declaration, UNTRACKED file: the known limitation of scoping, pinned
+    // so it is a documented behavior rather than a surprise. An untracked file
+    // that existed, undeclared, before a boundary is absent from that
+    // snapshot; if a running item then adds it to its `files`, the file shows
+    // as created within the interval. A NEW item that declares it is
+    // unaffected: its own Start cuts a boundary after the declaration.
+    #[test]
+    fn late_declared_untracked_file_appears_created_in_the_interval() {
+        let root = scratch("late-untracked");
+        std::fs::write(root.join("scratch.txt"), "pre-existing\n").unwrap();
+        let a = cap(&root, &["other.txt"]).expect("boundary before declaration");
+        let b = cap(&root, &["scratch.txt"]).expect("boundary after declaration");
+        let names = git(&root, &["diff", "--name-status", &a, &b]);
+        assert!(names.contains("A\tscratch.txt"), "got: {names}");
         let _ = std::fs::remove_dir_all(&root);
     }
 }
@@ -69585,5 +70163,330 @@ mod search_not_ready_tests {
         st.last_cycle_ms = 1;
         st.progress = None;
         assert_eq!(search_not_ready_reason(&st), None);
+    }
+}
+
+// issue-395-attribution-diffs-scoped-to-declared-paths: the attribution
+// replay's diffs run under a pathspec built from every item's declared
+// files. Real git, because the claim is about what git emits: a large
+// untracked tree captured into a claim boundary must stop costing anything
+// on a serve, while every path an item could own diffs exactly as before.
+#[cfg(test)]
+mod attribution_pathspec_tests {
+    use super::{
+        attr_diff_args, attr_interval_cache_key, attribution_pathspec, declared_covers,
+        parse_attr_diff,
+    };
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    fn scratch_repo(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "bram-attr-pathspec-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main", "."],
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+        ] {
+            assert!(git(&root, None, &args).status.success());
+        }
+        root
+    }
+
+    fn git(root: &Path, idx: Option<&Path>, args: &[&str]) -> std::process::Output {
+        let mut cmd = Command::new("git");
+        cmd.current_dir(root).args(args);
+        if let Some(i) = idx {
+            cmd.env("GIT_INDEX_FILE", i);
+        }
+        cmd.output().unwrap()
+    }
+
+    fn write(root: &Path, rel: &str, body: &str) {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    // capture_claim_tree's recipe: HEAD into a scratch index, add -A, write-tree.
+    fn capture(root: &Path) -> String {
+        let idx = root.join(".git").join("scratch-claim-index");
+        let _ = std::fs::remove_file(&idx);
+        assert!(git(root, Some(&idx), &["read-tree", "HEAD"])
+            .status
+            .success());
+        assert!(git(root, Some(&idx), &["add", "-A", "--", "."])
+            .status
+            .success());
+        let out = git(root, Some(&idx), &["write-tree"]);
+        let _ = std::fs::remove_file(&idx);
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn run_diff(root: &Path, a: &str, b: Option<&str>, spec: &[String]) -> String {
+        let args = attr_diff_args(a, b, spec);
+        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        String::from_utf8_lossy(&git(root, None, &refs).stdout).into_owned()
+    }
+
+    fn declared() -> HashMap<String, Vec<String>> {
+        let mut d = HashMap::new();
+        // A directory entry, a plain file, and a file only a worktree twin edits.
+        d.insert("dir-item".to_string(), vec!["app/".to_string()]);
+        d.insert(
+            "file-item".to_string(),
+            vec!["docs/y.md".to_string(), "src/z.rs".to_string()],
+        );
+        d
+    }
+
+    fn covered(d: &HashMap<String, Vec<String>>, path: &str) -> bool {
+        d.values().flatten().any(|f| declared_covers(f, path))
+    }
+
+    // Raymond's shape (#395): a big non-ignored untracked tree lands in the
+    // boundary, then disappears from the worktree. Seed it, capture, edit
+    // declared files (including via a worktree twin), delete the tree,
+    // capture again, edit more. Returns (repo, first tree, second tree).
+    fn raymond_repo(tag: &str) -> (PathBuf, String, String) {
+        let root = scratch_repo(tag);
+        write(&root, "app/x.txt", "one\ntwo\nthree\n");
+        write(&root, "docs/y.md", "# y\n");
+        write(&root, "src/z.rs", "fn z() {}\n");
+        write(&root, "other.txt", "undeclared\n");
+        assert!(git(&root, None, &["add", "-A"]).status.success());
+        assert!(git(&root, None, &["commit", "-q", "-m", "base"])
+            .status
+            .success());
+        for i in 0..300 {
+            write(
+                &root,
+                &format!("spike-envs/lib/pkg{}/mod.py", i),
+                &"x = 1\n".repeat(40),
+            );
+        }
+        let t1 = capture(&root);
+        write(&root, "app/x.txt", "one\nTWO\nthree\nfour\n");
+        write(&root, "app/new.txt", "created\n");
+        write(&root, ".claude/worktrees/w1/src/z.rs", "fn z() { 1 }\n");
+        write(&root, "other.txt", "undeclared, edited\n");
+        std::fs::remove_dir_all(root.join("spike-envs")).unwrap();
+        let t2 = capture(&root);
+        write(&root, "docs/y.md", "# y\n\nmore\n");
+        (root, t1, t2)
+    }
+
+    // Equivalence: on every path an item could own, the scoped diff is the
+    // unscoped diff. Fails if the pathspec drops a declared path -- a
+    // directory entry, a created file under it, or a worktree twin.
+    #[test]
+    fn scoped_diff_equals_unscoped_on_declared_paths() {
+        let (root, t1, t2) = raymond_repo("equiv");
+        let d = declared();
+        let spec = attribution_pathspec(&d);
+        for (a, b) in [(t1.as_str(), Some(t2.as_str())), (t2.as_str(), None)] {
+            let full = parse_attr_diff(&run_diff(&root, a, b, &[]));
+            let scoped = parse_attr_diff(&run_diff(&root, a, b, &spec));
+            let full_declared: HashMap<_, _> =
+                full.into_iter().filter(|(p, _)| covered(&d, p)).collect();
+            assert_eq!(
+                scoped.keys().collect::<std::collections::BTreeSet<_>>(),
+                full_declared
+                    .keys()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                "scoped paths must equal the declared-covered unscoped paths"
+            );
+            for (p, h) in &full_declared {
+                assert_eq!(
+                    format!("{:?}", scoped[p]),
+                    format!("{:?}", h),
+                    "hunks differ on {}",
+                    p
+                );
+            }
+        }
+        // The fixture really exercises the three declaration shapes.
+        let closed = parse_attr_diff(&run_diff(&root, &t1, Some(&t2), &spec));
+        assert!(closed.contains_key("app/new.txt"));
+        assert!(closed.contains_key(".claude/worktrees/w1/src/z.rs"));
+        let open = parse_attr_diff(&run_diff(&root, &t2, None, &spec));
+        assert!(open.contains_key("docs/y.md"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Cost: the untracked tree the boundaries captured contributes nothing
+    // to either diff. Fails if the pathspec is removed from attr_diff_args.
+    #[test]
+    fn captured_untracked_tree_costs_nothing_when_scoped() {
+        let (root, t1, t2) = raymond_repo("cost");
+        let spec = attribution_pathspec(&declared());
+        let closed_full = run_diff(&root, &t1, Some(&t2), &[]);
+        assert!(
+            closed_full.contains("spike-envs/"),
+            "fixture must reproduce the phantom deletions"
+        );
+        for (a, b) in [(t1.as_str(), Some(t2.as_str())), (t2.as_str(), None)] {
+            let out = run_diff(&root, a, b, &spec);
+            assert!(
+                !out.contains("spike-envs/"),
+                "untracked tree leaked into a scoped diff"
+            );
+            assert!(
+                !out.contains("other.txt"),
+                "undeclared path leaked into a scoped diff"
+            );
+            assert!(out.len() < 4_000, "scoped diff is {} bytes", out.len());
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Nothing declared -> no pathspec, and the caller skips the diffs. An
+    // empty pathspec must never mean "diff everything".
+    #[test]
+    fn empty_declared_set_yields_empty_pathspec() {
+        assert!(attribution_pathspec(&HashMap::new()).is_empty());
+        let mut d = HashMap::new();
+        d.insert("no-files".to_string(), Vec::<String>::new());
+        assert!(attribution_pathspec(&d).is_empty());
+    }
+
+    // Cache: a closed interval diffed under one declared set must not serve
+    // another, or adding a file to an item's `files` would never attribute
+    // that file's history. Fails if the key omits the pathspec.
+    #[test]
+    fn cache_key_changes_with_the_declared_set() {
+        let a = attribution_pathspec(&declared());
+        let mut more = declared();
+        more.get_mut("file-item")
+            .unwrap()
+            .push("other.txt".to_string());
+        let b = attribution_pathspec(&more);
+        assert_ne!(
+            attr_interval_cache_key("t1", "t2", &a),
+            attr_interval_cache_key("t1", "t2", &b)
+        );
+        // Same set, any declaration order -> same key (no needless misses).
+        let mut shuffled = HashMap::new();
+        shuffled.insert(
+            "file-item".to_string(),
+            vec!["src/z.rs".to_string(), "docs/y.md".to_string()],
+        );
+        shuffled.insert("dir-item".to_string(), vec!["app/".to_string()]);
+        assert_eq!(
+            attr_interval_cache_key("t1", "t2", &a),
+            attr_interval_cache_key("t1", "t2", &attribution_pathspec(&shuffled))
+        );
+    }
+}
+
+// issue-382-agent-learns-close-was-withdrawn: the host-note channel's pure
+// rules. Each test names the change that would make it fail.
+#[cfg(test)]
+mod host_note_tests {
+    use super::{
+        close_withdrawn_note_text, host_notes_without, prepend_host_notes, read_host_notes,
+        turn_accepts_host_notes, write_host_notes, HostNote,
+    };
+
+    fn note(id: &str, text: &str) -> HostNote {
+        HostNote {
+            id: id.to_string(),
+            kind: "issue-close-withdrawn".to_string(),
+            text: text.to_string(),
+            created_at_ms: 1,
+        }
+    }
+
+    // Structured turns keep their start-anchored prefix. Fails if a lifecycle
+    // or skip-worklist turn is allowed to carry a note in front of it.
+    #[test]
+    fn only_plain_turns_carry_notes() {
+        assert!(turn_accepts_host_notes("did the close fire?"));
+        for t in [
+            "approved: {\"items\":[]}",
+            "  drop: {}",
+            "iterate: {}",
+            "talk: hi",
+            "skip-worklist: fix it",
+        ] {
+            assert!(!turn_accepts_host_notes(t), "{}", t);
+        }
+    }
+
+    // No notes pending -> the turn is byte-identical to today.
+    #[test]
+    fn no_notes_leaves_the_turn_untouched() {
+        let t = "  hello there";
+        assert_eq!(prepend_host_notes(t, &[]), t);
+    }
+
+    // Notes go in FRONT and the user's text keeps its ending, so the
+    // end-anchored "just do it" opt-out still matches. Fails if notes are
+    // appended.
+    #[test]
+    fn notes_prepend_and_preserve_the_ending() {
+        let out = prepend_host_notes(
+            "change the label, just do it",
+            &[note("1", "a"), note("2", "b")],
+        );
+        assert!(out.starts_with("[bram: a]\n[bram: b]\n\n"));
+        assert!(out.ends_with("just do it"));
+    }
+
+    // Clearing removes exactly what was delivered: a note queued between the
+    // peek and the successful send survives. Fails if clearing empties the
+    // file wholesale.
+    #[test]
+    fn clearing_keeps_notes_queued_mid_send() {
+        let all = vec![note("1", "a"), note("2", "b"), note("3", "late")];
+        let left = host_notes_without(all, &["1".to_string(), "2".to_string()]);
+        assert_eq!(left, vec![note("3", "late")]);
+    }
+
+    // Two withdrawals before any turn are two notes, not one. Fails if a
+    // queue write replaces instead of appending.
+    #[test]
+    fn two_queued_notes_both_survive_a_roundtrip() {
+        let dir = std::env::temp_dir().join(format!(
+            "bram-host-notes-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let path = dir.join(".host-notes.json");
+        let mut notes = read_host_notes(&path);
+        assert!(notes.is_empty(), "missing file reads as no notes");
+        notes.push(note("1", "first"));
+        write_host_notes(&path, &notes).unwrap();
+        let mut notes = read_host_notes(&path);
+        notes.push(note("2", "second"));
+        write_host_notes(&path, &notes).unwrap();
+        assert_eq!(read_host_notes(&path).len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The correction names the issue and commit the agent would have cited,
+    // and says the close will not fire.
+    #[test]
+    fn withdrawn_note_names_issue_commit_and_consequence() {
+        let t = close_withdrawn_note_text(21, "94f7666aaaabbbb", "pane");
+        assert!(t.contains("#21"));
+        assert!(t.contains("94f7666"));
+        assert!(!t.contains("94f7666a"));
+        assert!(t.contains("will NOT fire on Push"));
+        assert!(t.contains("Commits tab"));
+        assert!(close_withdrawn_note_text(21, "94f7666", "file-edit").contains("by hand"));
     }
 }

@@ -61,6 +61,7 @@ resources/.worklist-push-mirror.json
 resources/.worklist-issue-close.json
 resources/.pending-session-title.json
 resources/.bram-queue.json
+resources/.host-notes.json
 
 # issue-229 lean audit ledger: machine-local, append-only record of
 # authorization decisions and Bram-gated commits. Untracked by design —

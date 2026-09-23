@@ -42408,20 +42408,23 @@ const CLAIM_INTERVALS_REL: &str = "resources/.claim-intervals.json";
 // untracked files entirely and to return empty on a clean tree. A newly
 // CREATED file is one of the commonest shapes of item work, so that omission
 // would make creation unattributable -- exactly the case #273 was filed
-// about. Reading HEAD into a scratch index, `add -A` against it, and
-// `write-tree` captures untracked content, honours .gitignore, and yields the
-// HEAD tree on a clean worktree so no null case is needed.
+// about. Reading HEAD into a scratch index, adding tracked changes and the
+// untracked content under declared paths, then `write-tree`, captures what
+// attribution can use, honours .gitignore, and yields the HEAD tree on a
+// clean worktree so no null case is needed.
 //
 // FAILS OPEN. Every step degrades to "no boundary recorded" and never returns
 // an error into the claim path: a snapshot must be incapable of blocking a
 // worklist transition.
-fn capture_claim_tree(root: &Path) -> Option<String> {
+fn capture_claim_tree(root: &Path, untracked_scope: &[String]) -> Option<ClaimCapture> {
+    let started = std::time::Instant::now();
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let idx = std::env::temp_dir().join(format!(
         "bram-claim-index-{}-{}",
         std::process::id(),
         SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
+    let list = idx.with_extension("untracked");
     let _ = std::fs::remove_file(&idx);
     let run = |args: &[&str]| -> Option<String> {
         let out = std::process::Command::new("git")
@@ -42435,21 +42438,78 @@ fn capture_claim_tree(root: &Path) -> Option<String> {
         }
         Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
     };
-    // warn-when-git-toplevel-above-root: the add is PATHSPEC-SCOPED to the
-    // project subtree ("." relative to root). Unscoped `add -A` operates on
-    // the entire working tree in git >= 2.0 even from a subdirectory, so a
+    // warn-when-git-toplevel-above-root: every add is PATHSPEC-SCOPED to the
+    // project subtree ("." relative to root). Unscoped `add` operates on the
+    // entire working tree in git >= 2.0 even from a subdirectory, so a
     // project nested inside a larger repo hashed everything the enclosing
     // repo could see — live case 2026-09-06: a `~/Downloads` project inside
     // a home-directory repo blocked a Drop route 132 s behind two `git add
     // -A` walks and wrote ~12 GiB of objects into `~/.git` in one evening.
-    // When root == toplevel, "." is the whole repo and nothing changes.
-    // Boundaries stay exact for everything the project can claim; content
-    // outside the root was never attributable anyway.
-    let tree = run(&["read-tree", "HEAD"])
-        .and_then(|_| run(&["add", "-A", "--", "."]))
-        .and_then(|_| run(&["write-tree"]));
+    //
+    // issue-395-claim-capture-timed: TRACKED changes are captured everywhere
+    // (`add -u`, which stats tracked files and hashes only the modified ones),
+    // exactly as before. UNTRACKED content is captured only under
+    // `untracked_scope` -- the board's declared paths -- because an undeclared
+    // untracked file can never resolve to an owner, and capturing it cost
+    // ~14 s and a frozen window for 28,200 virtualenv files in #395's shape.
+    // Tracked files stay whole on purpose: a tracked file with uncommitted
+    // edits that is added to a running item's `files` later must still find
+    // its pre-boundary state in the snapshot, or those older edits would be
+    // credited to the item. Undeclared untracked files do not get that
+    // protection; see the late-declaration test.
+    let read = run(&["read-tree", "HEAD"]).and_then(|_| run(&["add", "-u", "--", "."]));
+    let mut untracked = 0usize;
+    let staged = read.and_then(|_| {
+        if untracked_scope.is_empty() {
+            return Some(());
+        }
+        // `add -A -- <spec>` fails outright when a spec matches nothing -- the
+        // normal state of a declared file not yet created -- so list first
+        // (ls-files tolerates non-matching specs, and walks only their
+        // prefixes), then add exactly that list.
+        let mut args: Vec<&str> = vec!["ls-files", "--others", "--exclude-standard", "-z", "--"];
+        args.extend(untracked_scope.iter().map(|s| s.as_str()));
+        let out = std::process::Command::new("git")
+            .current_dir(root)
+            .env("GIT_INDEX_FILE", &idx)
+            .args(&args)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        untracked = out
+            .stdout
+            .split(|b| *b == 0)
+            .filter(|s| !s.is_empty())
+            .count();
+        if untracked == 0 {
+            return Some(());
+        }
+        std::fs::write(&list, &out.stdout).ok()?;
+        let list_arg = format!("--pathspec-from-file={}", list.display());
+        run(&[
+            "--literal-pathspecs",
+            "add",
+            &list_arg,
+            "--pathspec-file-nul",
+        ])
+        .map(|_| ())
+    });
+    let tree = staged.and_then(|_| run(&["write-tree"]));
     let _ = std::fs::remove_file(&idx);
-    tree.filter(|t| !t.is_empty())
+    let _ = std::fs::remove_file(&list);
+    tree.filter(|t| !t.is_empty()).map(|tree| ClaimCapture {
+        tree,
+        untracked,
+        ms: started.elapsed().as_millis(),
+    })
+}
+
+struct ClaimCapture {
+    tree: String,
+    untracked: usize,
+    ms: u128,
 }
 
 // Record a boundary when this claim's id-set DIFFERS from the live one.
@@ -42485,10 +42545,22 @@ fn record_claim_interval<R: tauri::Runtime>(
         append_bram_trace_line(app, "claim-interval", "op=skip-unchanged-ids");
         return;
     }
-    let Some(tree) = capture_claim_tree(&root) else {
+    let scope = attribution_pathspec(&worklist_declared_files(app));
+    let Some(capture) = capture_claim_tree(&root, &scope) else {
         append_bram_trace_line(app, "claim-interval", "op=capture-failed");
         return;
     };
+    append_bram_trace_line(
+        app,
+        "claim-interval",
+        &format!(
+            "op=captured ms={} untracked={} scoped={}",
+            capture.ms,
+            capture.untracked,
+            scope.len()
+        ),
+    );
+    let tree = capture.tree;
     let refname = format!("refs/bram/claims/{}", at_ms);
     let refd = std::process::Command::new("git")
         .current_dir(&root)
@@ -55499,7 +55571,16 @@ fn stamp_worklist_items_begun<R: tauri::Runtime>(app: &AppHandle<R>, ids: &[Stri
     }
 }
 
-#[tauri::command]
+// issue-395-claim-capture-timed: off the main thread. A non-async command
+// runs ON the main thread (https://v2.tauri.app/develop/calling-rust/ --
+// "Commands without the async keyword are executed on the main thread unless
+// defined with #[tauri::command(async)]"), and this one captures the claim
+// boundary, so a slow capture froze the whole window (a ~14 s beachball on
+// #395's shape). Ordering is unchanged: the pane sends the agent's turn only
+// after this command resolves (app/__shell/helpers.js, gate submit ->
+// recordWorklistActionAuthorization(...).then(... toTurn ...)), so the
+// boundary is still recorded before the approved work can begin.
+#[tauri::command(async)]
 fn record_worklist_action_authorization<R: tauri::Runtime>(
     app: AppHandle<R>,
     payload: serde_json::Value,
@@ -69247,7 +69328,8 @@ mod worklist_change_projection_tests {
 
 #[cfg(test)]
 mod claim_interval_tests {
-    use super::capture_claim_tree;
+    use super::{attribution_pathspec, capture_claim_tree};
+    use std::collections::HashMap;
     use std::path::PathBuf;
     use std::process::Command;
 
@@ -69274,6 +69356,19 @@ mod claim_interval_tests {
         d
     }
 
+    fn scope(files: &[&str]) -> Vec<String> {
+        let mut d = HashMap::new();
+        d.insert(
+            "item".to_string(),
+            files.iter().map(|f| f.to_string()).collect::<Vec<_>>(),
+        );
+        attribution_pathspec(&d)
+    }
+
+    fn cap(root: &PathBuf, files: &[&str]) -> Option<String> {
+        capture_claim_tree(root, &scope(files)).map(|c| c.tree)
+    }
+
     // The one property whose violation would corrupt a user's uncommitted
     // work, so it is asserted rather than assumed: capturing must leave the
     // worktree and the index byte-identical.
@@ -69285,7 +69380,10 @@ mod claim_interval_tests {
         let before_status = git(&root, &["status", "--porcelain"]);
         let before_body = std::fs::read_to_string(root.join("tracked.txt")).unwrap();
 
-        assert!(capture_claim_tree(&root).is_some(), "capture must succeed");
+        assert!(
+            cap(&root, &["untracked.txt"]).is_some(),
+            "capture must succeed"
+        );
 
         assert_eq!(before_status, git(&root, &["status", "--porcelain"]));
         assert_eq!(
@@ -69300,11 +69398,11 @@ mod claim_interval_tests {
     #[test]
     fn capture_includes_untracked_and_survives_clean_tree() {
         let root = scratch("untracked");
-        let clean = capture_claim_tree(&root).expect("clean tree still yields a tree");
+        let clean = cap(&root, &["created.txt"]).expect("clean tree still yields a tree");
         assert_eq!(clean, git(&root, &["rev-parse", "HEAD^{tree}"]));
 
         std::fs::write(root.join("created.txt"), "brand new\n").unwrap();
-        let tree = capture_claim_tree(&root).expect("capture");
+        let tree = cap(&root, &["created.txt"]).expect("capture");
         let listed = git(&root, &["ls-tree", "-r", "--name-only", &tree]);
         assert!(
             listed.contains("created.txt"),
@@ -69319,11 +69417,11 @@ mod claim_interval_tests {
     fn interval_between_two_boundaries_isolates_the_second_items_work() {
         let root = scratch("interval");
         std::fs::write(root.join("tracked.txt"), "base\nfrom A\n").unwrap();
-        let a = capture_claim_tree(&root).expect("A");
+        let a = cap(&root, &["tracked.txt", "b-only.txt"]).expect("A");
 
         std::fs::write(root.join("tracked.txt"), "base\nfrom A\nfrom B\n").unwrap();
         std::fs::write(root.join("b-only.txt"), "b\n").unwrap();
-        let b = capture_claim_tree(&root).expect("B");
+        let b = cap(&root, &["tracked.txt", "b-only.txt"]).expect("B");
 
         let names = git(&root, &["diff", "--name-only", &a, &b]);
         assert!(names.contains("b-only.txt"), "B's new file, got: {names}");
@@ -69333,6 +69431,110 @@ mod claim_interval_tests {
             !patch.contains("+from A"),
             "A's work must NOT appear in the A..B interval: {patch}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn listed(root: &PathBuf, tree: &str) -> String {
+        git(root, &["ls-tree", "-r", "--name-only", tree])
+    }
+
+    // issue-395-claim-capture-timed: an undeclared untracked bulk tree stays
+    // out of the boundary; declared untracked content goes in. Fails if the
+    // capture goes back to an unscoped `add -A`.
+    #[test]
+    fn undeclared_untracked_bulk_is_not_captured() {
+        let root = scratch("bulk");
+        for i in 0..200 {
+            let d = root.join(format!("spike-envs/lib/pkg{}", i));
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("mod.py"), "x = 1\n").unwrap();
+        }
+        std::fs::write(root.join("declared.txt"), "mine\n").unwrap();
+        let c = capture_claim_tree(&root, &scope(&["declared.txt"])).expect("capture");
+        let names = listed(&root, &c.tree);
+        assert!(
+            !names.contains("spike-envs/"),
+            "bulk leaked: {}",
+            names.len()
+        );
+        assert!(names.contains("declared.txt"));
+        assert_eq!(c.untracked, 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // An item that creates many files under a declared DIRECTORY gets all of
+    // them. Fails if a directory entry stops covering its contents.
+    #[test]
+    fn declared_directory_is_captured_whole() {
+        let root = scratch("dirdecl");
+        for i in 0..50 {
+            let d = root.join(format!("scaffold/sub{}", i % 5));
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join(format!("f{}.txt", i)), "gen\n").unwrap();
+        }
+        let c = capture_claim_tree(&root, &scope(&["scaffold/"])).expect("capture");
+        assert_eq!(c.untracked, 50);
+        assert_eq!(listed(&root, &c.tree).matches("scaffold/").count(), 50);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Worktree twins of a declared path are captured (#309).
+    #[test]
+    fn worktree_twin_of_declared_path_is_captured() {
+        let root = scratch("twin");
+        let d = root.join(".claude/worktrees/agent-a");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("declared.txt"), "twin\n").unwrap();
+        let tree = cap(&root, &["declared.txt"]).expect("capture");
+        assert!(listed(&root, &tree).contains(".claude/worktrees/agent-a/declared.txt"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // A declared file that does not exist yet -- the normal state before an
+    // item creates it -- must not fail the capture. Fails if the scoped add
+    // is done with `add -A -- <spec>`, which errors on a non-matching spec.
+    #[test]
+    fn declared_but_absent_file_does_not_fail_capture() {
+        let root = scratch("absent");
+        let tree = cap(&root, &["not-yet.txt", "nor-this/"]).expect("capture must succeed");
+        assert_eq!(tree, git(&root, &["rev-parse", "HEAD^{tree}"]));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Late declaration, TRACKED file: edits made before a boundary to a file
+    // no item declared yet are still in the snapshot, so an item that adds the
+    // file to its `files` afterwards is not credited with them. Fails if
+    // tracked content is scoped too (drop the `add -u`).
+    #[test]
+    fn late_declared_tracked_file_keeps_its_pre_boundary_state() {
+        let root = scratch("late-tracked");
+        std::fs::write(root.join("tracked.txt"), "base\nearlier edit\n").unwrap();
+        let a = cap(&root, &["other.txt"]).expect("boundary before declaration");
+        std::fs::write(root.join("tracked.txt"), "base\nearlier edit\nitem edit\n").unwrap();
+        let b = cap(&root, &["tracked.txt"]).expect("boundary after declaration");
+        let patch = git(&root, &["diff", &a, &b, "--", "tracked.txt"]);
+        assert!(patch.contains("+item edit"));
+        assert!(
+            !patch.contains("+earlier edit"),
+            "pre-boundary edit credited to the interval: {patch}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Late declaration, UNTRACKED file: the known limitation of scoping, pinned
+    // so it is a documented behavior rather than a surprise. An untracked file
+    // that existed, undeclared, before a boundary is absent from that
+    // snapshot; if a running item then adds it to its `files`, the file shows
+    // as created within the interval. A NEW item that declares it is
+    // unaffected: its own Start cuts a boundary after the declaration.
+    #[test]
+    fn late_declared_untracked_file_appears_created_in_the_interval() {
+        let root = scratch("late-untracked");
+        std::fs::write(root.join("scratch.txt"), "pre-existing\n").unwrap();
+        let a = cap(&root, &["other.txt"]).expect("boundary before declaration");
+        let b = cap(&root, &["scratch.txt"]).expect("boundary after declaration");
+        let names = git(&root, &["diff", "--name-status", &a, &b]);
+        assert!(names.contains("A\tscratch.txt"), "got: {names}");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

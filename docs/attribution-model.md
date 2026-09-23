@@ -266,6 +266,18 @@ captured content, not all of it. The property failure above still holds
 for a declared path that is itself large; this bounds the common case, and
 leaves the model comparison where it was.
 
+**The capture side (issue-395-claim-capture-timed).** The boundary snapshot
+itself was the other half of #395: a full `add -A` of 28,200 undeclared
+untracked files took ~14 s on a synchronous Tauri command, freezing the
+window at Start. Boundaries now capture tracked changes everywhere, as
+before, but untracked content only under declared paths, and the command
+runs off the main thread. The one semantic cost is pinned by a test
+(`late_declared_untracked_file_appears_created_in_the_interval`): an untracked
+file that existed undeclared before a boundary, then added to a *running*
+item's `files`, reads as created within that interval. Tracked files are
+exempt, which is why tracked content stays unscoped. A new item declaring
+the file is unaffected, since its own Start cuts a fresh boundary.
+
 ## 3. The status-quo model, stated precisely
 
 **Universe:** the ordered chain of boundary trees `refs/bram/claims/*` (per

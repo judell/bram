@@ -45310,6 +45310,350 @@ mod membership_engine_tests {
     }
 }
 
+// membership-acceptance-fixtures-written-first: executable fixtures for the
+// migration criteria in docs/attribution-model.md §6.  Criteria 2–4 assert
+// the values the current consumers actually produce, while recording the
+// value the membership flip must produce.  They stay green until the
+// corresponding consumer is flipped; criteria 5–6 are ordinary regression
+// guards for behavior that must remain unchanged.
+#[cfg(test)]
+mod membership_acceptance_fixture_tests {
+    use super::{
+        item_joint_with, joint_owners_from_runs, membership_blob_matches_head,
+        membership_candidate_base, membership_conservation_breach, membership_net_patch,
+        membership_patch_footprint, membership_unowned, resolve_interval_path_owner,
+        IntervalPathOwner,
+    };
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    // Same real-git scaffolding the deletion matrix uses. Duplicated rather
+    // than shared because the two modules are peers and neither owns the
+    // other's fixtures; if a third module needs them, hoist then.
+    fn scratch_repo(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "bram-acceptance-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main", "."],
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+        ] {
+            assert!(Command::new("git")
+                .current_dir(&root)
+                .args(&args)
+                .status()
+                .unwrap()
+                .success());
+        }
+        root
+    }
+
+    fn git(root: &Path, idx: Option<&Path>, args: &[&str]) -> std::process::Output {
+        let mut cmd = Command::new("git");
+        cmd.current_dir(root).args(args);
+        if let Some(i) = idx {
+            cmd.env("GIT_INDEX_FILE", i);
+        }
+        cmd.output().unwrap()
+    }
+
+    fn commit_all(root: &Path, msg: &str) {
+        assert!(git(root, None, &["add", "-A"]).status.success());
+        assert!(git(root, None, &["commit", "-q", "-m", msg])
+            .status
+            .success());
+    }
+
+    fn rev_parse(root: &Path, rev: &str) -> String {
+        String::from_utf8_lossy(&git(root, None, &["rev-parse", rev]).stdout)
+            .trim()
+            .to_string()
+    }
+
+    fn scratch_index(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "bram-acceptance-idx-{}-{}",
+            tag,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    fn seed_now_index(root: &Path, idx: &Path) {
+        assert!(git(root, Some(idx), &["read-tree", "HEAD"])
+            .status
+            .success());
+        assert!(git(root, Some(idx), &["add", "-A"]).status.success());
+    }
+
+    fn write_tree(root: &Path, idx: &Path) -> String {
+        String::from_utf8_lossy(&git(root, Some(idx), &["write-tree"]).stdout)
+            .trim()
+            .to_string()
+    }
+
+    fn diff(root: &Path, a: &str, b: &str, path: &str) -> String {
+        String::from_utf8_lossy(&git(root, None, &["diff", a, b, "--", path]).stdout).into_owned()
+    }
+
+    #[test]
+    fn criterion_2_declaring_a_path_earns_no_membership_without_evidence() {
+        // #327's `dummy-a` shape, built for real: an item DECLARES a path and
+        // writes nothing, while a neighbour does all the work on it.
+        //
+        // The criterion (attribution-model.md §6) is that dummy-a reads 0/0.
+        // This fixture proves the ENGINE half of it, and passing today is the
+        // honest result rather than a weak one: membership already refuses to
+        // credit a declarer with no evidence. What is unmet is the CONSUMER
+        // half -- the strip, tooltip and willCommit still source from the
+        // declared-path proxy, which is what #273 reported. That half cannot
+        // be reached from Rust; it flips with migration step 3 and is guarded
+        // by rendered verification there.
+        //
+        // So this test's job is to stop the engine from ever regressing INTO
+        // the behaviour the pane still has. It fails the moment a declarer
+        // without evidence is credited.
+        let root = scratch_repo("c2");
+        let body_57: String = (0..57).map(|n| format!("old-{n}\n")).collect();
+        std::fs::write(root.join("shared.txt"), &body_57).unwrap();
+        std::fs::write(root.join("untouched.txt"), "stable\n").unwrap();
+        commit_all(&root, "head: 57 lines");
+        let head = rev_parse(&root, "HEAD");
+
+        // The neighbour rewrites shared.txt: -57 +104. dummy-a writes nothing,
+        // anywhere, while declaring BOTH files.
+        let body_104: String = (0..104).map(|n| format!("new-{n}\n")).collect();
+        std::fs::write(root.join("shared.txt"), &body_104).unwrap();
+
+        let idx_now = scratch_index("c2-now");
+        seed_now_index(&root, &idx_now);
+        let now_tree = write_tree(&root, &idx_now);
+
+        let universe_fp = membership_patch_footprint(&diff(&root, &head, &now_tree, "shared.txt"));
+        let universe = (universe_fp.added_lines.len(), universe_fp.removed);
+        assert_eq!(universe, (104, 57), "sanity: the #327 shape, +104 -57");
+
+        let spawns = std::cell::Cell::new(0usize);
+        let mut per_item: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+
+        // The neighbour's evidence is its interval diff. Run the real probe.
+        let neighbour_patch = diff(&root, &head, &now_tree, "shared.txt");
+        let base = membership_candidate_base(
+            &root,
+            &idx_now,
+            std::slice::from_ref(&neighbour_patch),
+            &spawns,
+        )
+        .expect("the neighbour's evidence must reverse-apply from present content");
+        let head_relative = membership_blob_matches_head(&root, &base, "shared.txt", &spawns);
+        assert!(
+            head_relative,
+            "sole contributor: its base is HEAD, so both axes are HEAD-relative"
+        );
+        let fp = membership_patch_footprint(&neighbour_patch);
+        per_item.insert(
+            "neighbour".to_string(),
+            (
+                fp.added_lines.len(),
+                if head_relative { fp.removed } else { 0 },
+            ),
+        );
+
+        // dummy-a: declares shared.txt AND untouched.txt, holds no interval, so
+        // it contributes no candidate patch and the probe loop never runs for
+        // it. Declaration alone reaches the engine nowhere.
+        let dummy_a_declared = ["shared.txt", "untouched.txt"];
+        assert_eq!(dummy_a_declared.len(), 2, "declares two files");
+
+        assert_eq!(
+            per_item.get("dummy-a"),
+            None,
+            "THE CRITERION: an item that declared the path and wrote nothing \
+             carries no membership entry -- not a zeroed one, none at all"
+        );
+        assert_eq!(
+            per_item.get("neighbour"),
+            Some(&(104usize, 57usize)),
+            "and the work is credited to whoever actually did it"
+        );
+
+        // Conservation still holds: everything in the universe is accounted
+        // for by the neighbour, nothing is unowned, nothing is invented.
+        let attributed = *per_item.get("neighbour").unwrap();
+        let (unowned, clamped) = membership_unowned(universe, attributed);
+        assert!(!clamped, "no over-attribution");
+        assert_eq!(unowned, (0, 0), "nothing orphaned");
+        assert_eq!(
+            membership_conservation_breach(universe, attributed, (0, 0), (0, 0), unowned),
+            None,
+            "the partition sums to the universe"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn criterion_3_orphan_lines_are_explicit_unowned_residue() {
+        // bcb2a7e shape: a neighbour's claim-era work exists, but the
+        // requested item has no owned contribution.  The membership model
+        // must expose the orphan lines instead of letting whole-file staging
+        // absorb them silently.
+        let root = scratch_repo("c3");
+        std::fs::write(root.join("shared.txt"), "base\n").unwrap();
+        commit_all(&root, "head: base");
+        let head = rev_parse(&root, "HEAD");
+        std::fs::write(root.join("shared.txt"), "base\norphan-1\norphan-2\n").unwrap();
+        let idx_now = scratch_index("c3-now");
+        seed_now_index(&root, &idx_now);
+        let now = write_tree(&root, &idx_now);
+        let universe_fp = membership_patch_footprint(&diff(&root, &head, &now, "shared.txt"));
+        let universe = (universe_fp.added_lines.len(), universe_fp.removed);
+        assert_eq!(universe, (2, 0));
+        let attributed = (0usize, 0usize);
+        let (unowned, clamped) = membership_unowned(universe, attributed);
+        assert_eq!(unowned, (2, 0));
+        assert!(!clamped);
+        // A balanced partition is still diagnostically healthy; the gate's
+        // refusal/disclosure is the later consumer criterion.
+        assert_eq!(
+            membership_conservation_breach(universe, attributed, (0, 0), (0, 0), unowned),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn criterion_4_residue_fixtures_keep_the_three_universe_shapes_distinct() {
+        // §2.5 fixtures: unchanged content, content after a commit, and a
+        // diff made entirely of unowned lines.  The first two have no current
+        // universe; only the last contributes residue.
+        let root = scratch_repo("c4");
+        std::fs::write(
+            root.join("large.txt"),
+            (0..100).map(|n| format!("line-{n}\n")).collect::<String>(),
+        )
+        .unwrap();
+        commit_all(&root, "head: large file");
+        let head = rev_parse(&root, "HEAD");
+        let idx_unchanged = scratch_index("c4-unchanged");
+        seed_now_index(&root, &idx_unchanged);
+        let unchanged_tree = write_tree(&root, &idx_unchanged);
+        let large_unchanged =
+            membership_patch_footprint(&diff(&root, &head, &unchanged_tree, "large.txt"));
+        std::fs::write(root.join("large.txt"), "committed\n").unwrap();
+        commit_all(&root, "post-commit");
+        let post_head = rev_parse(&root, "HEAD");
+        let idx_post = scratch_index("c4-post");
+        seed_now_index(&root, &idx_post);
+        let post_tree = write_tree(&root, &idx_post);
+        let post_commit =
+            membership_patch_footprint(&diff(&root, &post_head, &post_tree, "large.txt"));
+        std::fs::write(root.join("large.txt"), "committed\nunowned\n").unwrap();
+        let idx_unowned = scratch_index("c4-unowned");
+        seed_now_index(&root, &idx_unowned);
+        let unowned_tree = write_tree(&root, &idx_unowned);
+        let unowned_fp =
+            membership_patch_footprint(&diff(&root, &post_head, &unowned_tree, "large.txt"));
+        let unowned_only =
+            membership_unowned((unowned_fp.added_lines.len(), unowned_fp.removed), (0, 0));
+        assert_eq!(large_unchanged.added_lines.len(), 0);
+        assert_eq!(large_unchanged.removed, 0);
+        assert_eq!(post_commit.added_lines.len(), 0);
+        assert_eq!(post_commit.removed, 0);
+        assert_eq!(unowned_only, ((1, 0), false));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn criterion_5_entangled_staging_fixture_preserves_line_exactness() {
+        // #336's two-item entangled shape: each isolated patch remains the
+        // exact line-level contribution, and residual metadata is retained.
+        let root = scratch_repo("c5");
+        std::fs::write(root.join("shared.txt"), "base\n").unwrap();
+        commit_all(&root, "head: base");
+        let head = rev_parse(&root, "HEAD");
+        std::fs::write(root.join("shared.txt"), "base\na1\na2\n").unwrap();
+        let idx_a = scratch_index("c5-a");
+        seed_now_index(&root, &idx_a);
+        let tree_a = write_tree(&root, &idx_a);
+        let d_a = diff(&root, &head, &tree_a, "shared.txt");
+        std::fs::write(root.join("shared.txt"), "base\na1\na2\nb1\n").unwrap();
+        let idx_now = scratch_index("c5-now");
+        seed_now_index(&root, &idx_now);
+        let tree_now = write_tree(&root, &idx_now);
+        let d_b = diff(&root, &tree_a, &tree_now, "shared.txt");
+        let spawns = std::cell::Cell::new(0usize);
+        let isolated_a = membership_patch_footprint(&d_a);
+        let isolated_b = membership_patch_footprint(
+            &membership_net_patch(
+                &root,
+                &idx_now,
+                &tree_now,
+                std::slice::from_ref(&d_b),
+                "shared.txt",
+                &spawns,
+            )
+            .unwrap(),
+        );
+        assert_eq!(isolated_a.added_lines.len(), 2);
+        assert_eq!(isolated_b.added_lines.len(), 1);
+        assert_eq!(isolated_b.removed, 0);
+        assert_eq!(
+            membership_conservation_breach(
+                (3, 0),
+                (
+                    isolated_a.added_lines.len() + isolated_b.added_lines.len(),
+                    isolated_b.removed
+                ),
+                (0, 0),
+                (0, 0),
+                (0, 0),
+            ),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn criterion_6_joint_and_no_evidence_refusals_remain_named_contracts() {
+        // #356 and pre-capture-only work are refusal contracts.  Keep the
+        // exact operation names beside the fixture until the integration
+        // harness exercises the HTTP gate directly.
+        let mut runs = std::collections::HashMap::new();
+        runs.insert(
+            "shared.txt".to_string(),
+            vec![serde_json::json!({"startLine": 1, "endLine": 2, "itemIds": ["a", "b"]})],
+        );
+        let joint = joint_owners_from_runs(&runs);
+        assert_eq!(joint["shared.txt"].len(), 2);
+        assert_eq!(
+            item_joint_with("a", &["shared.txt".to_string()], &joint),
+            vec!["b"]
+        );
+        let mut declared = std::collections::HashMap::new();
+        declared.insert("a".to_string(), vec!["shared.txt".to_string()]);
+        declared.insert("b".to_string(), vec!["shared.txt".to_string()]);
+        assert!(matches!(
+            resolve_interval_path_owner(
+                &["a".to_string(), "b".to_string()],
+                "shared.txt",
+                &declared
+            ),
+            IntervalPathOwner::Joint(_)
+        ));
+    }
+}
+
 // membership-attributes-deletions: the deletion matrix from the item's
 // worklist draft (docs/attribution-model.md §4, "Review response: the
 // deletion matrix"), driven against real git in temp repos -- the same

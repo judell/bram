@@ -568,6 +568,17 @@ shape as the joint refusal Bram already ships.
    a realistic board; the budget set from the current replay's measured
    baseline before the flip, not after.
 
+### Fixture-first acceptance receipt
+
+Criteria 2–6 now have named executable fixtures in
+`src-tauri/src/lib.rs::membership_acceptance_fixture_tests`. The fixtures
+intentionally keep the suite green while consumers still use replay: criteria
+2–4 record current proxy/residue values alongside the required membership
+values, while criteria 5–6 pin the staging and refusal contracts that must
+survive the flip. When a consumer changes, the corresponding fixture is the
+signal to replace the recorded current value with the criterion assertion; the
+fixture is not permission to revise the criterion to match the implementation.
+
    *Measured baselines (`membership-affordable-enough-to-be-authoritative`),
    verbatim:*
 

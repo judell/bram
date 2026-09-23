@@ -42850,6 +42850,60 @@ fn trace_ghost_reassignments<R: tauri::Runtime>(
     );
 }
 
+// issue-395-attribution-diffs-scoped-to-declared-paths: the replay's diffs
+// run under a pathspec of every item's declared files. A claim boundary
+// captures non-ignored untracked content (capture_claim_tree -- deliberate,
+// creation must be attributable), so an unscoped `git diff <tree>` reports
+// every snapshot-only path as a deletion: 28,265 virtualenv files, 198 MB of
+// patch text and ~10 s per /__worklist serve in #395, all discarded because
+// only a declared path can resolve to an owner (resolve_interval_path_owner
+// returns Unowned otherwise, which yields no runs). Scoping is therefore
+// output-equivalent on every path that can carry a run.
+//
+// Each declared entry contributes its literal path (a directory entry covers
+// its contents -- plain pathspecs prefix-match directories) plus the
+// worktree twins declared_covers also accepts (#309). Sorted and deduped so
+// the cache key below is independent of declaration order.
+fn attribution_pathspec(declared: &std::collections::HashMap<String, Vec<String>>) -> Vec<String> {
+    let mut set: std::collections::BTreeSet<String> = Default::default();
+    for f in declared.values().flatten() {
+        let f = f.trim_end_matches('/');
+        if f.is_empty() {
+            continue;
+        }
+        set.insert(format!(":(literal){}", f));
+        set.insert(format!(":(glob).claude/worktrees/*/{}", f));
+        set.insert(format!(":(glob).claude/worktrees/*/{}/**", f));
+    }
+    set.into_iter().collect()
+}
+
+// `git diff <a> [<b>] -- <pathspec…>`. An empty pathspec means "diff
+// nothing", never "diff everything": callers skip the spawn instead.
+fn attr_diff_args(a: &str, b: Option<&str>, pathspec: &[String]) -> Vec<String> {
+    let mut args = vec!["diff".to_string(), a.to_string()];
+    if let Some(b) = b {
+        args.push(b.to_string());
+    }
+    if !pathspec.is_empty() {
+        args.push("--".to_string());
+        args.extend(pathspec.iter().cloned());
+    }
+    args
+}
+
+// A closed interval's diff is immutable per tree pair AND pathspec: a pair
+// cached under one declared set must not serve another, or a file added to
+// an item's `files` would never have its history attributed.
+fn attr_interval_cache_key(a: &str, b: &str, pathspec: &[String]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    pathspec.hash(&mut h);
+    format!("{}..{}#{:016x}", a, b, h.finish())
+}
+
+static CLAIM_ATTR_PATHSPEC: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionResult {
     let mut empty: AttributionResult = Default::default();
     let Some(root) = project_root(Some(app)) else {
@@ -42944,6 +42998,18 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
     // its ids attributes to that id; declared by several, the lines carry
     // the joint set; declared by none, unowned — the pre-resolution rule.
     let declared = worklist_declared_files(app);
+    let pathspec = attribution_pathspec(&declared);
+    CLAIM_ATTR_PATHSPEC.store(pathspec.len(), std::sync::atomic::Ordering::Relaxed);
+    if pathspec.is_empty() {
+        // Nothing declared, so nothing can own a line: no diffs to run.
+        CLAIM_ATTR_SPAWNS.store(0, std::sync::atomic::Ordering::Relaxed);
+        return empty;
+    }
+    let diff = |a: &str, b: Option<&str>| -> String {
+        let args = attr_diff_args(a, b, &pathspec);
+        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        git(&refs).unwrap_or_default()
+    };
     let mut steps: Vec<(
         Vec<String>,
         std::collections::HashMap<String, Vec<AttrHunk>>,
@@ -42973,11 +43039,11 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
         let next_tree = arr.get(i + 1).map(&tree_of);
         let parsed = match next_tree {
             Some(b_tree) => {
-                let key = format!("{}..{}", a_tree, b_tree);
+                let key = attr_interval_cache_key(&a_tree, &b_tree, &pathspec);
                 if let Some(hit) = cache.lock().ok().and_then(|c| c.get(&key).cloned()) {
                     hit
                 } else {
-                    let out = git(&["diff", &a_tree, &b_tree]).unwrap_or_default();
+                    let out = diff(&a_tree, Some(&b_tree));
                     let parsed = parse_attr_diff(&out);
                     if let Ok(mut c) = cache.lock() {
                         c.insert(key, parsed.clone());
@@ -42986,7 +43052,7 @@ fn claim_attribution_runs<R: tauri::Runtime>(app: &AppHandle<R>) -> AttributionR
                 }
             }
             // The OPEN interval: never cached, it changes with every edit.
-            None => parse_attr_diff(&git(&["diff", &a_tree]).unwrap_or_default()),
+            None => parse_attr_diff(&diff(&a_tree, None)),
         };
         steps.push((ids, parsed));
     }
@@ -60985,10 +61051,11 @@ fn route_request<R: tauri::Runtime>(
                 app,
                 "claim-interval",
                 &format!(
-                    "op=attribute paths={} runs={} spawns={} ms={}",
+                    "op=attribute paths={} runs={} spawns={} pathspec={} ms={}",
                     paths,
                     total,
                     CLAIM_ATTR_SPAWNS.load(std::sync::atomic::Ordering::Relaxed),
+                    CLAIM_ATTR_PATHSPEC.load(std::sync::atomic::Ordering::Relaxed),
                     attr_started.elapsed().as_millis()
                 ),
             );
@@ -69444,5 +69511,228 @@ mod search_not_ready_tests {
         st.last_cycle_ms = 1;
         st.progress = None;
         assert_eq!(search_not_ready_reason(&st), None);
+    }
+}
+
+// issue-395-attribution-diffs-scoped-to-declared-paths: the attribution
+// replay's diffs run under a pathspec built from every item's declared
+// files. Real git, because the claim is about what git emits: a large
+// untracked tree captured into a claim boundary must stop costing anything
+// on a serve, while every path an item could own diffs exactly as before.
+#[cfg(test)]
+mod attribution_pathspec_tests {
+    use super::{
+        attr_diff_args, attr_interval_cache_key, attribution_pathspec, declared_covers,
+        parse_attr_diff,
+    };
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    fn scratch_repo(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "bram-attr-pathspec-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main", "."],
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+        ] {
+            assert!(git(&root, None, &args).status.success());
+        }
+        root
+    }
+
+    fn git(root: &Path, idx: Option<&Path>, args: &[&str]) -> std::process::Output {
+        let mut cmd = Command::new("git");
+        cmd.current_dir(root).args(args);
+        if let Some(i) = idx {
+            cmd.env("GIT_INDEX_FILE", i);
+        }
+        cmd.output().unwrap()
+    }
+
+    fn write(root: &Path, rel: &str, body: &str) {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    // capture_claim_tree's recipe: HEAD into a scratch index, add -A, write-tree.
+    fn capture(root: &Path) -> String {
+        let idx = root.join(".git").join("scratch-claim-index");
+        let _ = std::fs::remove_file(&idx);
+        assert!(git(root, Some(&idx), &["read-tree", "HEAD"])
+            .status
+            .success());
+        assert!(git(root, Some(&idx), &["add", "-A", "--", "."])
+            .status
+            .success());
+        let out = git(root, Some(&idx), &["write-tree"]);
+        let _ = std::fs::remove_file(&idx);
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn run_diff(root: &Path, a: &str, b: Option<&str>, spec: &[String]) -> String {
+        let args = attr_diff_args(a, b, spec);
+        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        String::from_utf8_lossy(&git(root, None, &refs).stdout).into_owned()
+    }
+
+    fn declared() -> HashMap<String, Vec<String>> {
+        let mut d = HashMap::new();
+        // A directory entry, a plain file, and a file only a worktree twin edits.
+        d.insert("dir-item".to_string(), vec!["app/".to_string()]);
+        d.insert(
+            "file-item".to_string(),
+            vec!["docs/y.md".to_string(), "src/z.rs".to_string()],
+        );
+        d
+    }
+
+    fn covered(d: &HashMap<String, Vec<String>>, path: &str) -> bool {
+        d.values().flatten().any(|f| declared_covers(f, path))
+    }
+
+    // Raymond's shape (#395): a big non-ignored untracked tree lands in the
+    // boundary, then disappears from the worktree. Seed it, capture, edit
+    // declared files (including via a worktree twin), delete the tree,
+    // capture again, edit more. Returns (repo, first tree, second tree).
+    fn raymond_repo(tag: &str) -> (PathBuf, String, String) {
+        let root = scratch_repo(tag);
+        write(&root, "app/x.txt", "one\ntwo\nthree\n");
+        write(&root, "docs/y.md", "# y\n");
+        write(&root, "src/z.rs", "fn z() {}\n");
+        write(&root, "other.txt", "undeclared\n");
+        assert!(git(&root, None, &["add", "-A"]).status.success());
+        assert!(git(&root, None, &["commit", "-q", "-m", "base"])
+            .status
+            .success());
+        for i in 0..300 {
+            write(
+                &root,
+                &format!("spike-envs/lib/pkg{}/mod.py", i),
+                &"x = 1\n".repeat(40),
+            );
+        }
+        let t1 = capture(&root);
+        write(&root, "app/x.txt", "one\nTWO\nthree\nfour\n");
+        write(&root, "app/new.txt", "created\n");
+        write(&root, ".claude/worktrees/w1/src/z.rs", "fn z() { 1 }\n");
+        write(&root, "other.txt", "undeclared, edited\n");
+        std::fs::remove_dir_all(root.join("spike-envs")).unwrap();
+        let t2 = capture(&root);
+        write(&root, "docs/y.md", "# y\n\nmore\n");
+        (root, t1, t2)
+    }
+
+    // Equivalence: on every path an item could own, the scoped diff is the
+    // unscoped diff. Fails if the pathspec drops a declared path -- a
+    // directory entry, a created file under it, or a worktree twin.
+    #[test]
+    fn scoped_diff_equals_unscoped_on_declared_paths() {
+        let (root, t1, t2) = raymond_repo("equiv");
+        let d = declared();
+        let spec = attribution_pathspec(&d);
+        for (a, b) in [(t1.as_str(), Some(t2.as_str())), (t2.as_str(), None)] {
+            let full = parse_attr_diff(&run_diff(&root, a, b, &[]));
+            let scoped = parse_attr_diff(&run_diff(&root, a, b, &spec));
+            let full_declared: HashMap<_, _> =
+                full.into_iter().filter(|(p, _)| covered(&d, p)).collect();
+            assert_eq!(
+                scoped.keys().collect::<std::collections::BTreeSet<_>>(),
+                full_declared
+                    .keys()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                "scoped paths must equal the declared-covered unscoped paths"
+            );
+            for (p, h) in &full_declared {
+                assert_eq!(
+                    format!("{:?}", scoped[p]),
+                    format!("{:?}", h),
+                    "hunks differ on {}",
+                    p
+                );
+            }
+        }
+        // The fixture really exercises the three declaration shapes.
+        let closed = parse_attr_diff(&run_diff(&root, &t1, Some(&t2), &spec));
+        assert!(closed.contains_key("app/new.txt"));
+        assert!(closed.contains_key(".claude/worktrees/w1/src/z.rs"));
+        let open = parse_attr_diff(&run_diff(&root, &t2, None, &spec));
+        assert!(open.contains_key("docs/y.md"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Cost: the untracked tree the boundaries captured contributes nothing
+    // to either diff. Fails if the pathspec is removed from attr_diff_args.
+    #[test]
+    fn captured_untracked_tree_costs_nothing_when_scoped() {
+        let (root, t1, t2) = raymond_repo("cost");
+        let spec = attribution_pathspec(&declared());
+        let closed_full = run_diff(&root, &t1, Some(&t2), &[]);
+        assert!(
+            closed_full.contains("spike-envs/"),
+            "fixture must reproduce the phantom deletions"
+        );
+        for (a, b) in [(t1.as_str(), Some(t2.as_str())), (t2.as_str(), None)] {
+            let out = run_diff(&root, a, b, &spec);
+            assert!(
+                !out.contains("spike-envs/"),
+                "untracked tree leaked into a scoped diff"
+            );
+            assert!(
+                !out.contains("other.txt"),
+                "undeclared path leaked into a scoped diff"
+            );
+            assert!(out.len() < 4_000, "scoped diff is {} bytes", out.len());
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Nothing declared -> no pathspec, and the caller skips the diffs. An
+    // empty pathspec must never mean "diff everything".
+    #[test]
+    fn empty_declared_set_yields_empty_pathspec() {
+        assert!(attribution_pathspec(&HashMap::new()).is_empty());
+        let mut d = HashMap::new();
+        d.insert("no-files".to_string(), Vec::<String>::new());
+        assert!(attribution_pathspec(&d).is_empty());
+    }
+
+    // Cache: a closed interval diffed under one declared set must not serve
+    // another, or adding a file to an item's `files` would never attribute
+    // that file's history. Fails if the key omits the pathspec.
+    #[test]
+    fn cache_key_changes_with_the_declared_set() {
+        let a = attribution_pathspec(&declared());
+        let mut more = declared();
+        more.get_mut("file-item")
+            .unwrap()
+            .push("other.txt".to_string());
+        let b = attribution_pathspec(&more);
+        assert_ne!(
+            attr_interval_cache_key("t1", "t2", &a),
+            attr_interval_cache_key("t1", "t2", &b)
+        );
+        // Same set, any declaration order -> same key (no needless misses).
+        let mut shuffled = HashMap::new();
+        shuffled.insert(
+            "file-item".to_string(),
+            vec!["src/z.rs".to_string(), "docs/y.md".to_string()],
+        );
+        shuffled.insert("dir-item".to_string(), vec!["app/".to_string()]);
+        assert_eq!(
+            attr_interval_cache_key("t1", "t2", &a),
+            attr_interval_cache_key("t1", "t2", &attribution_pathspec(&shuffled))
+        );
     }
 }

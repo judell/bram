@@ -1983,6 +1983,19 @@ so narrating from it reports intent as outcome (#354's field failure: the
 user deliberately declined, the host honoured it, and the report claimed
 a close was queued anyway).
 
+**A `[bram: …]` line at the start of a user turn is written by the host,
+not the user** (issue-382-agent-learns-close-was-withdrawn). It reports a
+state change you could not otherwise observe, and it **corrects** whatever
+you said earlier about that state. The live case: a user withdraws a queued
+close from the Commits tab after you told them it would fire on Push. The
+next turn then begins with `[bram: the queued close of #21 (commit 94f7666)
+was withdrawn … it will NOT fire on Push, and #21 stays open]`. Take it as
+fact, drop the old claim, and say so briefly if it changes something you
+told the user. Don't attribute the words to the user or treat them as a
+request. Notes ride only plain message turns, never `approved:` / `drop:` /
+`iterate:` / `skip-worklist:` turns, so a note can arrive a turn or two
+after the change it reports.
+
 **A partial landing is disclosed, not silent — narrate `residualPaths`
 and `retained` when they appear** (judell/bram#364). An interval-staged
 commit stages only the lines the requested item's claim intervals

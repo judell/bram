@@ -18055,6 +18055,151 @@ fn clear_proposing_flag<R: tauri::Runtime>(app: &AppHandle<R>, cause: &str) {
     let _ = app.emit("proposing-changed", serde_json::json!({"proposing": false}));
 }
 
+// issue-382-agent-learns-close-was-withdrawn: the pending host note.
+//
+// Some state changes happen entirely on the pane side -- a user withdraws a
+// queued issue close -- and the agent, which may have told the user that
+// close would fire, has no way to observe them: bram-guard returns no
+// additionalContext, and nothing else speaks to the agent between turns. A
+// host note is a one-line correction queued in resources/.host-notes.json and
+// delivered by PREPENDING it, visibly marked `[bram: ...]`, to the next plain
+// user turn, so the correction arrives exactly when the agent next acts and
+// the human sees in the transcript what the agent was told.
+//
+// Only PLAIN message turns carry notes. Structured turns are anchored at
+// their start -- approved:/drop:/iterate:/talk: payloads ride inline and the
+// agent reads the prefix; skip-worklist: must begin the turn -- so a note
+// prepended there would displace the directive. Notes wait for the next plain
+// turn instead. The end of the turn is never touched (the "just do it"
+// opt-out is end-anchored), and the host's own prefix detectors have already
+// run on the raw text before this point.
+//
+// Delivery is confirmed, not assumed: notes are PEEKED before the send and
+// cleared by id only after the PTY write succeeds, so a failed send leaves
+// them pending and a note queued mid-send is not lost.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HostNote {
+    id: String,
+    kind: String,
+    text: String,
+    created_at_ms: i64,
+}
+
+fn host_notes_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn host_notes_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    project_resource_path(app, ".host-notes.json")
+}
+
+fn read_host_notes(path: &Path) -> Vec<HostNote> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<HostNote>>(&s).ok())
+        .unwrap_or_default()
+}
+
+fn write_host_notes(path: &Path, notes: &[HostNote]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let body = serde_json::to_string_pretty(notes).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+}
+
+// A plain message turn: no structured, start-anchored prefix.
+fn turn_accepts_host_notes(turn_text: &str) -> bool {
+    let t = turn_text.trim_start();
+    !["approved:", "drop:", "iterate:", "talk:", "skip-worklist:"]
+        .iter()
+        .any(|p| t.starts_with(p))
+}
+
+fn prepend_host_notes(turn_text: &str, notes: &[HostNote]) -> String {
+    if notes.is_empty() {
+        return turn_text.to_string();
+    }
+    let block: Vec<String> = notes
+        .iter()
+        .map(|n| format!("[bram: {}]", n.text))
+        .collect();
+    format!("{}\n\n{}", block.join("\n"), turn_text.trim_start())
+}
+
+// Remove exactly the delivered ids, keeping anything queued since the peek.
+fn host_notes_without(notes: Vec<HostNote>, delivered: &[String]) -> Vec<HostNote> {
+    notes
+        .into_iter()
+        .filter(|n| !delivered.contains(&n.id))
+        .collect()
+}
+
+fn queue_host_note<R: tauri::Runtime>(app: &AppHandle<R>, kind: &str, text: String) {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let Some(path) = host_notes_file(app) else {
+        return;
+    };
+    let _guard = host_notes_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let mut notes = read_host_notes(&path);
+    let now = unix_now_ms();
+    let id = format!(
+        "{}-{}",
+        now,
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    notes.push(HostNote {
+        id: id.clone(),
+        kind: kind.to_string(),
+        text,
+        created_at_ms: now,
+    });
+    let pending = notes.len();
+    match write_host_notes(&path, &notes) {
+        Ok(()) => append_bram_trace_line(
+            app,
+            "host-note",
+            &format!("op=queued id={} kind={} pending={}", id, kind, pending),
+        ),
+        Err(e) => append_bram_trace_line(
+            app,
+            "host-note",
+            &format!("op=queue-failed kind={} error={}", kind, e),
+        ),
+    }
+}
+
+fn peek_host_notes<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<HostNote> {
+    let Some(path) = host_notes_file(app) else {
+        return Vec::new();
+    };
+    let _guard = host_notes_lock().lock().unwrap_or_else(|p| p.into_inner());
+    read_host_notes(&path)
+}
+
+fn clear_delivered_host_notes<R: tauri::Runtime>(app: &AppHandle<R>, delivered: &[HostNote]) {
+    let Some(path) = host_notes_file(app) else {
+        return;
+    };
+    let ids: Vec<String> = delivered.iter().map(|n| n.id.clone()).collect();
+    let _guard = host_notes_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let remaining = host_notes_without(read_host_notes(&path), &ids);
+    let _ = write_host_notes(&path, &remaining);
+    append_bram_trace_line(
+        app,
+        "host-note",
+        &format!(
+            "op=delivered ids={} remaining={}",
+            ids.join(","),
+            remaining.len()
+        ),
+    );
+}
+
 fn write_pty_turn_intent<R: tauri::Runtime>(
     app: &AppHandle<R>,
     state: &State<'_, AppState>,
@@ -18067,6 +18212,21 @@ fn write_pty_turn_intent<R: tauri::Runtime>(
     record_skip_worklist_authorization(app, data);
     record_proposing_intent(app, data);
     record_turn_context(app, data);
+    // issue-382-agent-learns-close-was-withdrawn: pending host notes ride the
+    // next PLAIN turn, prepended AFTER the detectors above have read the raw
+    // text and BEFORE framing, so an envelope's `text` carries them too.
+    let pending_notes = if turn_accepts_host_notes(data) {
+        peek_host_notes(app)
+    } else {
+        Vec::new()
+    };
+    let with_notes;
+    let data: &str = if pending_notes.is_empty() {
+        data
+    } else {
+        with_notes = prepend_host_notes(data, &pending_notes);
+        &with_notes
+    };
     // Envelope switch (docs/turn-transport-redesign.md step 6): substantial
     // or image-bearing sends are persisted as an outbound-turn envelope and
     // the PTY carries only a compact frame. Inline sends get the whitespace
@@ -18119,7 +18279,11 @@ fn write_pty_turn_intent<R: tauri::Runtime>(
         );
     }
     clear_stale_terminal_input_before_pane_send(app, state);
-    inject_turn_payload(app, state, data)
+    let sent = inject_turn_payload(app, state, data);
+    if sent.is_ok() && !pending_notes.is_empty() {
+        clear_delivered_host_notes(app, &pending_notes);
+    }
+    sent
 }
 
 fn sanitize_pty_turn_payload(data: &str) -> String {
@@ -57178,6 +57342,22 @@ fn issue_close_queue_vanished_pairs(
     last_known.difference(current).cloned().collect()
 }
 
+// issue-382-agent-learns-close-was-withdrawn: the correction the agent
+// receives. It names the issue and commit so the agent can match it to
+// whatever it said at commit time, and states the consequence plainly.
+fn close_withdrawn_note_text(issue: u64, commit_sha: &str, via: &str) -> String {
+    let short: String = commit_sha.chars().take(7).collect();
+    let how = if via == "pane" {
+        "the user withdrew it from the Commits tab"
+    } else {
+        "it was removed from resources/.worklist-issue-close.json by hand"
+    };
+    format!(
+        "the queued close of #{} (commit {}) was withdrawn -- {}; it will NOT fire on Push, and #{} stays open",
+        issue, short, how, issue
+    )
+}
+
 // close-queue-host-removals-announced-not-withdrawn: the flush's marking,
 // pure so it is testable without an AppHandle -- every pair present before
 // the rewrite and absent after is registered as a host removal, and returned
@@ -57271,6 +57451,11 @@ fn detect_issue_close_queue_withdrawals<R: tauri::Runtime>(
                 &format!("op=withdrawn issue={} sha={} via=file-edit", issue, sha),
             );
         }
+        queue_host_note(
+            app,
+            "issue-close-withdrawn",
+            close_withdrawn_note_text(issue, &sha, "file-edit"),
+        );
         append_audit_record(
             app,
             serde_json::json!({
@@ -57392,6 +57577,11 @@ fn handle_issue_close_queue_withdraw<R: tauri::Runtime>(
             &format!("op=withdrawn issue={} sha={} via=pane", issue, commit_sha),
         );
     }
+    queue_host_note(
+        app,
+        "issue-close-withdrawn",
+        close_withdrawn_note_text(issue, commit_sha, "pane"),
+    );
     append_audit_record(
         app,
         serde_json::json!({
@@ -69853,5 +70043,107 @@ mod attribution_pathspec_tests {
             attr_interval_cache_key("t1", "t2", &a),
             attr_interval_cache_key("t1", "t2", &attribution_pathspec(&shuffled))
         );
+    }
+}
+
+// issue-382-agent-learns-close-was-withdrawn: the host-note channel's pure
+// rules. Each test names the change that would make it fail.
+#[cfg(test)]
+mod host_note_tests {
+    use super::{
+        close_withdrawn_note_text, host_notes_without, prepend_host_notes, read_host_notes,
+        turn_accepts_host_notes, write_host_notes, HostNote,
+    };
+
+    fn note(id: &str, text: &str) -> HostNote {
+        HostNote {
+            id: id.to_string(),
+            kind: "issue-close-withdrawn".to_string(),
+            text: text.to_string(),
+            created_at_ms: 1,
+        }
+    }
+
+    // Structured turns keep their start-anchored prefix. Fails if a lifecycle
+    // or skip-worklist turn is allowed to carry a note in front of it.
+    #[test]
+    fn only_plain_turns_carry_notes() {
+        assert!(turn_accepts_host_notes("did the close fire?"));
+        for t in [
+            "approved: {\"items\":[]}",
+            "  drop: {}",
+            "iterate: {}",
+            "talk: hi",
+            "skip-worklist: fix it",
+        ] {
+            assert!(!turn_accepts_host_notes(t), "{}", t);
+        }
+    }
+
+    // No notes pending -> the turn is byte-identical to today.
+    #[test]
+    fn no_notes_leaves_the_turn_untouched() {
+        let t = "  hello there";
+        assert_eq!(prepend_host_notes(t, &[]), t);
+    }
+
+    // Notes go in FRONT and the user's text keeps its ending, so the
+    // end-anchored "just do it" opt-out still matches. Fails if notes are
+    // appended.
+    #[test]
+    fn notes_prepend_and_preserve_the_ending() {
+        let out = prepend_host_notes(
+            "change the label, just do it",
+            &[note("1", "a"), note("2", "b")],
+        );
+        assert!(out.starts_with("[bram: a]\n[bram: b]\n\n"));
+        assert!(out.ends_with("just do it"));
+    }
+
+    // Clearing removes exactly what was delivered: a note queued between the
+    // peek and the successful send survives. Fails if clearing empties the
+    // file wholesale.
+    #[test]
+    fn clearing_keeps_notes_queued_mid_send() {
+        let all = vec![note("1", "a"), note("2", "b"), note("3", "late")];
+        let left = host_notes_without(all, &["1".to_string(), "2".to_string()]);
+        assert_eq!(left, vec![note("3", "late")]);
+    }
+
+    // Two withdrawals before any turn are two notes, not one. Fails if a
+    // queue write replaces instead of appending.
+    #[test]
+    fn two_queued_notes_both_survive_a_roundtrip() {
+        let dir = std::env::temp_dir().join(format!(
+            "bram-host-notes-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let path = dir.join(".host-notes.json");
+        let mut notes = read_host_notes(&path);
+        assert!(notes.is_empty(), "missing file reads as no notes");
+        notes.push(note("1", "first"));
+        write_host_notes(&path, &notes).unwrap();
+        let mut notes = read_host_notes(&path);
+        notes.push(note("2", "second"));
+        write_host_notes(&path, &notes).unwrap();
+        assert_eq!(read_host_notes(&path).len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The correction names the issue and commit the agent would have cited,
+    // and says the close will not fire.
+    #[test]
+    fn withdrawn_note_names_issue_commit_and_consequence() {
+        let t = close_withdrawn_note_text(21, "94f7666aaaabbbb", "pane");
+        assert!(t.contains("#21"));
+        assert!(t.contains("94f7666"));
+        assert!(!t.contains("94f7666a"));
+        assert!(t.contains("will NOT fire on Push"));
+        assert!(t.contains("Commits tab"));
+        assert!(close_withdrawn_note_text(21, "94f7666", "file-edit").contains("by hand"));
     }
 }

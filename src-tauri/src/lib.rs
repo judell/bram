@@ -46736,8 +46736,9 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
     // it supplies the finished cue's verb + duration; if absent
     // (resize artifact, banner not yet painted, partial chunk), the
     // row shows generic "Finished". Refs #179.
+    let active_provider = current_provider(app);
     let active_matches = matches!(
-        (current_provider(app), provider),
+        (active_provider, provider),
         (
             Some(SessionProvider::Claude),
             JsonlCompletionProvider::Claude
@@ -46864,6 +46865,24 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
                 emit_turn_context(app, &[], "turn-end");
             }
         }
+    }
+
+    // A different provider's turn boundary must not clear or re-arm the
+    // attached agent's worklist claim. Keep the historical behavior when no
+    // provider identity is recorded, since older launches relied on the
+    // transcript detector alone.
+    if active_provider.is_some() && !active_matches {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "jsonl-turn-end",
+                &format!(
+                    "op=skip provider={} reason=provider-mismatch decision={} path={}",
+                    provider_label, decision.reason, basename
+                ),
+            );
+        }
+        return;
     }
 
     let Some((claimed_ids, claimed_at)) = inflight_claim_ids_and_claimed_at(app) else {

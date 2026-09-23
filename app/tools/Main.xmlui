@@ -108,6 +108,13 @@
        (Tool Descriptions / batch actions); tick bumps re-pick on dismiss
        or next. One-shot fetch, no polling. -->
   <DataSource id="footerTipSettings" url="/__settings" />
+  <!-- issue-389: pushed settings so the header's "managed externally" label
+       follows a Settings change live (same PushSource pattern as
+       Settings.xmlui's settingsChangedEvt). -->
+  <PushSource
+    id="headerSettingsEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('settings-changed')}" />
   <variable name="footerTipTick" value="{0}" />
   <LocalLinkPreview />
   <!-- Live session meta for the footer echo (mirrors Transcript's source):
@@ -528,9 +535,17 @@
             colorMap="{window.__bramProjectColorMap(appInfo.value)}"
             tooltip="{window.__bramProjectTooltip(appInfo.value)}" />
         </Theme>
+        <!-- issue-389: under "Do not start an agent" the switcher could only
+             ever produce a refusal, so it is replaced by a label saying why
+             (a vanished control reads as a bug — cf. judell/bram#380). -->
+        <Text
+          when="{window.__bramStartupPolicyIsNone(headerSettingsEvt.value, footerTipSettings.value)}"
+          variant="secondary"
+          value="Agent managed externally"
+          tooltip="Settings → On Bram launch is set to “Do not start an agent”, so Bram won’t start, switch, or type into the terminal’s agent." />
         <RadioGroup
           id="agentSwitcherSelect"
-          when="{(mainAgentStatus.value &amp;&amp; mainAgentStatus.value.provider) || (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider)}"
+          when="{!window.__bramStartupPolicyIsNone(headerSettingsEvt.value, footerTipSettings.value) &amp;&amp; ((mainAgentStatus.value &amp;&amp; mainAgentStatus.value.provider) || (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider))}"
           orientation="horizontal"
           initialValue="{(mainAgentStatus.value &amp;&amp; mainAgentStatus.value.provider) || (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider)}"
           enabled="{!agentSwitcherBusy.value}"

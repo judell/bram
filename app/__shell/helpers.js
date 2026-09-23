@@ -818,6 +818,16 @@ window.__bramAgentSwitcherTrace = function (stage, fields) {
     window.__bramIframeTrace("agent-switcher", payload);
   } catch (e) {}
 };
+// issue-389: true when Settings → On Bram launch is "Do not start an agent".
+// The header hides the Claude/Codex switcher then (every host path it would
+// drive refuses under "none") and says why instead. Prefers the pushed
+// settings-changed payload so a Settings change updates the header without a
+// reload; falls back to the one-shot /__settings fetch.
+window.__bramStartupPolicyIsNone = function (pushedEvt, fetchedSettings) {
+  var settings = (pushedEvt && pushedEvt.payload) || fetchedSettings || {};
+  var shell = settings.shell || {};
+  return shell.startupPolicy === "none";
+};
 window.__bramAgentSwitcherLabel = function (provider) {
   return String(provider || "").toLowerCase() === "codex" ? "Codex" : "Claude";
 };

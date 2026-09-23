@@ -57147,6 +57147,14 @@ fn withdraw_pending_issue_close_path(
     Ok(removed)
 }
 
+// close-queue-host-removals-announced-not-withdrawn: pairs the HOST itself
+// removed -- the withdraw route below, and the close-on-push flush for every
+// close it completed or retired. Before this generalization only the route
+// registered, so each completed close vanished from the file unmarked and the
+// detector logged it as a hand-edit withdrawal: six of six closes from
+// 2026-09-21 to 09-23 (#387 #384 #385 #380 #390 #395) each carried a false
+// `op=withdrawn via=file-edit` line and audit record 3-6 s after `op=closed`.
+//
 // issue-382-withdraw-queued-close: pairs the POST route just removed, so
 // the watcher's disappearance detector -- which sees the same file event a
 // beat later, from its own independent watch on resources/ -- can
@@ -57154,8 +57162,7 @@ fn withdraw_pending_issue_close_path(
 // line for it. Consumed on read (HashSet::remove), so a pair is only ever
 // suppressed once; a SECOND disappearance of the same (issue, sha) -- which
 // cannot happen without a re-enqueue in between -- would trace honestly.
-fn issue_close_queue_route_withdrawals() -> &'static Mutex<std::collections::HashSet<(u64, String)>>
-{
+fn issue_close_queue_host_removals() -> &'static Mutex<std::collections::HashSet<(u64, String)>> {
     static SET: OnceLock<Mutex<std::collections::HashSet<(u64, String)>>> = OnceLock::new();
     SET.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
 }
@@ -57171,12 +57178,38 @@ fn issue_close_queue_vanished_pairs(
     last_known.difference(current).cloned().collect()
 }
 
+// close-queue-host-removals-announced-not-withdrawn: the flush's marking,
+// pure so it is testable without an AppHandle -- every pair present before
+// the rewrite and absent after is registered as a host removal, and returned
+// so a failed write can back the markers out.
+fn issue_close_queue_mark_host_removals(
+    marked: &mut std::collections::HashSet<(u64, String)>,
+    before: &std::collections::HashSet<(u64, String)>,
+    after: &std::collections::HashSet<(u64, String)>,
+) -> Vec<(u64, String)> {
+    let removed = issue_close_queue_vanished_pairs(before, after);
+    for pair in &removed {
+        marked.insert(pair.clone());
+    }
+    removed
+}
+
+// close-queue-host-removals-announced-not-withdrawn: any add OR remove is a
+// change the pane must see -- an enqueue shows a new "will close" row, a
+// removal clears one.
+fn issue_close_queue_set_changed(
+    last_known: &std::collections::HashSet<(u64, String)>,
+    current: &std::collections::HashSet<(u64, String)>,
+) -> bool {
+    last_known != current
+}
+
 // issue-382-withdraw-queued-close: of the pairs that vanished, which ones
 // need a via=file-edit trace? A pair the withdraw route already removed
 // (and traced+audited via=pane) is registered in `route_marked` and gets
 // consumed here silently -- this is the double-log guard, factored out as
 // a pure function over a plain set so it's testable without touching the
-// process-global issue_close_queue_route_withdrawals() Mutex.
+// process-global issue_close_queue_host_removals() Mutex.
 fn issue_close_queue_classify_vanished(
     vanished: Vec<(u64, String)>,
     route_marked: &mut std::collections::HashSet<(u64, String)>,
@@ -57190,7 +57223,7 @@ fn issue_close_queue_classify_vanished(
 // issue-382-withdraw-queued-close: diff the current on-disk close queue
 // against the last-known set. Anything that vanished either came through
 // the withdraw route below (already traced+audited there; the marker in
-// issue_close_queue_route_withdrawals lets this be consumed silently so it
+// issue_close_queue_host_removals lets this be consumed silently so it
 // isn't logged twice) or vanished some other way -- a hand-edit of
 // resources/.worklist-issue-close.json, the escape hatch judell/bram#382
 // documents as the only lever available before this route existed. The
@@ -57213,10 +57246,16 @@ fn detect_issue_close_queue_withdrawals<R: tauri::Runtime>(
     if last_known.is_empty() && current.is_empty() {
         return;
     }
+    // close-queue-host-removals-announced-not-withdrawn: this watcher sees
+    // every change to the queue file -- enqueue, flush, withdraw route, hand
+    // edit -- so it is the one announcer. The Commits tab refetched the queue
+    // only on git-status-changed, which a Push fires seconds BEFORE the flush
+    // closes anything, so a completed close stayed on screen until reload.
+    let changed = issue_close_queue_set_changed(last_known, &current);
     let vanished = issue_close_queue_vanished_pairs(last_known, &current);
     let unattributed = issue_close_queue_classify_vanished(
         vanished,
-        &mut issue_close_queue_route_withdrawals()
+        &mut issue_close_queue_host_removals()
             .lock()
             .unwrap_or_else(|p| p.into_inner()),
     );
@@ -57243,6 +57282,9 @@ fn detect_issue_close_queue_withdrawals<R: tauri::Runtime>(
         );
     }
     *last_known = current;
+    if changed {
+        emit_replayable_signal(app, "issue-close-queue-changed");
+    }
 }
 
 // issue-382-withdraw-queued-close: the pane-initiated removal of a pending
@@ -57304,12 +57346,12 @@ fn handle_issue_close_queue_withdraw<R: tauri::Runtime>(
     // Backed out below on any path that does not actually remove a record, so
     // a failed or no-op call cannot leave a marker that silently swallows a
     // later genuine hand edit of the same pair.
-    issue_close_queue_route_withdrawals()
+    issue_close_queue_host_removals()
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .insert((issue, commit_sha.to_string()));
     let unregister = || {
-        issue_close_queue_route_withdrawals()
+        issue_close_queue_host_removals()
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&(issue, commit_sha.to_string()));
@@ -57673,6 +57715,10 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>, trigger: &s
         return;
     }
     let pending = records.len();
+    let pairs_before: std::collections::HashSet<(u64, String)> = records
+        .iter()
+        .map(|r| (r.issue, r.commit_sha.clone()))
+        .collect();
     eprintln!(
         "[issue-close-queue] op=flush-attempt trigger={} pending={}",
         trigger, pending
@@ -57982,8 +58028,31 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>, trigger: &s
             remaining.push(record);
         }
     }
+    // close-queue-host-removals-announced-not-withdrawn: every pair this
+    // flush drops (closed, closed via PR, retired as already closed) is a
+    // HOST removal, registered BEFORE the write for the same reason the
+    // withdraw route registers first: the watcher fires on the write itself.
+    // Backed out if the write fails, so a stale marker cannot swallow a later
+    // genuine hand edit of the same pair.
+    let pairs_after: std::collections::HashSet<(u64, String)> = remaining
+        .iter()
+        .map(|r| (r.issue, r.commit_sha.clone()))
+        .collect();
+    let host_removed = issue_close_queue_mark_host_removals(
+        &mut issue_close_queue_host_removals()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()),
+        &pairs_before,
+        &pairs_after,
+    );
     if let Err(e) = write_pending_issue_closes(&path, &remaining) {
         eprintln!("[issue-close-queue] write remaining failed: {}", e);
+        let mut marked = issue_close_queue_host_removals()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        for pair in &host_removed {
+            marked.remove(pair);
+        }
     }
     // issue-253: record the outcome of the attempt. `flush-none` is the
     // deferred-forever case — a non-empty queue that closed nothing — which
@@ -58033,7 +58102,8 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>, trigger: &s
 mod close_on_push_tests {
     use super::{
         close_issue_pr_comment, enqueue_pending_issue_close_path,
-        issue_close_queue_classify_vanished, issue_close_queue_vanished_pairs,
+        issue_close_queue_classify_vanished, issue_close_queue_mark_host_removals,
+        issue_close_queue_set_changed, issue_close_queue_vanished_pairs,
         parse_close_issue_selections, read_pending_issue_closes, read_pending_issue_closes_settled,
         withdraw_pending_issue_close, withdraw_pending_issue_close_path, PendingIssueClose,
     };
@@ -58261,6 +58331,55 @@ mod close_on_push_tests {
         let vanished = vec![(7, "abc123".to_string())];
         let unattributed = issue_close_queue_classify_vanished(vanished, &mut route_marked);
         assert_eq!(unattributed, vec![(7, "abc123".to_string())]);
+    }
+
+    // close-queue-host-removals-announced-not-withdrawn: the flush's own
+    // removals of completed closes are host removals, not withdrawals. The
+    // pre-fix shape: #395 closed, vanished unmarked, logged via=file-edit.
+    #[test]
+    fn flush_removals_of_completed_closes_are_not_withdrawals() {
+        let before: HashSet<(u64, String)> =
+            [(395, "ee92681".to_string()), (396, "aaaa".to_string())].into();
+        // 395 closed and left the file; 396 is still awaiting push.
+        let after: HashSet<(u64, String)> = [(396, "aaaa".to_string())].into();
+        let mut marked = HashSet::new();
+        let removed = issue_close_queue_mark_host_removals(&mut marked, &before, &after);
+        assert_eq!(removed, vec![(395, "ee92681".to_string())]);
+        let vanished = issue_close_queue_vanished_pairs(&before, &after);
+        assert!(issue_close_queue_classify_vanished(vanished, &mut marked).is_empty());
+        // Consumed once: a later hand edit of the same pair would trace.
+        assert!(marked.is_empty());
+    }
+
+    // An unmarked disappearance is still a hand edit. Fails if marking
+    // over-reaches to pairs the flush did not remove.
+    #[test]
+    fn unmarked_disappearance_still_classifies_as_file_edit() {
+        let before: HashSet<(u64, String)> =
+            [(395, "ee92681".to_string()), (396, "aaaa".to_string())].into();
+        let flush_after = before.clone(); // flush closed nothing
+        let mut marked = HashSet::new();
+        assert!(
+            issue_close_queue_mark_host_removals(&mut marked, &before, &flush_after).is_empty()
+        );
+        // Then the user hand-deletes 396.
+        let hand_after: HashSet<(u64, String)> = [(395, "ee92681".to_string())].into();
+        let vanished = issue_close_queue_vanished_pairs(&before, &hand_after);
+        assert_eq!(
+            issue_close_queue_classify_vanished(vanished, &mut marked),
+            vec![(396, "aaaa".to_string())]
+        );
+    }
+
+    // Add-only and remove-only both announce. Fails if the emit is gated on
+    // removals alone (an enqueue must show its "will close" row too).
+    #[test]
+    fn set_changed_covers_adds_and_removes() {
+        let a: HashSet<(u64, String)> = [(1, "x".to_string())].into();
+        let ab: HashSet<(u64, String)> = [(1, "x".to_string()), (2, "y".to_string())].into();
+        assert!(issue_close_queue_set_changed(&a, &ab));
+        assert!(issue_close_queue_set_changed(&ab, &a));
+        assert!(!issue_close_queue_set_changed(&ab, &ab.clone()));
     }
 }
 
@@ -67772,7 +67891,7 @@ pub fn run() {
                 // observed event never reads as a mass withdrawal. Every
                 // later disappearance relative to this set is either the
                 // route's own removal (registered in
-                // issue_close_queue_route_withdrawals and consumed silently
+                // issue_close_queue_host_removals and consumed silently
                 // here) or an unattributed hand-edit of
                 // .worklist-issue-close.json -- the escape hatch #382 names --
                 // logged via=file-edit so it lands in the audit trail instead

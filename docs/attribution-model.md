@@ -353,11 +353,95 @@ together).
   fourth first-class state alongside single/joint/unowned, rendered as
   such, staged only with both placements' items together. This is H's
   analog of the joint refusal: honest, rare, and shaped like #356's.
-- *Deletions:* first-class, and more natural than in R. A deletion is a
-  region of `git diff HEAD` like any other; membership annotates *edit
-  operations*, not surviving worktree lines, so `residual_owner_label`'s
-  pure-deletion-hunk special case (`lib.rs:41066`) dissolves. An item whose
-  evidence deletes lines owns that deletion.
+- *Deletions:* first-class, and more natural than in R — **implemented**
+  (membership-attributes-deletions, 2026-09-22), not merely aspirational.
+  Earlier text here claimed this unconditionally ("An item whose evidence
+  deletes lines owns that deletion") while the engine hardcoded every
+  candidate's removed count to zero; that gap, and why the naive fix
+  double-books (a modification "removes" a line that never existed vs
+  HEAD when it rewrites an earlier claimant's work — the dependency
+  fixture's `expected=1 got=2` fire), is recorded in the item's worklist
+  draft (`resources/worklist-drafts/membership-attributes-deletions.md`)
+  rather than restated here. The rule that closed the gap:
+
+  > A candidate's removed lines count as HEAD-relative deletions only
+  > when its `base_tree` — present content with the candidate's own
+  > evidence reverse-applied out (`membership_candidate_base`) — carries
+  > the SAME blob for the path as HEAD (`membership_blob_matches_head`,
+  > `git diff --quiet <base_tree> HEAD -- <path>`). Additions are
+  > unaffected: an added line is present in current content by
+  > definition, so it counts regardless of layering. When the blobs
+  > differ, the candidate sat on top of other work (still-live or
+  > already-superseded) and its removed count is baseline-relative, not
+  > HEAD-relative; that removed axis is **not** credited to the
+  > candidate, and falls to unowned by subtraction — the model's honest
+  > degradation, the same family as supersession.
+
+  **The deletion matrix**, five shapes and the rule's answer for each
+  (H = HEAD content; a same-click joint candidate behaves identically to
+  a single one — no special case):
+
+  | # | shape | expected `(added, removed)` |
+  |---|---|---|
+  | 1 | pure deletion — H `[a,b,c]`, X deletes `b` | X owns `(0,1)`; unowned `(0,0)` |
+  | 2 | deletion after a prior rewrite — H `[old]`, A `old→middle` (superseded), B `middle→new` | B owns `(1,0)` — the addition only; the `-old` deletion is **unowned** `(0,1)`; universe `(1,1)` |
+  | 3 | shared deletion — a same-click claim covering X and Y removes `b` | joint owns `(0,1)`; no special case |
+  | 4 | modification — H `[a]`, X `a→a'` | X owns `(1,1)` |
+  | 5 | multi-interval re-edit — X creates `[p,q]`, later deletes `q` | X owns `(1,0)`; unowned `(0,0)` — see below |
+
+  Cases 1–4 are proven against real git in temp repos:
+  `membership_deletion_matrix_tests::matrix_1_pure_deletion_owns_the_removed_line`,
+  `matrix_2_deletion_after_prior_rewrite_lands_unowned`,
+  `matrix_3_shared_deletion_is_joint_no_special_case`, and
+  `matrix_4_modification_owns_both_axes` (`lib.rs`). Case 2 is the shape
+  that motivated the review (a reviewer declined to sign off on an
+  earlier, hand-wavier draft of this rule over exactly this
+  counter-example); the fixture confirms the rule produces the
+  conservative answer — nobody is credited with deleting `old`, because
+  no surviving evidence accounts for removing it — with no special-casing
+  needed.
+
+  **Case 5 is fixed** (fix-patch-composition-for-repeated-paths,
+  2026-09-22). `git apply --cached --reverse` on a patch carrying two
+  `diff --git` sections for the *same* path (one per interval) does not
+  compose them: it reverses only the *last* section and silently drops
+  the earlier one, exit code 0. Proven directly with plain git,
+  independent of any Bram code: concatenating a new-file diff (`+p+q`)
+  with a same-path modification diff (`-q`) and reverse-applying the
+  concatenation lands at the tree from *after* the first diff, not at
+  HEAD. So for a candidate whose own evidence touched one path across
+  more than one interval, `membership_candidate_base`'s `base_tree` used
+  to come out "present state minus only the LAST interval's section,"
+  not "present state minus all of the candidate's evidence" —
+  `membership_net_patch`'s own doc comment ("reverse-apply the evidence
+  OUT of the present state," #367) claimed more than git actually did
+  whenever a candidate's sections shared a path.
+
+  The fix: `claim_interval_diff` and `membership_joint_patches` now
+  expose the per-interval sections that were always being concatenated
+  (in record order — the order intervals were matched in the claim
+  store, never re-derived from splitting concatenated text on
+  `diff --git`, which is the textual assumption that produced this
+  defect in the first place). `membership_candidate_base` takes those
+  sections instead of one concatenated patch and reverse-applies them
+  **one at a time, newest-interval-first**, each reversal against the
+  tree the *prior* reversal produced — which is what "undo this
+  candidate's work" actually means. Any section that fails to apply
+  aborts the whole derivation and returns no base, rather than a
+  partially-reversed one: a wrong answer that looks like a right one is
+  this defect's entire character, so there is no partial-success path.
+  A candidate that touches the path in exactly one interval takes the
+  same single-`git apply` path as before — case 5 is the only one of
+  the five whose outcome moves.
+
+  Measured outcome for case 5 after the fix: `base_tree` lands at
+  HEAD's own tree (both sections reversed, not just the last one),
+  `membership_blob_matches_head` correctly reports `true`, the net
+  patch is the honest `+p` (X's true, unambiguous net effect against
+  HEAD), and X's counts come out the matrix's originally expected
+  `(1,0)` — nothing lands unowned. The regression fixture
+  (`matrix_5_multi_interval_create_then_delete_counts_net_once`,
+  renamed from `..._diverges_from_the_matrix`) asserts exactly this.
 - *Unclaimed-time work:* in the universe (it is in the diff), accounted to
   no candidate's evidence, therefore unowned — visible, countable, and
   consultable by *every* surface including whole-file staging. The bcb2a7e
@@ -484,6 +568,30 @@ shape as the joint refusal Bram already ships.
    a realistic board; the budget set from the current replay's measured
    baseline before the flip, not after.
 
+### Fixture-first acceptance receipt
+
+Criteria 2–6 now have named executable fixtures in
+`src-tauri/src/lib.rs::membership_acceptance_fixture_tests`. The fixtures
+intentionally keep the suite green while consumers still use replay: criteria
+2–4 record current proxy/residue values alongside the required membership
+values, while criteria 5–6 pin the staging and refusal contracts that must
+survive the flip. When a consumer changes, the corresponding fixture is the
+signal to replace the recorded current value with the criterion assertion; the
+fixture is not permission to revise the criterion to match the implementation.
+
+   *Measured baselines (`membership-affordable-enough-to-be-authoritative`),
+   verbatim:*
+
+   ```
+   replay     (op=attribute)   n=4453  p50=67ms   p90=223ms  p99=623ms   max=6852ms
+   membership (op=membership)  n=974   p50=10ms   p90=429ms  p99=1358ms  max=9984ms
+   ```
+
+   The replay runs on every serve; membership's `n` was collected while it
+   still ran sampled (once per 60s per process), so the two denominators
+   differ and the figures are not a like-for-like sample-count comparison —
+   only the shape (p50 cheap, tail expensive) is the load-bearing fact.
+
 ### Migration sketch, per consuming surface
 
 Sized so implementation items can be cut directly; ordering is the
@@ -496,12 +604,68 @@ observe → display → gate → retire sequence.
    comparison line against the replay's runs. Observe-only; no consumer
    flips. (Criteria 1, 7.)
 
-   *Status: landed observe-only as `issue-273-membership-engine-observe` —
-   `membership_engine_observe` runs on every board serve beside the replay,
-   feeding only the `op=membership` / `op=membership-diverges` /
-   `op=membership-conservation-broken` traces (registered in
-   `trace-vocabulary.md`); the board payload, pane, gate, and staging all
-   still read the replay.*
+   *Status: landed observe-only as `issue-273-membership-engine-observe`,
+   and — as `membership-affordable-enough-to-be-authoritative` — the engine
+   now RETURNS its partition (`Option<BTreeMap<String, MembershipPathBuckets>>`)
+   instead of discarding it, and is memoized on board state (a single
+   process-local slot keyed on HEAD, the full worktree diff, the begun-item
+   roster, and the claim-interval record) rather than sampled by wall
+   clock.
+
+   As `membership-precomputed-off-the-render-path`, the engine was then
+   split along its one replay-free seam: `membership_partition_engine`
+   (the probe loop plus the memo — replay-free, so it can run anywhere)
+   versus `membership_report` (the conservation check plus the divergence
+   comparison, which alone touch the replay args, and both stay cheap). The
+   probe loop no longer runs on the request path AT ALL — it is reachable
+   only from `membership_precompute`, which fires on a background thread
+   after the events that invalidate the state key (`worklist-changed`,
+   `git-status-changed`) and once at startup, guarded so concurrent
+   triggers collapse to one run. The board serve calls only
+   `membership_partition` (the read-only entry point,
+   `allow_compute=false` hard-coded at its single call site), which reads
+   the memo — now TWO-SLOT, current plus previous — and never falls
+   through to a compute: an exact-state hit returns `fresh=true`, a miss
+   with a previous slot present returns that partition `fresh=false`, and
+   a miss with nothing to fall back to returns `None` (traced
+   `op=membership-unavailable reason=no-partition`, deduped per state
+   key). `membership_report` runs unconditionally on whatever came back,
+   but the conservation check runs ONLY when `fresh=true` — deliberately:
+   comparing a stale partition's buckets against the CURRENT worktree's
+   universe would compare last state's answer to this state's question and
+   manufacture a breach that never happened, so a stale serve skips the
+   check and traces `op=membership-conservation-skipped reason=stale`
+   instead of running it silently-wrong. The divergence comparison is a
+   set-equality check over data already in hand, not an arithmetic identity
+   against the partition's own provenance, so it still runs when stale —
+   but the line then carries a trailing `stale=true` so a stale
+   disagreement is never adjudicated as a real one; fresh lines keep the
+   exact pre-split format.
+
+   The filer's call, recorded here because the next implementer of step 2
+   inherits it: the conservation alarm stays tied to the RENDER, not to
+   state change — *"I only care when looking at the board."* It would have
+   been just as defensible to run the check the instant the precompute
+   refreshes the memo (a breach is a property of state, and state just
+   changed), but the alarm exists for a person reading rows, so it fires
+   only when there are rows being read — never off a background thread
+   nobody is watching.
+
+   The board payload gained `membershipStale: bool` — true when a serve
+   used the stale fallback — inserted deliberately AHEAD of any reader, so
+   its behavior in real traffic (how often is a serve actually stale?) is
+   observable before step 2 trusts it for anything. `op=membership` gained
+   a `fresh=` field beside `cached=` (registered, with the two new ops and
+   the `stale=true` suffix, in `trace-vocabulary.md`). Nothing reads
+   `membershipStale`, no row's appearance can change, and the replay above
+   still stays the sole authority for the board payload, pane, gate, and
+   staging — this item only makes a non-blocking partition available;
+   step 2 spends it. Step 2 must also honour the rule this item exists to
+   make possible: stale is acceptable for display (the strip may be a beat
+   behind and self-correct on the next serve), never for a gate (the
+   commit gate is an explicit user action with an expectation of work, so
+   it can afford to compute synchronously and refuse rather than act on a
+   partition that might not reflect the paths it is about to stage).*
 2. **Board payload flip**: `attribution`, `attributionTotals`,
    `totals_by_path`, `willCommit` (`lib.rs:54242`–`54381`) and `jointWith`
    (`lib.rs:54383`) source from membership; the reserved `unowned_by_path`

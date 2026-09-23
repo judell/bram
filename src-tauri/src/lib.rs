@@ -167,12 +167,28 @@ struct PendingIssueClose {
     patch_id: Option<String>,
     created_at_ms: i64,
     // issue-380: the branch this commit was made on, captured at ENQUEUE.
-    // At flush time the only branch available is whatever is checked out
-    // now, which need not be the one the commit is on -- the commit gate
-    // knows the right answer at the moment it matters. Optional for legacy
-    // records, like patch_id above.
+    //
+    // issue-390 CORRECTION. This field's original comment claimed that at
+    // flush time "the only branch available is whatever is checked out now",
+    // and concluded the value had to be captured early. That premise is
+    // false: which branch contains a commit is a property of the REF GRAPH,
+    // not of the checkout, and `git branch -r --contains <sha>` answers it at
+    // any time. See `merge_branches` below.
+    //
+    // The field is KEPT because it answers a different question -- where the
+    // commit was MADE -- which is real provenance and the honest fallback when
+    // the ref lookup fails or the commit has become unreachable. It is no
+    // longer what the banner names.
     #[serde(default)]
     branch: Option<String>,
+    // issue-390: the remote branches that CONTAIN this commit, re-derived by
+    // the flush each time it reaches `deferred-not-on-default`. Remote rather
+    // than local because that verdict is only reached once `gh_commit_visible`
+    // confirms the commit is on origin -- a local-only name would describe a
+    // branch the forge cannot merge. Empty when the lookup found nothing, in
+    // which case the reader falls back to `branch`.
+    #[serde(default)]
+    merge_branches: Vec<String>,
     // issue-380: the flush's own last decision about this record, recorded
     // where it is MADE so the route can serve it without recomputing the
     // predicate (commit_on_origin_default + gh_commit_visible + the #282
@@ -3465,6 +3481,26 @@ mod worklist_changed_coalesce_tests {
 }
 
 fn emit_replayable_signal<R: tauri::Runtime>(app: &AppHandle<R>, event_name: &str) {
+    // membership-precomputed-off-the-render-path: the signals that invalidate
+    // the membership state key are hooked HERE, in the one place every emitter
+    // passes through, rather than beside each emit.
+    //
+    // The first implementation hooked four call sites by hand and missed
+    // three -- including the file watcher's own debounced emits, which are
+    // the commonest invalidation of all -- so an ordinary file edit
+    // precomputed nothing and the next serve found a stale partition. That is
+    // the enumeration failure this codebase keeps paying for (#384's MCP path
+    // list, #387's Bash write verbs): a hand-maintained list of call sites
+    // standing in for the property "this signal invalidates the partition".
+    // The property belongs at the chokepoint, where a new emitter inherits it
+    // for free instead of having to remember.
+    //
+    // Cheap by construction: membership_precompute spawns and returns, and its
+    // in-flight guard collapses a burst (worklist-changed alone bursts three
+    // per gate click, #375) into a single run.
+    if matches!(event_name, "worklist-changed" | "git-status-changed") {
+        membership_precompute(app);
+    }
     trace_emit_signal(app, event_name);
     remember_tauri_event(event_name, serde_json::Value::Null);
     // #150 regression instrumentation: every remember is observable, so a
@@ -43367,6 +43403,15 @@ fn claim_interval_diff<R: tauri::Runtime>(
     let declared = worklist_declared_files(app);
     let mut ghost_notes: std::collections::BTreeSet<String> = Default::default();
     let mut patch = String::new();
+    // fix-patch-composition-for-repeated-paths: the same per-interval
+    // sections that get concatenated into `patch`, kept individually and in
+    // record order. `git apply --cached --reverse` does not compose when a
+    // patch carries more than one `diff --git a/<path> b/<path>` section for
+    // the same path (docs/attribution-model.md §4, case 5) — it silently
+    // reverses only the last one. Exposing the sections lets a caller that
+    // needs to undo this candidate's work reverse them one at a time instead
+    // of relying on one `git apply` over the concatenation.
+    let mut sections: Vec<String> = Vec::new();
     let mut matched = 0usize;
     let mut spawns = 0usize;
     for (i, rec) in arr.iter().enumerate() {
@@ -43430,6 +43475,7 @@ fn claim_interval_diff<R: tauri::Runtime>(
             if !s.trim().is_empty() {
                 matched += 1;
                 patch.push_str(&s);
+                sections.push(s.into_owned());
             }
         }
     }
@@ -43447,7 +43493,10 @@ fn claim_interval_diff<R: tauri::Runtime>(
     // the diffs this call ran on its behalf (the CLAIM_ATTR_SPAWNS discipline:
     // a cost asserted rather than measured is how a path quietly pays full
     // price). Additive — both prior consumers read only `patch`/`intervals`.
-    serde_json::json!({ "patch": patch, "intervals": matched, "spawns": spawns })
+    // `sections` is additive too (fix-patch-composition-for-repeated-paths):
+    // every existing consumer reads only `patch`/`intervals`/`spawns`, which
+    // stay byte-identical to before.
+    serde_json::json!({ "patch": patch, "intervals": matched, "spawns": spawns, "sections": sections })
 }
 
 // issue-327 interval staging: commit the requested items' OWN hunks by
@@ -43919,14 +43968,13 @@ mod residual_disclosure_tests {
 // The reverse-application footprint of a candidate patch, mapped to new-side
 // line numbers by walking each hunk's BODY — the `diff_residual_lines`
 // body-walk generalized to multi-file patches and to counting removed lines.
-// `removed` is evidence-baseline-relative and therefore EXCLUDED from the
-// HEAD-relative conservation arithmetic (the dependency fixture's live fire:
-// a modification patch "removes" a line that never existed vs HEAD). It is
-// kept, test-read only for now, for the deletion-attribution flip (§4's
-// deletion case) — the same reserved-slot discipline as `unowned_by_path`.
+// `removed` is evidence-BASELINE-relative, not HEAD-relative: it counts what
+// the candidate's own patch text removes, which is only the same thing as a
+// HEAD-relative deletion when the candidate's baseline (its `base_tree`,
+// membership-attributes-deletions below) coincides with HEAD. The caller
+// decides that by the blob-equality rule; this struct only measures.
 struct MembershipFootprint {
     added_lines: Vec<usize>,
-    #[allow(dead_code)]
     removed: usize,
 }
 
@@ -44196,7 +44244,7 @@ fn membership_joint_patches(
     declared: &std::collections::HashMap<String, Vec<String>>,
     begun: &std::collections::HashSet<String>,
     spawns: &std::cell::Cell<usize>,
-) -> Vec<(Vec<String>, String)> {
+) -> Vec<(Vec<String>, String, Vec<String>)> {
     let Ok(text) = std::fs::read_to_string(root.join(CLAIM_INTERVALS_REL)) else {
         return Vec::new();
     };
@@ -44206,7 +44254,11 @@ fn membership_joint_patches(
     let Some(arr) = doc.get("intervals").and_then(|v| v.as_array()) else {
         return Vec::new();
     };
-    let mut grouped: std::collections::BTreeMap<Vec<String>, String> = Default::default();
+    // fix-patch-composition-for-repeated-paths: carry each joint group's
+    // per-interval sections alongside its concatenated patch, in record
+    // order — the same additive shape as `claim_interval_diff`'s `sections`.
+    let mut grouped: std::collections::BTreeMap<Vec<String>, (String, Vec<String>)> =
+        Default::default();
     for (i, rec) in arr.iter().enumerate() {
         let Some(a) = rec.get("ref").and_then(|v| v.as_str()) else {
             continue;
@@ -44248,11 +44300,136 @@ fn membership_joint_patches(
         {
             let s = String::from_utf8_lossy(&o.stdout);
             if !s.trim().is_empty() {
-                grouped.entry(members).or_default().push_str(&s);
+                let entry = grouped.entry(members).or_default();
+                entry.0.push_str(&s);
+                entry.1.push(s.into_owned());
             }
         }
     }
-    grouped.into_iter().collect()
+    grouped
+        .into_iter()
+        .map(|(members, (patch, sections))| (members, patch, sections))
+        .collect()
+}
+
+// A candidate's own reverse-applied BASELINE: present content (`idx_now`)
+// with this candidate's own patch reversed out of it, written as a tree and
+// returned by oid. This is "what existed before this candidate's recorded
+// work" — the shared primitive behind two things that both need exactly
+// that tree: #367's net-effect normalization below (diffs base_tree →
+// now_tree) and the deletion-attribution rule
+// (membership-attributes-deletions, docs/attribution-model.md §4) that
+// compares base_tree's blob for a path against HEAD's. Fail-open: `None` on
+// any git failure — observe-only code must never block a serve.
+//
+// fix-patch-composition-for-repeated-paths: `sections` are the candidate's
+// per-interval diffs FOR THIS PATH, in record order (oldest first — the
+// order `claim_interval_diff` / `membership_joint_patches` matched them in,
+// never re-derived from splitting concatenated text on `diff --git`). A
+// single `git apply --cached --reverse` over a concatenation of several
+// sections for the SAME path does not compose: it reverses only the LAST
+// section and silently drops the earlier ones, exit code 0
+// (docs/attribution-model.md §4, case 5). So each section is reverse-applied
+// on its own, newest-interval-first (i.e. walking `sections` backward), each
+// one against the tree the PRIOR reversal produced — which is what "undo
+// this candidate's work" actually means. A candidate that touched the path
+// in exactly one interval takes the same single-`git apply` path as before.
+// Any section that fails to apply aborts the WHOLE derivation and returns
+// `None` — a partially-reversed base is a wrong answer that looks like a
+// right one, which is this defect's entire character, so there is no
+// partial-success return here.
+fn membership_candidate_base(
+    root: &Path,
+    idx_now: &Path,
+    sections: &[String],
+    spawns: &std::cell::Cell<usize>,
+) -> Option<String> {
+    if sections.is_empty() {
+        return None;
+    }
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tag = format!(
+        "{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let idx_tmp = std::env::temp_dir().join(format!("bram-membership-base-{}", tag));
+    let pfile = std::env::temp_dir().join(format!("bram-membership-base-{}.patch", tag));
+    let cleanup = || {
+        let _ = std::fs::remove_file(&idx_tmp);
+        let _ = std::fs::remove_file(&pfile);
+    };
+    if std::fs::copy(idx_now, &idx_tmp).is_err() {
+        cleanup();
+        return None;
+    }
+    let git = |idx: Option<&Path>, args: &[&str]| -> Option<std::process::Output> {
+        spawns.set(spawns.get() + 1);
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(root).args(args);
+        if let Some(idx) = idx {
+            cmd.env("GIT_INDEX_FILE", idx);
+        }
+        cmd.output().ok()
+    };
+    let pfile_s = pfile.to_string_lossy().to_string();
+    for section in sections.iter().rev() {
+        if std::fs::write(&pfile, section).is_err() {
+            cleanup();
+            return None;
+        }
+        // The intermediate state is asserted after every reversal, not just
+        // at the end: `git apply`'s own exit status IS that assertion — a
+        // section that applies without effect, or to the wrong place, fails
+        // this check rather than being indistinguishable from success the
+        // way the old single-shot concatenated form was.
+        let applied = git(
+            Some(&idx_tmp),
+            &["apply", "--cached", "--reverse", &pfile_s],
+        )
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+        if !applied {
+            cleanup();
+            return None;
+        }
+    }
+    let base_tree = git(Some(&idx_tmp), &["write-tree"]).and_then(|o| {
+        o.status
+            .success()
+            .then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    });
+    cleanup();
+    base_tree.filter(|t| !t.is_empty())
+}
+
+// One path's diff between two trees, as text — the shared plumbing behind
+// `membership_net_patch`'s re-diff and nothing else; split out so a caller
+// that already holds a `base_tree` (the probe loop, which needs it for the
+// blob-equality test regardless) does not reverse-apply the candidate a
+// second time to get the same tree `membership_net_patch` would recompute.
+fn membership_diff_tree_path(
+    root: &Path,
+    tree_a: &str,
+    tree_b: &str,
+    path: &str,
+    spawns: &std::cell::Cell<usize>,
+) -> Option<String> {
+    spawns.set(spawns.get() + 1);
+    let out = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["diff", tree_a, tree_b, "--", path])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+    if s.trim().is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 // Net-normalization for a concatenated multi-interval candidate (#367). An
@@ -44267,152 +44444,169 @@ fn membership_joint_patches(
 // present against that base, so each surviving line counts once. Fail-open:
 // None falls back to the raw concatenated patch — observe-only code must
 // never block a serve, and an over-count is exactly what the tripwire
-// exists to report. Single-diff candidates never come here.
+// exists to report. Single-diff candidates never come here. Callers that
+// already have a `base_tree` in hand (the probe loop) should call
+// `membership_diff_tree_path` directly instead — this function exists for
+// callers that want the net patch alone, computed end to end. No production
+// caller needs that end-to-end form today (the probe loop always already
+// has `base_tree` for the deletion-attribution test), so this is currently
+// exercised only by its own test — kept, not deleted, as the one-call
+// convenience the next caller of the net form will otherwise have to
+// reinvent.
+#[allow(dead_code)]
 fn membership_net_patch(
     root: &Path,
     idx_now: &Path,
     now_tree: &str,
-    patch: &str,
+    sections: &[String],
     path: &str,
     spawns: &std::cell::Cell<usize>,
 ) -> Option<String> {
     if now_tree.is_empty() {
         return None;
     }
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tag = format!(
-        "{}-{}",
-        std::process::id(),
-        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    );
-    let idx_tmp = std::env::temp_dir().join(format!("bram-membership-net-{}", tag));
-    let pfile = std::env::temp_dir().join(format!("bram-membership-net-{}.patch", tag));
-    let cleanup = || {
-        let _ = std::fs::remove_file(&idx_tmp);
-        let _ = std::fs::remove_file(&pfile);
-    };
-    if std::fs::copy(idx_now, &idx_tmp).is_err() || std::fs::write(&pfile, patch).is_err() {
-        cleanup();
-        return None;
+    let base_tree = membership_candidate_base(root, idx_now, sections, spawns)?;
+    membership_diff_tree_path(root, &base_tree, now_tree, path, spawns)
+}
+
+// membership-attributes-deletions (docs/attribution-model.md §4, the
+// deletion matrix): whether a candidate's baseline coincides with HEAD for
+// this path — the discriminator the whole rule rests on. `base_tree`
+// (`membership_candidate_base`) is "present content minus this candidate's
+// own work"; when that equals HEAD's content for the path, this candidate
+// is the sole contributor between HEAD and now, and its removed lines ARE
+// HEAD-relative deletions. When it differs, this candidate sat on top of
+// other work (still-live or already-superseded), and its removed count
+// describes a line that never existed relative to HEAD — the dependency
+// fixture's original double-booking fire. `git diff --quiet` reports "no
+// difference" (success) whether the path is absent from both trees or
+// present and identical in both, which is exactly the equality this needs
+// — no special-casing for a path HEAD never had (a candidate that created
+// the path from nothing). Fail-open: any git failure reads as "not
+// HEAD-relative", the same conservative direction as every other
+// degradation here.
+fn membership_blob_matches_head(
+    root: &Path,
+    tree: &str,
+    path: &str,
+    spawns: &std::cell::Cell<usize>,
+) -> bool {
+    if tree.is_empty() {
+        return false;
     }
-    let git = |idx: Option<&Path>, args: &[&str]| -> Option<std::process::Output> {
-        spawns.set(spawns.get() + 1);
-        let mut cmd = std::process::Command::new("git");
-        cmd.current_dir(root).args(args);
-        if let Some(idx) = idx {
-            cmd.env("GIT_INDEX_FILE", idx);
-        }
-        cmd.output().ok()
-    };
-    let pfile_s = pfile.to_string_lossy().to_string();
-    let applied = git(
-        Some(&idx_tmp),
-        &["apply", "--cached", "--reverse", &pfile_s],
-    )
-    .map(|o| o.status.success())
-    .unwrap_or(false);
-    if !applied {
-        cleanup();
-        return None;
-    }
-    let base_tree = git(Some(&idx_tmp), &["write-tree"]).and_then(|o| {
-        o.status
-            .success()
-            .then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
-    });
-    let net = base_tree
-        .as_deref()
-        .filter(|t| !t.is_empty())
-        .and_then(|t| {
-            git(None, &["diff", t, now_tree, "--", path]).and_then(|o| {
-                o.status
-                    .success()
-                    .then(|| String::from_utf8_lossy(&o.stdout).into_owned())
-            })
-        });
-    cleanup();
-    net.filter(|s| !s.trim().is_empty())
+    spawns.set(spawns.get() + 1);
+    std::process::Command::new("git")
+        .current_dir(root)
+        .args(["diff", "--quiet", "--no-renames", tree, "HEAD", "--", path])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 // One path's membership partition while the engine accumulates. Counts are
 // (added, removed); `owners` is the id set membership attributes on the path
 // (single + joint + ambiguous candidates alike), the coarse unit the
 // divergence comparison uses.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct MembershipPathBuckets {
     single: (usize, usize),
     joint: (usize, usize),
     ambiguous: (usize, usize),
     owners: std::collections::BTreeSet<String>,
-    // membership-conservation-breach-is-diagnosable: what each candidate
-    // contributed, so the tripwire can name the over-claimer instead of only
-    // reporting that someone over-claimed. Counts alone cost a full
-    // archaeology pass on the first real fire (tau, `expected=5 got=102`)
-    // and still did not identify which candidate produced the 101.
-    contributors: Vec<(String, usize)>,
+    // membership-attributes-deletions: each candidate's own (added, removed)
+    // contribution to this path, keyed the way the conservation-breach note
+    // already named a candidate — the item id for a single-owner candidate,
+    // or its joint members joined by "+". This is the shape
+    // `totals_by_path` (the replay) needs — path → item → (added, removed)
+    // — and it retires `contributors` (formerly a second, added-only,
+    // differently-shaped Vec of the same fact): the conservation-breach
+    // trace note is now a VIEW over this map (added axis only), not a
+    // separate field to keep in sync. A single-owner entry's key is
+    // directly comparable to the replay's `totals_by_path[path]` entry
+    // (docs/attribution-model.md §4, "Per-item counts match the replay
+    // where both are right"); a joint entry has no replay counterpart
+    // (joint sets are display-only there) and is compared to nothing.
+    // Keyed by the MEMBER LIST, not by a joined string. An earlier shape used
+    // `members.join("+")`, which destroyed the list at construction and made
+    // "ids contain no `+`" a load-bearing, unvalidated convention for anyone
+    // who needed the members back — including this engine's own serializer,
+    // which had to split the key to recover them. Keying by the list removes
+    // the convention rather than relocating it (review, 2026-09-23).
+    per_item: std::collections::BTreeMap<Vec<String>, (usize, usize)>,
+    // membership-precomputed-off-the-render-path: this path's `git diff
+    // HEAD` line counts (added, removed) — the conservation check's
+    // universe. Stored on the bucket (rather than kept in a sibling map
+    // local to the probe loop, as before the split) so `membership_report`,
+    // which runs off a bare partition with no access to the probe loop's
+    // local state, has everything the check needs.
+    universe: (usize, usize),
 }
 
-// The engine driver. Observe-only: its entire output is three trace ops —
-// `op=membership` (cost, every run), `op=membership-diverges` (per path
-// where the two models' owner sets disagree), and
-// `op=membership-conservation-broken` (the tripwire). Probes run only over
-// live begun items × their declared paths; the engine never diffs the whole
-// tree and never enumerates untracked content beyond names.
-fn membership_engine_observe<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    replay_owners_by_path: &std::collections::HashMap<String, std::collections::HashSet<String>>,
-    replay_joint_by_path: &std::collections::HashMap<String, std::collections::HashSet<String>>,
-) {
-    // membership-observer-leaves-the-serve-path: sample, do not run every serve.
-    //
-    // This engine is OBSERVE-ONLY -- nothing in the payload reads its partition
-    // -- and after `9f595ac` removed the replay's redundant key derivation it
-    // became the dominant cost of a board build: measured 204 ms / 44 spawns at
-    // 20 intervals, 1,318 ms / 200 at 200, and 9,035 ms / 1,730 at 2,000. Seconds
-    // of user-facing latency per serve, producing evidence no consumer reads,
-    // on exactly the boards that have been worked hardest.
-    //
-    // SAMPLED HERE rather than moved to a background tick, and the code decides
-    // that rather than taste: this function consumes `replay_owners_by_path` and
-    // `replay_joint_by_path`, both computed by the serve's attribution replay. Off
-    // the request path it would have to recompute that replay -- the very work
-    // `9f595ac` just made cheap -- so relocation would reintroduce the cost it was
-    // meant to remove.
-    //
-    // Sampling is safe for what this observes because the conditions are STATE,
-    // not events: a divergence or a conservation breach is a function of (board,
-    // worktree, intervals) and persists while that state does. The tau fire
-    // repeated identically across eleven serves in a six-hour window, and the
-    // synthetic reproduction fires on every serve while its condition holds. A
-    // 60s sample observes any state that lasts a minute, and still yields ~1,400
-    // observations a day -- far more than an adjudicator can read, which is the
-    // actual bottleneck (one evening's adjudication resolved all 69 of tau's
-    // divergences).
-    //
-    // The skip is TRACED. "Did not run" and "ran and found nothing" must not look
-    // alike -- the tripwire-versus-dead-instrument trap this project has already
-    // been bitten by.
-    const MEMBERSHIP_OBSERVE_INTERVAL_MS: i64 = 60_000;
-    static LAST_OBSERVE_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
-    {
-        let now = unix_now_ms();
-        let last = LAST_OBSERVE_MS.load(std::sync::atomic::Ordering::Relaxed);
-        // last == 0 is process start: always observe once, so a short-lived
-        // process still contributes and a fresh launch is never silent.
-        if last != 0 && now.saturating_sub(last) < MEMBERSHIP_OBSERVE_INTERVAL_MS {
-            append_bram_trace_line(
-                app,
-                "claim-interval",
-                &format!(
-                    "op=membership-skipped reason=sampled since_ms={} interval_ms={}",
-                    now.saturating_sub(last),
-                    MEMBERSHIP_OBSERVE_INTERVAL_MS
-                ),
-            );
+// Two-slot process-local memo: current plus previous. Single-slot (the
+// pre-split shape) has nothing to fall back to on a miss, so a miss had to
+// either compute or return nothing — exactly the tail this item removes from
+// the serve path. The previous slot is what lets a serve answer with
+// SOMETHING (marked stale) instead of ever reaching the probe loop itself.
+#[derive(Default)]
+struct MembershipMemoSlots {
+    current: Option<(
+        String,
+        std::collections::BTreeMap<String, MembershipPathBuckets>,
+    )>,
+    previous: Option<(
+        String,
+        std::collections::BTreeMap<String, MembershipPathBuckets>,
+    )>,
+}
+
+// Dedupe: one `op=membership-unavailable` line per distinct state key, not
+// once per serve — a sustained miss (nobody has triggered a precompute yet,
+// or every trigger raced and collapsed) would otherwise spam identically on
+// every board poll against the same state.
+static MEMBERSHIP_UNAVAILABLE_LAST_KEY: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
+    std::sync::OnceLock::new();
+fn membership_trace_unavailable_once<R: tauri::Runtime>(app: &AppHandle<R>, state_key: &str) {
+    let cell = MEMBERSHIP_UNAVAILABLE_LAST_KEY.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(mut guard) = cell.lock() {
+        if guard.as_deref() == Some(state_key) {
             return;
         }
-        LAST_OBSERVE_MS.store(now, std::sync::atomic::Ordering::Relaxed);
+        *guard = Some(state_key.to_string());
     }
+    append_bram_trace_line(
+        app,
+        "claim-interval",
+        "op=membership-unavailable reason=no-partition",
+    );
+}
+
+// The engine driver, split along the seam
+// membership-precomputed-off-the-render-path found: everything here is
+// replay-free, so it is safe to run off the request path. Traces
+// `op=membership` (cost, every run; `cached=` distinguishes a memo hit from
+// a real compute, `fresh=` distinguishes a live result — compute or
+// exact-key hit — from a carried-over previous partition) and, on a serve
+// with neither an exact hit nor a previous slot, `op=membership-unavailable
+// reason=no-partition`. Probes run only over live begun items × their
+// declared paths; the engine never diffs the whole tree and never
+// enumerates untracked content beyond names.
+//
+// `allow_compute` is the structural half of the invariant this item exists
+// to establish: when false (the board serve, via `membership_partition`),
+// EVERY branch below that would otherwise reach the probe loop returns
+// first — there is no path from a serve into the expensive section. When
+// true (only `membership_precompute`, always off the request path, always
+// on a background thread), a miss falls through to compute and refresh the
+// memo. This is enforced by control flow, not by a comment: read the
+// `if !allow_compute` branches below, each of which unconditionally
+// returns.
+fn membership_partition_engine<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    allow_compute: bool,
+) -> Option<(
+    std::collections::BTreeMap<String, MembershipPathBuckets>,
+    bool,
+)> {
     let started = std::time::Instant::now();
     let spawns = std::cell::Cell::new(0usize);
     // `ambiguous` counts paths whose partition holds a non-zero ambiguous
@@ -44421,25 +44615,35 @@ fn membership_engine_observe<R: tauri::Runtime>(
     // (the ambiguous-duplicate acceptance run's finding, recorded on #273:
     // ambiguity classifies the bucket, not the owner set, so neither the
     // divergence line nor the tripwire can attest it in the healthy state).
+    //
+    // `cached`: false on a real compute (this state was not in the memo, or
+    // this call exited before reaching the memo check at all), true on a
+    // memo hit (current OR previous). `fresh`: true when the returned
+    // partition is a live answer for THIS state (compute or exact-key hit),
+    // false when it is the carried-over previous partition.
     let trace_cost = |app: &AppHandle<R>,
                       paths: usize,
                       spawns: usize,
                       ambiguous: usize,
-                      started: std::time::Instant| {
+                      started: std::time::Instant,
+                      cached: bool,
+                      fresh: bool| {
         append_bram_trace_line(
             app,
             "claim-interval",
             &format!(
-                "op=membership paths={} ms={} spawns={} ambiguous={}",
+                "op=membership paths={} ms={} spawns={} ambiguous={} cached={} fresh={}",
                 paths,
                 started.elapsed().as_millis(),
                 spawns,
-                ambiguous
+                ambiguous,
+                cached,
+                fresh
             ),
         );
     };
     let Some(root) = project_root(Some(app)) else {
-        return;
+        return None;
     };
     // Live begun items: on the board (worklist.json is the live set) with
     // status "applied" or a host-stamped begunAtMs — the candidate roster,
@@ -44471,20 +44675,11 @@ fn membership_engine_observe<R: tauri::Runtime>(
         }
     }
     if begun_files.is_empty() {
-        trace_cost(app, 0, spawns.get(), 0, started);
-        return;
+        trace_cost(app, 0, spawns.get(), 0, started, false, false);
+        return None;
     }
     let begun_ids: std::collections::HashSet<String> =
         begun_files.iter().map(|(id, _)| id.clone()).collect();
-    // Pathspecs: the union of begun items' declared entries (files or
-    // directories — git pathspec semantics match `declared_covers` up to the
-    // worktree-prefix strip). Every git call below is scoped to these.
-    let mut pathspecs: Vec<String> = begun_files
-        .iter()
-        .flat_map(|(_, fs)| fs.iter().cloned())
-        .collect();
-    pathspecs.sort();
-    pathspecs.dedup();
     let git = |args: &[&str]| -> Option<String> {
         spawns.set(spawns.get() + 1);
         let out = std::process::Command::new("git")
@@ -44494,6 +44689,117 @@ fn membership_engine_observe<R: tauri::Runtime>(
             .ok()?;
         Some(String::from_utf8_lossy(&out.stdout).into_owned())
     };
+    // membership-affordable-enough-to-be-authoritative: the state key. The
+    // engine's inputs — HEAD, the worktree diff, the begun-item roster, and
+    // the claim-interval record — are a pure function of state that the
+    // serve already knows, so a repeat request against unchanged state is
+    // free. Hashes the FULL diff text and the FULL claim-intervals
+    // contents, not a numstat summary: a numstat-only key would serve a
+    // stale partition when an edit swaps a line without changing the
+    // added/removed counts — a correctness hazard given consumers may read
+    // this cached value from step 2 on. Built here, before the expensive
+    // per-path probe loop below, so a hit (current OR previous) skips every
+    // probe.
+    let state_key = {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let head = git(&["rev-parse", "HEAD"]).unwrap_or_default();
+        let diff = git(&["diff", "HEAD"]).unwrap_or_default();
+        let mut untracked: Vec<String> = git(&["ls-files", "--others", "--exclude-standard"])
+            .unwrap_or_default()
+            .lines()
+            .map(|s| s.to_string())
+            .collect();
+        untracked.sort();
+        let mut roster: Vec<String> = begun_files
+            .iter()
+            .map(|(id, files)| {
+                let mut fs = files.clone();
+                fs.sort();
+                format!("{}\u{1}{}", id, fs.join("\u{1}"))
+            })
+            .collect();
+        roster.sort();
+        let intervals_raw =
+            std::fs::read_to_string(root.join(CLAIM_INTERVALS_REL)).unwrap_or_default();
+        let mut hasher = DefaultHasher::new();
+        head.hash(&mut hasher);
+        diff.hash(&mut hasher);
+        untracked.join("\u{1}").hash(&mut hasher);
+        roster.join("\u{1}").hash(&mut hasher);
+        intervals_raw.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    };
+    static MEMBERSHIP_MEMO: std::sync::OnceLock<std::sync::Mutex<MembershipMemoSlots>> =
+        std::sync::OnceLock::new();
+    let memo =
+        MEMBERSHIP_MEMO.get_or_init(|| std::sync::Mutex::new(MembershipMemoSlots::default()));
+    match memo.lock() {
+        Ok(guard) => {
+            if let Some((key, cached)) = guard.current.as_ref() {
+                if *key == state_key {
+                    let cached = cached.clone();
+                    let ambiguous_paths = cached.values().filter(|m| m.ambiguous != (0, 0)).count();
+                    // CACHE HIT: this state was already observed. A divergence
+                    // or conservation-breach line would be a verbatim repeat of
+                    // what already ran for this exact state, so `membership_report`
+                    // decides what to emit based on `fresh` — here true.
+                    trace_cost(
+                        app,
+                        cached.len(),
+                        spawns.get(),
+                        ambiguous_paths,
+                        started,
+                        true,
+                        true,
+                    );
+                    return Some((cached, true));
+                }
+            }
+            if !allow_compute {
+                // SERVE PATH, no exact hit: fall back to the previous slot
+                // instead of computing — THE core invariant this item
+                // exists to establish. This branch always returns, which is
+                // what makes the probe loop below unreachable from a serve.
+                return if let Some((_, prev)) = guard.previous.as_ref() {
+                    let prev = prev.clone();
+                    let ambiguous_paths = prev.values().filter(|m| m.ambiguous != (0, 0)).count();
+                    trace_cost(
+                        app,
+                        prev.len(),
+                        spawns.get(),
+                        ambiguous_paths,
+                        started,
+                        true,
+                        false,
+                    );
+                    Some((prev, false))
+                } else {
+                    membership_trace_unavailable_once(app, &state_key);
+                    None
+                };
+            }
+        }
+        Err(_) => {
+            if !allow_compute {
+                // Mutex poisoned: the serve still must not compute.
+                membership_trace_unavailable_once(app, &state_key);
+                return None;
+            }
+        }
+    }
+    // Only `membership_precompute` (allow_compute=true) can reach this
+    // line — every `!allow_compute` branch above returns unconditionally.
+    debug_assert!(allow_compute);
+    // Pathspecs: the union of begun items' declared entries (files or
+    // directories — git pathspec semantics match `declared_covers` up to the
+    // worktree-prefix strip). Every git call below is scoped to these.
+    let mut pathspecs: Vec<String> = begun_files
+        .iter()
+        .flat_map(|(_, fs)| fs.iter().cloned())
+        .collect();
+    pathspecs.sort();
+    pathspecs.dedup();
     // Universe, tracked half: one pathspec-scoped numstat — per concrete
     // changed path, (added, removed) vs HEAD. Never the whole tree.
     let mut universe: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
@@ -44550,8 +44856,8 @@ fn membership_engine_observe<R: tauri::Runtime>(
         }
     }
     if universe.is_empty() {
-        trace_cost(app, 0, spawns.get(), 0, started);
-        return;
+        trace_cost(app, 0, spawns.get(), 0, started, false, false);
+        return None;
     }
     // Scratch state for the probes. idx_head is HEAD alone (the
     // already-committed screen); idx_now is HEAD plus a pathspec-scoped
@@ -44595,8 +44901,8 @@ fn membership_engine_observe<R: tauri::Runtime>(
         // incapable of blocking a board serve. The cost line still lands so
         // the absence of partition traces is attributable.
         cleanup();
-        trace_cost(app, 0, spawns.get(), 0, started);
-        return;
+        trace_cost(app, 0, spawns.get(), 0, started, false, false);
+        return None;
     }
     let pfile_s = pfile.to_string_lossy().to_string();
     let probe = |idx: &Path, patch: &str| -> bool {
@@ -44630,8 +44936,14 @@ fn membership_engine_observe<R: tauri::Runtime>(
     for path in universe.keys() {
         let buckets = per_path.entry(path.clone()).or_default();
         // Candidate patches: per single begun declarer via claim_interval_diff
-        // (the reused evidence derivation), plus the joint groups.
-        let mut candidates: Vec<(Vec<String>, String)> = Vec::new();
+        // (the reused evidence derivation), plus the joint groups. Each
+        // candidate carries its concatenated `patch` (probing, footprint,
+        // ambiguity — unchanged) AND its `sections` in record order — the
+        // fix-patch-composition-for-repeated-paths shape that lets
+        // `membership_candidate_base` undo a multi-interval candidate's own
+        // work section-by-section instead of via one `git apply` over the
+        // concatenation.
+        let mut candidates: Vec<(Vec<String>, String, Vec<String>)> = Vec::new();
         for (id, files) in &begun_files {
             if !files.iter().any(|f| declared_covers(f, path)) {
                 continue;
@@ -44641,14 +44953,24 @@ fn membership_engine_observe<R: tauri::Runtime>(
                 .set(spawns.get() + d.get("spawns").and_then(|v| v.as_u64()).unwrap_or(0) as usize);
             if let Some(p) = d.get("patch").and_then(|v| v.as_str()) {
                 if !p.trim().is_empty() {
-                    candidates.push((vec![id.clone()], p.to_string()));
+                    let sections: Vec<String> = d
+                        .get("sections")
+                        .and_then(|v| v.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_str())
+                                .map(String::from)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    candidates.push((vec![id.clone()], p.to_string(), sections));
                 }
             }
         }
         candidates.extend(membership_joint_patches(
             &root, path, &declared, &begun_ids, &spawns,
         ));
-        for (members, patch) in candidates {
+        for (members, patch, sections) in candidates {
             // Already in HEAD → committed content, out of the universe: no
             // membership (counting it would break conservation against a
             // universe that by construction excludes it).
@@ -44662,27 +44984,54 @@ fn membership_engine_observe<R: tauri::Runtime>(
             if !probe(&idx_now, &patch) {
                 continue;
             }
-            // A concatenated multi-interval candidate counts a line the item
-            // re-edited across its own intervals once per touching interval;
-            // count its NET effect instead (#367). The ambiguity check below
-            // reads the same normalized patch.
-            let patch = if patch.matches("diff --git").count() > 1 {
-                membership_net_patch(&root, &idx_now, &now_tree, &patch, path, &spawns)
+            // The candidate's own reverse-applied baseline — present content
+            // minus this candidate's own work, reversed section-by-section
+            // in record order (fix-patch-composition-for-repeated-paths).
+            // Computed once, shared by #367's net-effect normalization just
+            // below and by the deletion-attribution rule after it (both need
+            // the same reverse-applied tree; see `membership_candidate_base`).
+            let base_tree = membership_candidate_base(&root, &idx_now, &sections, &spawns);
+            // A multi-interval candidate counts a line the item re-edited
+            // across its own intervals once per touching interval; count its
+            // NET effect instead (#367). The ambiguity check below reads the
+            // same normalized patch. Whether a candidate is multi-interval is
+            // read from `sections.len()` — the record, not from counting
+            // `diff --git` occurrences in concatenated text (the same
+            // textual assumption that produced case 5's defect).
+            let patch = if sections.len() > 1 {
+                base_tree
+                    .as_deref()
+                    .filter(|t| !t.is_empty())
+                    .and_then(|t| membership_diff_tree_path(&root, t, &now_tree, path, &spawns))
                     .unwrap_or(patch)
             } else {
                 patch
             };
             let fp = membership_patch_footprint(&patch);
-            // PRESENT lines only. A candidate's `removed` count is measured
-            // against its own evidence baseline (the boundary tree), not
-            // against HEAD — a modification patch "removes" a line that never
-            // existed vs HEAD when it rewrites an earlier claimant's work, and
-            // counting that into a HEAD-relative universe double-books (first
-            // live fire: the dependency fixture, expected=1 got=2, 2026-09-08).
-            // HEAD-relative deletions stay in the universe's second axis and
-            // land UNOWNED by subtraction: deletion attribution is deferred,
-            // openly, not approximated (§4's deletion case awaits the flips).
-            let counts = (fp.added_lines.len(), 0);
+            // membership-attributes-deletions (docs/attribution-model.md
+            // §4, the deletion matrix): a candidate's removed lines count as
+            // HEAD-relative deletions ONLY when its `base_tree` blob for
+            // this path equals HEAD's blob for that path — i.e. this
+            // candidate is the sole contributor between HEAD and now.
+            // Additions are unaffected: an added line is present in current
+            // content by definition, so it is HEAD-relative regardless of
+            // layering. When the blobs differ, this candidate sat on top of
+            // other work (still-live or already-superseded) and its removed
+            // count describes a line that never existed relative to HEAD —
+            // counting it would double-book the universe (the dependency
+            // fixture's original fire, expected=1 got=2, 2026-09-08). Those
+            // deletions fall to unowned by subtraction: honest degradation,
+            // the same family as supersession, and the "deletion after a
+            // prior rewrite" case of the matrix — nobody is credited with a
+            // deletion no surviving evidence accounts for.
+            let head_relative = base_tree
+                .as_deref()
+                .map(|t| membership_blob_matches_head(&root, t, path, &spawns))
+                .unwrap_or(false);
+            let counts = (
+                fp.added_lines.len(),
+                if head_relative { fp.removed } else { 0 },
+            );
             let content = content_cache.entry(path.clone()).or_insert_with(|| {
                 std::fs::read(root.join(path))
                     .ok()
@@ -44709,51 +45058,257 @@ fn membership_engine_observe<R: tauri::Runtime>(
             };
             bucket.0 += counts.0;
             bucket.1 += counts.1;
-            if counts.0 > 0 {
-                buckets.contributors.push((members.join("+"), counts.0));
+            if counts.0 > 0 || counts.1 > 0 {
+                let entry = buckets.per_item.entry(members.clone()).or_insert((0, 0));
+                entry.0 += counts.0;
+                entry.1 += counts.1;
             }
             buckets.owners.extend(members);
         }
     }
     cleanup();
-    // Per-path finalization: unowned by subtraction, the conservation
-    // tripwire, and the coarse divergence comparison against the replay
-    // (owner id-set inequality, not line-exact — restricted to the
-    // membership universe, since membership makes no claim about paths
-    // with no current diff).
-    for (path, m) in &per_path {
-        let u = universe.get(path).copied().unwrap_or((0, 0));
+    // Per-path finalization: stash this path's universe on the bucket so
+    // `membership_report` — which only ever sees the bare partition, never
+    // this function's local `universe` map — has what the conservation
+    // check needs. The check itself, and the divergence comparison, moved
+    // to `membership_report`; this function stays replay-free.
+    for (path, m) in per_path.iter_mut() {
+        m.universe = universe.get(path).copied().unwrap_or((0, 0));
+    }
+    let ambiguous_paths = per_path.values().filter(|m| m.ambiguous != (0, 0)).count();
+    trace_cost(
+        app,
+        per_path.len(),
+        spawns.get(),
+        ambiguous_paths,
+        started,
+        false,
+        true,
+    );
+    if let Ok(mut guard) = memo.lock() {
+        let old_current = guard.current.take();
+        guard.previous = old_current;
+        guard.current = Some((state_key, per_path.clone()));
+    }
+    Some((per_path, true))
+}
+
+// Read-only entry point for the board serve. Delegates to
+// `membership_partition_engine` with `allow_compute=false`, hard-coded here
+// and nowhere else — the serve calls only this function, never the engine
+// directly, so it structurally cannot reach the probe loop. `fresh` in the
+// returned tuple distinguishes a live result from a carried-over previous
+// partition; pass it straight through to `membership_report`.
+fn membership_partition<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Option<(
+    std::collections::BTreeMap<String, MembershipPathBuckets>,
+    bool,
+)> {
+    membership_partition_engine(app, false)
+}
+
+static MEMBERSHIP_PRECOMPUTE_INFLIGHT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+// A state-changing event can arrive while the probe loop is running. Keep
+// that trigger instead of losing it: otherwise the worker can finish with an
+// older state key and, if no later event occurs, the serve path will fall back
+// to the previous partition forever.
+static MEMBERSHIP_PRECOMPUTE_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+// Runs the expensive probe loop on a background thread, filling the memo
+// for the next serve to read. Called after the events that invalidate the
+// state key (worklist-changed, git-status-changed) and once at startup —
+// never from a board serve. Concurrent triggers collapse to one run: a
+// trigger arriving while one is already in flight is dropped rather than
+// queued. That is safe: either the in-flight run already covers the state
+// that would have driven the dropped trigger, or it doesn't and the NEXT
+// trigger (another event fires) will — and in the meantime the board serve
+// degrades no worse than to the previous partition it already tolerates.
+fn membership_precompute<R: tauri::Runtime>(app: &AppHandle<R>) {
+    if MEMBERSHIP_PRECOMPUTE_INFLIGHT
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        MEMBERSHIP_PRECOMPUTE_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        loop {
+            membership_partition_engine(&app, true);
+            // Keep the inflight latch held while consuming coalesced triggers,
+            // so an event racing the final check either becomes this loop's
+            // next pass or, after the latch is released, starts its own worker.
+            if MEMBERSHIP_PRECOMPUTE_PENDING.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                continue;
+            }
+            MEMBERSHIP_PRECOMPUTE_INFLIGHT.store(false, std::sync::atomic::Ordering::SeqCst);
+            // Close the small release/check race: an event arriving between
+            // the swap above and the latch release leaves a pending bit for us
+            // to hand back through the normal spawning path.
+            if MEMBERSHIP_PRECOMPUTE_PENDING.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                membership_precompute(&app);
+            }
+            break;
+        }
+    });
+}
+
+// membership-crosses-the-wire: serialize the partition for the board payload.
+//
+// Shape decisions, made once here rather than left to each consumer:
+//
+// * Every bucket is `{added, removed}` — single, joint, ambiguous, unowned and
+//   universe alike. Uniform rather than a bare number for some and a pair for
+//   others, so no reader has to remember which is which.
+// * `perItem` is an ARRAY of `{members, counts}`, members being an id array.
+//   A first pass kept an object whose KEY was the internal `"a+b"` join and
+//   carried `members` inside the value — which still exported the encoding and
+//   still required splitting it to recover the list. The engine now keys
+//   `per_item` by the member list itself, so nothing joins and nothing splits;
+//   the only surviving join is the human-read `contributors=` trace field.
+// * `byPath` covers the paths in the PARTITION, which is built from the
+//   current `git diff HEAD` universe — so a declared path with no current
+//   changes is ABSENT rather than present-and-zero. Absence means "nothing
+//   changed here", never "not computed"; the partition is whole-board or it is
+//   not served at all (`membership` is null when there is no partition).
+// * Item totals cover only paths the item OWNS lines on — a declared path with
+//   no owned lines contributes nothing, not a zero entry. The distinction is
+//   load-bearing: "declared but owns nothing" is judell/bram#273's opening
+//   report, and a zero entry would render it identically to "owns nothing
+//   because nothing changed".
+// * `membershipStale` (written beside this) scopes the WHOLE partition, not
+//   any path within it. A fallback serves one coherent snapshot; marking parts
+//   of it fresh would assert a mixture that never existed.
+fn membership_payload_json(
+    partition: &std::collections::BTreeMap<String, MembershipPathBuckets>,
+) -> serde_json::Value {
+    let pair = |(a, r): (usize, usize)| serde_json::json!({ "added": a, "removed": r });
+    let mut by_path = serde_json::Map::new();
+    let mut totals: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+    for (path, m) in partition {
         let attributed = (
             m.single.0 + m.joint.0 + m.ambiguous.0,
             m.single.1 + m.joint.1 + m.ambiguous.1,
         );
-        let (unowned, _clamped) = membership_unowned(u, attributed);
-        if let Some((expected, got)) =
-            membership_conservation_breach(u, m.single, m.joint, m.ambiguous, unowned)
-        {
-            append_bram_trace_line(
-                app,
-                "claim-interval",
-                &format!(
-                    "op=membership-conservation-broken path={} expected={} got={} \
-                     universe={},{} single={},{} joint={},{} ambiguous={},{} unowned={},{} \
-                     contributors={}",
-                    path,
-                    expected,
-                    got,
-                    u.0,
-                    u.1,
-                    m.single.0,
-                    m.single.1,
-                    m.joint.0,
-                    m.joint.1,
-                    m.ambiguous.0,
-                    m.ambiguous.1,
-                    unowned.0,
-                    unowned.1,
-                    membership_contributors_note(&m.contributors)
-                ),
+        let (unowned, _clamped) = membership_unowned(m.universe, attributed);
+        // An ARRAY, not an object: an object needs a string key, and the only
+        // string available for a joint take is a flattened member list — which
+        // is exactly the encoding this boundary exists to stop exporting.
+        let mut per_item: Vec<serde_json::Value> = Vec::new();
+        for (members, counts) in &m.per_item {
+            per_item.push(serde_json::json!({
+                "members": members,
+                "counts": pair(*counts),
+            }));
+            if members.len() == 1 {
+                let e = totals.entry(members[0].clone()).or_insert((0, 0));
+                e.0 += counts.0;
+                e.1 += counts.1;
+            }
+        }
+        by_path.insert(
+            path.clone(),
+            serde_json::json!({
+                "owners": m.owners.iter().cloned().collect::<Vec<String>>(),
+                "single": pair(m.single),
+                "joint": pair(m.joint),
+                "ambiguous": pair(m.ambiguous),
+                "unowned": pair(unowned),
+                "universe": pair(m.universe),
+                "perItem": per_item,
+            }),
+        );
+    }
+    let totals_json: serde_json::Map<String, serde_json::Value> =
+        totals.into_iter().map(|(id, c)| (id, pair(c))).collect();
+    serde_json::json!({ "byPath": by_path, "itemTotals": totals_json })
+}
+
+// The conservation check and the divergence comparison, split out of the
+// old membership_engine_observe along the seam
+// membership-precomputed-off-the-render-path found: both are cheap (the
+// first is arithmetic over a partition already in hand, the second a set
+// comparison), so both stay on the serve, called right after
+// `membership_partition`.
+//
+// `fresh` gates the conservation check — this is the load-bearing rule.
+// The check compares `partition`'s buckets against the diff `partition` was
+// computed from. Running it against a STALE partition would compare last
+// state's buckets to THIS state's universe and report a breach that never
+// happened: the exact false alarm this project has spent weeks counting
+// honestly (docs/developing-bram.md, soak-vs-tripwire). So the check runs
+// fresh-only; a stale serve skips it and traces the skip — "did not run"
+// must never look like "ran and found nothing".
+//
+// The divergence comparison is a set-equality check over data already in
+// the buckets, not an arithmetic identity against the partition's own
+// provenance, so it MAY still run when stale — but a stale disagreement
+// carries `stale=true` so nobody adjudicates it as a real one. Fresh lines
+// keep the exact pre-split format, with no added field.
+fn membership_report<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    partition: &std::collections::BTreeMap<String, MembershipPathBuckets>,
+    fresh: bool,
+    replay_owners_by_path: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+    replay_joint_by_path: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+) {
+    if !fresh {
+        append_bram_trace_line(
+            app,
+            "claim-interval",
+            "op=membership-conservation-skipped reason=stale",
+        );
+    }
+    for (path, m) in partition {
+        if fresh {
+            let attributed = (
+                m.single.0 + m.joint.0 + m.ambiguous.0,
+                m.single.1 + m.joint.1 + m.ambiguous.1,
             );
+            let (unowned, _clamped) = membership_unowned(m.universe, attributed);
+            if let Some((expected, got)) =
+                membership_conservation_breach(m.universe, m.single, m.joint, m.ambiguous, unowned)
+            {
+                append_bram_trace_line(
+                    app,
+                    "claim-interval",
+                    &format!(
+                        "op=membership-conservation-broken path={} expected={} got={} \
+                         universe={},{} single={},{} joint={},{} ambiguous={},{} unowned={},{} \
+                         contributors={}",
+                        path,
+                        expected,
+                        got,
+                        m.universe.0,
+                        m.universe.1,
+                        m.single.0,
+                        m.single.1,
+                        m.joint.0,
+                        m.joint.1,
+                        m.ambiguous.0,
+                        m.ambiguous.1,
+                        unowned.0,
+                        unowned.1,
+                        membership_contributors_note(
+                            &m.per_item
+                                .iter()
+                                // Joined for DISPLAY only: this is a human-read
+                                // trace field, the one place a flattened member
+                                // list is the right answer.
+                                .map(|(who, counts)| (who.join("+"), counts.0))
+                                .collect::<Vec<_>>()
+                        )
+                    ),
+                );
+            }
         }
         let mut replay: std::collections::BTreeSet<String> = replay_owners_by_path
             .get(path)
@@ -44770,20 +45325,24 @@ fn membership_engine_observe<R: tauri::Runtime>(
                     s.iter().cloned().collect::<Vec<_>>().join(",")
                 }
             };
-            append_bram_trace_line(
-                app,
-                "claim-interval",
-                &format!(
+            let line = if fresh {
+                format!(
                     "op=membership-diverges path={} replay={} membership={}",
                     path,
                     join(&replay),
                     join(&m.owners)
-                ),
-            );
+                )
+            } else {
+                format!(
+                    "op=membership-diverges path={} replay={} membership={} stale=true",
+                    path,
+                    join(&replay),
+                    join(&m.owners)
+                )
+            };
+            append_bram_trace_line(app, "claim-interval", &line);
         }
     }
-    let ambiguous_paths = per_path.values().filter(|m| m.ambiguous != (0, 0)).count();
-    trace_cost(app, per_path.len(), spawns.get(), ambiguous_paths, started);
 }
 
 #[cfg(test)]
@@ -44842,7 +45401,8 @@ mod membership_engine_tests {
             "the raw concatenated evidence double-counts re-edited lines"
         );
         let spawns = std::cell::Cell::new(0usize);
-        let net = super::membership_net_patch(&root, &idx2, &t2, &concat, "f.txt", &spawns)
+        let sections = vec![d1.clone(), d2.clone()];
+        let net = super::membership_net_patch(&root, &idx2, &t2, &sections, "f.txt", &spawns)
             .expect("net normalization should succeed");
         assert_eq!(super::membership_patch_footprint(&net).added_lines.len(), 5);
         assert!(spawns.get() > 0, "net normalization spawns are counted");
@@ -44949,6 +45509,1089 @@ mod membership_engine_tests {
             membership_conservation_breach((10, 4), (3, 1), (2, 0), (1, 1), (5, 2)),
             Some((14, 15))
         );
+    }
+}
+
+// membership-acceptance-fixtures-written-first: executable fixtures for the
+// migration criteria in docs/attribution-model.md §6.  Criteria 2–4 assert
+// the values the current consumers actually produce, while recording the
+// value the membership flip must produce.  They stay green until the
+// corresponding consumer is flipped; criteria 5–6 are ordinary regression
+// guards for behavior that must remain unchanged.
+#[cfg(test)]
+mod membership_wire_contract_tests {
+    use super::{membership_payload_json, MembershipPathBuckets};
+
+    fn buckets(
+        single: (usize, usize),
+        joint: (usize, usize),
+        ambiguous: (usize, usize),
+        universe: (usize, usize),
+        owners: &[&str],
+        per_item: &[(&[&str], (usize, usize))],
+    ) -> MembershipPathBuckets {
+        MembershipPathBuckets {
+            single,
+            joint,
+            ambiguous,
+            universe,
+            owners: owners.iter().map(|s| s.to_string()).collect(),
+            per_item: per_item
+                .iter()
+                .map(|(m, c)| (m.iter().map(|s| s.to_string()).collect::<Vec<_>>(), *c))
+                .collect(),
+        }
+    }
+
+    fn one(path: &str, b: MembershipPathBuckets) -> serde_json::Value {
+        let mut m = std::collections::BTreeMap::new();
+        m.insert(path.to_string(), b);
+        membership_payload_json(&m)
+    }
+
+    // Every bucket crosses as {added, removed} -- uniform, never a bare number
+    // for some and a pair for others -- and unowned is derived, not stored.
+    #[test]
+    fn every_bucket_crosses_as_an_added_removed_pair() {
+        let v = one(
+            "f.txt",
+            buckets(
+                (3, 1),
+                (2, 0),
+                (1, 0),
+                (10, 4),
+                &["a", "b"],
+                &[(&["a"], (3, 1)), (&["a", "b"], (2, 0)), (&["c"], (1, 0))],
+            ),
+        );
+        let p = &v["byPath"]["f.txt"];
+        for k in ["single", "joint", "ambiguous", "unowned", "universe"] {
+            assert!(p[k]["added"].is_number(), "{k} carries added");
+            assert!(p[k]["removed"].is_number(), "{k} carries removed");
+        }
+        // unowned = universe - (single + joint + ambiguous)
+        assert_eq!(p["unowned"]["added"], serde_json::json!(4));
+        assert_eq!(p["unowned"]["removed"], serde_json::json!(3));
+        assert_eq!(p["owners"], serde_json::json!(["a", "b"]));
+    }
+
+    // THE CONTRACT THIS BOUNDARY EXISTS FOR: no internal joint encoding
+    // crosses, and an id containing '+' survives intact. A `members.join("+")`
+    // key -- the shape this replaced -- makes this case unrecoverable.
+    #[test]
+    fn an_id_containing_a_plus_survives_the_boundary() {
+        let v = one(
+            "f.txt",
+            buckets(
+                (0, 0),
+                (5, 0),
+                (0, 0),
+                (5, 0),
+                &["c++parser", "b"],
+                &[(&["c++parser", "b"], (5, 0))],
+            ),
+        );
+        let entries = v["byPath"]["f.txt"]["perItem"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0]["members"],
+            serde_json::json!(["c++parser", "b"]),
+            "the member list crosses verbatim; nothing is joined or split"
+        );
+        // And no object key anywhere carries the flattened form.
+        assert!(
+            !serde_json::to_string(&v)
+                .unwrap()
+                .contains("\"c++parser+b\""),
+            "no joined key may appear in the payload"
+        );
+    }
+
+    // A singleton take is a one-element members array, not a bare string, so a
+    // reader never branches on shape.
+    #[test]
+    fn singleton_ownership_is_a_one_element_members_array() {
+        let v = one(
+            "f.txt",
+            buckets(
+                (2, 0),
+                (0, 0),
+                (0, 0),
+                (2, 0),
+                &["solo"],
+                &[(&["solo"], (2, 0))],
+            ),
+        );
+        let entries = v["byPath"]["f.txt"]["perItem"].as_array().unwrap();
+        assert_eq!(entries[0]["members"], serde_json::json!(["solo"]));
+        assert_eq!(v["itemTotals"]["solo"]["added"], serde_json::json!(2));
+    }
+
+    // Item totals sum SINGLE-owner takes only; a joint take belongs to no one
+    // item's total, and an item with no owned lines is absent -- not zeroed.
+    #[test]
+    fn item_totals_omit_joint_takes_and_unowned_declarers() {
+        let v = one(
+            "f.txt",
+            buckets(
+                (2, 1),
+                (4, 0),
+                (0, 0),
+                (9, 3),
+                &["a", "b"],
+                &[(&["a"], (2, 1)), (&["a", "b"], (4, 0))],
+            ),
+        );
+        assert_eq!(
+            v["itemTotals"]["a"],
+            serde_json::json!({"added": 2, "removed": 1})
+        );
+        assert!(
+            v["itemTotals"].get("b").is_none(),
+            "b's only take is joint, so it carries no single-owner total"
+        );
+        assert!(
+            v["itemTotals"].get("declared-but-idle").is_none(),
+            "an item that owns nothing is ABSENT, never a zero entry -- a zero \
+             would render 'declared but owns nothing' identically to 'nothing changed'"
+        );
+    }
+
+    // An unowned-only path still serves: the buckets are empty and unowned
+    // carries the whole universe. This is the shape the gate must be able to
+    // see before it can refuse a whole-file absorption.
+    #[test]
+    fn an_unowned_only_path_serves_its_residue() {
+        let v = one("f.txt", buckets((0, 0), (0, 0), (0, 0), (7, 2), &[], &[]));
+        let p = &v["byPath"]["f.txt"];
+        assert_eq!(p["unowned"], serde_json::json!({"added": 7, "removed": 2}));
+        assert_eq!(p["perItem"].as_array().unwrap().len(), 0);
+        assert_eq!(p["owners"], serde_json::json!([]));
+        assert_eq!(v["itemTotals"].as_object().unwrap().len(), 0);
+    }
+
+    // An empty partition still produces a well-formed envelope rather than
+    // null-shaped surprises for the consumer that step 3 will add.
+    #[test]
+    fn an_empty_partition_serves_an_empty_envelope() {
+        let v = membership_payload_json(&std::collections::BTreeMap::new());
+        assert_eq!(v["byPath"].as_object().unwrap().len(), 0);
+        assert_eq!(v["itemTotals"].as_object().unwrap().len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod membership_acceptance_fixture_tests {
+    use super::{
+        item_joint_with, joint_owners_from_runs, membership_blob_matches_head,
+        membership_candidate_base, membership_conservation_breach, membership_net_patch,
+        membership_patch_footprint, membership_unowned, resolve_interval_path_owner,
+        IntervalPathOwner,
+    };
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    // Same real-git scaffolding the deletion matrix uses. Duplicated rather
+    // than shared because the two modules are peers and neither owns the
+    // other's fixtures; if a third module needs them, hoist then.
+    fn scratch_repo(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "bram-acceptance-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main", "."],
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+        ] {
+            assert!(Command::new("git")
+                .current_dir(&root)
+                .args(&args)
+                .status()
+                .unwrap()
+                .success());
+        }
+        root
+    }
+
+    fn git(root: &Path, idx: Option<&Path>, args: &[&str]) -> std::process::Output {
+        let mut cmd = Command::new("git");
+        cmd.current_dir(root).args(args);
+        if let Some(i) = idx {
+            cmd.env("GIT_INDEX_FILE", i);
+        }
+        cmd.output().unwrap()
+    }
+
+    fn commit_all(root: &Path, msg: &str) {
+        assert!(git(root, None, &["add", "-A"]).status.success());
+        assert!(git(root, None, &["commit", "-q", "-m", msg])
+            .status
+            .success());
+    }
+
+    fn rev_parse(root: &Path, rev: &str) -> String {
+        String::from_utf8_lossy(&git(root, None, &["rev-parse", rev]).stdout)
+            .trim()
+            .to_string()
+    }
+
+    fn scratch_index(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "bram-acceptance-idx-{}-{}",
+            tag,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    fn seed_now_index(root: &Path, idx: &Path) {
+        assert!(git(root, Some(idx), &["read-tree", "HEAD"])
+            .status
+            .success());
+        assert!(git(root, Some(idx), &["add", "-A"]).status.success());
+    }
+
+    fn write_tree(root: &Path, idx: &Path) -> String {
+        String::from_utf8_lossy(&git(root, Some(idx), &["write-tree"]).stdout)
+            .trim()
+            .to_string()
+    }
+
+    fn diff(root: &Path, a: &str, b: &str, path: &str) -> String {
+        String::from_utf8_lossy(&git(root, None, &["diff", a, b, "--", path]).stdout).into_owned()
+    }
+
+    #[test]
+    fn criterion_2_declaring_a_path_earns_no_membership_without_evidence() {
+        // #327's `dummy-a` shape, built for real: an item DECLARES a path and
+        // writes nothing, while a neighbour does all the work on it.
+        //
+        // The criterion (attribution-model.md §6) is that dummy-a reads 0/0.
+        // This fixture proves the ENGINE half of it, and passing today is the
+        // honest result rather than a weak one: membership already refuses to
+        // credit a declarer with no evidence. What is unmet is the CONSUMER
+        // half -- the strip, tooltip and willCommit still source from the
+        // declared-path proxy, which is what #273 reported. That half cannot
+        // be reached from Rust; it flips with migration step 3 and is guarded
+        // by rendered verification there.
+        //
+        // So this test's job is to stop the engine from ever regressing INTO
+        // the behaviour the pane still has. It fails the moment a declarer
+        // without evidence is credited.
+        let root = scratch_repo("c2");
+        let body_57: String = (0..57).map(|n| format!("old-{n}\n")).collect();
+        std::fs::write(root.join("shared.txt"), &body_57).unwrap();
+        std::fs::write(root.join("untouched.txt"), "stable\n").unwrap();
+        commit_all(&root, "head: 57 lines");
+        let head = rev_parse(&root, "HEAD");
+
+        // The neighbour rewrites shared.txt: -57 +104. dummy-a writes nothing,
+        // anywhere, while declaring BOTH files.
+        let body_104: String = (0..104).map(|n| format!("new-{n}\n")).collect();
+        std::fs::write(root.join("shared.txt"), &body_104).unwrap();
+
+        let idx_now = scratch_index("c2-now");
+        seed_now_index(&root, &idx_now);
+        let now_tree = write_tree(&root, &idx_now);
+
+        let universe_fp = membership_patch_footprint(&diff(&root, &head, &now_tree, "shared.txt"));
+        let universe = (universe_fp.added_lines.len(), universe_fp.removed);
+        assert_eq!(universe, (104, 57), "sanity: the #327 shape, +104 -57");
+
+        let spawns = std::cell::Cell::new(0usize);
+        let mut per_item: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+
+        // The neighbour's evidence is its interval diff. Run the real probe.
+        let neighbour_patch = diff(&root, &head, &now_tree, "shared.txt");
+        let base = membership_candidate_base(
+            &root,
+            &idx_now,
+            std::slice::from_ref(&neighbour_patch),
+            &spawns,
+        )
+        .expect("the neighbour's evidence must reverse-apply from present content");
+        let head_relative = membership_blob_matches_head(&root, &base, "shared.txt", &spawns);
+        assert!(
+            head_relative,
+            "sole contributor: its base is HEAD, so both axes are HEAD-relative"
+        );
+        let fp = membership_patch_footprint(&neighbour_patch);
+        per_item.insert(
+            "neighbour".to_string(),
+            (
+                fp.added_lines.len(),
+                if head_relative { fp.removed } else { 0 },
+            ),
+        );
+
+        // dummy-a: declares shared.txt AND untouched.txt, holds no interval, so
+        // it contributes no candidate patch and the probe loop never runs for
+        // it. Declaration alone reaches the engine nowhere.
+        let dummy_a_declared = ["shared.txt", "untouched.txt"];
+        assert_eq!(dummy_a_declared.len(), 2, "declares two files");
+
+        assert_eq!(
+            per_item.get("dummy-a"),
+            None,
+            "THE CRITERION: an item that declared the path and wrote nothing \
+             carries no membership entry -- not a zeroed one, none at all"
+        );
+        assert_eq!(
+            per_item.get("neighbour"),
+            Some(&(104usize, 57usize)),
+            "and the work is credited to whoever actually did it"
+        );
+
+        // Conservation still holds: everything in the universe is accounted
+        // for by the neighbour, nothing is unowned, nothing is invented.
+        let attributed = *per_item.get("neighbour").unwrap();
+        let (unowned, clamped) = membership_unowned(universe, attributed);
+        assert!(!clamped, "no over-attribution");
+        assert_eq!(unowned, (0, 0), "nothing orphaned");
+        assert_eq!(
+            membership_conservation_breach(universe, attributed, (0, 0), (0, 0), unowned),
+            None,
+            "the partition sums to the universe"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn criterion_3_orphan_lines_are_explicit_unowned_residue() {
+        // bcb2a7e shape: a neighbour's claim-era work exists, but the
+        // requested item has no owned contribution.  The membership model
+        // must expose the orphan lines instead of letting whole-file staging
+        // absorb them silently.
+        let root = scratch_repo("c3");
+        std::fs::write(root.join("shared.txt"), "base\n").unwrap();
+        commit_all(&root, "head: base");
+        let head = rev_parse(&root, "HEAD");
+        std::fs::write(root.join("shared.txt"), "base\norphan-1\norphan-2\n").unwrap();
+        let idx_now = scratch_index("c3-now");
+        seed_now_index(&root, &idx_now);
+        let now = write_tree(&root, &idx_now);
+        let universe_fp = membership_patch_footprint(&diff(&root, &head, &now, "shared.txt"));
+        let universe = (universe_fp.added_lines.len(), universe_fp.removed);
+        assert_eq!(universe, (2, 0));
+        let attributed = (0usize, 0usize);
+        let (unowned, clamped) = membership_unowned(universe, attributed);
+        assert_eq!(unowned, (2, 0));
+        assert!(!clamped);
+        // A balanced partition is still diagnostically healthy; the gate's
+        // refusal/disclosure is the later consumer criterion.
+        assert_eq!(
+            membership_conservation_breach(universe, attributed, (0, 0), (0, 0), unowned),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn criterion_4_residue_fixtures_keep_the_three_universe_shapes_distinct() {
+        // §2.5 fixtures: unchanged content, content after a commit, and a
+        // diff made entirely of unowned lines.  The first two have no current
+        // universe; only the last contributes residue.
+        let root = scratch_repo("c4");
+        std::fs::write(
+            root.join("large.txt"),
+            (0..100).map(|n| format!("line-{n}\n")).collect::<String>(),
+        )
+        .unwrap();
+        commit_all(&root, "head: large file");
+        let head = rev_parse(&root, "HEAD");
+        let idx_unchanged = scratch_index("c4-unchanged");
+        seed_now_index(&root, &idx_unchanged);
+        let unchanged_tree = write_tree(&root, &idx_unchanged);
+        let large_unchanged =
+            membership_patch_footprint(&diff(&root, &head, &unchanged_tree, "large.txt"));
+        std::fs::write(root.join("large.txt"), "committed\n").unwrap();
+        commit_all(&root, "post-commit");
+        let post_head = rev_parse(&root, "HEAD");
+        let idx_post = scratch_index("c4-post");
+        seed_now_index(&root, &idx_post);
+        let post_tree = write_tree(&root, &idx_post);
+        let post_commit =
+            membership_patch_footprint(&diff(&root, &post_head, &post_tree, "large.txt"));
+        std::fs::write(root.join("large.txt"), "committed\nunowned\n").unwrap();
+        let idx_unowned = scratch_index("c4-unowned");
+        seed_now_index(&root, &idx_unowned);
+        let unowned_tree = write_tree(&root, &idx_unowned);
+        let unowned_fp =
+            membership_patch_footprint(&diff(&root, &post_head, &unowned_tree, "large.txt"));
+        let unowned_only =
+            membership_unowned((unowned_fp.added_lines.len(), unowned_fp.removed), (0, 0));
+        assert_eq!(large_unchanged.added_lines.len(), 0);
+        assert_eq!(large_unchanged.removed, 0);
+        assert_eq!(post_commit.added_lines.len(), 0);
+        assert_eq!(post_commit.removed, 0);
+        assert_eq!(unowned_only, ((1, 0), false));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn criterion_5_entangled_staging_fixture_preserves_line_exactness() {
+        // #336's two-item entangled shape: each isolated patch remains the
+        // exact line-level contribution, and residual metadata is retained.
+        let root = scratch_repo("c5");
+        std::fs::write(root.join("shared.txt"), "base\n").unwrap();
+        commit_all(&root, "head: base");
+        let head = rev_parse(&root, "HEAD");
+        std::fs::write(root.join("shared.txt"), "base\na1\na2\n").unwrap();
+        let idx_a = scratch_index("c5-a");
+        seed_now_index(&root, &idx_a);
+        let tree_a = write_tree(&root, &idx_a);
+        let d_a = diff(&root, &head, &tree_a, "shared.txt");
+        std::fs::write(root.join("shared.txt"), "base\na1\na2\nb1\n").unwrap();
+        let idx_now = scratch_index("c5-now");
+        seed_now_index(&root, &idx_now);
+        let tree_now = write_tree(&root, &idx_now);
+        let d_b = diff(&root, &tree_a, &tree_now, "shared.txt");
+        let spawns = std::cell::Cell::new(0usize);
+        let isolated_a = membership_patch_footprint(&d_a);
+        let isolated_b = membership_patch_footprint(
+            &membership_net_patch(
+                &root,
+                &idx_now,
+                &tree_now,
+                std::slice::from_ref(&d_b),
+                "shared.txt",
+                &spawns,
+            )
+            .unwrap(),
+        );
+        assert_eq!(isolated_a.added_lines.len(), 2);
+        assert_eq!(isolated_b.added_lines.len(), 1);
+        assert_eq!(isolated_b.removed, 0);
+        assert_eq!(
+            membership_conservation_breach(
+                (3, 0),
+                (
+                    isolated_a.added_lines.len() + isolated_b.added_lines.len(),
+                    isolated_b.removed
+                ),
+                (0, 0),
+                (0, 0),
+                (0, 0),
+            ),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn criterion_6_joint_and_no_evidence_refusals_remain_named_contracts() {
+        // #356 and pre-capture-only work are refusal contracts.  Keep the
+        // exact operation names beside the fixture until the integration
+        // harness exercises the HTTP gate directly.
+        let mut runs = std::collections::HashMap::new();
+        runs.insert(
+            "shared.txt".to_string(),
+            vec![serde_json::json!({"startLine": 1, "endLine": 2, "itemIds": ["a", "b"]})],
+        );
+        let joint = joint_owners_from_runs(&runs);
+        assert_eq!(joint["shared.txt"].len(), 2);
+        assert_eq!(
+            item_joint_with("a", &["shared.txt".to_string()], &joint),
+            vec!["b"]
+        );
+        let mut declared = std::collections::HashMap::new();
+        declared.insert("a".to_string(), vec!["shared.txt".to_string()]);
+        declared.insert("b".to_string(), vec!["shared.txt".to_string()]);
+        assert!(matches!(
+            resolve_interval_path_owner(
+                &["a".to_string(), "b".to_string()],
+                "shared.txt",
+                &declared
+            ),
+            IntervalPathOwner::Joint(_)
+        ));
+    }
+}
+
+// membership-attributes-deletions: the deletion matrix from the item's
+// worklist draft (docs/attribution-model.md §4, "Review response: the
+// deletion matrix"), driven against real git in temp repos -- the same
+// method as `membership_engine_tests::concatenated_reedit_patch_counts_net_once`,
+// generalized to a small shared harness since every case needs the same
+// idx_now / idx_head / HEAD scaffolding. Each test reproduces the probe
+// loop's own gate (`git apply --cached --check --reverse`) before measuring,
+// so a fixture that failed the gate would be caught, not silently measured
+// anyway.
+#[cfg(test)]
+mod membership_deletion_matrix_tests {
+    use super::{
+        membership_blob_matches_head, membership_candidate_base, membership_diff_tree_path,
+        membership_patch_footprint, membership_unowned, MembershipPathBuckets,
+    };
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    fn scratch_repo(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "bram-deletion-matrix-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(git(&root, None, &["init", "-q"]).status.success());
+        assert!(git(&root, None, &["config", "user.email", "t@example.com"])
+            .status
+            .success());
+        assert!(git(&root, None, &["config", "user.name", "Test"])
+            .status
+            .success());
+        root
+    }
+
+    fn git(root: &Path, idx: Option<&Path>, args: &[&str]) -> std::process::Output {
+        let mut cmd = Command::new("git");
+        cmd.current_dir(root).args(args);
+        if let Some(idx) = idx {
+            cmd.env("GIT_INDEX_FILE", idx);
+        }
+        cmd.output().unwrap()
+    }
+
+    fn commit_all(root: &Path, msg: &str) {
+        assert!(git(root, None, &["add", "-A"]).status.success());
+        assert!(git(root, None, &["commit", "-q", "-m", msg])
+            .status
+            .success());
+    }
+
+    fn rev_parse(root: &Path, rev: &str) -> String {
+        let out = git(root, None, &["rev-parse", rev]);
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    // Every scratch GIT_INDEX_FILE this harness uses lives OUTSIDE the repo
+    // (std::env::temp_dir(), like the production code's idx_head/idx_now),
+    // never under `root` -- an index file written inside the working tree
+    // would itself show up as untracked content the next `add -A` sees,
+    // silently polluting whatever tree that index writes.
+    fn scratch_index(tag: &str) -> PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        std::env::temp_dir().join(format!(
+            "bram-deletion-matrix-idx-{}-{}-{}",
+            tag,
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ))
+    }
+
+    // Present-state scratch index: HEAD plus a full `add -A` -- the same
+    // shape the probe loop's `idx_now` is, generalized so each fixture can
+    // build it after arranging whatever working-tree content it wants.
+    fn seed_now_index(root: &Path, idx: &Path) {
+        assert!(git(root, Some(idx), &["read-tree", "HEAD"])
+            .status
+            .success());
+        assert!(git(root, Some(idx), &["add", "-A"]).status.success());
+    }
+
+    fn write_tree(root: &Path, idx: &Path) -> String {
+        let out = git(root, Some(idx), &["write-tree"]);
+        assert!(out.status.success(), "write-tree failed: {:?}", out);
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    // Writes `content` as a blob directly into a scratch index at `path`,
+    // without touching the working tree -- how these fixtures construct an
+    // intermediate tree (e.g. case 2's "middle") that never existed as a
+    // real commit or a real working-tree state.
+    fn set_index_blob(root: &Path, idx: &Path, path: &str, content: &str) {
+        use std::io::Write;
+        let mut child = Command::new("git")
+            .current_dir(root)
+            .args(["hash-object", "-w", "--stdin"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(content.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "hash-object failed: {:?}", out);
+        let blob = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let out2 = git(
+            root,
+            Some(idx),
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "100644",
+                &blob,
+                path,
+            ],
+        );
+        assert!(out2.status.success(), "update-index failed: {:?}", out2);
+    }
+
+    fn diff(root: &Path, a: &str, b: &str, path: &str) -> String {
+        let out = git(root, None, &["diff", a, b, "--", path]);
+        assert!(out.status.success(), "diff failed: {:?}", out);
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    // The probe loop's own gate, reproduced here so each fixture drives the
+    // exact check the production code runs: does `patch` reverse-apply
+    // cleanly against `idx`? (`membership_partition_engine`'s local
+    // `probe` closure, same two args, same command.)
+    fn probe(root: &Path, idx: &Path, patch: &str, tag: &str) -> bool {
+        let pfile = std::env::temp_dir().join(format!("bram-deletion-matrix-probe-{}", tag));
+        std::fs::write(&pfile, patch).unwrap();
+        let pfile_s = pfile.to_string_lossy().to_string();
+        let ok = git(
+            root,
+            Some(idx),
+            &["apply", "--cached", "--check", "--reverse", &pfile_s],
+        )
+        .status
+        .success();
+        let _ = std::fs::remove_file(&pfile);
+        ok
+    }
+
+    // Matrix #1 — pure deletion: HEAD [a,b,c], X deletes b. X is the sole
+    // contributor, so its base_tree (present minus X's own work) IS HEAD's
+    // tree for the path; the blob-equality rule therefore lets X's removed
+    // line count. Expected: X owns (0,1); unowned (0,0).
+    #[test]
+    fn matrix_1_pure_deletion_owns_the_removed_line() {
+        let root = scratch_repo("case1");
+        std::fs::write(root.join("f.txt"), "a\nb\nc\n").unwrap();
+        commit_all(&root, "head: a b c");
+        let head = rev_parse(&root, "HEAD");
+
+        // X's interval: HEAD -> present, with b deleted.
+        std::fs::write(root.join("f.txt"), "a\nc\n").unwrap();
+        let idx_now = scratch_index("case1-now");
+        seed_now_index(&root, &idx_now);
+        let now_tree = write_tree(&root, &idx_now);
+        let idx_head = scratch_index("case1-head");
+        assert!(git(&root, Some(&idx_head), &["read-tree", "HEAD"])
+            .status
+            .success());
+
+        let universe_fp = membership_patch_footprint(&diff(&root, &head, &now_tree, "f.txt"));
+        let universe = (universe_fp.added_lines.len(), universe_fp.removed);
+        assert_eq!(universe, (0, 1), "sanity: HEAD..now is a pure deletion");
+
+        let patch_x = diff(&root, &head, &now_tree, "f.txt");
+        assert!(
+            !probe(&root, &idx_head, &patch_x, "case1"),
+            "not already in HEAD"
+        );
+        assert!(
+            probe(&root, &idx_now, &patch_x, "case1"),
+            "X's evidence must account for present content"
+        );
+
+        let spawns = std::cell::Cell::new(0usize);
+        let base =
+            membership_candidate_base(&root, &idx_now, std::slice::from_ref(&patch_x), &spawns)
+                .expect("reverse-apply should produce a base tree");
+        assert!(
+            membership_blob_matches_head(&root, &base, "f.txt", &spawns),
+            "X is the sole contributor: base_tree must equal HEAD for f.txt"
+        );
+        let fp = membership_patch_footprint(&patch_x);
+        let counts = (fp.added_lines.len(), fp.removed);
+        assert_eq!(counts, (0, 1), "X owns the pure deletion");
+
+        let (unowned, clamped) = membership_unowned(universe, counts);
+        assert!(!clamped);
+        assert_eq!(unowned, (0, 0), "nothing left unowned");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Matrix #2 — deletion after a prior rewrite: HEAD [old]; A rewrites
+    // old->middle; B rewrites middle->new (still open). A's evidence is
+    // superseded (its patch does not reverse-apply against present
+    // content) and contributes nothing. B's evidence DOES account for
+    // present content, but B's own baseline (middle) is not HEAD's blob
+    // (old) -- B sat on top of A's now-superseded work -- so B's removed
+    // line is NOT HEAD-relative and does not count. Expected: B owns
+    // (1,0); the "-old" deletion is UNOWNED (0,1); universe (1,1). This is
+    // the case the review's counter-example named, and the case the
+    // blob-equality rule exists to get right.
+    #[test]
+    fn matrix_2_deletion_after_prior_rewrite_lands_unowned() {
+        let root = scratch_repo("case2");
+        std::fs::write(root.join("f.txt"), "old\n").unwrap();
+        commit_all(&root, "head: old");
+        let head = rev_parse(&root, "HEAD");
+
+        // "middle" never exists as a commit or a working-tree state -- it
+        // is A's boundary, a pure scratch tree, exactly like a real claim
+        // boundary capture.
+        let idx_mid = scratch_index("case2-mid");
+        assert!(git(&root, Some(&idx_mid), &["read-tree", "HEAD"])
+            .status
+            .success());
+        set_index_blob(&root, &idx_mid, "f.txt", "middle\n");
+        let middle = write_tree(&root, &idx_mid);
+
+        // Present state: B's open interval has taken it to "new".
+        std::fs::write(root.join("f.txt"), "new\n").unwrap();
+        let idx_now = scratch_index("case2-now");
+        seed_now_index(&root, &idx_now);
+        let now_tree = write_tree(&root, &idx_now);
+        let idx_head = scratch_index("case2-head");
+        assert!(git(&root, Some(&idx_head), &["read-tree", "HEAD"])
+            .status
+            .success());
+
+        let universe_fp = membership_patch_footprint(&diff(&root, &head, &now_tree, "f.txt"));
+        let universe = (universe_fp.added_lines.len(), universe_fp.removed);
+        assert_eq!(universe, (1, 1), "sanity: HEAD..now is one add, one remove");
+
+        // A's own patch: HEAD(old) -> middle, exactly what claim_interval_diff
+        // derives for a single-owner interval bounded by [A_start=HEAD,
+        // A_end=B_start].
+        let patch_a = diff(&root, &head, &middle, "f.txt");
+        // B's own patch: middle -> present, B's still-open interval.
+        let patch_b = diff(&root, &middle, &now_tree, "f.txt");
+        assert!(!patch_a.trim().is_empty());
+        assert!(!patch_b.trim().is_empty());
+
+        // A is superseded: its evidence no longer accounts for present
+        // content (present is "new"; A's patch's new-side is "middle").
+        assert!(
+            !probe(&root, &idx_now, &patch_a, "case2a"),
+            "A's patch must fail the present-state probe: superseded, contributes nothing"
+        );
+
+        // B's evidence accounts for present content.
+        assert!(
+            !probe(&root, &idx_head, &patch_b, "case2b"),
+            "not already in HEAD"
+        );
+        assert!(
+            probe(&root, &idx_now, &patch_b, "case2b"),
+            "B's evidence must account for present content"
+        );
+
+        let spawns = std::cell::Cell::new(0usize);
+        let base_b =
+            membership_candidate_base(&root, &idx_now, std::slice::from_ref(&patch_b), &spawns)
+                .expect("B's reverse-apply should produce a base tree");
+        let head_relative = membership_blob_matches_head(&root, &base_b, "f.txt", &spawns);
+        assert!(
+            !head_relative,
+            "B's baseline is middle, not HEAD's old -- must NOT be HEAD-relative"
+        );
+
+        let fp_b = membership_patch_footprint(&patch_b);
+        assert_eq!(
+            fp_b.added_lines.len(),
+            1,
+            "B's raw patch adds one line (new)"
+        );
+        assert_eq!(
+            fp_b.removed, 1,
+            "B's raw patch removes one line (middle), baseline-relative"
+        );
+
+        // The production rule: additions always count; removed counts only
+        // when head_relative.
+        let counts_b = (
+            fp_b.added_lines.len(),
+            if head_relative { fp_b.removed } else { 0 },
+        );
+        assert_eq!(
+            counts_b,
+            (1, 0),
+            "B owns the addition only -- the matrix's exact answer"
+        );
+
+        let (unowned, clamped) = membership_unowned(universe, counts_b);
+        assert!(!clamped);
+        assert_eq!(
+            unowned,
+            (0, 1),
+            "the -old deletion is UNOWNED: no surviving evidence accounts for removing it"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Matrix #3 — shared deletion: a same-click claim covering X and Y
+    // removes b. Mechanically identical to case 1 (same probe, same
+    // base_tree, same blob-equality test) -- membership_joint_patches
+    // derives a joint candidate's patch the same way a single-owner
+    // interval's is derived, over the joint boundary refs. Only the
+    // member SET differs, which routes the SAME counts into the `joint`
+    // bucket instead of `single` -- no special case. Expected: joint
+    // (0,1).
+    #[test]
+    fn matrix_3_shared_deletion_is_joint_no_special_case() {
+        let root = scratch_repo("case3");
+        std::fs::write(root.join("f.txt"), "a\nb\nc\n").unwrap();
+        commit_all(&root, "head: a b c");
+        let head = rev_parse(&root, "HEAD");
+
+        std::fs::write(root.join("f.txt"), "a\nc\n").unwrap();
+        let idx_now = scratch_index("case3-now");
+        seed_now_index(&root, &idx_now);
+        let now_tree = write_tree(&root, &idx_now);
+        let idx_head = scratch_index("case3-head");
+        assert!(git(&root, Some(&idx_head), &["read-tree", "HEAD"])
+            .status
+            .success());
+
+        let patch_joint = diff(&root, &head, &now_tree, "f.txt");
+        assert!(!probe(&root, &idx_head, &patch_joint, "case3"));
+        assert!(probe(&root, &idx_now, &patch_joint, "case3"));
+
+        let spawns = std::cell::Cell::new(0usize);
+        let base =
+            membership_candidate_base(&root, &idx_now, std::slice::from_ref(&patch_joint), &spawns)
+                .expect("reverse-apply should produce a base tree");
+        assert!(membership_blob_matches_head(&root, &base, "f.txt", &spawns));
+        let fp = membership_patch_footprint(&patch_joint);
+        let counts = (fp.added_lines.len(), fp.removed);
+        assert_eq!(counts, (0, 1));
+
+        // Bucket routing, mirroring the probe loop's own selection: a
+        // multi-member candidate lands in `joint`, not `single`, and the
+        // deletion rule applies identically either way.
+        let members = vec!["X".to_string(), "Y".to_string()];
+        let mut buckets = MembershipPathBuckets::default();
+        let bucket = if members.len() > 1 {
+            &mut buckets.joint
+        } else {
+            &mut buckets.single
+        };
+        bucket.0 += counts.0;
+        bucket.1 += counts.1;
+        assert_eq!(buckets.joint, (0, 1), "joint owns the shared deletion");
+        assert_eq!(
+            buckets.single,
+            (0, 0),
+            "single stays empty -- no special case"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Matrix #4 — modification: HEAD [a], X: a -> a'. X is the sole
+    // contributor on both axes. Expected: X owns (1,1).
+    #[test]
+    fn matrix_4_modification_owns_both_axes() {
+        let root = scratch_repo("case4");
+        std::fs::write(root.join("f.txt"), "a\n").unwrap();
+        commit_all(&root, "head: a");
+        let head = rev_parse(&root, "HEAD");
+
+        std::fs::write(root.join("f.txt"), "a-prime\n").unwrap();
+        let idx_now = scratch_index("case4-now");
+        seed_now_index(&root, &idx_now);
+        let now_tree = write_tree(&root, &idx_now);
+        let idx_head = scratch_index("case4-head");
+        assert!(git(&root, Some(&idx_head), &["read-tree", "HEAD"])
+            .status
+            .success());
+
+        let universe_fp = membership_patch_footprint(&diff(&root, &head, &now_tree, "f.txt"));
+        let universe = (universe_fp.added_lines.len(), universe_fp.removed);
+        assert_eq!(universe, (1, 1));
+
+        let patch_x = diff(&root, &head, &now_tree, "f.txt");
+        assert!(!probe(&root, &idx_head, &patch_x, "case4"));
+        assert!(probe(&root, &idx_now, &patch_x, "case4"));
+
+        let spawns = std::cell::Cell::new(0usize);
+        let base =
+            membership_candidate_base(&root, &idx_now, std::slice::from_ref(&patch_x), &spawns)
+                .expect("reverse-apply should produce a base tree");
+        assert!(
+            membership_blob_matches_head(&root, &base, "f.txt", &spawns),
+            "X is the sole contributor: base_tree must equal HEAD"
+        );
+        let fp = membership_patch_footprint(&patch_x);
+        let counts = (fp.added_lines.len(), fp.removed);
+        assert_eq!(counts, (1, 1), "X owns both the addition and the removal");
+
+        let (unowned, clamped) = membership_unowned(universe, counts);
+        assert!(!clamped);
+        assert_eq!(unowned, (0, 0));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Matrix #5 — multi-interval re-edit with deletion: X creates [p,q] in
+    // one interval, then deletes q in a later interval of its OWN.
+    //
+    // *** FIXED (fix-patch-composition-for-repeated-paths). *** This case
+    // used to falsify the matrix: `git apply --cached --reverse` on a patch
+    // carrying TWO "diff --git a/f.txt b/f.txt" sections for the SAME path
+    // does not compose them when reverse-applied as one concatenation -- it
+    // reverses only the LAST section and silently drops the earlier one,
+    // exit code 0. Proven directly with plain git (no Bram code involved):
+    // concatenating `git diff HEAD t1 -- f.txt` (new-file, +p+q) with
+    // `git diff t1 t2 -- f.txt` (-q) and reverse-applying the concatenation
+    // against an index holding t2 landed at t1 (f.txt = "p\nq\n"), NOT at
+    // HEAD (no f.txt at all) -- so `membership_candidate_base`'s `base_tree`
+    // for a multi-interval candidate came out "present state minus only its
+    // LAST interval's section," not "present state minus ALL of its
+    // evidence."
+    //
+    // The fix: `membership_candidate_base` no longer takes one concatenated
+    // patch. It takes the candidate's per-interval SECTIONS, in the record
+    // order they were matched (never re-derived from splitting concatenated
+    // text on "diff --git"), and reverse-applies them one at a time,
+    // newest-interval-first -- each reversal against the tree the PRIOR
+    // reversal produced, which is what "undo this candidate's work" actually
+    // means. Here that is `[d2, d1]`: reversing d2 (t1->t2, i.e. "-q")
+    // restores "p\nq\n"; reversing d1 (HEAD->t1, i.e. "+p+q") on top of that
+    // restores HEAD (no f.txt). `base_tree` now lands at HEAD, so
+    // `membership_blob_matches_head` reports true, X reads as the path's
+    // sole contributor (which it truly is), and the net patch (`base_tree`
+    // -> `now_tree`) is the honest "+p" -- X's own, unambiguous line. Any
+    // section that fails to apply aborts the whole derivation and returns
+    // `None` rather than a partially-reversed base (see
+    // `membership_candidate_base`'s doc comment).
+    #[test]
+    fn matrix_5_multi_interval_create_then_delete_counts_net_once() {
+        let root = scratch_repo("case5");
+        // HEAD has no f.txt at all -- X creates it fresh, in its first
+        // interval.
+        std::fs::write(root.join("keep.txt"), "keep\n").unwrap();
+        commit_all(&root, "head: no f.txt");
+        let head = rev_parse(&root, "HEAD");
+
+        // Interval 1: HEAD -> [p,q].
+        let idx1 = scratch_index("case5-1");
+        assert!(git(&root, Some(&idx1), &["read-tree", "HEAD"])
+            .status
+            .success());
+        set_index_blob(&root, &idx1, "f.txt", "p\nq\n");
+        let t1 = write_tree(&root, &idx1);
+        let d1 = diff(&root, &head, &t1, "f.txt");
+
+        // Interval 2 (X's own, still open): [p,q] -> [p].
+        let idx2 = scratch_index("case5-2");
+        assert!(git(&root, Some(&idx2), &["read-tree", "HEAD"])
+            .status
+            .success());
+        set_index_blob(&root, &idx2, "f.txt", "p\n");
+        let t2 = write_tree(&root, &idx2);
+        let d2 = diff(&root, &t1, &t2, "f.txt");
+
+        let concat = format!("{d1}{d2}");
+        let sections = vec![d1.clone(), d2.clone()];
+        assert!(
+            concat.matches("diff --git").count() > 1,
+            "concatenated evidence spans two intervals"
+        );
+        assert_eq!(
+            membership_patch_footprint(&concat).added_lines.len(),
+            2,
+            "the raw concatenated evidence double-counts p and q"
+        );
+
+        // Present state matches t2.
+        std::fs::write(root.join("f.txt"), "p\n").unwrap();
+        let idx_now = scratch_index("case5-now");
+        seed_now_index(&root, &idx_now);
+        let now_tree = write_tree(&root, &idx_now);
+        assert_eq!(now_tree, t2, "sanity: idx_now's write-tree matches t2");
+        let idx_head = scratch_index("case5-head");
+        assert!(git(&root, Some(&idx_head), &["read-tree", "HEAD"])
+            .status
+            .success());
+
+        let universe_fp = membership_patch_footprint(&diff(&root, &head, &now_tree, "f.txt"));
+        let universe = (universe_fp.added_lines.len(), universe_fp.removed);
+        assert_eq!(
+            universe,
+            (1, 0),
+            "HEAD..now is a plain one-line add of p -- X's true, unambiguous net effect"
+        );
+
+        assert!(
+            !probe(&root, &idx_head, &concat, "case5"),
+            "not already in HEAD"
+        );
+        assert!(
+            probe(&root, &idx_now, &concat, "case5"),
+            "X's full concatenated evidence must account for present content"
+        );
+
+        // HEAD's own tree oid (`head` above is the commit, not the tree) --
+        // what `base_tree` must equal once both sections are reversed.
+        let head_tree = rev_parse(&root, "HEAD^{tree}");
+
+        let spawns = std::cell::Cell::new(0usize);
+        let base = membership_candidate_base(&root, &idx_now, &sections, &spawns)
+            .expect("reverse-applying each section in turn should succeed");
+        eprintln!(
+            "case5 base_tree={base} t1(old-wrong-base)={t1} head_tree(expected-base)={head_tree}"
+        );
+        // THE FIX, measured directly: reversing d2 then d1 (newest-interval-
+        // first) lands base_tree at HEAD's tree, not at t1 (the old
+        // single-shot concatenated form's wrong answer).
+        assert_eq!(
+            base, head_tree,
+            "fixed: base_tree lands at HEAD's tree -- both sections reversed, not just the last one"
+        );
+
+        let head_relative = membership_blob_matches_head(&root, &base, "f.txt", &spawns);
+        eprintln!("case5 head_relative={head_relative} (expected true)");
+        assert!(
+            head_relative,
+            "fixed: base_tree's f.txt now equals HEAD's f.txt (both have none) -- \
+             X is correctly recognized as the path's sole contributor"
+        );
+
+        let net = membership_diff_tree_path(&root, &base, &now_tree, "f.txt", &spawns)
+            .expect("net-normalized patch (HEAD -> now_tree, X's true net effect)");
+        let fp = membership_patch_footprint(&net);
+        // The production rule: additions always count; removals only when
+        // head_relative.
+        let counts = (
+            fp.added_lines.len(),
+            if head_relative { fp.removed } else { 0 },
+        );
+        eprintln!("case5 counts={counts:?} matrix_expected=(1, 0)");
+        assert_eq!(
+            counts,
+            (1, 0),
+            "fixed: X owns its own net addition, the matrix's expected answer"
+        );
+
+        let (unowned, clamped) = membership_unowned(universe, counts);
+        assert!(!clamped);
+        eprintln!("case5 unowned={unowned:?} -- expected (0, 0), nothing left over");
+        assert_eq!(
+            unowned,
+            (0, 0),
+            "fixed: X's own addition is credited to X, nothing lands unowned"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
@@ -55385,6 +57028,55 @@ fn flush_pending_worklist_push_mirrors<R: tauri::Runtime>(app: &AppHandle<R>) {
 
 // ---- close-on-push-automatic (security H5) ----
 
+// issue-390: which remote branches contain this commit NOW. The queued-close
+// banner's job is to name the branch whose merge closes the issue, and that is
+// a fact about the ref graph rather than about whatever was checked out when
+// the commit was made. The workflow that breaks the enqueue-time capture is
+// the one conventions prescribe for issue-closing work -- commit on the default
+// branch through the gate, then cut a feature branch and reset the default --
+// so the captured value goes stale in exactly the case it was built to serve.
+//
+// `origin/HEAD` and the default branch are excluded: naming them would
+// reproduce the "is on main, not main" contradiction this fixes.
+fn issue_close_containing_remote_branches<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    sha: &str,
+) -> Vec<String> {
+    let Some(root) = project_root(Some(app)) else {
+        return Vec::new();
+    };
+    let default_ref = origin_default_ref(app, &root);
+    let out = match std::process::Command::new("git")
+        .current_dir(&root)
+        .args([
+            "branch",
+            "-r",
+            "--contains",
+            sha,
+            "--format=%(refname:short)",
+        ])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+    let default_short = default_ref
+        .as_deref()
+        .and_then(|r| r.rsplit('/').next())
+        .unwrap_or("")
+        .to_string();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.contains("->"))
+        .filter(|l| {
+            let short = l.rsplit('/').next().unwrap_or(l);
+            *l != "origin/HEAD" && (default_short.is_empty() || short != default_short)
+        })
+        .map(|l| l.to_string())
+        .collect()
+}
+
 fn issue_close_queue_file<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
     project_resource_path(app, ".worklist-issue-close.json")
 }
@@ -55866,6 +57558,8 @@ fn enqueue_issue_closes_from_auth<R: tauri::Runtime>(
                 patch_id: patch_id.clone(),
                 created_at_ms: unix_now_ms(),
                 branch: (!branch.is_empty()).then(|| branch.clone()),
+                // issue-390: derived by the flush, not at enqueue.
+                merge_branches: Vec::new(),
                 last_reason: None,
             };
             if let Err(e) = enqueue_pending_issue_close_path(&path, record) {
@@ -56182,6 +57876,10 @@ fn flush_pending_issue_closes<R: tauri::Runtime>(app: &AppHandle<R>, trigger: &s
         }
         if deferred_unmerged && closed_via_pr.is_none() {
             last_reason = Some("deferred-not-on-default");
+            // issue-390: re-derive the containing branches HERE, where the
+            // verdict is reached, so the banner names what will actually
+            // merge rather than what was checked out at enqueue.
+            record.merge_branches = issue_close_containing_remote_branches(app, &record.commit_sha);
             eprintln!(
                 "[issue-close-queue] op=deferred-not-on-default issue={} sha={}",
                 record.issue, record.commit_sha
@@ -56465,6 +58163,7 @@ mod close_on_push_tests {
             comment: c.map(String::from),
             created_at_ms: 0,
             branch: None,
+            merge_branches: Vec::new(),
             last_reason: None,
         };
         enqueue_pending_issue_close_path(&path, rec(None)).unwrap();
@@ -56479,6 +58178,7 @@ mod close_on_push_tests {
                 comment: None,
                 created_at_ms: 0,
                 branch: None,
+                merge_branches: Vec::new(),
                 last_reason: None,
             },
         )
@@ -56498,6 +58198,7 @@ mod close_on_push_tests {
             comment: None,
             created_at_ms: 0,
             branch: None,
+            merge_branches: Vec::new(),
             last_reason: None,
         }
     }
@@ -58753,6 +60454,11 @@ fn route_request<R: tauri::Runtime>(
                     "createdAtMs": r.created_at_ms,
                     "reason": r.last_reason,
                     "branch": r.branch,
+                    // issue-390: the branches that CONTAIN the commit now,
+                    // re-derived by the flush. The pane prefers these over
+                    // `branch` (the enqueue-time capture), which stays as
+                    // provenance and as the fallback when this is empty.
+                    "mergeBranches": r.merge_branches,
                     "defaultBranch": default_branch,
                 })
             })
@@ -59435,7 +61141,46 @@ fn route_request<R: tauri::Runtime>(
             // Nothing in this payload reads it; the replay above stays the
             // authority for every consumer until the observation earns the
             // step-2+ flips.
-            membership_engine_observe(app, &owners_by_path, &joint_owners_by_path);
+            //
+            // membership-precomputed-off-the-render-path: the serve now only
+            // READS the memo (`membership_partition`, `allow_compute=false`)
+            // — the probe loop that fills it runs off the request path, on
+            // `membership_precompute`'s invalidating-event triggers and at
+            // startup. `membership_report` runs the conservation check and
+            // divergence comparison against whatever came back; `fresh`
+            // (true = compute or exact-key hit, false = carried-over
+            // previous partition) gates the conservation check specifically
+            // — see membership_report's header for why a stale check would
+            // manufacture a false breach. `membershipStale` below is the
+            // payload's observation of that same fact — carried for
+            // migration step 2 to read; nothing reads it yet.
+            let (membership_stale, membership_payload) = match membership_partition(app) {
+                Some((partition, fresh)) => {
+                    membership_report(
+                        app,
+                        &partition,
+                        fresh,
+                        &owners_by_path,
+                        &joint_owners_by_path,
+                    );
+                    (!fresh, membership_payload_json(&partition))
+                }
+                None => (false, serde_json::Value::Null),
+            };
+            if let Some(obj) = doc.as_object_mut() {
+                obj.insert(
+                    "membershipStale".to_string(),
+                    serde_json::Value::Bool(membership_stale),
+                );
+                // membership-crosses-the-wire: the partition itself, so the
+                // pane can stop inferring ownership from declared paths.
+                // DELIBERATELY UNREAD — every consumer still sources from the
+                // replay; migration step 3 spends this. Serving it first means
+                // the field can be watched against real boards before anything
+                // depends on it, which is the same observe-then-consume
+                // discipline steps 1a and 1b used.
+                obj.insert("membership".to_string(), membership_payload);
+            }
         }
         // #286: the ids the currently live inflight claim covers, so an
         // agent reading the board mid-turn can see which ids it still
@@ -66016,6 +67761,11 @@ pub fn run() {
             start_codex_session_poll_fallback(app_handle.clone());
             start_claude_turn_stats_poll(app_handle.clone());
             start_git_head_watch(app_handle.clone());
+            // membership-precomputed-off-the-render-path: one attempt at
+            // startup so the first board serve of a session can hit a warm
+            // memo instead of finding nothing and falling through to
+            // op=membership-unavailable.
+            membership_precompute(&app_handle);
             // issue-253: the refs watcher only helps if Bram was running when
             // the push happened, and the reported case is a release script with
             // the app closed. One attempt at startup covers it; the flush's own

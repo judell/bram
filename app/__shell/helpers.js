@@ -12382,7 +12382,13 @@ window.__bramCloseQueueReason = function (rows) {
   var issues = list.map(function (r) { return "#" + (r && r.issue); }).join(", ");
   var head = "close queued for " + issues + (t ? " (pending since " + t + ")" : "");
   var sha = (p.commitSha ? String(p.commitSha) : "").slice(0, 7);
-  var br = p.branch;
+  // issue-390: prefer the flush-derived containing branches over the
+  // enqueue-time capture. The captured value goes stale in exactly the
+  // workflow conventions prescribe for issue-closing work (commit on the
+  // default branch, then cut a feature branch and reset it), so it names
+  // the default branch for a commit that has since moved off it.
+  var merge = (p.mergeBranches || []).filter(function (b) { return !!b; });
+  var br = merge.length ? merge.join(", ") : p.branch;
   var def = p.defaultBranch;
   switch (p.reason) {
     case "awaiting-push":
@@ -12394,7 +12400,18 @@ window.__bramCloseQueueReason = function (rows) {
       // A legacy record carries no branch; the two clauses that name one
       // must then both drop out rather than composing into "is not on the
       // default branch, not main".
-      if (!br) {
+      // issue-390: `br === def` is the SIBLING of the `!br` case below, and
+      // was unguarded — it composed into "is on main, not main", a sentence
+      // that asserts and denies the same fact. The six-case render fixture
+      // that produced the !br guard did include branch === defaultBranch, but
+      // only paired with `awaiting-push`, which renders a different arm: the
+      // matrix covered both values of each axis and never crossed them.
+      //
+      // Kept even though the data side is fixed. A legacy record, a failed
+      // ref lookup, or any future path leaving the two equal would otherwise
+      // print nonsense again; this is the difference between a stale record
+      // reading oddly and reading as a contradiction.
+      if (!br || br === def) {
         return (
           head + " — " + (sha || "the commit") + " has not reached " +
           (def || "the default branch") + " yet; it closes when it merges"

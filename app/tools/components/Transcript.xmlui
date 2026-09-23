@@ -245,9 +245,13 @@
             highlightText="{window.__bramSearchTerms($item.__needle)}"
             highlightActiveIndex="{$item.__activeOcc}" />
         </VStack>
-        <!-- assistant text -->
+        <!-- assistant text, and thinking (transcript-thinking-inline): Claude
+             Code 2.1.280 began writing into thinking blocks the short notes it
+             used to emit as reply text (every earlier version left them empty,
+             and the host drops empty ones), so they render exactly as reply
+             text did before the upgrade -- no fold, no separate styling. -->
         <Markdown
-          when="{$item.kind === 'text'}"
+          when="{$item.kind === 'text' || $item.kind === 'thinking'}"
           interpolateBindings="false" allowHtml="false"
           content="{$item.text}"
           highlightText="{window.__bramSearchTerms($item.__needle)}"
@@ -280,33 +284,6 @@
                 fit="contain" />
             </Link>
           </Items>
-        </VStack>
-        <!-- thinking (foldable) -->
-        <VStack when="{$item.kind === 'thinking'}" gap="$space-0_5">
-          <Link noIndicator="true" onClick="expanded = window.__bramToggleInArray(expanded, $item.id)">
-            <Text
-              fontSize="$fontSize-sm"
-              fontStyle="italic"
-              color="$textColor-secondary"
-              value="{((expanded || []).includes($item.id) ? '▾' : '▸') + '  💭 thinking'}" />
-          </Link>
-          <Text
-            when="{$item.__findPreview}"
-            fontSize="$fontSize-sm"
-            color="$textColor-secondary"
-            value="{$item.__findPreview}"
-            highlightText="{window.__bramSearchTerms($item.__needle)}"
-            highlightActiveIndex="{$item.__activeOcc}" />
-          <VStack
-            when="{(expanded || []).includes($item.id)}"
-            backgroundColor="$color-surface-50"
-            padding="$space-2"
-            borderRadius="$borderRadius">
-            <!-- Expanded body: unmarked while finding (the preview above
-                 is the counted, active-highlighted surface). -->
-            <Markdown content="{$item.text}" interpolateBindings="false" allowHtml="false"
-              highlightText="{$item.__findPreview ? [] : window.__bramSearchTerms($item.__needle)}" />
-          </VStack>
         </VStack>
         <!-- tool call (foldable) -->
         <VStack when="{$item.kind === 'tool'}" gap="$space-0_5">

@@ -113,6 +113,14 @@
               <Text width="100%" textAlign="start" value="{$item.label}" />
             </property>
           </Select>
+          <!-- issue-389: under "none" the Claude/Codex choice above no longer
+               picks what Bram launches — it tells Bram which agent YOU run in
+               the terminal (herdr etc.), so turn-end detection reads the right
+               transcripts. -->
+          <Text
+            when="{startupPolicyBox.value === 'none'}"
+            variant="caption"
+            value="With this setting, the Claude/Codex choice above tells Bram which agent you are running in the terminal. Bram will not launch it." />
           <Theme paddingLeft-summary-ExpandableItem="0">
             <ExpandableItem
               summary="Advanced"

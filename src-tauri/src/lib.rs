@@ -16923,13 +16923,20 @@ fn pty_spawn(
     let startup_policy = startup_policy_for_repo(configured_startup_policy, first_unmanaged_launch);
     if startup_policy == AgentStartupPolicy::None {
         // issue-389: leave the shell at its prompt. No launch command, no
-        // current-provider claim, no first command, no switch refresh.
+        // first command, no switch refresh. But DO record which agent the
+        // user says is running there (the configured `shell.agent`): without
+        // an explicit identity every turn-end scan logs provider-mismatch,
+        // Claude works only because its corpus is scanned by cwd regardless,
+        // and a Codex session under an external host is unreachable.
+        let external_provider = provider_identity_for_policy_none(configured_agent_provider(&app));
+        set_current_provider(&app, external_provider, "startup-policy-none");
         if bram_trace_enabled() {
             append_bram_trace_line(
                 &app,
                 "agent-switch",
                 &format!(
-                    "op=autostart policy=none configured_policy={} first_unmanaged={} command=",
+                    "op=autostart policy=none provider={} configured_policy={} first_unmanaged={} command=",
+                    session_provider_label(external_provider),
                     configured_startup_policy.as_str(),
                     first_unmanaged_launch
                 ),
@@ -19498,13 +19505,37 @@ fn refuse_agent_typing_if_policy_none<R: tauri::Runtime>(
     )
 }
 
+// issue-389: under startupPolicy "none" the provider identity is the
+// configured `shell.agent` — explicit, already a Settings control — rather
+// than a second "which agent" field that could disagree with it. Unknown
+// values fall back to Claude, matching the autostart path's default.
+fn provider_identity_for_policy_none(configured_agent: &str) -> SessionProvider {
+    SessionProvider::from_str(configured_agent).unwrap_or(SessionProvider::Claude)
+}
+
 #[cfg(test)]
 mod agent_startup_policy_tests {
     use super::{
-        merge_settings_into_config, new_session_launch_command, resolve_agent_startup_launch,
-        settings_view_from_config, startup_policy_for_repo, startup_policy_from_shell,
-        AgentStartupPolicy, ProjectConfig, SessionProvider, ShellConfig,
+        merge_settings_into_config, new_session_launch_command, provider_identity_for_policy_none,
+        resolve_agent_startup_launch, settings_view_from_config, startup_policy_for_repo,
+        startup_policy_from_shell, AgentStartupPolicy, ProjectConfig, SessionProvider, ShellConfig,
     };
+
+    #[test]
+    fn none_policy_takes_provider_identity_from_configured_agent() {
+        assert_eq!(
+            provider_identity_for_policy_none("codex"),
+            SessionProvider::Codex
+        );
+        assert_eq!(
+            provider_identity_for_policy_none("claude"),
+            SessionProvider::Claude
+        );
+        assert_eq!(
+            provider_identity_for_policy_none("something-else"),
+            SessionProvider::Claude
+        );
+    }
 
     fn shell(json: &str) -> ShellConfig {
         serde_json::from_str(json).expect("valid shell config")

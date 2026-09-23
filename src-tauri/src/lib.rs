@@ -50123,6 +50123,77 @@ fn search_index_status_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_
     rows
 }
 
+// status-untracked-undeclared-hint: untracked files no worklist item
+// declares, and the top three directories holding them (by first path
+// segment; files at the project root group as "(root)"). Pure, so the
+// counting and ranking are testable without a repo.
+const UNTRACKED_UNDECLARED_WARN: usize = 1000;
+
+fn untracked_undeclared_summary(
+    untracked: &[String],
+    declared: &std::collections::HashMap<String, Vec<String>>,
+) -> (usize, Vec<(String, usize)>) {
+    let mut by_dir: std::collections::HashMap<String, usize> = Default::default();
+    let mut count = 0usize;
+    for path in untracked {
+        if declared
+            .values()
+            .flatten()
+            .any(|d| declared_covers(d, path))
+        {
+            continue;
+        }
+        count += 1;
+        let dir = match path.split_once('/') {
+            Some((first, _)) => format!("{}/", first),
+            None => "(root)".to_string(),
+        };
+        *by_dir.entry(dir).or_insert(0) += 1;
+    }
+    let mut top: Vec<(String, usize)> = by_dir.into_iter().collect();
+    top.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    top.truncate(3);
+    (count, top)
+}
+
+fn group_thousands(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn untracked_undeclared_row(count: usize, top: &[(String, usize)]) -> serde_json::Value {
+    let dirs = top
+        .iter()
+        .map(|(d, n)| format!("{} ({})", d, group_thousands(*n)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let warn = count >= UNTRACKED_UNDECLARED_WARN;
+    let detail = if count == 0 {
+        "Every untracked file is covered by a worklist item's declared files".to_string()
+    } else if warn {
+        format!(
+            "{}. Files no item declares are not part of any work; if they are generated (virtualenvs, node_modules, build output), consider adding them to .gitignore",
+            dirs
+        )
+    } else {
+        dirs
+    };
+    serde_json::json!({
+        "signal": "Untracked, undeclared",
+        "level": if warn { "warn" } else if count == 0 { "ok" } else { "none" },
+        "state": format!("{} files", group_thousands(count)),
+        "detail": detail,
+        "seen": "",
+    })
+}
+
 fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String> {
     let now = unix_now_ms();
     let worklist = worklist_doc(app);
@@ -50288,6 +50359,40 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
             stale_applied.push(id.to_string());
         }
     }
+    // status-untracked-undeclared-hint: #395's root condition was project
+    // hygiene -- 28,265 virtualenv files neither tracked nor ignored. Since
+    // the claim capture stopped paying for them, nothing else in Bram would
+    // surface them, so this row does. Names only (`ls-files --others`), no
+    // content reads; the Status tab fetches on its refresh tick, not per
+    // board serve.
+    let untracked_row = {
+        let untracked: Vec<String> = project_root(Some(app))
+            .and_then(|root| {
+                std::process::Command::new("git")
+                    .current_dir(root)
+                    .args([
+                        "ls-files",
+                        "--others",
+                        "--exclude-standard",
+                        "-z",
+                        "--",
+                        ".",
+                    ])
+                    .output()
+                    .ok()
+            })
+            .filter(|o| o.status.success())
+            .map(|o| {
+                o.stdout
+                    .split(|b| *b == 0)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| String::from_utf8_lossy(s).into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (count, top) = untracked_undeclared_summary(&untracked, &worklist_declared_files(app));
+        untracked_undeclared_row(count, &top)
+    };
     let applied_integrity_row = if applied_items.is_empty() {
         serde_json::json!({
             "signal": "Applied integrity",
@@ -50790,7 +50895,8 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
                         "detail": history.iter().filter_map(|h| h.get("summary").and_then(|v| v.as_str())).collect::<Vec<&str>>().join(" | ").if_empty("No worklist history yet"),
                         "seen": last_history.get("iso").and_then(|v| v.as_str()).unwrap_or(""),
                     },
-                    applied_integrity_row
+                    applied_integrity_row,
+                    untracked_row
                 ]
             },
             {
@@ -70347,5 +70453,76 @@ mod host_note_tests {
         assert!(t.contains("will NOT fire on Push"));
         assert!(t.contains("Commits tab"));
         assert!(close_withdrawn_note_text(21, "94f7666", "file-edit").contains("by hand"));
+    }
+}
+
+// status-untracked-undeclared-hint: the Status row's counting and ranking.
+#[cfg(test)]
+mod untracked_undeclared_tests {
+    use super::{group_thousands, untracked_undeclared_row, untracked_undeclared_summary};
+    use std::collections::HashMap;
+
+    fn paths(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    // Declared paths (a directory entry and a worktree twin included) are
+    // excluded; the rest is counted and ranked by top directory. Fails if
+    // declared coverage stops being honoured.
+    #[test]
+    fn declared_paths_are_excluded_and_dirs_ranked() {
+        let mut declared = HashMap::new();
+        declared.insert("a".to_string(), vec!["scaffold/".to_string()]);
+        declared.insert("b".to_string(), vec!["notes.md".to_string()]);
+        let mut untracked = paths(&[
+            "scaffold/x.txt",
+            "scaffold/y/z.txt",
+            "notes.md",
+            ".claude/worktrees/w1/notes.md",
+            "stray.txt",
+        ]);
+        for i in 0..5 {
+            untracked.push(format!("spike-envs/lib/p{}.py", i));
+        }
+        for i in 0..2 {
+            untracked.push(format!("build/out{}.o", i));
+        }
+        let (count, top) = untracked_undeclared_summary(&untracked, &declared);
+        assert_eq!(count, 8);
+        assert_eq!(
+            top,
+            vec![
+                ("spike-envs/".to_string(), 5),
+                ("build/".to_string(), 2),
+                ("(root)".to_string(), 1),
+            ]
+        );
+    }
+
+    // The warning names the remedy only at the threshold, and never below.
+    #[test]
+    fn warns_with_remedy_only_at_threshold() {
+        let top = vec![("spike-envs/".to_string(), 28265)];
+        let row = untracked_undeclared_row(28265, &top);
+        assert_eq!(row["level"], "warn");
+        assert_eq!(row["state"], "28,265 files");
+        assert!(row["detail"].as_str().unwrap().contains(".gitignore"));
+        assert!(row["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("spike-envs/ (28,265)"));
+        let small = untracked_undeclared_row(3, &[("tmp/".to_string(), 3)]);
+        assert_eq!(small["level"], "none");
+        assert!(!small["detail"].as_str().unwrap().contains(".gitignore"));
+        assert_eq!(untracked_undeclared_row(0, &[])["level"], "ok");
+    }
+
+    #[test]
+    fn thousands_grouping() {
+        assert_eq!(group_thousands(0), "0");
+        assert_eq!(group_thousands(999), "999");
+        assert_eq!(group_thousands(1000), "1,000");
+        assert_eq!(group_thousands(28265), "28,265");
+        assert_eq!(group_thousands(1234567), "1,234,567");
     }
 }

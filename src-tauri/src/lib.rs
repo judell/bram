@@ -48065,6 +48065,71 @@ fn clear_active_sentinel_with_reason<R: tauri::Runtime>(app: &AppHandle<R>, reas
     }
 }
 
+// Whether a completion transcript belongs to the recorded current provider.
+// Gates the turn-state / Finished-cue effects in check_jsonl_for_turn_end.
+fn transcript_matches_active_provider(
+    active: Option<SessionProvider>,
+    transcript: JsonlCompletionProvider,
+) -> bool {
+    matches!(
+        (active, transcript),
+        (
+            Some(SessionProvider::Claude),
+            JsonlCompletionProvider::Claude
+        ) | (Some(SessionProvider::Codex), JsonlCompletionProvider::Codex)
+    )
+}
+
+// PR #394 (65da73a): another provider's turn boundary must not clear or
+// re-arm the attached agent's worklist claim. Only when a provider IS
+// recorded: with none recorded, launches keep the historical behaviour of
+// trusting the transcript detector alone — the `is_some()` guard the unit
+// tests below pin.
+fn claim_handling_skipped_for_provider(
+    active: Option<SessionProvider>,
+    transcript: JsonlCompletionProvider,
+) -> bool {
+    active.is_some() && !transcript_matches_active_provider(active, transcript)
+}
+
+#[cfg(test)]
+mod claim_provider_gate_tests {
+    use super::{
+        claim_handling_skipped_for_provider, JsonlCompletionProvider as T, SessionProvider as P,
+    };
+
+    #[test]
+    fn other_providers_turn_end_skips_claim_handling() {
+        assert!(claim_handling_skipped_for_provider(
+            Some(P::Claude),
+            T::Codex
+        ));
+        assert!(claim_handling_skipped_for_provider(
+            Some(P::Codex),
+            T::Claude
+        ));
+    }
+
+    #[test]
+    fn matching_providers_turn_end_handles_claim() {
+        assert!(!claim_handling_skipped_for_provider(
+            Some(P::Claude),
+            T::Claude
+        ));
+        assert!(!claim_handling_skipped_for_provider(
+            Some(P::Codex),
+            T::Codex
+        ));
+    }
+
+    #[test]
+    fn no_recorded_provider_keeps_historical_behaviour() {
+        // Fails if the `is_some()` guard is dropped.
+        assert!(!claim_handling_skipped_for_provider(None, T::Claude));
+        assert!(!claim_handling_skipped_for_provider(None, T::Codex));
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum JsonlCompletionProvider {
     Claude,
@@ -49039,13 +49104,7 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
     // (resize artifact, banner not yet painted, partial chunk), the
     // row shows generic "Finished". Refs #179.
     let active_provider = current_provider(app);
-    let active_matches = matches!(
-        (active_provider, provider),
-        (
-            Some(SessionProvider::Claude),
-            JsonlCompletionProvider::Claude
-        ) | (Some(SessionProvider::Codex), JsonlCompletionProvider::Codex)
-    );
+    let active_matches = transcript_matches_active_provider(active_provider, provider);
     if active_matches {
         update_turn_state(app, "jsonl", decision.reason, |s| {
             s.provider = Some(provider_label.to_string());
@@ -49173,7 +49232,7 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
     // attached agent's worklist claim. Keep the historical behavior when no
     // provider identity is recorded, since older launches relied on the
     // transcript detector alone.
-    if active_provider.is_some() && !active_matches {
+    if claim_handling_skipped_for_provider(active_provider, provider) {
         if bram_trace_enabled() {
             append_bram_trace_line(
                 app,

@@ -42294,6 +42294,59 @@ fn plan_instruction_file(
 
 // Apply a plan: write or skip, report into the Setup result, and trace every
 // decision with byte counts so the next occurrence explains itself.
+// issue-396-instruction-file-read-race: the read error, in the trace itself.
+// Gluejar's wipe came from a read that failed for an instant and left no
+// record of why; the Setup result carried the message, the grep-able trace
+// did not. `os_error` is the raw errno (e.g. 11, "Resource deadlock
+// avoided", which an iCloud placeholder mid-download can return), `-` when
+// the error has none.
+fn read_error_trace_fields(e: &std::io::Error) -> String {
+    format!(
+        "error_kind={:?} os_error={}",
+        e.kind(),
+        e.raw_os_error()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "-".to_string())
+    )
+}
+
+#[derive(Debug, PartialEq)]
+enum InstructionFileWrite {
+    Written,
+    AppearedDuringSetup,
+}
+
+// Perform a planned write. A `created` plan was made against a file that did
+// not exist when it was read; `fs::write` would create OR TRUNCATE, so a
+// file that reappeared since (a sync tool restoring it, a rename landing)
+// would be replaced by the bare block -- #396's failure one step later.
+// `create_new` fails with AlreadyExists instead, and nothing is truncated.
+fn write_instruction_file(
+    path: &Path,
+    content: &[u8],
+    create_only: bool,
+) -> std::io::Result<InstructionFileWrite> {
+    if !create_only {
+        std::fs::write(path, content)?;
+        return Ok(InstructionFileWrite::Written);
+    }
+    use std::io::Write;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut f) => {
+            f.write_all(content)?;
+            Ok(InstructionFileWrite::Written)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Ok(InstructionFileWrite::AppearedDuringSetup)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 fn apply_instruction_file_plan<R: tauri::Runtime>(
     app: &AppHandle<R>,
     path: &Path,
@@ -42319,8 +42372,9 @@ fn apply_instruction_file_plan<R: tauri::Runtime>(
                 app,
                 "setup",
                 &format!(
-                    "op=instruction-file path={} outcome=skipped:read-error",
-                    name
+                    "op=instruction-file path={} outcome=skipped:read-error {}",
+                    name,
+                    read_error_trace_fields(&e)
                 ),
             );
             return Ok(());
@@ -42330,10 +42384,21 @@ fn apply_instruction_file_plan<R: tauri::Runtime>(
     let plan = plan_instruction_file(existing.as_deref(), block, refresh_existing_block);
     let (outcome, after) = match &plan {
         InstructionFilePlan::Write { content, outcome } => {
-            std::fs::write(path, content.as_bytes())
-                .map_err(|e| format!("write {}: {}", path.display(), e))?;
-            wrote.push(path.display().to_string());
-            (outcome.to_string(), content.len())
+            match write_instruction_file(path, content.as_bytes(), *outcome == "created")
+                .map_err(|e| format!("write {}: {}", path.display(), e))?
+            {
+                InstructionFileWrite::Written => {
+                    wrote.push(path.display().to_string());
+                    (outcome.to_string(), content.len())
+                }
+                InstructionFileWrite::AppearedDuringSetup => {
+                    skipped.push(format!(
+                        "{} (appeared during Setup; left untouched)",
+                        path.display()
+                    ));
+                    ("skipped:appeared-during-setup".to_string(), before)
+                }
+            }
         }
         InstructionFilePlan::Unchanged => ("unchanged".to_string(), before),
         InstructionFilePlan::Skip { reason } => {
@@ -71214,5 +71279,67 @@ mod conventions_split_tests {
             stray_seeded_reference_files(&on_disk, &bundled),
             vec!["renamed-old.md".to_string()]
         );
+    }
+}
+
+// issue-396-instruction-file-read-race: the read-error trace names its
+// cause, and the create path never truncates a file that reappeared.
+#[cfg(test)]
+mod instruction_file_write_tests {
+    use super::{read_error_trace_fields, write_instruction_file, InstructionFileWrite};
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "bram-instr-write-{}-{}-{}",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn read_error_trace_names_kind_and_errno() {
+        // 11 is EAGAIN / "Resource deadlock avoided" family on macOS.
+        let e = std::io::Error::from_raw_os_error(11);
+        let t = read_error_trace_fields(&e);
+        assert!(t.starts_with("error_kind="), "{}", t);
+        assert!(t.ends_with("os_error=11"), "{}", t);
+        let synthetic = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "x");
+        assert_eq!(
+            read_error_trace_fields(&synthetic),
+            "error_kind=PermissionDenied os_error=-"
+        );
+    }
+
+    // The race: the plan said "created" (file absent at read time), then the
+    // user's file came back before the write. Fails if the create path goes
+    // back to fs::write, which would truncate it to the bare block.
+    #[test]
+    fn create_path_never_truncates_a_file_that_reappeared() {
+        let d = scratch("race");
+        let path = d.join("CLAUDE.md");
+        std::fs::write(&path, "# user guidance, restored by sync\n").unwrap();
+        let out = write_instruction_file(&path, b"<!-- bram:start -->\n", true).unwrap();
+        assert_eq!(out, InstructionFileWrite::AppearedDuringSetup);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# user guidance, restored by sync\n"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn create_path_creates_when_still_absent() {
+        let d = scratch("absent");
+        let path = d.join("AGENTS.md");
+        let out = write_instruction_file(&path, b"block\n", true).unwrap();
+        assert_eq!(out, InstructionFileWrite::Written);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "block\n");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

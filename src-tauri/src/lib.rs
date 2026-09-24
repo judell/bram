@@ -16957,6 +16957,29 @@ fn pty_spawn(
     auto_setup_before_launch(&app);
     let configured_startup_policy = configured_startup_policy(&app);
     let startup_policy = startup_policy_for_repo(configured_startup_policy, first_unmanaged_launch);
+    if startup_policy == AgentStartupPolicy::None {
+        // issue-389: leave the shell at its prompt. No launch command, no
+        // first command, no switch refresh. But DO record which agent the
+        // user says is running there (the configured `shell.agent`): without
+        // an explicit identity every turn-end scan logs provider-mismatch,
+        // Claude works only because its corpus is scanned by cwd regardless,
+        // and a Codex session under an external host is unreachable.
+        let external_provider = provider_identity_for_policy_none(configured_agent_provider(&app));
+        set_current_provider(&app, external_provider, "startup-policy-none");
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                &app,
+                "agent-switch",
+                &format!(
+                    "op=autostart policy=none provider={} configured_policy={} first_unmanaged={} command=",
+                    session_provider_label(external_provider),
+                    configured_startup_policy.as_str(),
+                    first_unmanaged_launch
+                ),
+            );
+        }
+        return Ok(());
+    }
     let last_active = if startup_policy == AgentStartupPolicy::LastActive {
         validated_last_active_session(&app)
     } else {
@@ -18386,6 +18409,7 @@ fn switch_agent(
         "claude" | "claud" => "claude",
         other => return Err(format!("unknown agent provider: {}", other)),
     };
+    refuse_agent_typing_if_policy_none(&app, "switch")?;
     cancel_agent_boot_hold(&app, "provider-switch");
     // Header switching is always "return to that agent", independent of the
     // On Bram launch policy. A pinned codex session outranks `resume --last`:
@@ -18799,6 +18823,7 @@ fn reload_agent_session(
         "claude" | "claud" => "claude",
         other => return Err(format!("unknown agent provider: {}", other)),
     };
+    refuse_agent_typing_if_policy_none(&app, "session-reload")?;
     let session_provider = if provider_key == "codex" {
         SessionProvider::Codex
     } else {
@@ -19286,6 +19311,7 @@ fn create_new_session(
         "claude" | "claud" => "claude",
         other => return Err(format!("unknown agent provider: {}", other)),
     };
+    refuse_agent_typing_if_policy_none(&app, "new-session")?;
     let trimmed = title.trim().to_string();
     if trimmed.is_empty() {
         return Err("session name is required".to_string());
@@ -19551,6 +19577,12 @@ enum AgentStartupPolicy {
     LastActive,
     AgentRecent,
     NewSession,
+    // issue-389: leave the PTY shell alone. Bram types no launch command, and
+    // every host path that would type one (header switch, Sessions-tab
+    // reload, new session) refuses — so a user can run another agent host
+    // (e.g. `herdr agent attach <id>`) in the pane without Bram typing
+    // `claude …` into it later.
+    None,
 }
 
 impl AgentStartupPolicy {
@@ -19559,6 +19591,7 @@ impl AgentStartupPolicy {
             "lastActive" => Some(Self::LastActive),
             "agentRecent" => Some(Self::AgentRecent),
             "newSession" => Some(Self::NewSession),
+            "none" => Some(Self::None),
             _ => None,
         }
     }
@@ -19568,6 +19601,7 @@ impl AgentStartupPolicy {
             Self::LastActive => "lastActive",
             Self::AgentRecent => "agentRecent",
             Self::NewSession => "newSession",
+            Self::None => "none",
         }
     }
 }
@@ -19592,7 +19626,9 @@ fn startup_policy_for_repo(
     configured: AgentStartupPolicy,
     first_unmanaged_launch: bool,
 ) -> AgentStartupPolicy {
-    if first_unmanaged_launch {
+    // An explicit "none" is an opt-out, not a resume preference: the
+    // first-launch fresh-session override must not defeat it.
+    if first_unmanaged_launch && configured != AgentStartupPolicy::None {
         AgentStartupPolicy::NewSession
     } else {
         configured
@@ -19633,7 +19669,10 @@ fn resolve_agent_startup_launch(
             resume: true,
             fallback: false,
         },
-        AgentStartupPolicy::NewSession => AgentStartupLaunch {
+        // Unreachable by construction: the autostart path returns before
+        // resolving a launch when the policy is None. Resolve it like
+        // NewSession so the match stays total without a panic.
+        AgentStartupPolicy::NewSession | AgentStartupPolicy::None => AgentStartupLaunch {
             provider: configured_provider,
             session_id: None,
             resume: false,
@@ -19642,13 +19681,61 @@ fn resolve_agent_startup_launch(
     }
 }
 
+// issue-389: the host-typed launch paths (header switch, Sessions-tab reload,
+// new session) are inert while the startup policy is "none" — the pane may be
+// running a foreign agent host, and typing `claude …` into it would land as
+// keystrokes in that TUI. Returns the error string the pane surfaces.
+fn refuse_agent_typing_if_policy_none<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    source: &str,
+) -> Result<(), String> {
+    if configured_startup_policy(app) != AgentStartupPolicy::None {
+        return Ok(());
+    }
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "agent-switch",
+            &format!("op=switch-refused reason=policy-none source={}", source),
+        );
+    }
+    Err(
+        "Bram is set not to start an agent (Settings → On Bram launch), so it will not type an agent command into the terminal. Change that setting to let Bram launch agents again."
+            .to_string(),
+    )
+}
+
+// issue-389: under startupPolicy "none" the provider identity is the
+// configured `shell.agent` — explicit, already a Settings control — rather
+// than a second "which agent" field that could disagree with it. Unknown
+// values fall back to Claude, matching the autostart path's default.
+fn provider_identity_for_policy_none(configured_agent: &str) -> SessionProvider {
+    SessionProvider::from_str(configured_agent).unwrap_or(SessionProvider::Claude)
+}
+
 #[cfg(test)]
 mod agent_startup_policy_tests {
     use super::{
-        merge_settings_into_config, new_session_launch_command, resolve_agent_startup_launch,
-        settings_view_from_config, startup_policy_for_repo, startup_policy_from_shell,
-        AgentStartupPolicy, ProjectConfig, SessionProvider, ShellConfig,
+        merge_settings_into_config, new_session_launch_command, provider_identity_for_policy_none,
+        resolve_agent_startup_launch, settings_view_from_config, startup_policy_for_repo,
+        startup_policy_from_shell, AgentStartupPolicy, ProjectConfig, SessionProvider, ShellConfig,
     };
+
+    #[test]
+    fn none_policy_takes_provider_identity_from_configured_agent() {
+        assert_eq!(
+            provider_identity_for_policy_none("codex"),
+            SessionProvider::Codex
+        );
+        assert_eq!(
+            provider_identity_for_policy_none("claude"),
+            SessionProvider::Claude
+        );
+        assert_eq!(
+            provider_identity_for_policy_none("something-else"),
+            SessionProvider::Claude
+        );
+    }
 
     fn shell(json: &str) -> ShellConfig {
         serde_json::from_str(json).expect("valid shell config")
@@ -19668,6 +19755,40 @@ mod agent_startup_policy_tests {
             startup_policy_from_shell(None),
             AgentStartupPolicy::AgentRecent
         );
+    }
+
+    #[test]
+    fn none_policy_round_trips_and_survives_first_unmanaged_launch() {
+        assert_eq!(
+            AgentStartupPolicy::from_str("none"),
+            Some(AgentStartupPolicy::None)
+        );
+        assert_eq!(AgentStartupPolicy::None.as_str(), "none");
+        assert_eq!(
+            startup_policy_from_shell(Some(&shell(r#"{"startupPolicy":"none"}"#))),
+            AgentStartupPolicy::None
+        );
+        // The first-launch fresh-session override must not defeat an opt-out.
+        assert_eq!(
+            startup_policy_for_repo(AgentStartupPolicy::None, true),
+            AgentStartupPolicy::None
+        );
+        assert_eq!(
+            startup_policy_for_repo(AgentStartupPolicy::None, false),
+            AgentStartupPolicy::None
+        );
+    }
+
+    #[test]
+    fn settings_merge_and_view_preserve_none_policy() {
+        let existing = serde_json::json!({ "shell": { "agent": "claude" } });
+        let update = serde_json::json!({ "shell": { "startupPolicy": "none" } });
+        let merged = merge_settings_into_config(existing, &update);
+        assert_eq!(merged["shell"]["startupPolicy"], "none");
+        let config = serde_json::from_value::<ProjectConfig>(merged).unwrap();
+        let view = settings_view_from_config(Some(config));
+        assert_eq!(view["shell"]["startupPolicy"], "none");
+        assert_eq!(view["shell"]["continueLast"], false);
     }
 
     #[test]
@@ -20023,6 +20144,7 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
             // Compatibility for older tools panes during an upgrade. New code
             // reads startupPolicy; old code still sees its familiar boolean.
             "continueLast": startup_policy != AgentStartupPolicy::NewSession.as_str()
+                && startup_policy != AgentStartupPolicy::None.as_str()
         },
         "worklist": { "batchCommitActions": batch },
         "ui": { "showTargetApp": show_target_app, "toolsPaneHotReload": tools_pane_hot_reload },
@@ -47943,6 +48065,71 @@ fn clear_active_sentinel_with_reason<R: tauri::Runtime>(app: &AppHandle<R>, reas
     }
 }
 
+// Whether a completion transcript belongs to the recorded current provider.
+// Gates the turn-state / Finished-cue effects in check_jsonl_for_turn_end.
+fn transcript_matches_active_provider(
+    active: Option<SessionProvider>,
+    transcript: JsonlCompletionProvider,
+) -> bool {
+    matches!(
+        (active, transcript),
+        (
+            Some(SessionProvider::Claude),
+            JsonlCompletionProvider::Claude
+        ) | (Some(SessionProvider::Codex), JsonlCompletionProvider::Codex)
+    )
+}
+
+// PR #394 (65da73a): another provider's turn boundary must not clear or
+// re-arm the attached agent's worklist claim. Only when a provider IS
+// recorded: with none recorded, launches keep the historical behaviour of
+// trusting the transcript detector alone — the `is_some()` guard the unit
+// tests below pin.
+fn claim_handling_skipped_for_provider(
+    active: Option<SessionProvider>,
+    transcript: JsonlCompletionProvider,
+) -> bool {
+    active.is_some() && !transcript_matches_active_provider(active, transcript)
+}
+
+#[cfg(test)]
+mod claim_provider_gate_tests {
+    use super::{
+        claim_handling_skipped_for_provider, JsonlCompletionProvider as T, SessionProvider as P,
+    };
+
+    #[test]
+    fn other_providers_turn_end_skips_claim_handling() {
+        assert!(claim_handling_skipped_for_provider(
+            Some(P::Claude),
+            T::Codex
+        ));
+        assert!(claim_handling_skipped_for_provider(
+            Some(P::Codex),
+            T::Claude
+        ));
+    }
+
+    #[test]
+    fn matching_providers_turn_end_handles_claim() {
+        assert!(!claim_handling_skipped_for_provider(
+            Some(P::Claude),
+            T::Claude
+        ));
+        assert!(!claim_handling_skipped_for_provider(
+            Some(P::Codex),
+            T::Codex
+        ));
+    }
+
+    #[test]
+    fn no_recorded_provider_keeps_historical_behaviour() {
+        // Fails if the `is_some()` guard is dropped.
+        assert!(!claim_handling_skipped_for_provider(None, T::Claude));
+        assert!(!claim_handling_skipped_for_provider(None, T::Codex));
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum JsonlCompletionProvider {
     Claude,
@@ -48916,13 +49103,8 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
     // it supplies the finished cue's verb + duration; if absent
     // (resize artifact, banner not yet painted, partial chunk), the
     // row shows generic "Finished". Refs #179.
-    let active_matches = matches!(
-        (current_provider(app), provider),
-        (
-            Some(SessionProvider::Claude),
-            JsonlCompletionProvider::Claude
-        ) | (Some(SessionProvider::Codex), JsonlCompletionProvider::Codex)
-    );
+    let active_provider = current_provider(app);
+    let active_matches = transcript_matches_active_provider(active_provider, provider);
     if active_matches {
         update_turn_state(app, "jsonl", decision.reason, |s| {
             s.provider = Some(provider_label.to_string());
@@ -49044,6 +49226,24 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
                 emit_turn_context(app, &[], "turn-end");
             }
         }
+    }
+
+    // A different provider's turn boundary must not clear or re-arm the
+    // attached agent's worklist claim. Keep the historical behavior when no
+    // provider identity is recorded, since older launches relied on the
+    // transcript detector alone.
+    if claim_handling_skipped_for_provider(active_provider, provider) {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "jsonl-turn-end",
+                &format!(
+                    "op=skip provider={} reason=provider-mismatch decision={} path={}",
+                    provider_label, decision.reason, basename
+                ),
+            );
+        }
+        return;
     }
 
     let Some((claimed_ids, claimed_at)) = inflight_claim_ids_and_claimed_at(app) else {

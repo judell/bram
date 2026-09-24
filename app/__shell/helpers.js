@@ -818,6 +818,24 @@ window.__bramAgentSwitcherTrace = function (stage, fields) {
     window.__bramIframeTrace("agent-switcher", payload);
   } catch (e) {}
 };
+// issue-389: true when Settings → On Bram launch is "Do not start an agent".
+// The header hides the Claude/Codex switcher then (every host path it would
+// drive refuses under "none") and says why instead. Prefers the pushed
+// settings-changed payload so a Settings change updates the header without a
+// reload; falls back to the one-shot /__settings fetch.
+window.__bramStartupPolicyIsNone = function (pushedEvt, fetchedSettings) {
+  var settings = (pushedEvt && pushedEvt.payload) || fetchedSettings || {};
+  var shell = settings.shell || {};
+  return shell.startupPolicy === "none";
+};
+// PR #394 review: the header switcher's `when`, kept as a single call per
+// docs/developing-bram.md. Shown only when Bram is launching agents itself
+// (policy is not "none") AND a provider is known.
+window.__bramShowAgentSwitcher = function (pushedEvt, fetchedSettings, mainStatus, enhance) {
+  if (window.__bramStartupPolicyIsNone(pushedEvt, fetchedSettings)) return false;
+  var provider = (mainStatus && mainStatus.provider) || (enhance && enhance.activeProvider);
+  return !!provider;
+};
 window.__bramAgentSwitcherLabel = function (provider) {
   return String(provider || "").toLowerCase() === "codex" ? "Codex" : "Claude";
 };
@@ -2277,7 +2295,7 @@ window.__bramSettingsFormData = function (settings, section) {
   if (section === "shell") {
     var shell = s.shell || {};
     var policy = shell.startupPolicy;
-    if (policy !== "lastActive" && policy !== "agentRecent" && policy !== "newSession") {
+    if (policy !== "lastActive" && policy !== "agentRecent" && policy !== "newSession" && policy !== "none") {
       policy = shell.continueLast === false ? "newSession" : "agentRecent";
     }
     return {

@@ -103,7 +103,8 @@
             data="{[
               { value: 'agentRecent', label: 'Resume selected agent’s most recent session' },
               { value: 'lastActive', label: 'Resume most-recently-active agent’s session' },
-              { value: 'newSession', label: 'Start a new session' }
+              { value: 'newSession', label: 'Start a new session' },
+              { value: 'none', label: 'Do not start an agent (manage the terminal yourself)' }
             ]}">
             <!-- Long labels wrap flush-left instead of centered: the same
                  valueTemplate + width-bound Text as the Worklist's issue
@@ -112,6 +113,14 @@
               <Text width="100%" textAlign="start" value="{$item.label}" />
             </property>
           </Select>
+          <!-- issue-389: under "none" the Claude/Codex choice above no longer
+               picks what Bram launches — it tells Bram which agent YOU run in
+               the terminal (herdr etc.), so turn-end detection reads the right
+               transcripts. -->
+          <Text
+            when="{startupPolicyBox.value === 'none'}"
+            variant="caption"
+            value="With this setting, the Claude/Codex choice above tells Bram which agent you are running in the terminal. Bram will not launch it." />
           <Theme paddingLeft-summary-ExpandableItem="0">
             <ExpandableItem
               summary="Advanced"

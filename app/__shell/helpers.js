@@ -4340,21 +4340,27 @@ window.__bramStartButtonLabel = function (items, sel, claim, mode) {
 // two (via __bramNameList, so ids stay actionable), a count beyond that.
 // `kind` adds the one-line description a verb needs beyond its scope.
 window.__bramGateScopeTooltip = function (sel, kind, items, claim, mode) {
+  // gate-tooltips-multiline: Markdown lines, joined like the Worklist strip
+  // tooltip (__bramWorklist2StripTooltip) -- one long single-line tooltip ran
+  // past its edge. Rendered via tooltipMarkdown on the gate buttons.
   var ids = sel || [];
   var n = ids.length;
-  if (!n) return "Tick one or more items first";
+  if (!n) return "Tick one or more items first.";
   if (kind === "start" && mode === "one" && window.__bramStartChoiceNeeded(items, sel, claim)) {
-    return "Starts one of the " + n + " selected items now; the others wait for separate commits";
+    return ["Starts one of the " + n + " selected items now.", "The others wait for separate commits."].join("\n\n");
   }
-  var scope = n === 1
-    ? "Applies to the selected item: " + ids[0]
-    : n <= 2
-      ? "Applies to the " + n + " selected items: " + window.__bramNameList(ids, 2)
-      : "Applies to the " + n + " selected items";
+  var lines = [];
   if (kind === "start-commit") {
-    return "One click: start, then commit when done. One item at a time (see #272). " + scope;
+    lines.push("One click: start, then commit when done.");
+    lines.push("One item at a time (see #272).");
   }
-  return scope;
+  if (n <= 2) {
+    lines.push("Applies to:");
+    lines.push(ids.map(function (id) { return "- `" + id + "`"; }).join("\n"));
+  } else {
+    lines.push("Applies to the " + n + " selected items.");
+  }
+  return lines.join("\n\n");
 };
 
 // Names offending items instead of counting them. A bare count collides with

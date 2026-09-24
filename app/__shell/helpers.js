@@ -4339,6 +4339,34 @@ window.__bramStartButtonLabel = function (items, sel, claim, mode) {
 // The tooltip carrying what the ticked rows' button applies to: names up to
 // two (via __bramNameList, so ids stay actionable), a count beyond that.
 // `kind` adds the one-line description a verb needs beyond its scope.
+// push-withheld-when-commits-ride-a-pr: on the default branch, unpushed
+// commits that also ride another branch reach it through that branch's PR,
+// so Push is withheld (the host decides: gitStatus.pushWithheld) and the
+// hover says where things stand. Markdown lines, like the gate tooltips.
+window.__bramPushWithheld = function (status) {
+  return !!(status && status.pushWithheld && (status.pushWithheld.branches || []).length);
+};
+window.__bramPushTooltip = function (status) {
+  if (window.__bramPushWithheld(status)) {
+    var w = status.pushWithheld;
+    var def = w.defaultBranch || status.branch || "main";
+    var names = (w.branches || []).map(function (b) { return "`" + b + "`"; }).join(", ");
+    return [
+      "These commits are also on " + names + ", which reaches `" + def + "` through its PR.",
+      "Don't push `" + def + "` directly: push the branch, or let the PR merge.",
+    ].join("\n\n");
+  }
+  return status && status.upstream
+    ? "Push unpublished commits to `" + status.upstream + "`"
+    : "Push unpublished commits and set upstream on origin";
+};
+window.__bramPushWithheldNote = function (status) {
+  if (!window.__bramPushWithheld(status)) return "";
+  var b = (status.pushWithheld.branches || []).filter(function (x) { return x.indexOf("origin/") !== 0; })[0]
+    || status.pushWithheld.branches[0];
+  return "These commits ride " + b + "; they reach " + (status.pushWithheld.defaultBranch || "main") + " through its PR.";
+};
+
 window.__bramGateScopeTooltip = function (sel, kind, items, claim, mode) {
   // gate-tooltips-multiline: Markdown lines, joined like the Worklist strip
   // tooltip (__bramWorklist2StripTooltip) -- one long single-line tooltip ran

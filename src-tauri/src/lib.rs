@@ -21857,7 +21857,13 @@ fn git_status_summary<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, 
         .unwrap_or(false);
     let branch = git_current_branch(app).unwrap_or_else(|_| "HEAD".to_string());
     let upstream = git_upstream_branch(app);
+    let push_withheld = if has_origin && ahead > 0 {
+        push_withheld_for_status(app, &branch)
+    } else {
+        None
+    };
     serde_json::to_vec(&serde_json::json!({
+        "pushWithheld": push_withheld,
         "ahead": ahead,
         "behind": behind,
         "dirty": dirty,
@@ -21866,6 +21872,82 @@ fn git_status_summary<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, 
         "hasOrigin": has_origin,
     }))
     .map_err(|e| e.to_string())
+}
+
+// push-withheld-when-commits-ride-a-pr: on the default branch, unpushed
+// commits that ALSO live on another branch are headed for the default branch
+// through that branch's PR (the gate commits on main, then a feature branch
+// carries them; a maintainer merges). Pushing the default branch directly
+// would land them without review, so the Commits tab withholds Push and says
+// where things stand. #390 answers "which branches contain this commit" from
+// the ref graph the same way. Pure so the rule is testable without a repo:
+// `containing` is, per unpushed commit, every branch (local short names and
+// remote-tracking `origin/...`) that contains it.
+fn push_withheld_branches(current: &str, default: &str, containing: &[Vec<String>]) -> Vec<String> {
+    if current != default {
+        return Vec::new();
+    }
+    let excluded = [
+        current.to_string(),
+        default.to_string(),
+        format!("origin/{}", default),
+        format!("origin/{}", current),
+        "origin/HEAD".to_string(),
+        "origin".to_string(),
+    ];
+    let mut out: Vec<String> = containing
+        .iter()
+        .flatten()
+        .filter(|b| !b.is_empty() && !b.contains("->") && !excluded.contains(b))
+        .cloned()
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn push_withheld_for_status<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    branch: &str,
+) -> Option<serde_json::Value> {
+    let root = project_root(Some(app))?;
+    let default = origin_default_ref(app, &root)?
+        .trim_start_matches("refs/remotes/origin/")
+        .to_string();
+    if branch != default {
+        return None;
+    }
+    // Bounded: a default branch far ahead of origin is not this shape, and
+    // two ref lookups per commit must not grow without limit.
+    let shas: Vec<String> = git_run(app, &["rev-list", "--max-count=50", "@{u}..HEAD"])
+        .ok()?
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    let containing: Vec<Vec<String>> = shas
+        .iter()
+        .map(|sha| {
+            git_run(
+                app,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname:short)",
+                    "--contains",
+                    sha,
+                    "refs/heads",
+                    "refs/remotes",
+                ],
+            )
+            .map(|out| out.lines().map(|l| l.trim().to_string()).collect())
+            .unwrap_or_default()
+        })
+        .collect();
+    let branches = push_withheld_branches(branch, &default, &containing);
+    if branches.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({ "branches": branches, "defaultBranch": default }))
 }
 
 // True when origin/<branch> has no commits that HEAD lacks, so a plain
@@ -71708,5 +71790,52 @@ mod preview_shim_tests {
         // point -- i.e. removing the inserted tag reproduces the input.
         let without_shim = out.replacen(&format!("\n{}", SHIM_TAG), "", 1);
         assert_eq!(without_shim, html);
+    }
+}
+
+// push-withheld-when-commits-ride-a-pr: the rule, without a repo.
+#[cfg(test)]
+mod push_withheld_tests {
+    use super::push_withheld_branches;
+
+    fn v(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn withheld_when_every_unpushed_commit_rides_a_feature_branch() {
+        let c = vec![
+            v(&["main", "pr-fix"]),
+            v(&["main", "pr-fix", "origin/pr-fix"]),
+        ];
+        assert_eq!(
+            push_withheld_branches("main", "main", &c),
+            v(&["origin/pr-fix", "pr-fix"])
+        );
+    }
+
+    #[test]
+    fn withheld_when_only_some_ride_a_branch() {
+        let c = vec![v(&["main"]), v(&["main", "pr-fix"])];
+        assert_eq!(push_withheld_branches("main", "main", &c), v(&["pr-fix"]));
+    }
+
+    #[test]
+    fn not_withheld_off_the_default_branch() {
+        let c = vec![v(&["pr-fix", "other"])];
+        assert!(push_withheld_branches("pr-fix", "main", &c).is_empty());
+    }
+
+    // #329's shape: plain work on main, no other branch. Push stays live.
+    #[test]
+    fn not_withheld_for_plain_work_on_main() {
+        let c = vec![v(&["main"]), v(&["main"])];
+        assert!(push_withheld_branches("main", "main", &c).is_empty());
+    }
+
+    #[test]
+    fn default_and_origin_head_are_not_another_branch() {
+        let c = vec![v(&["main", "origin/main", "origin/HEAD", "origin"])];
+        assert!(push_withheld_branches("main", "main", &c).is_empty());
     }
 }

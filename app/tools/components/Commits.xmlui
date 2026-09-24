@@ -89,8 +89,17 @@
         when="{(commits.value || []).filter(c => !c.pushed).length > 0}"
         label="Push {(commits.value || []).filter(c => !c.pushed).length}{gitStatus.value &amp;&amp; gitStatus.value.branch ? ' to ' + gitStatus.value.branch : ''}"
         size="xs"
-        tooltip="{gitStatus.value &amp;&amp; gitStatus.value.upstream ? 'Push unpublished commits to ' + gitStatus.value.upstream : 'Push unpublished commits and set upstream on origin'}"
+        enabled="{!window.__bramPushWithheld(gitStatus.value)}"
+        tooltipMarkdown="{window.__bramPushTooltip(gitStatus.value)}"
         onClick="pushError = null; gitPush(commits, gitStatus, gitStatus.value &amp;&amp; gitStatus.value.branch, (e) => pushError = e)" />
+      <!-- push-withheld-when-commits-ride-a-pr: on the default branch, when
+           the unpushed commits also ride another branch, that branch's PR is
+           how they reach it; say so where the disabled Push sits. -->
+      <Text
+        when="{window.__bramPushWithheld(gitStatus.value)}"
+        fontSize="$fontSize-sm"
+        color="$textColor-secondary"
+        value="{window.__bramPushWithheldNote(gitStatus.value)}" />
       <!-- local-repo-no-origin-first-class: with no remote, unpushed is
            undefined (the host marks no commit unpushed, so Push never
            renders); say the state plainly instead of offering nothing. -->

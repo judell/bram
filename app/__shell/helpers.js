@@ -332,6 +332,9 @@ window._xsLogs = window._xsLogs || [];
             previous: stored,
             elapsedMs: Date.now() - bootedAt,
           });
+          try {
+            if (window.__bramSendFollowupRoute) window.__bramSendFollowupRoute(h, stored);
+          } catch (e) {}
         }
       }, 500);
     } catch (e) {}
@@ -661,6 +664,7 @@ window.toTurn = function (text) {
       at: new Date().toISOString(),
     });
   } catch (e) {}
+  try { if (window.__bramSendFollowupSend) window.__bramSendFollowupSend(s); } catch (e) {}
   // Send the text RAW. Per-transport normalization is the host's job now
   // (docs/turn-transport-redesign.md step 6): the host collapses whitespace
   // only for small inline sends, while substantial/image-bearing sends ride
@@ -2024,6 +2028,7 @@ window.__bramGateAct = function (kind, items, sel, shareMode, claim) {
 window.__bramGateGoTranscript = function () {
   try {
     if (String(window.location.hash || "").indexOf("/transcript") < 0) {
+      if (window.__bramSendFollowup) window.__bramSendFollowup.autoAt = Date.now();
       window.location.hash = "#/transcript";
     }
   } catch (e) {}
@@ -4558,16 +4563,128 @@ window.__bramTranscriptUnmount = function (atBottom, total, agentId) {
 // arrival - the remount means no prop transition ever fires (zero
 // cause=stream-switch traces in the field, ever).
 window.__bramMountFollow = function (state, agentId) {
-  if (!state) return true;
-  if (String(state.stream || "") !== String(agentId || "")) {
+  var follow = true;
+  if (state && String(state.stream || "") !== String(agentId || "")) {
     window.__bramIframeTrace("follow-state", {
       op: "stream-switch-mount",
       from: String(state.stream || "") || "main",
       to: String(agentId || "") || "main",
     });
-    return true;
+  } else if (state) {
+    follow = state.atBottom !== false;
   }
-  return state.atBottom !== false;
+  // send-followup: remember how this mount landed, for op=arrive.
+  if (window.__bramSendFollowup) {
+    window.__bramSendFollowup.landed = {
+      at: Date.now(), value: follow ? "follow" : "restore-reading",
+    };
+  }
+  return follow;
+};
+
+// trace-send-followup-for-transcript-autoswitch: an observe-only record of
+// what happens after a pane send, so the Transcript auto-switch policy can
+// be decided from evidence rather than intuition (per tab, per send kind,
+// with or without a screenshot, and against a saved scrollback position).
+// Ops: send, arrive, arrive-corrected, leave, turn-end -- field meanings in
+// docs/trace-vocabulary.md (send-followup). Nothing here changes behavior.
+// Turns typed straight into the terminal never reach toTurn, so they show
+// up only as turn-end lines with a large (or -1) sinceSendMs.
+window.__bramSendFollowup = {
+  seq: 0,
+  last: null,     // { id, at, tab, arrived }
+  arrival: null,  // { sendId, at, landed, corrected }
+  autoAt: 0,      // __bramGateGoTranscript moved the pane
+  chipAt: 0,      // the "▼ N new" chip was clicked
+  landed: null,   // { at, value } from the latest __bramMountFollow
+  wasWorking: false,
+};
+
+window.__bramSendFollowupTab = function (route) {
+  var r = String(route || "").replace(/^#?\/?/, "").split(/[/?]/)[0];
+  return r || "root";
+};
+
+window.__bramSendFollowupSend = function (text) {
+  var s = window.__bramSendFollowup;
+  var t = String(text || "");
+  var route = "";
+  try { route = String(location.hash || ""); } catch (e) {}
+  var vr = window.__bramVisibleRange || null;
+  var m = /^\s*(approved|drop|iterate|skip-worklist|voice):/.exec(t);
+  s.seq += 1;
+  s.last = {
+    id: "s" + Date.now().toString(36) + "-" + s.seq,
+    at: Date.now(),
+    tab: window.__bramSendFollowupTab(route),
+    arrived: false,
+  };
+  window.__bramIframeTrace("send-followup", {
+    op: "send",
+    sendId: s.last.id,
+    tab: s.last.tab,
+    kind: m ? m[1] : "chat",
+    hasImage: /\.(png|jpe?g|gif|webp|heic)\b/i.test(t),
+    savedReading: !!(vr && vr.atBottom === false),
+  });
+};
+
+window.__bramSendFollowupRoute = function (route, previous) {
+  var s = window.__bramSendFollowup;
+  var now = Date.now();
+  var to = window.__bramSendFollowupTab(route);
+  if (window.__bramSendFollowupTab(previous) === "transcript" && s.arrival) {
+    window.__bramIframeTrace("send-followup", {
+      op: "leave", sendId: s.arrival.sendId, dwellMs: now - s.arrival.at, tab: to,
+    });
+    s.arrival = null;
+  }
+  var last = s.last;
+  if (to !== "transcript" || !last || last.arrived || last.tab === "transcript") return;
+  if (now - last.at > 120000) return;
+  last.arrived = true;
+  // The route poll runs every 500ms, so a switch the pane made itself is
+  // seen within ~0.5s of its stamp.
+  var via = now - s.autoAt < 2000 ? "auto" : (now - s.chipAt < 2000 ? "chip" : "nav");
+  var sendId = last.id;
+  var delayMs = now - last.at;
+  // Let the Transcript mount (and __bramMountFollow decide) before reading
+  // how the arrival landed.
+  setTimeout(function () {
+    var landed = s.landed && Math.abs(s.landed.at - now) < 3000 ? s.landed.value : "unknown";
+    s.arrival = { sendId: sendId, at: now, landed: landed, corrected: false };
+    window.__bramIframeTrace("send-followup", {
+      op: "arrive", sendId: sendId, delayMs: delayMs, via: via, landed: landed,
+    });
+  }, 800);
+};
+
+window.__bramSendFollowupScrollBottom = function () {
+  var a = window.__bramSendFollowup.arrival;
+  if (!a || a.landed !== "restore-reading" || a.corrected) return;
+  var ms = Date.now() - a.at;
+  if (ms > 30000) return;
+  a.corrected = true;
+  window.__bramIframeTrace("send-followup", {
+    op: "arrive-corrected", sendId: a.sendId, scrolledToBottomMs: ms,
+  });
+};
+
+window.__bramSendFollowupStatus = function (v) {
+  var s = window.__bramSendFollowup;
+  var working = !!(v && v.state === "working");
+  if (s.wasWorking && !working) {
+    var route = "";
+    try { route = String(location.hash || ""); } catch (e) {}
+    window.__bramIframeTrace("send-followup", {
+      op: "turn-end",
+      sendId: s.last ? s.last.id : "",
+      sinceSendMs: s.last ? Date.now() - s.last.at : -1,
+      tab: window.__bramSendFollowupTab(route),
+      unseen: window.__bramUnseenCount || 0,
+    });
+  }
+  s.wasWorking = working;
 };
 
 window.__bramOverlapIndex = function (items, claim) {
@@ -7511,6 +7628,9 @@ window.subscribeTauriEvent("__bramNativeToolbarPtyMenuUnsub",
     window.subscribeTauriEvent("__bramAgentStatusExternalUnsub",
       "agent-status-changed", function (e) {
         lastValue = (e && e.payload) || null;
+        try {
+          if (window.__bramSendFollowupStatus) window.__bramSendFollowupStatus(lastValue);
+        } catch (e2) {}
         if (!window.bramAgentMenu) {
           window.__bramIframeTrace("agent-header-status-loaded", {
             state: (lastValue && lastValue.state) || "",
@@ -9726,6 +9846,7 @@ window.bramSubscribeTranscriptFindClear = (function () {
 // cause=unseen-jump. The markup pairs this call with
 // navigate('/transcript'); same-route navigation is a no-op.
 window.__bramUnseenJump = function () {
+  if (window.__bramSendFollowup) window.__bramSendFollowup.chipAt = Date.now();
   var onTranscript = false;
   try { onTranscript = String(location.hash || "").indexOf("/transcript") >= 0; } catch (e) { /* ignore */ }
   window.__bramClearTranscriptFind("unseen-jump");
@@ -9909,6 +10030,9 @@ window.__bramFollowClassify = function (cur, atEnd, agentId) {
     if (cur !== atEnd) {
       window.__bramFollowTransition(atEnd,
         atEnd ? "user-scroll-bottom" : "user-scroll-up", agentId);
+      if (atEnd && window.__bramSendFollowupScrollBottom) {
+        window.__bramSendFollowupScrollBottom();
+      }
     } else {
       window.__bramFollowAtBottom = atEnd !== false;
     }

@@ -38,6 +38,15 @@ Use `toTurn` for one-shot form submissions (Approve, Confirm). Use
 > `__worklist/*`, `__settings`, …) and serves only project content plus
 > the static `__vendor/*` / `__shell/*` namespaces.
 
+Device APIs that Bram's app bundle can't grant — geolocation is the first
+one (judell/bram#386) — are made **absent** in the preview pane on
+purpose, not left present-but-failing: `navigator.geolocation` doesn't
+exist there, so `"geolocation" in navigator` and
+`if (navigator.geolocation)` both fail honestly and a well-written app
+takes its own no-location path instead of hitting a denial after its
+feature detection passes. Test those features in a real browser at the
+same URL, not in this pane.
+
 ## Live SQL views via `/query`
 
 When a managed project keeps data in SQLite, its target app (or the

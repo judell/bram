@@ -68134,7 +68134,8 @@ fn handle_target_scheme<R: tauri::Runtime>(
     // to the project upstream, exactly as the shell scheme's Tier 1 does, so
     // relative sub-resource URLs resolve identically at the isolated origin.
     if let Some(after) = rel.strip_prefix("__project/") {
-        return proxy_to_target(right_pane_upstream, after, uri.query(), request);
+        let response = proxy_to_target(right_pane_upstream, after, uri.query(), request);
+        return maybe_inject_preview_shim(app, rel, response);
     }
     if rel.starts_with("__") {
         // Static Bram assets the target legitimately needs to RENDER — vendored
@@ -68167,7 +68168,115 @@ fn handle_target_scheme<R: tauri::Runtime>(
     // Project sub-resources at absolute non-`__` paths (e.g. /xmlui/foo.js,
     // /Main.xmlui) — proxy straight to the project upstream, mirroring the
     // shell scheme's Tier 4.
-    proxy_to_target(right_pane_upstream, rel, uri.query(), request)
+    let response = proxy_to_target(right_pane_upstream, rel, uri.query(), request);
+    maybe_inject_preview_shim(app, rel, response)
+}
+
+// judell/bram#386: the target-app preview pane runs inside Bram's app
+// bundle, which declares no NSLocationWhenInUseUsageDescription, so macOS
+// never lets the pane request location -- `navigator.geolocation` exists
+// but `getCurrentPosition` always fails with PERMISSION_DENIED. Rather than
+// leave that denial for well-written apps to hit after their own feature
+// detection passes, insert a small shim as the first child of `<head>` so
+// it runs before the page's own scripts and removes `navigator.geolocation`
+// outright -- feature detection then fails honestly, and apps take their
+// own no-location path. Only rewrites `text/html` responses with no (or
+// identity) content-encoding, and only when a `<head` tag is present;
+// every other response passes through untouched.
+fn maybe_inject_preview_shim<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    rel: &str,
+    response: http::Response<Vec<u8>>,
+) -> http::Response<Vec<u8>> {
+    let is_html = response
+        .headers()
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| {
+            v.split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .eq_ignore_ascii_case("text/html")
+        })
+        .unwrap_or(false);
+    if !is_html {
+        return response;
+    }
+    let is_compressed = response
+        .headers()
+        .get(http::header::CONTENT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| !v.trim().eq_ignore_ascii_case("identity"))
+        .unwrap_or(false);
+    if is_compressed {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "target-scheme",
+                &format!("op=preview-shim-skipped reason=compressed rel={}", rel),
+            );
+        }
+        return response;
+    }
+    let (parts, body) = response.into_parts();
+    let Ok(html) = std::str::from_utf8(&body) else {
+        // Not valid UTF-8 text (unexpected for a claimed text/html body) --
+        // pass through untouched rather than risk corrupting it.
+        return http::Response::from_parts(parts, body);
+    };
+    match insert_preview_shim(html) {
+        Some(new_html) => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "target-scheme",
+                    &format!("op=preview-shim-injected rel={}", rel),
+                );
+            }
+            let mut parts = parts;
+            let new_body = new_html.into_bytes();
+            parts.headers.insert(
+                http::header::CONTENT_LENGTH,
+                http::HeaderValue::from_str(&new_body.len().to_string())
+                    .unwrap_or_else(|_| http::HeaderValue::from_static("0")),
+            );
+            http::Response::from_parts(parts, new_body)
+        }
+        None => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "target-scheme",
+                    &format!("op=preview-shim-skipped reason=no-head rel={}", rel),
+                );
+            }
+            http::Response::from_parts(parts, body)
+        }
+    }
+}
+
+// Pure: finds the first genuine `<head` opening tag (case-insensitively,
+// and not a `<header` false match) and returns the document with the
+// preview shim's `<script>` tag inserted as its first child. `None` when
+// no `<head` tag is present -- the caller passes the body through
+// untouched in that case.
+fn insert_preview_shim(html: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let head_start =
+        lower
+            .match_indices("<head")
+            .find_map(|(idx, _)| match lower.as_bytes().get(idx + 5) {
+                Some(b) if *b == b'>' || b.is_ascii_whitespace() => Some(idx),
+                _ => None,
+            })?;
+    let close_rel = html[head_start..].find('>')?;
+    let insert_at = head_start + close_rel + 1;
+    let mut out = String::with_capacity(html.len() + 64);
+    out.push_str(&html[..insert_at]);
+    out.push_str("\n<script src=\"/__shell/preview-shim.js\"></script>");
+    out.push_str(&html[insert_at..]);
+    Some(out)
 }
 
 fn proxy_to_target(
@@ -71541,5 +71650,63 @@ mod instruction_file_write_tests {
         assert_eq!(out, InstructionFileWrite::Written);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "block\n");
         let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+// judell/bram#386: insert_preview_shim is the pure piece of the geolocation
+// fix -- everything that decides WHETHER to call it (content-type,
+// content-encoding) lives in maybe_inject_preview_shim, which needs a live
+// AppHandle and isn't practical to unit-test here.
+#[cfg(test)]
+mod preview_shim_tests {
+    use super::insert_preview_shim;
+
+    const SHIM_TAG: &str = "<script src=\"/__shell/preview-shim.js\"></script>";
+
+    #[test]
+    fn inserts_right_after_head() {
+        let html = "<html><head><title>t</title></head><body></body></html>";
+        let out = insert_preview_shim(html).expect("should find <head>");
+        let expected = format!(
+            "<html><head>\n{}<title>t</title></head><body></body></html>",
+            SHIM_TAG
+        );
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn handles_uppercase_head_with_attributes() {
+        let html = "<html><HEAD lang=\"en\"><title>t</title></HEAD></html>";
+        let out = insert_preview_shim(html).expect("should find <HEAD lang=\"en\">");
+        let expected = format!(
+            "<html><HEAD lang=\"en\">\n{}<title>t</title></HEAD></html>",
+            SHIM_TAG
+        );
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn returns_none_with_no_head_tag() {
+        let html = "<html><body>no head here</body></html>";
+        assert_eq!(insert_preview_shim(html), None);
+    }
+
+    #[test]
+    fn does_not_false_match_header_element() {
+        // <header> must not be mistaken for <head>; with no real <head> tag
+        // this must still return None.
+        let html = "<html><body><header>banner</header></body></html>";
+        assert_eq!(insert_preview_shim(html), None);
+    }
+
+    #[test]
+    fn leaves_rest_of_document_byte_identical() {
+        let html = "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n</head>\n<body>hello</body>\n</html>\n";
+        let out = insert_preview_shim(html).expect("should find <head>");
+        // Everything up to and including the inserted tag, then everything
+        // after, must match the original byte-for-byte around the insertion
+        // point -- i.e. removing the inserted tag reproduces the input.
+        let without_shim = out.replacen(&format!("\n{}", SHIM_TAG), "", 1);
+        assert_eq!(without_shim, html);
     }
 }

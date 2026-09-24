@@ -1,4 +1,4 @@
-<Component name="WorklistGateBar" var.gateSent="{[]}" var.startMode="{'one'}" var.gateLockTick="{0}">
+<Component name="WorklistGateBar" var.gateSent="{[]}" var.gateLockTick="{0}">
   <!-- issue-278: the Worklist gate, in the Footer.
        The gate row cannot be pinned where it lived - `position: sticky` cannot
        escape its containing block, and `dock` needs a bounded parent height
@@ -10,6 +10,17 @@
   <DataSource id="gateWorklist" url="/__worklist" transformResult="{(d) => window.__bramWorklistAccept(d)}" />
   <DataSource id="gateConfig" url="/__worklist-config" />
   <DataSource id="gateClaim" url="/__inflight" />
+  <!-- issue-404-serial-gate-bar-first-cut: the current branch, for
+       Commit's hover ("where does this land"), refetched on the same host
+       event the Commits tab uses. -->
+  <DataSource id="gateGit" url="/__git/status" />
+  <PushSource
+    id="gateGitEvt"
+    initial="{null}"
+    subscribe="{window.bramSubscribeTauriEvent('git-status-changed', false)}" />
+  <ChangeListener
+    listenTo="{gateGitEvt.value &amp;&amp; gateGitEvt.value.tick}"
+    onDidChange="window.__bramRefetchOnLiveEvent(gateGitEvt.value, gateGit)" />
   <PushSource id="gateSel" subscribe="{window.bramSubscribeW2Selection()}" />
   <!-- The composer is an isolated sibling component. Reading its window
        mirror through a helper is not reactive, so Refine stayed dim after
@@ -98,33 +109,7 @@
        handlers stay single-call. -->
   <ChangeListener
     listenTo="{(gateSel.value || []).join(',')}"
-    onDidChange="() => { startMode = window.__bramW2ResetStartMode() }" />
-  <!-- gate-withholds-futile-joint-commit-offer, Start side: starting a
-       shared file together in ONE click writes one claim and one capture
-       boundary — a permanent foreclosure of per-item commits (#356). The
-       old passive caption rendered beside an armed Start and was read past
-       ("i would not have wanted to start two items that could not be
-       committed separately"), so the foreclosure is now a CHOICE in the
-       click path, mirroring the commit side's radio. The safe option (one at a
-       time) is the preselected default — no-preselection proved
-       unenforceable (RadioGroup auto-selects its first Option; field
-       receipt in start-choice-safe-default-commit-language) — so choosing
-       the combined commit is the deliberate act. "One at a time" narrows
-       each Start click to the first selected item (its own
-       claim/boundary); the rest stay ticked for the next click. Self-retiring with #269
-       (per-item claims empty the condition) — see the item draft. -->
-  <HStack
-    when="{(gateSel.value || []).length >= 2 &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value) &amp;&amp; window.__bramStartChoiceNeeded(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)}"
-    horizontalAlignment="center"
-    paddingHorizontal="$space-8"
-    paddingTop="$space-1">
-    <RadioGroup
-      initialValue="{startMode}"
-      onDidChange="(v) => { startMode = window.__bramW2SetStartMode(v) }">
-      <Option value="one" label="Start one at a time — separate commits" />
-      <Option value="together" label="{window.__bramStartAllLabel(gateSel.value)}" />
-    </RadioGroup>
-  </HStack>
+    onDidChange="window.__bramW2ResetStartMode()" />
   <!-- gate-withholds-futile-joint-commit-offer, commit side: when Commit is
        withheld because a still-begun same-click partner is unselected, say
        so as an instruction — the host would refuse this selection every
@@ -330,8 +315,8 @@
          So this is deliberately a bounded signal that points, not a complete
          one that describes. -->
     <Button
-      label="{window.__bramStartButtonLabel(gateWorklist.value.items, gateSel.value, gateClaim.value, startMode)}"
-      tooltipMarkdown="{window.__bramGateScopeTooltip(gateSel.value, 'start', gateWorklist.value.items, gateClaim.value, startMode)}"
+      label="{window.__bramStartButtonLabel(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
+      tooltipMarkdown="{window.__bramGateScopeTooltip(gateSel.value, 'start')}"
       size="sm"
       enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
       onClick="window.__bramGateAct('start', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode, gateClaim.value)" />
@@ -339,11 +324,11 @@
       label="{window.__bramStartVerb(gateWorklist.value.items, gateSel.value, gateClaim.value) + ' &amp; commit'}"
       size="sm"
       enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value) &amp;&amp; (gateSel.value || []).length === 1 &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
-      tooltipMarkdown="{window.__bramGateScopeTooltip(gateSel.value, 'start-commit')}"
+      tooltipMarkdown="{window.__bramGateScopeTooltip(gateSel.value, 'start-commit', gateGit.value &amp;&amp; gateGit.value.branch)}"
       onClick="window.__bramGateAct('start-commit', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode, gateClaim.value)" />
     <Button
       label="Commit"
-      tooltipMarkdown="{window.__bramGateScopeTooltip(gateSel.value, 'commit')}"
+      tooltipMarkdown="{window.__bramGateScopeTooltip(gateSel.value, 'commit', gateGit.value &amp;&amp; gateGit.value.branch)}"
       size="sm"
       enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value) &amp;&amp; window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
       onClick="window.__bramGateAct('commit', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode, gateClaim.value)" />

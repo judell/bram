@@ -1899,21 +1899,9 @@ window.__bramGateAct = function (kind, items, sel, shareMode, claim) {
   // Selection is literal user intent. Shared-file handling may change how the
   // agent prepares the commit, but never which ids this action authorizes.
   var ids0 = sel || [];
-  // gate-withholds-futile-joint-commit-offer, Start side: under the
-  // one-at-a-time choice, each click starts only the FIRST selected item —
-  // its own claim and capture boundary — so per-item commits stay possible
-  // on the shared file. The rest stay ticked; the next click starts the
-  // next. This is the one sanctioned narrowing of the selection-is-intent
-  // rule above, and it is itself the user's explicit choice via the radio.
-  var startNarrowed = false;
-  if (
-    kind === "start" &&
-    window.__bramW2StartMode === "one" &&
-    window.__bramStartChoiceNeeded(items, ids0, claim)
-  ) {
-    ids0 = [ids0[0]];
-    startNarrowed = true;
-  }
+  // issue-404-serial-gate-bar-first-cut: no narrowing. A gate button acts
+  // on everything ticked; the one-at-a-time radio that used to narrow Start
+  // to the first selected item is gone (#404, #273).
   // issue-343: the trace comes FIRST — the old order (guard, then trace)
   // made a click with an empty selection a perfectly silent no-op, which is
   // exactly the evidence signature Andrew reported: no click line, no
@@ -1938,7 +1926,6 @@ window.__bramGateAct = function (kind, items, sel, shareMode, claim) {
     count: ids0.length,
     op: ids0.length ? "act" : "empty-selection",
     store: (window.__bramW2Selection || []).length,
-    startMode: startNarrowed ? "one" : undefined,
     cautioned: cautioned,
   });
   if (!ids0.length) return;
@@ -4263,29 +4250,17 @@ window.__bramFirstRunLanding = function (enhance) {
   return true;
 };
 
-window.__bramW2StartMode = "one";
-window.__bramW2SetStartMode = function (m) {
-  window.__bramW2StartMode = m || "one";
-  return window.__bramW2StartMode;
-};
+// issue-404-serial-gate-bar-first-cut: the start-time mode is gone; this
+// reset survives only for its selection-change duty below.
 window.__bramW2ResetStartMode = function () {
-  window.__bramW2StartMode = "one";
   // issue-368: a selection change also disarms any pending commit caution —
   // a first click's arm must not carry over to green-light a different
   // selection's commit. Folded here (rather than a second statement in the
   // gate bar's ChangeListener) so the markup handler stays a single call.
   if (window.__bramGateCautionClear) window.__bramGateCautionClear("selection-changed");
-  return "one";
+  return "together";
 };
 
-// The combined-commit option's label, count-aware and execution-neutral:
-// "start" here means ONE AUTHORIZATION CLICK, never parallel execution
-// (which is the agent's business and provider-dependent), so the label
-// hangs on the consequence — commit granularity — per Jon's field review.
-window.__bramStartAllLabel = function (sel) {
-  var n = (sel || []).length;
-  return (n === 2 ? "Start both now" : "Start all " + n + " now") + " — one combined commit";
-};
 // separate-authorization-from-claim: one click, two meanings. On a fresh item
 // it starts work; on an item whose agent stopped mid-apply — authorization
 // still live, nothing running — it picks the work back up, and calling that
@@ -4328,12 +4303,8 @@ window.__bramStartVerb = function (items, sel, claim) {
 // discomfort) -- the same ordinal collision __bramNameList below was
 // written to avoid. What a button applies to moves to its tooltip
 // (__bramGateScopeTooltip), where the question actually arises.
-window.__bramStartButtonLabel = function (items, sel, claim, mode) {
-  var verb = window.__bramStartVerb(items, sel, claim);
-  if (mode === "one" && window.__bramStartChoiceNeeded(items, sel, claim)) {
-    return verb + " one";
-  }
-  return verb;
+window.__bramStartButtonLabel = function (items, sel, claim) {
+  return window.__bramStartVerb(items, sel, claim);
 };
 
 // The tooltip carrying what the ticked rows' button applies to: names up to
@@ -4367,16 +4338,13 @@ window.__bramPushWithheldNote = function (status) {
   return "These commits ride " + b + "; they reach " + (status.pushWithheld.defaultBranch || "main") + " through its PR.";
 };
 
-window.__bramGateScopeTooltip = function (sel, kind, items, claim, mode) {
+window.__bramGateScopeTooltip = function (sel, kind, branch) {
   // gate-tooltips-multiline: Markdown lines, joined like the Worklist strip
   // tooltip (__bramWorklist2StripTooltip) -- one long single-line tooltip ran
   // past its edge. Rendered via tooltipMarkdown on the gate buttons.
   var ids = sel || [];
   var n = ids.length;
   if (!n) return "Tick one or more items first.";
-  if (kind === "start" && mode === "one" && window.__bramStartChoiceNeeded(items, sel, claim)) {
-    return ["Starts one of the " + n + " selected items now.", "The others wait for separate commits."].join("\n\n");
-  }
   var lines = [];
   if (kind === "start-commit") {
     lines.push("One click: start, then commit when done.");
@@ -4387,6 +4355,11 @@ window.__bramGateScopeTooltip = function (sel, kind, items, claim, mode) {
     lines.push(ids.map(function (id) { return "- `" + id + "`"; }).join("\n"));
   } else {
     lines.push("Applies to the " + n + " selected items.");
+  }
+  // issue-404-serial-gate-bar-first-cut: where a commit lands, shown where
+  // the commit decision is made.
+  if ((kind === "commit" || kind === "start-commit") && branch) {
+    lines.push("→ `" + branch + "`");
   }
   return lines.join("\n\n");
 };
@@ -4474,10 +4447,15 @@ window.__bramStartConsequence = function (items, sel, claim) {
     if (!n) return "";
     var sharedPaths = window.__bramSelectionSharedFilePaths(items, sel, claim);
     var what = sharedPaths.length === 1 ? sharedPaths[0] : n + " files";
+    // issue-404-serial-gate-bar-first-cut: consequence plus the dependable
+    // alternative, with no talk of clicks (how claims are recorded is
+    // Bram's business). "Start and commit one before starting the other" is
+    // the reliable meaning of "separately" now that same-tree hunk
+    // separation is frozen (#273).
     return (
-      "These share " + what + " -- started together in one click they can " +
-      "only be committed together afterward. Start them in separate clicks " +
-      "to keep per-item commits possible."
+      "These share " + what + ". Started together, they'll be committed " +
+      "together. To commit them separately, start and commit one before " +
+      "starting the other."
     );
   }
 

@@ -595,6 +595,29 @@ shape as the joint refusal Bram already ships.
    a realistic board; the budget set from the current replay's measured
    baseline before the flip, not after.
 
+   **Gate-time cost and agreement (gate-computes-membership-fresh).** The
+   rule "stale is acceptable for display, never for a gate" now has its
+   mechanism. `gate_membership_observe` runs on every real `worklist-commit`
+   before any staging decision. It calls the engine with `allow_compute =
+   true`, which returns either a fresh compute or an exact-state memo hit,
+   never the previous slot, and compares membership's owner sets with the
+   replay's on the paths the commit would stage. It traces
+   `op=gate-membership ms= paths= fresh= agrees=` and one
+   `op=gate-membership-diverges` per disagreeing path. The replay still
+   decides; step 4 spends this capability, and must then *refuse* on
+   `op=gate-membership-unavailable` rather than proceed.
+
+   This is the **pre-flip soak's instrument**. Serve-time baselines existed;
+   gate-time cost and agreement at the moment a commit actually happens did
+   not. Two departures from the item's first draft:
+
+   - The compute covers the begun roster, not only the commit's paths,
+     because the engine's natural bound is already begun items' declared
+     paths. The comparison is scoped to the commit's paths.
+   - The snapshot boundary (compute and staging against the same captured
+     state) is deferred to step 4, where the gate will *act* on the
+     partition. Observing needs only a fresh answer.
+
 ### Fixture-first acceptance receipt
 
 Criteria 2–6 now have named executable fixtures in

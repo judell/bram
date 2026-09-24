@@ -62109,20 +62109,7 @@ fn route_request<R: tauri::Runtime>(
             // Which begun items have attributed lines on each path — the
             // entanglement test the will-commit computation below shares
             // with the commit route's own scan.
-            let mut owners_by_path: std::collections::HashMap<
-                String,
-                std::collections::HashSet<String>,
-            > = Default::default();
-            for (k, v) in &runs {
-                for run in v {
-                    if let Some(id) = run.get("itemId").and_then(|x| x.as_str()) {
-                        owners_by_path
-                            .entry(k.clone())
-                            .or_default()
-                            .insert(id.to_string());
-                    }
-                }
-            }
+            let owners_by_path = replay_owners_from_runs(&runs);
             // avoid-futile-joint-commit: surface the same joint-attribution
             // fact the commit-time refusal (op=refuse-joint-interval) would
             // hit, BEFORE any commit is attempted — computed from `&runs`
@@ -64398,6 +64385,133 @@ fn release_claim_on_commit_refusal<R: tauri::Runtime>(app: &AppHandle<R>, ids: &
     );
 }
 
+// Which begun items the replay credits with lines on each path: the
+// entanglement test shared by the board serve, the commit route, and (since
+// gate-computes-membership-fresh) the gate's membership comparison. Joint
+// runs carry `itemIds` instead and are gathered by joint_owners_from_runs.
+fn replay_owners_from_runs(
+    runs: &std::collections::HashMap<String, Vec<serde_json::Value>>,
+) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
+    let mut owners: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        Default::default();
+    for (k, v) in runs {
+        for run in v {
+            if let Some(id) = run.get("itemId").and_then(|x| x.as_str()) {
+                owners.entry(k.clone()).or_default().insert(id.to_string());
+            }
+        }
+    }
+    owners
+}
+
+// gate-computes-membership-fresh: the gate's comparison, pure. For every
+// changed path the commit would stage (a partition path covered by a
+// requested item's declared files), does membership's owner set equal the
+// replay's (single owners plus joint members) -- the same test
+// membership_report applies on board serves? Returns (paths checked,
+// divergences as (path, replay, membership)).
+fn gate_membership_comparison(
+    partition: &std::collections::BTreeMap<String, MembershipPathBuckets>,
+    requested_files: &[String],
+    replay_owners: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+    replay_joint: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+) -> (
+    usize,
+    Vec<(
+        String,
+        std::collections::BTreeSet<String>,
+        std::collections::BTreeSet<String>,
+    )>,
+) {
+    let mut checked = 0usize;
+    let mut diverged = Vec::new();
+    for (path, m) in partition {
+        if !requested_files.iter().any(|d| declared_covers(d, path)) {
+            continue;
+        }
+        checked += 1;
+        let mut replay: std::collections::BTreeSet<String> = replay_owners
+            .get(path)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default();
+        if let Some(j) = replay_joint.get(path) {
+            replay.extend(j.iter().cloned());
+        }
+        if replay != m.owners {
+            diverged.push((path.clone(), replay, m.owners.clone()));
+        }
+    }
+    (checked, diverged)
+}
+
+// gate-computes-membership-fresh, observe-only: at every real commit, obtain a
+// membership partition that is fresh for the CURRENT state (allow_compute =
+// true either computes or hits the memo slot keyed on exactly this HEAD +
+// diff + untracked + roster + intervals -- never the stale previous slot),
+// compare it with the replay the gate is about to act on, and trace cost and
+// agreement. The replay still decides everything; nothing here can change the
+// commit's outcome or return an error into it. Migration step 4 will spend
+// this capability (and must then refuse, not proceed, when it is
+// unavailable); until then it is the pre-flip soak's instrument: gate-time
+// cost (criterion 7 has serve-time baselines only) and agreement at the
+// moment a commit actually happens.
+fn gate_membership_observe<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    ids: &[String],
+    requested_files: &[String],
+    runs_by_path: &std::collections::HashMap<String, Vec<serde_json::Value>>,
+) {
+    let started = std::time::Instant::now();
+    let Some((partition, fresh)) = membership_partition_engine(app, true) else {
+        append_bram_trace_line(
+            app,
+            "claim-interval",
+            &format!(
+                "op=gate-membership-unavailable ids={} ms={}",
+                ids.len(),
+                started.elapsed().as_millis()
+            ),
+        );
+        return;
+    };
+    let replay_owners = replay_owners_from_runs(runs_by_path);
+    let replay_joint = joint_owners_from_runs(runs_by_path);
+    let (checked, diverged) =
+        gate_membership_comparison(&partition, requested_files, &replay_owners, &replay_joint);
+    let join = |s: &std::collections::BTreeSet<String>| -> String {
+        if s.is_empty() {
+            "-".to_string()
+        } else {
+            s.iter().cloned().collect::<Vec<_>>().join(",")
+        }
+    };
+    for (path, replay, membership) in &diverged {
+        append_bram_trace_line(
+            app,
+            "claim-interval",
+            &format!(
+                "op=gate-membership-diverges ids={} path={} replay={} membership={}",
+                ids.join(","),
+                path,
+                join(replay),
+                join(membership)
+            ),
+        );
+    }
+    append_bram_trace_line(
+        app,
+        "claim-interval",
+        &format!(
+            "op=gate-membership ids={} paths={} ms={} fresh={} agrees={}",
+            ids.len(),
+            checked,
+            started.elapsed().as_millis(),
+            fresh,
+            diverged.is_empty()
+        ),
+    );
+}
+
 fn handle_worklist_commit<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
@@ -64604,6 +64718,21 @@ fn handle_worklist_commit<R: tauri::Runtime>(
     // across the commit because interval staging never touches the worktree
     // the replay is positioned against.
     let (runs_by_path, _, _, _unowned_by_path) = claim_attribution_runs(app);
+    // gate-computes-membership-fresh: observe-only, before any staging
+    // decision. See gate_membership_observe.
+    {
+        let requested_files: Vec<String> = items
+            .iter()
+            .filter(|it| {
+                it.get("id")
+                    .and_then(|v| v.as_str())
+                    .map(|id| ids.iter().any(|r| r == id))
+                    .unwrap_or(false)
+            })
+            .flat_map(worklist_item_files)
+            .collect();
+        gate_membership_observe(app, &ids, &requested_files, &runs_by_path);
+    }
     let begun_outside: std::collections::HashSet<String> = items
         .iter()
         .filter_map(|it| {
@@ -71837,5 +71966,77 @@ mod push_withheld_tests {
     fn default_and_origin_head_are_not_another_branch() {
         let c = vec![v(&["main", "origin/main", "origin/HEAD", "origin"])];
         assert!(push_withheld_branches("main", "main", &c).is_empty());
+    }
+}
+
+// gate-computes-membership-fresh: the gate's comparison and the shared replay
+// owner derivation, pure.
+#[cfg(test)]
+mod gate_membership_tests {
+    use super::{gate_membership_comparison, replay_owners_from_runs, MembershipPathBuckets};
+    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+    fn bucket(owners: &[&str]) -> MembershipPathBuckets {
+        MembershipPathBuckets {
+            owners: owners
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<BTreeSet<_>>(),
+            ..Default::default()
+        }
+    }
+
+    fn set(xs: &[&str]) -> HashSet<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn replay_owners_collects_single_item_runs_per_path() {
+        let mut runs: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+        runs.insert(
+            "a.rs".into(),
+            vec![
+                serde_json::json!({"itemId": "x"}),
+                serde_json::json!({"itemId": "y"}),
+                serde_json::json!({"itemIds": ["x", "y"]}),
+            ],
+        );
+        let owners = replay_owners_from_runs(&runs);
+        assert_eq!(owners["a.rs"], set(&["x", "y"]));
+    }
+
+    // Agreement on the requested paths; a divergence on a path the commit
+    // does not stage is not the gate's business. Fails if the requested-path
+    // filter is dropped (the unrelated divergence would be counted).
+    #[test]
+    fn agrees_on_requested_paths_and_ignores_others() {
+        let mut partition = BTreeMap::new();
+        partition.insert("app/a.rs".to_string(), bucket(&["item-a"]));
+        partition.insert("other/b.rs".to_string(), bucket(&["item-b"]));
+        let mut replay = HashMap::new();
+        replay.insert("app/a.rs".to_string(), set(&["item-a"]));
+        replay.insert("other/b.rs".to_string(), set(&["someone-else"]));
+        let (checked, diverged) =
+            gate_membership_comparison(&partition, &["app/".to_string()], &replay, &HashMap::new());
+        assert_eq!(checked, 1);
+        assert!(diverged.is_empty());
+    }
+
+    // A disagreement on a staged path is reported with both owner sets.
+    // Joint replay members count as owners, as in membership_report.
+    #[test]
+    fn reports_divergence_with_both_owner_sets() {
+        let mut partition = BTreeMap::new();
+        partition.insert("a.rs".to_string(), bucket(&["x"]));
+        let mut joint = HashMap::new();
+        joint.insert("a.rs".to_string(), set(&["x", "y"]));
+        let (checked, diverged) =
+            gate_membership_comparison(&partition, &["a.rs".to_string()], &HashMap::new(), &joint);
+        assert_eq!(checked, 1);
+        assert_eq!(diverged.len(), 1);
+        let (path, replay, membership) = &diverged[0];
+        assert_eq!(path, "a.rs");
+        assert_eq!(replay.iter().cloned().collect::<Vec<_>>(), vec!["x", "y"]);
+        assert_eq!(membership.iter().cloned().collect::<Vec<_>>(), vec!["x"]);
     }
 }

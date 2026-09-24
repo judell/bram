@@ -795,10 +795,13 @@ should say so.
 - **Perf work:** baselines are commits — record the before with the
   same trace line that will verify the after.
 - **When the deliverable is something a person reads or sees** (a docs
-  page, a pane surface, a rendered table), the commit gate includes
-  looking at the rendered output; a passing test verifies behavior, not
-  communication. **When you delegate such work, say so explicitly in the
-  subagent's prompt:** "verify" means render it.
+  page, a pane surface, a rendered table), the person looks and you
+  show: serve it, hand over the URL, and wait for their verdict. A
+  passing test verifies behavior, not communication — don't
+  render-check on their behalf. Specs, measurements and a liveness
+  check are fine; judging how it looks is theirs. **When you
+  delegate**, tell the subagent to report where to look, not to
+  render-check.
 - **When a hard stretch ends**, ask what documentation would have
   short-circuited it and what feature would have obviated the
   workaround, and file each where it belongs. A workaround you land

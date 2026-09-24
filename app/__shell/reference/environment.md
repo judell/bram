@@ -243,16 +243,34 @@ your hands. Verify the artifact you actually execute (checksum, marker
 string, behavioral probe), and when you report results, label which of
 your instruments are authoritative and which are only corroborating.
 
-### Render what the reader will see
+### The user is the eyes for rendered output
 
 For changes whose deliverable is something a human reads or sees — a
-docs page, a pane surface, a rendered table — the artifact-you-run is
-the **rendered output**, and the commit gate includes looking at it. A
-passing spec verifies behavior, not communication. When the work is
-delegated, this must be an explicit instruction in the subagent's
-prompt, not an assumed judgment: a delegated agent that cannot verify
-its own work will report success, and "verify" for a rendered artifact
-means render it.
+docs page, a pane surface, a rendered table — the person looks and you
+show. A passing spec verifies behavior, not communication, and judging
+communication is the user's call, not something to decide for them.
+
+Automated rendering can fail where a person's browser works fine — a
+headless run can come back blank on a page that renders correctly for
+a real user — so a self-check can report a phantom defect that has
+nothing to do with the actual change.
+
+Checks that can't be done by eye are still fine: computed widths, DOM
+assertions, and existing headless spec suites (xmlui's
+`tests-e2e/how-to-examples/*.spec.ts`, for example). They verify
+behavior and stay in place; they just don't stand in for the look. A
+liveness check before handing over a URL — the server responds, no
+console errors — is fine too; that confirms the thing exists, it
+doesn't judge how it reads.
+
+Serve the artifact, hand over the exact URL (or say where to click),
+say what changed, and wait for the verdict. When the user is away, say
+the rendered review is pending on them rather than substituting your
+own judgment in the meantime.
+
+When delegating such work, tell the subagent to report where to look,
+not to render-check it: "here's the URL, here's what changed" is the
+right shape of instruction, not "verify this renders correctly."
 
 ### Close every hard stretch with two questions
 

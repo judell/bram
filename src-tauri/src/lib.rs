@@ -26009,10 +26009,17 @@ fn run_issue_index_pass<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<IndexPa
     // tab refetch on the event instead of polling. Bare signal — the client's
     // bramSubscribeTauriEvent wrapper supplies the `.tick`. Same pattern as
     // git-status-changed. First (cold-index) pass fires once; harmless.
+    //
+    // issues-changed-after-list-rebuild: the signal fires ONCE, AFTER the
+    // cached list below is rebuilt. It used to fire first, so subscribers
+    // (Awaiting You, the Issues tab, the close-queue surfaces) refetched in
+    // the gap and read the pre-rebuild list, and nothing re-signalled
+    // afterwards: 2026-09-24, Jon's #389 reply showed "rdhyee moved last"
+    // until an unrelated refetch (emit 20:14:32.783, Inbox serve 20:14:32.900,
+    // pass end 20:14:50). The single-issue path (index one issue, upsert its
+    // list row, then emit) already had this order.
     let list_stale = issues_list_stale(&conn);
-    if indexed > 0 {
-        emit_replayable_signal(app, "issues-changed");
-    }
+    let mut signal_issues_changed = indexed > 0;
     if indexed > 0 || list_stale {
         // Rebuild + cache the full issues list so /__issues can also serve
         // cache-first, byte-identical to a live build_issues_list. Runs on
@@ -26023,7 +26030,7 @@ fn run_issue_index_pass<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<IndexPa
             Ok(list_bytes) => {
                 if list_stale && indexed == 0 {
                     append_bram_trace_line(app, "search-index", "op=issues-list-rebuild-retry");
-                    emit_replayable_signal(app, "issues-changed");
+                    signal_issues_changed = true;
                 }
                 let list_json = String::from_utf8(list_bytes).unwrap_or_default();
                 let status = cache_issues_list_row(&conn, &list_json);
@@ -26076,6 +26083,11 @@ fn run_issue_index_pass<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<IndexPa
                 set_issues_list_stale(&conn, true);
             }
         }
+    }
+    // After the rebuild -- or its failure, when per-issue docs still changed
+    // and subscribers should refetch what they can.
+    if signal_issues_changed {
+        emit_replayable_signal(app, "issues-changed");
     }
     let rows = search_index::row_count(&conn).unwrap_or(0);
     Ok(IndexPassOutcome {

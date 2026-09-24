@@ -4459,128 +4459,64 @@ window.__bramStartConsequence = function (items, sel, claim) {
     );
   }
 
-  // All begun. Find items Commit is withheld from: `proposed` with no
-  // exclusive changed path (applied items skip exclusivity, mirroring
-  // __bramSelectionAllCommittable), and collect who blocks them.
-  var blocked = [];
+  // All begun. gate-note-planned-overlap-is-not-a-change: the one thing
+  // worth saying first is "nothing to commit", for begun items with no
+  // changes at all. A path another begun item merely DECLARES is a plan,
+  // not a change -- counting split.sharedDeclared here sent route A
+  // (2026-09-24: two items whose work lived in worktrees, clean checkout)
+  // into "entangled in a shared file ... ask the agent to separate their
+  // edits".
+  //
+  // The entangled/withheld copy that followed is gone. Since #327,
+  // __bramSelectionAllCommittable offers Commit whenever each item has
+  // changes of its own, exclusive OR shared, so that copy -- computed
+  // without selection context -- told users Commit was withheld while the
+  // button was lit; and its advice was the hunk separation #273 froze. A
+  // selection missing a joint partner is refused by
+  // __bramSelectionJointMissing, which has its own gate note.
   var empty = [];
-  var blockerSet = {};
-  var sharedPathSet = {};
   for (var b = 0; b < begun.length; b++) {
     var itb = byId[begun[b]];
     if ((itb.status || "proposed") === "applied") continue;
     var split = window.__bramItemChangedSplit(itb, list, claim);
-    if (split.exclusive.length) continue;
-    // issue-351: zero changes is NOT entanglement. An empty change set has
-    // a vacuously empty exclusive list, and with no blockers the `mutual`
-    // arm below fired the "entangled in shared files" copy on a lone item
-    // with an empty CHANGES column — sending the user to separate edits
-    // that do not exist. The ordinary state of a freshly begun item gets
-    // the ordinary sentence instead.
     var hasAnyChange =
       (itb.changeSummary && itb.changeSummary.changed > 0) ||
-      split.shared.length > 0 ||
-      split.sharedDeclared.length > 0;
-    if (!hasAnyChange) {
-      empty.push(itb.id);
-      continue;
-    }
-    blocked.push(itb.id);
-    var paths = split.shared.concat(split.sharedDeclared);
-    for (var p = 0; p < paths.length; p++) sharedPathSet[paths[p]] = true;
-    var files = itb.changedFiles || [];
-    for (var f = 0; f < files.length; f++) {
-      var sharers = (files[f] && files[f].sharedWith) || [];
-      for (var w = 0; w < sharers.length; w++) {
-        var o = byId[sharers[w]];
-        if (o && o.id !== itb.id && window.__bramWorklist2Begun(o, claim)) {
-          blockerSet[o.id] = true;
-        }
-      }
-    }
+      split.exclusive.length > 0 ||
+      split.shared.length > 0;
+    if (!hasAnyChange) empty.push(itb.id);
   }
-  if (empty.length && !blocked.length) {
+  if (empty.length) {
     return (
       window.__bramNameList(empty) +
       (empty.length === 1 ? " has" : " have") +
       " no changes yet — nothing to commit."
     );
   }
-  if (blocked.length) {
-    var who = Object.keys(blockerSet);
-    var pathCount = Object.keys(sharedPathSet).length;
-    // Advise committing a blocker first only when some blocker is itself
-    // committable alone; mutually-entangled proposed items have no such
-    // exit, and "commit X first" would name another withheld button.
-    var advisable = [];
-    var mutual = true;
-    for (var a = 0; a < who.length; a++) {
-      if (blocked.indexOf(who[a]) !== -1) continue;
-      mutual = false;
-      var oa = byId[who[a]];
-      if (!oa) continue;
-      if (window.__bramSelectionAllCommittable(list, [oa.id], claim)) {
-        advisable.push(oa.id);
+
+  // All begun, with changes. Speak only when a file they share actually has
+  // uncommitted changes: those edits are mixed, and the dependable way to
+  // land them is one commit (#273 froze same-tree separation; #404's voice).
+  if (!n) return "";
+  var sharedPaths2 = window.__bramSelectionSharedFilePaths(items, sel, claim);
+  var changedShared = sharedPaths2.filter(function (p) {
+    for (var c = 0; c < chosen.length; c++) {
+      var files = (byId[chosen[c]] && byId[chosen[c]].changedFiles) || [];
+      for (var f = 0; f < files.length; f++) {
+        if (files[f] && files[f].path === p &&
+            ((files[f].added || 0) > 0 || (files[f].removed || 0) > 0)) {
+          return true;
+        }
       }
     }
-    if (mutual) {
-      return (
-        window.__bramNameList(blocked) + "'s edits are entangled in " +
-        (pathCount === 1 ? "a shared file" : "shared files") +
-        "; " + (blocked.length === 2 ? "neither" : "none") +
-        " has exclusive changes, so Commit is withheld. Ask the agent to " +
-        "separate their edits."
-      );
-    }
-    var head =
-      window.__bramNameList(blocked) + "'s changes share " +
-      (pathCount === 1 ? "a file" : "files") + " with " +
-      window.__bramNameList(who) +
-      "'s, so nothing is exclusively " +
-      (blocked.length === 1 ? "its" : "their") +
-      " own and Commit is withheld. ";
-    if (advisable.length) {
-      // No repeated names in the guidance half: the blockers were just named,
-      // so refer back -- unless advisable is a strict subset of them, where
-      // the pronoun would be ambiguous and the names earn their keep.
-      var advRef =
-        advisable.length === who.length
-          ? (advisable.length === 1 ? "it alone" : "only those")
-          : (advisable.length === 1 ? advisable[0] + " alone" : "only " + window.__bramNameList(advisable));
-      return (
-        head + "Select " + advRef +
-        " to commit first, or ask the agent to separate their edits."
-      );
-    }
-    return head + "Ask the agent to separate their edits.";
-  }
-
-  // All begun, all committable: the radio group carries the granularity
-  // choice; the line only flags that shared edits are already mixed.
-  //
-  // avoid-futile-joint-commit: "you can commit together or ask the agent to
-  // separate them" is only true when there is a per-item interval to
-  // separate FROM. When the selection is jointly attributed (host-reported
-  // via jointWith -- these items were approved together in one click and
-  // share a single capture boundary), separation was never available, and
-  // the radio group's split Option is disabled for exactly this reason (see
-  // WorklistGateBar.xmlui). Say so instead of repeating the false promise.
-  if (!n) return "";
-  if (window.__bramSelectionJointShared(items, sel)) {
-    return (
-      "These share " + (n === 1 ? "a file" : n + " files") + ". " +
-      (begun.length === 2 ? "Both" : "All") +
-      " were started together in one click, so their shared-file edits can " +
-      "only be committed together -- or ask the agent to separate them " +
-      "(it parks one item's changes, you Drop that item, commit the other, " +
-      "then it restores and re-proposes)."
-    );
-  }
+    return false;
+  });
+  if (!changedShared.length) return "";
+  var whatChanged = changedShared.length === 1
+    ? changedShared[0]
+    : changedShared.length + " files";
   return (
-    "These share " + (n === 1 ? "a file" : n + " files") + ". " +
-    (begun.length === 2 ? "Both" : "All") +
-    " already have changes on disk; their edits in shared files mix. " +
-    "You can commit together or ask the agent to separate them."
+    "These share " + whatChanged + ", which has uncommitted changes. " +
+    "Commit them together."
   );
 };
 

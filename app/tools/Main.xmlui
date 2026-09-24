@@ -545,7 +545,7 @@
           tooltip="Settings → On Bram launch is set to “Do not start an agent”, so Bram won’t start, switch, or type into the terminal’s agent." />
         <RadioGroup
           id="agentSwitcherSelect"
-          when="{!window.__bramStartupPolicyIsNone(headerSettingsEvt.value, footerTipSettings.value) &amp;&amp; ((mainAgentStatus.value &amp;&amp; mainAgentStatus.value.provider) || (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider))}"
+          when="{window.__bramShowAgentSwitcher(headerSettingsEvt.value, footerTipSettings.value, mainAgentStatus.value, enhanceStatus.value)}"
           orientation="horizontal"
           initialValue="{(mainAgentStatus.value &amp;&amp; mainAgentStatus.value.provider) || (enhanceStatus.value &amp;&amp; enhanceStatus.value.activeProvider)}"
           enabled="{!agentSwitcherBusy.value}"

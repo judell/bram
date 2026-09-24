@@ -828,6 +828,14 @@ window.__bramStartupPolicyIsNone = function (pushedEvt, fetchedSettings) {
   var shell = settings.shell || {};
   return shell.startupPolicy === "none";
 };
+// PR #394 review: the header switcher's `when`, kept as a single call per
+// docs/developing-bram.md. Shown only when Bram is launching agents itself
+// (policy is not "none") AND a provider is known.
+window.__bramShowAgentSwitcher = function (pushedEvt, fetchedSettings, mainStatus, enhance) {
+  if (window.__bramStartupPolicyIsNone(pushedEvt, fetchedSettings)) return false;
+  var provider = (mainStatus && mainStatus.provider) || (enhance && enhance.activeProvider);
+  return !!provider;
+};
 window.__bramAgentSwitcherLabel = function (provider) {
   return String(provider || "").toLowerCase() === "codex" ? "Codex" : "Claude";
 };

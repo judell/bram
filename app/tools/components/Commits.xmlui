@@ -92,14 +92,6 @@
         enabled="{!window.__bramPushWithheld(gitStatus.value)}"
         tooltipMarkdown="{window.__bramPushTooltip(gitStatus.value)}"
         onClick="pushError = null; gitPush(commits, gitStatus, gitStatus.value &amp;&amp; gitStatus.value.branch, (e) => pushError = e)" />
-      <!-- push-withheld-when-commits-ride-a-pr: on the default branch, when
-           the unpushed commits also ride another branch, that branch's PR is
-           how they reach it; say so where the disabled Push sits. -->
-      <Text
-        when="{window.__bramPushWithheld(gitStatus.value)}"
-        fontSize="$fontSize-sm"
-        color="$textColor-secondary"
-        value="{window.__bramPushWithheldNote(gitStatus.value)}" />
       <!-- local-repo-no-origin-first-class: with no remote, unpushed is
            undefined (the host marks no commit unpushed, so Push never
            renders); say the state plainly instead of offering nothing. -->
@@ -115,6 +107,17 @@
         enabled="{!pullRebase.inProgress &amp;&amp; gitStatus.value &amp;&amp; gitStatus.value.behind > 0}"
         onClick="pullError = null; pullRebase.execute()" />
     </HStack>
+
+    <!-- push-withheld-when-commits-ride-a-pr: on the default branch, when
+         the unpushed commits also ride another branch, that branch's PR is
+         how they reach it. On its own line below the header: beside the
+         disabled Push it widened the header row past the pane and forced a
+         horizontal scrollbar. The Push hover carries the full explanation. -->
+    <Text
+      when="{window.__bramPushWithheld(gitStatus.value)}"
+      fontSize="$fontSize-sm"
+      color="$textColor-secondary"
+      value="{window.__bramPushWithheldNote(gitStatus.value)}" />
 
     <HStack when="{pullError}" backgroundColor="$color-danger-100" padding="$space-2" gap="$space-2" verticalAlignment="start">
       <Text fontSize="$fontSize-sm" color="$color-danger-700" width="*">Pull failed: {pullError}</Text>

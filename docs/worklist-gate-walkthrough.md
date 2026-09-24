@@ -69,7 +69,7 @@ clearing it first.
 
 ## The standing check
 
-**After every single action below — every Start, Commit, Drop, Refine —
+**After every single action below — every Start, Commit, Drop, item feedback —
 confirm before doing anything else:**
 
 - the spinner is gone
@@ -115,16 +115,19 @@ dropped after. The overlap index counts declared claims from unbegun items.
 **Do:** tick `p1` only.
 
 **Expect:**
-- `Start 1` enabled
-- `Start & commit 1` enabled
+- `Start` enabled; hovering it reads "Applies to the selected item: p1"
+- `Start & commit` enabled
 - `Commit` **not** offered
-- `Refine` **disabled** (composer empty)
-- `Drop 1` enabled
+- The gate row holds only Start, Start & commit, Commit (when offered)
+  and Drop
+- `Drop` enabled
 - **No** radio group (needs 2+)
 - **No** explainer line (single unbegun item is an unsurprising combo)
 
-**Then:** type anything in the composer. `Refine 1` should enable. Clear it
-again; it should disable.
+**Then:** look at the composer. Its placeholder reads "Feedback about
+selection: Enter sends it; the buttons above send it with their action…",
+and a **Chat** button shows beside it. Clear the selection: **Chat**
+hides and the placeholder returns to general chat.
 
 **Then:** expand `p1`'s row. **No Diff surface** — an unbegun item shows
 "No changes yet" and nothing else (Diff is gated on the begun predicate,
@@ -175,7 +178,7 @@ the Start-available case, so the Start-tense wording):
 > proposed one to start it.
 
 (Not silence: the explainer fires on any begun+unbegun mix, and the buttons
-agree — only Refine and Drop are joint actions there.)
+agree — only Drop, and item feedback via Enter, are joint actions there.)
 
 *History:* the original line keyed on shared files alone and narrated
 unavailable actions twice over ("Started together…" and then "Commit p1
@@ -280,7 +283,8 @@ recovery), and recommends Drop. Spinner clears without you doing anything.
 *This is the exact case that wedged the UI three times in 0.5.2
 development.*
 
-**8b — refine.** Tick any item, type feedback, click **Refine**.
+**8b — item feedback.** Tick any item, type feedback in the composer, press
+**Enter**.
 
 **Expect:** spinner clears when the agent's turn ends. No manual unwind.
 

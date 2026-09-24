@@ -40755,6 +40755,127 @@ fn sidecar_matches_seeded<R: tauri::Runtime>(app: &AppHandle<R>, on_disk: &Path)
     }
 }
 
+// conventions-core-and-reference-split: the operational reference behind the
+// core conventions. Canonical files live in app/__shell/reference/*.md; Setup
+// seeds each to <proj>/.claude/bram-reference/<name>.md with the same version
+// stamp as the core (seeded_conventions_bytes), and the core's when-to-read
+// pointers name that path. The set is ENUMERATED from the bundle, like
+// bundled_skill_names -- a hand-kept list of file names would be exactly the
+// anti-enumeration shape (a list standing in for the property "every bundled
+// reference file"), and the first file added without updating it would
+// silently never reach a managed project.
+const ENHANCE_REFERENCE_DIR_REL: &str = ".claude/bram-reference";
+const ENHANCE_REFERENCE_BUNDLE_DIR: &str = "__shell/reference";
+
+fn bundled_reference_names<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<String> {
+    let is_md = |n: &str| n.ends_with(".md");
+    let mut v: Vec<String> = if let Some(root) = resolve_app_root(Some(app)) {
+        std::fs::read_dir(root.join(ENHANCE_REFERENCE_BUNDLE_DIR))
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| e.path().is_file())
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .filter(|n| is_md(n))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        EMBEDDED_APP
+            .get_dir(ENHANCE_REFERENCE_BUNDLE_DIR)
+            .map(|d| {
+                d.files()
+                    .filter_map(|f| f.path().file_name().and_then(|n| n.to_str()))
+                    .filter(|n| is_md(n))
+                    .map(|n| n.to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    v.sort();
+    v
+}
+
+fn stamp_seeded_doc(bundle: &[u8]) -> Vec<u8> {
+    let mut out = format!("<!-- bram v{} -->\n", env!("CARGO_PKG_VERSION")).into_bytes();
+    out.extend_from_slice(bundle);
+    out
+}
+
+fn seeded_reference_bytes<R: tauri::Runtime>(app: &AppHandle<R>, name: &str) -> Option<Vec<u8>> {
+    let (bundle, _) = serve_app_file(
+        Some(app),
+        &format!("{}/{}", ENHANCE_REFERENCE_BUNDLE_DIR, name),
+    )?;
+    Some(stamp_seeded_doc(&bundle))
+}
+
+// Every bundled reference file present and byte-identical to its stamped
+// bundle. Feeds the same currency flag as the core sidecar, so an upgrade
+// that changes a reference file raises the needs-setup banner exactly as a
+// core change does -- a stale reference is a stale convention.
+fn reference_docs_current<R: tauri::Runtime>(app: &AppHandle<R>, proj: &Path) -> bool {
+    let dir = proj.join(ENHANCE_REFERENCE_DIR_REL);
+    bundled_reference_names(app).iter().all(|name| {
+        match (
+            std::fs::read(dir.join(name)),
+            seeded_reference_bytes(app, name),
+        ) {
+            (Ok(disk), Some(expected)) => disk == expected,
+            _ => false,
+        }
+    })
+}
+
+// Seeded files that are no longer bundled (a rename or a removal) and still
+// carry Setup's stamp. Only stamped files are pruned: anything else in the
+// directory was put there by someone else. Pure for testing.
+fn stray_seeded_reference_files(on_disk: &[(String, Vec<u8>)], bundled: &[String]) -> Vec<String> {
+    on_disk
+        .iter()
+        .filter(|(name, _)| name.ends_with(".md") && !bundled.contains(name))
+        .filter(|(_, bytes)| bytes.starts_with(b"<!-- bram v"))
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+fn seed_reference_docs<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    proj: &Path,
+    wrote: &mut Vec<String>,
+    skipped: &mut Vec<String>,
+) -> Result<(), String> {
+    let dir = proj.join(ENHANCE_REFERENCE_DIR_REL);
+    let bundled = bundled_reference_names(app);
+    if !bundled.is_empty() {
+        std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {}", dir.display(), e))?;
+    }
+    for name in &bundled {
+        let Some(bytes) = seeded_reference_bytes(app, name) else {
+            continue;
+        };
+        // Whole-file Setup-managed, like the core sidecar: always refreshed.
+        write_template_if_safe(&dir.join(name), &bytes, true, wrote, skipped)?;
+    }
+    let on_disk: Vec<(String, Vec<u8>)> = std::fs::read_dir(&dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter_map(|e| {
+                    let name = e.file_name().into_string().ok()?;
+                    let bytes = std::fs::read(e.path()).ok()?;
+                    Some((name, bytes))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    for name in stray_seeded_reference_files(&on_disk, &bundled) {
+        let path = dir.join(&name);
+        if std::fs::remove_file(&path).is_ok() {
+            wrote.push(format!("{} (removed: no longer bundled)", path.display()));
+        }
+    }
+    Ok(())
+}
+
 fn extract_marker_block<'a>(disk: &'a str, start: &str, end: &str) -> Option<&'a str> {
     let start_idx = disk.find(start)?;
     let tail = &disk[start_idx..];
@@ -40879,7 +41000,11 @@ fn compute_seed_currency_checks<R: tauri::Runtime>(
     // one. A stray sidecar that somehow appears (or drifts) is now
     // genuinely detected instead of hidden behind an unconditional `true`.
     let sidecar_exists = sidecar.exists() || sidecar_legacy.exists();
-    let claude_sidecar_current = sidecar.exists() && sidecar_matches_seeded(app, &sidecar);
+    // conventions-core-and-reference-split: the core and its seeded
+    // reference files are one convention set; either stale means stale.
+    let claude_sidecar_current = sidecar.exists()
+        && sidecar_matches_seeded(app, &sidecar)
+        && reference_docs_current(app, proj);
     // AGENTS.md: same genuine-shape reasoning as CLAUDE.md above -- the
     // source repo's AGENTS.md really does carry this hand-authored prose,
     // never a Setup-managed marker block.
@@ -41757,6 +41882,8 @@ fn run_enhance<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec
         // wasn't there, or already migrated).
         let legacy_sidecar = proj.join(ENHANCE_SIDECAR_LEGACY_REL);
         let _ = std::fs::remove_file(&legacy_sidecar);
+        // The core's when-to-read pointers resolve here.
+        seed_reference_docs(app, &proj, &mut wrote, &mut skipped)?;
     }
 
     // Bram-bundled skills (bram-bundled-skills): seed each app/skills/<name>/
@@ -42289,6 +42416,59 @@ fn plan_instruction_file(
 
 // Apply a plan: write or skip, report into the Setup result, and trace every
 // decision with byte counts so the next occurrence explains itself.
+// issue-396-instruction-file-read-race: the read error, in the trace itself.
+// Gluejar's wipe came from a read that failed for an instant and left no
+// record of why; the Setup result carried the message, the grep-able trace
+// did not. `os_error` is the raw errno (e.g. 11, "Resource deadlock
+// avoided", which an iCloud placeholder mid-download can return), `-` when
+// the error has none.
+fn read_error_trace_fields(e: &std::io::Error) -> String {
+    format!(
+        "error_kind={:?} os_error={}",
+        e.kind(),
+        e.raw_os_error()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "-".to_string())
+    )
+}
+
+#[derive(Debug, PartialEq)]
+enum InstructionFileWrite {
+    Written,
+    AppearedDuringSetup,
+}
+
+// Perform a planned write. A `created` plan was made against a file that did
+// not exist when it was read; `fs::write` would create OR TRUNCATE, so a
+// file that reappeared since (a sync tool restoring it, a rename landing)
+// would be replaced by the bare block -- #396's failure one step later.
+// `create_new` fails with AlreadyExists instead, and nothing is truncated.
+fn write_instruction_file(
+    path: &Path,
+    content: &[u8],
+    create_only: bool,
+) -> std::io::Result<InstructionFileWrite> {
+    if !create_only {
+        std::fs::write(path, content)?;
+        return Ok(InstructionFileWrite::Written);
+    }
+    use std::io::Write;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut f) => {
+            f.write_all(content)?;
+            Ok(InstructionFileWrite::Written)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Ok(InstructionFileWrite::AppearedDuringSetup)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 fn apply_instruction_file_plan<R: tauri::Runtime>(
     app: &AppHandle<R>,
     path: &Path,
@@ -42314,8 +42494,9 @@ fn apply_instruction_file_plan<R: tauri::Runtime>(
                 app,
                 "setup",
                 &format!(
-                    "op=instruction-file path={} outcome=skipped:read-error",
-                    name
+                    "op=instruction-file path={} outcome=skipped:read-error {}",
+                    name,
+                    read_error_trace_fields(&e)
                 ),
             );
             return Ok(());
@@ -42325,10 +42506,21 @@ fn apply_instruction_file_plan<R: tauri::Runtime>(
     let plan = plan_instruction_file(existing.as_deref(), block, refresh_existing_block);
     let (outcome, after) = match &plan {
         InstructionFilePlan::Write { content, outcome } => {
-            std::fs::write(path, content.as_bytes())
-                .map_err(|e| format!("write {}: {}", path.display(), e))?;
-            wrote.push(path.display().to_string());
-            (outcome.to_string(), content.len())
+            match write_instruction_file(path, content.as_bytes(), *outcome == "created")
+                .map_err(|e| format!("write {}: {}", path.display(), e))?
+            {
+                InstructionFileWrite::Written => {
+                    wrote.push(path.display().to_string());
+                    (outcome.to_string(), content.len())
+                }
+                InstructionFileWrite::AppearedDuringSetup => {
+                    skipped.push(format!(
+                        "{} (appeared during Setup; left untouched)",
+                        path.display()
+                    ));
+                    ("skipped:appeared-during-setup".to_string(), before)
+                }
+            }
         }
         InstructionFilePlan::Unchanged => ("unchanged".to_string(), before),
         InstructionFilePlan::Skip { reason } => {
@@ -50071,6 +50263,37 @@ fn agent_coordination_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_j
         }
     }
 
+    // --- Seeded reference docs (conventions-core-and-reference-split) ---
+    {
+        let names = bundled_reference_names(app);
+        if !names.is_empty() {
+            let dir = proj.join(ENHANCE_REFERENCE_DIR_REL);
+            let stale: Vec<String> = names
+                .iter()
+                .filter(
+                    |n| match (std::fs::read(dir.join(n)), seeded_reference_bytes(app, n)) {
+                        (Ok(disk), Some(expected)) => disk != expected,
+                        _ => true,
+                    },
+                )
+                .cloned()
+                .collect();
+            rows.push(json!({
+                "signal": ENHANCE_REFERENCE_DIR_REL,
+                "level": if stale.is_empty() { "ok" } else { "warn" },
+                "state": if stale.is_empty() { "current" } else { "stale" },
+                "detail": if stale.is_empty() {
+                    format!("{} reference files byte-match the bundle", names.len())
+                } else if is_source_repo {
+                    format!("Not in sync with app/__shell/reference: {} — cargo build syncs them here", stale.join(", "))
+                } else {
+                    format!("Missing or stale: {} — run Setup to refresh", stale.join(", "))
+                },
+                "seen": "",
+            }));
+        }
+    }
+
     // --- CLAUDE.md marker block ---
     {
         let path = proj.join("CLAUDE.md");
@@ -50435,13 +50658,51 @@ fn search_index_status_rows<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<serde_
 // counting and ranking are testable without a repo.
 const UNTRACKED_UNDECLARED_WARN: usize = 1000;
 
+// untracked-count-excludes-bram-files: the files Bram itself writes into a
+// managed project. They churn with every session (tau-extractor: 384 of 394
+// "undeclared" untracked files were worklist history, feedback history,
+// outbound turns and drafts), so counting them would trip the .gitignore
+// suggestion for files the user never created. NOT all of resources/: a
+// project keeps its own content there too (tau tracks resources/review/...).
+fn is_bram_owned_path(path: &str) -> bool {
+    if let Some(rest) = path.strip_prefix("resources/") {
+        // Every dotfile directly under resources/ is a Bram sidecar.
+        if rest.starts_with('.') && !rest.contains('/') {
+            return true;
+        }
+        return [
+            "bram-traces/",
+            "outbound-turns/",
+            "message-drafts/",
+            "worklist",
+            "feedback-",
+        ]
+        .iter()
+        .any(|p| rest.starts_with(p));
+    }
+    [
+        ".claude/bram-conventions.md",
+        ".claude/bram-reference/",
+        ".claude/settings.json",
+        ".claude/settings.local.json",
+        ".claude/skills/",
+    ]
+    .iter()
+    .any(|p| path == *p || (p.ends_with('/') && path.starts_with(p)))
+}
+
 fn untracked_undeclared_summary(
     untracked: &[String],
     declared: &std::collections::HashMap<String, Vec<String>>,
-) -> (usize, Vec<(String, usize)>) {
+) -> (usize, Vec<(String, usize)>, usize) {
     let mut by_dir: std::collections::HashMap<String, usize> = Default::default();
     let mut count = 0usize;
+    let mut bram_owned = 0usize;
     for path in untracked {
+        if is_bram_owned_path(path) {
+            bram_owned += 1;
+            continue;
+        }
         if declared
             .values()
             .flatten()
@@ -50459,7 +50720,7 @@ fn untracked_undeclared_summary(
     let mut top: Vec<(String, usize)> = by_dir.into_iter().collect();
     top.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     top.truncate(3);
-    (count, top)
+    (count, top, bram_owned)
 }
 
 fn group_thousands(n: usize) -> String {
@@ -50474,7 +50735,11 @@ fn group_thousands(n: usize) -> String {
     out
 }
 
-fn untracked_undeclared_row(count: usize, top: &[(String, usize)]) -> serde_json::Value {
+fn untracked_undeclared_row(
+    count: usize,
+    top: &[(String, usize)],
+    bram_owned: usize,
+) -> serde_json::Value {
     let dirs = top
         .iter()
         .map(|(d, n)| format!("{} ({})", d, group_thousands(*n)))
@@ -50490,6 +50755,16 @@ fn untracked_undeclared_row(count: usize, top: &[(String, usize)]) -> serde_json
         )
     } else {
         dirs
+    };
+    // Say what was left out, so the number is explained rather than hidden.
+    let detail = if bram_owned > 0 {
+        format!(
+            "{} (plus {} of Bram's own files, not counted)",
+            detail,
+            group_thousands(bram_owned)
+        )
+    } else {
+        detail
     };
     serde_json::json!({
         "signal": "Untracked, undeclared",
@@ -50696,8 +50971,9 @@ fn coordination_status<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>,
                     .collect()
             })
             .unwrap_or_default();
-        let (count, top) = untracked_undeclared_summary(&untracked, &worklist_declared_files(app));
-        untracked_undeclared_row(count, &top)
+        let (count, top, bram_owned) =
+            untracked_undeclared_summary(&untracked, &worklist_declared_files(app));
+        untracked_undeclared_row(count, &top, bram_owned)
     };
     let applied_integrity_row = if applied_items.is_empty() {
         serde_json::json!({
@@ -70793,8 +71069,9 @@ mod untracked_undeclared_tests {
         for i in 0..2 {
             untracked.push(format!("build/out{}.o", i));
         }
-        let (count, top) = untracked_undeclared_summary(&untracked, &declared);
+        let (count, top, bram_owned) = untracked_undeclared_summary(&untracked, &declared);
         assert_eq!(count, 8);
+        assert_eq!(bram_owned, 0);
         assert_eq!(
             top,
             vec![
@@ -70809,7 +71086,7 @@ mod untracked_undeclared_tests {
     #[test]
     fn warns_with_remedy_only_at_threshold() {
         let top = vec![("spike-envs/".to_string(), 28265)];
-        let row = untracked_undeclared_row(28265, &top);
+        let row = untracked_undeclared_row(28265, &top, 0);
         assert_eq!(row["level"], "warn");
         assert_eq!(row["state"], "28,265 files");
         assert!(row["detail"].as_str().unwrap().contains(".gitignore"));
@@ -70817,10 +71094,50 @@ mod untracked_undeclared_tests {
             .as_str()
             .unwrap()
             .starts_with("spike-envs/ (28,265)"));
-        let small = untracked_undeclared_row(3, &[("tmp/".to_string(), 3)]);
+        let small = untracked_undeclared_row(3, &[("tmp/".to_string(), 3)], 0);
         assert_eq!(small["level"], "none");
         assert!(!small["detail"].as_str().unwrap().contains(".gitignore"));
-        assert_eq!(untracked_undeclared_row(0, &[])["level"], "ok");
+        assert_eq!(untracked_undeclared_row(0, &[], 0)["level"], "ok");
+    }
+
+    // untracked-count-excludes-bram-files: Bram's own working files are left
+    // out and reported; a project's own resources/ content is still counted.
+    // Fails if the rule widens to all of resources/ (tau tracks
+    // resources/review/...) or stops excluding Bram's churn.
+    #[test]
+    fn bram_owned_files_are_excluded_but_project_resources_count() {
+        let untracked = paths(&[
+            "resources/worklist.json",
+            "resources/worklist-drafts/a.md",
+            "resources/worklist-history/2026.json",
+            "resources/feedback-history/x.md",
+            "resources/outbound-turns/1-turn.json",
+            "resources/message-drafts/d.md",
+            "resources/bram-traces/bram-trace.log",
+            "resources/.host-notes.json",
+            ".claude/bram-reference/diagnostics.md",
+            ".claude/bram-conventions.md",
+            "resources/review/catalog.json",
+            "resources/sub/.hidden",
+            ".claude/my-notes.md",
+            "stray.txt",
+        ]);
+        let (count, top, bram_owned) = untracked_undeclared_summary(&untracked, &HashMap::new());
+        assert_eq!(bram_owned, 10);
+        assert_eq!(count, 4);
+        assert_eq!(
+            top,
+            vec![
+                ("resources/".to_string(), 2),
+                ("(root)".to_string(), 1),
+                (".claude/".to_string(), 1),
+            ]
+        );
+        let row = untracked_undeclared_row(count, &top, bram_owned);
+        assert!(row["detail"]
+            .as_str()
+            .unwrap()
+            .ends_with("(plus 10 of Bram's own files, not counted)"));
     }
 
     #[test]
@@ -70989,5 +71306,181 @@ mod instruction_file_plan_tests {
             plan_instruction_file(Some(current.as_bytes()), &block(), true),
             InstructionFilePlan::Unchanged
         );
+    }
+}
+
+// conventions-core-and-reference-split: the core stays within budget, every
+// pointer it holds resolves to a bundled reference file, and pruning only
+// ever removes Setup's own stamped seeds.
+#[cfg(test)]
+mod conventions_split_tests {
+    use super::stray_seeded_reference_files;
+    use std::path::PathBuf;
+
+    // The always-loaded core. Every session in every managed project pays for
+    // it before the user types; #396 found it at 133,505 chars, over Claude
+    // Code's instruction limit. Raising this number is a decision, not a
+    // drift: a passage belongs in the core only if an agent would act wrongly
+    // BEFORE it knows it needs to look anything up. Anything with a
+    // recognizable trigger goes to app/__shell/reference/ behind a pointer;
+    // history goes to docs/conventions-rationale.md.
+    const CORE_BUDGET_CHARS: usize = 45_000;
+
+    fn app_path(rel: &str) -> PathBuf {
+        [env!("CARGO_MANIFEST_DIR"), "..", "app", rel]
+            .iter()
+            .collect()
+    }
+
+    #[test]
+    fn core_conventions_stay_within_budget() {
+        let core = std::fs::read_to_string(app_path("__shell/conventions.md")).unwrap();
+        let n = core.chars().count();
+        assert!(
+            n <= CORE_BUDGET_CHARS,
+            "app/__shell/conventions.md is {} chars, budget {}. Move trigger-specific detail to \
+             app/__shell/reference/ behind a when-to-read pointer, and history to \
+             docs/conventions-rationale.md, rather than raising the budget.",
+            n,
+            CORE_BUDGET_CHARS
+        );
+    }
+
+    // A pointer that names a file Setup does not seed is the dangling-pointer
+    // defect this split fixed (docs/apis.md etc. never existed in managed
+    // projects). Fails if a pointer is misspelled or its target is removed.
+    #[test]
+    fn every_core_pointer_resolves_to_a_bundled_reference_file() {
+        let core = std::fs::read_to_string(app_path("__shell/conventions.md")).unwrap();
+        let prefix = ".claude/bram-reference/";
+        let mut checked = 0;
+        let mut rest = core.as_str();
+        while let Some(i) = rest.find(prefix) {
+            let tail = &rest[i + prefix.len()..];
+            let name: String = tail
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
+                .collect();
+            let name = name.trim_end_matches('.').to_string();
+            // A bare mention of the directory itself is not a pointer.
+            if name.is_empty() {
+                rest = tail;
+                continue;
+            }
+            assert!(
+                name.ends_with(".md"),
+                "malformed pointer near: {}",
+                &tail[..tail.len().min(60)]
+            );
+            assert!(
+                app_path("__shell/reference").join(&name).is_file(),
+                "core points at .claude/bram-reference/{} but app/__shell/reference/{} does not exist",
+                name,
+                name
+            );
+            checked += 1;
+            rest = tail;
+        }
+        assert!(checked > 0, "the core should carry when-to-read pointers");
+    }
+
+    // The core must not point at files that exist only in the source repo.
+    #[test]
+    fn core_does_not_point_at_source_only_files() {
+        let core = std::fs::read_to_string(app_path("__shell/conventions.md")).unwrap();
+        for bad in [
+            "docs/conventions-rationale.md",
+            "docs/developing-bram.md",
+            "docs/apis.md",
+            "docs/trace-vocabulary.md",
+            "docs/forge-adapter.md",
+        ] {
+            assert!(
+                !core.contains(bad)
+                    || core.contains(&format!("github.com/judell/bram/blob/main/{}", bad)),
+                "core points at source-only {} without a GitHub link",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn prune_removes_only_stamped_seeds_no_longer_bundled() {
+        let on_disk = vec![
+            ("kept.md".to_string(), b"<!-- bram v0.6.9 -->\nx".to_vec()),
+            (
+                "renamed-old.md".to_string(),
+                b"<!-- bram v0.6.9 -->\ny".to_vec(),
+            ),
+            ("users-own.md".to_string(), b"# my notes\n".to_vec()),
+            ("notes.txt".to_string(), b"<!-- bram v0.6.9 -->\n".to_vec()),
+        ];
+        let bundled = vec!["kept.md".to_string()];
+        assert_eq!(
+            stray_seeded_reference_files(&on_disk, &bundled),
+            vec!["renamed-old.md".to_string()]
+        );
+    }
+}
+
+// issue-396-instruction-file-read-race: the read-error trace names its
+// cause, and the create path never truncates a file that reappeared.
+#[cfg(test)]
+mod instruction_file_write_tests {
+    use super::{read_error_trace_fields, write_instruction_file, InstructionFileWrite};
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "bram-instr-write-{}-{}-{}",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn read_error_trace_names_kind_and_errno() {
+        // 11 is EAGAIN / "Resource deadlock avoided" family on macOS.
+        let e = std::io::Error::from_raw_os_error(11);
+        let t = read_error_trace_fields(&e);
+        assert!(t.starts_with("error_kind="), "{}", t);
+        assert!(t.ends_with("os_error=11"), "{}", t);
+        let synthetic = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "x");
+        assert_eq!(
+            read_error_trace_fields(&synthetic),
+            "error_kind=PermissionDenied os_error=-"
+        );
+    }
+
+    // The race: the plan said "created" (file absent at read time), then the
+    // user's file came back before the write. Fails if the create path goes
+    // back to fs::write, which would truncate it to the bare block.
+    #[test]
+    fn create_path_never_truncates_a_file_that_reappeared() {
+        let d = scratch("race");
+        let path = d.join("CLAUDE.md");
+        std::fs::write(&path, "# user guidance, restored by sync\n").unwrap();
+        let out = write_instruction_file(&path, b"<!-- bram:start -->\n", true).unwrap();
+        assert_eq!(out, InstructionFileWrite::AppearedDuringSetup);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# user guidance, restored by sync\n"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn create_path_creates_when_still_absent() {
+        let d = scratch("absent");
+        let path = d.join("AGENTS.md");
+        let out = write_instruction_file(&path, b"block\n", true).unwrap();
+        assert_eq!(out, InstructionFileWrite::Written);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "block\n");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

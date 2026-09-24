@@ -3896,7 +3896,7 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, attribu
   // and the way out.
   if (item.strandedApproval) {
     return withCloses(
-      "Approved — agent not yet notified · tell the agent to proceed, or Refine with a note",
+      "Approved — agent not yet notified · tell the agent to proceed, or select the item and send a note",
     );
   }
   return withCloses("With the agent · nothing to do");
@@ -4997,7 +4997,9 @@ window.__bramWorklistActionStatusLabel = function (item) {
 window.__bramWorklistActionDisplay = function (kind, items) {
   var action =
     kind === "approved" ? "Started" :
-    kind === "iterate" ? "Refined" :
+    // retire-refine-wording: the Refine button is gone; an iterate: turn is
+    // item feedback (a message sent with items selected).
+    kind === "iterate" ? "Feedback on" :
     kind === "drop" ? "Dropped" :
     "Submitted";
   var ids = (items || []).map(function (i) {
@@ -13999,7 +14001,7 @@ window.__bramTipsRegistry = [
   { id: 'issue-to-item', priority: 50, route: '/worklist2',
     text: 'Tip: To convert an open issue into a Worklist item, click + New item in the Worklist and pick the issue from the selector.' },
   { id: 'feedback-history', priority: 55, route: '/worklist2',
-    text: "Tip: Expand an item's Feedback section to see your past Refine messages for that item, newest first." },
+    text: "Tip: Expand an item's Feedback section to see the feedback you've sent it, newest first." },
   { id: 'issue-comments-collab', priority: 60,
     url: 'https://blog.jonudell.net/2026/06/17/vibe-coding-as-a-team-sport/',
     text: 'Tip: Use issue comments to communicate with other team members — humans and agents alike.' },
@@ -14018,7 +14020,7 @@ window.__bramTipsRegistry = [
   { id: 'paste-screenshot', priority: 110,
     text: 'Tip: Paste a screenshot to show a UI glitch to the agent. It renders in the Worklist and Transcript so you can both see it.' },
   { id: 'iterate-before-approve', priority: 120,
-    text: 'Tip: Use Refine to improve an in-progress item.' },
+    text: 'Tip: Select an in-progress item and send a message to give it feedback.' },
   { id: 'tips-dismiss-interval', priority: 130, route: '/settings?from=tip&highlight=tipsDismissInterval',
     text: "Tip: Use Settings → 'Dismissed tips return after' to control how long a dismissed tip stays hidden." },
 ];

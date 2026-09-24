@@ -127,7 +127,7 @@
               initialValue="{window.__bramQueueSendMode($item)}"
               onDidChange="(v) => { entries = window.__bramQueueSetSendMode(entries, $itemIndex, v, (queueWorklist.value &amp;&amp; queueWorklist.value.items) || []); }">
               <Option value="message" label="Message" />
-              <Option value="iterate" label="Refine" />
+              <Option value="iterate" label="Feedback" />
             </Select>
             <Select
               when="{window.__bramQueueSendMode($item) === 'iterate'}"
@@ -144,7 +144,7 @@
                  the PushSource replay leaves it stuck (dimmed-while-ready, or
                  undimmed-while-working). A direct binding recomputes every
                  render and can't strand. On send, land on the surface where
-                 the result shows (Message -> Transcript, Refine ->
+                 the result shows (Message -> Transcript, Feedback ->
                  Worklist); the enabled gate blocks no-op sends, so
                  navigation only runs on a real send. -->
             <Button

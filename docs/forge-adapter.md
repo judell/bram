@@ -78,6 +78,37 @@ default GitHub. The detected forge is exposed as `forge` on
 Missing `glab` degrades exactly like missing `gh`: empty envelopes plus
 stderr lines, never a hard failure.
 
+## Writes that assert a state
+
+**The rule.** A forge write that only *adds* (a comment, a label, an
+issue body) fires immediately. A write that *asserts a repository state*
+waits until that state is observably true.
+
+Today closing an issue is the only write in the second class. A close
+claims the fix is reachable on the default branch, so it is queued at the
+commit gate and fires on the user's **Push** once the commit reaches the
+default branch, or through a merged PR in a squash-merge repo. Until then
+the claim is false.
+
+**Why close is gated and a comment isn't.** A wrong close changes lifecycle
+state and notifies every watcher, and reopening leaves a false "completed"
+in the issue's history. A wrong comment is additive and editable.
+
+**The cost, plainly.** The ordinary path adds no delay: Push flushes the
+queue at once. The machinery exists for the cases where the claim isn't
+true yet, and it has been the source of:
+
+- #282: squash-merge made the predicate unsatisfiable;
+- #329: no trigger fired, so a queued close waited;
+- #380: the deferral reason was invisible;
+- #382: consent could not be withdrawn;
+- false "withdrawn" records on every completed close (f061881).
+
+**Before gating another write,** weigh that bill. Nothing else is gated
+today, by deliberate choice rather than omission. For example, a comment
+naming a not-yet-pushed commit fires immediately, and is corrected by
+editing it.
+
 ## Phase-1 bounds (each a candidate follow-up)
 
 - GitLab issue lists cap at one `--per-page 100` page.

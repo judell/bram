@@ -124,15 +124,32 @@
          props on one Text loses the linebreak preservation the whole fix is
          for — see https://www.xmlui.org/docs/howto/display-preformatted-text#overflow:-preformatted-text-doesn't-wrap,-so-bound-it-and-scroll,
          whose bounded-container idiom this mirrors for vertical instead of
-         horizontal overflow. -->
+         horizontal overflow.
+         issue-383-push-error-scroll-cue: the bounded container is a
+         ScrollViewer with scrollStyle="overlay", because a plain overflow
+         VStack scrolls with no cue: Walt read the capped message as
+         truncated, with the remedy and the no-verify override below the
+         fold. showScrollerFade (default true, overlay modes only) draws a
+         bottom fade while more lies below and a top fade once scrolled
+         (https://www.xmlui.org/docs/reference/components/ScrollViewer#showscrollerfade,
+         https://www.xmlui.org/docs/reference/components/ScrollViewer#scrollstyle). -->
     <HStack when="{pushError}" backgroundColor="$color-danger-100" padding="$space-2" gap="$space-2" verticalAlignment="start">
-      <VStack width="*" maxHeight="240px" overflowY="auto">
-        <Text
-          fontSize="$fontSize-sm"
-          color="$color-danger-700"
-          preserveLinebreaks="true"
-          value="{'Push failed: ' + pushError}" />
-      </VStack>
+      <!-- The fade defaults to the page surface
+           (backgroundColor-fade-Scroller = rgb(from $color-surface-0 r g b /
+           0.75)), which reads as a white smear over this danger-tinted box;
+           tint it to the box, and halve its 64px default height for a 240px
+           cap. -->
+      <Theme
+        backgroundColor-fade-Scroller="rgb(from $color-danger-100 r g b / 0.9)"
+        height-fade-Scroller="32px">
+        <ScrollViewer width="*" maxHeight="240px" scrollStyle="overlay">
+          <Text
+            fontSize="$fontSize-sm"
+            color="$color-danger-700"
+            preserveLinebreaks="true"
+            value="{'Push failed: ' + pushError}" />
+        </ScrollViewer>
+      </Theme>
       <Button label="✕" variant="ghost" size="xs" tooltip="Dismiss" onClick="pushError = null" />
     </HStack>
 

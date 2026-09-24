@@ -707,3 +707,43 @@ human driving against the full state range, for finding what you didn't
 know to script. The two feed each other — graduating a finding here
 into a `scenario/` branch or a harness assertion is how an exploratory
 discovery becomes a durable regression guard.
+
+## Moved from the seeded conventions
+
+These sections lived in `app/__shell/conventions.md` until the
+core/reference split (`conventions-core-and-reference-split`,
+judell/bram#396). They matter only when developing Bram itself, so they
+live here, unseeded. The history behind the seeded rules is in
+[`conventions-rationale.md`](conventions-rationale.md).
+
+### XMLUI lookup order
+
+When you are figuring out how to do a thing in XMLUI, ask the XMLUI
+MCP server for how-to documents first (`xmlui_search_howto`). The
+how-to corpus usually carries the complete pattern and tradeoffs.
+After that, use `xmlui_component_docs` for exact component props,
+events, and exposed methods. Use examples as a fallback or to confirm
+local style, not as the first source of truth.
+
+When a non-obvious markup choice depends on documentation, cite the
+relevant how-to or component URL in the response.
+
+### Test Worklist UX through the worklist itself
+
+When a change touches the Worklist UX (button states, gray-out,
+feedback flow, pruning), surface it as a pending item even when the
+diff is already on disk. Approving the item exercises the new
+behavior end-to-end — file rewrites, pruning, Talk-page update — as
+the actual test.
+
+### Fold optional companion input into existing actions
+
+When a surface already has clear primary actions (Approve / Drop /
+Submit) and a new optional input is added (free-text feedback, notes,
+override flag), fold the input value into the existing actions'
+onClick payloads rather than adding a separate Submit / Send button.
+Render the input above or beside the primary buttons; clear it after
+submission. A separate submit button creates a third decision point
+("which button do I click for what?") and forces the user to send
+two messages when one would do. Only add a separate submit button if
+the auxiliary input is genuinely independent of the primary actions.

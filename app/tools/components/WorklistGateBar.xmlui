@@ -331,17 +331,19 @@
          one that describes. -->
     <Button
       label="{window.__bramStartButtonLabel(gateWorklist.value.items, gateSel.value, gateClaim.value, startMode)}"
+      tooltip="{window.__bramGateScopeTooltip(gateSel.value, 'start', gateWorklist.value.items, gateClaim.value, startMode)}"
       size="sm"
       enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
       onClick="window.__bramGateAct('start', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode, gateClaim.value)" />
     <Button
-      label="{window.__bramStartVerb(gateWorklist.value.items, gateSel.value, gateClaim.value) + ' &amp; commit ' + (gateSel.value || []).length}"
+      label="{window.__bramStartVerb(gateWorklist.value.items, gateSel.value, gateClaim.value) + ' &amp; commit'}"
       size="sm"
       enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value) &amp;&amp; (gateSel.value || []).length === 1 &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
-      tooltip="One click: start, then commit when done. One item at a time — see #272"
+      tooltip="{window.__bramGateScopeTooltip(gateSel.value, 'start-commit')}"
       onClick="window.__bramGateAct('start-commit', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode, gateClaim.value)" />
     <Button
-      label="{'Commit ' + (gateSel.value || []).length}"
+      label="Commit"
+      tooltip="{window.__bramGateScopeTooltip(gateSel.value, 'commit')}"
       size="sm"
       enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value) &amp;&amp; window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
       onClick="window.__bramGateAct('commit', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode, gateClaim.value)" />
@@ -355,7 +357,8 @@
          guards and host untouched). The gate row is pure lifecycle:
          Start / Start & commit / Commit / Drop. -->
     <Button
-      label="{'Drop ' + (gateSel.value || []).length}"
+      label="Drop"
+      tooltip="{window.__bramGateScopeTooltip(gateSel.value, 'drop')}"
       size="sm"
       enabled="{!window.__bramInflightBlocker(gateClaim.value)}"
       onClick="window.__bramGateAct('drop', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode, gateClaim.value)" />

@@ -299,8 +299,10 @@ The **Chat** button beside the message box (shown only while items are
 selected) sends that one message as general chat without clearing the
 selection.
 
-**The gate verbs.** The gate row is pure lifecycle: **Start N / Start &
-commit N / Commit N / Drop N**. Labels may be renamed; the wire kinds
+**The gate verbs.** The gate row is pure lifecycle: **Start / Start &
+commit / Commit / Drop**, each acting on the ticked items (hover names
+them); **Start** reads **Resume** on an item whose work was stopped
+mid-apply. Labels may be renamed; the wire kinds
 (`approved:` / `drop:` / `iterate:`) are stable. When telling the user
 what to click, use the rendered label.
 

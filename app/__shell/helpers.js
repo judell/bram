@@ -4305,13 +4305,38 @@ window.__bramStartVerb = function (items, sel, claim) {
   return resuming ? "Resume" : "Start";
 };
 
+// issue-397-gate-verbs-without-counts: the gate buttons say what they do,
+// not how many. "Start 2" read as "start item #2" (#397, and Jon's own
+// discomfort) -- the same ordinal collision __bramNameList below was
+// written to avoid. What a button applies to moves to its tooltip
+// (__bramGateScopeTooltip), where the question actually arises.
 window.__bramStartButtonLabel = function (items, sel, claim, mode) {
-  var n = (sel || []).length;
   var verb = window.__bramStartVerb(items, sel, claim);
   if (mode === "one" && window.__bramStartChoiceNeeded(items, sel, claim)) {
-    return verb + " 1 of " + n;
+    return verb + " one";
   }
-  return verb + " " + n;
+  return verb;
+};
+
+// The tooltip carrying what the ticked rows' button applies to: names up to
+// two (via __bramNameList, so ids stay actionable), a count beyond that.
+// `kind` adds the one-line description a verb needs beyond its scope.
+window.__bramGateScopeTooltip = function (sel, kind, items, claim, mode) {
+  var ids = sel || [];
+  var n = ids.length;
+  if (!n) return "Tick one or more items first";
+  if (kind === "start" && mode === "one" && window.__bramStartChoiceNeeded(items, sel, claim)) {
+    return "Starts one of the " + n + " selected items now; the others wait for separate commits";
+  }
+  var scope = n === 1
+    ? "Applies to the selected item: " + ids[0]
+    : n <= 2
+      ? "Applies to the " + n + " selected items: " + window.__bramNameList(ids, 2)
+      : "Applies to the " + n + " selected items";
+  if (kind === "start-commit") {
+    return "One click: start, then commit when done. One item at a time (see #272). " + scope;
+  }
+  return scope;
 };
 
 // Names offending items instead of counting them. A bare count collides with

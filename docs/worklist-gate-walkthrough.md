@@ -115,12 +115,12 @@ dropped after. The overlap index counts declared claims from unbegun items.
 **Do:** tick `p1` only.
 
 **Expect:**
-- `Start 1` enabled
-- `Start & commit 1` enabled
+- `Start` enabled; hovering it reads "Applies to the selected item: p1"
+- `Start & commit` enabled
 - `Commit` **not** offered
 - The gate row holds only Start, Start & commit, Commit (when offered)
   and Drop
-- `Drop 1` enabled
+- `Drop` enabled
 - **No** radio group (needs 2+)
 - **No** explainer line (single unbegun item is an unsurprising combo)
 

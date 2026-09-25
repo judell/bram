@@ -14128,7 +14128,7 @@ window.__bramTipsRegistry = [
   { id: 'batch-actions', priority: 20, route: '/worklist2',
     text: 'Tip: Tick several Worklist rows to act on them together.' },
   { id: 'gate-one-click', priority: 22, route: '/worklist2',
-    text: "Tip: Use 'Start & commit' to bypass the option to refine." },
+    text: "Tip: Use 'Start & commit' to have the agent make the change and commit it in one step." },
   { id: 'gate-shared-message', priority: 24, route: '/worklist2',
     text: "Tip: The Worklist message box applies to whatever button you press. One note fans out to every selected item's feedback." },
   { id: 'queue', priority: 30, route: '/queue?from=tip',

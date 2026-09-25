@@ -116,7 +116,7 @@ https://github.com/judell/bram/issues/404#issuecomment-5823184308.
     components;
   - #3912: the Markdown part of #3895 that #3910 doesn't cover.
 - **Board:** both items dropped by hand.
-- **Rule change:** `conventions-user-is-the-eyes` (6c74257), written because
+- **Rule change:** `conventions-user-is-the-eyes` (7d5436c), written because
   of this run.
 
 ## Nuances by theme

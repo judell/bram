@@ -1,16 +1,6 @@
-## Prerequisites
+## Prerequisite
 
-`Bram` opens an app next to your terminal, so you need a project for it to open. Any web app works — vanilla HTML/JS, a React or other Node app, a Python web app, an XMLUI app, really anything you'd otherwise iterate on in a browser tab.
-
-One way to try Bram with real git history is:
-
-```bash
-git clone https://github.com/xmlui-org/xmlui-weather
-```
-
-That gives you a working repo to explore in the Bram workspace, and you can stage work items as local git commits to get a feel for that flow. If you want Bram to modify `xmlui-weather`, install the XMLUI CLI (which also includes the MCP server) per <https://xmlui.org/get-started>. Note that Bram itself doesn't require XMLUI; substitute whatever toolchain your project needs.
-
-Now continue with the steps here.
+Run `bram` from a folder that is a git repository. A standalone local repository works; one hosted on GitHub or GitLab is better, because Bram's issue features (the Issues tab, closing issues on push) use the issues there.
 
 ## Install
 

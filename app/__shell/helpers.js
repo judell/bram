@@ -1700,8 +1700,6 @@ window.__bramGateBarLabel = function (sel) {
 window.__bramGateHasText = function () {
   return String(window.__bramMessageAgentText || "").trim().length > 0;
 };
-window.__bramW2ShareMode = "together";
-window.__bramW2SetShareMode = function (m) { window.__bramW2ShareMode = m || "together"; };
 window.__bramW2CloseMap = {};
 window.__bramW2SetCloseMap = function (m) { window.__bramW2CloseMap = m || {}; };
 
@@ -4501,7 +4499,13 @@ window.__bramStartConsequence = function (items, sel, claim) {
   // All begun, with changes. Speak only when a file they share actually has
   // uncommitted changes: those edits are mixed, and the dependable way to
   // land them is one commit (#273 froze same-tree separation; #404's voice).
-  if (!n) return "";
+  // gate-remove-commit-share-radio: several committable items commit as ONE
+  // commit (one approval, one worklist-commit; #272). Say so, with the
+  // serial path for separate commits.
+  var oneCommit = chosen.length >= 2
+    ? "Commit makes one commit for these " + chosen.length + " items. To commit them separately, commit one at a time."
+    : "";
+  if (!n) return oneCommit;
   var sharedPaths2 = window.__bramSelectionSharedFilePaths(items, sel, claim);
   var changedShared = sharedPaths2.filter(function (p) {
     for (var c = 0; c < chosen.length; c++) {
@@ -4515,7 +4519,7 @@ window.__bramStartConsequence = function (items, sel, claim) {
     }
     return false;
   });
-  if (!changedShared.length) return "";
+  if (!changedShared.length) return oneCommit;
   var whatChanged = changedShared.length === 1
     ? changedShared[0]
     : changedShared.length + " files";
@@ -12333,14 +12337,9 @@ window.__bramSelectionHasBegunShared = function (items, sel, claim) {
 window.__bramWithShareMode = function (text, mode, items, sel, claim) {
   var body = text || "";
   var chosen = sel || [];
-  var hasShared = window.__bramSelectionHasBegunShared(items, chosen, claim);
-  if (chosen.length > 1 && mode === "split" && hasShared) {
-    return (
-      (body ? body + "\n\n" : "") +
-      "split-shared-files: separate the selected items' shared-file changes " +
-      "so each selected item commits on its own; do not include unselected items."
-    );
-  }
+  // gate-remove-commit-share-radio: no "split" mode any more. The radio that
+  // chose it is gone; its only effect was the split-shared-files hunk
+  // separation #273 froze. `mode` is kept for the call shape.
   if (!window.__bramSelectionHasUnselectedShared(items, chosen, claim)) return body;
   return (
     (body ? body + "\n\n" : "") +

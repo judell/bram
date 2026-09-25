@@ -90,14 +90,13 @@
       width="100%"
       value="{window.__bramStartConsequence(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)}" />
   </HStack>
-  <!-- commit-granularity share-mode choice, moved here from the page body
-       (0.5.3 gate run: "the radio group belongs above the buttons in the
-       footer otherwise can get lost below the fold like the buttons did").
-       Writes the window store the gate actions already read
-       (__bramW2ShareMode / __bramW2SetShareMode); the page no longer renders
-       it. Original design rationale (why the control exists whenever 2+
-       committable items are selected, entangled or not) lives in git history
-       at Worklist.xmlui, commit-granularity A+B. -->
+  <!-- gate-remove-commit-share-radio: the commit-time "One commit / A commit
+       each" radio is gone. For disjoint selections it changed nothing (the
+       payload was identical, one worklist-commit, one commit), one approval
+       can't yield N commits anyway (#272), and its only live effect was the
+       split-shared-files hunk separation #273 froze. Commit on N ticked items
+       makes one commit; __bramStartConsequence says so, and separate commits
+       are the serial path: commit one at a time. -->
   <!-- `when` carries the full expression rather than a same-element var:
        a `var.` declared on an element scopes to its CHILDREN, so a `when`
        on that element referencing it fails silently and the control never
@@ -123,41 +122,7 @@
     <Text
       fontSize="$fontSize-sm"
       color="$textColor-secondary"
-      value="{'Committable together with ' + window.__bramNameList(window.__bramSelectionJointMissing(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)) + ' — select both, or ask the agent to separate them (park, drop, re-propose).'}" />
-  </HStack>
-  <!-- avoid-futile-joint-commit: shareJointShared reads the host-computed
-       `jointWith` field (/__worklist per-item, same change) via
-       __bramSelectionJointShared -- true when a selected item was approved
-       together with another in one click and their shared-path edits carry
-       a single capture boundary. Unlike shareChoiceEntangled (a declared-
-       files prediction), this is the field-tested fact that the split
-       option is UNAVAILABLE, not merely consequential: a split commit
-       attempt on these items is refused host-side (409
-       op=refuse-joint-interval, src-tauri/src/lib.rs) every time, so the
-       Option is disabled here rather than left clickable and silently
-       failing later. `enabled` per
-       https://www.xmlui.org/docs/reference/components/Option#enabled
-       (and confirmed on RadioGroup's own `enabled`,
-       https://www.xmlui.org/docs/reference/components/RadioGroup#enabled).
-       shareInitial forces the group's own selection off "split" when the
-       selection is joint-shared, so a `together`/`split` preference saved
-       from an earlier, non-joint selection can't silently carry an
-       unusable choice into this one. -->
-  <HStack
-    var.shareChoiceEntangled="{window.__bramSelectionSharesFiles(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)}"
-    var.shareJointShared="{window.__bramSelectionJointShared(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value)}"
-    var.shareSplitLabel="{shareJointShared ? 'A commit each — not available: these items were started together' : (shareChoiceEntangled ? 'A commit each — the agent will separate them' : 'A commit each — selected items land separately')}"
-    var.shareInitial="{shareJointShared ? 'together' : window.__bramW2ShareMode}"
-    when="{(gateSel.value || []).length >= 2 &amp;&amp; window.__bramSelectionAllCommittable(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)}"
-    horizontalAlignment="center"
-    paddingHorizontal="$space-8"
-    paddingTop="$space-1">
-    <RadioGroup
-      initialValue="{shareInitial}"
-      onDidChange="(v) => window.__bramW2SetShareMode(v)">
-      <Option value="together" label="One commit — selected items land together" />
-      <Option value="split" label="{shareSplitLabel}" enabled="{!shareJointShared}" />
-    </RadioGroup>
+      value="{'Committable together with ' + window.__bramNameList(window.__bramSelectionJointMissing(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)) + ' — select both.'}" />
   </HStack>
   <!-- issue-328: close consent AT THE GATE. When the selection carries
        closesIssues, one real checkbox per issue renders here — where the
@@ -319,19 +284,19 @@
       tooltipMarkdown="{window.__bramGateScopeTooltip(gateSel.value, 'start')}"
       size="sm"
       enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
-      onClick="window.__bramGateAct('start', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode, gateClaim.value)" />
+      onClick="window.__bramGateAct('start', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
     <Button
       label="{window.__bramStartVerb(gateWorklist.value.items, gateSel.value, gateClaim.value) + ' &amp; commit'}"
       size="sm"
       enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value) &amp;&amp; (gateSel.value || []).length === 1 &amp;&amp; window.__bramSelectionAllNeedStart(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
       tooltipMarkdown="{window.__bramGateScopeTooltip(gateSel.value, 'start-commit', gateGit.value &amp;&amp; gateGit.value.branch)}"
-      onClick="window.__bramGateAct('start-commit', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode, gateClaim.value)" />
+      onClick="window.__bramGateAct('start-commit', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
     <Button
       label="Commit"
       tooltipMarkdown="{window.__bramGateScopeTooltip(gateSel.value, 'commit', gateGit.value &amp;&amp; gateGit.value.branch)}"
       size="sm"
       enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramSelectionAddressedBlocked(gateSel.value, gateTurnCtx.value) &amp;&amp; window.__bramSelectionAllCommittable(gateWorklist.value.items, gateSel.value, gateClaim.value)}"
-      onClick="window.__bramGateAct('commit', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode, gateClaim.value)" />
+      onClick="window.__bramGateAct('commit', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
     <!-- switch-to-transcript-on-action: Refine retired. It was never an
          authorization — the other gate buttons write auth records; Refine
          wrote none, it was conversation squatting among the signatures from
@@ -346,6 +311,6 @@
       tooltipMarkdown="{window.__bramGateScopeTooltip(gateSel.value, 'drop')}"
       size="sm"
       enabled="{!window.__bramInflightBlocker(gateClaim.value)}"
-      onClick="window.__bramGateAct('drop', gateWorklist.value.items, gateSel.value, window.__bramW2ShareMode, gateClaim.value)" />
+      onClick="window.__bramGateAct('drop', gateWorklist.value.items, gateSel.value, 'together', gateClaim.value)" />
   </HStack>
 </Component>

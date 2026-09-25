@@ -85,6 +85,9 @@ fn extract_app_file<R: tauri::Runtime>(app: &AppHandle<R>, rel: &str) -> Result<
 struct PtyState {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
+    // issue-405: the terminal shell's pid, so quitting can hang up its
+    // process group (hangup_pty_jobs). None if the platform can't say.
+    shell_pid: Option<u32>,
 }
 
 #[derive(Default)]
@@ -16344,10 +16347,11 @@ fn pty_spawn(
         }
     }
 
-    let _child = pair
+    let child = pair
         .slave
         .spawn_command(command)
         .map_err(|e| e.to_string())?;
+    let shell_pid = child.process_id();
     drop(pair.slave);
 
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
@@ -16356,6 +16360,7 @@ fn pty_spawn(
     *state.0.lock().unwrap() = Some(PtyState {
         master: pair.master,
         writer,
+        shell_pid,
     });
 
     // #transcript-nav-activity-sparkline: emit PTY output throughput as a
@@ -68756,6 +68761,10 @@ pub fn run() {
             whisper_status,
         ])
         .setup(move |app| {
+            // issue-405: SIGTERM/SIGINT/SIGHUP run shutdown_children, so a
+            // `kill` hangs up the terminal's jobs instead of orphaning them.
+            #[cfg(unix)]
+            install_exit_signal_shutdown(app.handle().clone());
             use tauri::Emitter;
 
             // Bind the right-pane HTTP server before anything else so the
@@ -70036,89 +70045,215 @@ pub fn run() {
         // menu quit) still destroys the window first.
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) && window.label() == "main" {
-                kill_spawned_server_on_close(&window.app_handle().clone());
+                shutdown_children(&window.app_handle().clone(), "window-destroyed");
             }
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app, event| {
-            if let tauri::RunEvent::ExitRequested { .. } = event {
-                {
-                    let state = app.state::<WhisperState>();
-                    let mut guard = state.0.lock().unwrap();
-                    if let Some(mut child) = guard.take() {
-                        let started = std::time::Instant::now();
-                        let pid = child.id();
-                        let kill_result = child.kill();
-                        whisper_trace(
-                            app,
-                            &format!(
-                                "kill phase=child-kill pid={} ok={} reason=app-exit",
-                                pid,
-                                kill_result.is_ok()
-                            ),
-                        );
-                        let wait_started = std::time::Instant::now();
-                        let wait_result = child.wait();
-                        whisper_trace(
-                            app,
-                            &format!(
-                                "kill phase=wait pid={} ok={} elapsed_ms={} reason=app-exit",
-                                pid,
-                                wait_result.is_ok(),
-                                wait_started.elapsed().as_millis()
-                            ),
-                        );
-                        whisper_trace(
-                            app,
-                            &format!(
-                                "kill phase=done pid={} total_elapsed_ms={} reason=app-exit",
-                                pid,
-                                started.elapsed().as_millis()
-                            ),
-                        );
-                    }
-                }
-                {
-                    let state = app.state::<SpawnedServerState>();
-                    let mut guard = state.0.lock().unwrap();
-                    if let Some(mut spawned) = guard.take() {
-                        let pid = spawned.child.id();
-                        // issue-341: group kill + sidecar cleanup, not a
-                        // bare pid kill — compound sh -c commands leave the
-                        // real server as a grandchild.
-                        kill_server_group(pid, project_root(Some(app)).as_deref());
-                        let _ = spawned.child.wait();
-                        eprintln!("[server] op=exit-kill pid={} via=exit-requested", pid);
-                        append_bram_trace_line(
-                            app,
-                            "server",
-                            &format!("op=exit-kill pid={} via=exit-requested", pid),
-                        );
-                    }
-                }
-            }
+        .run(|app, event| match event {
+            tauri::RunEvent::ExitRequested { .. } => shutdown_children(app, "exit-requested"),
+            // issue-405: Cmd-Q (the macOS app menu's Quit) ends the event
+            // loop without ExitRequested or a traced window destruction, so
+            // the last event, Exit, runs the same idempotent cleanup.
+            tauri::RunEvent::Exit => shutdown_children(app, "exit"),
+            _ => {}
         });
 }
 
-// issue-341: belt for quit paths that bypass RunEvent::ExitRequested —
-// Walt's clean menu quit orphaned the child even though the exit-requested
-// kill existed, so the main window's destruction also reaps. Idempotent
-// with the exit-requested path: whichever fires first takes the child.
-fn kill_spawned_server_on_close<R: tauri::Runtime>(app: &AppHandle<R>) {
-    let state = app.state::<SpawnedServerState>();
-    let mut guard = state.0.lock().unwrap();
-    if let Some(mut spawned) = guard.take() {
-        let pid = spawned.child.id();
-        kill_server_group(pid, project_root(Some(app)).as_deref());
-        let _ = spawned.child.wait();
-        eprintln!("[server] op=exit-kill pid={} via=window-destroyed", pid);
+// Stop everything Bram started, on every exit path: RunEvent::ExitRequested,
+// the main window's destruction (issue-341: Walt's clean menu quit skipped
+// ExitRequested but still destroyed the window), and SIGTERM/SIGINT/SIGHUP
+// (issue-405: a signal ended the process with neither event firing, so
+// `kill` orphaned everything below). Each part take()s its state, so
+// whichever path runs first does the work and the rest are no-ops.
+fn shutdown_children<R: tauri::Runtime>(app: &AppHandle<R>, via: &str) {
+    {
+        let state = app.state::<WhisperState>();
+        let mut guard = state.0.lock().unwrap();
+        if let Some(mut child) = guard.take() {
+            let started = std::time::Instant::now();
+            let pid = child.id();
+            let kill_result = child.kill();
+            whisper_trace(
+                app,
+                &format!(
+                    "kill phase=child-kill pid={} ok={} reason=app-exit",
+                    pid,
+                    kill_result.is_ok()
+                ),
+            );
+            let wait_started = std::time::Instant::now();
+            let wait_result = child.wait();
+            whisper_trace(
+                app,
+                &format!(
+                    "kill phase=wait pid={} ok={} elapsed_ms={} reason=app-exit",
+                    pid,
+                    wait_result.is_ok(),
+                    wait_started.elapsed().as_millis()
+                ),
+            );
+            whisper_trace(
+                app,
+                &format!(
+                    "kill phase=done pid={} total_elapsed_ms={} reason=app-exit",
+                    pid,
+                    started.elapsed().as_millis()
+                ),
+            );
+        }
+    }
+    {
+        let state = app.state::<SpawnedServerState>();
+        let mut guard = state.0.lock().unwrap();
+        if let Some(mut spawned) = guard.take() {
+            let pid = spawned.child.id();
+            // issue-341: group kill + sidecar cleanup, not a
+            // bare pid kill — compound sh -c commands leave the
+            // real server as a grandchild.
+            kill_server_group(pid, project_root(Some(app)).as_deref());
+            let _ = spawned.child.wait();
+            eprintln!("[server] op=exit-kill pid={} via={}", pid, via);
+            append_bram_trace_line(
+                app,
+                "server",
+                &format!("op=exit-kill pid={} via={}", pid, via),
+            );
+        }
+    }
+    hangup_pty_jobs(app, via);
+}
+
+// issue-405: the terminal's jobs outlived Bram. On macOS the OS does not
+// hang up the terminal's foreground job when Bram exits -- reproduced: a
+// job in its own foreground group (pgid == tpgid, like `herdr agent
+// attach`) survived `kill -TERM <bram>` reparented to launchd, having
+// received no SIGHUP, while only Bram held /dev/ptmx. So Bram hangs the
+// jobs up itself: SIGHUP to the terminal's foreground group and the
+// shell's group, a short grace, then SIGKILL to any group still alive.
+// Never signals Bram's own group, 0 or 1. Takes the PTY state: idempotent.
+#[cfg(unix)]
+fn hangup_pty_jobs<R: tauri::Runtime>(app: &AppHandle<R>, via: &str) {
+    let taken = {
+        let state = app.state::<AppState>();
+        let mut guard = match state.0.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.take()
+    };
+    let Some(pty) = taken else { return };
+    let own = unsafe { libc::getpgrp() };
+    let fg = pty.master.process_group_leader();
+    let shell_pgid = pty
+        .shell_pid
+        .map(|p| unsafe { libc::getpgid(p as libc::pid_t) });
+    let mut groups: Vec<libc::pid_t> = Vec::new();
+    for g in [fg, shell_pgid].into_iter().flatten() {
+        if g > 1 && g != own && !groups.contains(&g) {
+            groups.push(g);
+        }
+    }
+    for g in &groups {
+        unsafe {
+            libc::killpg(*g, libc::SIGHUP);
+        }
+    }
+    append_bram_trace_line(
+        app,
+        "pty",
+        &format!(
+            "op=exit-hangup via={} shell_pid={:?} fg_pgid={:?} groups={:?}",
+            via, pty.shell_pid, fg, groups
+        ),
+    );
+    let alive = |g: libc::pid_t| unsafe { libc::killpg(g, 0) == 0 };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+    while std::time::Instant::now() < deadline && groups.iter().any(|g| alive(*g)) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let survivors: Vec<libc::pid_t> = groups.iter().copied().filter(|g| alive(*g)).collect();
+    if !survivors.is_empty() {
+        for g in &survivors {
+            unsafe {
+                libc::killpg(*g, libc::SIGKILL);
+            }
+        }
         append_bram_trace_line(
             app,
-            "server",
-            &format!("op=exit-kill pid={} via=window-destroyed", pid),
+            "pty",
+            &format!("op=exit-kill via={} groups={:?}", via, survivors),
         );
     }
+    drop(pty);
+}
+
+// Windows: closing the pseudo-console ends its attached processes; left
+// alone here until checked on Windows (issue-405 stays open for that).
+#[cfg(not(unix))]
+fn hangup_pty_jobs<R: tauri::Runtime>(_app: &AppHandle<R>, _via: &str) {}
+
+// issue-405: route SIGTERM, SIGINT and SIGHUP through shutdown_children.
+// Without a handler the default action ends the process at once and no
+// exit hook runs. The handler only writes a byte to a pipe (async-signal
+// safe); a watcher thread does the work, restores the default handlers so
+// a second signal still ends Bram immediately, then asks the app to exit.
+#[cfg(unix)]
+static EXIT_SIGNAL_PIPE_W: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+#[cfg(unix)]
+extern "C" fn on_exit_signal(_sig: libc::c_int) {
+    let fd = EXIT_SIGNAL_PIPE_W.load(std::sync::atomic::Ordering::Relaxed);
+    if fd >= 0 {
+        let b = [1u8];
+        unsafe {
+            libc::write(fd, b.as_ptr() as *const libc::c_void, 1);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn install_exit_signal_shutdown<R: tauri::Runtime>(app: AppHandle<R>) {
+    let mut fds = [0 as libc::c_int; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return;
+    }
+    for fd in fds {
+        unsafe {
+            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+        }
+    }
+    EXIT_SIGNAL_PIPE_W.store(fds[1], std::sync::atomic::Ordering::Relaxed);
+    const SIGNALS: [libc::c_int; 3] = [libc::SIGTERM, libc::SIGINT, libc::SIGHUP];
+    for sig in SIGNALS {
+        unsafe {
+            libc::signal(
+                sig,
+                on_exit_signal as extern "C" fn(libc::c_int) as libc::sighandler_t,
+            );
+        }
+    }
+    std::thread::spawn(move || {
+        let mut b = [0u8; 1];
+        loop {
+            let n = unsafe { libc::read(fds[0], b.as_mut_ptr() as *mut libc::c_void, 1) };
+            if n == 1 {
+                break;
+            }
+            if n < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return;
+        }
+        for sig in SIGNALS {
+            unsafe {
+                libc::signal(sig, libc::SIG_DFL);
+            }
+        }
+        append_bram_trace_line(&app, "pty", "op=exit-signal via=signal");
+        shutdown_children(&app, "signal");
+        app.exit(0);
+    });
 }
 
 #[cfg(test)]

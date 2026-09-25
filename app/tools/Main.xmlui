@@ -62,6 +62,14 @@
   <ChangeListener
     listenTo="{enhanceStatus.value &amp;&amp; (enhanceStatus.value.firstRun || enhanceStatus.value.startupGreetingVisible)}"
     onDidChange="() => { if (window.__bramFirstRunLanding(enhanceStatus.value) &amp;&amp; ($pathname === '/' || $pathname === '/worklist2')) navigate('/transcript') }" />
+  <!-- update-banner-visible-on-transcript: on the Transcript the pinned
+       update banner yields to the Transcript's own pinned heading, so a
+       launch that opens there with an update pending lands on the Worklist
+       instead, once per load (__bramUpdateLandingAway decides; same shape
+       as the first-run landing above). -->
+  <ChangeListener
+    listenTo="{appInfo.value ? (appInfo.value.has_update + '|' + appInfo.value.latest) : ''}"
+    onDidChange="() => { if (window.__bramUpdateLandingAway(appInfo.value, updateBannerDismissedVersion, $pathname)) navigate('/worklist2') }" />
   <DataSource id="rpInfo" url="/__right-pane-info" />
   <!-- issue-221-skill-launcher: project skills from .claude/skills/*/SKILL.md.
        Refetched on open and when enhance-status-changed fires. -->

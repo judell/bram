@@ -4253,6 +4253,29 @@ window.__bramFirstRunLanding = function (enhance) {
   return true;
 };
 
+// update-banner-visible-on-transcript: the update banner and the
+// Transcript's heading are both StickySections pinned at $height-AppHeader,
+// and only one pinned section holds that spot (earlier ones yield,
+// https://www.xmlui.org/docs/howto/make-a-sticky-header-in-a-scroll-area),
+// so a launch that opens on the Transcript hides a pending update. Decide,
+// once per page load on the first appInfo, whether to land on the Worklist
+// instead; Main.xmlui's ChangeListener performs the navigate. The one shot
+// is spent on the first evaluation either way, so a Transcript chosen later
+// is never overridden. A first-run introduction (which lands ON the
+// Transcript) takes precedence; the banner shows on the next launch.
+window.__bramUpdateLandingDone = false;
+window.__bramUpdateLandingAway = function (info, dismissedVersion, pathname) {
+  if (window.__bramUpdateLandingDone || !info) return false;
+  window.__bramUpdateLandingDone = true;
+  if (window.__bramFirstRunLandingDone) return false;
+  var away = !!info.has_update && info.latest !== dismissedVersion &&
+    String(pathname || "") === "/transcript";
+  if (away) {
+    window.__bramIframeTrace("update-landing", { op: "away", from: "/transcript", target: "/worklist2", latest: String(info.latest || "") });
+  }
+  return away;
+};
+
 // issue-404-serial-gate-bar-first-cut: the start-time mode is gone; this
 // reset survives only for its selection-change duty below.
 window.__bramW2ResetStartMode = function () {

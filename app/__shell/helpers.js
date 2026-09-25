@@ -14156,6 +14156,11 @@ window.__bramTipsRegistry = [
     text: "Tip: If a Worklist item's scope gets out of hand, tell the agent to file an issue, then drop the item. You can resurrect it later from the issue and Worklist history." },
   { id: 'paste-screenshot', priority: 110,
     text: 'Tip: Paste a screenshot to show a UI glitch to the agent. It renders in the Worklist and Transcript so you can both see it.' },
+  // tip-project-sqlite: the project's own db (.bram.json "db"), served
+  // read-only via /query; the agent creates and fills the tables
+  // (app/__shell/reference/environment.md, Live SQL views via /query).
+  { id: 'project-sqlite', priority: 112,
+    text: "Tip: Developers — your target app can show live data from a SQLite database in your project, served by Bram. The agent creates and fills the tables; just ask." },
   { id: 'iterate-before-approve', priority: 120,
     text: 'Tip: Select an in-progress item and send a message to give it feedback.' },
   { id: 'tips-dismiss-interval', priority: 130, route: '/settings?from=tip&highlight=tipsDismissInterval',

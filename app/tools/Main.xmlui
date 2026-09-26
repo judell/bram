@@ -139,8 +139,8 @@
   <ChangeListener
     listenTo="{footerSessionsChangedEvt.value &amp;&amp; footerSessionsChangedEvt.value.tick}"
     onDidChange="() => { footerSessions.refetch(); footerAgents.refetch(); }" />
-  <!-- footer-indexing-status: search-indexer state for the first-row
-       indicator. Pushed via search-index-changed (no polling); refetch on
+  <!-- footer-indexing-status: search-indexer state for the bottom-row
+       indicator (flush right). Pushed via search-index-changed (no polling); refetch on
        its tick. -->
   <DataSource id="footerIndexStatus" url="/__search-index-status" />
   <PushSource
@@ -881,7 +881,12 @@
                /__event/latest replay fetch that other PushSources use for
                boot recovery (see bramSubscribeTauriEvent in helpers.js). -->
           <PushSource id="footerProposing" initial="{null}" subscribe="{window.bramSubscribeTauriEvent('proposing-changed', false)}" />
-          <HStack width="*" verticalAlignment="center" var.footerProposingFlag="{!!(footerProposing.value &amp;&amp; footerProposing.value.payload &amp;&amp; footerProposing.value.payload.proposing)}">
+          <!-- Renders only when there's a context line: an empty container
+               still took its half of the row, and the status ellipsized
+               against blank space. -->
+          <HStack
+            when="{!!window.__bramFooterContextLine(headerInflightClaim.value, !!(footerProposing.value &amp;&amp; footerProposing.value.payload &amp;&amp; footerProposing.value.payload.proposing), footerSel.value, mainAgentStatus.value)}"
+            width="*" verticalAlignment="center" var.footerProposingFlag="{!!(footerProposing.value &amp;&amp; footerProposing.value.payload &amp;&amp; footerProposing.value.payload.proposing)}">
             <Text
               when="{!!window.__bramFooterContextLine(headerInflightClaim.value, footerProposingFlag, footerSel.value, mainAgentStatus.value)}"
               width="100%"

@@ -139,8 +139,8 @@ agent's goodwill.
 
 4. **XMLUI CLI - optional.** If you are developing an XMLUI app, or if you are developing `Bram` itself (the agent pane UI is an embedded XMLUI app) you will want the XMLUI MCP server. Follow the steps [here](https://xmlui.org/get-started) to get it.
 
-5. **`whisper-server` — optional.** Powers the 🎤 voice button in the
-   parent-shell toolbar and the agent pane. Tested on macOS and Windows/WSL, see [Voice input](#voice-input) below for install and per-platform
+5. **`whisper-server` — optional.** Powers the 🎤 dictation buttons in
+   the agent pane. Tested on macOS and Windows/WSL, see [Voice input](#voice-input) below for install and per-platform
    status.
 
 ## [Download the latest release →](https://github.com/judell/bram/releases/latest)
@@ -286,7 +286,7 @@ Bram autostarts an agent in the terminal at launch. Configure it under
 
 Bram supports two ways to dictate instead of type:
 
-- **🎤 Whisper buttons (recommended).** Local, low-latency dictation via [`whisper-server`](https://github.com/ggml-org/whisper.cpp/tree/master/examples/server). Click the 🎤 button in the parent-shell toolbar (or the agent pane) to start recording, click again to send; the transcript arrives in the terminal as a `voice: ...` line so it's distinguishable from typed input. This is the better experience — lower latency, your choice of model, good transcription quality — but it needs local setup.
+- **🎤 Whisper buttons (recommended).** Local, low-latency dictation via [`whisper-server`](https://github.com/ggml-org/whisper.cpp/tree/master/examples/server). Click a 🎤 button in the agent pane (next to the message box, a feedback box, an issue comment) to start recording, and click again when you're done. Your words appear in the box as you speak, so when you stop there's no wait: the text is already there to edit or send. Live text uses the same `whisper-server` and model, so there's nothing extra to install. This is the better experience — lower latency, your choice of model, good transcription quality — but it needs local setup.
 - **The agent's native `/voice` command.** No local setup, but support varies by agent and platform. It's the zero-install fallback, and the working path where the Whisper button isn't proven yet.
 
 Bram spawns the local `whisper-server` on the first record click and kills it on app exit — you don't manage the process; you just need the binary, `ffmpeg`, and a model file installed.

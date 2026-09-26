@@ -12,6 +12,18 @@
     id="voiceArrival"
     initial="{null}"
     subscribe="{window.bramSubscribeVoiceArrival()}" />
+  <!-- issue-407: live dictation. Each partial for this editor's voiceTarget
+       is written into editorBox (window.__bramVoiceShowLive); the delivered
+       transcript restores the pre-dictation text before appending. -->
+  <PushSource
+    when="{!!$props.voiceTarget}"
+    id="voicePartial"
+    initial="{null}"
+    subscribe="{window.bramSubscribeVoicePartial()}" />
+  <ChangeListener
+    when="{!!$props.voiceTarget}"
+    listenTo="{voicePartial.value &amp;&amp; voicePartial.value.at}"
+    onDidChange="() => window.__bramVoiceShowLive(editorBox, voicePartial.value, $props.voiceTarget)" />
   <ChangeListener
     when="{!!$props.voiceTarget}"
     listenTo="{voiceArrival.value &amp;&amp; voiceArrival.value.at}">
@@ -20,8 +32,8 @@
       const transcript = (ev &amp;&amp; ev.transcript) || '';
       const target = (ev &amp;&amp; ev.meta &amp;&amp; ev.meta.target) || '';
       if (target === $props.voiceTarget) {
+        const nextValue = window.__bramVoiceFinalizeInto(editorBox, $props.voiceTarget, transcript);
         if (transcript) {
-          const nextValue = window.__bramAppendVoiceToBox(editorBox, transcript);
           if (nextValue !== false) {
             emitEvent('commit', nextValue);
             lastCommittedValue = nextValue;

@@ -22,7 +22,7 @@
     subscribe="{window.bramSubscribeVoiceArrival()}" />
   <ChangeListener
     listenTo="{voiceArrival.value &amp;&amp; voiceArrival.value.at}"
-    onDidChange="() => { const ev = voiceArrival.value || null; const t = (ev &amp;&amp; ev.transcript) || ''; const target = (ev &amp;&amp; ev.meta &amp;&amp; ev.meta.target) || ''; if (target === 'message-agent') { if (t &amp;&amp; composerBox) window.__bramAppendVoiceToBox(composerBox, t); voiceRecording = false; worklistVoiceRecordingActive = false; } }" />
+    onDidChange="() => { const ev = voiceArrival.value || null; const t = (ev &amp;&amp; ev.transcript) || ''; const target = (ev &amp;&amp; ev.meta &amp;&amp; ev.meta.target) || ''; if (target === 'message-agent') { window.__bramVoiceFinalizeInto(composerBox, 'message-agent', t); voiceRecording = false; worklistVoiceRecordingActive = false; } }" />
   <PushSource
     id="sendRestore"
     initial="{null}"
@@ -171,5 +171,15 @@
       </Theme>
     </HStack>
   </Form>
+  <!-- issue-407: live dictation. Each partial is written into composerBox
+       (window.__bramVoiceShowLive); the delivered transcript restores the
+       pre-dictation text before appending. -->
+  <PushSource
+    id="voicePartial"
+    initial="{null}"
+    subscribe="{window.bramSubscribeVoicePartial()}" />
+  <ChangeListener
+    listenTo="{voicePartial.value &amp;&amp; voicePartial.value.at}"
+    onDidChange="() => window.__bramVoiceShowLive(composerBox, voicePartial.value, 'message-agent')" />
   <PastedImageStrip target="message-agent" />
 </Component>

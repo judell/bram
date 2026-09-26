@@ -8247,6 +8247,100 @@ window.bramSubscribeVoiceArrival = (function () {
   };
 })();
 
+// issue-407: live dictation preview. While a pane editor's 🎤 records,
+// main.js posts voice-into-partial ({ target, requestId, committed,
+// provisional }) after each sliding-window transcription. Keep the latest
+// and publish it; the delivered transcript (voice-into-result) or an idle
+// voice-state clears it. Editors show it under their input and still get
+// the final text through voice-into-result, unchanged.
+window.__bramVoicePartial = null;
+window.addEventListener("message", function (event) {
+  var d = event && event.data;
+  if (!d) return;
+  if (d.type === "voice-into-partial") {
+    window.__bramVoicePartial = {
+      target: String(d.target || ""),
+      requestId: d.requestId,
+      committed: String(d.committed || ""),
+      provisional: String(d.provisional || ""),
+      at: Date.now(),
+    };
+  } else if (d.type === "voice-into-result" || (d.type === "voice-state" && d.state === "idle")) {
+    if (!window.__bramVoicePartial) return;
+    window.__bramVoicePartial = null;
+  } else {
+    return;
+  }
+  window.dispatchEvent(new CustomEvent("bram:voice-partial"));
+});
+window.bramSubscribeVoicePartial = (function () {
+  var factory;
+  return function () {
+    if (factory) return factory;
+    var subscribers = new Set();
+    window.addEventListener("bram:voice-partial", function () {
+      subscribers.forEach(function (fn) {
+        try { fn(); } catch (e) { console.error("[bram] voice-partial subscriber threw:", e); }
+      });
+    });
+    factory = function (emit) {
+      var fire = function () { emit(window.__bramVoicePartial); };
+      subscribers.add(fire);
+      fire();
+      return function () { subscribers.delete(fire); };
+    };
+    return factory;
+  };
+})();
+// The live text goes INTO the editor (Jon: "why not put the text into the
+// message box instead of below it"). The box's text from before the
+// dictation is kept per target; each partial rewrites the box as that text
+// plus the live transcript. When the transcript is delivered, the editor
+// calls __bramVoiceFinalizeInto, which sets pre-dictation text + final
+// transcript in one step, so the final text lands exactly once. A textarea can't gray out part of its text, so
+// provisional words look like the rest until they're replaced.
+window.__bramVoiceLiveBase = {};
+window.__bramVoiceShowLive = function (box, partial, target) {
+  if (!box || !partial || !target || partial.target !== target) return;
+  // Only the current partial may write: delivery clears
+  // window.__bramVoicePartial synchronously, so a reaction to a stale
+  // partial that lands after __bramVoiceFinalizeInto can't re-add live text.
+  var cur = window.__bramVoicePartial;
+  if (!cur || cur.requestId !== partial.requestId || cur.at !== partial.at) return;
+  var rec = window.__bramVoiceLiveBase[target];
+  if (!rec || rec.requestId !== partial.requestId) {
+    rec = { requestId: partial.requestId, base: String(box.value || "") };
+    window.__bramVoiceLiveBase[target] = rec;
+  }
+  var liveText = [partial.committed, partial.provisional].filter(Boolean).join(" ");
+  var spacer = rec.base && liveText && !/\s$/.test(rec.base) ? " " : "";
+  try { box.setValue(rec.base + spacer + liveText); } catch (e) {}
+};
+// Deliver the final transcript into a box that may be showing live text.
+// Computes pre-dictation text + final transcript from the remembered base
+// and sets it ONCE: a separate restore-then-append read box.value back
+// before XMLUI had applied the restore, and appended onto the live text
+// (first test: 311 chars became 597, the dictation doubled). With no live
+// base on record, falls back to __bramAppendVoiceToBox. Returns the new
+// value, or false when nothing changed (same contract as the append).
+window.__bramVoiceFinalizeInto = function (box, target, transcript) {
+  var rec = window.__bramVoiceLiveBase[target];
+  delete window.__bramVoiceLiveBase[target];
+  if (!rec) return window.__bramAppendVoiceToBox(box, transcript);
+  if (!box) return false;
+  var base = rec.base;
+  var cleaned = String(transcript || "").replace(/\r?\n/g, " ").replace(/[ \t]+/g, " ").trim();
+  var spacer = base && cleaned && !/\s$/.test(base) ? " " : "";
+  var next = base + spacer + cleaned;
+  try { box.setValue(next); } catch (e) { return false; }
+  try {
+    if (typeof box.focus === "function") box.focus();
+    if (typeof box.setSelectionRange === "function") box.setSelectionRange(next.length, next.length);
+  } catch (e) {}
+  try { window.__bramIframeTrace && window.__bramIframeTrace("voice-trace", { stage: "finalize-into", baseLen: base.length, transcriptLen: cleaned.length, nextLen: next.length }); } catch (e) {}
+  return cleaned ? next : false;
+};
+
 // Parent → agent-pane bridge for whisper-server failure notices.
 // main.js posts { type: "bram-whisper-unavailable", reason, kind?, detail? }
 // to the tools-pane iframe when voice cannot start or transcription fails.

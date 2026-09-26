@@ -1,5 +1,17 @@
 <Component name="AgentMessageQueue"
   var.entries="{null}">
+  <!-- A note's Send or Delete stops a mic recording into it
+       (__bramQueueRemove), but its editor is gone by the time the result
+       arrives, so nothing would clear the shared recording flag and the
+       other 🎤 buttons would stay disabled. Only one recording runs at a
+       time, so any arrival means recording has ended. -->
+  <PushSource
+    id="queueVoiceArrival"
+    initial="{null}"
+    subscribe="{window.bramSubscribeVoiceArrival()}" />
+  <ChangeListener
+    listenTo="{queueVoiceArrival.value &amp;&amp; queueVoiceArrival.value.at}"
+    onDidChange="() => worklistVoiceRecordingActive = false" />
 
   <!-- issue-90-q-page: a durable scratch queue. Notes accumulate while the
        agent works; each is re-editable in place and sent manually as a

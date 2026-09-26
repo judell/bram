@@ -2545,23 +2545,77 @@ listen("pty-send-sent", (e) => {
   // On stop the live text is what gets delivered; localStorage
   // bram.voice.fullPass === "1" (no UI, kept in reserve) sends the whole
   // recording in one request instead, as before. If live capture can't
-  // start, the full pass is used automatically.
+  // start, the full pass is used automatically. localStorage
+  // bram.voice.pauseMs (no UI) overrides LIVE_PAUSE_MS for speakers who
+  // pause longer or shorter; voice-final logs every pause (pausesMs) so the
+  // default can be revisited from data.
   const LIVE_RATE = 16000;
   const LIVE_STEP_MS = 700;
-  const LIVE_PAUSE_MS = 700;
+  // 700 ms broke sentences at thinking pauses (Jon: "a bit aggressive about
+  // stopping in the middle of the sentence"); a final window ends with a
+  // period and the next starts capitalized.
+  const LIVE_PAUSE_MS = 1200;
+  // Quiet this long after a sub-LIVE_MIN_VOICED_S blip means it was a blip.
+  const LIVE_BLIP_QUIET_MS = 700;
+  // Pauses shorter than this are gaps between words, not worth logging.
+  const LIVE_PAUSE_LOG_MIN_MS = 250;
   const LIVE_MIN_FINAL_S = 1.5;
   const LIVE_MAX_WIN_S = 12;
+  // At the cap, cut at the quietest block in this much trailing audio
+  // instead of at the very end, so the cut falls between words (a hard cut
+  // produced "prototyp ing", 2026-09-26). The rest stays for the next window.
+  const LIVE_CAP_LOOKBACK_S = 1.5;
+  // A request that hasn't answered by now is abandoned, so a stuck
+  // whisper-server costs seconds, not WebKit's ~60 s fetch timeout per
+  // request (seen 2026-09-26 when a full stderr pipe wedged the server).
+  const LIVE_REQUEST_TIMEOUT_MS = 15000;
   const LIVE_RMS = 0.012;
   const LIVE_SILENCE_KEEP_MS = 2000;
+  // A click or breath is one or two ~85 ms blocks over LIVE_RMS; speech is
+  // far more. Windows below this much voiced audio are never sent.
+  const LIVE_MIN_VOICED_S = 0.3;
+  // Whisper's stock output for near-silence. Only traced (silencePhrase on
+  // voice-window), never dropped: a 0.5 s cutoff deleted a deliberate
+  // "thank you" (0.43 s voiced) while the LIVE_MIN_VOICED_S gate alone kept
+  // every phantom out. If phantoms return, their voicedS sets the cutoff.
+  const LIVE_SILENCE_PHRASES = /^(thank you|thanks|thanks for watching|thank you for watching|bye|you)$/;
   let live = null;
 
-  // Whether the window holds any speech at all; a window of only silence is
-  // dropped instead of transcribed.
-  const liveHasSpeech = (L) => L.win.some((c) => c.voiced);
+  // Seconds of voiced audio in the first n samples of the window (all of it
+  // by default).
+  const liveVoicedS = (L, n = L.winLen) => {
+    let voiced = 0;
+    let o = 0;
+    for (const c of L.win) {
+      if (o >= n) break;
+      const k = Math.min(c.length, n - o);
+      if (c.voiced) voiced += k;
+      o += k;
+    }
+    return voiced / LIVE_RATE;
+  };
+  // Whether the window holds enough speech to transcribe; a window of
+  // silence and stray blips is dropped instead.
+  const liveHasSpeech = (L) => liveVoicedS(L) >= LIVE_MIN_VOICED_S;
+  const liveIsSilencePhrase = (text) =>
+    LIVE_SILENCE_PHRASES.test(
+      String(text || "")
+        .toLowerCase()
+        .replace(/[^a-z ]/g, "")
+        .trim(),
+    );
   const liveDropWindow = (L) => {
     L.win = [];
     L.winLen = 0;
     L.sentLen = 0;
+  };
+
+  const livePauseMs = () => {
+    try {
+      const v = Number(localStorage.getItem("bram.voice.pauseMs"));
+      if (v >= 300 && v <= 5000) return v;
+    } catch (_) {}
+    return LIVE_PAUSE_MS;
   };
 
   const fullPassReserved = () => {
@@ -2630,6 +2684,8 @@ listen("pty-send-sent", (e) => {
             target: live.target.voiceTarget || "",
             committed,
             provisional,
+            parts: live.parts,
+            openSeq: live.seq,
           },
           "*",
         );
@@ -2649,10 +2705,30 @@ listen("pty-send-sent", (e) => {
     return out;
   };
 
-  const liveTranscribe = async (final) => {
+  // The sample index to cut a capped window at: the middle of the quietest
+  // block in the last LIVE_CAP_LOOKBACK_S, or the end if none is known.
+  const liveQuietCut = (L) => {
+    const from = L.winLen - LIVE_RATE * LIVE_CAP_LOOKBACK_S;
+    let o = 0;
+    let best = -1;
+    let bestRms = Infinity;
+    for (const c of L.win) {
+      const end = o + c.length;
+      if (end >= from && typeof c.rms === "number" && c.rms < bestRms) {
+        bestRms = c.rms;
+        best = o + Math.floor(c.length / 2);
+      }
+      o = end;
+    }
+    return best > 0 ? best : L.winLen;
+  };
+
+  const liveTranscribe = async (final, cutAt) => {
     const L = live;
     L.busy = true;
-    const n = L.winLen;
+    const n = cutAt || L.winLen;
+    const voicedS = liveVoicedS(L, n);
+    let silencePhrase = false;
     L.sentLen = n;
     const fd = new FormData();
     fd.append("file", liveWav(liveFlat(n)), "live.wav");
@@ -2662,23 +2738,37 @@ listen("pty-send-sent", (e) => {
     fd.append("prompt", L.committed.join(" ").slice(-200));
     const t0 = Date.now();
     let status = null;
+    let timedOut = false;
+    const abort = new AbortController();
+    const timer = setTimeout(() => {
+      timedOut = true;
+      abort.abort();
+    }, LIVE_REQUEST_TIMEOUT_MS);
     try {
-      const res = await fetch(WHISPER_URL, { method: "POST", body: fd });
+      const res = await fetch(WHISPER_URL, { method: "POST", body: fd, signal: abort.signal });
       status = res.status;
       const text = res.ok ? liveClean((await res.json()).text) : "";
       if (live !== L) return;
       L.latencies.push(Date.now() - t0);
       if (final) {
-        if (text) L.committed.push(text);
+        silencePhrase = liveIsSilencePhrase(text);
+        if (text) {
+          L.committed.push(text);
+          L.parts.push({ seq: L.seq, text });
+        }
+        // Every final closes a window, kept or not; the pane counts windows
+        // to tell which text it already showed before an edit.
+        L.seq++;
         let drop = n;
         while (drop > 0 && L.win.length) {
           if (L.win[0].length <= drop) {
             drop -= L.win[0].length;
             L.winLen -= L.win.shift().length;
           } else {
-            const voiced = L.win[0].voiced;
+            const { voiced, rms } = L.win[0];
             L.win[0] = L.win[0].subarray(drop);
             L.win[0].voiced = voiced;
+            L.win[0].rms = rms;
             L.winLen -= drop;
             drop = 0;
           }
@@ -2692,10 +2782,15 @@ listen("pty-send-sent", (e) => {
     } catch (e) {
       L.errors++;
     } finally {
+      clearTimeout(timer);
       voiceLog("voice-window", {
         requestId: L.requestId,
         final,
         windowS: Math.round((n / LIVE_RATE) * 10) / 10,
+        voicedS: Math.round(voicedS * 100) / 100,
+        ...(silencePhrase ? { silencePhrase } : {}),
+        ...(cutAt ? { cut: "quiet" } : {}),
+        ...(timedOut ? { timedOut } : {}),
         latencyMs: Date.now() - t0,
         httpStatus: status,
       });
@@ -2707,14 +2802,17 @@ listen("pty-send-sent", (e) => {
     const L = live;
     if (!L || L.stopped) return;
     if (!L.busy && L.winLen > 0 && !liveHasSpeech(L)) {
-      liveDropWindow(L);
+      // Too little voice to send. Once the quiet has lasted a pause, it was a
+      // blip, not the start of speech: drop it.
+      if (L.quietMs >= LIVE_BLIP_QUIET_MS) liveDropWindow(L);
     } else if (!L.busy && L.winLen > 0) {
       const secs = L.winLen / LIVE_RATE;
       const fresh = L.winLen - L.sentLen;
-      const paused = L.quietMs >= LIVE_PAUSE_MS && secs >= LIVE_MIN_FINAL_S;
-      const final = secs >= LIVE_MAX_WIN_S || (paused && fresh > 0);
+      const paused = L.quietMs >= L.pauseMs && secs >= LIVE_MIN_FINAL_S;
+      const capped = secs >= LIVE_MAX_WIN_S && !paused;
+      const final = capped || (paused && fresh > 0);
       if (final || fresh >= LIVE_RATE * 0.3) {
-        L.pending = liveTranscribe(final);
+        L.pending = liveTranscribe(final, capped ? liveQuietCut(L) : 0);
         await L.pending;
       }
     }
@@ -2727,7 +2825,14 @@ listen("pty-send-sent", (e) => {
     for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
     const rms = Math.sqrt(sum / data.length);
     const voiced = rms > LIVE_RMS;
-    if (voiced) L.quietMs = 0;
+    if (voiced) {
+      // A pause inside speech just ended; keep its length for voice-final.
+      if (L.spoke && L.quietMs >= LIVE_PAUSE_LOG_MIN_MS && L.pauses.length < 500) {
+        L.pauses.push(Math.round(L.quietMs / 10) * 10);
+      }
+      L.spoke = true;
+      L.quietMs = 0;
+    }
     else L.quietMs += (data.length / sampleRate) * 1000;
     // Silence doesn't grow the window: not before the first word, and not
     // after LIVE_SILENCE_KEEP_MS of quiet. Whisper invents "Thank you." from
@@ -2735,6 +2840,7 @@ listen("pty-send-sent", (e) => {
     if (!voiced && (L.winLen === 0 || L.quietMs > LIVE_SILENCE_KEEP_MS)) return;
     const c = liveResample(data, sampleRate);
     c.voiced = voiced;
+    c.rms = rms;
     L.win.push(c);
     L.winLen += c.length;
   };
@@ -2749,7 +2855,12 @@ listen("pty-send-sent", (e) => {
       winLen: 0,
       sentLen: 0,
       quietMs: 0,
+      pauseMs: livePauseMs(),
+      pauses: [],
+      spoke: false,
       committed: [],
+      parts: [],
+      seq: 0,
       provisional: "",
       busy: false,
       pending: null,
@@ -2799,6 +2910,7 @@ listen("pty-send-sent", (e) => {
         requestId,
         capture: L.capture,
         sampleRate: L.ctx.sampleRate,
+        pauseMs: L.pauseMs,
       });
       L.timer = setTimeout(liveTick, LIVE_STEP_MS);
     } catch (e) {
@@ -2835,6 +2947,18 @@ listen("pty-send-sent", (e) => {
       } catch (_) {}
     }
     if (L.winLen >= LIVE_RATE * 0.3 && liveHasSpeech(L)) await liveTranscribe(true);
+    // A successful final clears the provisional text. If it's still set, the
+    // last window never came back (whisper-server stuck or down): keep what
+    // was on screen rather than lose it. The 2026-09-26 hang delivered an
+    // empty result because nothing had been committed yet.
+    if (L.provisional) {
+      voiceLog("voice-live-kept-provisional", { requestId: L.requestId, chars: L.provisional.length });
+      L.committed.push(L.provisional);
+      L.parts.push({ seq: L.seq, text: L.provisional });
+      L.seq++;
+      L.provisional = "";
+      livePublish();
+    }
     const text = L.committed.join(" ").trim();
     const lat = L.latencies;
     voiceLog("voice-final", {
@@ -2845,6 +2969,8 @@ listen("pty-send-sent", (e) => {
       windows: lat.length,
       avgLatencyMs: lat.length ? Math.round(lat.reduce((a, b) => a + b, 0) / lat.length) : null,
       errors: L.errors,
+      pauseMs: L.pauseMs,
+      pausesMs: L.pauses,
     });
     if (live === L) live = null;
     return { text, errors: L.errors };

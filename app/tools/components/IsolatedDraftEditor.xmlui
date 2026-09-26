@@ -117,6 +117,7 @@
     (value) => { const nextValue = value || ''; editorBox.setValue(nextValue); lastCommittedValue = nextValue; commitTick = commitTick + 1; }
   </method>
   <method name="clear">
+    window.__bramVoiceStopOnSend($props.voiceTarget || '');
     editorBox.setValue('');
     lastCommittedValue = '';
     commitTick = commitTick + 1;

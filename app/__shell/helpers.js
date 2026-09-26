@@ -2033,6 +2033,11 @@ window.__bramGateGoTranscript = function () {
 };
 
 window.__bramClearComposer = function () {
+  // Every send that isn't a plain message clears the box here (feedback to
+  // selected items, Chat, gate buttons carrying text), so a mic recording
+  // into it stops here too. Missing this left the mic on after a feedback
+  // send (2026-09-26, 21:05:33).
+  window.__bramVoiceStopOnSend("message-agent");
   window.__bramSetMessageAgentText("");
   try { window.__bramRequestComposerClear(); } catch (e) {}
   try { window.__bramClearWorklistDraft(); } catch (e) {}
@@ -2053,6 +2058,7 @@ window.__bramSubmitMessageAgentComposer = function (box, mode) {
     voiceTarget: "message-agent",
   });
   if (!result || !result.submitted) return false;
+  window.__bramVoiceStopOnSend("message-agent");
   try { if (box && typeof box.setValue === "function") box.setValue(""); } catch (e) {}
   window.__bramClearWorklistDraft();
   return true;
@@ -8254,6 +8260,7 @@ window.bramSubscribeVoiceArrival = (function () {
 // voice-state clears it. Editors show it under their input and still get
 // the final text through voice-into-result, unchanged.
 window.__bramVoicePartial = null;
+window.__bramVoiceLastParts = {};
 window.addEventListener("message", function (event) {
   var d = event && event.data;
   if (!d) return;
@@ -8263,7 +8270,15 @@ window.addEventListener("message", function (event) {
       requestId: d.requestId,
       committed: String(d.committed || ""),
       provisional: String(d.provisional || ""),
+      parts: Array.isArray(d.parts) ? d.parts : [],
+      openSeq: Number(d.openSeq) || 0,
       at: Date.now(),
+    };
+    // Outlives the partial (cleared on delivery) so finalize can still
+    // count windows after an edit.
+    window.__bramVoiceLastParts[String(d.target || "")] = {
+      requestId: d.requestId,
+      parts: window.__bramVoicePartial.parts,
     };
   } else if (d.type === "voice-into-result" || (d.type === "voice-state" && d.state === "idle")) {
     if (!window.__bramVoicePartial) return;
@@ -8300,6 +8315,96 @@ window.bramSubscribeVoicePartial = (function () {
 // transcript in one step, so the final text lands exactly once. A textarea can't gray out part of its text, so
 // provisional words look like the rest until they're replaced.
 window.__bramVoiceLiveBase = {};
+// Your edits win. Each window main.js transcribes has a number (seq); the
+// partial carries the committed parts with their numbers and the number of
+// the window still open. If the box no longer holds what dictation last
+// wrote, you edited it: your text becomes the new base, and only windows
+// you hadn't seen yet are added after it — erased text stays erased
+// (Jon: "I had to erase it … and it came back"). Clearing the box is an
+// edit like any other; dictation carries on into the empty box. Only a
+// send stops the mic (__bramVoiceStopOnSend).
+function __bramVoiceLiveText(rec, parts, provisional, openSeq) {
+  var words = [];
+  (parts || []).forEach(function (p) {
+    if (p && p.seq >= rec.fromSeq && p.text) words.push(p.text);
+  });
+  if (provisional && openSeq >= rec.fromSeq) words.push(provisional);
+  return words.join(" ");
+}
+function __bramVoiceJoin(base, text) {
+  var spacer = base && text && !/\s$/.test(base) ? " " : "";
+  return base + spacer + text;
+}
+// Adopt the box's current text as the base when it differs from what
+// dictation last wrote. Returns true when an edit was adopted.
+function __bramVoiceAdoptEdit(rec, box, target) {
+  if (rec.written === undefined) return false;
+  var cur = String(box.value || "");
+  // box.value can lag a setValue (the 311→597 duplication), so the value
+  // written just before the last one isn't an edit either.
+  // An empty box is never a lag, though: it's a send or a clear.
+  if (cur === rec.written || (cur.trim() && cur === rec.prevWritten)) return false;
+  rec.edited = true;
+  // The window that showed as provisional text is part of what you edited;
+  // skip it too, or its final text would bring the erased words back.
+  rec.fromSeq = rec.wHadProv ? rec.wOpenSeq + 1 : rec.wOpenSeq;
+  rec.base = cur;
+  rec.written = cur;
+  rec.prevWritten = undefined;
+  try { window.__bramIframeTrace && window.__bramIframeTrace("voice-trace", { stage: "live-edit-adopted", target: target, baseLen: cur.length, fromSeq: rec.fromSeq }); } catch (e) {}
+  return true;
+}
+// Sending while this box records stops the mic (the message box's send,
+// IsolatedDraftEditor.clear() — which every other 🎤 box's submit and
+// cancel buttons call — and a queue note's Send or Delete): the same voiceStop the 🎤
+// toggle uses, delivered through voice-arrival so the editor resets its 🎤.
+// The record is marked stopped first, so neither a late partial nor the
+// final transcript writes into the just-cleared box.
+window.__bramVoiceStopOnSend = function (target) {
+  if (!window._voiceSession || window._voiceSessionTarget !== target) return;
+  var rec = window.__bramVoiceLiveBase[target];
+  if (!rec || rec.requestId !== window._voiceSession) {
+    rec = { requestId: window._voiceSession, base: "", fromSeq: 0, edited: false };
+    window.__bramVoiceLiveBase[target] = rec;
+  }
+  rec.stopped = true;
+  try { window.__bramIframeTrace && window.__bramIframeTrace("voice-trace", { stage: "live-send-stop", target: target }); } catch (e) {}
+  window.voiceStop(function (t, meta) {
+    window.__bramSetLatestVoiceState(t, Object.assign({}, meta || {}, { target: target }));
+  });
+};
+function __bramVoiceTrackScroll(rec, el) {
+  rec.el = el;
+  rec.follow = true;
+  el.addEventListener("scroll", function () {
+    // Our own scrolls land at the bottom, so they keep following; scrolling
+    // up to read turns it off until you scroll back down.
+    rec.follow = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+  });
+}
+function __bramVoiceFollow(rec) {
+  var el = rec.el;
+  if (!el || !rec.follow) {
+    __bramVoiceScrollTrace(rec, "skip");
+    return;
+  }
+  var go = function () { el.scrollTop = el.scrollHeight; };
+  setTimeout(go, 0);
+  setTimeout(function () { go(); __bramVoiceScrollTrace(rec, "after"); }, 80);
+}
+// Trace only when the box is scrollable or following changed, to keep the
+// log quiet while the text still fits.
+function __bramVoiceScrollTrace(rec, stage) {
+  var el = rec.el;
+  var info = el
+    ? { sh: el.scrollHeight, st: Math.round(el.scrollTop), ch: el.clientHeight, follow: !!rec.follow }
+    : { hasEl: false };
+  var key = JSON.stringify([stage, info.follow, el ? el.scrollHeight > el.clientHeight : null]);
+  if (el && el.scrollHeight <= el.clientHeight && rec.lastScrollKey === key) return;
+  rec.lastScrollKey = key;
+  info.stage = "live-scroll-" + stage;
+  try { window.__bramIframeTrace && window.__bramIframeTrace("voice-trace", info); } catch (e) {}
+}
 window.__bramVoiceShowLive = function (box, partial, target) {
   if (!box || !partial || !target || partial.target !== target) return;
   // Only the current partial may write: delivery clears
@@ -8308,36 +8413,83 @@ window.__bramVoiceShowLive = function (box, partial, target) {
   var cur = window.__bramVoicePartial;
   if (!cur || cur.requestId !== partial.requestId || cur.at !== partial.at) return;
   var rec = window.__bramVoiceLiveBase[target];
-  if (!rec || rec.requestId !== partial.requestId) {
-    rec = { requestId: partial.requestId, base: String(box.value || "") };
+  var first = !rec || rec.requestId !== partial.requestId;
+  if (first) {
+    rec = { requestId: partial.requestId, base: String(box.value || ""), fromSeq: 0, edited: false, stopped: false };
     window.__bramVoiceLiveBase[target] = rec;
   }
-  var liveText = [partial.committed, partial.provisional].filter(Boolean).join(" ");
-  var spacer = rec.base && liveText && !/\s$/.test(rec.base) ? " " : "";
-  try { box.setValue(rec.base + spacer + liveText); } catch (e) {}
+  if (rec.stopped) return;
+  __bramVoiceAdoptEdit(rec, box, target);
+  var next = __bramVoiceJoin(rec.base, __bramVoiceLiveText(rec, partial.parts, partial.provisional, partial.openSeq));
+  rec.prevWritten = rec.written;
+  rec.written = next;
+  rec.wOpenSeq = partial.openSeq;
+  rec.wHadProv = !!partial.provisional;
+  // Keep the newest words in view when the text outgrows the box (Jon:
+  // "we don't scroll to the bottom … my words are not visible"), unless you
+  // scrolled up to read. Following is tracked from the element's own scroll
+  // events, and the scroll is applied after XMLUI has rendered the new value
+  // (and an autoSize box has grown). A single requestAnimationFrame right
+  // after setValue didn't scroll in Jon's test (cause unconfirmed; the
+  // live-scroll trace records scrollHeight/scrollTop to settle it).
+  // focus() may land after the first partial; pick the textarea up later.
+  if (!rec.el && document.activeElement && document.activeElement.tagName === "TEXTAREA") {
+    __bramVoiceTrackScroll(rec, document.activeElement);
+  }
+  try { box.setValue(next); } catch (e) {}
+  __bramVoiceFollow(rec);
+  // Dictating into a box means you're in it: on the first words, focus it
+  // with the caret at the end so Enter sends without a click first (Jon:
+  // "I can't press enter until I click into the message box"). Only the
+  // first time, so a caret you place to edit mid-dictation isn't moved.
+  if (first) {
+    try {
+      if (typeof box.focus === "function") box.focus();
+    } catch (e) {}
+    // The XMLUI TextArea API exposes no scroll method; the focused element
+    // is its DOM textarea, kept for scrolling.
+    var active = document.activeElement;
+    if (!rec.el && active && active.tagName === "TEXTAREA") {
+      __bramVoiceTrackScroll(rec, active);
+      __bramVoiceFollow(rec);
+    }
+  }
 };
 // Deliver the final transcript into a box that may be showing live text.
-// Computes pre-dictation text + final transcript from the remembered base
-// and sets it ONCE: a separate restore-then-append read box.value back
-// before XMLUI had applied the restore, and appended onto the live text
-// (first test: 311 chars became 597, the dictation doubled). With no live
-// base on record, falls back to __bramAppendVoiceToBox. Returns the new
-// value, or false when nothing changed (same contract as the append).
+// Computes base + final text from the record and sets it ONCE: a separate
+// restore-then-append read box.value back before XMLUI had applied the
+// restore, and appended onto the live text (first test: 311 chars became
+// 597, the dictation doubled). After an edit, the final text is the
+// windows you hadn't seen, not the whole transcript; after a send or clear
+// the box is left alone. With no live base on record, falls back to
+// __bramAppendVoiceToBox. Returns the new value, or false when nothing
+// was added (same contract as the append).
 window.__bramVoiceFinalizeInto = function (box, target, transcript) {
   var rec = window.__bramVoiceLiveBase[target];
   delete window.__bramVoiceLiveBase[target];
+  var last = window.__bramVoiceLastParts[target];
+  delete window.__bramVoiceLastParts[target];
   if (!rec) return window.__bramAppendVoiceToBox(box, transcript);
   if (!box) return false;
+  if (rec.stopped) {
+    try { window.__bramIframeTrace && window.__bramIframeTrace("voice-trace", { stage: "finalize-into-stopped", target: target }); } catch (e) {}
+    return false;
+  }
+  __bramVoiceAdoptEdit(rec, box, target);
   var base = rec.base;
-  var cleaned = String(transcript || "").replace(/\r?\n/g, " ").replace(/[ \t]+/g, " ").trim();
-  var spacer = base && cleaned && !/\s$/.test(base) ? " " : "";
-  var next = base + spacer + cleaned;
+  var text = transcript;
+  if (rec.edited) {
+    var parts = last && last.requestId === rec.requestId ? last.parts : [];
+    text = __bramVoiceLiveText(rec, parts, "", 0);
+  }
+  var cleaned = String(text || "").replace(/\r?\n/g, " ").replace(/[ \t]+/g, " ").trim();
+  var next = __bramVoiceJoin(base, cleaned);
   try { box.setValue(next); } catch (e) { return false; }
   try {
     if (typeof box.focus === "function") box.focus();
     if (typeof box.setSelectionRange === "function") box.setSelectionRange(next.length, next.length);
   } catch (e) {}
-  try { window.__bramIframeTrace && window.__bramIframeTrace("voice-trace", { stage: "finalize-into", baseLen: base.length, transcriptLen: cleaned.length, nextLen: next.length }); } catch (e) {}
+  try { window.__bramIframeTrace && window.__bramIframeTrace("voice-trace", { stage: "finalize-into", baseLen: base.length, transcriptLen: cleaned.length, nextLen: next.length, edited: rec.edited }); } catch (e) {}
   return cleaned ? next : false;
 };
 
@@ -13595,6 +13747,9 @@ window.__bramQueueAdd = function (entries) {
 window.__bramQueueRemove = function (entries, idx, suppressTrace) {
   var next = (entries || []).slice();
   var removed = next[idx];
+  // Send and Delete both end here; the note's editor goes away, so a mic
+  // still recording into it would have nowhere to deliver.
+  if (removed && removed.id) window.__bramVoiceStopOnSend("queue-item:" + removed.id);
   if (!suppressTrace) {
     window.__bramIframeTrace("queue", { op: "delete", id: (removed && removed.id) || "", chars: String((removed && removed.text) || "").length });
   }

@@ -20887,6 +20887,33 @@ fn whisper_start(
                         ),
                     ),
                 }
+                // Drain stderr for the server's lifetime. It logs ~350 bytes
+                // per request, and a pipe nobody reads fills at 64 KB: the
+                // server then blocks on its next write and stops answering
+                // (0% CPU, no children). Live dictation sends ~1 request a
+                // second, so it wedged after 175 requests (2026-09-26); batch
+                // dictation would have needed ~175 dictations. Error lines
+                // still reach the trace, capped so a noisy server can't flood it.
+                if let Some(pipe) = child.stderr.take() {
+                    let app2 = app.clone();
+                    std::thread::spawn(move || {
+                        let mut traced = 0;
+                        for line in BufReader::new(pipe).lines() {
+                            let Ok(line) = line else { break };
+                            if traced < 20 && line.to_ascii_lowercase().contains("error") {
+                                traced += 1;
+                                whisper_trace(
+                                    &app2,
+                                    &format!(
+                                        "stderr pid={} {:?}",
+                                        pid,
+                                        bram_trace_preview(&line, 300)
+                                    ),
+                                );
+                            }
+                        }
+                    });
+                }
                 *guard = Some(child);
                 return Ok(pid);
             }

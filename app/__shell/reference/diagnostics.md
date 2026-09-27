@@ -65,12 +65,40 @@ cycles, which are sent through `toTurn` and cleared through
 
 ## Log-first development
 
-Agents default to writing and reading code; in Bram the higher-value
-habit is writing and reading logs. Behavior here arises from the
+Agents default to writing and reading code, but the higher-value habit
+is writing and reading logs. Runtime questions ("was the right message
+sent at the right time? did the transition fire? did it render? how long
+do this user's pauses actually run?") are answered by evidence, not
+inspection.
+
+These norms apply to the **project's own app** as much as to Bram. The
+examples below are Bram's, because Bram's behavior arises from the
 interplay of Rust, the parent shell, XMLUI, two agent CLIs, and
-Markdown/Python-governed workflow — runtime questions ("was the right
-message sent at the right time? did the transition fire? did it
-render?") are answered by evidence, not inspection. The norms:
+Markdown/Python-governed workflow. But the method is the same for a
+React app, a Python service or a CLI: when behavior is uncertain, offer
+to instrument before you fix. Add log lines, let the user run the app
+normally, read the log, and decide from it.
+
+**The shape of a good log line.**
+
+- **One event per line,** so a grep returns whole events.
+- **A stable, greppable tag** (`[checkout]`, `stage=voice-window`), the
+  same wherever the event is written.
+- **Named fields** (JSON or `key=value`), not prose.
+- **The values that decide the question:** counts, durations,
+  thresholds, ids, and the input that led to a branch. Log both the
+  branch taken and why.
+- **Written where the user's normal run will produce it,** so the
+  evidence gathers without a special test.
+
+Live dictation in Bram's own history is the model. A per-window
+`voicedS` settled the phantom "Thank you" question. A `pausesMs` list
+on each recording turned the pause threshold from a guess into a
+distribution. And counting requests since the server started confirmed
+a suspected cause: the server wedged at 175 requests, close to the 177
+that a full 64 KB log pipe predicts.
+
+The norms:
 
 - **The drill.** When behavior goes wrong — or a new mechanism is being
   designed — the first question is: does the trace already capture what

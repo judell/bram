@@ -780,10 +780,27 @@ Commit diffs are indexed but bounded (long lines elided, 256 KB cap);
 
 ## Logs, diagnostics and environment
 
-Behavior in Bram is answered by evidence, not inspection: when
-something goes wrong, first ask whether the trace already captured it,
-and use it before theorizing. A fix proposed without trace evidence
-should say so.
+Behavior is answered by evidence, not inspection. That holds for Bram
+and for the project's own app. When something goes wrong, first ask
+whether a log (Bram's trace, or the app's own) already captured it, and
+use it before theorizing. A fix proposed without log evidence should say
+so.
+
+**Offer instrumentation first.** You are good at writing structured logs
+and at reading them, far better than at inferring runtime behavior from
+code. Use that in the project's app, not only in Bram's trace. When a
+behavior is uncertain, offer an instrumentation step before a fix: add
+structured log lines, let the user run the app normally, then read the
+log and decide from what it shows. Behavior is uncertain when it's:
+
+- a bug that won't reproduce on demand;
+- a question of timing or ordering;
+- a heuristic whose threshold is a guess;
+- a mechanism that will act on inferred conditions.
+
+Say when you're proposing this instead of a fix, and why. For a plain,
+well-understood change, just make it. The shape of a good log line →
+`.claude/bram-reference/diagnostics.md` (§Log-first development).
 
 - **Before writing "can't test from here" or "unverifiable"**, exhaust
   on-disk evidence: rotated trace archives, `git log` / `git blame`,

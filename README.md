@@ -181,9 +181,9 @@ The first time you launch `claude` or `codex` in a repo, Bram checks what that p
 
 Claude and Codex differ in the trust step you see after Bram writes those files:
 
-- **Claude setup** is repo-local. Bram writes `.claude/bram-conventions.md`, `.claude/hooks/claude-worklist-guard.py`, `.claude/hooks/claude-permission-menu-hook.py`, and `.claude/settings.json` registrations. Claude reads that project config on launch; there is no separate Codex-style hook trust menu. The Claude `PreToolUse` hook is the safety gate for `Write`, `Edit`, and `Bash`; the permission hook shows Claude permission and AskUserQuestion prompts in Bram's agent pane.
-- **Codex setup** has an explicit trust/approval step. Bram writes user-global hook scripts under `~/.bram`, updates `~/.codex/config.toml`, writes Bram `developer_instructions`, and adds a repo-local `AGENTS.md` block. Codex then shows its hook approval screen; approve it only when it points at Bram-owned paths such as `~/.bram/codex-worklist-guard.py`, `~/.bram/codex-permission-menu-hook.py`, `~/.codex/config.toml`, and this repo's `AGENTS.md`. The Codex `PreToolUse` hook gates `apply_patch`, `Bash`, `Write`, `Edit`, and mutation-shaped MCP tools; the Codex permission hook shows `PermissionRequest` / `PostToolUse` menus in Bram's agent pane.
-- **Do not approve unexpected Codex paths.** If the Codex approval screen lists hook scripts somewhere other than `~/.bram` or config changes somewhere other than the expected Codex/project files, stop and inspect them first.
+- **Claude setup** is repo-local. Bram writes `.claude/bram-conventions.md` and `.claude/settings.json` hook registrations that point at `~/.bram/bram-guard`. Claude reads that project config on launch; there is no separate Codex-style hook trust menu. The Claude `PreToolUse` hook is the safety gate for `Write`, `Edit`, and `Bash`; the permission hook shows Claude permission and AskUserQuestion prompts in Bram's agent pane.
+- **Codex setup** has an explicit trust/approval step. Bram updates `~/.codex/config.toml` with hook registrations that point at `~/.bram/bram-guard`, writes Bram `developer_instructions`, and adds a repo-local `AGENTS.md` block. Codex then shows its hook approval screen; approve it only when it points at Bram-owned paths such as `~/.bram/bram-guard`, `~/.codex/config.toml`, and this repo's `AGENTS.md`. The Codex `PreToolUse` hook gates `apply_patch`, `Bash`, `Write`, `Edit`, and mutation-shaped MCP tools; the Codex permission hook shows `PermissionRequest` / `PostToolUse` menus in Bram's agent pane.
+- **Do not approve unexpected Codex paths.** If the Codex approval screen lists hook commands other than `~/.bram/bram-guard` or config changes somewhere other than the expected Codex/project files, stop and inspect them first.
 
 Hook names mean the same thing in both providers:
 
@@ -208,24 +208,22 @@ Current behavior:
 When the prompt runs, Bram installs two layers:
 
 - A provider-neutral core: Bram records the latest structured `approved:` / `drop:` payload in `resources/.worklist-authorization.json` and uses that local record when validating Worklist removals. The desktop watcher can revert an invalid prune as a defense-in-depth fallback if a hook ever fails to fire.
-- A Claude adapter: `.claude/hooks/claude-worklist-guard.py`, registered in `.claude/settings.json` as a `PreToolUse` hook for `Write|Edit|Bash`. The hook denies edits to project files not covered by a proposed/applied worklist item (with the explicit opt-out phrase "just do it" in the last user message as the escape hatch), validates worklist-prune authorization for changes to `resources/worklist.json` itself, and blocks mutation-shaped Bash commands without worklist coverage. Setup also installs `.claude/hooks/claude-permission-menu-hook.py` for Claude permission and AskUserQuestion surfacing in the agent pane.
-- A Codex adapter: `~/.bram/codex-worklist-guard.py`, registered in `~/.codex/config.toml` as a `PreToolUse` hook with matcher `^(apply_patch|Bash|Write|Edit|mcp__.*)$`. Same coverage logic as the Claude hook, broadened to catch Codex's `apply_patch` tool and MCP filesystem write/edit/create/move calls. Setup also writes `developer_instructions` into the Codex config so the gate prose lands in the developer-role context part of every session, not just the user-role `AGENTS.md`, and installs `~/.bram/codex-permission-menu-hook.py` for `PermissionRequest` / `PostToolUse` menu surfacing with the xterm grid retained as fallback. Existing `~/.xmlui-desktop/codex-worklist-guard.py` installs remain accepted during migration; rerunning Setup rewrites the config to the Bram path.
+- A Claude adapter: `~/.bram/bram-guard guard claude-worklist`, registered in `.claude/settings.json` as a `PreToolUse` hook for `Write`, `Edit`, `Bash`, and `mcp__.*`. The hook denies edits to project files not covered by a proposed/applied worklist item (with the explicit opt-out phrase "just do it" in the last user message as the escape hatch), validates worklist-prune authorization for changes to `resources/worklist.json` itself, and blocks mutation-shaped Bash commands without worklist coverage. Setup also registers `~/.bram/bram-guard guard claude-permission-menu` for Claude permission and AskUserQuestion surfacing in the agent pane.
+- A Codex adapter: `~/.bram/bram-guard guard codex-worklist`, registered in `~/.codex/config.toml` as a `PreToolUse` hook with matcher `^(apply_patch|Bash|Write|Edit|mcp__.*)$`. Same coverage logic as the Claude hook, broadened to catch Codex's `apply_patch` tool and MCP filesystem write/edit/create/move calls. Setup also writes `developer_instructions` into the Codex config so the gate prose lands in the developer-role context part of every session, not just the user-role `AGENTS.md`, and registers `~/.bram/bram-guard guard codex-permission-menu` for `PermissionRequest` / `PostToolUse` menu surfacing with the xterm grid retained as fallback.
 
-In the Bram source repo, every provider hook lives under
-`app/provider-hooks/` with a provider-prefixed name, and that is the
-source of truth. The copies Setup installs are runtime artefacts,
-refreshed from those sources by Setup and by `src-tauri/build.rs`
-during Cargo builds:
-
-| canonical | installed |
-|---|---|
-| `app/provider-hooks/claude-worklist-guard.py` | `.claude/hooks/claude-worklist-guard.py` |
-| `app/provider-hooks/claude-permission-menu-hook.py` | `.claude/hooks/claude-permission-menu-hook.py` |
-| `app/provider-hooks/codex-worklist-guard.py` | `~/.bram/codex-worklist-guard.py` |
-| `app/provider-hooks/codex-permission-menu-hook.py` | `~/.bram/codex-permission-menu-hook.py` |
-
-Functional edits belong in the canonical copy. Editing an installed one
-creates setup drift and may be overwritten by the next build.
+Every hook is the same compiled Rust binary, `bram-guard`, built from
+`src-tauri/src/bin/bram-guard.rs` (the logic lives in
+`src-tauri/src/guard.rs`) and shipped beside the `bram` executable. The
+first argument after `guard` picks the hook: `claude-worklist`,
+`claude-permission-menu`, `codex-worklist`, or `codex-permission-menu`.
+Hook configs never reference the binary's own location. They reference
+`~/.bram/bram-guard`, which Bram re-points at its own `bram-guard` on
+every launch: a symlink on macOS and Linux, a hardlink (or copy) of
+`bram-guard.exe` on Windows. Moving or updating the app therefore never
+orphans the registration. Earlier releases installed Python hook scripts
+(`.claude/hooks/*.py`, `~/.bram/codex-*.py`); Setup deletes each one once
+no Claude settings file (or, for the Codex scripts, `~/.codex/config.toml`)
+still references it.
 
 PreToolUse hooks are the generic extension point — both Claude Code and codex expose them — so the two adapters share the same shape: each runs *before* the agent invokes a tool, receives a JSON payload describing the pending call on stdin, and can exit 0 to allow, return a deny decision to block (stderr/permissionDecisionReason goes back to the agent as a tool error), or fail to launch.
 
@@ -236,7 +234,7 @@ That means first-run setup is provider-aware in when it prompts but provider-sym
 `app/__shell/conventions.md` is the canonical project convention file.
 It governs Claude and Codex in different ways:
 
-- **Claude: direct prompt binding plus enforcement.** Setup copies that file to `.claude/bram-conventions.md`, adds an `@`-import block to `CLAUDE.md`, and installs the `worklist-guard.py` PreToolUse hook. A new Claude session therefore reads the conventions file directly and is also mechanically blocked from unsafe worklist edits. Existing projects with the legacy `.claude/xmlui-desktop-conventions.md` path are migrated to the new name on the next Setup run.
+- **Claude: direct prompt binding plus enforcement.** Setup copies that file to `.claude/bram-conventions.md`, adds an `@`-import block to `CLAUDE.md`, and registers the `bram-guard` PreToolUse hook. A new Claude session therefore reads the conventions file directly and is also mechanically blocked from unsafe worklist edits. Existing projects with the legacy `.claude/xmlui-desktop-conventions.md` path are migrated to the new name on the next Setup run.
 - **Codex: repo-local AGENTS.md plus native hook enforcement.** Setup writes a marked Bram block into repo-root `AGENTS.md`, installs top-level `developer_instructions` in `~/.codex/config.toml`, and registers the Codex Worklist guard as a native `PreToolUse` hook. Codex launches also receive the same concise Worklist guidance as a startup seed. The app reinforces that with the shared local authorization record in `resources/.worklist-authorization.json` and the watcher-revert fallback as defense in depth.
 
 So the practical rule is: both agents are governed by the same Worklist
@@ -252,9 +250,9 @@ filesystem channel instead — writing `resources/.worklist-intent.json`
 and reading `resources/.worklist-result.json`, which the host
 dispatches through the same handlers as the HTTP routes.
 
-The provider hooks validate direct edits to `resources/worklist.json`. Proposal authoring and iterate-time prose refinement are allowed there; mechanical prune / status-advance operations are expected to go through `POST /__worklist/mutate` instead. Both providers now reject direct Worklist edits that remove items or change their `status`, which keeps the shared backend endpoint as the canonical state machine for `advance` / `prune`. The watcher-based fallback (compare old/new worklist snapshots, consult `resources/.worklist-authorization.json`, restore prior contents if the prune wasn't authorized) remains as defense-in-depth — it fires later than a native hook, but it covers the case where a hook fails to launch (e.g., Python missing) or where a future provider integration lacks a comparable extension point.
+The provider hooks validate direct edits to `resources/worklist.json`. Proposal authoring and iterate-time prose refinement are allowed there; mechanical prune / status-advance operations are expected to go through `POST /__worklist/mutate` instead. Both providers now reject direct Worklist edits that remove items or change their `status`, which keeps the shared backend endpoint as the canonical state machine for `advance` / `prune`. The watcher-based fallback (compare old/new worklist snapshots, consult `resources/.worklist-authorization.json`, restore prior contents if the prune wasn't authorized) remains as defense-in-depth — it fires later than a native hook, but it covers the case where a hook fails to launch (e.g., the `~/.bram/bram-guard` link is missing or points at a deleted build) or where a future provider integration lacks a comparable extension point.
 
-The hook is a Python script and needs Python 3 to run. On macOS and Linux it's invoked directly via its shebang (`#!/usr/bin/env python3`), so `python3` must be on PATH — almost always the case. On Windows it's invoked via `py -3 <path>`; the `py` launcher ships with the python.org installer and resolves Python via the Windows registry, independent of PATH. If Python isn't installed at all, Claude Code shows "Failed with non-blocking status code" for every Write/Edit and the validator is silently inert — writes still proceed, but the worklist guard isn't actually checking them. Install Python 3 to enable enforcement.
+The guard has no runtime dependencies: no Python, no interpreter on PATH. If `~/.bram/bram-guard` is missing, Bram's Setup status reports the project as needing Setup, because the expected hook commands are derived from that link.
 
 </details>
 

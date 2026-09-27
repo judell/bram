@@ -605,24 +605,39 @@
                  one body — and turns a 2,000-line untracked file into a row you
                  may decline to open rather than a wall. -->
             <!-- issue-327 file-table experiment: header row and file rows are
-                 a real Table, so the columns align by construction. Table has
-                 no single-click row event (only rowDoubleClick and hover —
-                 the Review-overlaps table above uses the hover pair), so
-                 "click the file row to open it" is single-row selection per
-                 the master-detail pattern:
-                 https://www.xmlui.org/docs/howto/build-a-master-detail-layout
-                 Selecting a row opens its Tabs below the table; selecting
-                 another switches. diffKeys stays the expansion source of
-                 truth — the Table's own selection is internal, positional
-                 state (the ExpandableItem class), trusted only for the
-                 highlight. -->
+                 a real Table, so the columns align by construction. A file's
+                 diff opens from the disclosure triangle in the first column,
+                 not from row selection (which needed a visible checkbox and
+                 gave no cue that rows were clickable). diffKeys is the one
+                 expansion state, keyed by item and path, never by position. -->
+            <!-- While a file's diff is open, the table narrows to that row;
+                 closing it brings the others back. -->
             <Table
               when="{$item.changedFiles}"
-              data="{$item.changedFiles}"
-              idKey="path"
-              rowsSelectable="{rowBegun}"
-              enableMultiRowSelection="{false}"
-              onSelectionDidChange="(sel) => diffKeys = window.__bramTableSelectDiff(diffKeys, rowId, sel)">
+              data="{window.__bramFilesTableRows($item.changedFiles, diffKeys, rowId)}"
+              idKey="path">
+              <!-- Disclosure triangle, the click target: ▶ closed, ▼ open,
+                   absent where the row can't expand. It replaces row
+                   selection as the way to open a diff (Jon: "hide the
+                   checkbox completely … treat the triangle as the active
+                   site"). A ghost Button gives the pointer cursor on hover;
+                   nested children replace its label, so the Text sets the
+                   size. Peer: the ghost ✕ in Commits.xmlui.
+                   https://www.xmlui.org/docs/reference/components/Button
+                   https://www.xmlui.org/docs/reference/components/Column -->
+              <Column header="" width="36px">
+                <Button
+                  when="{!!window.__bramDiffDisclosure(diffKeys, rowId, $item.path, rowBegun, rowItem)}"
+                  variant="ghost"
+                  size="xs"
+                  tooltip="{window.__bramDiffToggleTooltip(diffKeys, rowId, $item.path)}"
+                  onClick="diffKeys = window.__bramDiffToggleFile(diffKeys, rowId, $item.path)">
+                  <Text
+                    fontSize="$fontSize-md"
+                    color="$textColor-secondary"
+                    value="{window.__bramDiffDisclosure(diffKeys, rowId, $item.path, rowBegun, rowItem)}" />
+                </Button>
+              </Column>
               <!-- "expected to change" is the planning tense; on a begun row
                    whose work is done it should read "changed". Same
                    static-header constraint as the overlaps table — waits on
@@ -666,6 +681,10 @@
                 </VStack>
               </Column>
             </Table>
+            <Text
+              when="{!!window.__bramFilesHiddenNote($item.changedFiles, diffKeys, rowId)}"
+              variant="caption"
+              value="{window.__bramFilesHiddenNote($item.changedFiles, diffKeys, rowId)}" />
             <Items
               when="{$item.changedFiles}"
               data="{$item.changedFiles}">

@@ -3386,23 +3386,6 @@ window.__bramOwnershipRows = function (patch, runs) {
   return out;
 };
 
-// issue-327 file-table experiment: map a Table row selection onto the keyed
-// diff-expansion store. Single-select master-detail per the documented
-// pattern (https://www.xmlui.org/docs/howto/build-a-master-detail-layout):
-// selecting a file row opens its Tabs, selecting another switches, an empty
-// selection closes. One expansion per item; diffKeys stays the source of
-// truth (Table selection is component-internal and positional, the
-// ExpandableItem class of state, so nothing but the highlight relies on it).
-window.__bramTableSelectDiff = function (keys, itemId, sel) {
-  var prefix = String(itemId) + "::";
-  var next = (keys || []).filter(function (k) {
-    return String(k).indexOf(prefix) !== 0;
-  });
-  var picked = sel && sel.length ? sel[sel.length - 1] : null;
-  if (picked && picked.path) next.push(window.__bramDiffExpansionKey(itemId, picked.path));
-  return next;
-};
-
 // issue-327 scoped diff: the scopes a file's Diff tab offers. "All changes" is
 // the combined patch (commit truth: whole-file staging takes all of it); each
 // claimant with attributed lines is its own scope, rendered as that item's
@@ -13591,6 +13574,52 @@ window.__bramFlipDiffExpansion = function (keys, itemId, path) {
 };
 window.__bramDiffExpanded = function (keys, itemId, path) {
   return (keys || []).indexOf(window.__bramDiffExpansionKey(itemId, path)) !== -1;
+};
+
+// The files table's disclosure triangle (Jon, 2026-09-26: "it is not nearly
+// obvious enough that those rows are expandable"). Blank where a row can't
+// expand: plan rows (not begun) and files with no diff. Otherwise ▼ when the
+// diff is open, ▶ when closed. It reads the same state as the diff body
+// (__bramDiffExpanded / __bramDiffForPath), so the two can't disagree.
+// Only one file's diff is open at a time, so while one is open the table
+// shows just that row (Jon: "we can make the display a lot more legible by
+// hiding the unexpanded rows"). Clicking its triangle again closes the
+// diff and brings the rest back. The note says rows are hidden, so the missing
+// files don't read as gone.
+window.__bramFilesTableRows = function (files, keys, itemId) {
+  var all = files || [];
+  var open = all.filter(function (f) {
+    return f && window.__bramDiffExpanded(keys, itemId, f.path);
+  });
+  return open.length ? open : all;
+};
+window.__bramFilesHiddenNote = function (files, keys, itemId) {
+  var all = files || [];
+  var shown = window.__bramFilesTableRows(all, keys, itemId).length;
+  if (shown >= all.length) return "";
+  return "Showing " + shown + " of " + all.length + " files. Click \u25BC to show them all.";
+};
+// The triangle is the click target (Jon: "treat the triangle as the active
+// site"): open this file's diff, closing any other of the item's, or close
+// it if it's already open. One file at a time, as row selection gave.
+window.__bramDiffToggleFile = function (keys, itemId, path) {
+  var key = window.__bramDiffExpansionKey(itemId, path);
+  var wasOpen = (keys || []).indexOf(key) !== -1;
+  var prefix = String(itemId) + "::";
+  var next = (keys || []).filter(function (k) {
+    return String(k).indexOf(prefix) !== 0;
+  });
+  if (!wasOpen) next.push(key);
+  return next;
+};
+window.__bramDiffToggleTooltip = function (keys, itemId, path) {
+  return window.__bramDiffExpanded(keys, itemId, path) ? "Hide this file's diff" : "Show this file's diff";
+};
+window.__bramDiffDisclosure = function (keys, itemId, path, begun, item) {
+  if (!begun || !window.__bramDiffForPath(item, path)) return "";
+  // Full-size ▼ / ▶, sized in markup to match the row's checkbox (the small
+  // ▾ / ▸ read as specks: "They need to be as big as the checkbox").
+  return window.__bramDiffExpanded(keys, itemId, path) ? "\u25BC" : "\u25B6";
 };
 
 // issue-326: refuse a board older than one already rendered.

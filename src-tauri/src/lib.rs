@@ -14030,7 +14030,9 @@ fn history_committed_issue_map<R: tauri::Runtime>(
 
 #[cfg(test)]
 mod history_committed_tests {
-    use super::{history_committed_issue_map_from_dir, history_committed_item_ids};
+    use super::{
+        gate_shas_from_history_md, history_committed_issue_map_from_dir, history_committed_item_ids,
+    };
     use std::io::Write;
 
     const COMMIT_RECORD_MD: &str = "# Worklist change @ 2026-09-08T20:00:46Z (1788897646626)\n\n**Summary:** 1 committed\n\n## Items committed\n\n- `dismiss-click-evidence-before-guard` (was applied, ``)\n  - **Before:** ...\n  - **After:** ...\n  - **Commit:** https://github.com/judell/bram/commit/4dba1de9812ceb09c8668b7d9e166c49e710436a\n";
@@ -14055,6 +14057,21 @@ mod history_committed_tests {
     #[test]
     fn parser_yields_nothing_for_a_dropped_record() {
         assert!(history_committed_item_ids(DROPPED_RECORD_MD).is_empty());
+    }
+
+    // issue-410: gate SHAs come only from "Items committed". A forge URL
+    // and a bare backticked SHA (no remote) both parse; a cleared row's
+    // commit landed OUTSIDE the Worklist and must never count as a gate SHA.
+    #[test]
+    fn gate_shas_parse_committed_only() {
+        let md = "# Worklist change\n\n**Summary:** 2 committed, 1 cleared\n\n## Items committed\n\n- `a` (was applied, ``)\n  - **Commit:** https://github.com/judell/bram/commit/0A78D0E8823FE62FE30CB49EEEDFC7E15503E8DB\n- `b` (was applied, ``)\n  - **Commit:** `50659d43c8aaab59fa7644e0d651f7b74353a548`\n\n## Items cleared\n\n- `c` (was applied, ``)\n  - **Commit:** `beb0502`\n";
+        assert_eq!(
+            gate_shas_from_history_md(md),
+            vec![
+                "0a78d0e8823fe62fe30cb49eeedfc7e15503e8db".to_string(),
+                "50659d43c8aaab59fa7644e0d651f7b74353a548".to_string(),
+            ]
+        );
     }
 
     // issue-406: a row cleared because its work was committed outside the
@@ -57415,10 +57432,17 @@ fn generate_worklist_changelog<R: tauri::Runtime>(
         out.push('\n');
     }
 
+    // issue-410: without a remote there's no URL, but the entry must still
+    // name the gate commit (the landed check rebuilds its set of Worklist
+    // commits from these lines after a restart), so fall back to the SHA.
     let commit_url = if committed.is_empty() {
         None
     } else {
-        current_head_commit_url(app)
+        current_head_commit_url(app).or_else(|| {
+            git_run(app, &["rev-parse", "HEAD"])
+                .ok()
+                .map(|s| format!("`{}`", s.trim()))
+        })
     };
 
     let emit_removed_section =
@@ -61958,8 +61982,12 @@ fn route_request<R: tauri::Runtime>(
                 // files a commit touched since it began has landed outside
                 // the gate. Only begun, clean items pay for the git log.
                 if !has_changes && item.get("begunAtMs").is_some() {
-                    if let Some((sha, subject)) =
-                        worklist_item_landed(app, item, &file_paths, Some(true))
+                    if let Some(LandedInfo {
+                        sha,
+                        subject,
+                        covered,
+                        planned,
+                    }) = worklist_item_landed(app, item, &file_paths, Some(true))
                     {
                         // Soak signal for #406 phase two: how often work lands
                         // outside the gate. Once per item per process, not per
@@ -61991,6 +62019,8 @@ fn route_request<R: tauri::Runtime>(
                                     "sha": sha,
                                     "short": sha.chars().take(7).collect::<String>(),
                                     "subject": subject,
+                                    "covered": covered,
+                                    "planned": planned,
                                 }),
                             );
                         }
@@ -64156,12 +64186,24 @@ fn handle_worklist_drop_direct<R: tauri::Runtime>(
 // last clause separates landed work from reverted or never-done work, which
 // is also clean but should be Dropped. Returns (sha, subject) of the newest
 // such commit.
+// What the landed check found: the newest commit since the item began that
+// touched its paths and that the Worklist did NOT make itself, plus how many
+// of the item's declared paths such commits touched (plan coverage). Bram can
+// verify files, not the intent of the Before / After, so coverage is
+// reported, never used as a gate.
+struct LandedInfo {
+    sha: String,
+    subject: String,
+    covered: usize,
+    planned: usize,
+}
+
 fn worklist_item_landed<R: tauri::Runtime>(
     app: &AppHandle<R>,
     item: &serde_json::Value,
     paths: &[String],
     known_clean: Option<bool>,
-) -> Option<(String, String)> {
+) -> Option<LandedInfo> {
     if paths.is_empty() {
         return None;
     }
@@ -64177,16 +64219,137 @@ fn worklist_item_landed<R: tauri::Runtime>(
     if !clean {
         return None;
     }
+    // issue-410: every commit since the item began that touched its paths,
+    // newest first, with the files each touched. Commits the Worklist made
+    // (its own gate commits, for this item or a sibling sharing a file)
+    // don't count: they are not work landing outside the Worklist.
     let since = format!("--since=@{}", begun_ms / 1000);
-    let mut args = vec!["log", "-1", "--format=%H%x09%s", since.as_str(), "--"];
+    let mut args = vec![
+        "log",
+        "--format=%x00%H%x09%s",
+        "--name-only",
+        since.as_str(),
+        "--",
+    ];
     args.extend(paths.iter().map(|p| p.as_str()));
     let out = git_run(app, &args).ok()?;
-    let line = out.trim();
-    let (sha, subject) = line.split_once('\t')?;
-    if sha.is_empty() {
-        return None;
+    let mut newest: Option<(String, String)> = None;
+    let mut touched: Vec<String> = Vec::new();
+    for record in out.split('\0').filter(|r| !r.trim().is_empty()) {
+        let mut lines = record.lines();
+        let Some(head) = lines.next() else { continue };
+        let Some((sha, subject)) = head.split_once('\t') else {
+            continue;
+        };
+        if is_gate_sha(app, sha) {
+            continue;
+        }
+        if newest.is_none() {
+            newest = Some((sha.to_string(), subject.to_string()));
+        }
+        touched.extend(
+            lines
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty()),
+        );
     }
-    Some((sha.to_string(), subject.to_string()))
+    let (sha, subject) = newest?;
+    let covered = paths
+        .iter()
+        .filter(|p| {
+            let dir = format!("{}/", p.trim_end_matches('/'));
+            touched.iter().any(|t| t == *p || t.starts_with(&dir))
+        })
+        .count();
+    Some(LandedInfo {
+        sha,
+        subject,
+        covered,
+        planned: paths.len(),
+    })
+}
+
+// issue-410: SHAs of commits the Worklist made through its gate. The commit
+// route adds each one the moment it commits (before the prune, closing the
+// window where a gate commit made its own item look landed). On first use the
+// set is seeded from worklist-history: the **Commit:** lines under
+// "## Items committed" (never "## Items cleared", whose commits landed
+// OUTSIDE the Worklist). A history line may carry a forge URL ending in the
+// SHA, or the SHA itself in backticks when the repo has no remote.
+static GATE_SHAS: OnceLock<Mutex<Option<HashSet<String>>>> = OnceLock::new();
+
+fn gate_shas_cell() -> &'static Mutex<Option<HashSet<String>>> {
+    GATE_SHAS.get_or_init(|| Mutex::new(None))
+}
+
+fn gate_shas_from_history_md(md: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_committed = false;
+    for line in md.lines() {
+        if let Some(heading) = line.strip_prefix("## ") {
+            in_committed = heading.trim() == "Items committed";
+            continue;
+        }
+        if !in_committed {
+            continue;
+        }
+        let Some(rest) = line.trim_start().strip_prefix("- **Commit:**") else {
+            continue;
+        };
+        let tail = rest.trim().trim_matches('`');
+        let candidate = tail.rsplit('/').next().unwrap_or("").trim_matches('`');
+        if candidate.len() >= 7 && candidate.chars().all(|c| c.is_ascii_hexdigit()) {
+            out.push(candidate.to_lowercase());
+        }
+    }
+    out
+}
+
+fn with_gate_shas<R: tauri::Runtime, T>(
+    app: &AppHandle<R>,
+    f: impl FnOnce(&mut HashSet<String>) -> T,
+) -> Option<T> {
+    let mut guard = gate_shas_cell().lock().ok()?;
+    if guard.is_none() {
+        let mut set = HashSet::new();
+        if let Some(dir) = worklist_history_dir(app) {
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.extension().and_then(|e| e.to_str()) != Some("md") {
+                        continue;
+                    }
+                    if let Ok(text) = std::fs::read_to_string(&p) {
+                        set.extend(gate_shas_from_history_md(&text));
+                    }
+                }
+            }
+        }
+        *guard = Some(set);
+    }
+    guard.as_mut().map(f)
+}
+
+fn record_gate_sha<R: tauri::Runtime>(app: &AppHandle<R>, sha: &str) {
+    let sha = sha.trim().to_lowercase();
+    if !sha.is_empty() {
+        with_gate_shas(app, |set| {
+            set.insert(sha);
+        });
+    }
+}
+
+// A full SHA matches a recorded one exactly, or by prefix when history only
+// kept a short form.
+fn is_gate_sha<R: tauri::Runtime>(app: &AppHandle<R>, sha: &str) -> bool {
+    let sha = sha.trim().to_lowercase();
+    with_gate_shas(app, |set| {
+        set.contains(&sha)
+            || set
+                .iter()
+                .any(|g| g.len() < sha.len() && sha.starts_with(g))
+    })
+    .unwrap_or(false)
 }
 
 fn worklist_item_declared_paths(item: &serde_json::Value) -> Vec<String> {
@@ -64280,7 +64443,7 @@ fn handle_worklist_clear_landed<R: tauri::Runtime>(
         };
         let paths = worklist_item_declared_paths(item);
         match worklist_item_landed(app, item, &paths, None) {
-            Some((sha, _)) => cleared.push((id.clone(), sha)),
+            Some(info) => cleared.push((id.clone(), info.sha)),
             None => {
                 refused.push(serde_json::json!({ "id": id, "reason": "not verified as committed" }))
             }
@@ -65586,6 +65749,10 @@ fn handle_worklist_commit<R: tauri::Runtime>(
             );
         }
     }
+    // issue-410: known as the Worklist's own commit from this instant, so the
+    // landed check never reads it as work committed outside the Worklist, even
+    // in the moment before the prune.
+    record_gate_sha(app, &sha);
 
     // issue-366: the universal backstop. Two no-op shapes are equally the
     // lie — HEAD unmoved (the field case: the prior sha recorded as this

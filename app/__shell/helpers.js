@@ -2770,9 +2770,12 @@ window.__bramWorklist2StripTooltip = function (item, claim, items, attributionTo
     return (
       "Committed outside the Worklist in `" + item.landed.short + "`" +
       (item.landed.subject ? ": *" + item.landed.subject + "*" : "") +
-      "\n\nIts files have no uncommitted changes, and this commit touched them " +
-      "after the item began. Clearing the row removes it from the board; " +
-      "the history entry keeps the commit."
+      "\n\nIts files have no uncommitted changes, and commits made outside the " +
+      "Worklist since the item began touched " +
+      (item.landed.planned ? item.landed.covered + " of its " + item.landed.planned + " planned files" : "them") +
+      ". Bram can check files, not whether the item's intent is done, so it " +
+      "can't tell whether the work is finished. If it is, clearing the row " +
+      "removes it from the board; the history entry keeps the commit."
     );
   }
   var split = window.__bramItemChangedSplit(item, items, claim);
@@ -3876,9 +3879,13 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, attribu
   if (item.landed && item.landed.short) {
     // The commit's subject lives in the tooltip, not the strip (Jon: "I
     // don't see what this part of the message is adding").
+    // issue-410: report plan coverage and say what Bram can't tell (Jon: the
+    // earlier wording "does not convey that we don't know if all intended
+    // changes were made"). Files can be checked; the intent can't.
     return withCloses(
       "Committed outside the Worklist in " + item.landed.short +
-        " · Clear it with the button above",
+        window.__bramLandedCoverage(item.landed) +
+        ". Bram can't tell whether the work is finished; if it is, Clear it",
     );
   }
   // Nothing on disk yet, and begun -- the two states the icon now separates.
@@ -13617,6 +13624,12 @@ window.__bramDiffExpanded = function (keys, itemId, path) {
 // issue-406-offer-to-clear-landed-rows: rows whose work landed outside the
 // Worklist, offered for clearing in one click above the board. The host
 // re-verifies each id when the route runs and prunes only landed ones.
+// " · 3 of 4 planned files", or "" when the host sent no counts.
+window.__bramLandedCoverage = function (landed) {
+  if (!landed || !landed.planned) return "";
+  return " · " + landed.covered + " of " + landed.planned + " planned file" +
+    (landed.planned === 1 ? "" : "s");
+};
 window.__bramLandedIds = function (board) {
   return ((board && board.items) || [])
     .filter(function (i) { return i && i.landed; })

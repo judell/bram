@@ -135,6 +135,15 @@ claims must say they are wrong). Record in
 premise that failed, what was verified, and what would make the item
 actionable again.
 
+**Rows whose work was committed outside the Worklist.** When work lands
+through a plain `git commit` (typed in chat, or from a terminal), its row
+reads "Committed outside the Worklist in `<sha>`", and the pane offers
+**Clear it** / **Clear them**. If the user asks you to clear such rows, POST
+`/__worklist/clear-landed` with `{"ids": [...], "via": "agent"}`. The host clears only
+rows it verifies as landed (begun, files clean against `HEAD`, and a commit
+since the item began touched them), and lists any others as refused. Rows
+it refuses still need the user's Drop.
+
 **Drop removes the item, not the bytes — and orphaned changes are
 misattributed, not merely unattributed.** The pane reasons about
 changed files *through items* (the overlap index walks `item.files`,

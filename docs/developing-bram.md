@@ -647,9 +647,12 @@ The starter names are `disjoint-entanglement`, `dependency`,
 duplicate placements — the one membership shape no wild board reliably
 produces; see `docs/attribution-model.md` §4), `reedit-own-lines`
 (one item's file created then re-edited across two claim windows —
-judell/bram#367's double-count shape, kept as its regression fixture), and `multi-file`
+judell/bram#367's double-count shape, kept as its regression fixture), `multi-file`
 (one begun item over five files: two modified, one new, one large diff,
-one listed but untouched, so its files table shows every row state). For example, a focused board is:
+one listed but untouched, so its files table shows every row state), and
+`committed-outside` (judell/bram#406: one row whose work landed through a
+plain `git commit`, and one begun-then-reverted row that must not read as
+landed). For example, a focused board is:
 
 ```sh
 scripts/demo-instance.sh new ordering \

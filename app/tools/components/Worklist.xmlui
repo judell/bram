@@ -388,6 +388,26 @@
       color="$textColor-secondary">
       (no items)
     </Text>
+    <!-- issue-406-offer-to-clear-landed-rows: rows whose work was committed
+         outside the Worklist, offered for clearing in one click. The host
+         re-verifies each (POST /__worklist/clear-landed) and prunes only
+         those; the board refetches on worklist-changed. The rows it would
+         clear are tinted whenever the offer shows (Jon: "we need a stronger
+         indication of which row or rows apply"; then "we should not be
+         relying on hovering the button"). Peer for the binding:
+         Context.xmlui's warn-100 / transparent backgroundColor. -->
+    <HStack
+      when="{!!window.__bramLandedNote(worklist.value)}"
+      gap="$space-2"
+      verticalAlignment="center">
+      <Text color="$textColor-secondary" value="{window.__bramLandedNote(worklist.value)}" />
+      <Button
+        label="{window.__bramLandedButtonLabel(worklist.value)}"
+        variant="outlined"
+        size="xs"
+        tooltip="{window.__bramLandedButtonTooltip(worklist.value)}"
+        onClick="window.__bramClearLanded(worklist.value)" />
+    </HStack>
     <!-- worklist-drag-reorder-and-link-labels: drag the ⋮⋮ grip to reorder.
          DndItems is the vendored xmlui-dnd-list extension the Queue uses
          (dce8049); it keys rows by item id, so a row's checkbox and
@@ -409,6 +429,7 @@
       <VStack
         gap="$space-1"
         paddingBottom="$space-2"
+        backgroundColor="{window.__bramLandedRowTint($item)}"
         testId="worklist-row-{$item.id}">
         <!-- worklist2-remove-expander-chrome: no indicator glyphs (History's
              chrome-free section headers are the precedent); the header line

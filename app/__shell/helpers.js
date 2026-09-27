@@ -2763,6 +2763,18 @@ window.__bramItemChangedSplit = function (item, items, claim, coSelected) {
 // The shared paths behind the strip's counts. Filenames only -- the row
 // stays a scan line and the paths are one hover away.
 window.__bramWorklist2StripTooltip = function (item, claim, items, attributionTotals) {
+  // issue-406: which commit took the work, by its subject (a bare SHA
+  // doesn't say whether it's the right one), and why the row counts as
+  // landed.
+  if (item && item.landed && item.landed.short) {
+    return (
+      "Committed outside the Worklist in `" + item.landed.short + "`" +
+      (item.landed.subject ? ": *" + item.landed.subject + "*" : "") +
+      "\n\nIts files have no uncommitted changes, and this commit touched them " +
+      "after the item began. Clearing the row removes it from the board; " +
+      "the history entry keeps the commit."
+    );
+  }
   var split = window.__bramItemChangedSplit(item, items, claim);
   // For a committable row, the terse label dropped the on-disk total, the
   // shared paths, the plan denominator and the last-change time; the tooltip
@@ -3856,6 +3868,18 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, attribu
     // press a button that is already sitting in the footer, labelled -- the
     // strip's job is to name where the item IS, not to narrate the next click.
     return withCloses("Proposed");
+  }
+  // issue-406: its work was committed outside the Worklist (a plain git
+  // commit in chat or a terminal). The host sets `landed` only for a begun
+  // item whose files are clean and were touched by a commit since it began,
+  // so this must win over "nothing came of it", which would misstate it.
+  if (item.landed && item.landed.short) {
+    // The commit's subject lives in the tooltip, not the strip (Jon: "I
+    // don't see what this part of the message is adding").
+    return withCloses(
+      "Committed outside the Worklist in " + item.landed.short +
+        " · Clear it with the button above",
+    );
   }
   // Nothing on disk yet, and begun -- the two states the icon now separates.
   // Earlier this returned "" (brief, because begun-ness was transient), then
@@ -5953,6 +5977,9 @@ window.__bramHistoryDateRangeLine = function (group) {
 window.__bramHistoryPhaseLabel = function (phase) {
   if (phase && phase.kind === "feedback") return "Feedback";
   var summary = ((phase && phase.summary) || "").toLowerCase();
+  // issue-406: a row cleared because its work was committed outside the
+  // Worklist. Checked first: it isn't a gate commit.
+  if (summary.indexOf("cleared") >= 0) return "Cleared";
   if (summary.indexOf("committed") >= 0) return "Committed";
   if (summary.indexOf("applied") >= 0) return "Applied";
   if (summary.indexOf("proposed") >= 0) return "Proposed";
@@ -5976,7 +6003,7 @@ window.__bramHistoryCommitUrl = function (group) {
     var phase = phases[i] || {};
     var summary = (phase.summary || "").toLowerCase();
     var url = typeof phase.commitUrl === "string" ? phase.commitUrl.trim() : "";
-    if (url && summary.indexOf("committed") >= 0) return url;
+    if (url && (summary.indexOf("committed") >= 0 || summary.indexOf("cleared") >= 0)) return url;
   }
   return "";
 };
@@ -5991,7 +6018,7 @@ window.__bramHistoryCommitStatus = function (group) {
     var phase = phases[i] || {};
     var summary = (phase.summary || "").toLowerCase();
     var st = typeof phase.commitStatus === "string" ? phase.commitStatus : "";
-    if (st && summary.indexOf("committed") >= 0) return st;
+    if (st && (summary.indexOf("committed") >= 0 || summary.indexOf("cleared") >= 0)) return st;
   }
   return "";
 };
@@ -6044,6 +6071,7 @@ window.__bramHistoryItemFate = function (group) {
   var phases = (group && group.phases) || [];
   for (var i = phases.length - 1; i >= 0; i--) {
     var summary = ((phases[i] && phases[i].summary) || "").toLowerCase();
+    if (summary.indexOf("cleared") >= 0) return "Fate: cleared (its work was committed outside the Worklist).";
     if (summary.indexOf("committed") >= 0) return "Fate: committed.";
     if (summary.indexOf("dropped") >= 0 || summary.indexOf("pruned") >= 0) return "Fate: dropped.";
   }
@@ -13586,6 +13614,48 @@ window.__bramDiffExpanded = function (keys, itemId, path) {
 // hiding the unexpanded rows"). Clicking its triangle again closes the
 // diff and brings the rest back. The note says rows are hidden, so the missing
 // files don't read as gone.
+// issue-406-offer-to-clear-landed-rows: rows whose work landed outside the
+// Worklist, offered for clearing in one click above the board. The host
+// re-verifies each id when the route runs and prunes only landed ones.
+window.__bramLandedIds = function (board) {
+  return ((board && board.items) || [])
+    .filter(function (i) { return i && i.landed; })
+    .map(function (i) { return i.id; });
+};
+window.__bramLandedNote = function (board) {
+  var n = window.__bramLandedIds(board).length;
+  if (!n) return "";
+  return n === 1
+    ? "1 item looks already committed"
+    : n + " items look already committed";
+};
+// Landed rows are tinted whenever they're on the board, which is exactly
+// when the "Clear it" / "Clear them" offer shows: the tint says which rows
+// the button would clear. Warn-tinted because clearing removes rows.
+window.__bramLandedRowTint = function (item) {
+  return item && item.landed ? "$color-warn-100" : "transparent";
+};
+// The button and its tooltip agree in number with the note beside them.
+window.__bramLandedButtonLabel = function (board) {
+  return window.__bramLandedIds(board).length === 1 ? "Clear it" : "Clear them";
+};
+window.__bramLandedButtonTooltip = function (board) {
+  return window.__bramLandedIds(board).length === 1
+    ? "Remove this row: its work is already in a commit"
+    : "Remove these rows: their work is already in a commit";
+};
+window.__bramClearLanded = function (board) {
+  var ids = window.__bramLandedIds(board);
+  if (!ids.length) return;
+  window
+    .fetch("/__worklist/clear-landed", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: ids, via: "pane" }),
+    })
+    .catch(function () {});
+};
+
 // worklist-drag-reorder-and-link-labels: the Worklist rows' drag order.
 // __bramWorklistReorder posts the dropped order to the host and returns a
 // pending record the markup holds; __bramWorklistOrdered shows the board in

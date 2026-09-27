@@ -13918,7 +13918,10 @@ fn history_committed_item_ids(md: &str) -> Vec<String> {
     let mut in_section = false;
     for line in md.lines() {
         if let Some(heading) = line.strip_prefix("## ") {
-            in_section = heading.trim() == "Items committed";
+            // Cleared rows (issue-406) landed in a commit too, just outside
+            // the Worklist, so they count as committed work here.
+            let h = heading.trim();
+            in_section = h == "Items committed" || h == "Items cleared";
             continue;
         }
         if !in_section {
@@ -14052,6 +14055,17 @@ mod history_committed_tests {
     #[test]
     fn parser_yields_nothing_for_a_dropped_record() {
         assert!(history_committed_item_ids(DROPPED_RECORD_MD).is_empty());
+    }
+
+    // issue-406: a row cleared because its work was committed outside the
+    // Worklist lands in its own section, and still counts as committed work.
+    #[test]
+    fn parser_counts_a_cleared_record_as_committed() {
+        let md = "# Worklist change\n\n**Summary:** 1 cleared\n\n## Items cleared\n\n- `committed-outside-landed` (was applied, ``)\n  - **Commit:** `beb0502`\n";
+        assert_eq!(
+            history_committed_item_ids(md),
+            vec!["committed-outside-landed".to_string()]
+        );
     }
 
     // Field case (#264): a snapshot whose only worklist-history record for
@@ -57252,6 +57266,28 @@ fn generate_worklist_changelog<R: tauri::Runtime>(
 
     let mut committed: Vec<&serde_json::Value> = Vec::new();
     let mut dropped: Vec<&serde_json::Value> = Vec::new();
+    // Rows cleared as landed (issue-406): their work is in a commit, but it
+    // went in outside the Worklist, so they get their own section and label
+    // ("Cleared", Jon's word) rather than reading as gate commits.
+    let mut cleared: Vec<&serde_json::Value> = Vec::new();
+    // Landing commits recorded by /__worklist/clear-landed, taken (consumed)
+    // for the ids this transition removed.
+    let landed_shas: HashMap<String, String> = match landed_clears_cell().lock() {
+        Ok(mut map) => prior_items
+            .iter()
+            .filter_map(|i| worklist_item_id(i))
+            .filter(|id| !current_by_id.contains_key(id))
+            .filter_map(|id| map.remove(&id).map(|sha| (id, sha)))
+            .collect(),
+        Err(_) => HashMap::new(),
+    };
+    if !landed_shas.is_empty() {
+        append_bram_trace_line(
+            app,
+            "worklist-history",
+            &format!("op=changelog landed_shas={}", landed_shas.len()),
+        );
+    }
     for item in &prior_items {
         let id = match worklist_item_id(item) {
             Some(id) => id,
@@ -57276,6 +57312,12 @@ fn generate_worklist_changelog<R: tauri::Runtime>(
         //   4. else → skip silently; the policy hook would have reverted any
         //      other case before the watcher saw it.
         let prior_status = worklist_item_status(item).to_string();
+        // issue-406: rows cleared as landed, whatever their status, linked
+        // below to their own landing commit.
+        if landed_shas.contains_key(&id) {
+            cleared.push(item);
+            continue;
+        }
         if prior_status == "applied" {
             committed.push(item);
             continue;
@@ -57302,6 +57344,7 @@ fn generate_worklist_changelog<R: tauri::Runtime>(
         && proposed.is_empty()
         && applied.is_empty()
         && committed.is_empty()
+        && cleared.is_empty()
         && dropped.is_empty()
     {
         return None;
@@ -57322,6 +57365,9 @@ fn generate_worklist_changelog<R: tauri::Runtime>(
     }
     if !committed.is_empty() {
         tallies.push(format!("{} committed", committed.len()));
+    }
+    if !cleared.is_empty() {
+        tallies.push(format!("{} cleared", cleared.len()));
     }
     if !dropped.is_empty() {
         tallies.push(format!("{} dropped", dropped.len()));
@@ -57397,7 +57443,14 @@ fn generate_worklist_changelog<R: tauri::Runtime>(
                 if !after.is_empty() {
                     out.push_str(&format!("  - **After:** {}\n", after.replace('\n', " ")));
                 }
-                if let Some(url) = commit_url {
+                // A landed row always names its commit: the forge URL when
+                // there's a remote, else the short SHA (a local-only repo
+                // would otherwise lose which commit it landed in).
+                let landed = landed_shas.get(&id).map(|sha| {
+                    commit_url_for_sha(app, sha)
+                        .unwrap_or_else(|| format!("`{}`", sha.chars().take(7).collect::<String>()))
+                });
+                if let Some(url) = landed.as_deref().or(commit_url) {
                     out.push_str(&format!("  - **Commit:** {}\n", url));
                 }
             }
@@ -57409,6 +57462,7 @@ fn generate_worklist_changelog<R: tauri::Runtime>(
         &committed,
         commit_url.as_deref(),
     );
+    emit_removed_section(&mut out, "Items cleared", &cleared, None);
     emit_removed_section(&mut out, "Items dropped", &dropped, None);
 
     // Trailing-newline padding kept from the legacy bottom of the function.
@@ -57824,6 +57878,7 @@ fn worklist_history_changelog_items(
             "## Items proposed" => String::from("proposed"),
             "## Items applied" => String::from("applied"),
             "## Items committed" => String::from("committed"),
+            "## Items cleared" => String::from("cleared"),
             "## Items dropped" => String::from("dropped"),
             "## Items feedback" => String::from("feedback"),
             _ => section_kind,
@@ -61899,6 +61954,48 @@ fn route_request<R: tauri::Runtime>(
                         obj.insert("changeSummary".to_string(), summary);
                     }
                 }
+                // issue-406: a begun item with nothing left to commit whose
+                // files a commit touched since it began has landed outside
+                // the gate. Only begun, clean items pay for the git log.
+                if !has_changes && item.get("begunAtMs").is_some() {
+                    if let Some((sha, subject)) =
+                        worklist_item_landed(app, item, &file_paths, Some(true))
+                    {
+                        // Soak signal for #406 phase two: how often work lands
+                        // outside the gate. Once per item per process, not per
+                        // serve (the board is served many times a minute).
+                        let id = item
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let first_sighting = landed_seen_cell()
+                            .lock()
+                            .map(|mut seen| seen.insert(id.clone()))
+                            .unwrap_or(false);
+                        if first_sighting {
+                            append_bram_trace_line(
+                                app,
+                                "worklist",
+                                &format!(
+                                    "op=landed-detected id={} sha={}",
+                                    id,
+                                    sha.chars().take(7).collect::<String>()
+                                ),
+                            );
+                        }
+                        if let Some(obj) = item.as_object_mut() {
+                            obj.insert(
+                                "landed".to_string(),
+                                serde_json::json!({
+                                    "sha": sha,
+                                    "short": sha.chars().take(7).collect::<String>(),
+                                    "subject": subject,
+                                }),
+                            );
+                        }
+                    }
+                }
                 // rung2-diff-by-disk-state: evidence follows disk, not
                 // status. Any item whose files carry uncommitted changes
                 // gets its diff — a proposed item with work on disk (the
@@ -64049,6 +64146,224 @@ fn handle_worklist_drop_direct<R: tauri::Runtime>(
         200,
         "application/json; charset=utf-8",
         format!("{{\"ok\":true,\"pruned\":{}}}", serde_json::json!(ids)).into_bytes(),
+    )
+}
+
+// issue-406-offer-to-clear-landed-rows: work committed outside the gate (a
+// plain `git commit` in chat or a terminal) leaves its rows on the board with
+// nothing to commit. An item has LANDED when it has begun, every declared path
+// is clean against HEAD, and a commit since it began touched one of them. The
+// last clause separates landed work from reverted or never-done work, which
+// is also clean but should be Dropped. Returns (sha, subject) of the newest
+// such commit.
+fn worklist_item_landed<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    item: &serde_json::Value,
+    paths: &[String],
+    known_clean: Option<bool>,
+) -> Option<(String, String)> {
+    if paths.is_empty() {
+        return None;
+    }
+    let begun_ms = item.get("begunAtMs").and_then(|v| v.as_i64())?;
+    let clean = match known_clean {
+        Some(c) => c,
+        None => {
+            let mut args = vec!["status", "--porcelain", "--"];
+            args.extend(paths.iter().map(|p| p.as_str()));
+            git_run(app, &args).ok()?.trim().is_empty()
+        }
+    };
+    if !clean {
+        return None;
+    }
+    let since = format!("--since=@{}", begun_ms / 1000);
+    let mut args = vec!["log", "-1", "--format=%H%x09%s", since.as_str(), "--"];
+    args.extend(paths.iter().map(|p| p.as_str()));
+    let out = git_run(app, &args).ok()?;
+    let line = out.trim();
+    let (sha, subject) = line.split_once('\t')?;
+    if sha.is_empty() {
+        return None;
+    }
+    Some((sha.to_string(), subject.to_string()))
+}
+
+fn worklist_item_declared_paths(item: &serde_json::Value) -> Vec<String> {
+    let mut paths = worklist_json_ids(item, "files");
+    if paths.is_empty() {
+        if let Some(f) = item.get("file").and_then(|v| v.as_str()) {
+            paths.push(f.to_string());
+        }
+    }
+    paths
+}
+
+fn commit_url_for_sha<R: tauri::Runtime>(app: &AppHandle<R>, sha: &str) -> Option<String> {
+    let remote_url = git_run(app, &["remote", "get-url", "origin"]).ok()?;
+    let html_base = remote_to_html(remote_url.trim());
+    if html_base.is_empty() || sha.is_empty() {
+        return None;
+    }
+    Some(format!("{}/commit/{}", html_base, sha))
+}
+
+// Ids cleared as landed, with their landing commit, handed to the history
+// changelog so they read as committed, linked to their own commit rather
+// than whatever HEAD is when the watcher runs.
+static LANDED_CLEARS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+fn landed_clears_cell() -> &'static Mutex<HashMap<String, String>> {
+    LANDED_CLEARS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+// Items already traced as landed this process (op=landed-detected fires once).
+static LANDED_SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn landed_seen_cell() -> &'static Mutex<HashSet<String>> {
+    LANDED_SEEN.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+// POST /__worklist/clear-landed {ids}: prune the rows the host can verify
+// have landed. No Drop authorization, because the host re-verifies each id
+// at call time and prunes nothing else; the pane's "Clear them" button and an
+// agent asked in chat ("clear those") both use it. Ids that aren't landed are
+// refused and listed.
+fn handle_worklist_clear_landed<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    body: &[u8],
+) -> (u16, &'static str, Vec<u8>) {
+    let _mutate_guard = worklist_mutate_cell().lock();
+    let req: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return worklist_json_error(400, format!("invalid JSON: {}", e)),
+    };
+    let ids = worklist_json_ids(&req, "ids");
+    if ids.is_empty() {
+        return worklist_json_error(400, "ids[] required");
+    }
+    // Who asked: "pane" (the Clear button) or "agent" (asked in chat). The
+    // chat share is the #406 phase-two demand signal.
+    let via: String = req
+        .get("via")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unspecified")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .take(16)
+        .collect();
+    let wl_path = match worklist_file(app) {
+        Some(p) => p,
+        None => return worklist_json_error(500, "no project root"),
+    };
+    let mut wl: serde_json::Value = match std::fs::read_to_string(&wl_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+    {
+        Some(v) => v,
+        None => return worklist_json_error(500, "worklist unreadable"),
+    };
+    let items = wl
+        .get("items")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut cleared: Vec<(String, String)> = Vec::new();
+    let mut refused: Vec<serde_json::Value> = Vec::new();
+    for id in &ids {
+        let item = items
+            .iter()
+            .find(|i| i.get("id").and_then(|v| v.as_str()) == Some(id.as_str()));
+        let Some(item) = item else {
+            refused.push(serde_json::json!({ "id": id, "reason": "not on the board" }));
+            continue;
+        };
+        let paths = worklist_item_declared_paths(item);
+        match worklist_item_landed(app, item, &paths, None) {
+            Some((sha, _)) => cleared.push((id.clone(), sha)),
+            None => {
+                refused.push(serde_json::json!({ "id": id, "reason": "not verified as committed" }))
+            }
+        }
+    }
+    if cleared.is_empty() {
+        append_bram_trace_line(
+            app,
+            "worklist",
+            &format!(
+                "op=clear-landed via={} cleared=0 refused={}",
+                via,
+                refused.len()
+            ),
+        );
+        return (
+            409,
+            "application/json; charset=utf-8",
+            serde_json::json!({ "ok": false, "cleared": [], "refused": refused })
+                .to_string()
+                .into_bytes(),
+        );
+    }
+    let cleared_ids: Vec<String> = cleared.iter().map(|(id, _)| id.clone()).collect();
+    let remaining: Vec<serde_json::Value> = items
+        .into_iter()
+        .filter(|i| {
+            i.get("id")
+                .and_then(|v| v.as_str())
+                .map(|id| !cleared_ids.iter().any(|c| c == id))
+                .unwrap_or(true)
+        })
+        .collect();
+    let prior_version = worklist_version_from_doc(&wl);
+    if let Some(obj) = wl.as_object_mut() {
+        obj.insert("items".to_string(), serde_json::Value::Array(remaining));
+        obj.insert(
+            "version".to_string(),
+            serde_json::Value::from(prior_version + 1),
+        );
+    }
+    if let Ok(mut map) = landed_clears_cell().lock() {
+        for (id, sha) in &cleared {
+            map.insert(id.clone(), sha.clone());
+        }
+    }
+    let on_disk = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&wl).unwrap_or_default()
+    );
+    let prior_cache = match last_worklist_cell().lock() {
+        Ok(mut guard) => guard.replace(on_disk.clone()),
+        Err(_) => None,
+    };
+    if let Err(e) = std::fs::write(&wl_path, &on_disk) {
+        if let Ok(mut guard) = last_worklist_cell().lock() {
+            *guard = prior_cache;
+        }
+        return worklist_json_error(500, format!("write failed: {}", e));
+    }
+    prune_claim_intervals(app);
+    append_bram_trace_line(
+        app,
+        "worklist",
+        &format!(
+            "op=clear-landed via={} cleared={} refused={} ids={}",
+            via,
+            cleared.len(),
+            refused.len(),
+            cleared_ids.join(",")
+        ),
+    );
+    emit_replayable_signal(app, "worklist-changed");
+    (
+        200,
+        "application/json; charset=utf-8",
+        serde_json::json!({
+            "ok": true,
+            "cleared": cleared.iter().map(|(id, sha)| serde_json::json!({ "id": id, "sha": sha })).collect::<Vec<_>>(),
+            "refused": refused,
+        })
+        .to_string()
+        .into_bytes(),
     )
 }
 
@@ -68155,6 +68470,14 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             let mut buf = Vec::new();
             let _ = request.as_reader().read_to_end(&mut buf);
             handle_worklist_drop_direct(app, &buf)
+        }
+    } else if path == "__worklist/clear-landed" {
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            let mut buf = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut buf);
+            handle_worklist_clear_landed(app, &buf)
         }
     } else if path == "__worklist/reorder" {
         if method != "POST" {

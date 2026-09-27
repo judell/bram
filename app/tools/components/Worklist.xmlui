@@ -1,6 +1,7 @@
 <Component
   name="Worklist"
   var.expandedKeys="{window.__bramRestoreWorklist2Expansion($queryParams.expand)}"
+  var.worklistPendingOrder="{null}"
   var.diffKeys="{[]}"
   var.diffScopes="{{}}"
   var.hunkNavKeys="{{}}"
@@ -387,7 +388,17 @@
       color="$textColor-secondary">
       (no items)
     </Text>
-    <Items data="{worklist.value &amp;&amp; worklist.value.items ? worklist.value.items : []}">
+    <!-- worklist-drag-reorder-and-link-labels: drag the ⋮⋮ grip to reorder.
+         DndItems is the vendored xmlui-dnd-list extension the Queue uses
+         (dce8049); it keys rows by item id, so a row's checkbox and
+         expansion follow its item through a drag. The host persists the
+         order (POST /__worklist/reorder). Until the board refetches,
+         worklistPendingOrder holds the dropped order so the row doesn't
+         snap back; it's ignored once the board's version moves on. -->
+    <DndItems
+      data="{window.__bramWorklistOrdered(worklist.value, worklistPendingOrder)}"
+      dragHandle="true"
+      onReorder="(newOrder) => worklistPendingOrder = window.__bramWorklistReorder(newOrder, worklist.value)">
       <!-- Row separation (review 2026-08-20): breathing room between
            items, which matters most when rows are expanded. Tightened
            2026-08-24 from $space-4 to $space-2 — with the stage glyph column
@@ -507,8 +518,14 @@
                L449) always pointed to; the earlier attempt's two-line-id
                regression is avoided by maxLines=1 + ellipsis truncation, with
                the full id recoverable in the tooltip it already carries. -->
-          <Text
-            value="{$item.id}"
+          <!-- The id reads as a link (Jon: "render the labels to look like
+               links"), so the row invites the click that expands it. No
+               onClick here: the enclosing HStack already flips expansion,
+               and a second handler would flip it back. Peer: the Link
+               toggle in Commits.xmlui.
+               https://www.xmlui.org/docs/reference/components/Link -->
+          <Link
+            label="{$item.id}"
             tooltip="{$item.id}"
             width="17rem"
             maxLines="1"
@@ -995,7 +1012,7 @@
                as information, not a control. -->
         </VStack>
       </VStack>
-    </Items>
+    </DndItems>
     <!-- worklist2-batch-selection (as clarified): ONE control row serves
          one or several — the Iterate-N principle applied to every verb.
          Appears when anything is ticked; the message is about the set and

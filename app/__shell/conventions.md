@@ -227,6 +227,10 @@ read and capture `version`; write with `version: <captured + 1>`; on a
 the new contents, and retry. A file with no `version` is version 0, and
 the first write introducing `version: 1` is allowed.
 
+**Item order is the user's.** The user reorders the Worklist by dragging,
+and Bram saves that order in `worklist.json`. When you write the file,
+keep the items in the order you read them, and add new items at the end.
+
 **Prose lives only in the draft file.** Both guards reject inline
 `before` / `after` keys in `worklist.json`. Prose edits made in response to item
 feedback go to the draft; `worklist.json` changes only when metadata (`files`,

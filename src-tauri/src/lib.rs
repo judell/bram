@@ -64052,6 +64052,129 @@ fn handle_worklist_drop_direct<R: tauri::Runtime>(
     )
 }
 
+// worklist-drag-reorder-and-link-labels: the pane's drag-to-reorder. Order
+// is the user's arrangement and changes no item's content or lifecycle, so it
+// needs no authorization -- but the id set must match exactly, so a reorder
+// can never add or prune an item, and `baseVersion` must match disk, so a drag
+// built on a stale board can't overwrite an agent's concurrent write (409;
+// the pane refetches). Same mutex, version bump and watcher-cache claim as
+// handle_worklist_mutate.
+fn handle_worklist_reorder<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    body: &[u8],
+) -> (u16, &'static str, Vec<u8>) {
+    let _mutate_guard = worklist_mutate_cell().lock();
+    let req: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return worklist_json_error(400, format!("invalid JSON: {}", e)),
+    };
+    let ids = worklist_json_ids(&req, "ids");
+    let base_version = req.get("baseVersion").and_then(|v| v.as_i64());
+    let wl_path = match worklist_file(app) {
+        Some(p) => p,
+        None => return worklist_json_error(500, "no project root"),
+    };
+    let mut wl: serde_json::Value = match std::fs::read_to_string(&wl_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+    {
+        Some(v) => v,
+        None => return worklist_json_error(500, "worklist unreadable"),
+    };
+    let prior_version = worklist_version_from_doc(&wl);
+    if base_version != Some(prior_version) {
+        append_bram_trace_line(
+            app,
+            "worklist",
+            &format!(
+                "op=reorder refused=stale-version base={:?} disk={}",
+                base_version, prior_version
+            ),
+        );
+        emit_replayable_signal(app, "worklist-changed");
+        return worklist_json_error(409, "stale worklist version; refetch and retry");
+    }
+    let items = match wl.get("items").and_then(|v| v.as_array()) {
+        Some(arr) => arr.clone(),
+        None => return worklist_json_error(500, "worklist has no items"),
+    };
+    let current: Vec<String> = items
+        .iter()
+        .filter_map(|i| i.get("id").and_then(|v| v.as_str()).map(String::from))
+        .collect();
+    let mut want = ids.clone();
+    let mut have = current.clone();
+    want.sort();
+    have.sort();
+    if want != have || ids.len() != items.len() {
+        append_bram_trace_line(
+            app,
+            "worklist",
+            &format!(
+                "op=reorder refused=id-mismatch sent={} current={}",
+                ids.len(),
+                current.len()
+            ),
+        );
+        emit_replayable_signal(app, "worklist-changed");
+        return worklist_json_error(409, "ids must be exactly the current items");
+    }
+    if ids == current {
+        return (
+            200,
+            "application/json; charset=utf-8",
+            br#"{"ok":true,"changed":false}"#.to_vec(),
+        );
+    }
+    let reordered: Vec<serde_json::Value> = ids
+        .iter()
+        .filter_map(|id| {
+            items
+                .iter()
+                .find(|i| i.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
+                .cloned()
+        })
+        .collect();
+    if let Some(obj) = wl.as_object_mut() {
+        obj.insert("items".to_string(), serde_json::Value::Array(reordered));
+        obj.insert(
+            "version".to_string(),
+            serde_json::Value::from(prior_version + 1),
+        );
+    }
+    let on_disk = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&wl).unwrap_or_default()
+    );
+    let prior_cache = match last_worklist_cell().lock() {
+        Ok(mut guard) => guard.replace(on_disk.clone()),
+        Err(_) => None,
+    };
+    if let Err(e) = std::fs::write(&wl_path, &on_disk) {
+        if let Ok(mut guard) = last_worklist_cell().lock() {
+            *guard = prior_cache;
+        }
+        return worklist_json_error(500, format!("write failed: {}", e));
+    }
+    append_bram_trace_line(
+        app,
+        "worklist",
+        &format!(
+            "op=reorder count={} version={}",
+            ids.len(),
+            prior_version + 1
+        ),
+    );
+    emit_replayable_signal(app, "worklist-changed");
+    (
+        200,
+        "application/json; charset=utf-8",
+        serde_json::json!({ "ok": true, "changed": true, "version": prior_version + 1 })
+            .to_string()
+            .into_bytes(),
+    )
+}
+
 fn handle_worklist_mutate<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
@@ -68032,6 +68155,14 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             let mut buf = Vec::new();
             let _ = request.as_reader().read_to_end(&mut buf);
             handle_worklist_drop_direct(app, &buf)
+        }
+    } else if path == "__worklist/reorder" {
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            let mut buf = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut buf);
+            handle_worklist_reorder(app, &buf)
         }
     } else if path == "__worklist/commit" {
         if method != "POST" {

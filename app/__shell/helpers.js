@@ -13586,6 +13586,36 @@ window.__bramDiffExpanded = function (keys, itemId, path) {
 // hiding the unexpanded rows"). Clicking its triangle again closes the
 // diff and brings the rest back. The note says rows are hidden, so the missing
 // files don't read as gone.
+// worklist-drag-reorder-and-link-labels: the Worklist rows' drag order.
+// __bramWorklistReorder posts the dropped order to the host and returns a
+// pending record the markup holds; __bramWorklistOrdered shows the board in
+// that order until the host's write lands (the board's version moves past
+// baseVersion) or the host refuses it (failed, set by the fetch below; the
+// host also emits worklist-changed on a refusal, so the board refetches
+// and this re-evaluates). Rows are matched by id, never by position.
+window.__bramWorklistReorder = function (newOrder, board) {
+  var ids = (newOrder || []).map(function (i) { return i && i.id; }).filter(Boolean);
+  var pending = { ids: ids, baseVersion: board && board.version, failed: false };
+  window
+    .fetch("/__worklist/reorder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: ids, baseVersion: pending.baseVersion }),
+    })
+    .then(function (r) { if (!r.ok) pending.failed = true; })
+    .catch(function () { pending.failed = true; });
+  return pending;
+};
+window.__bramWorklistOrdered = function (board, pending) {
+  var items = (board && board.items) || [];
+  if (!pending || pending.failed || !board || board.version !== pending.baseVersion) return items;
+  if (pending.ids.length !== items.length) return items;
+  var byId = {};
+  items.forEach(function (i) { byId[i.id] = i; });
+  var out = pending.ids.map(function (id) { return byId[id]; });
+  return out.every(Boolean) ? out : items;
+};
+
 window.__bramFilesTableRows = function (files, keys, itemId) {
   var all = files || [];
   var open = all.filter(function (f) {

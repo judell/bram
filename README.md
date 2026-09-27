@@ -2,7 +2,7 @@
 
 ## What is it?
 
-A desktop app that wraps Claude Code and Codex in a GUI and embeds them in a structured, audited, and search-enabled workflow that connects to GitHub or GitLab.
+Bram is a desktop app that embeds Claude Code and/or Codex. It makes agentic software development legible, orderly, accountable, and collaborative. 
 
 ## Why the name?
 

@@ -542,6 +542,39 @@ fn authority_menu_hook(
             started.elapsed().as_millis()
         ),
     );
+    // addressed-turn-edits-stay-in-item-files: after a file-tool edit, tell
+    // the agent when the target isn't among the addressed items' files.
+    // PostToolUse additionalContext is the documented channel to the model
+    // (https://code.claude.com/docs/en/agent-sdk/hooks) and for Codex, where
+    // it is "added as extra developer context"
+    // (https://learn.chatgpt.com/docs/hooks). Codex's file edit is
+    // apply_patch, also matched as Edit / Write. Still exit 0: this hook
+    // never gates.
+    let advisory = if event != "PostToolUse" {
+        None
+    } else if provider == "claude-rs"
+        && matches!(
+            tool.as_str(),
+            "Edit" | "Write" | "MultiEdit" | "NotebookEdit"
+        )
+    {
+        crate::guard_policy::addressed_turn_advisory(payload)
+    } else if provider == "codex-rs" && matches!(tool.as_str(), "apply_patch" | "Edit" | "Write") {
+        crate::guard_policy::codex_addressed_turn_advisory(payload)
+    } else {
+        None
+    };
+    {
+        if let Some(msg) = advisory {
+            let out = serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": msg,
+                }
+            });
+            println!("{}", out);
+        }
+    }
     0
 }
 

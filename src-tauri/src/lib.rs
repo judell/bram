@@ -17908,6 +17908,38 @@ fn emit_turn_context<R: tauri::Runtime>(app: &AppHandle<R>, ids: &[String], kind
     }
 }
 
+// addressed-turn-edits-stay-in-item-files: the JSONL turn-end detector can
+// fire on the PRIOR turn's end_turn record still in the rolling tail, right
+// after a new turn is submitted (the new user message moves the file's mtime).
+// The inflight claim already refuses that clear when it is under 2 s old
+// ("fresh-sentinel"); the addressed-turn context didn't, so an addressed
+// turn's context was erased ~0.5 s in (2026-09-27 07:27:07.776 set, 08.280
+// cleared), blinding the #368 observer and the addressed-turn advisory for
+// the whole turn. Same 2 s guard here.
+fn end_turn_context_unless_fresh<R: tauri::Runtime>(app: &AppHandle<R>, source: &str) {
+    let set_at_ms = project_root(Some(app))
+        .and_then(|root| std::fs::read_to_string(root.join(TURN_CONTEXT_REL)).ok())
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("atMs").and_then(|t| t.as_i64()));
+    if let Some(at) = set_at_ms {
+        let age_ms = unix_now_ms().saturating_sub(at);
+        if age_ms < 2000 {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "turn-context",
+                    &format!(
+                        "op=skip-clear source={} reason=fresh-context age_ms={}",
+                        source, age_ms
+                    ),
+                );
+            }
+            return;
+        }
+    }
+    emit_turn_context(app, &[], "turn-end");
+}
+
 /// Stamp the submitted turn's addressing. Prefix parse mirrors
 /// record_prefixed_inflight_sentinel's tolerance: a malformed payload is a
 /// general turn, never an error.
@@ -49366,7 +49398,7 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
                     // independent of whether an inflight claim exists.
                     clear_proposing_flag(app, "turn-finished");
                     // issue-368: the addressed-turn window ends with the turn.
-                    emit_turn_context(app, &[], "turn-end");
+                    end_turn_context_unless_fresh(app, "jsonl-turn-end");
                 }
             }
             JsonlCompletionProvider::Codex => {
@@ -49380,7 +49412,7 @@ fn check_jsonl_for_turn_end<R: tauri::Runtime>(app: &AppHandle<R>, path: &std::p
                 agent_status_emit_finished(app, provider_label, None, None, "jsonl-end-turn");
                 clear_proposing_flag(app, "turn-finished");
                 // issue-368: the addressed-turn window ends with the turn.
-                emit_turn_context(app, &[], "turn-end");
+                end_turn_context_unless_fresh(app, "jsonl-turn-end");
             }
         }
     }

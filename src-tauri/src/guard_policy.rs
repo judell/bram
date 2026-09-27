@@ -2634,6 +2634,88 @@ fn turn_context_addressed_ids(project_root: &Path) -> Option<Vec<String>> {
     )
 }
 
+// addressed-turn-edits-stay-in-item-files: after a file tool edits a path the
+// items this turn is addressed to don't declare, tell the AGENT (the #368
+// breadcrumb only reaches hook-events.log). Lines written in an addressed turn
+// are credited to the addressed items, so a misrouted edit gets committed
+// under the wrong id or left behind (2026-09-27: a423886 / 6b22c82). Returned
+// as PostToolUse additionalContext, which the hooks docs say reaches the
+// model; allow-time reasons aren't documented to. Advisory only: nothing is
+// blocked. None for general turns, lifecycle and draft paths, and covered
+// targets. Claude reads the target from `file_path`; Codex's apply_patch
+// carries a patch, whose targets `patch_targets` extracts. Codex also
+// documents PostToolUse `hookSpecificOutput.additionalContext` as "added as
+// extra developer context" (https://learn.chatgpt.com/docs/hooks).
+pub(crate) fn addressed_turn_advisory(payload: &Value) -> Option<String> {
+    let ti = payload.get("tool_input")?;
+    let target = ti
+        .get("file_path")
+        .or_else(|| ti.get("notebook_path"))?
+        .as_str()?;
+    let start = Path::new(target)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let project_root = find_project_root(&start)?;
+    let rel = normalize_target(&project_root, target)?;
+    addressed_advisory_for(&project_root, "claude-rs", &[rel])
+}
+
+pub(crate) fn codex_addressed_turn_advisory(payload: &Value) -> Option<String> {
+    let ti = payload.get("tool_input")?;
+    let cwd = payload.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
+    let project_root = find_project_root(cwd)?;
+    let rels: Vec<String> = patch_targets(ti)
+        .iter()
+        .filter_map(|t| codex_normalize_target(&project_root, t))
+        .collect();
+    addressed_advisory_for(&project_root, "codex-rs", &rels)
+}
+
+// The shared check: which of these targets the addressed items don't cover.
+fn addressed_advisory_for(project_root: &Path, provider: &str, rels: &[String]) -> Option<String> {
+    let ids = turn_context_addressed_ids(project_root)?;
+    if ids.is_empty() {
+        return None;
+    }
+    let set: HashSet<String> = ids.iter().cloned().collect();
+    let addressed_cov = worklist_covered_files_filtered(project_root, Some(&set));
+    let stray: Vec<&String> = rels
+        .iter()
+        .filter(|rel| !is_lifecycle_path(rel) && !is_worklist_draft(rel))
+        .filter(|rel| !coverage_verdict(&addressed_cov, rel).0)
+        .collect();
+    if stray.is_empty() {
+        return None;
+    }
+    let paths: Vec<String> = stray.iter().map(|r| format!("`{}`", r)).collect();
+    crate::guard::append_breadcrumb(
+        project_root,
+        provider,
+        "addressed-turn-advisory",
+        "-",
+        &format!(
+            "target={} addressed={}",
+            stray
+                .iter()
+                .map(|r| r.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+            ids.join(",")
+        ),
+    );
+    Some(format!(
+        "Bram: {} {} in the files of the item(s) this turn is addressed to ({}). \
+         Lines written in this turn are credited to them, so this change will be \
+         committed under their id or left behind when the right item commits. If it \
+         belongs to another item, say so and route it there (or add the file to this \
+         item's `files`) before editing further.",
+        paths.join(", "),
+        if paths.len() == 1 { "isn't" } else { "aren't" },
+        ids.join(", ")
+    ))
+}
+
 // would-deny-keys-on-authorization: the durable grant the eventual rule
 // should key on. Mirrors the host's own liveness test
 // (worklist_active_authorization_summary): an `approved` record that is

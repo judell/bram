@@ -443,6 +443,61 @@ the discipline for completing them serially.
   #21 stays open]`. They ride only plain message turns, never
   `approved:` / `drop:` / `iterate:` / `skip-worklist:` turns.
 
+## Pushing: grace window and auto-rebase
+
+- **Post-commit push grace.** For 10 minutes after a gate commit both
+  guards allow `git push` (only), so "commit this, then push" works on an
+  emptied board. Push within it only when the user asked in the
+  approval; outside it, the Push path is the user's (the **Push** button
+  in the Commits tab).
+- **Push auto-rebases.** The Push button fetches and rebases on
+  `origin/<branch>` on non-fast-forward. Don't `git pull --rebase`
+  yourself; intervene only when it reports rebase conflicts (then a
+  manual rebase, resolve, push).
+- **Notice sibling commits that should be squashed**, and flag it before
+  push. Two consecutive unpushed commits that are one feature: ask
+  "`<sha1>` and `<sha2>` are two halves of the same feature — want to squash
+  them?" If yes and both are unpushed: `git reset --soft HEAD~2` then
+  `git commit -F <new-msg>`; verify with `git log --oneline -3` and
+  `git log --oneline @{u}..HEAD`. Never squash pushed commits without
+  explicit force-push consent, and never squash a commit the Worklist
+  recorded: rewriting it orphans its history link (see "Don't rewrite a
+  commit the worklist history has recorded" in the core conventions).
+
+## Rows committed outside the Worklist
+
+When work lands through a plain `git commit` (typed in chat, or from a
+terminal), its row reads "Committed outside the Worklist in `<sha>`" with
+plan coverage ("N of M planned files"), and the pane offers **Clear it** /
+**Clear them**. Bram can check files, not whether the item's intent is done,
+so the row says it can't tell whether the work is finished.
+
+If the user asks you to clear such rows, POST `/__worklist/clear-landed`
+with `{"ids": [...], "via": "agent"}`. The host clears only rows it verifies
+as landed: begun, files clean against `HEAD`, and a commit **not made by the
+Worklist itself** since the item began touched them. It lists any others as
+refused. Rows it refuses still need the user's Drop. Cleared rows are
+recorded in history under *Items cleared*, linked to the landing commit.
+
+## Routing edits to the right item
+
+Lines written in a turn addressed to items (`iterate:` or `approved:`) are
+credited to those items. A change that belongs in another item's files is
+then committed under the wrong id, or left behind as a residual path when the
+right item commits.
+
+- **Before editing**, check that the target is in the addressed items'
+  `files`. If it isn't, say so and route it: add the file to this item's
+  `files` if it truly belongs there, or move the work to the item that owns
+  the file (ask the user to send the feedback on that row, or propose one).
+- **The guard tells you after the fact.** After an Edit / Write (Claude) or
+  `apply_patch` (Codex) to a file the addressed items don't declare, you
+  receive "Bram: `<path>` isn't in the files of the item(s) this turn is
+  addressed to (…)". Treat it as a stop-and-route signal, not noise.
+- **Use the file tools for tracked files.** The guards can see an Edit /
+  Write target and check it; a `python3` or `sed` write is invisible to
+  them. Shell writes are fine for scratch files and generated output.
+
 ## Enforcement and security contract
 
 The structured `approved:` / `drop:` line is not authority by itself.

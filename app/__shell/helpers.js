@@ -2960,6 +2960,16 @@ window.__bramSelectionAllCommittable = function (items, sel, claim) {
     // withholding and the #337 selection-scoping both retire into this.
     var split = window.__bramItemChangedSplit(it, list, claim, chosen);
     if (!split.exclusive.length && !split.shared.length) return false;
+    // "Changes of its own" on a shared path means lines of its own, not just a
+    // changed path: a begun item with no work, sharing a file a neighbour
+    // edited, was offered Commit while its strip read "Will commit +0 −0"
+    // (2026-09-27, issue-406-chat-commit-everything-ready beside the #410
+    // fix). The host's attribution (willCommit) is the arbiter; the commit
+    // would only have been refused as empty (#366).
+    if (!split.exclusive.length) {
+      var wc = it.willCommit;
+      if (wc && (Number(wc.added) || 0) + (Number(wc.removed) || 0) === 0) return false;
+    }
   }
   return true;
 };
@@ -3841,25 +3851,29 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, attribu
     // 1 of 7 files changed, that file shared with issue-269), so omitting the
     // hint here would have left the very case that prompted the split showing
     // a Stalled icon above a line that never names Start.
-    var nShared = split.shared.length;
     // #336: this branch now also receives entangled APPLIED items (the
     // exclusivity check covers them since the short-circuit fell). Two
     // truths, both said: whether this item has work of its own here (the
     // old wording claimed "nothing" for an item with 70 attributed lines),
     // and WHO is blocking, so the absent Commit button names its cause.
-    var own = window.__bramOwnClause(item, attribution);
+    // Said plainly (Jon, 2026-09-27: "way too complicated to read at a
+    // glance … simplify dramatically"). The earlier line stacked the own
+    // clause, the shared-file count, the blockers and a Start-again tail, and
+    // for an item with no work read "Changes only on shared files · unique:
+    // +0 · …". The detail stays in the tooltip.
+    var wcShared = item.willCommit;
+    var ownLines = wcShared
+      ? (Number(wcShared.added) || 0) + (Number(wcShared.removed) || 0)
+      : null;
+    if (ownLines === 0 || !window.__bramOwnClause(item, attribution)) {
+      return withCloses("No changes of its own yet");
+    }
     var blockers = window.__bramItemShareBlockers(item, items, claim);
-    var head = own
-      ? "Changes only on shared files" + own
-      : "Nothing of its own changed";
     return withCloses(
-      head + " · " + nShared + " shared file" +
-        (nShared === 1 ? "" : "s") + " changed" +
-        (blockers.length
-          ? " with " + blockers.join(", ") + " — commit " +
-            (blockers.length === 1 ? "it" : "those") + " first"
-          : "") +
-        (window.__bramItemNeedsStart(item, claim) ? " · Start again" : ""),
+      blockers.length
+        ? "Shares its changed files with " + blockers.join(", ") + " · commit " +
+            (blockers.length === 1 ? "that" : "those") + " first"
+        : "Its changes are all in shared files",
     );
   }
   // The strip names the same state the icon does. Both branches used to return

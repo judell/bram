@@ -97,3 +97,9 @@ resources/bram-traces/
 # Subagent worktrees (isolation: "worktree" delegation); session scaffolding,
 # auto-collected when unchanged, never repo content.
 .claude/worktrees/
+
+# build.rs mirrors app/__shell/reference/*.md here so the shared
+# conventions pointers (.claude/bram-reference/<name>.md, the path Setup
+# seeds in managed projects) resolve in this repo too. Generated on every
+# cargo build; edit the source in app/__shell/reference/, never this.
+.claude/bram-reference/

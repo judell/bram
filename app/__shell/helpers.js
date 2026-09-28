@@ -11452,6 +11452,40 @@ window.__bramSearchQuery = function (query, mode) {
   return stem ? stem : s;
 };
 
+// The user's own message, as typed: every single newline is a line break
+// (issue #412). CommonMark renders a lone `\n` as a soft break (a space), and
+// XMLUI's Markdown has no breaks option, so turn each lone `\n` into a hard
+// break by appending two spaces to the line before it. Two spaces, not a
+// trailing backslash: a hard break at the end of a block (the line before a
+// list item or heading) is ignored, whereas a backslash there renders as a
+// literal `\`. Fenced code keeps its lines untouched. Dictated text (`voice:`)
+// is left alone: Whisper's newlines mark pauses, not intent.
+window.__bramHardBreaks = function (text) {
+  if (typeof text !== "string" || text.indexOf("\n") < 0) return text;
+  if (/^\s*voice:/.test(text)) return text;
+  var lines = text.replace(/\r\n?/g, "\n").split("\n");
+  var fence = null; // {ch, len} while inside a fenced code block
+  for (var i = 0; i < lines.length - 1; i++) {
+    var line = lines[i];
+    var m = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (fence) {
+      if (m && m[1].charAt(0) === fence.ch && m[1].length >= fence.len &&
+          /^\s*$/.test(line.slice(m[0].length))) {
+        fence = null;
+      }
+      continue;
+    }
+    if (m) {
+      fence = { ch: m[1].charAt(0), len: m[1].length };
+      continue;
+    }
+    if (/^\s*$/.test(line) || /^\s*$/.test(lines[i + 1])) continue;
+    if (/ {2,}$/.test(line) || /\\$/.test(line)) continue;
+    lines[i] = line + "  ";
+  }
+  return lines.join("\n");
+};
+
 window.__bramSearchTerms = function (query) {
   var s = (query == null ? "" : String(query)).trim();
   if (s.length < 2) return [];

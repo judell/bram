@@ -88,7 +88,7 @@
             borderRadius="$borderRadius"
             gap="$space-1">
             <Text value="You" fontWeight="bold" color="$color-primary-600" fontSize="$fontSize-sm" />
-            <Markdown content="{$item.text}" interpolateBindings="false" allowHtml="false"
+            <Markdown content="{window.__bramHardBreaks($item.text)}" interpolateBindings="false" allowHtml="false"
               highlightText="{window.__bramSearchTerms($item.__needle)}"
               highlightActiveIndex="{$item.__activeOcc}" />
           </VStack>

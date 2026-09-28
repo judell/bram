@@ -241,7 +241,7 @@
                highlightText/highlightActiveIndex ride the find decoration
                (__needle/__activeOcc/__blockIdx baked by the find plan; inert
                otherwise). -->
-          <Markdown content="{$item.text}" interpolateBindings="false" allowHtml="false"
+          <Markdown content="{window.__bramHardBreaks($item.text)}" interpolateBindings="false" allowHtml="false"
             highlightText="{window.__bramSearchTerms($item.__needle)}"
             highlightActiveIndex="{$item.__activeOcc}" />
         </VStack>

@@ -320,9 +320,8 @@ what to click, use the rendered label.
 | message with items selected | `iterate:` | No `resolve`, no bracket call. Act per status (below). |
 | message with nothing selected, or **Chat** | ordinary chat | Respond. Nothing is approved or dropped; do not edit files. |
 
-The host sets the inflight sentinel for `approved:` and `iterate:` on
-its `toTurn` write path; for drops, `resolve` raises it and `prune`
-clears it. Respond to any per-item feedback, whatever the kind.
+The host sets the inflight sentinel for `approved:` and `iterate:` when
+it sends them; for drops, `resolve` raises it and `prune` clears it. Respond to any per-item feedback, whatever the kind.
 
 **`/__worklist/resolve`** returns `{"kind":"approved"|"drop", "items":
 [<recorded content>]}` — execute those items; don't re-read
@@ -343,12 +342,12 @@ route through `resolve`.
 - Either way the item keeps its status; iterate never advances or
   commits on its own.
 
-**Edit only the addressed items' files, with the file tools.** Lines
-written in an addressed turn are credited to the addressed items, so when
-the change belongs in another item's files, say so and route it before
-editing. Use Edit / Write for tracked files so the guards can see them.
+**Edit only the addressed items' files, with Edit / Write.** An addressed
+turn's lines are credited to its items; **a chat turn's edits belong to
+no item**, even for begun work, and break its commit. When the user
+redirects begun work in chat, ask for it as feedback on the item.
 
-- **Routing a change, or the guard says a file isn't in the addressed items' files** → read `.claude/bram-reference/worklist-mechanics.md` (§Routing edits to the right item).
+- **Routing a change, or a commit left `unowned` residue** → read `.claude/bram-reference/worklist-mechanics.md` (§Routing edits to the right item; §Edits made in chat turns).
 
 Feedback items arrive as `{id, feedbackRef}`: read the user's
 full-fidelity text from `resources/feedback-drafts/<feedbackRef>.md`

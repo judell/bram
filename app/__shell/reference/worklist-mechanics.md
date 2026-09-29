@@ -498,6 +498,46 @@ right item commits.
   Write target and check it; a `python3` or `sed` write is invisible to
   them. Shell writes are fine for scratch files and generated output.
 
+## Edits made in chat turns
+
+A chat turn (nothing selected, or **Chat**) is addressed to no item, so its
+edits are credited to no item, even when they're for an item that has
+begun. The gate builds an item's commit from the item's own turns, so work
+done between them is a gap it can't account for. This stays true until the
+gate carries unowned lines itself (#273).
+
+**Symptoms:**
+
+- **A partial landing.** The `worklist-commit` response carries
+  `residualPaths` entries with `"owner":"unowned"` and `retained: [id]`. Only
+  the lines from the item's own turns landed, and the commit message may
+  describe more than the commit holds.
+- **A refusal with a misleading reason.** Two shapes are on record, and both
+  blame "another begun item" that contributed nothing:
+  - "this item's changes are entirely shared with another begun item and it
+    has no claim interval to stage from";
+  - "the requested item's interval patch does not apply to HEAD — its change
+    is defined relative to another begun item's work".
+- **Before committing:** the row's Ownership tab lists lines under "no item".
+
+**Recovery:**
+
+- **Resetting the files and re-applying the diff in an addressed turn does
+  not work.** That turn is recorded relative to a tree that already holds
+  the unowned lines, so its patch doesn't apply to HEAD either.
+- **What works:** with the user's go-ahead, a plain `git commit` of the
+  item's files, then clearing the row with the "Committed outside the
+  Worklist" offer. Until `landed-detector-needs-item-work` lands, that offer
+  can also flag a begun item with no work of its own, and **Clear them**
+  ignores selection. If any flagged row isn't really done, Drop the finished
+  row alone instead.
+- Save the full diff as a patch in scratch space before trying anything, so
+  a failed attempt can't lose work.
+
+**Prevention:** when the user redirects begun work in chat, ask them to send
+it as feedback on the item (or press Start or Resume) before editing.
+Receipts: judell/bram#273 (comments 5885260506 and 5897031890).
+
 ## Enforcement and security contract
 
 The structured `approved:` / `drop:` line is not authority by itself.

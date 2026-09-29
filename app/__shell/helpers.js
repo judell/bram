@@ -14005,6 +14005,29 @@ window.__bramLandedIds = function (board) {
     .filter(function (i) { return i && i.landed; })
     .map(function (i) { return i.id; });
 };
+// issue-415: the Status tab's Guard section (GET /__guard/selftest).
+window.__bramGuardSelftestSummary = function (r) {
+  if (!r) return "";
+  if (!r.link) return "not installed: ~/.bram/bram-guard is missing";
+  if (r.ok) return "working: " + (r.cases || []).length + " cases as expected, registration current";
+  var failed = r.failed || [];
+  return "failing: " + failed.length + " check" + (failed.length === 1 ? "" : "s") + " (" + failed.join(", ") + ")";
+};
+window.__bramGuardRegistrationLine = function (r) {
+  var reg = (r && r.registration) || {};
+  var c = reg.claude || {};
+  var parts = [];
+  if (c.ok) parts.push("Claude: all matchers registered");
+  else {
+    var bits = [];
+    if ((c.missing || []).length) bits.push("not registered: " + c.missing.join(", "));
+    if ((c.extra || []).length) bits.push("unexpected: " + c.extra.join(", "));
+    parts.push("Claude: " + (bits.join("; ") || "registration not current"));
+  }
+  parts.push("Codex: " + ((reg.codex || {}).ok ? "hook current" : "hook not current (run Setup)"));
+  return parts.join(" · ");
+};
+
 window.__bramLandedNote = function (board) {
   var n = window.__bramLandedIds(board).length;
   if (!n) return "";

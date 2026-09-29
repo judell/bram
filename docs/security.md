@@ -233,6 +233,41 @@ that behaves identically under every semantics Claude Code has implemented
 (#249); `mcp__.*` is a deliberate exception, since MCP tool names vary with the
 user's configured servers and cannot be enumerated. It is verified by probe.
 
+### Coverage is probed live, not presumed (#415)
+
+The policy's unit tests (the `self_test()` ports in `guard_policy.rs`)
+exercise the decider in isolation. They can't see the installed chain, where
+both recorded failures were: a `Bash` matcher dropped from the registration
+for three and a half weeks (#119), and a check that shipped inert
+(xmlui-org/xmlui-mcp#33). `GET /__guard/selftest`, shown as **Guard** on the
+Status tab, probes that chain:
+
+- **Cases.** It spawns `~/.bram/bram-guard guard <hook>` exactly as a
+  provider does, with each case's payload on stdin, against a throwaway
+  fixture project in the temp dir. The fixture has one covered file, an
+  empty authorization marker (present, granting nothing; without it the
+  guard stands aside) and a GitHub-shaped `origin` for the signature cases.
+  None of the cases consult the host, so the fixture needs no port.
+  - Claude: `Write` covered is allowed; `Write`, `Edit` and an MCP write
+    uncovered are denied; an unsigned `gh issue comment` is denied and a
+    signed one allowed.
+  - Codex: `apply_patch` uncovered is denied and covered is allowed.
+
+  Each case reports the guard's actual decision and reason. A guard that
+  can't be run is an **error**, never an allow.
+- **Registration,** by name. The project's Claude hook settings (the same
+  file every status surface reads, `claude_hook_settings_path`) are compared
+  with `CLAUDE_GUARD_MATCHERS`, and missing or unexpected matchers are
+  listed ("not registered: Bash"). For Codex, `codex_hook_block_current`
+  checks `~/.codex/config.toml`.
+- **Trace:** `[guard-selftest] ok=… cases=… failed=… missing=… extra=…`.
+
+**Adding a tool or provider** (#119's checklist): register its matcher or
+hook, add its allow and deny cases to `guard_selftest`, and confirm the
+Status tab reads green before and red after deliberately breaking the
+registration. Verified that way for this change: removing `Bash` from a demo
+instance's registration made the self-test report `missing: ["Bash"]`.
+
 ## Ranked action plan
 
 Severity is impact-weighted against the threat model. Effort: **S** = < half a

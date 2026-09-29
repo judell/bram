@@ -39731,6 +39731,56 @@ const CLAUDE_GUARD_MATCHERS: [&str; 4] = ["Write", "Edit", "Bash", "mcp__.*"];
 // reads it as current, so `claudeNeedsSetup` stays false, Setup never runs, and
 // the migration that would split it never fires. Same class of bug as the
 // presence-based check that hid the stale `py -3` commands in #247.
+// issue-415: the same reading as guard_matcher_shape_current, reported
+// rather than judged: which of CLAUDE_GUARD_MATCHERS carry the guard command,
+// and which other matchers do (legacy "Write|Edit", or none at all), so the
+// self-test can say "Bash not registered" instead of "needs Setup".
+fn guard_matcher_report(
+    value: &serde_json::Value,
+    expected_command: &str,
+) -> (Vec<String>, Vec<String>) {
+    let mut present: Vec<String> = Vec::new();
+    let mut extra: Vec<String> = Vec::new();
+    if let Some(arr) = value
+        .get("hooks")
+        .and_then(|h| h.get("PreToolUse"))
+        .and_then(|p| p.as_array())
+    {
+        for entry in arr {
+            let carries_guard = entry
+                .get("hooks")
+                .and_then(|h| h.as_array())
+                .map(|hooks| {
+                    hooks.iter().any(|h| {
+                        h.get("command").and_then(|c| c.as_str()) == Some(expected_command)
+                    })
+                })
+                .unwrap_or(false);
+            if !carries_guard {
+                continue;
+            }
+            let m = entry
+                .get("matcher")
+                .and_then(|m| m.as_str())
+                .unwrap_or("(none)")
+                .to_string();
+            if CLAUDE_GUARD_MATCHERS.contains(&m.as_str()) {
+                if !present.contains(&m) {
+                    present.push(m);
+                }
+            } else if !extra.contains(&m) {
+                extra.push(m);
+            }
+        }
+    }
+    let missing = CLAUDE_GUARD_MATCHERS
+        .iter()
+        .filter(|m| !present.iter().any(|p| p == *m))
+        .map(|m| m.to_string())
+        .collect();
+    (missing, extra)
+}
+
 fn guard_matcher_shape_current(value: &serde_json::Value, expected_command: &str) -> bool {
     let Some(arr) = value
         .get("hooks")
@@ -61223,6 +61273,12 @@ fn route_request<R: tauri::Runtime>(
         return (200, "application/json; charset=utf-8", body);
     }
 
+    // issue-415: probe the installed guard chain; see guard_selftest.
+    if path == "__guard/selftest" {
+        let body = serde_json::to_vec(&guard_selftest(app)).unwrap_or_default();
+        return (200, "application/json; charset=utf-8", body);
+    }
+
     if path == "__right-pane-info" {
         #[derive(serde::Serialize)]
         struct RightPaneInfo<'a> {
@@ -63333,6 +63389,367 @@ fn drain_worklist_intent<R: tauri::Runtime>(app: &AppHandle<R>) {
 // routes this handler once also served were deleted (delete-phase
 // tranche 1, #214): the host writes and clears the iterate sentinel on
 // the toTurn path. Refs #84, #91.
+// issue-415: live guard self-test. The guard's policy has unit tests, but the
+// installed chain (the ~/.bram/bram-guard link, the binary it points at, the
+// provider registration and its matchers) was only ever presumed; the two
+// real failures were there (a Bash matcher dropped for 3.5 weeks, #119; a
+// check shipped inert, xmlui-org/xmlui-mcp#33). This runs the installed
+// guard exactly as a provider does (`<link> guard <hook>`, payload on stdin)
+// against a throwaway fixture project, so no real file is touched, and
+// reports each case's actual decision. The fixture needs the authorization
+// marker (resources/.worklist-authorization.json, empty: present, granting
+// nothing), since without it the guard stands aside, and a GitHub-shaped
+// origin for the signature cases. It needs no port: none of these cases
+// consult the host (established by probing the installed guard, 2026-09-29).
+fn guard_selftest_fixture() -> Result<PathBuf, String> {
+    let dir = std::env::temp_dir().join(format!(
+        "bram-guard-selftest-{}-{}",
+        std::process::id(),
+        unix_now_ms()
+    ));
+    let w = |rel: &str, body: &str| -> Result<(), String> {
+        let p = dir.join(rel);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&p, body).map_err(|e| e.to_string())
+    };
+    w(
+        "resources/worklist.json",
+        r#"{"version":1,"items":[{"id":"selftest-covered","status":"proposed","files":["src/covered.txt"]}]}"#,
+    )?;
+    w(
+        "resources/.worklist-authorization.json",
+        r#"{"kind":"","ids":[],"items":[]}"#,
+    )?;
+    w("src/covered.txt", "x\n")?;
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(&dir)
+            .args(args)
+            .output()
+    };
+    git(&["init", "-q"]).map_err(|e| format!("git init: {}", e))?;
+    git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/example/bram-guard-selftest.git",
+    ])
+    .map_err(|e| format!("git remote: {}", e))?;
+    Ok(dir)
+}
+
+// Run one case through the installed guard. Claude answers deny with exit 2
+// and a stderr message; Codex always exits 0 and answers deny as stdout JSON
+// (permissionDecision "deny"). Anything else is an error, not a decision.
+fn guard_selftest_run_case(
+    link: &Path,
+    hook: &str,
+    payload: &serde_json::Value,
+) -> (String, String) {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = match std::process::Command::new(link)
+        .args(["guard", hook])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                "error".to_string(),
+                format!("could not run the guard: {}", e),
+            )
+        }
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(payload.to_string().as_bytes());
+    }
+    let out = match child.wait_with_output() {
+        Ok(o) => o,
+        Err(e) => return ("error".to_string(), e.to_string()),
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let short = |s: &str| s.trim().chars().take(200).collect::<String>();
+    let code = out.status.code();
+    if hook.starts_with("codex") {
+        if code != Some(0) {
+            return (
+                "error".to_string(),
+                format!("exit {:?}: {}", code, short(&stderr)),
+            );
+        }
+        let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_default();
+        if v.pointer("/hookSpecificOutput/permissionDecision")
+            .and_then(|d| d.as_str())
+            == Some("deny")
+        {
+            let reason = v
+                .pointer("/hookSpecificOutput/permissionDecisionReason")
+                .and_then(|r| r.as_str())
+                .unwrap_or("");
+            return ("deny".to_string(), short(reason));
+        }
+        return ("allow".to_string(), String::new());
+    }
+    match code {
+        Some(0) => ("allow".to_string(), String::new()),
+        Some(2) => ("deny".to_string(), short(&stderr)),
+        other => (
+            "error".to_string(),
+            format!("exit {:?}: {}", other, short(&stderr)),
+        ),
+    }
+}
+
+fn guard_selftest<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
+    let link = guard_link_if_installed();
+    let mut cases: Vec<serde_json::Value> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    match (&link, guard_selftest_fixture()) {
+        (None, _) => failed.push("guard-link".to_string()),
+        (Some(_), Err(e)) => {
+            failed.push("fixture".to_string());
+            cases.push(serde_json::json!({
+                "id": "fixture", "pass": false, "got": "error", "reason": e,
+            }));
+        }
+        (Some(link), Ok(dir)) => {
+            let root = dir.to_string_lossy().to_string();
+            let file = |rel: &str| dir.join(rel).to_string_lossy().to_string();
+            let os = if cfg!(windows) {
+                "Windows"
+            } else if cfg!(target_os = "macos") {
+                "macOS"
+            } else {
+                "Linux"
+            };
+            let signed = format!(
+                "Bram's Claude (Bram {}, main thread, selftest, {}, selftest) speaking from the Selftest project (github.com/example/bram-guard-selftest):\n\nguard self-test",
+                env!("CARGO_PKG_VERSION"),
+                os
+            );
+            let add = "*** Begin Patch\n*** Add File: src/uncovered.txt\n+y\n*** End Patch";
+            let update =
+                "*** Begin Patch\n*** Update File: src/covered.txt\n@@\n-x\n+y\n*** End Patch";
+            let specs: Vec<(&str, &str, &str, serde_json::Value)> = vec![
+                (
+                    "claude-write-covered",
+                    "claude-worklist",
+                    "allow",
+                    serde_json::json!({
+                    "tool_name": "Write", "cwd": root,
+                    "tool_input": {"file_path": file("src/covered.txt"), "content": "y"}}),
+                ),
+                (
+                    "claude-write-uncovered",
+                    "claude-worklist",
+                    "deny",
+                    serde_json::json!({
+                    "tool_name": "Write", "cwd": root,
+                    "tool_input": {"file_path": file("src/uncovered.txt"), "content": "y"}}),
+                ),
+                (
+                    "claude-edit-uncovered",
+                    "claude-worklist",
+                    "deny",
+                    serde_json::json!({
+                    "tool_name": "Edit", "cwd": root,
+                    "tool_input": {"file_path": file("src/uncovered.txt"), "old_string": "a", "new_string": "b"}}),
+                ),
+                (
+                    "claude-mcp-write-uncovered",
+                    "claude-worklist",
+                    "deny",
+                    serde_json::json!({
+                    "tool_name": "mcp__filesystem__write_file", "cwd": root,
+                    "tool_input": {"path": file("src/uncovered.txt"), "content": "y"}}),
+                ),
+                (
+                    "claude-forge-unsigned",
+                    "claude-worklist",
+                    "deny",
+                    serde_json::json!({
+                    "tool_name": "Bash", "cwd": root,
+                    "tool_input": {"command": "gh issue comment 5 --body \"guard self-test\""}}),
+                ),
+                (
+                    "claude-forge-signed",
+                    "claude-worklist",
+                    "allow",
+                    serde_json::json!({
+                    "tool_name": "Bash", "cwd": root,
+                    "tool_input": {"command": format!("gh issue comment 5 --body {}", serde_json::json!(signed))}}),
+                ),
+                (
+                    "codex-patch-uncovered",
+                    "codex-worklist",
+                    "deny",
+                    serde_json::json!({
+                    "tool_name": "apply_patch", "cwd": root, "tool_input": {"input": add}}),
+                ),
+                (
+                    "codex-patch-covered",
+                    "codex-worklist",
+                    "allow",
+                    serde_json::json!({
+                    "tool_name": "apply_patch", "cwd": root, "tool_input": {"input": update}}),
+                ),
+            ];
+            for (id, hook, expect, payload) in specs {
+                let (got, reason) = guard_selftest_run_case(link, hook, &payload);
+                let pass = got == expect;
+                if !pass {
+                    failed.push(id.to_string());
+                }
+                cases.push(serde_json::json!({
+                    "id": id, "hook": hook, "expect": expect, "got": got,
+                    "pass": pass, "reason": reason,
+                }));
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+    // Registration in the current project (Claude) and the user's Codex
+    // config, reported by name. The same settings file every status surface
+    // reads (claude_hook_settings_path), not .claude/settings.json, which
+    // carries no PreToolUse hooks.
+    let expected_cmd = expected_worklist_guard_command();
+    let settings_path = project_root(Some(app)).map(|r| claude_hook_settings_path(&r));
+    let (missing, extra) = match (&expected_cmd, &settings_path) {
+        (Some(cmd), Some(path)) => std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .map(|v| guard_matcher_report(&v, cmd))
+            .unwrap_or_else(|| {
+                (
+                    CLAUDE_GUARD_MATCHERS
+                        .iter()
+                        .map(|m| m.to_string())
+                        .collect(),
+                    Vec::new(),
+                )
+            }),
+        _ => (
+            CLAUDE_GUARD_MATCHERS
+                .iter()
+                .map(|m| m.to_string())
+                .collect(),
+            Vec::new(),
+        ),
+    };
+    let claude_ok = missing.is_empty() && extra.is_empty();
+    if !claude_ok {
+        failed.push("claude-registration".to_string());
+    }
+    let codex_ok = home_dir()
+        .map(|h| h.join(ENHANCE_CODEX_CONFIG_REL))
+        .map(|config| codex_hook_block_current(&config, link.as_deref()))
+        .unwrap_or(false);
+    if !codex_ok {
+        failed.push("codex-registration".to_string());
+    }
+    let ok = failed.is_empty();
+    append_bram_trace_line(
+        app,
+        "guard-selftest",
+        &format!(
+            "ok={} cases={} failed={} missing={} extra={}",
+            ok,
+            cases.len(),
+            if failed.is_empty() {
+                "-".to_string()
+            } else {
+                failed.join(",")
+            },
+            if missing.is_empty() {
+                "-".to_string()
+            } else {
+                missing.join(",")
+            },
+            if extra.is_empty() {
+                "-".to_string()
+            } else {
+                extra.join(",")
+            }
+        ),
+    );
+    serde_json::json!({
+        "ok": ok,
+        "link": link.map(|l| l.to_string_lossy().to_string()),
+        "cases": cases,
+        "failed": failed,
+        "registration": {
+            "claude": {
+                "ok": claude_ok,
+                "settings": settings_path.map(|p| p.to_string_lossy().to_string()),
+                "missing": missing,
+                "extra": extra,
+            },
+            "codex": { "ok": codex_ok },
+        },
+        "ranAtMs": unix_now_ms(),
+    })
+}
+
+#[cfg(test)]
+mod guard_selftest_tests {
+    use super::*;
+
+    // A guard that can't be run must read as an error, never as a decision:
+    // a dead chain has to fail the self-test, not pass it as "allow".
+    #[test]
+    fn unrunnable_guard_is_an_error_not_an_allow() {
+        let (got, reason) = guard_selftest_run_case(
+            Path::new("/nonexistent/bram-guard"),
+            "claude-worklist",
+            &serde_json::json!({ "tool_name": "Write" }),
+        );
+        assert_eq!(got, "error");
+        assert!(reason.starts_with("could not run the guard"), "{}", reason);
+        let (got, _) = guard_selftest_run_case(
+            Path::new("/nonexistent/bram-guard"),
+            "codex-worklist",
+            &serde_json::json!({ "tool_name": "apply_patch" }),
+        );
+        assert_eq!(got, "error");
+    }
+
+    // The regression #119 recorded: the guard registered under every matcher
+    // but Bash, plus a legacy combined matcher. The report names both.
+    #[test]
+    fn matcher_report_names_missing_and_extra() {
+        let cmd = "/home/u/.bram/bram-guard guard claude-worklist";
+        let settings = serde_json::json!({"hooks": {"PreToolUse": [
+            {"matcher": "Write", "hooks": [{"type": "command", "command": cmd}]},
+            {"matcher": "Edit", "hooks": [{"type": "command", "command": cmd}]},
+            {"matcher": "mcp__.*", "hooks": [{"type": "command", "command": cmd}]},
+            {"matcher": "Write|Edit", "hooks": [{"type": "command", "command": cmd}]},
+            {"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": "other"}]}
+        ]}});
+        let (missing, extra) = guard_matcher_report(&settings, cmd);
+        assert_eq!(missing, vec!["Bash".to_string()]);
+        assert_eq!(extra, vec!["Write|Edit".to_string()]);
+    }
+
+    #[test]
+    fn matcher_report_clean_when_all_registered() {
+        let cmd = "g guard claude-worklist";
+        let entries: Vec<serde_json::Value> = CLAUDE_GUARD_MATCHERS
+            .iter()
+            .map(|m| serde_json::json!({"matcher": m, "hooks": [{"command": cmd}]}))
+            .collect();
+        let settings = serde_json::json!({"hooks": {"PreToolUse": entries}});
+        let (missing, extra) = guard_matcher_report(&settings, cmd);
+        assert!(missing.is_empty() && extra.is_empty());
+        assert!(guard_matcher_shape_current(&settings, cmd));
+    }
+}
+
 // issue-414: the target app's address for a normal browser, or None when the
 // project has no target app. Same rule the Target app info dialog used
 // (d5a4970): a declared .bram.json project server is

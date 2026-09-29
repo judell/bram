@@ -6,6 +6,10 @@
 
   <DataSource id="status" url="/__coordination-status?t={refreshTick}" />
   <DataSource id="sessionSize" url="/__session-size?t={refreshTick}" pollIntervalInSeconds="30" />
+  <!-- issue-415: live guard self-test. Runs the installed guard chain
+       against a throwaway project when the tab opens and on Refresh; no
+       polling (docs/developing-bram.md, Push over polling). -->
+  <DataSource id="guardSelftest" url="/__guard/selftest?t={refreshTick}" />
 
   <VStack padding="$space-6" gap="$space-4">
     <HStack gap="$space-3" verticalAlignment="center">
@@ -19,8 +23,38 @@
       <Button
         label="Refresh"
         size="sm"
-        onClick="refreshTick = refreshTick + 1; status.refetch(); sessionSize.refetch();" />
+        onClick="refreshTick = refreshTick + 1; status.refetch(); sessionSize.refetch(); guardSelftest.refetch();" />
     </HStack>
+
+    <!-- issue-415: whether the worklist guard actually runs and decides as
+         expected, probed rather than presumed. Pass, or the failing cases
+         with the guard's own decision and reason. -->
+    <VStack when="{guardSelftest.value}" gap="$space-2">
+      <HStack gap="$space-3" verticalAlignment="center">
+        <Heading level="h3">Guard</Heading>
+        <Text
+          fontWeight="$fontWeight-bold"
+          color="{guardSelftest.value.ok ? '$color-success-700' : '$color-danger-700'}"
+          value="{window.__bramGuardSelftestSummary(guardSelftest.value)}" />
+      </HStack>
+      <Text
+        fontSize="$fontSize-sm"
+        color="$textColor-secondary"
+        value="{window.__bramGuardRegistrationLine(guardSelftest.value)}" />
+      <Table data="{guardSelftest.value.cases || []}">
+        <Column header="case" width="230px" bindTo="id" />
+        <Column header="expected" width="90px" bindTo="expect" />
+        <Column header="guard said" width="100px">
+          <Text
+            fontWeight="$fontWeight-bold"
+            color="{$item.pass ? '$color-success-700' : '$color-danger-700'}"
+            value="{$item.got}" />
+        </Column>
+        <Column header="reason">
+          <Text fontSize="$fontSize-sm" value="{$item.reason}" overflowMode="flow" breakMode="word" />
+        </Column>
+      </Table>
+    </VStack>
 
     <VStack when="{sessionSize.value &amp;&amp; sessionSize.value.humanBytes}" gap="$space-2">
       <Heading level="h3">Session size</Heading>

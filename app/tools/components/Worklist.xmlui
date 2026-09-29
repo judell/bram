@@ -401,12 +401,16 @@
       gap="$space-2"
       verticalAlignment="center">
       <Text color="$textColor-secondary" value="{window.__bramLandedNote(worklist.value)}" />
+      <!-- landed-detector-needs-item-work: like every gate button, Clear
+           acts on ticked rows only: the ticked rows that are flagged
+           (tinted). Dimmed when there are none. -->
       <Button
-        label="{window.__bramLandedButtonLabel(worklist.value)}"
+        label="{window.__bramLandedButtonLabel(worklist.value, worklist2Selected)}"
+        enabled="{window.__bramLandedCanClear(worklist.value, worklist2Selected)}"
         variant="outlined"
         size="xs"
-        tooltip="{window.__bramLandedButtonTooltip(worklist.value)}"
-        onClick="window.__bramClearLanded(worklist.value)" />
+        tooltip="{window.__bramLandedButtonTooltip(worklist.value, worklist2Selected)}"
+        onClick="window.__bramClearLanded(worklist.value, worklist2Selected)" />
     </HStack>
     <!-- worklist-drag-reorder-and-link-labels: drag the ⋮⋮ grip to reorder.
          DndItems is the vendored xmlui-dnd-list extension the Queue uses

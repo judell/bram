@@ -64332,6 +64332,61 @@ struct LandedInfo {
     planned: usize,
 }
 
+// landed-detector-needs-item-work: whether any claim interval owned by `id`
+// changed one of `paths`. Interval n runs from record n's tree to record
+// n+1's tree, or to the working tree for the newest (open) interval, and its
+// work belongs to record n's ids. Records owned by items still on the board
+// are kept by claim_intervals_partition, so the evidence is there for any
+// item this is asked about. No record, or no change in any of them, means
+// the item did no work of its own.
+fn item_interval_changed_paths<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    paths: &[String],
+) -> bool {
+    if id.is_empty() || paths.is_empty() {
+        return false;
+    }
+    let Some(root) = project_root(Some(app)) else {
+        return false;
+    };
+    let Ok(text) = std::fs::read_to_string(root.join(CLAIM_INTERVALS_REL)) else {
+        return false;
+    };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    let Some(arr) = doc.get("intervals").and_then(|v| v.as_array()) else {
+        return false;
+    };
+    let tree_of =
+        |rec: &serde_json::Value| rec.get("tree").and_then(|v| v.as_str()).map(String::from);
+    for (n, rec) in arr.iter().enumerate() {
+        let owns = rec
+            .get("ids")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str()).any(|x| x == id))
+            .unwrap_or(false);
+        if !owns {
+            continue;
+        }
+        let Some(base) = tree_of(rec) else { continue };
+        let end = arr.get(n + 1).and_then(tree_of);
+        let mut args: Vec<&str> = vec!["diff", "--name-only", base.as_str()];
+        if let Some(e) = end.as_deref() {
+            args.push(e);
+        }
+        args.push("--");
+        args.extend(paths.iter().map(|p| p.as_str()));
+        if let Ok(out) = git_run(app, &args) {
+            if !out.trim().is_empty() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn worklist_item_landed<R: tauri::Runtime>(
     app: &AppHandle<R>,
     item: &serde_json::Value,
@@ -64388,6 +64443,15 @@ fn worklist_item_landed<R: tauri::Runtime>(
         );
     }
     let (sha, subject) = newest?;
+    // landed-detector-needs-item-work: a commit touching the item's files is
+    // not evidence that the item did the work. Without this, a begun item
+    // that never changed anything (issue-406-chat-commit-everything-ready,
+    // waiting on field evidence) was flagged landed because another item's
+    // commit outside the Worklist (0cca559) touched one of its planned files.
+    let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    if !item_interval_changed_paths(app, id, paths) {
+        return None;
+    }
     let covered = paths
         .iter()
         .filter(|p| {

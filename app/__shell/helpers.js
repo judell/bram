@@ -13919,23 +13919,40 @@ window.__bramLandedNote = function (board) {
     ? "1 item looks already committed"
     : n + " items look already committed";
 };
-// Landed rows are tinted whenever they're on the board, which is exactly
-// when the "Clear it" / "Clear them" offer shows: the tint says which rows
-// the button would clear. Warn-tinted because clearing removes rows.
+// landed-detector-needs-item-work: Clear acts like every gate button, on
+// the ticked rows only: it clears the ticked rows that are flagged, and is
+// dimmed when there are none. Before, it sent every landed id whatever was
+// ticked, so clearing one row cleared them all, including any the detector
+// had wrongly flagged; an interim version fell back to that when no ticked
+// row was flagged, which still cleared rows nobody ticked.
+window.__bramLandedTargetIds = function (board, selected) {
+  var sel = selected || [];
+  return window.__bramLandedIds(board).filter(function (id) { return sel.indexOf(id) >= 0; });
+};
+window.__bramLandedCanClear = function (board, selected) {
+  return window.__bramLandedTargetIds(board, selected).length > 0;
+};
+// Every flagged row is tinted: these are the rows Clear could remove (Jon:
+// "we need a stronger indication of which row or rows apply"). Ticking
+// them is what makes Clear act on them. Warn-tinted because clearing
+// removes rows.
 window.__bramLandedRowTint = function (item) {
   return item && item.landed ? "$color-warn-100" : "transparent";
 };
-// The button and its tooltip agree in number with the note beside them.
-window.__bramLandedButtonLabel = function (board) {
-  return window.__bramLandedIds(board).length === 1 ? "Clear it" : "Clear them";
+// The label counts the ticked flagged rows it would clear.
+window.__bramLandedButtonLabel = function (board, selected) {
+  var n = window.__bramLandedTargetIds(board, selected).length;
+  return n > 1 ? "Clear " + n : "Clear it";
 };
-window.__bramLandedButtonTooltip = function (board) {
-  return window.__bramLandedIds(board).length === 1
-    ? "Remove this row: its work is already in a commit"
-    : "Remove these rows: their work is already in a commit";
+window.__bramLandedButtonTooltip = function (board, selected) {
+  var n = window.__bramLandedTargetIds(board, selected).length;
+  if (n === 0) return "Tick a highlighted row to clear it";
+  return n === 1
+    ? "Remove the ticked row: its work is already in a commit"
+    : "Remove the " + n + " ticked rows: their work is already in a commit";
 };
-window.__bramClearLanded = function (board) {
-  var ids = window.__bramLandedIds(board);
+window.__bramClearLanded = function (board, selected) {
+  var ids = window.__bramLandedTargetIds(board, selected);
   if (!ids.length) return;
   window
     .fetch("/__worklist/clear-landed", {

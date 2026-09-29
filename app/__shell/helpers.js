@@ -1337,8 +1337,8 @@ window.__bramTraceHelperTiming = function (name, t0, extra) {
 // name, remaining segments are a property path inside the parsed JSON
 // object. Used by the __bram-prefixed localStorage shim helpers below
 // so they can run in plain JS without re-entering XMLUI's statement
-// queue. `bram.worklistMessageDraft` reads
-// `JSON.parse(localStorage.bram).worklistMessageDraft`. Splitter keys
+// queue. `bram.worklistSubmittedMessage` reads
+// `JSON.parse(localStorage.bram).worklistSubmittedMessage`. Splitter keys
 // like `bram.splitter.worklist` are two-level.
 function __bramSplitKey(key) {
   var s = String(key);
@@ -1422,6 +1422,30 @@ function __bramWriteSS(key, value) {
 // loop for every statement in the body; now the entire body runs as
 // one plain-JS function call (one xs statement total).
 
+// The message box's unsent draft is focus, not a decision
+// (docs/developing-bram.md, "Client storage: decision vs. focus"), so it
+// lives in sessionStorage: it survives a pane reload, not a relaunch, and
+// no other Bram window can read it. In localStorage it was shared by every
+// Bram window (one app, one WebKit store): text dictated and sent in
+// ~/bram-studio reappeared unsent in ~/bram's box after a relaunch and was
+// sent to the wrong agent (2026-09-29,
+// message-draft-bleeds-across-bram-windows). The old localStorage value is
+// left in place; nothing reads it now. Every write is traced with its
+// caller and whether a recording is live, so a stale draft can be traced
+// to its writer.
+var __BRAM_MESSAGE_DRAFT_KEY = "bram.worklistMessageDraft";
+function __bramWriteMessageDraft(value, via) {
+  var text = String(value || "");
+  __bramWriteSS(__BRAM_MESSAGE_DRAFT_KEY, text);
+  try {
+    window.__bramIframeTrace && window.__bramIframeTrace("draft-write", {
+      via: via,
+      chars: text.length,
+      recording: !!window._voiceSession,
+    });
+  } catch (e) {}
+}
+
 var __bramWorklistDraftPersistTimer = null;
 var __bramWorklistDraftPending = null;
 
@@ -1431,13 +1455,13 @@ function __bramFlushWorklistDraft() {
     __bramWorklistDraftPersistTimer = null;
   }
   if (__bramWorklistDraftPending !== null) {
-    __bramWriteLS("bram.worklistMessageDraft", __bramWorklistDraftPending);
+    __bramWriteMessageDraft(__bramWorklistDraftPending, "input");
     __bramWorklistDraftPending = null;
   }
 }
 
 window.__bramRestoreWorklistDraft = function () {
-  return __bramReadLS("bram.worklistMessageDraft", "");
+  return __bramReadSS(__BRAM_MESSAGE_DRAFT_KEY, "");
 };
 
 window.__bramPersistWorklistDraft = function (text) {
@@ -1452,7 +1476,7 @@ window.__bramClearWorklistDraft = function () {
     __bramWorklistDraftPersistTimer = null;
   }
   __bramWorklistDraftPending = null;
-  __bramWriteLS("bram.worklistMessageDraft", "");
+  __bramWriteMessageDraft("", "clear");
 };
 
 window.__bramFlushWorklistDraft = __bramFlushWorklistDraft;
@@ -2488,7 +2512,7 @@ window.__bramSubmitWorklistMessageFast = function (text, voiceTarget) {
   if (typeof window.toTurn === "function") window.toTurn(toSend);
   window.__bramIframeTrace("message-agent-submit", { stage: "after-toTurn", chars: toSend.length, sentAt: sentAt });
   var baseline = 0;
-  __bramWriteLS("bram.worklistMessageDraft", "");
+  __bramWriteMessageDraft("", "submit");
   __bramWriteLS("bram.worklistSubmittedMessage", userTyped);
   __bramWriteSS("bram.worklistSessionSubmittedMessage", userTyped);
   window.__bramSetWorklistSubmittedKind("message");
@@ -13128,7 +13152,7 @@ window.__bramApplySendRestore = function (snapshot, box) {
   } else {
     merged = existing + "\n\n" + text;
   }
-  __bramWriteLS("bram.worklistMessageDraft", merged);
+  __bramWriteMessageDraft(merged, "send-restore");
   if (box && typeof box.setValue === "function") {
     try { box.setValue(merged); } catch (e) {}
   }

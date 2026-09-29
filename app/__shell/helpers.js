@@ -1422,27 +1422,43 @@ function __bramWriteSS(key, value) {
 // loop for every statement in the body; now the entire body runs as
 // one plain-JS function call (one xs statement total).
 
-// The message box's unsent draft is focus, not a decision
-// (docs/developing-bram.md, "Client storage: decision vs. focus"), so it
-// lives in sessionStorage: it survives a pane reload, not a relaunch, and
-// no other Bram window can read it. In localStorage it was shared by every
-// Bram window (one app, one WebKit store): text dictated and sent in
-// ~/bram-studio reappeared unsent in ~/bram's box after a relaunch and was
-// sent to the wrong agent (2026-09-29,
-// message-draft-bleeds-across-bram-windows). The old localStorage value is
-// left in place; nothing reads it now. Every write is traced with its
-// caller and whether a recording is live, so a stale draft can be traced
-// to its writer.
-var __BRAM_MESSAGE_DRAFT_KEY = "bram.worklistMessageDraft";
+// localStorage is one store shared by every Bram window (one app, one
+// WebKit store), so a persisted key that belongs to a project must carry
+// the project in its name (docs/developing-bram.md, "Scope persisted keys
+// by project"; #279 did the same for the saved tab). Returns null when the
+// project isn't known: callers then neither read nor write, rather than
+// fall back to a slot every window shares. The key is flat, not the
+// dot-path form __bramWriteLS parses, because project paths can contain
+// dots. main.js sets window.__bramProjectKey before this pane loads.
+window.__bramProjectScopedKey = function (base) {
+  var projectKey = "";
+  try { projectKey = String((window.parent && window.parent.__bramProjectKey) || ""); } catch (e) {}
+  return projectKey ? base + ":" + projectKey : null;
+};
+
+// The message box's unsent draft survives reloads and relaunches: it's
+// unsent prose the user can't redo (#271's audit: "must survive"). It was
+// one unscoped key, so text dictated and sent in ~/bram-studio reappeared
+// unsent in ~/bram's box after a relaunch and went to the wrong agent
+// (2026-09-29, message-draft-bleeds-across-bram-windows). Now it's scoped
+// by project. The old shared key is not migrated, since migrating it would
+// hand its text to whichever project read it first; nothing reads it now.
+// Every write is traced with its caller and whether a recording is live,
+// so a stale draft can be traced to its writer.
+var __BRAM_MESSAGE_DRAFT_BASE = "bram.worklistMessageDraft";
 function __bramWriteMessageDraft(value, via) {
   var text = String(value || "");
-  __bramWriteSS(__BRAM_MESSAGE_DRAFT_KEY, text);
+  var key = window.__bramProjectScopedKey(__BRAM_MESSAGE_DRAFT_BASE);
+  if (key) {
+    try {
+      if (text) localStorage.setItem(key, text);
+      else localStorage.removeItem(key);
+    } catch (e) {}
+  }
   try {
-    window.__bramIframeTrace && window.__bramIframeTrace("draft-write", {
-      via: via,
-      chars: text.length,
-      recording: !!window._voiceSession,
-    });
+    var fields = { via: via, chars: text.length, recording: !!window._voiceSession };
+    if (!key) fields.skipped = "no-project-key";
+    window.__bramIframeTrace && window.__bramIframeTrace("draft-write", fields);
   } catch (e) {}
 }
 
@@ -1461,7 +1477,15 @@ function __bramFlushWorklistDraft() {
 }
 
 window.__bramRestoreWorklistDraft = function () {
-  return __bramReadSS(__BRAM_MESSAGE_DRAFT_KEY, "");
+  var key = window.__bramProjectScopedKey(__BRAM_MESSAGE_DRAFT_BASE);
+  var text = "";
+  if (key) {
+    try { text = localStorage.getItem(key) || ""; } catch (e) {}
+  }
+  try {
+    window.__bramIframeTrace && window.__bramIframeTrace("draft-restore", { hasKey: !!key, chars: text.length });
+  } catch (e) {}
+  return text;
 };
 
 window.__bramPersistWorklistDraft = function (text) {

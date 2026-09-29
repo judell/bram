@@ -238,6 +238,39 @@ relied on exactly this and did no migration; do the same unless a
 specific read site still reaches into the old store (grep for it — don't
 assume).
 
+### Scope persisted keys by project
+
+`localStorage` is **one store shared by every Bram window** on the machine.
+It's one app (`org.xmlui.bram`) with one WebKit store, whichever project each
+window serves. So every persisted key needs a second question after decision
+vs. focus: **is it about this project, or about the user?**
+
+- **About the user** (a preference that holds in any project, such as
+  `bram.turnCompleteBeep` or a dismissed notice): an unscoped key is right.
+- **About this project** (its saved tab, the unsent message-box draft, and
+  anything naming its items, sessions or files): suffix the key with the
+  project. Use `window.__bramProjectScopedKey(base)` in `helpers.js`, which
+  returns `base + ":" + projectKey`, or null when the project isn't known. On
+  null, neither read nor write: never fall back to the shared slot. `main.js`
+  sets `window.__bramProjectKey` (from `/__app-info`) before the pane loads,
+  so the helper works synchronously.
+- **Don't migrate an unscoped project key's old value** unless you know which
+  project wrote it. A one-shot migration hands the value to whichever project
+  reads first, and that is the leak itself.
+
+The receipts:
+
+- #279: the saved tab. Two windows fought over one slot.
+- `message-draft-bleeds-across-bram-windows`, 2026-09-29: a draft dictated
+  and sent in `~/bram-studio` reappeared unsent in `~/bram`'s box after a
+  relaunch, and went to the wrong agent.
+- The draft is also the case #271's audit singled out as "must survive"
+  (unsent prose the user can't redo). That's why it stays in `localStorage`,
+  scoped, rather than moving to `sessionStorage`. That move was tried first,
+  and it would have dropped drafts on every relaunch.
+
+Existing unscoped keys haven't been audited against this rule yet.
+
 ## Push over polling
 
 Do NOT add `pollIntervalInSeconds` to XMLUI DataSources for

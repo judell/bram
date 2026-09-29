@@ -1885,6 +1885,9 @@ listen("pty-send-sent", (e) => {
     TOOLS_PANE_SRC = toolsSrc;
     const projectKey =
       appInfo && typeof appInfo.projectKey === "string" ? appInfo.projectKey : "";
+    // Set before the tools pane loads, so its per-project localStorage keys
+    // (helpers.js __bramProjectScopedKey) can read it synchronously.
+    window.__bramProjectKey = projectKey;
     if (projectKey) {
       toolsRouteKey = toolsRouteKeyFor(projectKey);
       migrateToolsRouteKey(localStorage, toolsRouteKey);

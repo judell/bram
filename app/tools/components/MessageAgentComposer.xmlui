@@ -13,9 +13,22 @@
     id="composerClear"
     initial="{0}"
     subscribe="{window.bramSubscribeComposerClear()}" />
+  <!-- ChangeListener fires once at mount with the initial value (0); only a
+       real clear request (tick 1 or more) may empty the box. Without that
+       guard, every reload and relaunch cleared a restored draft (Inspector
+       export, 2026-09-29: composerBox.setValue("") at mount). -->
   <ChangeListener
     listenTo="{composerClear.value}"
-    onDidChange="() => composerBox.setValue('')" />
+    onDidChange="(change) => window.__bramComposerClearOnTick(composerBox, change)" />
+  <!-- message-box-on-draft-editor-pattern: the host's saved draft arrives
+       after mount; it fills the box only if the box is still empty. -->
+  <PushSource
+    id="draftHydrated"
+    initial="{0}"
+    subscribe="{window.bramSubscribeDraftHydrated()}" />
+  <ChangeListener
+    listenTo="{draftHydrated.value}"
+    onDidChange="() => window.__bramApplyDraftHydration(composerBox)" />
   <PushSource
     id="voiceArrival"
     initial="{null}"

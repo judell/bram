@@ -61228,6 +61228,33 @@ fn route_request<R: tauri::Runtime>(
         return (200, "application/json; charset=utf-8", bytes);
     }
 
+    // message-box-on-draft-editor-pattern: the message box's unsent draft,
+    // persisted by the host like the Queue (per project by construction,
+    // survives relaunch). GET returns { text } (empty when there is none);
+    // writes go through POST /__draft/save.
+    if path == "__draft" {
+        let Some(dpath) = project_resource_path(app, MESSAGE_DRAFT_FILE) else {
+            return (
+                500,
+                "text/plain; charset=utf-8",
+                b"no project root".to_vec(),
+            );
+        };
+        let text = std::fs::read(&dpath)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .and_then(|d| d.get("text").and_then(|t| t.as_str()).map(String::from))
+            .unwrap_or_default();
+        append_bram_trace_line(
+            app,
+            "draft",
+            &format!("op=read chars={}", text.chars().count()),
+        );
+        let bytes = serde_json::to_vec(&serde_json::json!({ "text": text }))
+            .unwrap_or_else(|_| b"{\"text\":\"\"}".to_vec());
+        return (200, "application/json; charset=utf-8", bytes);
+    }
+
     if path == "__issues" {
         let issue_limit = project_search_issue_limit(app);
         let mut limit = issue_limit;
@@ -63115,6 +63142,81 @@ fn drain_worklist_intent<R: tauri::Runtime>(app: &AppHandle<R>) {
 // routes this handler once also served were deleted (delete-phase
 // tranche 1, #214): the host writes and clears the iterate sentinel on
 // the toTurn path. Refs #84, #91.
+// message-box-on-draft-editor-pattern: the message box's draft file, under
+// the project's resources/ like the Queue's. Gitignored in this repo.
+const MESSAGE_DRAFT_FILE: &str = ".bram-message-draft.json";
+
+// POST /__draft/save { text }. Last writer wins: one message box per window,
+// and the pane never saves before it has read the saved draft (the guard is
+// client-side, __bramDraftHydrated in helpers.js), so a startup save can't
+// clobber it. An empty text removes the file.
+fn handle_draft_save<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    body: &[u8],
+) -> (u16, &'static str, Vec<u8>) {
+    let text = match serde_json::from_slice::<serde_json::Value>(body) {
+        Ok(v) => match v.get("text").and_then(|t| t.as_str()) {
+            Some(t) => t.to_string(),
+            None => {
+                return (
+                    400,
+                    "application/json; charset=utf-8",
+                    b"{\"error\":\"missing text\"}".to_vec(),
+                );
+            }
+        },
+        Err(e) => {
+            return (
+                400,
+                "application/json; charset=utf-8",
+                format!("{{\"error\":\"invalid JSON: {}\"}}", e).into_bytes(),
+            );
+        }
+    };
+    let Some(dpath) = project_resource_path(app, MESSAGE_DRAFT_FILE) else {
+        return (
+            500,
+            "text/plain; charset=utf-8",
+            b"no project root".to_vec(),
+        );
+    };
+    let result = if text.is_empty() {
+        match std::fs::remove_file(&dpath) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+            _ => Ok(()),
+        }
+    } else {
+        if let Some(parent) = dpath.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let doc = serde_json::json!({ "text": text, "savedAtMs": unix_now_ms() });
+        let pretty = serde_json::to_string_pretty(&doc).unwrap_or_else(|_| "{}".to_string());
+        std::fs::write(&dpath, format!("{}\n", pretty)).map_err(|e| e.to_string())
+    };
+    match result {
+        Ok(()) => {
+            append_bram_trace_line(
+                app,
+                "draft",
+                &format!("op=save chars={}", text.chars().count()),
+            );
+            (
+                200,
+                "application/json; charset=utf-8",
+                b"{\"ok\":true}".to_vec(),
+            )
+        }
+        Err(e) => {
+            append_bram_trace_line(app, "draft", &format!("op=save-error error={}", e));
+            (
+                500,
+                "application/json; charset=utf-8",
+                format!("{{\"error\":{}}}", serde_json::json!(e)).into_bytes(),
+            )
+        }
+    }
+}
+
 // issue-90-q-page: replace the queue file wholesale from the pane's working
 // copy. Body must be {"entries": [...]} — shape-checked, then persisted
 // pretty-printed for hand-inspection.
@@ -68646,6 +68748,14 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             let mut buf = Vec::new();
             let _ = request.as_reader().read_to_end(&mut buf);
             handle_queue_save(app, &buf)
+        }
+    } else if path == "__draft/save" {
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            let mut buf = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut buf);
+            handle_draft_save(app, &buf)
         }
     } else if path == "__worklist/mutate" {
         if method != "POST" {

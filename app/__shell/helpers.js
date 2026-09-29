@@ -1436,31 +1436,150 @@ window.__bramProjectScopedKey = function (base) {
   return projectKey ? base + ":" + projectKey : null;
 };
 
-// The message box's unsent draft survives reloads and relaunches: it's
-// unsent prose the user can't redo (#271's audit: "must survive"). It was
-// one unscoped key, so text dictated and sent in ~/bram-studio reappeared
-// unsent in ~/bram's box after a relaunch and went to the wrong agent
-// (2026-09-29, message-draft-bleeds-across-bram-windows). Now it's scoped
-// by project. The old shared key is not migrated, since migrating it would
-// hand its text to whichever project read it first; nothing reads it now.
-// Every write is traced with its caller and whether a recording is live,
-// so a stale draft can be traced to its writer.
+// message-box-on-draft-editor-pattern: the message box's unsent draft is
+// saved by the host, like the Queue. POST /__draft/save writes
+// resources/.bram-message-draft.json in this project, so it's per project by
+// construction and survives relaunch (#271: unsent prose "must survive").
+// A sessionStorage copy (per window; survives a pane reload) gives the box
+// its text synchronously at mount. The host copy arrives async and fills an
+// empty box (__bramApplyDraftHydration, wired in MessageAgentComposer).
+// Two guards keep a stray write from wiping the saved draft:
+//  - nothing is saved to the host before it has been read (the Queue's
+//    click-before-hydrate race, #324); typed text is held until then;
+//  - an empty value from the box is saved only after this window has typed
+//    something that isn't just the restored text (traced as skipped
+//    "untyped-empty" otherwise). Sends and clears always save.
+// The box used to be emptied at mount by the composerClear ChangeListener;
+// see __bramComposerClearOnTick. The per-project localStorage key (ddafb42)
+// is read once, as this project's migration source, then removed. Every
+// write is traced.
 var __BRAM_MESSAGE_DRAFT_BASE = "bram.worklistMessageDraft";
-function __bramWriteMessageDraft(value, via) {
-  var text = String(value || "");
-  var key = window.__bramProjectScopedKey(__BRAM_MESSAGE_DRAFT_BASE);
-  if (key) {
-    try {
-      if (text) localStorage.setItem(key, text);
-      else localStorage.removeItem(key);
-    } catch (e) {}
-  }
+var __BRAM_MESSAGE_DRAFT_SS_KEY = "bram.worklistMessageDraft";
+var __bramDraftHydrated = false;
+var __bramDraftHostText = "";
+var __bramDraftBaseline = "";
+var __bramDraftTyped = false;
+var __bramDraftHeldForHost = null;
+
+function __bramDraftTrace(subkind, fields) {
+  try { window.__bramIframeTrace && window.__bramIframeTrace(subkind, fields); } catch (e) {}
+}
+
+function __bramDraftSaveToHost(text) {
+  __bramDraftHostText = text;
   try {
-    var fields = { via: via, chars: text.length, recording: !!window._voiceSession };
-    if (!key) fields.skipped = "no-project-key";
-    window.__bramIframeTrace && window.__bramIframeTrace("draft-write", fields);
+    fetch("/__draft/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: text }),
+    })
+      .then(function (r) {
+        if (!r.ok) throw new Error("draft save returned " + r.status);
+      })
+      .catch(function (e) {
+        __bramDraftTrace("draft-write", { via: "host-error", error: String(e) });
+      });
   } catch (e) {}
 }
+
+function __bramWriteMessageDraft(value, via) {
+  var text = String(value || "");
+  var skipped = "";
+  if (via === "input") {
+    if (text && text !== __bramDraftBaseline) __bramDraftTyped = true;
+    if (!text && !__bramDraftTyped) skipped = "untyped-empty";
+  }
+  if (!skipped) {
+    __bramWriteSS(__BRAM_MESSAGE_DRAFT_SS_KEY, text);
+    if (__bramDraftHydrated) __bramDraftSaveToHost(text);
+    else __bramDraftHeldForHost = text;
+  }
+  var fields = { via: via, chars: text.length, recording: !!window._voiceSession };
+  if (skipped) fields.skipped = skipped;
+  else if (!__bramDraftHydrated) fields.held = true;
+  __bramDraftTrace("draft-write", fields);
+}
+
+// Read the host's copy once per pane load. If the host has none, move this
+// project's per-project localStorage draft (if any) over, then drop that key.
+var __bramDraftHydrateSubscribers = new Set();
+function __bramDraftHydrateDone(text, source) {
+  __bramDraftHydrated = true;
+  __bramDraftHostText = text;
+  if (source === "migrated") __bramDraftSaveToHost(text);
+  if (__bramDraftHeldForHost !== null) {
+    var held = __bramDraftHeldForHost;
+    __bramDraftHeldForHost = null;
+    __bramDraftSaveToHost(held);
+  }
+  __bramDraftTrace("draft-hydrate", { source: source, chars: text.length });
+  __bramDraftHydrateSubscribers.forEach(function (fn) {
+    try { fn(); } catch (e) { console.error("[bram] draft-hydrate subscriber threw:", e); }
+  });
+}
+try {
+  fetch("/__draft", { cache: "no-store" })
+    .then(function (r) {
+      if (!r.ok) throw new Error("draft read returned " + r.status);
+      return r.json();
+    })
+    .then(function (d) {
+      var text = String((d && d.text) || "");
+      var source = "host";
+      var key = window.__bramProjectScopedKey(__BRAM_MESSAGE_DRAFT_BASE);
+      if (key) {
+        try {
+          var legacy = localStorage.getItem(key) || "";
+          if (!text && legacy) {
+            text = legacy;
+            source = "migrated";
+          }
+          localStorage.removeItem(key);
+        } catch (e) {}
+      }
+      __bramDraftHydrateDone(text, source);
+    })
+    .catch(function (e) {
+      __bramDraftTrace("draft-hydrate", { source: "error", error: String(e) });
+      __bramDraftHydrateDone("", "error");
+    });
+} catch (e) {}
+
+// PushSource factory: emits once the host copy has been read (at once if it
+// already has), so the message box can fill itself.
+window.bramSubscribeDraftHydrated = (function () {
+  var factory;
+  var tick = 0;
+  return function () {
+    if (factory) return factory;
+    factory = function (emit) {
+      var fire = function () { tick += 1; emit(tick); };
+      __bramDraftHydrateSubscribers.add(fire);
+      if (__bramDraftHydrated) fire();
+      return function () { __bramDraftHydrateSubscribers.delete(fire); };
+    };
+    return factory;
+  };
+})();
+
+// Fill the message box from the host's copy if the box is still empty
+// (a relaunch, where sessionStorage had nothing). Never overwrites text.
+window.__bramApplyDraftHydration = function (box) {
+  if (!box || !__bramDraftHydrated) return;
+  var cur = "";
+  try { cur = String(box.value || ""); } catch (e) {}
+  var text = __bramDraftHostText;
+  if (!cur && text) {
+    __bramDraftBaseline = text;
+    try { box.setValue(text); } catch (e) {}
+    __bramDraftTrace("draft-hydrate-applied", { chars: text.length });
+  } else {
+    __bramDraftTrace("draft-hydrate-applied", {
+      chars: 0,
+      skipped: cur ? "box-not-empty" : "nothing-saved",
+    });
+  }
+};
 
 var __bramWorklistDraftPersistTimer = null;
 var __bramWorklistDraftPending = null;
@@ -1476,15 +1595,12 @@ function __bramFlushWorklistDraft() {
   }
 }
 
+// The box's value at mount: this window's sessionStorage copy (present after
+// a pane reload). After a relaunch it's empty, and hydration fills the box.
 window.__bramRestoreWorklistDraft = function () {
-  var key = window.__bramProjectScopedKey(__BRAM_MESSAGE_DRAFT_BASE);
-  var text = "";
-  if (key) {
-    try { text = localStorage.getItem(key) || ""; } catch (e) {}
-  }
-  try {
-    window.__bramIframeTrace && window.__bramIframeTrace("draft-restore", { hasKey: !!key, chars: text.length });
-  } catch (e) {}
+  var text = __bramReadSS(__BRAM_MESSAGE_DRAFT_SS_KEY, "");
+  if (text) __bramDraftBaseline = text;
+  __bramDraftTrace("draft-restore", { source: "session", chars: text.length, hydrated: __bramDraftHydrated });
   return text;
 };
 
@@ -1603,6 +1719,20 @@ window.bramSubscribeMessageAgentText = (function () {
 // state before invoking it: the persisted draft cleared, but the live control
 // kept its value when the user returned to another tab.
 window.__bramComposerClearTick = Number(window.__bramComposerClearTick || 0);
+// The composerClear ChangeListener's handler. ChangeListener fires once at
+// mount with the PushSource's initial value (0), which used to empty the box
+// right after its draft was restored, on every reload and relaunch
+// (message-box-on-draft-editor-pattern; found with an Inspector export,
+// 2026-09-29). A real clear request always carries a tick of 1 or more.
+window.__bramComposerClearOnTick = function (box, change) {
+  var tick = change && change.newValue;
+  if (!(typeof tick === "number" && tick > 0)) {
+    __bramDraftTrace("composer-clear", { skipped: "mount", tick: tick == null ? null : tick });
+    return;
+  }
+  try { if (box && typeof box.setValue === "function") box.setValue(""); } catch (e) {}
+};
+
 window.bramSubscribeComposerClear = (function () {
   var factory;
   var subscribers = new Set();

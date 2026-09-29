@@ -446,6 +446,27 @@ term.attachCustomKeyEventHandler((ev) => {
   // etc. on non-US layouts).
   if (ev.altKey) return true;
 
+  // #411: Shift-Enter inserts a newline in the agent's prompt instead of
+  // submitting. xterm.js sends a bare \r for Shift-Enter, the same byte as
+  // Enter, so send \n (Ctrl+J) instead: Claude Code lists Ctrl+J as the
+  // multiline key that "works in any terminal without configuration"
+  // (https://code.claude.com/docs/en/interactive-mode#multiline-input), and
+  // Codex treats it as newline too. It's a plain control byte, so a
+  // multiplexer in between (herdr) is less likely to act on it than on the
+  // ESC CR of Option-Enter. term.input goes through term.onData → pty_write,
+  // the same path as a typed key. At a bare shell prompt \n still submits.
+  if (
+    ev.key === "Enter" &&
+    ev.shiftKey &&
+    !ev.ctrlKey &&
+    !ev.metaKey &&
+    !ev.isComposing
+  ) {
+    ev.preventDefault();
+    term.input("\n", true);
+    return false;
+  }
+
   // Non-macOS terminal copy/paste:
   //   - Plain Ctrl+C: copies the selection when one exists (Windows Terminal
   //     behavior); falls through to xterm.js → SIGINT when there's no

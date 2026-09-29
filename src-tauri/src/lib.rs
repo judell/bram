@@ -367,6 +367,9 @@ struct ProjectConfig {
     // transcript content).
     #[serde(default)]
     db: Option<String>,
+    // issue-414: start minimized and/or open the target app in the browser.
+    #[serde(default)]
+    launch: Option<LaunchConfig>,
 }
 // (The transitional `guards.rustAuthority` toggle was retired by
 // retire-python-hooks-rust-only: the Rust bram-guard is the only
@@ -579,30 +582,190 @@ fn encode_path_for_filename_ascii_lossy(p: &std::path::Path) -> String {
 
 fn determine_project_root() -> PathBuf {
     let args: Vec<String> = std::env::args().collect();
-    let candidate: PathBuf = if args.len() >= 2 && !args[1].starts_with('-') {
-        PathBuf::from(&args[1])
-    } else {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    // issue-414: launch flags may come before or after PROJECT_DIR, so the
+    // project is the first argument that isn't a flag.
+    let candidate: PathBuf = match args.iter().skip(1).find(|a| !a.starts_with('-')) {
+        Some(dir) => PathBuf::from(dir),
+        None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     };
     let canonical = candidate.canonicalize().unwrap_or(candidate);
     strip_unc_prefix(canonical)
 }
 
+// issue-414: launch options for projects whose target app is the point and
+// Bram is plumbing (tau-extractor-sandbox: teammates open the app, not the
+// terminal). From the command line (CLI_LAUNCH, parsed in parse_cli_flags)
+// or .bram.json "launch"; command-line flags win.
+#[derive(Clone, Default, serde::Deserialize)]
+struct LaunchConfig {
+    #[serde(default)]
+    minimized: Option<bool>,
+    // true, or a route such as "/architecture".
+    #[serde(default, rename = "openApp")]
+    open_app: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Default)]
+struct LaunchOpts {
+    minimized: Option<bool>,
+    // Some(None): open the app's own URL; Some(Some(route)): open that route.
+    open_app: Option<Option<String>>,
+}
+
+static CLI_LAUNCH: OnceLock<LaunchOpts> = OnceLock::new();
+
+fn is_launch_flag(arg: &str) -> bool {
+    arg == "--minimized" || arg == "--open-app" || arg.starts_with("--open-app=")
+}
+
+fn parse_launch_flags(args: &[String]) -> LaunchOpts {
+    let mut opts = LaunchOpts::default();
+    for a in args.iter().skip(1) {
+        if a == "--minimized" {
+            opts.minimized = Some(true);
+        } else if a == "--open-app" {
+            opts.open_app = Some(None);
+        } else if let Some(route) = a.strip_prefix("--open-app=") {
+            let route = route.trim();
+            opts.open_app = Some(if route.is_empty() {
+                None
+            } else {
+                Some(route.to_string())
+            });
+        }
+    }
+    opts
+}
+
+// The scheme://host:port part of a URL, so a route can replace its path.
+fn url_origin(url: &str) -> &str {
+    let after = url.find("://").map(|i| i + 3).unwrap_or(0);
+    match url[after..].find('/') {
+        Some(j) => &url[..after + j],
+        None => url,
+    }
+}
+
+// Whether something is listening at the URL's host and port.
+fn url_answers(url: &str) -> bool {
+    use std::net::ToSocketAddrs;
+    let origin = url_origin(url);
+    let hostport = origin.split("://").nth(1).unwrap_or(origin);
+    let with_port = if hostport.contains(':') {
+        hostport.to_string()
+    } else {
+        format!("{}:80", hostport)
+    };
+    let Ok(addrs) = with_port.to_socket_addrs() else {
+        return false;
+    };
+    addrs.into_iter().any(|a| {
+        std::net::TcpStream::connect_timeout(&a, std::time::Duration::from_millis(500)).is_ok()
+    })
+}
+
+fn apply_launch_options<R: tauri::Runtime>(app: &AppHandle<R>, root: Option<&Path>) {
+    let cli = CLI_LAUNCH.get().cloned().unwrap_or_default();
+    let cfg = root
+        .and_then(load_project_config)
+        .and_then(|c| c.launch)
+        .unwrap_or_default();
+    let minimized = cli.minimized.or(cfg.minimized).unwrap_or(false);
+    let open_app = cli.open_app.clone().or_else(|| match &cfg.open_app {
+        Some(serde_json::Value::Bool(true)) => Some(None),
+        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => {
+            Some(Some(s.trim().to_string()))
+        }
+        _ => None,
+    });
+    if !minimized && open_app.is_none() {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        if minimized {
+            // After a beat: macOS can ignore a minimize sent before the
+            // window is first shown.
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            let ok = app
+                .get_webview_window("main")
+                .map(|w| w.minimize().is_ok())
+                .unwrap_or(false);
+            append_bram_trace_line(&app, "launch", &format!("op=minimized ok={}", ok));
+        }
+        let Some(route) = open_app else { return };
+        // Wait for the target app to be served: a declared project server
+        // can take a while to start.
+        let started = std::time::Instant::now();
+        let deadline = std::time::Duration::from_secs(60);
+        loop {
+            if let Some(base) = target_app_browser_url(&app) {
+                let url = match route.as_deref() {
+                    Some(r) => {
+                        let r = if r.starts_with('/') {
+                            r.to_string()
+                        } else {
+                            format!("/{}", r)
+                        };
+                        format!("{}{}", url_origin(&base), r)
+                    }
+                    None => base.clone(),
+                };
+                if url_answers(&url) {
+                    let res = app.opener().open_url(url.clone(), None::<String>);
+                    append_bram_trace_line(
+                        &app,
+                        "launch",
+                        &format!(
+                            "op=open-app url={} waitedMs={} ok={}",
+                            url,
+                            started.elapsed().as_millis(),
+                            res.is_ok()
+                        ),
+                    );
+                    return;
+                }
+            }
+            if started.elapsed() > deadline {
+                let reason = if target_app_browser_url(&app).is_some() {
+                    "not-answering"
+                } else {
+                    "no-target-app"
+                };
+                append_bram_trace_line(
+                    &app,
+                    "launch",
+                    &format!("op=open-app-timeout reason={}", reason),
+                );
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+    });
+}
+
 fn parse_cli_flags() {
     let args: Vec<String> = std::env::args().collect();
+    let _ = CLI_LAUNCH.set(parse_launch_flags(&args));
     if args.len() < 2 {
         return;
     }
     match args[1].as_str() {
         "-h" | "--help" => {
             println!(
-                "Usage: bram [PROJECT_DIR]\n\n\
+                "Usage: bram [PROJECT_DIR] [--minimized] [--open-app[=<route>]]\n\n\
                  Tauri shell that pairs a terminal with an XMLUI surface.\n\n\
                  Arguments:\n  \
                    [PROJECT_DIR]    Path to the XMLUI project to load (defaults to current directory)\n\n\
                  Options:\n  \
-                   -h, --help       Print this help and exit\n  \
-                   -V, --version    Print version and exit"
+                   --minimized          Start with the Bram window minimized\n  \
+                   --open-app[=<route>] Once the target app is served, open it in the system\n                       \
+                   browser, optionally at a route (e.g. /architecture)\n  \
+                   -h, --help           Print this help and exit\n  \
+                   -V, --version        Print version and exit\n\n\
+                 A project can set the same in .bram.json:\n  \
+                   \"launch\": {{ \"minimized\": true, \"openApp\": \"/architecture\" }}\n\
+                 Command-line flags win over .bram.json."
             );
             std::process::exit(0);
         }
@@ -633,6 +796,7 @@ fn parse_cli_flags() {
                 }
             }
         }
+        s if is_launch_flag(s) => {}
         s if s.starts_with('-') => {
             eprintln!("bram: unknown option '{}'", s);
             eprintln!("Try 'bram --help' for more information.");
@@ -60951,6 +61115,15 @@ fn route_request<R: tauri::Runtime>(
                     obj.insert("repo".to_string(), serde_json::Value::String(slug));
                 }
             }
+            // issue-414: where a person opens this project's app, so an agent
+            // or a start script can say exactly where to go. null when the
+            // project has no target app.
+            obj.insert(
+                "targetAppUrl".to_string(),
+                target_app_browser_url(app)
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null),
+            );
         }
         let body = serde_json::to_vec(&v).unwrap_or_default();
         return (200, "application/json; charset=utf-8", body);
@@ -61056,7 +61229,16 @@ fn route_request<R: tauri::Runtime>(
             url: &'a str,
             default_right_pane: &'a str,
             spawned: Option<&'a ServerConfig>,
+            // issue-414: the browser-safe address (or null), and whether the
+            // project has a target app at all, for the header's Open app ↗.
+            #[serde(rename = "browserUrl")]
+            browser_url: Option<String>,
+            #[serde(rename = "hasTargetApp")]
+            has_target_app: bool,
         }
+        // Computed before taking the locks below: it takes them itself.
+        let browser_url = target_app_browser_url(app);
+        let has_target_app = browser_url.is_some();
         let pane_state = app.state::<PaneUrlsState>();
         let urls = pane_state.0.lock().unwrap();
         let spawn_state = app.state::<SpawnedServerState>();
@@ -61065,6 +61247,8 @@ fn route_request<R: tauri::Runtime>(
             url: &urls.right_pane,
             default_right_pane: &urls.default_right_pane,
             spawned: spawned_guard.as_ref().map(|s| &s.config),
+            browser_url,
+            has_target_app,
         };
         let body = serde_json::to_vec(&info).unwrap_or_default();
         return (200, "application/json; charset=utf-8", body);
@@ -63142,6 +63326,38 @@ fn drain_worklist_intent<R: tauri::Runtime>(app: &AppHandle<R>) {
 // routes this handler once also served were deleted (delete-phase
 // tranche 1, #214): the host writes and clears the iterate sentinel on
 // the toTurn path. Refs #84, #91.
+// issue-414: the target app's address for a normal browser, or None when the
+// project has no target app. Same rule the Target app info dialog used
+// (d5a4970): a declared .bram.json project server is
+// http://localhost:<port><path>; otherwise the built-in loopback static
+// server (default_right_pane), but only when the project actually serves a
+// root index.html, which is what that server points at. The embedded pane's
+// own bramapp:// URL can't be opened by a browser, so it is never returned.
+fn target_app_browser_url<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<String> {
+    {
+        let spawn_state = app.state::<SpawnedServerState>();
+        let spawned = spawn_state.0.lock().ok()?;
+        if let Some(s) = spawned.as_ref() {
+            return Some(format!(
+                "http://localhost:{}{}",
+                s.config.port, s.config.path
+            ));
+        }
+    }
+    let root = project_root(Some(app))?;
+    if !root.join("index.html").is_file() {
+        return None;
+    }
+    let pane_state = app.state::<PaneUrlsState>();
+    let urls = pane_state.0.lock().ok()?;
+    let url = urls.default_right_pane.clone();
+    if url.is_empty() {
+        None
+    } else {
+        Some(url)
+    }
+}
+
 // message-box-on-draft-editor-pattern: the message box's draft file, under
 // the project's resources/ like the Queue's. Gitignored in this repo.
 const MESSAGE_DRAFT_FILE: &str = ".bram-message-draft.json";
@@ -69635,6 +69851,8 @@ pub fn run() {
             // else, including a second Bram instance.
             let startup_project_root = project_root(Some(app.handle()));
             set_shell_window_title(app.handle());
+            // issue-414: --minimized / --open-app, or .bram.json "launch".
+            apply_launch_options(app.handle(), startup_project_root.as_deref());
             let previous_port = startup_project_root
                 .as_ref()
                 .and_then(|p| std::fs::read_to_string(p.join("resources/.bram-port")).ok())

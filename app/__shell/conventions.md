@@ -135,7 +135,7 @@ claims must say they are wrong). Record in
 premise that failed, what was verified, and what would make the item
 actionable again.
 
-- **A row reads "Committed outside the Worklist", or the user asks you to clear such rows** → read `.claude/bram-reference/worklist-mechanics.md` (§Rows committed outside the Worklist).
+- **A row reads "Committed outside the Worklist", you committed an item's work yourself, or the user asks you to clear such rows** → read `.claude/bram-reference/worklist-mechanics.md` (§Rows committed outside the Worklist).
 
 **Drop removes the item, not the bytes — and orphaned changes are
 misattributed, not merely unattributed.** The pane reasons about

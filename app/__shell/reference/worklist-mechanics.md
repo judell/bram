@@ -479,6 +479,16 @@ Worklist itself** since the item began touched them. It lists any others as
 refused. Rows it refuses still need the user's Drop. Cleared rows are
 recorded in history under *Items cleared*, linked to the landing commit.
 
+**When you commit an item's work yourself outside the gate** (a "just do
+it" or `skip-worklist:` turn, or a recovery commit after a refusal or a
+partial landing), clear the rows you landed with `clear-landed` in the
+**same turn**, without being asked. The user's go-ahead for the commit
+covers it, and the host verifies each row, so nothing on disk can be lost.
+Report any refused ids and leave them for the user's Drop. **Never use
+`mutate op:"prune"` for this:** it needs the authorization only a Drop click
+creates, so it fails (`authorization expired`, `id not in auth`), and the
+rows sit on the board (#413).
+
 ## Routing edits to the right item
 
 Lines written in a turn addressed to items (`iterate:` or `approved:`) are

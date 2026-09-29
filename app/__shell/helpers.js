@@ -1651,6 +1651,9 @@ window.__bramComposerPlaceholder = function (pathname, sel) {
 // markers, the same post-send transcript switch — so "message the items" is
 // one mechanism whichever surface invokes it.
 window.__bramSubmitFeedbackForSelection = function (box) {
+  if (window.__bramVoiceRepairWait("message-agent", function () {
+    window.__bramSubmitFeedbackForSelection(box);
+  })) return true;
   var sel = (window.__bramW2Selection || []).slice();
   if (!sel.length) return false;
   var message = "";
@@ -2049,6 +2052,9 @@ window.__bramMessageAgentBlur = function () {
 };
 
 window.__bramSubmitMessageAgentComposer = function (box, mode) {
+  if (window.__bramVoiceRepairWait("message-agent", function () {
+    window.__bramSubmitMessageAgentComposer(box, mode);
+  })) return true;
   var message = "";
   try { message = String((box && box.value) || "").trim(); } catch (e) {}
   if (!message) return false;
@@ -8392,6 +8398,51 @@ function __bramVoiceAdoptEdit(rec, box, target) {
 // toggle uses, delivered through voice-arrival so the editor resets its 🎤.
 // The record is marked stopped first, so neither a late partial nor the
 // final transcript writes into the just-cleared box.
+// Boundary repair (dictation-pauses-become-sentence-breaks): after each
+// pause, main.js transcribes the dictation's recent windows again as one,
+// so a pause doesn't come back as a sentence break, and marks the partial
+// `repairing` until that lands. A send made meanwhile waits (at most
+// __BRAM_VOICE_REPAIR_WAIT_MS) for the repaired text to reach the box, then
+// runs as usual. Returns true when it took the send over; `resend` runs it
+// later. A second Enter while waiting is absorbed, not sent twice.
+var __BRAM_VOICE_REPAIR_WAIT_MS = 2000;
+// The partial reaches the box through an XMLUI subscriber that renders
+// after this listener runs; give it that long before reading the box.
+var __BRAM_VOICE_REPAIR_SETTLE_MS = 250;
+var __bramVoiceRepairWaiting = false;
+var __bramVoiceRepairResending = false;
+window.__bramVoiceRepairWait = function (target, resend) {
+  if (__bramVoiceRepairResending) return false;
+  if (__bramVoiceRepairWaiting) return true;
+  var p = window.__bramVoicePartial;
+  if (!p || p.target !== target || !p.repairing) return false;
+  __bramVoiceRepairWaiting = true;
+  var t0 = Date.now();
+  var done = false;
+  var finish = function (reason) {
+    if (done) return;
+    done = true;
+    window.removeEventListener("bram:voice-partial", check);
+    clearTimeout(timer);
+    setTimeout(function () {
+      __bramVoiceRepairWaiting = false;
+      try { window.__bramIframeTrace && window.__bramIframeTrace("voice-trace", { stage: "send-repair-wait", target: target, reason: reason, waitedMs: Date.now() - t0 }); } catch (e) {}
+      __bramVoiceRepairResending = true;
+      try { resend(); } catch (e) {
+        console.error("[bram] send after repair wait failed:", e);
+      } finally {
+        __bramVoiceRepairResending = false;
+      }
+    }, __BRAM_VOICE_REPAIR_SETTLE_MS);
+  };
+  var check = function () {
+    var q = window.__bramVoicePartial;
+    if (!q || q.target !== target || !q.repairing) finish(q ? "repaired" : "delivered");
+  };
+  var timer = setTimeout(function () { finish("timeout"); }, __BRAM_VOICE_REPAIR_WAIT_MS);
+  window.addEventListener("bram:voice-partial", check);
+  return true;
+};
 window.__bramVoiceStopOnSend = function (target) {
   if (!window._voiceSession || window._voiceSessionTarget !== target) return;
   var rec = window.__bramVoiceLiveBase[target];

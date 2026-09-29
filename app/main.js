@@ -2213,11 +2213,67 @@ listen("pty-send-sent", (e) => {
 // first record click. (issue-407 retired the parent toolbar's 🎤, which
 // dictated into the terminal: little used, and confusing next to the pane's.)
 (() => {
-  const WHISPER_HOST = "http://127.0.0.1:18080";
-  const WHISPER_URL = WHISPER_HOST + "/inference";
-  // Host-native macOS/Linux launch expands this on the host. Windows launch
-  // sends it to WSL so it resolves under the WSL user's home directory.
-  const MODEL_PATH = "~/.local/share/whisper-models/ggml-small.en.bin";
+  // Speech-to-text engines. The live loop, the boundary repair and the
+  // reserve full pass talk only to the selected engine; what is specific to
+  // one engine (endpoint, request format, model, quirks) lives in its
+  // adapter. Whisper is the only engine today. localStorage
+  // bram.voice.engine (a decision, no UI yet) selects one; an unknown name
+  // falls back to Whisper with a trace line. The local-server lifecycle
+  // below (ensureServerRunning, whisper_status / whisper_start) is the
+  // Whisper adapter's too; a hosted engine would skip it.
+  const VOICE_ENGINES = {
+    whisper: {
+      id: "whisper",
+      host: "http://127.0.0.1:18080",
+      url: "http://127.0.0.1:18080/inference",
+      // Host-native macOS/Linux launch expands this on the host. Windows launch
+      // sends it to WSL so it resolves under the WSL user's home directory.
+      modelPath: "~/.local/share/whisper-models/ggml-small.en.bin",
+      caps: {
+        // Batch only: live text comes from polling a sliding window.
+        streams: false,
+        // Each request comes back as finished sentences, so a window cut at
+        // a pause ends with a period; the live loop repairs those boundaries.
+        punctuatesPerRequest: true,
+        // Invents "Thank you." from silence; silence is never sent alone.
+        hallucinatesOnSilence: true,
+      },
+      // Whisper's stock output for near-silence. Only traced (silencePhrase
+      // on voice-window), never dropped: a 0.5 s cutoff deleted a deliberate
+      // "thank you" (0.43 s voiced) while the LIVE_MIN_VOICED_S gate alone
+      // kept every phantom out. If phantoms return, their voicedS sets the
+      // cutoff.
+      silencePhrases: /^(thank you|thanks|thanks for watching|thank you for watching|bye|you)$/,
+      // `exact` pins decoding (no temperature fallback) for the live windows.
+      form(file, name, opts) {
+        const fd = new FormData();
+        fd.append("file", file, name);
+        fd.append("response_format", "json");
+        if (opts && opts.exact) {
+          fd.append("temperature", "0.0");
+          fd.append("temperature_inc", "0.0");
+        }
+        if (opts && typeof opts.prompt === "string") fd.append("prompt", opts.prompt);
+        return fd;
+      },
+      text(json) {
+        return (json && json.text) || "";
+      },
+    },
+  };
+  const VOICE_ENGINE_DEFAULT = "whisper";
+  const voiceEngine = (() => {
+    let name = VOICE_ENGINE_DEFAULT;
+    try {
+      name = localStorage.getItem("bram.voice.engine") || VOICE_ENGINE_DEFAULT;
+    } catch (_) {}
+    if (VOICE_ENGINES[name]) return VOICE_ENGINES[name];
+    setTimeout(() => voiceLog("voice-engine-unknown", { requested: name, using: VOICE_ENGINE_DEFAULT }), 0);
+    return VOICE_ENGINES[VOICE_ENGINE_DEFAULT];
+  })();
+  const WHISPER_HOST = voiceEngine.host;
+  const WHISPER_URL = voiceEngine.url;
+  const MODEL_PATH = voiceEngine.modelPath;
   const READY_TIMEOUT_MS = 15000;
   const READY_POLL_MS = 300;
   const IFRAME_ORPHAN_GRACE_MS = 10000;
@@ -2574,11 +2630,15 @@ listen("pty-send-sent", (e) => {
   // A click or breath is one or two ~85 ms blocks over LIVE_RMS; speech is
   // far more. Windows below this much voiced audio are never sent.
   const LIVE_MIN_VOICED_S = 0.3;
-  // Whisper's stock output for near-silence. Only traced (silencePhrase on
-  // voice-window), never dropped: a 0.5 s cutoff deleted a deliberate
-  // "thank you" (0.43 s voiced) while the LIVE_MIN_VOICED_S gate alone kept
-  // every phantom out. If phantoms return, their voicedS sets the cutoff.
-  const LIVE_SILENCE_PHRASES = /^(thank you|thanks|thanks for watching|thank you for watching|bye|you)$/;
+  // Boundary repair (dictation-pauses-become-sentence-breaks). A window
+  // finalized at a pause comes back as a finished sentence ("my dictation
+  // into. Bram. Itself.": 2026-09-29, breaks at exactly the pauses over
+  // pauseMs). So consecutive finals collect into a segment, and after each
+  // new final the whole segment is transcribed again in one request, whose
+  // text replaces the segment's parts: one context, no pause breaks. A
+  // segment holds at most this much audio; past that a new one starts, and
+  // that one boundary stays unrepaired.
+  const LIVE_SEGMENT_MAX_S = 20;
   let live = null;
 
   // Seconds of voiced audio in the first n samples of the window (all of it
@@ -2598,7 +2658,8 @@ listen("pty-send-sent", (e) => {
   // silence and stray blips is dropped instead.
   const liveHasSpeech = (L) => liveVoicedS(L) >= LIVE_MIN_VOICED_S;
   const liveIsSilencePhrase = (text) =>
-    LIVE_SILENCE_PHRASES.test(
+    !!voiceEngine.silencePhrases &&
+    voiceEngine.silencePhrases.test(
       String(text || "")
         .toLowerCase()
         .replace(/[^a-z ]/g, "")
@@ -2686,6 +2747,9 @@ listen("pty-send-sent", (e) => {
             provisional,
             parts: live.parts,
             openSeq: live.seq,
+            // A boundary repair is due or in flight: a send waits for it
+            // (helpers.js __bramVoiceRepairWait).
+            repairing: !!live.repairDue,
           },
           "*",
         );
@@ -2723,6 +2787,93 @@ listen("pty-send-sent", (e) => {
     return best > 0 ? best : L.winLen;
   };
 
+  // Add a finalized window's audio to the current segment, or start a new
+  // one; once a segment spans a boundary, a repair is due.
+  const liveSegmentAdd = (L, samples, partIdx) => {
+    const S = L.segment;
+    if (
+      S &&
+      S.lastPart === partIdx - 1 &&
+      S.len + samples.length <= LIVE_RATE * LIVE_SEGMENT_MAX_S
+    ) {
+      S.audio.push(samples);
+      S.len += samples.length;
+      S.lastPart = partIdx;
+      L.repairDue = true;
+    } else {
+      L.segment = { audio: [samples], len: samples.length, firstPart: partIdx, lastPart: partIdx };
+    }
+  };
+
+  // Transcribe the current segment again as one request. Its text goes in
+  // the segment's first part and the rest go empty; their seq numbers stay,
+  // so the pane's edit tracking still lines up.
+  const liveRepair = async () => {
+    const L = live;
+    const S = L.segment;
+    L.repairDue = false;
+    if (!S || S.lastPart <= S.firstPart) return;
+    L.busy = true;
+    const first = S.firstPart;
+    const through = S.lastPart;
+    const flat = new Float32Array(S.len);
+    let o = 0;
+    for (const a of S.audio) {
+      flat.set(a, o);
+      o += a.length;
+    }
+    const before = L.parts
+      .slice(0, first)
+      .map((p) => p.text)
+      .filter(Boolean)
+      .join(" ");
+    const fd = voiceEngine.form(liveWav(flat), "segment.wav", {
+      exact: true,
+      prompt: before.slice(-200),
+    });
+    const t0 = Date.now();
+    let status = null;
+    let timedOut = false;
+    let applied = false;
+    let silencePhrase = false;
+    const abort = new AbortController();
+    const timer = setTimeout(() => {
+      timedOut = true;
+      abort.abort();
+    }, LIVE_REQUEST_TIMEOUT_MS);
+    try {
+      const res = await fetch(WHISPER_URL, { method: "POST", body: fd, signal: abort.signal });
+      status = res.status;
+      const text = res.ok ? liveClean(voiceEngine.text(await res.json())) : "";
+      if (live !== L) return;
+      silencePhrase = liveIsSilencePhrase(text);
+      if (text && !silencePhrase) {
+        L.parts[first].text = text;
+        for (let i = first + 1; i <= through; i++) L.parts[i].text = "";
+        L.committed = L.parts.map((p) => p.text).filter(Boolean);
+        applied = true;
+      }
+    } catch (e) {
+      L.errors++;
+    } finally {
+      clearTimeout(timer);
+      const ms = Date.now() - t0;
+      L.repairMs.push(ms);
+      voiceLog("voice-repair", {
+        requestId: L.requestId,
+        windows: through - first + 1,
+        segmentS: Math.round((S.len / LIVE_RATE) * 10) / 10,
+        applied,
+        ...(silencePhrase ? { silencePhrase } : {}),
+        ...(timedOut ? { timedOut } : {}),
+        latencyMs: ms,
+        httpStatus: status,
+      });
+      L.busy = false;
+      if (live === L) livePublish();
+    }
+  };
+
   const liveTranscribe = async (final, cutAt) => {
     const L = live;
     L.busy = true;
@@ -2730,12 +2881,11 @@ listen("pty-send-sent", (e) => {
     const voicedS = liveVoicedS(L, n);
     let silencePhrase = false;
     L.sentLen = n;
-    const fd = new FormData();
-    fd.append("file", liveWav(liveFlat(n)), "live.wav");
-    fd.append("response_format", "json");
-    fd.append("temperature", "0.0");
-    fd.append("temperature_inc", "0.0");
-    fd.append("prompt", L.committed.join(" ").slice(-200));
+    const samples = liveFlat(n);
+    const fd = voiceEngine.form(liveWav(samples), "live.wav", {
+      exact: true,
+      prompt: L.committed.join(" ").slice(-200),
+    });
     const t0 = Date.now();
     let status = null;
     let timedOut = false;
@@ -2747,7 +2897,7 @@ listen("pty-send-sent", (e) => {
     try {
       const res = await fetch(WHISPER_URL, { method: "POST", body: fd, signal: abort.signal });
       status = res.status;
-      const text = res.ok ? liveClean((await res.json()).text) : "";
+      const text = res.ok ? liveClean(voiceEngine.text(await res.json())) : "";
       if (live !== L) return;
       L.latencies.push(Date.now() - t0);
       if (final) {
@@ -2755,6 +2905,7 @@ listen("pty-send-sent", (e) => {
         if (text) {
           L.committed.push(text);
           L.parts.push({ seq: L.seq, text });
+          liveSegmentAdd(L, samples, L.parts.length - 1);
         }
         // Every final closes a window, kept or not; the pane counts windows
         // to tell which text it already showed before an edit.
@@ -2801,7 +2952,12 @@ listen("pty-send-sent", (e) => {
   const liveTick = async () => {
     const L = live;
     if (!L || L.stopped) return;
-    if (!L.busy && L.winLen > 0 && !liveHasSpeech(L)) {
+    if (!L.busy && L.repairDue) {
+      // A repair goes ahead of the next live window: a send may be waiting
+      // on it.
+      L.pending = liveRepair();
+      await L.pending;
+    } else if (!L.busy && L.winLen > 0 && !liveHasSpeech(L)) {
       // Too little voice to send. Once the quiet has lasted a pause, it was a
       // blip, not the start of speech: drop it.
       if (L.quietMs >= LIVE_BLIP_QUIET_MS) liveDropWindow(L);
@@ -2869,6 +3025,9 @@ listen("pty-send-sent", (e) => {
       latencies: [],
       errors: 0,
       capture: "",
+      segment: null,
+      repairDue: false,
+      repairMs: [],
     };
     try {
       const Ctx = window.AudioContext || window.webkitAudioContext;
@@ -2947,6 +3106,9 @@ listen("pty-send-sent", (e) => {
       } catch (_) {}
     }
     if (L.winLen >= LIVE_RATE * 0.3 && liveHasSpeech(L)) await liveTranscribe(true);
+    // The stop's own final can make a repair due; the delivered text should
+    // be the repaired one.
+    if (L.repairDue) await liveRepair();
     // A successful final clears the provisional text. If it's still set, the
     // last window never came back (whisper-server stuck or down): keep what
     // was on screen rather than lose it. The 2026-09-26 hang delivered an
@@ -2971,6 +3133,10 @@ listen("pty-send-sent", (e) => {
       errors: L.errors,
       pauseMs: L.pauseMs,
       pausesMs: L.pauses,
+      repairs: L.repairMs.length,
+      repairAvgMs: L.repairMs.length
+        ? Math.round(L.repairMs.reduce((a, b) => a + b, 0) / L.repairMs.length)
+        : null,
     });
     if (live === L) live = null;
     return { text, errors: L.errors };
@@ -3200,9 +3366,7 @@ listen("pty-send-sent", (e) => {
       let transcript = "";
       let httpStatus = null;
       try {
-        const formData = new FormData();
-        formData.append("file", blob, "recording.webm");
-        formData.append("response_format", "json");
+        const formData = voiceEngine.form(blob, "recording.webm", {});
         const reqStart = Date.now();
         voiceLog("whisper-request", {
           requestId: reqId,
@@ -3215,7 +3379,7 @@ listen("pty-send-sent", (e) => {
         httpStatus = res.status;
         if (res.ok) {
           const data = await res.json();
-          transcript = (data.text || "").trim();
+          transcript = voiceEngine.text(data).trim();
         } else {
           let responseBody = "";
           let serverError = "";

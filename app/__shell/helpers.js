@@ -14012,46 +14012,30 @@ window.__bramLandedNote = function (board) {
     ? "1 item looks already committed"
     : n + " items look already committed";
 };
-// landed-detector-needs-item-work: Clear acts like every gate button, on
-// the ticked rows only: it clears the ticked rows that are flagged, and is
-// dimmed when there are none. Before, it sent every landed id whatever was
-// ticked, so clearing one row cleared them all, including any the detector
-// had wrongly flagged; an interim version fell back to that when no ticked
-// row was flagged, which still cleared rows nobody ticked.
-window.__bramLandedTargetIds = function (board, selected) {
-  var sel = selected || [];
-  return window.__bramLandedIds(board).filter(function (id) { return sel.indexOf(id) >= 0; });
-};
-window.__bramLandedCanClear = function (board, selected) {
-  return window.__bramLandedTargetIds(board, selected).length > 0;
-};
-// Every flagged row is tinted: these are the rows Clear could remove (Jon:
-// "we need a stronger indication of which row or rows apply"). Ticking
-// them is what makes Clear act on them. Warn-tinted because clearing
-// removes rows.
+// Every flagged row is tinted (Jon: "we need a stronger indication of which
+// row or rows apply"). Warn-tinted because its Clear removes the row.
 window.__bramLandedRowTint = function (item) {
   return item && item.landed ? "$color-warn-100" : "transparent";
 };
-// The label counts the ticked flagged rows it would clear.
-window.__bramLandedButtonLabel = function (board, selected) {
-  var n = window.__bramLandedTargetIds(board, selected).length;
-  return n > 1 ? "Clear " + n : "Clear it";
+// landed-row-clear-button: each flagged row carries its own Clear, which
+// clears just that row. It replaced a banner button that acted on ticked
+// flagged rows and sat dimmed the rest of the time (Jon: "I don't like the
+// fact that the mechanism to clear it exists here, but is inactive"). The
+// banner button before that cleared every flagged row regardless of the
+// selection, which could have removed a wrongly flagged one. The host
+// re-verifies the row before clearing it.
+window.__bramLandedRowClearTooltip = function (item) {
+  var sha = (item && item.landed && item.landed.short) || "a commit";
+  return "Remove this row: its work is already in " + sha;
 };
-window.__bramLandedButtonTooltip = function (board, selected) {
-  var n = window.__bramLandedTargetIds(board, selected).length;
-  if (n === 0) return "Tick a highlighted row to clear it";
-  return n === 1
-    ? "Remove the ticked row: its work is already in a commit"
-    : "Remove the " + n + " ticked rows: their work is already in a commit";
-};
-window.__bramClearLanded = function (board, selected) {
-  var ids = window.__bramLandedTargetIds(board, selected);
-  if (!ids.length) return;
+window.__bramClearLandedOne = function (id) {
+  if (!id) return;
+  window.__bramIframeTrace("click", { target: "worklist-row-clear", id: id });
   window
     .fetch("/__worklist/clear-landed", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ids: ids, via: "pane" }),
+      body: JSON.stringify({ ids: [id], via: "pane" }),
     })
     .catch(function () {});
 };

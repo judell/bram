@@ -400,17 +400,9 @@
       when="{!!window.__bramLandedNote(worklist.value)}"
       gap="$space-2"
       verticalAlignment="center">
+      <!-- landed-row-clear-button: the count only; each flagged row has its
+           own Clear. -->
       <Text color="$textColor-secondary" value="{window.__bramLandedNote(worklist.value)}" />
-      <!-- landed-detector-needs-item-work: like every gate button, Clear
-           acts on ticked rows only: the ticked rows that are flagged
-           (tinted). Dimmed when there are none. -->
-      <Button
-        label="{window.__bramLandedButtonLabel(worklist.value, worklist2Selected)}"
-        enabled="{window.__bramLandedCanClear(worklist.value, worklist2Selected)}"
-        variant="outlined"
-        size="xs"
-        tooltip="{window.__bramLandedButtonTooltip(worklist.value, worklist2Selected)}"
-        onClick="window.__bramClearLanded(worklist.value, worklist2Selected)" />
     </HStack>
     <!-- worklist-drag-reorder-and-link-labels: drag the ⋮⋮ grip to reorder.
          DndItems is the vendored xmlui-dnd-list extension the Queue uses
@@ -597,6 +589,20 @@
                file table is where it belongs; the scan line keeps one sentence
                with one meaning. Board-level total stays in the header. -->
           </HStack>
+          <!-- landed-row-clear-button: a row whose work landed outside the
+               Worklist carries its own Clear, beside the text that says "if it
+               is, Clear it". Outside the expansion toggle, so clicking it
+               never expands the row. It replaces the banner's button, which
+               was visible but dimmed until a flagged row was ticked (Jon: "I
+               don't like the fact that the mechanism to clear it exists here,
+               but is inactive"). -->
+          <Button
+            when="{!!$item.landed}"
+            label="Clear"
+            variant="outlined"
+            size="xs"
+            tooltip="{window.__bramLandedRowClearTooltip($item)}"
+            onClick="window.__bramClearLandedOne($item.id)" />
         </HStack>
         <VStack
           when="{(expandedKeys || []).includes($item.id)}"

@@ -280,6 +280,35 @@ Bram autostarts an agent in the terminal at launch. Configure it under
   (`claude --continue` / `codex resume --last`) instead of starting fresh.
 - `firstCommand` — optional command typed into the agent once it's ready.
 
+### Launch options
+
+For projects where the app is the point and Bram is plumbing, for example a
+repo teammates clone to read and annotate an XMLUI app, Bram can start
+minimized and open the app in your browser:
+
+```sh
+bram PROJECT_DIR --minimized --open-app=/architecture
+```
+
+- `--minimized` starts with the Bram window minimized.
+- `--open-app[=<route>]` waits until the target app is being served, then
+  opens it in the system browser, optionally at a route. The address is the
+  project's declared `server` (`http://localhost:<port><path>`), or Bram's
+  built-in server when the project has a root `index.html`.
+
+The same, per project, in `.bram.json`, so a plain `bram PROJECT_DIR` does
+it (command-line flags win):
+
+```json
+{
+  "launch": { "minimized": true, "openApp": "/architecture" }
+}
+```
+
+`openApp` is `true` for the app's own address, or a route. In the running
+app, the header's **Open app ↗** button opens the same address, and the ⓘ
+dialog shows it with a **Copy** button.
+
 ## Voice input
 
 Bram supports two ways to dictate instead of type:

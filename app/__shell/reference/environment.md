@@ -47,6 +47,19 @@ takes its own no-location path instead of hitting a denial after its
 feature detection passes. Test those features in a real browser at the
 same URL, not in this pane.
 
+## Where the user opens the target app
+
+When the user asks how to see or share the app, give them the address.
+`GET /__app-info` → `targetAppUrl` is the browser-safe URL: the declared
+`.bram.json` project server (`http://localhost:<port><path>`), or Bram's
+built-in server when the project serves a root `index.html`. It's `null`
+when there's no target app. In the pane, the header's **Open app ↗** button
+opens it, and the ⓘ dialog shows it with **Copy**. Don't hand out the
+embedded pane's `bramapp://` URL; a normal browser can't open it. A project
+whose app is the point can launch Bram minimized with the app opened:
+`bram <dir> --minimized --open-app[=<path>]`, or `.bram.json`
+`"launch": { "minimized": true, "openApp": "/route" }`.
+
 ## Live SQL views via `/query`
 
 When a managed project keeps data in SQLite, its target app (or the

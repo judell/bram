@@ -347,14 +347,23 @@
 
   <ModalDialog id="urlInfoDialog" title="Target app info">
     <VStack gap="$space-3">
-      <VStack gap="$space-1" var.browserUrl="{rpInfo.value ? (rpInfo.value.spawned ? ('http://localhost:' + rpInfo.value.spawned.port + rpInfo.value.spawned.path) : rpInfo.value.default_right_pane) : ''}">
+      <!-- issue-414: the host works out the browser-safe URL
+           (/__right-pane-info browserUrl, the d5a4970 rule); it used to be
+           computed inline here. Copy puts it on the clipboard for pasting
+           or sharing. -->
+      <VStack gap="$space-1">
         <Text fontWeight="bold">URL</Text>
-        <Text fontFamily="$fontFamily-monospace" fontSize="$fontSize-sm">{browserUrl}</Text>
-        <HStack gap="$space-2">
+        <Text fontFamily="$fontFamily-monospace" fontSize="$fontSize-sm">{(rpInfo.value &amp;&amp; rpInfo.value.browserUrl) || 'This project has no target app.'}</Text>
+        <HStack gap="$space-2" when="{rpInfo.value &amp;&amp; rpInfo.value.hasTargetApp}">
           <Button
             label="Open in browser"
             size="sm"
-            onClick="browserUrl &amp;&amp; openExternal(browserUrl)" />
+            onClick="openExternal(rpInfo.value.browserUrl)" />
+          <Button
+            label="Copy"
+            size="sm"
+            variant="outlined"
+            onClick="window.__bramCopyText(rpInfo.value.browserUrl, toast)" />
         </HStack>
       </VStack>
 
@@ -566,6 +575,16 @@
              message moved to the footer status line (Jon: it belongs there,
              not in the app header) — see the footer HStack below. -->
         <SpaceFiller />
+        <!-- issue-414: opening the target app in a browser was three clicks
+             deep (ⓘ, then Open in browser). The usual case, since the
+             target pane is off by default. Tooltip shows the address. -->
+        <Button
+          when="{rpInfo.value &amp;&amp; rpInfo.value.hasTargetApp}"
+          label="Open app ↗"
+          variant="ghost"
+          size="sm"
+          tooltip="{'Open the target app in your browser: ' + rpInfo.value.browserUrl}"
+          onClick="openExternal(rpInfo.value.browserUrl)" />
         <Theme fontSize-Button="$fontSize-lg">
           <Button
             label="ⓘ"

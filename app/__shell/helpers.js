@@ -13898,6 +13898,23 @@ window.__bramDiffExpanded = function (keys, itemId, path) {
 // hiding the unexpanded rows"). Clicking its triangle again closes the
 // diff and brings the rest back. The note says rows are hidden, so the missing
 // files don't read as gone.
+// issue-414: copy text to the clipboard from pane markup (the tools iframe
+// has allow="clipboard-write"). XMLUI has no copy action of its own. Pass
+// XMLUI's `toast` to report the outcome.
+window.__bramCopyText = function (text, toastApi) {
+  var s = String(text || "");
+  if (!s) return;
+  var say = function (msg) { if (typeof toastApi === "function") toastApi(msg); };
+  try {
+    navigator.clipboard.writeText(s).then(
+      function () { say("Copied " + s); },
+      function (e) { say("Couldn't copy: " + String(e)); }
+    );
+  } catch (e) {
+    say("Couldn't copy: " + String(e));
+  }
+};
+
 // issue-406-offer-to-clear-landed-rows: rows whose work landed outside the
 // Worklist, offered for clearing in one click above the board. The host
 // re-verifies each id when the route runs and prunes only landed ones.

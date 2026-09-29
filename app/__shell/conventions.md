@@ -323,6 +323,8 @@ what to click, use the rendered label.
 The host sets the inflight sentinel for `approved:` and `iterate:` when
 it sends them; for drops, `resolve` raises it and `prune` clears it. Respond to any per-item feedback, whatever the kind.
 
+- **Recommending Drop / Commit on named items** → post a plan; read `.claude/bram-reference/worklist-mechanics.md` (§Recommending next steps).
+
 **`/__worklist/resolve`** returns `{"kind":"approved"|"drop", "items":
 [<recorded content>]}` — execute those items; don't re-read
 `worklist.json` to second-guess them. Records are **consumed on first

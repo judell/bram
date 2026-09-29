@@ -464,6 +464,39 @@ the discipline for completing them serially.
   recorded: rewriting it orphans its history link (see "Don't rewrite a
   commit the worklist history has recorded" in the core conventions).
 
+## Recommending next steps
+
+When you recommend Drop or Commit steps on named items ("Drop `a` and `b`,
+then Commit `c`"), also post them as a plan, so the user can approve all of
+them with one click instead of ticking rows button by button (#413):
+
+```
+{"summary": "why, in a sentence", "steps": [
+  {"verb": "drop", "ids": ["a", "b"]},
+  {"verb": "commit", "ids": ["c"]}
+]}
+```
+
+POST it to `/__worklist/plan`, the same transport as the other worklist
+routes.
+
+- **The host checks it and refuses, naming the id,** if an id isn't on the
+  board, a commit id hasn't started (nothing to commit), or an id is named
+  in more than one step.
+- **The pane shows it above the gate row** as "Recommended: Drop a, b ·
+  Commit c", with **Do recommended** and a dismiss ×. It's shown only while
+  the board is unchanged since you posted it: any board change (a prune, an
+  advance, a reorder) makes it stale, and it disappears. Post again if it
+  still applies.
+- **The plan grants nothing.** **Do recommended** runs the gate buttons' own
+  paths for exactly those ids. Drops happen at once, host-direct, like a
+  feedback-less **Drop**. Commits arrive as an ordinary `approved:` commit
+  turn, like **Commit**, which you handle as usual.
+- **Say it in chat too.** The plan is the button's data; your message is the
+  reasoning. Don't post a plan the user hasn't seen described.
+- An empty `steps` list clears the plan. Push, PRs and other non-board steps
+  don't belong in it.
+
 ## Rows committed outside the Worklist
 
 When work lands through a plain `git commit` (typed in chat, or from a

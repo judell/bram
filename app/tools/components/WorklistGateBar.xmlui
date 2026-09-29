@@ -255,6 +255,33 @@
       color="$textColor-secondary"
       value="{window.__bramGateStrandedExitLine(gateClaim.value, gateAgent.value, gateLockTick)}" />
   </HStack>
+  <!-- issue-413: the agent's recommended next steps (POST /__worklist/plan),
+       shown while they still apply to the board, with or without a
+       selection. Do recommended runs the same Drop and Commit paths as the
+       buttons below, for exactly the ids the line names; it grants nothing
+       the buttons don't. Dimmed while the agent is working, like Commit's
+       caution. × dismisses. -->
+  <HStack
+    when="{!!window.__bramPlanLine(gateWorklist.value)}"
+    horizontalAlignment="center"
+    verticalAlignment="center"
+    gap="$space-2"
+    paddingHorizontal="$space-2"
+    paddingTop="$space-1">
+    <Text fontSize="$fontSize-sm" value="{window.__bramPlanLine(gateWorklist.value)}" />
+    <Button
+      label="Do recommended"
+      size="sm"
+      enabled="{!window.__bramInflightBlocker(gateClaim.value) &amp;&amp; !window.__bramAgentWorking(gateAgent.value)}"
+      tooltipMarkdown="{window.__bramPlanTooltip(gateWorklist.value)}"
+      onClick="window.__bramDoRecommended(gateWorklist.value, gateClaim.value)" />
+    <Button
+      label="×"
+      variant="ghost"
+      size="sm"
+      tooltip="Dismiss the recommendation"
+      onClick="window.__bramDismissPlan()" />
+  </HStack>
   <HStack
     when="{(gateSel.value || []).length > 0}"
     verticalAlignment="center"

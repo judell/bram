@@ -62,6 +62,7 @@ resources/.worklist-issue-close.json
 resources/.pending-session-title.json
 resources/.bram-queue.json
 resources/.bram-message-draft.json
+resources/.worklist-plan.json
 resources/.host-notes.json
 
 # issue-229 lean audit ledger: machine-local, append-only record of

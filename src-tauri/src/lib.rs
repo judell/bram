@@ -62746,6 +62746,13 @@ fn route_request<R: tauri::Runtime>(
         observe_pending_advances(app, &doc);
         observe_worklist_attribution(app, &doc);
         observe_state_mirror_divergence(app, &doc);
+        // issue-413: the agent's recommended next steps, while they still
+        // apply to this board.
+        if let Some(plan) = worklist_plan_current(app, &doc) {
+            if let Some(obj) = doc.as_object_mut() {
+                obj.insert("plan".to_string(), plan);
+            }
+        }
         let body = serde_json::to_vec(&doc).unwrap_or_default();
         return (200, "application/json; charset=utf-8", body);
     }
@@ -63356,6 +63363,159 @@ fn target_app_browser_url<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<Strin
     } else {
         Some(url)
     }
+}
+
+// issue-413: the agent's recommended next steps, as data the user can
+// approve with one click (Do recommended). The agent POSTs
+// { summary, steps: [{ verb: "drop" | "commit", ids: [...] }] }; the host
+// checks every id against the board and stores the plan with the board
+// version it was checked against. The plan grants nothing: the click runs
+// the same Drop and Commit paths the gate buttons do, which record their own
+// authorization. It is served on /__worklist only while that version is
+// current and every id is still on the board; a later board change makes it
+// stale. An empty steps list clears it (dismiss, or after the click).
+const WORKLIST_PLAN_FILE: &str = ".worklist-plan.json";
+
+fn worklist_plan_item<'a>(doc: &'a serde_json::Value, id: &str) -> Option<&'a serde_json::Value> {
+    doc.get("items")?
+        .as_array()?
+        .iter()
+        .find(|i| i.get("id").and_then(|v| v.as_str()) == Some(id))
+}
+
+fn worklist_plan_current<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    doc: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let path = project_resource_path(app, WORKLIST_PLAN_FILE)?;
+    let plan: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+    let board_version = doc.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
+    if plan.get("version").and_then(|v| v.as_u64()) != Some(board_version) {
+        return None;
+    }
+    let steps = plan.get("steps")?.as_array()?;
+    for step in steps {
+        for id in step.get("ids")?.as_array()? {
+            worklist_plan_item(doc, id.as_str()?)?;
+        }
+    }
+    Some(plan)
+}
+
+fn handle_worklist_plan<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    body: &[u8],
+) -> (u16, &'static str, Vec<u8>) {
+    let refuse = |msg: String| {
+        (
+            400,
+            "application/json; charset=utf-8",
+            serde_json::to_vec(&serde_json::json!({ "error": msg })).unwrap_or_default(),
+        )
+    };
+    let req: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return refuse(format!("invalid JSON: {}", e)),
+    };
+    let Some(path) = project_resource_path(app, WORKLIST_PLAN_FILE) else {
+        return (
+            500,
+            "text/plain; charset=utf-8",
+            b"no project root".to_vec(),
+        );
+    };
+    let steps = req
+        .get("steps")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if steps.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        append_bram_trace_line(app, "worklist", "op=plan-clear");
+        emit_replayable_signal(app, "worklist-changed");
+        return (
+            200,
+            "application/json; charset=utf-8",
+            b"{\"ok\":true,\"cleared\":true}".to_vec(),
+        );
+    }
+    let doc = worklist_doc(app);
+    let mut clean_steps = Vec::new();
+    let mut summary_parts = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for step in &steps {
+        let verb = step.get("verb").and_then(|v| v.as_str()).unwrap_or("");
+        if verb != "drop" && verb != "commit" {
+            return refuse(format!(
+                "step verb must be \"drop\" or \"commit\", got {:?}",
+                verb
+            ));
+        }
+        let ids: Vec<String> = step
+            .get("ids")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if ids.is_empty() {
+            return refuse(format!("a {} step names no ids", verb));
+        }
+        for id in &ids {
+            // One step per id: "drop and commit X" can't both be meant.
+            if !seen.insert(id.clone()) {
+                return refuse(format!("{} is named in more than one step", id));
+            }
+            let Some(item) = worklist_plan_item(&doc, id) else {
+                return refuse(format!("{} is not on the board", id));
+            };
+            // Commit needs work to commit: the item has begun or is applied.
+            if verb == "commit" {
+                let applied = item.get("status").and_then(|v| v.as_str()) == Some("applied");
+                if !applied && item.get("begunAtMs").is_none() {
+                    return refuse(format!(
+                        "{} hasn't started, so there is nothing to commit",
+                        id
+                    ));
+                }
+            }
+        }
+        summary_parts.push(format!("{}={}", verb, ids.join(",")));
+        clean_steps.push(serde_json::json!({ "verb": verb, "ids": ids }));
+    }
+    let version = doc.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
+    let plan = serde_json::json!({
+        "summary": req.get("summary").and_then(|v| v.as_str()).unwrap_or(""),
+        "steps": clean_steps,
+        "version": version,
+        "postedAtMs": unix_now_ms(),
+    });
+    let pretty = serde_json::to_string_pretty(&plan).unwrap_or_else(|_| "{}".to_string());
+    if let Err(e) = std::fs::write(&path, format!("{}\n", pretty)) {
+        return (
+            500,
+            "application/json; charset=utf-8",
+            serde_json::to_vec(&serde_json::json!({ "error": e.to_string() })).unwrap_or_default(),
+        );
+    }
+    append_bram_trace_line(
+        app,
+        "worklist",
+        &format!(
+            "op=plan-post version={} steps={}",
+            version,
+            summary_parts.join(" ")
+        ),
+    );
+    emit_replayable_signal(app, "worklist-changed");
+    (
+        200,
+        "application/json; charset=utf-8",
+        serde_json::to_vec(&serde_json::json!({ "ok": true, "version": version }))
+            .unwrap_or_default(),
+    )
 }
 
 // message-box-on-draft-editor-pattern: the message box's draft file, under
@@ -69033,6 +69193,14 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             let mut buf = Vec::new();
             let _ = request.as_reader().read_to_end(&mut buf);
             handle_queue_save(app, &buf)
+        }
+    } else if path == "__worklist/plan" {
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            let mut buf = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut buf);
+            handle_worklist_plan(app, &buf)
         }
     } else if path == "__draft/save" {
         if method != "POST" {

@@ -2078,6 +2078,82 @@ window.__bramGateCloseContradictionMessage = function (items, sel, claim, text) 
 //   drop           kind=drop
 //   iterate        a DIFFERENT call entirely (__bramWorklist2BatchIterate),
 //                  taking the raw feedback string rather than a fanned map
+// issue-413: the agent's recommended next steps, served on the board as
+// `plan` ({ summary, steps: [{ verb, ids }] }) by POST /__worklist/plan
+// while it still applies. The line names exactly what one click will do.
+function __bramPlanSteps(board) {
+  var plan = board && board.plan;
+  return (plan && Array.isArray(plan.steps)) ? plan.steps : [];
+}
+window.__bramPlanLine = function (board) {
+  var parts = __bramPlanSteps(board).map(function (s) {
+    var verb = s.verb === "drop" ? "Drop" : s.verb === "commit" ? "Commit" : String(s.verb || "");
+    return verb + " " + (s.ids || []).join(", ");
+  });
+  return parts.length ? "Recommended: " + parts.join(" · ") : "";
+};
+window.__bramPlanTooltip = function (board) {
+  var plan = board && board.plan;
+  var summary = String((plan && plan.summary) || "").trim();
+  var how = "Drops happen at once, like the Drop button. Commits go to the agent, like the Commit button.";
+  return summary ? summary + "\n\n" + how : how;
+};
+// Runs the plan through the gate buttons' own paths, for exactly the named
+// ids: feedback-less drops host-direct (POST /__worklist/drop, as Drop does),
+// commits through __bramGateAct("commit"), as Commit does. Then clears the
+// plan. It grants nothing the buttons don't.
+// The commit is sent only after the drop request settles. The authorization
+// record holds one kind at a time, so a commit click recorded while the drop
+// route was still working replaced the drop's authorization and its prune
+// was refused ("id not in auth"): found by the first click test,
+// 2026-09-29, where the dropped row stayed on the board.
+window.__bramDoRecommended = function (board, claim) {
+  var steps = __bramPlanSteps(board);
+  var dropIds = [];
+  var commitIds = [];
+  steps.forEach(function (s) {
+    var ids = s.ids || [];
+    if (s.verb === "drop") dropIds = dropIds.concat(ids);
+    else if (s.verb === "commit") commitIds = commitIds.concat(ids);
+  });
+  window.__bramIframeTrace("click", {
+    target: "gatebar-do-recommended",
+    drop: dropIds.length,
+    commit: commitIds.length,
+  });
+  var items = (board && board.items) || [];
+  var commit = function () {
+    if (commitIds.length) window.__bramGateAct("commit", items, commitIds, "together", claim);
+  };
+  window.__bramDismissPlan();
+  if (!dropIds.length) {
+    commit();
+    return;
+  }
+  window
+    .fetch("/__worklist/drop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: dropIds }),
+    })
+    .then(function (r) {
+      window.__bramIframeTrace("click", { target: "gatebar-do-recommended", op: "drop-done", status: r.status });
+    })
+    .catch(function (e) {
+      window.__bramIframeTrace("click", { target: "gatebar-do-recommended", op: "drop-failed", error: String(e) });
+    })
+    .then(commit);
+};
+window.__bramDismissPlan = function () {
+  window
+    .fetch("/__worklist/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ steps: [] }),
+    })
+    .catch(function () {});
+};
+
 window.__bramGateAct = function (kind, items, sel, shareMode, claim) {
   // Selection is literal user intent. Shared-file handling may change how the
   // agent prepares the commit, but never which ids this action authorizes.

@@ -506,6 +506,15 @@ begun. The gate builds an item's commit from the item's own turns, so work
 done between them is a gap it can't account for. This stays true until the
 gate carries unowned lines itself (#273).
 
+**Marking an item applied ends its claim, too.** `mutate op:"advance"`
+consumes the authorization, and edits made after it, even later in the same
+Start turn, are credited to no item, exactly like chat-turn edits. So finish
+every edit, and every test that might send you back to edit, before
+advancing. If a check after advancing turns up something to fix, don't edit:
+say so, and ask the user to send it as feedback on the item (an addressed
+turn opens a new claim), then edit in that turn. Apply-and-commit turns have
+no advance, so their edits stay claimed up to the commit.
+
 **Symptoms:**
 
 - **A partial landing.** The `worklist-commit` response carries
@@ -535,8 +544,12 @@ gate carries unowned lines itself (#273).
   a failed attempt can't lose work.
 
 **Prevention:** when the user redirects begun work in chat, ask them to send
-it as feedback on the item (or press Start or Resume) before editing.
-Receipts: judell/bram#273 (comments 5885260506 and 5897031890).
+it as feedback on the item (or press Start or Resume) before editing; and
+in a Start turn, advance only after the last edit and the last test.
+Receipts: judell/bram#273 (comments 5885260506 and 5897031890); for the
+advance case, `landed-detector-needs-item-work` (2026-09-29), where a
+regression fix written after the advance was left behind by `45c5239` and
+recovered outside the Worklist as `332bd7f`.
 
 ## Enforcement and security contract
 

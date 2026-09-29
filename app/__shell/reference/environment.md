@@ -114,6 +114,17 @@ On GitLab projects the parallel `glab` commands apply (`glab issue note
 forge-agnostic and identical on both. Every body you post needs the
 signature (see the core conventions); build it in a body file first.
 
+**Edit a comment by its id, never with `gh issue comment --edit-last`.**
+Bram posts its own forge comments (the close-on-push "Closed by …" note,
+lifecycle mirrors) through the same account you post through, so "the last
+comment by this account" can be Bram's, not yours. On 2026-09-29 an
+`--edit-last` meant for an agent's comment on judell/bram#413 overwrote
+Bram's close comment, which the user pushed a minute before. Keep the id
+from the URL `gh issue comment` prints, and edit with
+`gh api -X PATCH repos/<owner>/<repo>/issues/comments/<id> -F body=@<file>`;
+on GitLab, `glab api` against the note's id. Before editing, confirm the id
+is yours: its body opens with your signature.
+
 Bram internals, for diagnosing Bram itself — the forge adapter:
 https://github.com/judell/bram/blob/main/docs/forge-adapter.md
 

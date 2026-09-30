@@ -3,6 +3,7 @@
   var.commitsExpanded="{false}"
   var.searchQuery="{getLastSearchQuery()}"
   var.pullError="{null}"
+  var.pullWarningDismissed="{false}"
   var.pushError="{null}"
   var.searchNeedle="{searchQuery.trim().toLowerCase()}"
   var.filteredCommits="{filterCommitList(commits.value, searchNeedle)}"
@@ -38,7 +39,7 @@
     id="pullRebase"
     method="post"
     url="/__git/pull-rebase"
-    onSuccess="pullError = null; commits.refetch(); gitStatus.refetch()"
+    onSuccess="pullError = null; pullWarningDismissed = false; commits.refetch(); gitStatus.refetch()"
     onError="(e) => pullError = (e &amp;&amp; e.message) ? e.message : String(e)" />
 
   <!-- rung9-publish-surface: the close queue's post-push state. The
@@ -105,7 +106,8 @@
         label="{gitStatus.value &amp;&amp; gitStatus.value.behind > 0 ? 'Pull ' + gitStatus.value.behind : 'Pull'}"
         size="xs"
         enabled="{!pullRebase.inProgress &amp;&amp; gitStatus.value &amp;&amp; gitStatus.value.behind > 0}"
-        onClick="pullError = null; pullRebase.execute()" />
+        onClick="pullError = null; pullRebase.execute()"
+        onError="(e) => pullError = (e.error &amp;&amp; e.error.message) ? e.error.message : String(e)" />
     </HStack>
 
     <!-- push-withheld-when-commits-ride-a-pr: on the default branch, when
@@ -122,6 +124,18 @@
     <HStack when="{pullError}" backgroundColor="$color-danger-100" padding="$space-2" gap="$space-2" verticalAlignment="start">
       <Text fontSize="$fontSize-sm" color="$color-danger-700" width="*">Pull failed: {pullError}</Text>
       <Button label="✕" variant="ghost" size="xs" tooltip="Dismiss" onClick="pullError = null" />
+    </HStack>
+    <!-- pull-rebase-stash-safety: the pull succeeded but reapplying the
+         autostash conflicted, so git kept the changes in the stash and left
+         conflict markers. Stays until dismissed, not a transient toast.
+         Reads the response via lastResult
+         (https://www.xmlui.org/docs/howto/consume-an-apicall-response).
+         The Button's own onError above keeps a failed execute() from
+         escaping as an unhandled rejection
+         (https://www.xmlui.org/docs/howto/handle-action-errors-on-a-component). -->
+    <HStack when="{!pullWarningDismissed &amp;&amp; pullRebase.lastResult &amp;&amp; pullRebase.lastResult.autostashRetained}" backgroundColor="$color-warning-100" padding="$space-2" gap="$space-2" verticalAlignment="start">
+      <Text fontSize="$fontSize-sm" color="$color-warning-800" width="*" value="{pullRebase.lastResult.message}" />
+      <Button label="✕" variant="ghost" size="xs" tooltip="Dismiss" onClick="pullWarningDismissed = true" />
     </HStack>
     <!-- issue-383: pushError can now be genuinely multi-line (stdout+stderr,
          a pre-push hook's whole explanation ahead of git's one-line

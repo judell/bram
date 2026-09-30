@@ -22045,7 +22045,8 @@ fn git_push_stderr_is_nonff(stderr: &str) -> bool {
 #[cfg(test)]
 mod git_push_output_tests {
     use super::{
-        bram_trace_push_output, git_push_stderr_is_missing_upstream, git_push_stderr_is_nonff,
+        bram_trace_push_output, git_output_autostash_conflicted, git_output_is_index_lock_busy,
+        git_push_stderr_is_missing_upstream, git_push_stderr_is_nonff, git_trace_excerpt,
         GitPushOutput,
     };
 
@@ -22131,6 +22132,44 @@ mod git_push_output_tests {
         assert!(out
             .combined_for_display()
             .contains("has no upstream branch policy exception"));
+    }
+
+    // pull-rebase-stash-safety: the texts below are git 2.48.1's own output,
+    // captured in a scratch repo (and, for the lock, in the 2026-09-30
+    // field failure).
+    #[test]
+    fn index_lock_busy_detected_only_for_the_lock_refusal() {
+        assert!(git_output_is_index_lock_busy(
+            "fatal: Unable to create '/Users/x/repo/.git/index.lock': File exists.\n\nAnother git process seems to be running in this repository"
+        ));
+        assert!(git_output_is_index_lock_busy(
+            "error: could not write index\nfatal: Cannot autostash"
+        ));
+        assert!(git_output_is_index_lock_busy(
+            "error: cannot lock ref 'refs/remotes/origin/main': is at 7ca12a3 but expected 3b65062"
+        ));
+        assert!(!git_output_is_index_lock_busy(
+            "error: could not apply 61d3807... local"
+        ));
+    }
+
+    #[test]
+    fn autostash_conflict_detected_from_success_output() {
+        assert!(git_output_autostash_conflicted(
+            "Created autostash: 7b747b9\nFast-forward\nApplying autostash resulted in conflicts.\nYour changes are safe in the stash.\n"
+        ));
+        assert!(!git_output_autostash_conflicted(
+            "Created autostash: 7b747b9\nFast-forward\nApplied autostash.\n"
+        ));
+    }
+
+    #[test]
+    fn git_trace_excerpt_is_one_line_and_bounded() {
+        let long = format!("line one\nline two {}", "x".repeat(400));
+        let excerpt = git_trace_excerpt(&long);
+        assert!(!excerpt.contains('\n'));
+        assert!(excerpt.starts_with("line one\\nline two"));
+        assert!(excerpt.chars().count() <= 302);
     }
 
     #[test]
@@ -22398,6 +22437,12 @@ fn repo_has_origin<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
 }
 
 fn git_status_summary<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, String> {
+    // pull-rebase-stash-safety: wait for an in-flight Pull/Push rebase
+    // rather than race it (see git_rebase_exclusive_cell).
+    let _exclusive = match git_rebase_exclusive_cell().lock() {
+        Ok(guard) => guard,
+        Err(error) => error.into_inner(),
+    };
     // local-repo-no-origin-first-class: without an origin the fetch (and
     // the whole route with it, via `?`) used to fatal — the exact error a
     // local-only repo showed for merely opening the Commits tab. ahead /
@@ -22529,30 +22574,231 @@ fn upstream_is_fast_forward<R: tauri::Runtime>(app: &AppHandle<R>, branch: &str)
     }
 }
 
-// Dirty check that ignores exec-bit mode-only changes (100755 <-> 100644).
-// On Windows those filemode flips are a benign git artifact (#208); counting
-// them as dirty forces an unnecessary auto-stash before a rebase.
-fn working_tree_dirty_ignoring_filemode<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
-    git_run(app, &["-c", "core.fileMode=false", "status", "--porcelain"])
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false)
+// pull-rebase-stash-safety: both rebase paths (Pull, and Push's auto-rebase)
+// now let git stash with `--autostash` instead of a manual
+// `stash push --include-untracked` / `stash pop`. The manual stash wasn't
+// atomic: on 2026-09-30 it hit a held `.git/index.lock` after it had already
+// written the stash and removed six untracked files, Bram read the error as
+// "nothing stashed", and the files sat orphaned in `stash@{0}`. Autostash
+// stashes tracked changes only (a rebase never needs untracked files moved)
+// and reapplies them itself, including on `git rebase --abort`.
+// `-c core.fileMode=false` keeps #208's point: on Windows, exec-bit-only
+// flips are a benign artifact and shouldn't count as changes to stash.
+const GIT_LOCK_RETRY_DELAYS_MS: &[u64] = &[150, 300, 600, 1200];
+
+// Three shapes, all git 2.48.1 and all seen in the synthetic test: most
+// commands name the lock file; rebase's autostash step reports only "could
+// not write index" / "Cannot autostash"; a fetch racing another fetch
+// reports "cannot lock ref". A retried rebase can meet a half-started one,
+// which rebase_with_autostash cleans up.
+fn git_output_is_index_lock_busy(text: &str) -> bool {
+    (text.contains("index.lock") && text.contains("File exists"))
+        || text.contains("could not write index")
+        || text.contains("cannot lock ref")
 }
 
-// Whether a prior auto-stash with the given label is still on the stash stack.
-// Used to refuse stacking a second debris stash on top of one a previous
-// failed cycle left behind (#208).
-fn has_stash_labeled<R: tauri::Runtime>(app: &AppHandle<R>, label: &str) -> bool {
+// Git exits 0 when a rebase succeeds but reapplying the autostash conflicts:
+// it leaves conflict markers in the working tree and keeps the stash. The
+// output text is the only signal (verified on git 2.48.1).
+fn git_output_autostash_conflicted(text: &str) -> bool {
+    text.contains("Applying autostash resulted in conflicts")
+}
+
+fn git_trace_excerpt(text: &str) -> String {
+    text.trim()
+        .chars()
+        .take(300)
+        .collect::<String>()
+        .replace('\n', "\\n")
+}
+
+// Run a git step, retrying while another git process holds `index.lock`.
+// A lock refusal happens before git changes anything, so the retry is safe.
+fn git_run_capture_lock_retry<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    args: &[&str],
+    category: &str,
+    step: &str,
+) -> GitPushOutput {
+    let mut out = git_run_capture_both(app, args);
+    for (attempt, delay_ms) in GIT_LOCK_RETRY_DELAYS_MS.iter().enumerate() {
+        if out.ok || !git_output_is_index_lock_busy(&out.combined_for_display()) {
+            break;
+        }
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                category,
+                &format!(
+                    "op=lock-retry step={} attempt={} delay_ms={}",
+                    step,
+                    attempt + 1,
+                    delay_ms
+                ),
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(*delay_ms));
+        out = git_run_capture_both(app, args);
+    }
+    out
+}
+
+const AUTOSTASH_RETAINED_ADVICE: &str = "your uncommitted changes conflicted with the incoming commits. Git left conflict markers in the affected files and kept a copy of your changes in the stash. To keep both: edit each file to what you want, run `git restore --staged <file>`, then `git stash drop`. To take the incoming version instead: `git checkout HEAD -- <file>` (your changes stay in the stash; `git stash show -p` shows them)";
+
+const AUTOSTASH_PARKED_ADVICE: &str = "your uncommitted changes weren't reapplied (another git process held the index). They're safe in the stash: run `git stash list`, then `git stash pop`";
+
+// `git stash list` entries git itself parks there when it can't reapply an
+// autostash, for any reason. Comparing the count before and after is the
+// reliable signal; git's wording varies by cause (conflict, held lock).
+fn autostash_entry_count<R: tauri::Runtime>(app: &AppHandle<R>) -> usize {
     git_run(app, &["stash", "list"])
-        .map(|s| s.lines().any(|line| line.contains(label)))
-        .unwrap_or(false)
+        .map(|s| s.lines().filter(|l| l.ends_with(": autostash")).count())
+        .unwrap_or(0)
+}
+
+fn rebase_in_progress<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
+    let Some(root) = project_root(Some(app)) else {
+        return false;
+    };
+    ["rebase-merge", "rebase-apply"].iter().any(|dir| {
+        git_run(app, &["rev-parse", "--git-path", dir])
+            .map(|p| root.join(p.trim()).exists())
+            .unwrap_or(false)
+    })
+}
+
+struct AutostashRebase {
+    ok: bool,
+    text: String,
+    autostash_retained: bool,
+    // The rebase failed and Bram couldn't abort it (the synthetic test hit
+    // this with the index locked: `rebase --abort` fatals with "could not
+    // move back"), so the repo is left mid-rebase.
+    rebase_stuck: bool,
+}
+
+impl AutostashRebase {
+    fn failure_message(&self) -> String {
+        let mut msg = self.text.trim().to_string();
+        if self.rebase_stuck {
+            msg.push_str("\n\nA rebase is still in progress: Bram couldn't abort it. Run `git rebase --abort`.");
+        }
+        if self.autostash_retained {
+            msg.push_str("\n\nGit saved your uncommitted changes in the stash (`git stash list`). If `git status` shows them missing from your files, run `git stash pop`; if they're still there, the stash entry is a spare copy you can drop.");
+        }
+        msg
+    }
+
+    fn retained_advice(&self) -> &'static str {
+        if git_output_autostash_conflicted(&self.text) {
+            AUTOSTASH_RETAINED_ADVICE
+        } else {
+            AUTOSTASH_PARKED_ADVICE
+        }
+    }
+}
+
+// Shared by Pull and Push's auto-rebase: optionally fetch, then
+// `rebase --autostash <upstream>`, abort on failure, and report honestly
+// whether the user's changes came back and whether the rebase is over.
+// Serializes the autostash rebase against Bram's own status refresh
+// (git_status_summary), which every git change triggers and which runs
+// `git fetch` and index reads. In the synthetic test that refresh, racing a
+// pull, broke the fetch ("cannot lock ref"), the rebase ("could not write
+// index", after creating .git/rebase-merge) and the abort.
+fn git_rebase_exclusive_cell() -> &'static Mutex<()> {
+    static CELL: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(()))
+}
+
+fn rebase_with_autostash<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    upstream: &str,
+    fetch_first: bool,
+    category: &str,
+    op: &str,
+) -> AutostashRebase {
+    let _exclusive = match git_rebase_exclusive_cell().lock() {
+        Ok(guard) => guard,
+        Err(error) => error.into_inner(),
+    };
+    let before = autostash_entry_count(app);
+    let out = {
+        let fetch = if fetch_first {
+            Some(git_run_capture_lock_retry(
+                app,
+                &["fetch", "origin"],
+                category,
+                "fetch",
+            ))
+        } else {
+            None
+        };
+        match fetch {
+            Some(f) if !f.ok => f,
+            _ => {
+                let rebase_args: &[&str] = &[
+                    "-c",
+                    "core.fileMode=false",
+                    "rebase",
+                    "--autostash",
+                    upstream,
+                ];
+                git_run_capture_lock_retry(app, rebase_args, category, "rebase")
+            }
+        }
+    };
+    let text = out.combined_for_display();
+    let mut rebase_stuck = false;
+    if !out.ok && rebase_in_progress(app) {
+        // Aborting reapplies the autostash. Retried on a held lock, because
+        // a failed abort leaves the repo mid-rebase.
+        let _ = git_run_capture_lock_retry(app, &["rebase", "--abort"], category, "abort");
+        if rebase_in_progress(app) {
+            // A rebase that failed while starting can leave only
+            // .git/rebase-merge/autostash (no head-name), which --abort
+            // can't read. --quit clears it and moves the autostash to the
+            // stash list; the working tree is untouched.
+            let _ = git_run_capture_lock_retry(app, &["rebase", "--quit"], category, "quit");
+        }
+        rebase_stuck = rebase_in_progress(app);
+    }
+    let autostash_retained =
+        autostash_entry_count(app) > before || (out.ok && git_output_autostash_conflicted(&text));
+    if bram_trace_enabled() {
+        let line = if out.ok {
+            format!(
+                "op={} ok=true autostash_retained={}",
+                op, autostash_retained
+            )
+        } else {
+            format!(
+                "op={} ok=false exit={} autostash_retained={} rebase_stuck={} err={}",
+                op,
+                out.exit_code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+                autostash_retained,
+                rebase_stuck,
+                git_trace_excerpt(&text)
+            )
+        };
+        append_bram_trace_line(app, category, &line);
+    }
+    AutostashRebase {
+        ok: out.ok,
+        text,
+        autostash_retained,
+        rebase_stuck,
+    }
 }
 
 // Rebase local commits on top of origin and retry push. Takes a fast-forward
 // fast path when origin has nothing HEAD lacks: a plain `git push`, no stash
-// and no rebase. Only when the branch has genuinely diverged does it stash any
-// uncommitted changes (filemode-insensitive), rebase, push, and pop the stash.
-// If the stash pop has conflicts, the stash is left in place so the user can
-// recover via `git stash list` / `git stash apply`.
+// and no rebase. Only when the branch has genuinely diverged does it rebase
+// with `--autostash` (tracked changes only, filemode-insensitive), then push.
+// If reapplying the autostash conflicts, git keeps the stash and the error
+// says so.
 fn auto_rebase_and_push<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     // no-origin-console-error-remaining-paths: the Push button is hidden in
     // a no-origin repo, but the route stays reachable (stale pane, curl) —
@@ -22589,122 +22835,74 @@ fn auto_rebase_and_push<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), Str
             &format!("op=push path=rebase branch={}", branch),
         );
     }
-    let dirty = working_tree_dirty_ignoring_filemode(app);
-    let mut stashed = false;
-    if dirty {
-        if has_stash_labeled(app, "bram-auto-rebase") {
-            return Err("a previous bram-auto-rebase stash is still present — resolve it (`git stash list` / `git stash pop` / `git stash drop`) before retrying the push".to_string());
-        }
-        git_run(
-            app,
-            &[
-                "stash",
-                "push",
-                "--include-untracked",
-                "-m",
-                "bram-auto-rebase",
-            ],
-        )
-        .map_err(|e| format!("auto-stash failed: {}", e))?;
-        stashed = true;
+    let upstream = format!("origin/{}", branch);
+    let rebase = rebase_with_autostash(app, &upstream, false, "git-push", "rebase");
+    if !rebase.ok {
+        return Err(format!(
+            "rebase conflicts (aborted — re-run the rebase manually or ask the agent, then push): {}",
+            rebase.failure_message()
+        ));
     }
-
-    let result: Result<(), String> = (|| {
-        let upstream = format!("origin/{}", branch);
-        match git_run(app, &["rebase", &upstream]) {
-            Ok(_) => {
-                let push_args: &[&str] = &["push"];
-                let out = git_run_capture_both(app, push_args);
-                trace_git_push_result(app, "rebase", push_args, &branch, &out);
-                if out.ok {
-                    Ok(())
-                } else {
-                    Err(out.combined_for_display())
-                }
-            }
-            Err(rebase_err) => {
-                let _ = git_run(app, &["rebase", "--abort"]);
-                Err(format!(
-                    "rebase conflicts (aborted, working tree clean — re-run the rebase manually or ask the agent, then push): {}",
-                    rebase_err.trim()
-                ))
-            }
-        }
-    })();
-
-    if stashed {
-        if let Err(pop_err) = git_run(app, &["stash", "pop"]) {
-            let prefix = result
-                .as_ref()
-                .err()
-                .cloned()
-                .unwrap_or_else(|| "push succeeded".to_string());
-            return Err(format!(
-                "{}; stash pop failed: {} (stash retained — recover with `git stash list` / `git stash apply`)",
-                prefix,
-                pop_err.trim()
-            ));
-        }
+    let autostash_retained = rebase.autostash_retained;
+    let push_args: &[&str] = &["push"];
+    let out = git_run_capture_both(app, push_args);
+    trace_git_push_result(app, "rebase", push_args, &branch, &out);
+    if !out.ok {
+        return Err(out.combined_for_display());
     }
-
-    result
+    if autostash_retained {
+        return Err(format!("push succeeded, but {}", rebase.retained_advice()));
+    }
+    Ok(())
 }
 
-fn pull_rebase_with_autostash<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+struct PullRebaseOutcome {
+    autostash_retained: bool,
+    advice: &'static str,
+}
+
+fn pull_rebase_with_autostash<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<PullRebaseOutcome, String> {
     // no-origin-console-error-remaining-paths: same clean refusal as the
     // push route — `git pull` in a no-origin repo fatals on 'origin'.
     if !repo_has_origin(app) {
         return Err("no remote configured — this is a local-only repository".to_string());
     }
-    let dirty = git_run(app, &["status", "--porcelain"])
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false);
-    let mut stashed = false;
-    if dirty {
-        git_run(
-            app,
-            &[
-                "stash",
-                "push",
-                "--include-untracked",
-                "-m",
-                "bram-pull-rebase",
-            ],
-        )
-        .map_err(|e| format!("auto-stash failed: {}", e))?;
-        stashed = true;
+    // Fetch, then rebase onto the upstream ref, rather than `git pull
+    // --rebase`: pull reads FETCH_HEAD after its own fetch, and the pane's
+    // /__git/status refresh (fired by every git change) runs its own `git
+    // fetch origin`, rewriting FETCH_HEAD mid-pull ("no such ref was
+    // fetched", "Cannot rebase onto multiple branches"; both seen in the
+    // synthetic test). `@{u}` is a ref, updated atomically.
+    let rebase = rebase_with_autostash(app, "@{u}", true, "git-pull", "pull-rebase");
+    if !rebase.ok {
+        return Err(rebase.failure_message());
     }
-
-    let result = git_run(app, &["pull", "--rebase"]).map(|_| ());
-    if result.is_err() {
-        let _ = git_run(app, &["rebase", "--abort"]);
-    }
-
-    if stashed {
-        if let Err(pop_err) = git_run(app, &["stash", "pop"]) {
-            let prefix = result
-                .as_ref()
-                .err()
-                .cloned()
-                .unwrap_or_else(|| "pull succeeded".to_string());
-            return Err(format!(
-                "{}; stash pop failed: {} (stash retained — recover with `git stash list` / `git stash apply`)",
-                prefix,
-                pop_err.trim()
-            ));
-        }
-    }
-
-    result
+    Ok(PullRebaseOutcome {
+        autostash_retained: rebase.autostash_retained,
+        advice: rebase.retained_advice(),
+    })
 }
 
 fn handle_git_pull_rebase<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, &'static str, Vec<u8>) {
     match pull_rebase_with_autostash(app) {
-        Ok(_) => (
-            200,
-            "application/json; charset=utf-8",
-            br#"{"ok":true}"#.to_vec(),
-        ),
+        Ok(outcome) => {
+            let body = if outcome.autostash_retained {
+                serde_json::json!({
+                    "ok": true,
+                    "autostashRetained": true,
+                    "message": format!("Pulled, but {}.", outcome.advice),
+                })
+            } else {
+                serde_json::json!({ "ok": true })
+            };
+            (
+                200,
+                "application/json; charset=utf-8",
+                body.to_string().into_bytes(),
+            )
+        }
         Err(e) => {
             eprintln!("[http /__git/pull-rebase] {}", e);
             (500, "text/plain; charset=utf-8", e.into_bytes())

@@ -19911,6 +19911,9 @@ fn create_new_session(
                         &format!("op=launch-timeout waited_ms={}", waited),
                     );
                 }
+                // A manual launch is now the only way on; let its boot
+                // bytes release the hold.
+                open_agent_boot_evidence(&waiter_app, "launch-timeout");
                 return;
             }
             Ok(waited) => {
@@ -19923,6 +19926,7 @@ fn create_new_session(
                 }
             }
         }
+        open_agent_boot_evidence(&waiter_app, "launch");
         let _ = pty_write_internal(
             &waiter_app,
             &state,
@@ -36440,6 +36444,16 @@ static AGENT_BOOT_SETTLE_DEADLINE_MS: std::sync::atomic::AtomicI64 =
     std::sync::atomic::AtomicI64::new(0);
 static AGENT_BOOT_SETTLE_RESETS: std::sync::atomic::AtomicU32 =
     std::sync::atomic::AtomicU32::new(0);
+// Boot evidence counts only once the new CLI's launch command has been
+// typed. Before that the outgoing agent is still painting and tearing down,
+// and its bytes look exactly like boot evidence (2026-09-30 20:51:02.992Z:
+// Codex's own ?2026h, 1 ms after arming, then its exit's ?1004l, released
+// the hold 0.7 s before `codex` was launched; the brief was lost). #319
+// noted the same teardown source.
+static AGENT_BOOT_EVIDENCE_OPEN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static AGENT_BOOT_EVIDENCE_IGNORED: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
 
 fn agent_boot_hold_provider_cell() -> &'static Mutex<String> {
     static CELL: OnceLock<Mutex<String>> = OnceLock::new();
@@ -36533,6 +36547,8 @@ fn arm_agent_boot_hold<R: tauri::Runtime>(app: &AppHandle<R>, provider: &str) {
     }
     AGENT_BOOT_SETTLE_DEADLINE_MS.store(0, std::sync::atomic::Ordering::Relaxed);
     AGENT_BOOT_SETTLE_RESETS.store(0, std::sync::atomic::Ordering::Relaxed);
+    AGENT_BOOT_EVIDENCE_OPEN.store(false, std::sync::atomic::Ordering::Relaxed);
+    AGENT_BOOT_EVIDENCE_IGNORED.store(0, std::sync::atomic::Ordering::Relaxed);
     if bram_trace_enabled() {
         append_bram_trace_line(
             app,
@@ -36545,11 +36561,52 @@ fn arm_agent_boot_hold<R: tauri::Runtime>(app: &AppHandle<R>, provider: &str) {
     }
 }
 
-// First boot evidence: start the settle window (no-op when unarmed or
-// already settling; later toggles go through reset_agent_boot_settle).
+// Called just before the new CLI's launch command is written (or when the
+// launch gate times out and a manual launch is the only way on). Discards
+// anything the outgoing agent's bytes started.
+fn open_agent_boot_evidence<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str) {
+    if !agent_boot_hold_active() {
+        return;
+    }
+    AGENT_BOOT_SETTLE_DEADLINE_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+    AGENT_BOOT_SETTLE_RESETS.store(0, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut carry) = agent_boot_evidence_carry_cell().lock() {
+        carry.clear();
+    }
+    AGENT_BOOT_EVIDENCE_OPEN.store(true, std::sync::atomic::Ordering::Relaxed);
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "send-gate",
+            &format!(
+                "op=boot-evidence-open reason={} ignored_before={}",
+                reason,
+                AGENT_BOOT_EVIDENCE_IGNORED.load(std::sync::atomic::Ordering::Relaxed)
+            ),
+        );
+    }
+}
+
+// First boot evidence: start the settle window (no-op when unarmed, before
+// the launch, or already settling; later toggles go through
+// reset_agent_boot_settle).
 fn note_agent_boot_evidence<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str) {
     let since = AGENT_BOOT_HOLD_SINCE_MS.load(std::sync::atomic::Ordering::Relaxed);
     if since <= 0 {
+        return;
+    }
+    if !AGENT_BOOT_EVIDENCE_OPEN.load(std::sync::atomic::Ordering::Relaxed) {
+        let n = AGENT_BOOT_EVIDENCE_IGNORED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if n == 0 && bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "send-gate",
+                &format!(
+                    "op=boot-evidence-ignored reason={} phase=pre-launch",
+                    reason
+                ),
+            );
+        }
         return;
     }
     let now = unix_now_ms();

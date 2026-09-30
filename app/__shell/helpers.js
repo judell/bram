@@ -1013,6 +1013,9 @@ window.__bramSessionMetaLine = function (s) {
   if (!s) return "";
   var provider = String(s.provider || "").toUpperCase();
   var title = s.title || "(untitled)";
+  if (s.pending) {
+    return (provider ? provider + "  " : "") + title + "  ·  requested — session not yet confirmed";
+  }
   var id = String(s.id || "");
   var shortId = id.length > 12 ? id.slice(0, 12) : (id || "unknown");
   var when = "";

@@ -18673,19 +18673,30 @@ fn switch_agent(
     let has_session = SessionProvider::from_str(provider_key)
         .and_then(|p| latest_session_path_for_provider(&app, p).ok().flatten())
         .is_some();
-    let base_command = if provider_key == "codex" {
-        match codex_reload_target(&app) {
-            // A pinned reload target implies its session exists.
-            Some(target) => agent_resume_command("codex", &target.id),
-            None if has_session => agent_resume_command("codex", ""),
-            None => agent_launch_command("codex").map(str::to_string),
-        }
-    } else if has_session {
-        agent_resume_command(provider_key, "")
+    let pending = read_pending_session_title(&app, SessionProvider::Codex);
+    let pending_target = if provider_key == "codex" {
+        pending.as_ref().and_then(|rec| {
+            rec.session_id
+                .as_deref()
+                .and_then(|id| session_path_for_id(&app, SessionProvider::Codex, id))
+                .or_else(|| pending_codex_session_path(&app))
+                .and_then(|path| session_id_for_path(SessionProvider::Codex, &path))
+        })
     } else {
-        agent_launch_command(provider_key).map(str::to_string)
-    }
-    .ok_or("unknown agent provider")?;
+        None
+    };
+    let pin = if provider_key == "codex" {
+        codex_reload_target(&app)
+    } else {
+        None
+    };
+    let (base_command, pending_disposition) = provider_switch_launch(
+        provider_key,
+        has_session,
+        pin.as_ref().map(|target| target.id.as_str()),
+        pending.as_ref(),
+        pending_target.as_deref(),
+    );
     if !has_session && bram_trace_enabled() {
         append_bram_trace_line(
             &app,
@@ -18706,7 +18717,25 @@ fn switch_agent(
         append_bram_trace_line(
             &app,
             "agent-switch",
-            &format!("op=start provider={} command={}", provider_key, command),
+            &format!(
+                "op=start provider={} command={} pending={} requested_sid={} resume_sid={}",
+                provider_key,
+                command,
+                pending_disposition,
+                pending
+                    .as_ref()
+                    .filter(|rec| rec.provider == provider_key)
+                    .and_then(|rec| rec.session_id.as_deref())
+                    .unwrap_or("unbound"),
+                if pending_disposition == "restart-pending" {
+                    "none"
+                } else {
+                    pending_target
+                        .as_deref()
+                        .or_else(|| pin.as_ref().map(|target| target.id.as_str()))
+                        .unwrap_or("latest-or-fresh")
+                }
+            ),
         );
     }
     // NOT armed here, deliberately (#305, reverting the arm added by 597935b).
@@ -18778,12 +18807,22 @@ fn switch_agent(
                 }
             }
         }
-        let _ = pty_write_internal(
+        if let Err(error) = pty_write_internal(
             &waiter_app,
             &state,
             &format!("{}\r", command),
             "agent-switch-launch",
-        );
+        ) {
+            append_bram_trace_line(
+                &waiter_app,
+                "agent-switch",
+                &format!("op=launch-error provider={} error={}", provider_key, error),
+            );
+            return;
+        }
+        if let Some(id) = pending_target.as_deref() {
+            let _ = pin_codex_reload_target(&waiter_app, id);
+        }
         trace_agent_pty_step(&waiter_app, "switch", provider_key, "launch");
         // Switching providers must reset the transcript to the new provider's
         // latest session, not diff against the old cursor. Without this, the
@@ -18804,6 +18843,42 @@ fn switch_agent(
         }
     });
     Ok(())
+}
+
+// A pending named Codex launch outranks the previous-session pin. If the CLI
+// was interrupted before creating a rollout, there is nothing new to resume:
+// launch fresh again, keeping the title for its first confirmed session. Never
+// silently turn that request into `resume <previous>` or `resume --last`.
+fn provider_switch_launch(
+    provider: &str,
+    has_session: bool,
+    pinned_id: Option<&str>,
+    pending: Option<&PendingSessionTitle>,
+    pending_target: Option<&str>,
+) -> (String, &'static str) {
+    if provider == "codex" {
+        if let Some(rec) = pending.filter(|rec| rec.provider == "codex") {
+            return match pending_target {
+                Some(id) => (
+                    agent_resume_command(provider, id).unwrap(),
+                    "resume-pending",
+                ),
+                None => (
+                    new_session_launch_command(provider, &rec.title, None),
+                    "restart-pending",
+                ),
+            };
+        }
+        if let Some(id) = pinned_id {
+            return (agent_resume_command(provider, id).unwrap(), "none");
+        }
+    }
+    let command = if has_session {
+        agent_resume_command(provider, "").unwrap()
+    } else {
+        agent_launch_command(provider).unwrap().to_string()
+    };
+    (command, "none")
 }
 
 // Resolve a Codex rollout by the UUID in its session_meta record without the
@@ -19186,7 +19261,6 @@ fn pending_session_title_abandoned_by_resume(
     resumed_session_id: &str,
 ) -> bool {
     rec.provider == session_provider_label(provider)
-        && rec.previous_session_id.as_deref() == Some(resumed_session_id)
         && rec.session_id.as_deref() != Some(resumed_session_id)
 }
 
@@ -19195,8 +19269,8 @@ fn pending_session_title_abandoned_by_resume(
 // the queued title can no longer be claimed and its synthetic `pending-...`
 // row would otherwise remain current for ten minutes. An explicit Sessions
 // reload of that previous conversation abandons the pending launch in the
-// same way. Retire only that exact previous-id match so an unrelated resume
-// cannot consume a still-viable title.
+// same way. Any explicitly resumed different session supersedes the pending
+// request; keeping it would label that old conversation with the new title.
 fn clear_pending_session_title_for_resume<R: tauri::Runtime>(
     app: &AppHandle<R>,
     provider: SessionProvider,
@@ -19222,10 +19296,11 @@ fn clear_pending_session_title_for_resume<R: tauri::Runtime>(
                 app,
                 "session-new",
                 &format!(
-                    "op=cancel-pending provider={} sid={} source={}",
+                    "op=cancel-pending provider={} sid={} source={} requested_sid={} disposition=abandoned",
                     session_provider_label(provider),
                     resumed_session_id,
-                    source
+                    source,
+                    rec.session_id.as_deref().unwrap_or("unbound")
                 ),
             );
         }
@@ -19258,19 +19333,52 @@ fn pending_codex_session_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<P
             if canonical_path_string(Path::new(&cwd)) != project_cwd {
                 return None;
             }
-            let modified = std::fs::metadata(&candidate).ok()?.modified().ok()?;
-            let modified_ms = system_time_ms(modified)?;
-            // Filesystems with coarse timestamp precision can round the new
-            // rollout's mtime just below the pending record's millisecond
-            // timestamp. A two-second allowance remains safely inside the
-            // ten-minute handoff window and the previous-UUID exclusion above.
-            if modified_ms + 2_000 < rec.created_at_ms {
+            let metadata = std::fs::metadata(&candidate).ok()?;
+            let modified = metadata.modified().ok()?;
+            // A recent write to an OLD rollout is not a new session. Use its
+            // birth time, not mtime, for both discovery and title binding.
+            if !pending_session_title_can_claim(
+                &rec,
+                &session_id,
+                true,
+                metadata.created().ok().and_then(system_time_ms),
+            ) {
                 return None;
             }
             Some((modified, candidate))
         })
         .max_by_key(|(modified, _)| *modified)
         .map(|(_, candidate)| candidate)
+}
+
+fn pending_session_title_can_claim(
+    rec: &PendingSessionTitle,
+    session_id: &str,
+    allow_claim: bool,
+    created_ms: Option<i64>,
+) -> bool {
+    if session_id.is_empty() {
+        return false;
+    }
+    if rec.session_id.as_deref() == Some(session_id) {
+        return true; // A confirmed/reserved identity may retry its rename.
+    }
+    allow_claim
+        && rec.previous_session_id.as_deref() != Some(session_id)
+        && created_ms.is_some_and(|created| created.saturating_add(2_000) >= rec.created_at_ms)
+}
+
+fn claim_pending_session_title(
+    rec: &mut PendingSessionTitle,
+    session_id: &str,
+    allow_claim: bool,
+    created_ms: Option<i64>,
+) -> bool {
+    if !pending_session_title_can_claim(rec, session_id, allow_claim, created_ms) {
+        return false;
+    }
+    rec.session_id = Some(session_id.to_string());
+    true
 }
 
 // Apply a queued title to a just-surfaced session. On rotation, claim the
@@ -19301,52 +19409,35 @@ fn apply_pending_session_title<R: tauri::Runtime>(
     // is only to stop it attaching to an unrelated much-later rotation.
     let stale = unix_now_ms() - rec.created_at_ms > 600_000;
     if rec.provider == want && !stale {
-        if let Some(target) = rec.session_id.as_deref() {
-            if target != new_sid {
-                // new-session-handoff-race: the reserved sid never surfaced —
-                // the launch failed and a DIFFERENT session rotated in while
-                // the title was pending. If that session's file was created
-                // after the New Session click, it is the replacement
-                // (typically the user's manual recovery launch): re-bind the
-                // queued title instead of leaving it orphaned against a
-                // session that never existed. A resumed older session has a
-                // pre-click file birth time and is left alone; so is the
-                // outgoing session itself.
-                let old_target = target.to_string();
-                if !allow_claim || rec.previous_session_id.as_deref() == Some(new_sid) {
-                    return;
-                }
-                let fresh = session_path_for_id(app, provider, new_sid)
-                    .and_then(|p| std::fs::metadata(p).ok())
-                    .and_then(|m| m.created().ok())
-                    .and_then(system_time_ms)
-                    .map(|created_ms| created_ms + 2_000 >= rec.created_at_ms)
-                    .unwrap_or(false);
-                if !fresh {
-                    return;
-                }
-                rec.session_id = Some(new_sid.to_string());
-                if let Ok(bytes) = serde_json::to_vec(&rec) {
-                    let _ = std::fs::write(&path, bytes);
-                }
-                if bram_trace_enabled() {
-                    append_bram_trace_line(
-                        app,
-                        "session-new",
-                        &format!(
-                            "op=rebound provider={} from={} sid={}",
-                            want, old_target, new_sid
-                        ),
-                    );
-                }
-            }
-        } else if allow_claim {
-            rec.session_id = Some(new_sid.to_string());
+        let created_ms = session_path_for_id(app, provider, new_sid)
+            .and_then(|p| std::fs::metadata(p).ok())
+            .and_then(|m| m.created().ok())
+            .and_then(system_time_ms);
+        let old_target = rec.session_id.clone();
+        if !claim_pending_session_title(&mut rec, new_sid, allow_claim, created_ms) {
+            return;
+        }
+        if old_target.as_deref() != Some(new_sid) {
             if let Ok(bytes) = serde_json::to_vec(&rec) {
                 let _ = std::fs::write(&path, bytes);
             }
-        } else {
-            return;
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "session-new",
+                    &format!(
+                        "op={} provider={} from={} sid={} evidence=rollout-birth",
+                        if old_target.is_some() {
+                            "rebound"
+                        } else {
+                            "claimed"
+                        },
+                        want,
+                        old_target.as_deref().unwrap_or("unbound"),
+                        new_sid
+                    ),
+                );
+            }
         }
         let rename_result = match provider {
             SessionProvider::Codex => pin_codex_reload_target(app, new_sid)
@@ -19393,9 +19484,10 @@ fn apply_pending_session_title<R: tauri::Runtime>(
 #[cfg(test)]
 mod pending_session_title_tests {
     use super::{
-        codex_session_is_visible, merge_pending_session_entry,
-        pending_session_title_abandoned_by_resume, session_change_snapshot, PendingSessionTitle,
-        SessionEntry, SessionProvider,
+        claim_pending_session_title, codex_session_is_visible, merge_pending_session_entry,
+        new_session_launch_command, pending_session_title_abandoned_by_resume,
+        pending_session_title_can_claim, provider_switch_launch, session_change_snapshot,
+        PendingSessionTitle, SessionEntry, SessionProvider,
     };
 
     #[test]
@@ -19413,7 +19505,7 @@ mod pending_session_title_tests {
             SessionProvider::Codex,
             "previous-codex-id"
         ));
-        assert!(!pending_session_title_abandoned_by_resume(
+        assert!(pending_session_title_abandoned_by_resume(
             &rec,
             SessionProvider::Codex,
             "different-codex-id"
@@ -19423,6 +19515,182 @@ mod pending_session_title_tests {
             SessionProvider::Claude,
             "previous-codex-id"
         ));
+    }
+
+    fn pending_codex() -> PendingSessionTitle {
+        PendingSessionTitle {
+            provider: "codex".into(),
+            title: "intelligent switching".into(),
+            created_at_ms: 10_000,
+            session_id: None,
+            previous_session_id: Some("old-codex".into()),
+        }
+    }
+
+    #[test]
+    fn unbound_codex_roundtrip_restarts_fresh_instead_of_resuming_previous() {
+        let rec = pending_codex();
+        assert_eq!(
+            new_session_launch_command("codex", &rec.title, None),
+            "codex"
+        );
+        // Switching away must not consume a different provider's request.
+        assert_eq!(
+            provider_switch_launch("claude", true, None, Some(&rec), None),
+            ("claude --continue".into(), "none")
+        );
+        assert!(!pending_session_title_abandoned_by_resume(
+            &rec,
+            SessionProvider::Claude,
+            "old-claude"
+        ));
+        // Both a persisted old pin and the --last fallback used to defeat New.
+        for pin in [Some("old-codex"), None] {
+            assert_eq!(
+                provider_switch_launch("codex", true, pin, Some(&rec), None),
+                ("codex".into(), "restart-pending")
+            );
+        }
+        assert!(!pending_session_title_can_claim(
+            &rec,
+            "old-codex",
+            true,
+            Some(10_001)
+        ));
+        assert!(pending_session_title_can_claim(
+            &rec,
+            "fresh-codex",
+            true,
+            Some(10_001)
+        ));
+    }
+
+    #[test]
+    fn discovered_pending_codex_outranks_old_pin_and_survives_rename_retry() {
+        let mut rec = pending_codex();
+        assert_eq!(
+            provider_switch_launch(
+                "codex",
+                true,
+                Some("old-codex"),
+                Some(&rec),
+                Some("fresh-codex")
+            ),
+            ("codex resume fresh-codex".into(), "resume-pending")
+        );
+        assert!(pending_session_title_can_claim(
+            &rec,
+            "fresh-codex",
+            true,
+            Some(10_001)
+        ));
+        assert!(claim_pending_session_title(
+            &mut rec,
+            "fresh-codex",
+            true,
+            Some(10_001)
+        ));
+        assert_eq!(rec.session_id.as_deref(), Some("fresh-codex"));
+        assert!(pending_session_title_can_claim(
+            &rec,
+            "fresh-codex",
+            false,
+            None
+        ));
+        assert!(!pending_session_title_abandoned_by_resume(
+            &rec,
+            SessionProvider::Codex,
+            "fresh-codex"
+        ));
+        assert!(pending_session_title_abandoned_by_resume(
+            &rec,
+            SessionProvider::Codex,
+            "another-old-session"
+        ));
+    }
+
+    #[test]
+    fn unbound_title_never_claims_an_old_rollout_on_rotation_or_outgoing_write() {
+        let mut rec = pending_codex();
+        assert!(!claim_pending_session_title(
+            &mut rec,
+            "old-codex",
+            true,
+            Some(10_001)
+        ));
+        assert!(!claim_pending_session_title(
+            &mut rec,
+            "another-old-session",
+            true,
+            Some(1)
+        ));
+        assert!(rec.session_id.is_none());
+        assert!(!pending_session_title_can_claim(
+            &rec,
+            "another-old-session",
+            true,
+            Some(1)
+        ));
+        assert!(!pending_session_title_can_claim(
+            &rec,
+            "unknown-birth",
+            true,
+            None
+        ));
+        assert!(!pending_session_title_can_claim(
+            &rec,
+            "fresh-codex",
+            false,
+            Some(10_001)
+        ));
+        assert!(!pending_session_title_can_claim(
+            &rec,
+            "",
+            true,
+            Some(10_001)
+        ));
+    }
+
+    #[test]
+    fn ordinary_provider_switch_and_claude_reserved_identity_are_unchanged() {
+        for (provider, expected) in [
+            ("claude", "claude --continue"),
+            ("codex", "codex resume --last"),
+        ] {
+            assert_eq!(
+                provider_switch_launch(provider, true, None, None, None).0,
+                expected
+            );
+            assert_eq!(
+                provider_switch_launch(provider, false, None, None, None).0,
+                provider
+            );
+        }
+        assert_eq!(
+            provider_switch_launch("codex", true, Some("pinned"), None, None).0,
+            "codex resume pinned"
+        );
+        let rec = PendingSessionTitle {
+            provider: "claude".into(),
+            session_id: Some("reserved".into()),
+            ..pending_codex()
+        };
+        assert_eq!(
+            new_session_launch_command("claude", &rec.title, rec.session_id.as_deref()),
+            "claude --name 'intelligent switching' --session-id reserved"
+        );
+        assert!(pending_session_title_can_claim(
+            &rec, "reserved", false, None
+        ));
+        assert!(!pending_session_title_abandoned_by_resume(
+            &rec,
+            SessionProvider::Claude,
+            "reserved"
+        ));
+        assert_eq!(
+            provider_switch_launch("codex", true, Some("old-codex"), Some(&rec), None).0,
+            "codex resume old-codex"
+        );
     }
 
     #[test]

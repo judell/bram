@@ -23,6 +23,32 @@ is *"it did not"*. It produced two wrong readings minutes apart on 2026-09-01 �
 against a true 0 — the second after the first was already understood, which is
 the argument for writing it down rather than remembering it.
 
+### Named Codex sessions across provider switches
+
+`[agent-switch] op=start` records the launch decision, not proof that the CLI
+accepted it. `pending=restart-pending` means a still-valid named request has no
+identified rollout: returning to Codex launches fresh, ignoring the old resume
+pin. `pending=resume-pending` means a rollout was found for that request and its
+UUID is resumed. `pending=none` follows the ordinary pinned/latest/fresh policy.
+`requested_sid=unbound` distinguishes the unallocated Codex request from a known
+UUID; `resume_sid=none` on a restart confirms no old conversation was selected.
+`op=launch-error` means writing the command failed and no refresh is scheduled.
+
+Confirmation is separate: `[session-new] op=claimed from=unbound sid=<uuid>
+evidence=rollout-birth` binds a new request to an observed rollout. An old
+rollout's recent **write** is not evidence of a new session, and the outgoing
+UUID is excluded even inside the timestamp allowance. `op=rebound` uses the
+same evidence when replacing an orphaned reserved UUID; `op=named` means the
+title was successfully applied. Until then, the footer and Sessions row say
+“requested — session not yet confirmed,” not that the title is confirmed current.
+
+An explicit resume of a different session abandons the request:
+`[session-new] op=cancel-pending provider=<p> sid=<resumed uuid> source=<path>
+requested_sid=<uuid|unbound> disposition=abandoned`. Resuming the reserved UUID
+keeps its pending rename retry. The existing ten-minute pending-request TTL
+still applies. Claude's preallocated `--session-id` and normal switch policy
+are unchanged.
+
 ### Snapshot before manual hunk surgery
 
 Splitting one file's changes between items means rewriting a file that holds

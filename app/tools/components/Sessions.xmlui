@@ -242,7 +242,7 @@
               when="{$item.pending}"
               width="*"
               color="$textColor-secondary"
-              value="{($item.current ? '[current] ' : '') + ($item.title || '(untitled)') + ' — starting, will switch on next conversation turn'}" />
+              value="{'[requested] ' + ($item.title || '(untitled)') + ' — session not yet confirmed'}" />
             <Text width="140px" fontSize="$fontSize-sm" value="{formatDateTime(new Date($item.mtime * 1000), 'yyyy-MM-dd HH:mm')}" />
             <Text width="70px" fontSize="$fontSize-sm" value="{$item.pending ? 'Pending' : (Math.round($item.size / 1024) + ' KB')}" />
           </HStack>

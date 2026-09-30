@@ -14066,6 +14066,16 @@ window.__bramGuardRegistrationLine = function (r) {
   return parts.join(" · ");
 };
 
+// guard-link-per-project: the shared ~/.bram/bram-guard link follows
+// whichever Bram re-pointed it last; this project's hooks are handed to the
+// guard it recorded when the two differ.
+window.__bramGuardRoutingLine = function (r) {
+  var g = (r && r.routing) || {};
+  if (!g.projectGuard) return "This project hasn't recorded its guard yet (it does within a minute of launch).";
+  if (!g.linkTarget || g.linkTarget === g.projectGuard) return "Hooks run this project's own guard: " + g.projectGuard;
+  return "The shared link points at " + g.linkTarget + " (another Bram); hooks here are routed to this project's guard: " + g.projectGuard;
+};
+
 window.__bramLandedNote = function (board) {
   var n = window.__bramLandedIds(board).length;
   if (!n) return "";

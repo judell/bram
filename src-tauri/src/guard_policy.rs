@@ -241,6 +241,8 @@ const LIFECYCLE_PATHS_EXACT: &[&str] = &[
     "resources/.worklist-result.json",
     "resources/.bram-port",
     "resources/.bram-port.json",
+    // guard-link-per-project: the host records its own guard here.
+    "resources/.bram-guard-target",
 ];
 const LIFECYCLE_PATHS_PREFIXES: &[&str] = &[
     "resources/worklist-drafts/",

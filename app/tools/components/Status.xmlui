@@ -41,6 +41,10 @@
         fontSize="$fontSize-sm"
         color="$textColor-secondary"
         value="{window.__bramGuardRegistrationLine(guardSelftest.value)}" />
+      <Text
+        fontSize="$fontSize-sm"
+        color="$textColor-secondary"
+        value="{window.__bramGuardRoutingLine(guardSelftest.value)}" />
       <Table data="{guardSelftest.value.cases || []}">
         <Column header="case" width="230px" bindTo="id" />
         <Column header="expected" width="90px" bindTo="expect" />

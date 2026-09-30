@@ -35,6 +35,9 @@ pub fn run_guard_mode(args: &[String]) -> i32 {
         Ok(v) => (v, None),
         Err(e) => (serde_json::json!({}), Some(e.to_string())),
     };
+    if let Some(code) = route_to_project_guard(hook, args, &payload, &input) {
+        return code;
+    }
     match hook {
         "claude-permission-menu" => authority_menu_hook("claude-rs", &payload, started),
         "codex-permission-menu" => authority_menu_hook("codex-rs", &payload, started),
@@ -58,6 +61,114 @@ pub fn run_guard_mode(args: &[String]) -> i32 {
             // call over a typo in a registration string.
             eprintln!("bram guard: unknown hook '{}'", other);
             0
+        }
+    }
+}
+
+// --- Per-project guard routing (guard-link-per-project) -------------------
+//
+// ~/.bram/bram-guard is one link per machine, and every running Bram
+// re-points it to the guard beside its own binary every 60 s, so with two
+// instances on different builds every project's hooks ran whichever guard
+// wrote last (2026-09-30: ~/bram's hooks on the installed guard while it
+// ran a dev build). Each instance now records its own guard in
+// <root>/resources/.bram-guard-target; whichever guard the link reaches
+// hands the call to that one. Registrations don't change for either
+// provider. Any routing failure falls back to deciding in-process, as
+// before; routing never denies on its own.
+pub const GUARD_TARGET_REL: &str = "resources/.bram-guard-target";
+const GUARD_ROUTED_ENV: &str = "BRAM_GUARD_ROUTED";
+
+// The project's recorded guard, when it exists and isn't `current`, with
+// the project root it was recorded in (where the breadcrumb belongs; the
+// hook's cwd can be a subdirectory with no resources/).
+pub(crate) fn route_target(start: &Path, current: &Path) -> Option<(PathBuf, PathBuf)> {
+    let mut cur = start.to_path_buf();
+    let text = loop {
+        if let Ok(text) = std::fs::read_to_string(cur.join(GUARD_TARGET_REL)) {
+            break text;
+        }
+        if !cur.pop() {
+            return None;
+        }
+    };
+    let target = PathBuf::from(text.trim());
+    if text.trim().is_empty() || !target.is_file() {
+        return None;
+    }
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    if canon(&target) == canon(current) {
+        return None;
+    }
+    Some((target, cur))
+}
+
+fn route_to_project_guard(
+    hook: &str,
+    args: &[String],
+    payload: &serde_json::Value,
+    input: &str,
+) -> Option<i32> {
+    if std::env::var_os(GUARD_ROUTED_ENV).is_some() {
+        return None;
+    }
+    let provider = if hook.starts_with("codex-") {
+        "codex-rs"
+    } else {
+        "claude-rs"
+    };
+    let start = resolve_project_root(provider, payload);
+    let current = std::env::current_exe().ok()?;
+    let (target, root) = route_target(&start, &current)?;
+    let mut child_args: Vec<String> = vec!["guard".to_string()];
+    child_args.extend(args.iter().cloned());
+    let spawned = std::process::Command::new(&target)
+        .args(&child_args)
+        .env(GUARD_ROUTED_ENV, "1")
+        .stdin(std::process::Stdio::piped())
+        .spawn();
+    let mut child = match spawned {
+        Ok(c) => c,
+        Err(e) => {
+            append_breadcrumb(
+                &root,
+                provider,
+                "route-skip",
+                hook,
+                &format!("to={} reason=spawn-failed: {}", target.display(), e),
+            );
+            return None;
+        }
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        let _ = stdin.write_all(input.as_bytes());
+    }
+    match child.wait().ok().and_then(|s| s.code()) {
+        Some(code) => {
+            append_breadcrumb(
+                &root,
+                provider,
+                "route",
+                hook,
+                &format!(
+                    "from={} to={} exit={}",
+                    current.display(),
+                    target.display(),
+                    code
+                ),
+            );
+            Some(code)
+        }
+        None => {
+            append_breadcrumb(
+                &root,
+                provider,
+                "route-skip",
+                hook,
+                &format!("to={} reason=no-exit-code", target.display()),
+            );
+            None
         }
     }
 }
@@ -703,6 +814,14 @@ pub fn install_guard_link(home: &Path, exe: &Path) -> std::io::Result<PathBuf> {
 
 pub fn ensure_bram_guard_link() -> Option<PathBuf> {
     let home = crate::home_dir()?;
+    let target = own_guard_binary()?;
+    install_guard_link(&home, &target).ok()
+}
+
+// The guard this instance ships with: the dedicated guard binary beside the
+// running main binary, else the main binary itself. The link points here,
+// and the host records it in <root>/resources/.bram-guard-target.
+pub fn own_guard_binary() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     // windows-guard-bin-no-console: prefer the dedicated guard entrypoint
     // sitting beside the main binary — GUI subsystem on Windows in every
@@ -719,11 +838,10 @@ pub fn ensure_bram_guard_link() -> Option<PathBuf> {
             "bram-guard"
         })
     });
-    let target = match sibling {
+    Some(match sibling {
         Some(s) if s.exists() => s,
         _ => exe,
-    };
-    install_guard_link(&home, &target).ok()
+    })
 }
 
 pub fn guard_hook_command(link: &Path, hook: &str) -> String {
@@ -744,6 +862,56 @@ mod guard_mode_tests {
 
     fn count_entries(dir: &Path) -> usize {
         std::fs::read_dir(dir).map(|d| d.count()).unwrap_or(0)
+    }
+
+    // guard-link-per-project
+    #[test]
+    fn route_target_finds_the_project_guard_from_a_subdirectory() {
+        let root = scratch("route-found");
+        let nested = root.join("app").join("tools");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(root.join("resources")).unwrap();
+        let project_guard = root.join("project-guard");
+        std::fs::write(&project_guard, "").unwrap();
+        let running_guard = root.join("running-guard");
+        std::fs::write(&running_guard, "").unwrap();
+        std::fs::write(
+            root.join(GUARD_TARGET_REL),
+            format!("{}\n", project_guard.display()),
+        )
+        .unwrap();
+        let (target, found_root) = route_target(&nested, &running_guard).expect("routed");
+        assert_eq!(
+            target.canonicalize().unwrap(),
+            project_guard.canonicalize().unwrap()
+        );
+        assert_eq!(found_root, root);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn route_target_declines_self_missing_and_absent_targets() {
+        let root = scratch("route-declines");
+        std::fs::create_dir_all(root.join("resources")).unwrap();
+        let running_guard = root.join("running-guard");
+        std::fs::write(&running_guard, "").unwrap();
+        // No target file anywhere up the tree from here is fine only if the
+        // walk ends; scratch dirs live under the system temp dir.
+        std::fs::write(
+            root.join(GUARD_TARGET_REL),
+            format!("{}\n", running_guard.display()),
+        )
+        .unwrap();
+        assert_eq!(route_target(&root, &running_guard), None, "self");
+        std::fs::write(
+            root.join(GUARD_TARGET_REL),
+            format!("{}\n", root.join("gone").display()),
+        )
+        .unwrap();
+        assert_eq!(route_target(&root, &running_guard), None, "missing binary");
+        std::fs::write(root.join(GUARD_TARGET_REL), "  \n").unwrap();
+        assert_eq!(route_target(&root, &running_guard), None, "empty file");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -16625,6 +16625,7 @@ fn pty_spawn(
                     if now.saturating_sub(guard_link_last_ensure_ms) >= 60_000 {
                         guard_link_last_ensure_ms = now;
                         let _ = guard::ensure_bram_guard_link();
+                        record_own_guard_target(&app_for_throughput);
                     }
                 }
                 // codex-trust-menu-arm-until-settled: commit an armed
@@ -42356,6 +42357,41 @@ fn codex_hook_toml_block(guard_link: Option<&Path>) -> Option<String> {
 // The registered shadow path, only when it already exists on disk —
 // status checks must not reference (or create) a link the guard's own
 // startup/Setup path hasn't installed yet.
+// guard-link-per-project: record this instance's guard in its project, so
+// whichever guard ~/.bram/bram-guard reaches can route this project's hooks
+// to it (guard::route_target). Written at launch (the ticker's first pass)
+// and re-checked with each 60 s re-link; only on change, and only in a
+// managed project (one with resources/). Not removed on exit: a stale entry
+// still names this project's own build, which is the guard it should get.
+fn record_own_guard_target<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let Some(root) = project_root(Some(app)) else {
+        return;
+    };
+    if !root.join("resources").is_dir() {
+        return;
+    }
+    let Some(guard_bin) = guard::own_guard_binary() else {
+        return;
+    };
+    let want = format!("{}\n", guard_bin.display());
+    let path = root.join(guard::GUARD_TARGET_REL);
+    if std::fs::read_to_string(&path).ok().as_deref() == Some(want.as_str()) {
+        return;
+    }
+    let result = atomic_write_text(&path, &want);
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "guard",
+            &format!(
+                "op=target-recorded guard={} result={}",
+                guard_bin.display(),
+                if result.is_ok() { "ok" } else { "error" }
+            ),
+        );
+    }
+}
+
 fn guard_link_if_installed() -> Option<PathBuf> {
     let link = home_dir()?.join(".bram").join(if cfg!(windows) {
         "bram-guard.exe"
@@ -64393,9 +64429,24 @@ fn guard_selftest<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json::Value {
             }
         ),
     );
+    // guard-link-per-project: where the shared link points right now, and
+    // which guard this project records for itself. When they differ, hooks
+    // here are routed (hook-events.log `route` lines).
+    let link_target = link
+        .as_ref()
+        .and_then(|l| std::fs::read_link(l).ok())
+        .map(|t| t.to_string_lossy().to_string());
+    let project_guard = project_root(Some(app))
+        .and_then(|root| std::fs::read_to_string(root.join(guard::GUARD_TARGET_REL)).ok())
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
     serde_json::json!({
         "ok": ok,
         "link": link.map(|l| l.to_string_lossy().to_string()),
+        "routing": {
+            "linkTarget": link_target,
+            "projectGuard": project_guard,
+        },
         "cases": cases,
         "failed": failed,
         "registration": {

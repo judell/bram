@@ -87,6 +87,17 @@ struct PtyState {
     writer: Box<dyn Write + Send>,
     // issue-405: the terminal shell's pid, so quitting can hang up its
     // process group (hangup_pty_jobs). None if the platform can't say.
+    //
+    // Unix-only in effect: hangup_pty_jobs is #[cfg(unix)], and its
+    // non-unix twin is an explicit no-op, so on Windows nothing reads this
+    // and rustc's dead-code warning is correct. Renaming to _shell_pid or
+    // dropping the field would break the unix path that genuinely uses it,
+    // and a blanket #[allow(dead_code)] would also mask a future real
+    // disuse; scoping the allowance to the platform where the reader is
+    // compiled out keeps the check live on unix. Mirror of the
+    // #[cfg_attr(not(windows), allow(dead_code))] already used elsewhere
+    // in this file for the same shape.
+    #[cfg_attr(not(unix), allow(dead_code))]
     shell_pid: Option<u32>,
 }
 

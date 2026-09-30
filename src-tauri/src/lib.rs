@@ -17880,6 +17880,59 @@ fn drain_pty_intents<R: tauri::Runtime>(
                     remaining.push(line.to_string());
                     continue;
                 }
+                // boot-settle-wait-for-claude-bounce: re-check at write time.
+                // The hold released on evidence, but Claude may have turned
+                // its modes off since (22:10:09: released .414, OFF .441,
+                // written .473). Hold until they're back on, bounded like
+                // the boot hold itself.
+                if decision == BootHeldIntentDecision::Deliver
+                    && intent_provider == "claude"
+                    && BOOT_MODES_TRACKING.load(std::sync::atomic::Ordering::Relaxed)
+                    && !BOOT_MODES_ON.load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    let now = unix_now_ms();
+                    let first = BOOT_MODES_OFF_AT_WRITE_SINCE_MS
+                        .compare_exchange(
+                            0,
+                            now,
+                            std::sync::atomic::Ordering::Relaxed,
+                            std::sync::atomic::Ordering::Relaxed,
+                        )
+                        .is_ok();
+                    let since =
+                        BOOT_MODES_OFF_AT_WRITE_SINCE_MS.load(std::sync::atomic::Ordering::Relaxed);
+                    if first && bram_trace_enabled() {
+                        append_bram_trace_line(
+                            app,
+                            "send-gate",
+                            "op=boot-settle-rearm reason=modes-off-at-write",
+                        );
+                    }
+                    if now.saturating_sub(since) < AGENT_BOOT_HOLD_EXPIRE_MS {
+                        held += 1;
+                        remaining.push(line.to_string());
+                        continue;
+                    }
+                    // Still off after the bound: hand the text back rather
+                    // than paste it into input that isn't listening.
+                    let id = intent
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("intent")
+                        .to_string();
+                    boot_restores.push((id.clone(), data.to_string()));
+                    if bram_trace_enabled() {
+                        append_bram_trace_line(
+                            app,
+                            "send-gate",
+                            &format!(
+                                "op=boot-held-restore id={} generation={} provider={} reason=modes-off-at-write",
+                                id, generation, intent_provider
+                            ),
+                        );
+                    }
+                    continue;
+                }
                 if decision != BootHeldIntentDecision::Deliver {
                     let expired = decision == BootHeldIntentDecision::RestoreExpired;
                     expire_boot_hold |= expired;
@@ -36580,6 +36633,76 @@ static AGENT_BOOT_EVIDENCE_OPEN: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static AGENT_BOOT_EVIDENCE_IGNORED: std::sync::atomic::AtomicU32 =
     std::sync::atomic::AtomicU32::new(0);
+// boot-settle-wait-for-claude-bounce: Claude Code enables its TUI modes,
+// turns them off, and turns them on again before its input is live. The
+// 400 ms quiet window guessed at that and lost at 2026-09-30 22:10Z, when
+// the OFF came 437 ms after the first ON. For Claude the release is now the
+// bounce itself: the first ON after an OFF. No timer decides readiness
+// (development-principles.md); AGENT_BOOT_HOLD_EXPIRE_MS only bounds the
+// wait. Codex doesn't bounce and keeps the quiet window, a known exception
+// until its own readiness evidence is found. The mode state is tracked from
+// the launch write onward, so a delivery can also be checked at write time.
+static BOOT_MODES_TRACKING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static BOOT_MODES_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static BOOT_MODES_SEEN_ON: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static BOOT_MODES_BOUNCED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static BOOT_MODES_OFF_AT_WRITE_SINCE_MS: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct BootModes {
+    seen_on: bool,
+    on: bool,
+    bounced: bool,
+}
+
+// One focus-reporting toggle applied to the boot mode state. Returns the new
+// state and whether this toggle is the bounce's re-enable (ready).
+fn boot_modes_step(m: BootModes, on: bool) -> (BootModes, bool) {
+    if on {
+        let ready = m.bounced && !m.on;
+        (
+            BootModes {
+                seen_on: true,
+                on: true,
+                bounced: m.bounced,
+            },
+            ready,
+        )
+    } else {
+        (
+            BootModes {
+                seen_on: m.seen_on,
+                on: false,
+                bounced: m.bounced || m.seen_on,
+            },
+            false,
+        )
+    }
+}
+
+// Focus-reporting toggles in `buf`, in order, skipping any that end inside
+// the carried tail of the previous chunk.
+fn boot_focus_toggles(buf: &[u8], carry_len: usize) -> Vec<bool> {
+    let on: &[u8] = b"\x1b[?1004h";
+    let off: &[u8] = b"\x1b[?1004l";
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + on.len() <= buf.len() {
+        let w = &buf[i..i + on.len()];
+        let end = i + on.len();
+        if end > carry_len && (w == on || w == off) {
+            out.push(w == on);
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
 
 fn agent_boot_hold_provider_cell() -> &'static Mutex<String> {
     static CELL: OnceLock<Mutex<String>> = OnceLock::new();
@@ -36675,6 +36798,7 @@ fn arm_agent_boot_hold<R: tauri::Runtime>(app: &AppHandle<R>, provider: &str) {
     AGENT_BOOT_SETTLE_RESETS.store(0, std::sync::atomic::Ordering::Relaxed);
     AGENT_BOOT_EVIDENCE_OPEN.store(false, std::sync::atomic::Ordering::Relaxed);
     AGENT_BOOT_EVIDENCE_IGNORED.store(0, std::sync::atomic::Ordering::Relaxed);
+    set_boot_modes(false, BootModes::default());
     if bram_trace_enabled() {
         append_bram_trace_line(
             app,
@@ -36700,6 +36824,7 @@ fn open_agent_boot_evidence<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str)
         carry.clear();
     }
     AGENT_BOOT_EVIDENCE_OPEN.store(true, std::sync::atomic::Ordering::Relaxed);
+    set_boot_modes(true, BootModes::default());
     if bram_trace_enabled() {
         append_bram_trace_line(
             app,
@@ -36708,6 +36833,64 @@ fn open_agent_boot_evidence<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str)
                 "op=boot-evidence-open reason={} ignored_before={}",
                 reason,
                 AGENT_BOOT_EVIDENCE_IGNORED.load(std::sync::atomic::Ordering::Relaxed)
+            ),
+        );
+    }
+}
+
+fn set_boot_modes(tracking: bool, m: BootModes) {
+    use std::sync::atomic::Ordering::Relaxed;
+    BOOT_MODES_TRACKING.store(tracking, Relaxed);
+    BOOT_MODES_SEEN_ON.store(m.seen_on, Relaxed);
+    BOOT_MODES_ON.store(m.on, Relaxed);
+    BOOT_MODES_BOUNCED.store(m.bounced, Relaxed);
+    BOOT_MODES_OFF_AT_WRITE_SINCE_MS.store(0, Relaxed);
+}
+
+fn set_boot_modes_state(m: BootModes) {
+    use std::sync::atomic::Ordering::Relaxed;
+    BOOT_MODES_SEEN_ON.store(m.seen_on, Relaxed);
+    BOOT_MODES_ON.store(m.on, Relaxed);
+    BOOT_MODES_BOUNCED.store(m.bounced, Relaxed);
+}
+
+fn boot_modes() -> BootModes {
+    use std::sync::atomic::Ordering::Relaxed;
+    BootModes {
+        seen_on: BOOT_MODES_SEEN_ON.load(Relaxed),
+        on: BOOT_MODES_ON.load(Relaxed),
+        bounced: BOOT_MODES_BOUNCED.load(Relaxed),
+    }
+}
+
+fn boot_hold_is_claude() -> bool {
+    agent_boot_hold_provider() == "claude"
+}
+
+// Release the hold (both rules). Claude releases on the bounce; the quiet
+// window's poll calls this too.
+fn release_agent_boot_hold<R: tauri::Runtime>(app: &AppHandle<R>, rule: &str) {
+    AGENT_BOOT_SETTLE_DEADLINE_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+    let since = AGENT_BOOT_HOLD_SINCE_MS.swap(0, std::sync::atomic::Ordering::Relaxed);
+    if since <= 0 {
+        return;
+    }
+    AGENT_BOOT_RELEASED_GENERATION.store(
+        AGENT_BOOT_HOLD_GENERATION.load(std::sync::atomic::Ordering::Relaxed),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    if bram_trace_enabled() {
+        let m = boot_modes();
+        append_bram_trace_line(
+            app,
+            "send-gate",
+            &format!(
+                "op=boot-settled rule={} bounced={} modes_on={} held_ms={} resets={}",
+                rule,
+                m.bounced,
+                m.on,
+                unix_now_ms().saturating_sub(since),
+                AGENT_BOOT_SETTLE_RESETS.load(std::sync::atomic::Ordering::Relaxed)
             ),
         );
     }
@@ -36736,10 +36919,16 @@ fn note_agent_boot_evidence<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str)
         return;
     }
     let now = unix_now_ms();
+    // Claude: no deadline; the bounce releases (i64::MAX marks "settling").
+    let deadline = if boot_hold_is_claude() {
+        i64::MAX
+    } else {
+        now + AGENT_BOOT_SETTLE_MS
+    };
     if AGENT_BOOT_SETTLE_DEADLINE_MS
         .compare_exchange(
             0,
-            now + AGENT_BOOT_SETTLE_MS,
+            deadline,
             std::sync::atomic::Ordering::Relaxed,
             std::sync::atomic::Ordering::Relaxed,
         )
@@ -36752,10 +36941,14 @@ fn note_agent_boot_evidence<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str)
             app,
             "send-gate",
             &format!(
-                "op=boot-evidence reason={} held_ms={} settle_ms={}",
+                "op=boot-evidence reason={} held_ms={} release={}",
                 reason,
                 now.saturating_sub(since),
-                AGENT_BOOT_SETTLE_MS
+                if boot_hold_is_claude() {
+                    "bounce".to_string()
+                } else {
+                    format!("quiet-window-{}ms", AGENT_BOOT_SETTLE_MS)
+                }
             ),
         );
     }
@@ -36763,6 +36956,9 @@ fn note_agent_boot_evidence<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str)
 
 // A mode toggle while settling: the TUI isn't done initializing.
 fn reset_agent_boot_settle<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str) {
+    if boot_hold_is_claude() {
+        return;
+    }
     if !agent_boot_hold_active()
         || AGENT_BOOT_SETTLE_DEADLINE_MS.load(std::sync::atomic::Ordering::Relaxed) == 0
     {
@@ -36786,42 +36982,18 @@ fn reset_agent_boot_settle<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str) 
 // the drain tick and after each scanned chunk.
 fn poll_agent_boot_settle<R: tauri::Runtime>(app: &AppHandle<R>) {
     let deadline = AGENT_BOOT_SETTLE_DEADLINE_MS.load(std::sync::atomic::Ordering::Relaxed);
-    if deadline == 0 || unix_now_ms() < deadline || !agent_boot_hold_active() {
+    if deadline == 0 || deadline == i64::MAX || unix_now_ms() < deadline {
         return;
     }
-    if AGENT_BOOT_SETTLE_DEADLINE_MS
-        .compare_exchange(
-            deadline,
-            0,
-            std::sync::atomic::Ordering::Relaxed,
-            std::sync::atomic::Ordering::Relaxed,
-        )
-        .is_err()
-    {
+    if !agent_boot_hold_active() {
         return;
     }
-    let since = AGENT_BOOT_HOLD_SINCE_MS.swap(0, std::sync::atomic::Ordering::Relaxed);
-    if since > 0 {
-        AGENT_BOOT_RELEASED_GENERATION.store(
-            AGENT_BOOT_HOLD_GENERATION.load(std::sync::atomic::Ordering::Relaxed),
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        if bram_trace_enabled() {
-            append_bram_trace_line(
-                app,
-                "send-gate",
-                &format!(
-                    "op=boot-settled held_ms={} resets={}",
-                    unix_now_ms().saturating_sub(since),
-                    AGENT_BOOT_SETTLE_RESETS.load(std::sync::atomic::Ordering::Relaxed)
-                ),
-            );
-        }
-    }
+    release_agent_boot_hold(app, "quiet-window");
 }
 
 fn cancel_agent_boot_hold<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str) {
     AGENT_BOOT_SETTLE_DEADLINE_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+    set_boot_modes(false, BootModes::default());
     let since = AGENT_BOOT_HOLD_SINCE_MS.swap(0, std::sync::atomic::Ordering::Relaxed);
     if since > 0 && bram_trace_enabled() {
         append_bram_trace_line(
@@ -36895,7 +37067,8 @@ fn agent_boot_settle_toggle(buf: &[u8], carry_len: usize) -> Option<&'static str
 }
 
 fn agent_boot_evidence_scan<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
-    if !agent_boot_hold_active() {
+    if !agent_boot_hold_active() && !BOOT_MODES_TRACKING.load(std::sync::atomic::Ordering::Relaxed)
+    {
         return;
     }
     let mut buf: Vec<u8> = Vec::with_capacity(chunk.len() + 16);
@@ -36908,6 +37081,20 @@ fn agent_boot_evidence_scan<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8])
         *carry = buf[buf.len() - keep..].to_vec();
     } else {
         buf.extend_from_slice(chunk);
+    }
+    if BOOT_MODES_TRACKING.load(std::sync::atomic::Ordering::Relaxed) {
+        let mut m = boot_modes();
+        let mut ready = false;
+        for on in boot_focus_toggles(&buf, carry_len) {
+            let (next, r) = boot_modes_step(m, on);
+            m = next;
+            ready |= r;
+        }
+        set_boot_modes_state(m);
+        if ready && boot_hold_is_claude() && agent_boot_hold_active() {
+            release_agent_boot_hold(app, "bounce");
+            return;
+        }
     }
     let settling = AGENT_BOOT_SETTLE_DEADLINE_MS.load(std::sync::atomic::Ordering::Relaxed) != 0;
     if !settling {
@@ -36939,6 +37126,37 @@ mod agent_boot_evidence_tests {
     }
 
     // new-session-first-message-boot-settle: Claude's 2026-09-30 boot bytes.
+    // boot-settle-wait-for-claude-bounce: the recorded focus-reporting
+    // sequences. 20:44 and 22:10 are the same shape (ON, OFF, ON) at
+    // different speeds, which is the point: only the order matters.
+    #[test]
+    fn claude_is_ready_at_the_bounce_re_enable_not_before() {
+        use super::{boot_modes_step as step, BootModes};
+        let m = BootModes::default();
+        let (m, r1) = step(m, true);
+        assert!(!r1, "first ON is evidence, not readiness");
+        let (m, r2) = step(m, false);
+        assert!(!r2 && m.bounced && !m.on, "OFF after ON is the bounce");
+        let (m, r3) = step(m, true);
+        assert!(r3 && m.on, "ON after the bounce is ready");
+        let (_, r4) = step(m, true);
+        assert!(!r4, "a repeated ON is not a second readiness signal");
+    }
+    #[test]
+    fn an_off_before_any_on_is_not_a_bounce() {
+        use super::{boot_modes_step as step, BootModes};
+        let (m, _) = step(BootModes::default(), false);
+        assert!(!m.bounced);
+        let (_, r) = step(m, true);
+        assert!(!r);
+    }
+    #[test]
+    fn focus_toggles_are_read_in_order_from_the_22_10_bytes() {
+        use super::boot_focus_toggles as t;
+        let chunk = b"\x1b[?2004h\x1b[?2031h\x1b[?1004h..\x1b[?1004l\x1b[?2031l\x1b[?2004l..\x1b[?2004h\x1b[?2031h\x1b[?1004h";
+        assert_eq!(t(chunk, 0), vec![true, false, true]);
+        assert_eq!(t(b"\x1b[?1004h rest", 8), Vec::<bool>::new());
+    }
     #[test]
     fn claude_mode_bounce_resets_the_settle_window() {
         use super::agent_boot_settle_toggle as t;

@@ -19063,8 +19063,9 @@ fn resync_transcript_to_session<R: tauri::Runtime>(
     if current_provider(app) != Some(provider) {
         set_current_provider(app, provider, "session-resync");
     }
+    let touched_at = std::time::SystemTime::now();
     if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&path) {
-        let _ = file.set_modified(std::time::SystemTime::now());
+        let _ = file.set_modified(touched_at);
     }
     if bram_trace_enabled() {
         append_bram_trace_line(
@@ -19076,6 +19077,34 @@ fn resync_transcript_to_session<R: tauri::Runtime>(
                 id
             ),
         );
+    }
+    // resume-marks-session-current: the mtime touch alone doesn't make an
+    // explicitly resumed Claude session current. latest_claude_session_path's
+    // hysteresis keeps its cached pick while that file is <5s old, and the
+    // session just interrupted is exactly that fresh, so the footer and
+    // `[current]` kept naming it until the resumed session's next write
+    // (87s, 2026-09-30). The caller named this session, so the cache and
+    // last-active follow it now. Codex is left to its reload pin.
+    if provider == SessionProvider::Claude {
+        let cache_cell = LIVE_CLAUDE_SESSION.get_or_init(|| Mutex::new(None));
+        let mut cached = match cache_cell.lock() {
+            Ok(guard) => guard,
+            Err(error) => error.into_inner(),
+        };
+        *cached = Some((path.clone(), touched_at));
+        drop(cached);
+        remember_last_active_session(app, provider, id);
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "agent-switch",
+                &format!(
+                    "op=live-session-set provider={} session={} source=explicit-resume",
+                    session_provider_label(provider),
+                    id
+                ),
+            );
+        }
     }
     // Refresh session-list consumers (the Sessions tab and the transcript
     // header/footer meta lines) which key off sessions-list-changed, not

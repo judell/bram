@@ -8056,6 +8056,26 @@ fn askuserquestion_to_menu(value: &serde_json::Value, tool: &str) -> Option<PtyM
     if options.is_empty() {
         return None;
     }
+    // askuserquestion-card-type-something-and-chat: Claude Code appends two
+    // rows of its own after the agent's options (specimens 2026-06-17,
+    // 06-22, 09-30), which the hook payload doesn't carry. A digit acts
+    // immediately in this menu, so both answer with the bare key: N+1 opens
+    // Claude's free-text input (the card then types the text and Enter, per
+    // the 09-30 specimen), N+2 returns to chat. The card identifies them by
+    // position: they're always the last two.
+    let n = options.len();
+    options.push(MenuOption {
+        key: (n + 1).to_string(),
+        label: "Type something.".to_string(),
+        answer_keys: Some((n + 1).to_string()),
+        description: Some("Write your own answer instead of choosing one above.".to_string()),
+    });
+    options.push(MenuOption {
+        key: (n + 2).to_string(),
+        label: "Chat about this".to_string(),
+        answer_keys: Some((n + 2).to_string()),
+        description: Some("Skip the question and go back to talking with the agent.".to_string()),
+    });
     let text = q0
         .get("question")
         .and_then(|q| q.as_str())
@@ -8074,6 +8094,59 @@ fn askuserquestion_to_menu(value: &serde_json::Value, tool: &str) -> Option<PtyM
         at_host_ms: None,
         signature_source: None,
     })
+}
+
+#[cfg(test)]
+mod askuserquestion_menu_tests {
+    use super::askuserquestion_to_menu;
+
+    #[test]
+    fn claudes_own_rows_follow_the_agents_options() {
+        let payload = serde_json::json!({
+            "tool_input": {"questions": [{
+                "question": "Which fruit?",
+                "options": [
+                    {"label": "Apple", "description": "red"},
+                    {"label": "Pear"}
+                ]
+            }]}
+        });
+        let menu = askuserquestion_to_menu(&payload, "AskUserQuestion").expect("menu");
+        let rows: Vec<(String, String, Option<String>)> = menu
+            .options
+            .iter()
+            .map(|o| (o.key.clone(), o.label.clone(), o.answer_keys.clone()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("1".into(), "Apple".into(), None),
+                ("2".into(), "Pear".into(), None),
+                ("3".into(), "Type something.".into(), Some("3".into())),
+                ("4".into(), "Chat about this".into(), Some("4".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn only_the_type_something_key_opens_free_text() {
+        use super::menu_answer_opens_free_text as opens;
+        let payload = serde_json::json!({
+            "tool_input": {"questions": [{"question": "?", "options": [{"label": "A"}, {"label": "B"}]}]}
+        });
+        let menu = askuserquestion_to_menu(&payload, "AskUserQuestion").expect("menu");
+        assert!(opens(Some(&menu), "3"));
+        assert!(!opens(Some(&menu), "1"));
+        assert!(!opens(Some(&menu), "4"));
+        assert!(!opens(None, "3"));
+    }
+
+    #[test]
+    fn no_agent_options_still_means_no_menu() {
+        let payload =
+            serde_json::json!({"tool_input": {"questions": [{"question": "?", "options": []}]}});
+        assert!(askuserquestion_to_menu(&payload, "AskUserQuestion").is_none());
+    }
 }
 
 fn split_shell_words_limited(input: &str, limit: usize) -> Vec<String> {
@@ -17854,7 +17927,19 @@ fn drain_pty_intents<R: tauri::Runtime>(
                     }
                     Ok(())
                 } else {
-                    pty_write_internal(app, state, data, "pty-intent-sendKeys")
+                    let r = pty_write_internal(app, state, data, "pty-intent-sendKeys");
+                    if r.is_ok()
+                        && data.contains('\r')
+                        && AUQ_FREE_TEXT_SINCE_MS.swap(0, std::sync::atomic::Ordering::Relaxed) > 0
+                        && bram_trace_enabled()
+                    {
+                        append_bram_trace_line(
+                            app,
+                            "send-gate",
+                            "op=free-text-closed reason=enter",
+                        );
+                    }
+                    r
                 }
             }
             "menuAnswer" => {
@@ -17864,7 +17949,24 @@ fn drain_pty_intents<R: tauri::Runtime>(
                     .and_then(|open| open.as_ref().map(|p| p.prompt_id.clone()));
                 let verdict = menu_answer_identity_verdict(current_prompt_id.as_deref(), prompt_id);
                 if verdict == MenuAnswerIdentityVerdict::Accept {
-                    pty_write_internal(app, state, data, "pty-intent-menuAnswer")
+                    let opens_free_text = turn_state_cell()
+                        .lock()
+                        .ok()
+                        .map(|t| menu_answer_opens_free_text(t.pending_menu.as_ref(), data))
+                        .unwrap_or(false);
+                    let r = pty_write_internal(app, state, data, "pty-intent-menuAnswer");
+                    if r.is_ok() && opens_free_text {
+                        AUQ_FREE_TEXT_SINCE_MS
+                            .store(unix_now_ms(), std::sync::atomic::Ordering::Relaxed);
+                        if bram_trace_enabled() {
+                            append_bram_trace_line(
+                                app,
+                                "send-gate",
+                                &format!("op=free-text-open key={}", data.trim()),
+                            );
+                        }
+                    }
+                    r
                 } else {
                     if bram_trace_enabled() {
                         append_bram_trace_line(
@@ -36382,10 +36484,13 @@ static SEND_GATE_STALE_WARNED_MS: std::sync::atomic::AtomicI64 =
     std::sync::atomic::AtomicI64::new(0);
 
 // The menu tool currently blocking pane sends, or None when sends may
-// flow. AskUserQuestion is exempt: Claude Code's composer accepts typed
-// input while a question is displayed and typing over it is a
-// legitimate answer path (2026-07-19 22:04:50 landed in <1s with the
-// question open); permission menus and pickers swallow pasted input.
+// flow. AskUserQuestion used to be exempt ("typing over it is a
+// legitimate answer path", 2026-07-19 22:04:50). It isn't any more: on
+// 2026-09-30 21:17:21Z (Claude Code 2.1.286) a pane send with the question
+// open had its paste ignored, and its Enter chose the highlighted option;
+// the answer was recorded as option 1 and the message was lost. Held like
+// any other menu, the send goes out after the question is answered; the
+// card's "Type something" row is the way to answer in your own words.
 // guard-double-escape-agent-exit: a pane-origin bare Esc is forwarded
 // only when it has a job — an open turn to interrupt (lenient PTY-chrome
 // phase check, so a genuine interrupt is never held; see the #210 scar in
@@ -36405,16 +36510,36 @@ fn pane_escape_has_job() -> bool {
         || PANE_MENU_DISPLAYED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+// askuserquestion-card-type-something-and-chat: choosing "Type something."
+// dismisses the menu at the digit, but Claude is still waiting for the
+// text. A held pane send released then lands in that input line and is
+// submitted as the answer (2026-09-30 21:27:51Z). So the gate stays shut
+// from that digit until an Enter is written, or for 30 s at most.
+static AUQ_FREE_TEXT_SINCE_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+const AUQ_FREE_TEXT_MAX_MS: i64 = 30_000;
+
+fn auq_free_text_open() -> bool {
+    let since = AUQ_FREE_TEXT_SINCE_MS.load(std::sync::atomic::Ordering::Relaxed);
+    since > 0 && unix_now_ms().saturating_sub(since) < AUQ_FREE_TEXT_MAX_MS
+}
+
+// Whether `answer` picks the pending AskUserQuestion's "Type something."
+// row: the second to last, per askuserquestion_to_menu.
+fn menu_answer_opens_free_text(menu: Option<&PtyMenu>, answer: &str) -> bool {
+    let Some(m) = menu else {
+        return false;
+    };
+    m.tool == "AskUserQuestion"
+        && m.options.len() >= 3
+        && m.options[m.options.len() - 2].key == answer.trim()
+}
+
 fn send_gate_blocking_menu_tool() -> Option<String> {
-    turn_state_cell().lock().ok().and_then(|t| {
-        t.pending_menu.as_ref().and_then(|m| {
-            if m.tool == "AskUserQuestion" {
-                None
-            } else {
-                Some(m.tool.clone())
-            }
-        })
-    })
+    turn_state_cell()
+        .lock()
+        .ok()
+        .and_then(|t| t.pending_menu.as_ref().map(|m| m.tool.clone()))
+        .or_else(|| auq_free_text_open().then(|| "AskUserQuestion".to_string()))
 }
 
 // new-session-handoff-race: from New Session click until the fresh agent CLI

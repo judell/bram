@@ -17,6 +17,8 @@
     var.promptId="{($props.menu &amp;&amp; $props.menu.promptId) || ''}"
     var.menuPreviewOpen="{true}"
     var.previewModalOpen="{false}"
+    var.typeSomethingFor="{null}"
+    var.typeSomethingText=""
     var.menuHeaderSource="{$props.menu.toolCallSignature || $props.menu.text || ''}"
     var.menuHeaderCmd="{(menuHeaderSource.split('\n').find(l => l.indexOf(($props.menu.tool || '') + ': ') === 0 || l.indexOf(($props.menu.tool || '') + '(') === 0) || '').replace(($props.menu.tool || '') + ': ', '').replace(($props.menu.tool || '') + '(', '')}"
     var.menuHeaderLine="{(menuHeaderCmd || menuHeaderSource.split('\n')[0] || '').slice(0, 100)}"
@@ -141,15 +143,18 @@
       width="100%">
       <Theme paddingHorizontal-Button-sm="$space-3">
         <Items data="{$props.menu.options}">
+          <!-- askuserquestion-card-type-something-and-chat: Claude's own
+               "Type something." row opens a text box below instead of
+               answering at once; every other row answers on click. -->
           <HStack
             gap="$space-2"
             verticalAlignment="center"
             width="100%"
             var.answerKeys="{$item.answerKeys || ($item.key + '\r')}"
-            onClick="window.__bramSendMenuAnswer(answerKeys, promptId)">
+            onClick="typeSomethingFor = window.__bramMenuRowClick($props.menu, $item, answerKeys, promptId, typeSomethingFor)">
             <Button
               label="{($item.key || '')}"
-              variant="outlined"
+              variant="{window.__bramMenuRowVariant($props.menu, $item, typeSomethingFor, promptId)}"
               size="sm"
               enabled="{!!promptId}" />
             <VStack width="*" gap="$space-0_5">
@@ -169,6 +174,18 @@
           </HStack>
         </Items>
       </Theme>
+      <HStack when="{!!promptId &amp;&amp; typeSomethingFor === promptId}" gap="$space-2" verticalAlignment="center" width="100%">
+        <TextBox
+          width="*"
+          autoFocus="{true}"
+          placeholder="Your answer"
+          onDidChange="(v) => typeSomethingText = v" />
+        <Button
+          label="Send"
+          size="sm"
+          enabled="{!!promptId &amp;&amp; typeSomethingText.trim().length > 0}"
+          onClick="window.__bramAnswerTypeSomething(window.__bramTypeSomethingKey($props.menu), typeSomethingText, promptId)" />
+      </HStack>
     </VStack>
     <HStack
       when="{!$props.menu.options || $props.menu.options.length === 0}"

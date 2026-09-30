@@ -775,6 +775,57 @@ window.sendKeys = function (text) {
 // immediate double-click window synchronously; the host independently checks
 // the identity against its current OpenPrompt before writing any bytes.
 if (!window.__bramSentMenuAnswerIds) window.__bramSentMenuAnswerIds = new Set();
+// askuserquestion-card-type-something-and-chat: in an AskUserQuestion card
+// the host appends Claude's own two rows last, so "Type something." is the
+// second to last. Position, not label, so an agent option that happens to
+// share the label isn't mistaken for it.
+window.__bramIsTypeSomethingRow = function (menu, item) {
+  var opts = (menu && menu.options) || [];
+  return !!(menu && menu.tool === "AskUserQuestion" && item &&
+    opts.length >= 3 && String(item.key) === String(opts.length - 1));
+};
+// A card row click. Returns the value for the card's typeSomethingKey var:
+// the row's key when it's the "Type something." row (opening the text box),
+// otherwise the current value, after sending the row's answer.
+// The returned value is the prompt id the text box is open for, so a box
+// opened for one question never shows on the next (2026-09-30 21:25: a box
+// left open from the previous question appeared without choosing 3).
+window.__bramMenuRowClick = function (menu, item, answerKeys, promptId, current) {
+  if (window.__bramIsTypeSomethingRow(menu, item)) return String(promptId || "");
+  window.__bramSendMenuAnswer(answerKeys, promptId);
+  return current;
+};
+window.__bramTypeSomethingKey = function (menu) {
+  var opts = (menu && menu.options) || [];
+  return opts.length >= 3 ? String(opts[opts.length - 2].key) : "";
+};
+// The chosen "Type something." row reads as selected while its box is open.
+window.__bramMenuRowVariant = function (menu, item, openFor, promptId) {
+  return openFor && openFor === promptId && window.__bramIsTypeSomethingRow(menu, item)
+    ? "solid"
+    : "outlined";
+};
+// Answer via Claude's free-text row, in the order the 2026-09-30 specimen
+// showed works when typed: the row's digit (which switches Claude to its
+// input at once), then the text, then Enter, as separate writes. One write
+// of all three would reach Claude as a single chunk and risks being read
+// as a paste instead of a menu shortcut. The text is one line: Enter would
+// submit early.
+window.__bramAnswerTypeSomething = function (key, text, promptId) {
+  var said = String(text || "").replace(/[\r\n]+/g, " ").trim();
+  window.__bramIframeTrace("menu-answer-client", {
+    op: "type-something",
+    promptId: String(promptId || ""),
+    key: String(key || ""),
+    textLength: said.length,
+  });
+  if (!said || !key) return;
+  window.__bramSendMenuAnswer(String(key), promptId);
+  setTimeout(function () {
+    window.sendKeys(said);
+    setTimeout(function () { window.sendKeys("\r"); }, 150);
+  }, 250);
+};
 window.__bramSendMenuAnswer = function (text, promptId) {
   var id = String(promptId || "");
   var data = String(text || "");

@@ -969,9 +969,44 @@ window.__bramCreateNewSession = function (provider, title) {
     "new session"
   );
 };
-window.__bramCreateNewSessionClick = function (provider, name, toastApi) {
+// fresh-session-handoff-mock: the dialog's optional "what's next" is the
+// user's own words about the new work. Create wraps them in a brief that asks
+// the NEW session to build its own context (search history, read the session
+// being left) and settle the framing with the user before acting; there is
+// no handoff document and no back-and-forth in the old session. The brief
+// goes out as a plain toTurn, which the host's boot hold delivers as the new
+// session's first turn. Plain, so a ticked Worklist row can't turn it into
+// item feedback (the prototype's first run did).
+window.__bramNewSessionBrief = function (words, predecessor) {
+  var prev = predecessor && predecessor.id
+    ? "the session I just left (" + String(predecessor.provider || "") + " " + predecessor.id +
+      (predecessor.title ? ', "' + predecessor.title + '"' : "") + ")"
+    : "the session I just left (see the Sessions list)";
+  return [
+    "You're starting a new session for this line of work, in my words:",
+    "",
+    String(words || "").trim(),
+    "",
+    "Before anything else, build your context for it. Search the project history (/__search; the port is in resources/.bram-port) for what bears on it, and read " + prev + " where it's relevant.",
+    "",
+    "Then tell me what you found, with citations; what you looked for and didn't find; and what you think should frame this work. Don't change files or propose worklist items yet. We'll settle the framing together first.",
+  ].join("\n");
+};
+window.__bramCreateNewSessionClick = function (provider, name, toastApi, words, predecessor) {
+  var said = String(words || "").trim();
   if (typeof toastApi === "function") toastApi("Starting a new session…");
-  window.__bramCreateNewSession(provider, name).catch(function (e) {
+  window.__bramCreateNewSession(provider, name).then(function () {
+    if (!said) return;
+    var brief = window.__bramNewSessionBrief(said, predecessor);
+    window.__bramIframeTrace("new-session-client", {
+      op: "first-message-queued",
+      provider: String(provider || ""),
+      textLength: said.length,
+      briefLength: brief.length,
+      predecessor: (predecessor && predecessor.id) || "",
+    });
+    window.toTurn(brief);
+  }).catch(function (e) {
     if (toastApi && typeof toastApi.error === "function") {
       toastApi.error("Could not create session: " + String((e && e.message) || e));
     }

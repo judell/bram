@@ -8,6 +8,7 @@
   var.renameDraft=""
   var.newSessionOpen="{false}"
   var.newSessionDraft=""
+  var.newSessionNext=""
   var.pendingDeletes="{loadPendingSessionDeletes()}"
   var.pendingRenames="{loadPendingSessionRenames()}"
   var.lastDeleteId="{null}"
@@ -117,7 +118,7 @@
   <ModalDialog
     id="newSessionDialog"
     when="{newSessionOpen}"
-    onClose="newSessionOpen = false; newSessionDraft = ''"
+    onClose="newSessionOpen = false; newSessionDraft = ''; newSessionNext = ''"
     title="New session">
     <VStack gap="$space-3" padding="$space-4">
       <TextBox
@@ -129,16 +130,21 @@
         spellCheck="{false}"
         autoCapitalize="off"
         onDidChange="(v) => newSessionDraft = v" />
+      <TextArea
+        width="*"
+        minRows="3"
+        placeholder="What's next? (optional, in your own words)"
+        onDidChange="(v) => newSessionNext = v" />
       <Text
         color="$textColor-secondary"
         fontSize="$fontSize-sm"
-        value="Stops the running agent and starts a fresh session with this exact name. The name is session metadata, not a message to the agent; your next message will be the first conversation turn. The prior session stays in the list, resumable." />
+        value="Create stops the running agent and starts a new session with this name. If you say what's next, the new session builds its context from your words (project history, and the session you're leaving), reports what it found, and waits for you to settle the framing together. The current session stays in the list, resumable." />
       <HStack horizontalAlignment="end" gap="$space-2">
-        <Button label="Cancel" variant="outlined" onClick="newSessionOpen = false; newSessionDraft = ''" />
+        <Button label="Cancel" variant="outlined" onClick="newSessionOpen = false; newSessionDraft = ''; newSessionNext = ''" />
         <Button
           label="Create"
           enabled="{newSessionDraft &amp;&amp; newSessionDraft.trim().length > 0}"
-          onClick="let name = newSessionDraft; newSessionOpen = false; newSessionDraft = ''; window.__bramCreateNewSessionClick(currentProvider, name, toast)" />
+          onClick="let name = newSessionDraft; let next = newSessionNext; newSessionOpen = false; newSessionDraft = ''; newSessionNext = ''; window.__bramCreateNewSessionClick(currentProvider, name, toast, next, window.__bramCurrentSessionOf(sessionsFirstPage.value))" />
       </HStack>
     </VStack>
   </ModalDialog>
@@ -170,7 +176,7 @@
         variant="solid"
         size="sm"
         tooltip="Start a fresh session and make it current"
-        onClick="newSessionDraft = ''; newSessionOpen = true" />
+        onClick="newSessionDraft = ''; newSessionNext = ''; newSessionOpen = true" />
     </HStack>
     <Text
       when="{sessionsMeta.value}"

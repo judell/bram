@@ -3911,7 +3911,7 @@ fn emit_talk_session_changed_for_provider<R: tauri::Runtime>(
             // new-session-handoff-race: a surfaced session file proves an
             // agent CLI is running — release any awaiting-boot send hold
             // even if its boot bytes were missed (no-op when unarmed).
-            clear_agent_boot_hold(app, "session-surfaced");
+            note_agent_boot_evidence(app, "session-surfaced");
             // sessions-new-named-session: bind a queued title to the new
             // session. A deliberate Codex bootstrap reaches this path before
             // its first real user turn; later writes retry any failed rename.
@@ -17706,6 +17706,7 @@ fn drain_pty_intents<R: tauri::Runtime>(
     app: &AppHandle<R>,
     state: &State<'_, AppState>,
 ) -> Result<(), String> {
+    poll_agent_boot_settle(app);
     let Some(path) = pty_intent_file(app) else {
         return Ok(());
     };
@@ -36427,6 +36428,18 @@ static AGENT_BOOT_HOLD_GENERATION: std::sync::atomic::AtomicU64 =
 static AGENT_BOOT_RELEASED_GENERATION: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 const AGENT_BOOT_HOLD_EXPIRE_MS: i64 = 30_000;
+// new-session-first-message-boot-settle: evidence starts a settle window
+// instead of releasing at once. Claude Code enables its TUI modes, turns
+// them off, re-enables them and only then draws its input (2026-09-30
+// 20:25:56Z: the brief pasted into that ~300 ms gap was swallowed). The
+// hold releases once the window passes with no further mode toggle; the
+// drain tick (~300 ms) polls the deadline. AGENT_BOOT_HOLD_EXPIRE_MS
+// still bounds the whole hold.
+const AGENT_BOOT_SETTLE_MS: i64 = 400;
+static AGENT_BOOT_SETTLE_DEADLINE_MS: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+static AGENT_BOOT_SETTLE_RESETS: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
 
 fn agent_boot_hold_provider_cell() -> &'static Mutex<String> {
     static CELL: OnceLock<Mutex<String>> = OnceLock::new();
@@ -36518,6 +36531,8 @@ fn arm_agent_boot_hold<R: tauri::Runtime>(app: &AppHandle<R>, provider: &str) {
     if let Ok(mut carry) = agent_boot_evidence_carry_cell().lock() {
         carry.clear();
     }
+    AGENT_BOOT_SETTLE_DEADLINE_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+    AGENT_BOOT_SETTLE_RESETS.store(0, std::sync::atomic::Ordering::Relaxed);
     if bram_trace_enabled() {
         append_bram_trace_line(
             app,
@@ -36530,28 +36545,100 @@ fn arm_agent_boot_hold<R: tauri::Runtime>(app: &AppHandle<R>, provider: &str) {
     }
 }
 
-fn clear_agent_boot_hold<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str) {
+// First boot evidence: start the settle window (no-op when unarmed or
+// already settling; later toggles go through reset_agent_boot_settle).
+fn note_agent_boot_evidence<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str) {
+    let since = AGENT_BOOT_HOLD_SINCE_MS.load(std::sync::atomic::Ordering::Relaxed);
+    if since <= 0 {
+        return;
+    }
+    let now = unix_now_ms();
+    if AGENT_BOOT_SETTLE_DEADLINE_MS
+        .compare_exchange(
+            0,
+            now + AGENT_BOOT_SETTLE_MS,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        return;
+    }
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "send-gate",
+            &format!(
+                "op=boot-evidence reason={} held_ms={} settle_ms={}",
+                reason,
+                now.saturating_sub(since),
+                AGENT_BOOT_SETTLE_MS
+            ),
+        );
+    }
+}
+
+// A mode toggle while settling: the TUI isn't done initializing.
+fn reset_agent_boot_settle<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str) {
+    if !agent_boot_hold_active()
+        || AGENT_BOOT_SETTLE_DEADLINE_MS.load(std::sync::atomic::Ordering::Relaxed) == 0
+    {
+        return;
+    }
+    AGENT_BOOT_SETTLE_DEADLINE_MS.store(
+        unix_now_ms() + AGENT_BOOT_SETTLE_MS,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    let resets = AGENT_BOOT_SETTLE_RESETS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "send-gate",
+            &format!("op=boot-settle-reset reason={} resets={}", reason, resets),
+        );
+    }
+}
+
+// Release the hold once the settle window has passed quietly. Called from
+// the drain tick and after each scanned chunk.
+fn poll_agent_boot_settle<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let deadline = AGENT_BOOT_SETTLE_DEADLINE_MS.load(std::sync::atomic::Ordering::Relaxed);
+    if deadline == 0 || unix_now_ms() < deadline || !agent_boot_hold_active() {
+        return;
+    }
+    if AGENT_BOOT_SETTLE_DEADLINE_MS
+        .compare_exchange(
+            deadline,
+            0,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        return;
+    }
     let since = AGENT_BOOT_HOLD_SINCE_MS.swap(0, std::sync::atomic::Ordering::Relaxed);
     if since > 0 {
         AGENT_BOOT_RELEASED_GENERATION.store(
             AGENT_BOOT_HOLD_GENERATION.load(std::sync::atomic::Ordering::Relaxed),
             std::sync::atomic::Ordering::Relaxed,
         );
-    }
-    if since > 0 && bram_trace_enabled() {
-        append_bram_trace_line(
-            app,
-            "send-gate",
-            &format!(
-                "op=boot-evidence reason={} held_ms={}",
-                reason,
-                unix_now_ms().saturating_sub(since)
-            ),
-        );
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "send-gate",
+                &format!(
+                    "op=boot-settled held_ms={} resets={}",
+                    unix_now_ms().saturating_sub(since),
+                    AGENT_BOOT_SETTLE_RESETS.load(std::sync::atomic::Ordering::Relaxed)
+                ),
+            );
+        }
     }
 }
 
 fn cancel_agent_boot_hold<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str) {
+    AGENT_BOOT_SETTLE_DEADLINE_MS.store(0, std::sync::atomic::Ordering::Relaxed);
     let since = AGENT_BOOT_HOLD_SINCE_MS.swap(0, std::sync::atomic::Ordering::Relaxed);
     if since > 0 && bram_trace_enabled() {
         append_bram_trace_line(
@@ -36593,12 +36680,45 @@ fn agent_boot_evidence_match(buf: &[u8]) -> Option<&'static str> {
         .find_map(|(p, n)| buf.windows(p.len()).any(|w| w == *p).then_some(*n))
 }
 
+// Mode toggles that restart the settle window. Synchronized output
+// (?2026h/l) is deliberately absent: Codex brackets every paint with it,
+// so it would never let the window pass. It still counts as first
+// evidence through AGENT_BOOT_EVIDENCE.
+const AGENT_BOOT_SETTLE_TOGGLES: [(&[u8], &str); 8] = [
+    (b"\x1b[?1004h", "focus-reporting"),
+    (b"\x1b[?2031h", "theme-notify"),
+    (b"\x1b[?1049h", "alt-screen"),
+    (b"\x1b[?1004l", "focus-reporting-off"),
+    (b"\x1b[?2031l", "theme-notify-off"),
+    (b"\x1b[?2004l", "bracketed-paste-off"),
+    (b"\x1b[?1049l", "alt-screen-off"),
+    (b"\x1b[?2004h", "bracketed-paste"),
+];
+
+// The last settle toggle in `buf` whose match ends past `carry_len`, so a
+// sequence already seen at the tail of the previous chunk (kept as carry)
+// isn't counted again.
+fn agent_boot_settle_toggle(buf: &[u8], carry_len: usize) -> Option<&'static str> {
+    let mut best: Option<(usize, &'static str)> = None;
+    for (pat, name) in AGENT_BOOT_SETTLE_TOGGLES.iter() {
+        for (i, w) in buf.windows(pat.len()).enumerate() {
+            let end = i + pat.len();
+            if w == *pat && end > carry_len && best.map_or(true, |(e, _)| end > e) {
+                best = Some((end, *name));
+            }
+        }
+    }
+    best.map(|(_, n)| n)
+}
+
 fn agent_boot_evidence_scan<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
     if !agent_boot_hold_active() {
         return;
     }
     let mut buf: Vec<u8> = Vec::with_capacity(chunk.len() + 16);
+    let mut carry_len = 0;
     if let Ok(mut carry) = agent_boot_evidence_carry_cell().lock() {
+        carry_len = carry.len();
         buf.extend_from_slice(&carry);
         buf.extend_from_slice(chunk);
         let keep = buf.len().min(15);
@@ -36606,9 +36726,15 @@ fn agent_boot_evidence_scan<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8])
     } else {
         buf.extend_from_slice(chunk);
     }
-    if let Some(name) = agent_boot_evidence_match(&buf) {
-        clear_agent_boot_hold(app, name);
+    let settling = AGENT_BOOT_SETTLE_DEADLINE_MS.load(std::sync::atomic::Ordering::Relaxed) != 0;
+    if !settling {
+        if let Some(name) = agent_boot_evidence_match(&buf) {
+            note_agent_boot_evidence(app, name);
+        }
+    } else if let Some(name) = agent_boot_settle_toggle(&buf, carry_len) {
+        reset_agent_boot_settle(app, name);
     }
+    poll_agent_boot_settle(app);
 }
 
 #[cfg(test)]
@@ -36627,6 +36753,32 @@ mod agent_boot_evidence_tests {
     #[test]
     fn shell_bracketed_paste_and_prompt_are_not_boot_evidence() {
         assert_eq!(m(b"PS> \x1b[?2004h"), None);
+    }
+
+    // new-session-first-message-boot-settle: Claude's 2026-09-30 boot bytes.
+    #[test]
+    fn claude_mode_bounce_resets_the_settle_window() {
+        use super::agent_boot_settle_toggle as t;
+        assert_eq!(
+            t(b"\x1b[>4m\x1b[?1004l\x1b[?2031l\x1b[?2004l", 0),
+            Some("bracketed-paste-off")
+        );
+        assert_eq!(
+            t(b"\x1b[?2004h\x1b[?2031h\x1b[?1004h", 0),
+            Some("focus-reporting")
+        );
+    }
+    #[test]
+    fn synchronized_output_never_resets_the_settle_window() {
+        use super::agent_boot_settle_toggle as t;
+        assert_eq!(t(b"\x1b[?2026h paint \x1b[?2026l", 0), None);
+    }
+    #[test]
+    fn a_toggle_seen_in_the_carry_is_not_counted_again() {
+        use super::agent_boot_settle_toggle as t;
+        let buf = b"\x1b[?1004l plain text";
+        assert_eq!(t(buf, 8), None);
+        assert_eq!(t(buf, 7), Some("focus-reporting-off"));
     }
 }
 

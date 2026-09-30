@@ -822,7 +822,7 @@ instead of a fix; for a plain change, just make it. Log-line shape →
   explicitly (e.g. `--workers=2`); default worker-per-core has frozen
   every webview on the machine.
 
-- **Something misbehaves, or you're designing a mechanism that acts on inferred conditions** → read `.claude/bram-reference/diagnostics.md` (§Log-first development).
+- **Something misbehaves, or you're designing a mechanism that waits or acts on inferred conditions** → read `.claude/bram-reference/diagnostics.md` (§Log-first development) and `development-principles.md`.
 - **Debugging Bram itself (trace log, Inspector export, Status tab)** → read `.claude/bram-reference/diagnostics.md` (§Debugging Bram itself).
 - **Questions about Bram's guards, retired hook scripts, or bundled skills** → read `.claude/bram-reference/diagnostics.md` (§Guards, retired hooks, and bundled skills).
 - **Your project's markup wants to talk back to the agent (`toShell`, `toTurn`)** → read `.claude/bram-reference/environment.md` (§Target app helpers).

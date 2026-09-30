@@ -32,7 +32,12 @@
        the triggering event (root cause not isolated). Acceptable for
        background updates (an item appearing a beat late is invisible); NOT
        acceptable as the response to a Dismiss click, which is why that path
-       is click-driven above. -->
+       is click-driven above. Remeasured 2026-09-30 23:11:37Z with the
+       push-fanout / live-refetch trace lines (helpers.js): event to refetch
+       in 19 ms, list served 100 ms later, so the ~30 s did not reproduce.
+       A tab that isn't showing gets no refetch (push_subscribers=0) and
+       loads fresh when it's opened again. -->
+
   <PushSource id="inboxWorklistEvt" initial="{null}"
     subscribe="{window.bramSubscribeTauriEvent('worklist-changed')}" />
   <ChangeListener listenTo="{inboxWorklistEvt.value &amp;&amp; inboxWorklistEvt.value.tick}"

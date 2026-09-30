@@ -9362,7 +9362,23 @@ window.bramSubscribeTauriEvent = (function () {
       function (e) {
         tick += 1;
         lastPayload = (e && e.payload) || null;
-        var snapshot = { tick: tick, payload: lastPayload };
+        var snapshot = { tick: tick, payload: lastPayload, name: eventName };
+        // awaiting-you-refetch-on-background-change: event-received's
+        // `subscribers` counts Tauri-listener registrations (one per cache
+        // key), not the PushSources behind it. push_subscribers is how many
+        // mounted PushSources this event actually reaches.
+        try {
+          if (typeof window.logToHost === "function") {
+            window.logToHost({
+              kind: "iframe-trace",
+              subkind: "push-fanout",
+              at: new Date().toISOString(),
+              event_name: eventName,
+              tick: tick,
+              push_subscribers: subscribers.size,
+            });
+          }
+        } catch (err) {}
         subscribers.forEach(function (fn) {
           try { fn(snapshot); } catch (err) {
             console.error("[bramSubscribeTauriEvent] subscriber threw:", err);
@@ -9379,7 +9395,7 @@ window.bramSubscribeTauriEvent = (function () {
           if (!data || !data.exists) return;
           tick += 1;
           lastPayload = data.payload || null;
-          var snapshot = { tick: tick, payload: lastPayload, replayed: true };
+          var snapshot = { tick: tick, payload: lastPayload, replayed: true, name: eventName };
           subscribers.forEach(function (fn) {
             try { fn(snapshot); } catch (err) {
               console.error("[bramSubscribeTauriEvent] replay subscriber threw:", err);
@@ -9390,7 +9406,7 @@ window.bramSubscribeTauriEvent = (function () {
     };
     var factory = function (emit) {
       var fire = function (snapshot) {
-        emit(snapshot || { tick: tick, payload: lastPayload });
+        emit(snapshot || { tick: tick, payload: lastPayload, name: eventName });
       };
       subscribers.add(fire);
       if (shouldReplayLatest) fire();
@@ -9406,12 +9422,34 @@ window.bramSubscribeTauriEvent = (function () {
 // null state as tick 0. Treat only a real host event (positive tick, not a
 // replay snapshot) as invalidation, then refetch each supplied DataSource.
 window.__bramRefetchOnLiveEvent = function (eventValue) {
-  if (!eventValue || !eventValue.tick || eventValue.replayed) return false;
-  for (var i = 1; i < arguments.length; i++) {
-    var source = arguments[i];
-    if (source && typeof source.refetch === "function") source.refetch();
+  var live = !!(eventValue && eventValue.tick && !eventValue.replayed);
+  var refetched = 0;
+  if (live) {
+    for (var i = 1; i < arguments.length; i++) {
+      var source = arguments[i];
+      if (source && typeof source.refetch === "function") {
+        source.refetch();
+        refetched += 1;
+      }
+    }
   }
-  return true;
+  // awaiting-you-refetch-on-background-change: splits the chain after
+  // push-fanout. No line = the ChangeListener never fired; refetched>0 with
+  // no host serve = refetch() didn't reach the host.
+  try {
+    if (typeof window.logToHost === "function" && eventValue) {
+      window.logToHost({
+        kind: "iframe-trace",
+        subkind: "live-refetch",
+        at: new Date().toISOString(),
+        event_name: eventValue.name || "",
+        tick: eventValue.tick || 0,
+        replayed: !!eventValue.replayed,
+        refetched: refetched,
+      });
+    }
+  } catch (err) {}
+  return live;
 };
 
 // External-driven AgentMenu bridge — emits the current pending menu

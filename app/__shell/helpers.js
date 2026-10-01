@@ -4238,7 +4238,7 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, attribu
   // issue-406: its work was committed outside the Worklist (a plain git
   // commit in chat or a terminal). The host sets `landed` only for a begun
   // item whose files are clean and were touched by a commit since it began,
-  // so this must win over "nothing came of it", which would misstate it.
+  // so this must win over "no changes in this repo", which would misstate it.
   if (item.landed && item.landed.short) {
     // The commit's subject lives in the tooltip, not the strip (Jon: "I
     // don't see what this part of the message is adding").
@@ -4272,12 +4272,17 @@ window.__bramWorklist2Strip = function (item, claim, items, attribution, attribu
     // So name the ambiguity and point at where the answer is. Since bc8e666 the
     // agent is REQUIRED to record which of the three it was in the draft before
     // reporting in chat, so the draft is not a guess -- it is the designated
-    // home for exactly this. The fact half (Green-lit <age>, nothing came of
-    // it) is unchanged; only the action tail moves.
+    // home for exactly this. Only the action tail moved then.
+    //
+    // issue-396: and the fact half was wrong in a fourth ending -- done, but
+    // outside what this board can commit (a PR in another repo, a server
+    // change, forge-only work). Raymond's case: a reviewed, approved PR in a
+    // nested repo read "nothing came of it". "No changes in this repo" is
+    // true in all four endings; the draft still says which one it was.
     var age = window.__bramGreenLitAge(item);
     return withCloses(
       "Green-lit" + (age ? " " + age : "") +
-        ", nothing came of it · the reason is in the draft — Start again, or Drop",
+        ", no changes in this repo · the reason is in the draft — Start again, or Drop",
     );
   }
   // issue-350-stranded-approval-reconciliation: the host marks an approved

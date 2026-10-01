@@ -126,12 +126,14 @@ configuration issue, a process restart, every check passed):
   resulting row. No special undo path.
 
 **Write the finding into the draft before reporting it in chat.** Chat
-does not outlive the turn; the draft does. "Nothing came of it"
-collapses three situations with opposite right answers: never got to
+does not outlive the turn; the draft does. "No changes in this repo"
+collapses four situations with different right answers: never got to
 it (**Start again**), worked it and found nothing to change (**Drop**),
-or found the item's premise **false** (**Drop**, and the draft's own
-claims must say they are wrong). Record in
-`resources/worklist-drafts/<id>.md` which of the three it is: the
+found the item's premise **false** (**Drop**, and the draft's own
+claims must say they are wrong), or **done elsewhere**: a PR in another
+repo, a server change, a forge action (**Drop**, and the draft links
+where the work landed). Record in
+`resources/worklist-drafts/<id>.md` which of the four it is: the
 premise that failed, what was verified, and what would make the item
 actionable again.
 

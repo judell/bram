@@ -55930,6 +55930,78 @@ mod comment_permalink_tests {
     }
 }
 
+// awaiting-you-sweep-only-issues-that-involve-you (judell/bram#406): the sweep
+// listed every open issue where someone else moved last, which is right for
+// the repo owner and wrong for a collaborator (Raymond saw the owner's #409
+// in his Needs you now). Off-owner viewers keep only issues they are in.
+//
+// The owner comes from the ISSUE URL, deliberately not from git `origin`: a
+// collaborator working in a fork has `origin` = their fork while gh lists the
+// upstream's issues.
+fn issue_repo_owner(url: &str) -> Option<&str> {
+    let rest = url.strip_prefix("https://github.com/")?;
+    let owner = rest.split('/').next().unwrap_or("");
+    if owner.is_empty() {
+        None
+    } else {
+        Some(owner)
+    }
+}
+
+// Agents post through the human's account, so "the viewer filed it" also
+// covers the viewer's own agent on any machine. Assignees aren't in the
+// cached fields, but the notifications path already lanes assign/mention.
+fn issue_involves_viewer(rec: &serde_json::Value, login: &str) -> bool {
+    let is_viewer = |v: &serde_json::Value| {
+        v["author"]["login"]
+            .as_str()
+            .is_some_and(|l| l.eq_ignore_ascii_case(login))
+    };
+    if is_viewer(rec) {
+        return true;
+    }
+    rec["comments"]
+        .as_array()
+        .is_some_and(|cs| cs.iter().any(is_viewer))
+}
+
+#[cfg(test)]
+mod issue_sweep_scope_tests {
+    use super::*;
+
+    #[test]
+    fn owner_from_issue_url() {
+        assert_eq!(
+            issue_repo_owner("https://github.com/judell/bram/issues/409"),
+            Some("judell")
+        );
+        assert_eq!(
+            issue_repo_owner("https://gitlab.com/judell/bram/issues/1"),
+            None
+        );
+        assert_eq!(issue_repo_owner(""), None);
+        assert_eq!(issue_repo_owner("https://github.com//bram/issues/1"), None);
+    }
+
+    #[test]
+    fn involves_viewer_cases() {
+        let authored = serde_json::json!({"author": {"login": "RdHyee"}});
+        assert!(issue_involves_viewer(&authored, "rdhyee"));
+        let commented = serde_json::json!({
+            "author": {"login": "judell"},
+            "comments": [{"author": {"login": "rdhyee"}, "body": "me too"}]
+        });
+        assert!(issue_involves_viewer(&commented, "rdhyee"));
+        let untouched = serde_json::json!({
+            "author": {"login": "judell"},
+            "comments": [{"author": {"login": "someone"}, "body": "x"}]
+        });
+        assert!(!issue_involves_viewer(&untouched, "rdhyee"));
+        let no_comments = serde_json::json!({"author": {"login": "judell"}});
+        assert!(!issue_involves_viewer(&no_comments, "rdhyee"));
+    }
+}
+
 fn local_issue_sweep_items<R: tauri::Runtime>(
     app: &AppHandle<R>,
     skip_numbers: &std::collections::HashSet<u64>,
@@ -55962,6 +56034,7 @@ fn local_issue_sweep_items<R: tauri::Runtime>(
     // (no origin) keeps the project dimension on its honest default.
     let local_locator =
         project_root(Some(app)).and_then(|root| guard_policy::expected_repo_locator(&root));
+    let mut skipped = 0usize;
     for rec in &issues {
         let state = rec.get("state").and_then(|v| v.as_str()).unwrap_or("");
         if !state.eq_ignore_ascii_case("open") {
@@ -55990,6 +56063,13 @@ fn local_issue_sweep_items<R: tauri::Runtime>(
         };
         if last.is_empty() {
             continue;
+        }
+        let url = rec.get("url").and_then(|v| v.as_str()).unwrap_or("");
+        if let Some(owner) = issue_repo_owner(url) {
+            if !owner.eq_ignore_ascii_case(&login) && !issue_involves_viewer(rec, &login) {
+                skipped += 1;
+                continue;
+            }
         }
         // awaiting-cross-machine-agent-moves: a move by the local login used
         // to be filtered unconditionally — which made an agent posting from
@@ -56022,7 +56102,6 @@ fn local_issue_sweep_items<R: tauri::Runtime>(
             }
         }
         let title = rec.get("title").and_then(|v| v.as_str()).unwrap_or("");
-        let url = rec.get("url").and_then(|v| v.as_str()).unwrap_or("");
         // awaiting-open-links-to-comment: on this path no parsing is needed —
         // `gh issue list --json comments` already hands back each comment's
         // web permalink (…/issues/<n>#issuecomment-<id>), so Open lands on the
@@ -56104,6 +56183,13 @@ fn local_issue_sweep_items<R: tauri::Runtime>(
                 "activityAt": marker,
             }),
         ));
+    }
+    if skipped > 0 {
+        append_bram_trace_line(
+            app,
+            "needs-you",
+            &format!("op=sweep-scoped kept={} skipped={}", out.len(), skipped),
+        );
     }
     out
 }

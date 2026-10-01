@@ -182,6 +182,7 @@
         <Switch
           id="mirrorIssuesSwitch"
           label="Mirror Worklist lifecycle to GitHub issues"
+          labelPosition="end"
           initialValue="{!!(settingsValue &amp;&amp; settingsValue.mirrorWorklistLifecycleToIssue)}"
           onDidChange="(v) => saveSettings.execute({ mirrorWorklistLifecycleToIssue: v })" />
       </VStack>
@@ -208,11 +209,13 @@
         <Switch
           id="targetAppSwitch"
           label="Show target app"
+          labelPosition="end"
           initialValue="{settingsShowTargetApp(settingsValue)}"
           onDidChange="(v) => saveSettings.execute({ ui: { showTargetApp: v } })" />
         <Switch
           id="hotReloadSwitch"
           label="Agent-pane hot-reload"
+          labelPosition="end"
           initialValue="{settingsToolsPaneHotReload(settingsValue)}"
           onDidChange="(v) => saveSettings.execute({ ui: { toolsPaneHotReload: v } })" />
         <!-- issue-231: per-user preferences, localStorage-backed (not project
@@ -221,12 +224,14 @@
              dismiss tooltip echoes it. -->
         <Switch
           label="Show tips in the footer"
+          labelPosition="end"
           initialValue="{window.__bramTipsEnabled ? window.__bramTipsEnabled() : true}"
           onDidChange="(v) => window.__bramSetTipsEnabled(v)" />
         <!-- turn-complete-beep: per-user (localStorage) audio cue; toggling
              on plays the beep once as confirmation. -->
         <Switch
           label="Soft beep on menus and turn completion"
+          labelPosition="end"
           initialValue="{window.__bramBeepEnabled ? window.__bramBeepEnabled() : false}"
           onDidChange="(v) => window.__bramSetBeepEnabled(v)" />
         <VStack
@@ -250,6 +255,7 @@
              Search tab opens with all facet badges selected or none. -->
         <Switch
           label="Search badges start all on"
+          labelPosition="end"
           initialValue="{window.__bramSearchBadgesInitialAllOn ? window.__bramSearchBadgesInitialAllOn() : true}"
           onDidChange="(v) => window.__bramSetSearchBadgesInitialAllOn(v)" />
       </VStack>
@@ -281,6 +287,7 @@
           <Switch
             id="descriptionsSwitch"
             label="Tool Descriptions"
+            labelPosition="end"
             initialValue="{settingsDescribeCommands(settingsValue)}"
             onDidChange="(v) => saveSettings.execute({ ai: { describeCommands: v } })" />
         </VStack>
@@ -308,11 +315,13 @@
         <Switch
           id="tracingSwitch"
           label="Tracing enabled"
+          labelPosition="end"
           initialValue="{settingsTracingEnabled(settingsValue)}"
           onDidChange="(v) => saveSettings.execute({ traces: { enabled: v } })" />
         <Switch
           id="inspectorTapSwitch"
           label="Inspector trace tap"
+          labelPosition="end"
           initialValue="{settingsInspectorTap(settingsValue)}"
           onDidChange="(v) => saveSettings.execute({ traces: { inspectorTap: v } })" />
         <Form

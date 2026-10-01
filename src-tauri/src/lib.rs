@@ -364,6 +364,8 @@ struct ProjectConfig {
     #[serde(default)]
     ui: Option<UiConfig>,
     #[serde(default)]
+    sessions: Option<SessionsConfig>,
+    #[serde(default)]
     traces: Option<TracesConfig>,
     #[serde(default)]
     menus: Option<MenusConfig>,
@@ -441,6 +443,19 @@ struct UiConfig {
     show_target_app: Option<bool>,
     #[serde(default, rename = "toolsPaneHotReload")]
     tools_pane_hot_reload: Option<bool>,
+}
+
+// suggest-fresh-session: when the agent may suggest starting a fresh session.
+// Per project, in `.bram.json` under `sessions`. Defaults (resolved in
+// settings_view_from_config): new item true, new issue true, topic shift false.
+#[derive(Default, Clone, serde::Deserialize)]
+struct SessionsConfig {
+    #[serde(default, rename = "suggestOnNewItem")]
+    suggest_on_new_item: Option<bool>,
+    #[serde(default, rename = "suggestOnNewIssue")]
+    suggest_on_new_issue: Option<bool>,
+    #[serde(default, rename = "suggestOnTopicShift")]
+    suggest_on_topic_shift: Option<bool>,
 }
 
 #[derive(Default, Clone, serde::Deserialize)]
@@ -20617,6 +20632,34 @@ mod agent_startup_policy_tests {
         assert_eq!(merged["shell"]["args"], "--flag");
         assert_eq!(merged["shell"]["firstCommand"], "/status");
     }
+
+    // suggest-fresh-session: defaults, and a partial `sessions` save that
+    // flips one key without disturbing the other keys or other sections.
+    #[test]
+    fn sessions_settings_defaults_and_partial_save() {
+        let view = settings_view_from_config(None);
+        assert_eq!(view["sessions"]["suggestOnNewItem"], true);
+        assert_eq!(view["sessions"]["suggestOnNewIssue"], true);
+        assert_eq!(view["sessions"]["suggestOnTopicShift"], false);
+
+        let existing = serde_json::json!({
+            "ui": { "showTargetApp": true },
+            "shell": { "agent": "codex" }
+        });
+        let update = serde_json::json!({ "sessions": { "suggestOnTopicShift": true } });
+        let merged = merge_settings_into_config(existing, &update);
+        assert_eq!(merged["ui"]["showTargetApp"], true);
+        assert_eq!(merged["shell"]["agent"], "codex");
+        assert_eq!(merged["sessions"]["suggestOnTopicShift"], true);
+        assert!(merged["sessions"].get("suggestOnNewItem").is_none());
+
+        let cfg = serde_json::from_value::<ProjectConfig>(merged).unwrap();
+        let view = settings_view_from_config(Some(cfg));
+        assert_eq!(view["sessions"]["suggestOnNewItem"], true);
+        assert_eq!(view["sessions"]["suggestOnNewIssue"], true);
+        assert_eq!(view["sessions"]["suggestOnTopicShift"], true);
+        assert_eq!(view["ui"]["showTargetApp"], true);
+    }
 }
 
 fn trace_agent_pty_step<R: tauri::Runtime>(
@@ -20760,6 +20803,19 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
     let describe_commands = project_config_describe_commands(config.clone());
     let search_commit_depth = search_commit_depth_from_config(config.as_ref());
     let search_issue_limit = search_issue_limit_from_config(config.as_ref());
+    let sessions_cfg = config.as_ref().and_then(|c| c.sessions.clone());
+    let suggest_on_new_item = sessions_cfg
+        .as_ref()
+        .and_then(|s| s.suggest_on_new_item)
+        .unwrap_or(true);
+    let suggest_on_new_issue = sessions_cfg
+        .as_ref()
+        .and_then(|s| s.suggest_on_new_issue)
+        .unwrap_or(true);
+    let suggest_on_topic_shift = sessions_cfg
+        .as_ref()
+        .and_then(|s| s.suggest_on_topic_shift)
+        .unwrap_or(false);
     let (
         agent,
         args,
@@ -20849,6 +20905,11 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
         },
         "worklist": { "batchCommitActions": batch },
         "ui": { "showTargetApp": show_target_app, "toolsPaneHotReload": tools_pane_hot_reload },
+        "sessions": {
+            "suggestOnNewItem": suggest_on_new_item,
+            "suggestOnNewIssue": suggest_on_new_issue,
+            "suggestOnTopicShift": suggest_on_topic_shift
+        },
         "traces": {
             "enabled": tracing_enabled,
             "inspectorTap": inspector_tap,
@@ -40635,6 +40696,13 @@ const CLAUDE_CURL_ALLOW_PATTERNS: &[&str] = &[
     "Bash(curl -4 -sS --retry-connrefused --retry 3 --retry-delay 1 -X POST * \"http://127.0.0.1*__iterate*)",
     "Bash(curl -4 -sS --retry-connrefused --retry 3 --retry-delay 1 \"http://127.0.0.1*__issue*)",
     "Bash(curl -4 -sS --retry-connrefused --retry 3 --retry-delay 1 \"http://127.0.0.1*__enhance*)",
+    // suggest-fresh-session: the convention reads GET /__settings (the
+    // `sessions` switches) and posts to /__sessions/suggest. The POST entries
+    // name that one route, not `__sessions*`, so a later POST route under
+    // /__sessions is not pre-approved by accident.
+    "Bash(curl -4 -sS --retry-connrefused --retry 3 --retry-delay 1 \"http://127.0.0.1*__settings*)",
+    "Bash(curl -4 -sS --retry-connrefused --retry 3 --retry-delay 1 -X POST \"http://127.0.0.1*__sessions/suggest*)",
+    "Bash(curl -4 -sS --retry-connrefused --retry 3 --retry-delay 1 -X POST * \"http://127.0.0.1*__sessions/suggest*)",
 ];
 // Compact high-priority gate prose embedded in the Bram binary. Keep detailed
 // lifecycle rules in app/__shell/conventions.md to avoid drift.
@@ -56551,6 +56619,103 @@ fn write_needs_you_dismissed<R: tauri::Runtime>(
     }
 }
 
+// suggest-fresh-session: pure parse/validate of the POST body. `name` is
+// required; `whatsNext` is optional. Both are trimmed.
+fn parse_sessions_suggest_body(body: &[u8]) -> Result<(String, String), &'static str> {
+    let parsed: serde_json::Value = serde_json::from_slice(body).map_err(|_| "invalid json")?;
+    let field = |key: &str| {
+        parsed
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    let name = field("name");
+    if name.is_empty() {
+        return Err("name required");
+    }
+    Ok((name, field("whatsNext")))
+}
+
+// POST /__sessions/suggest {name, whatsNext} (suggest-fresh-session): the
+// agent asks the pane to open its New session dialog pre-filled. Nothing is
+// created here; the user still edits and clicks Create. The emit is a plain
+// (non-replayable) one on purpose: remembering it would make the frontend's
+// replayLatest re-open the dialog on every pane reload.
+fn handle_sessions_suggest<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    body: &[u8],
+) -> (u16, &'static str, Vec<u8>) {
+    let (name, text) = match parse_sessions_suggest_body(body) {
+        Ok(v) => v,
+        Err(msg) => {
+            return (
+                400,
+                "application/json; charset=utf-8",
+                serde_json::json!({ "error": msg }).to_string().into_bytes(),
+            )
+        }
+    };
+    append_bram_trace_line(
+        app,
+        "session-suggest",
+        &format!(
+            "op=posted name_len={} text_len={}",
+            name.chars().count(),
+            text.chars().count()
+        ),
+    );
+    let payload = serde_json::json!({
+        "name": name,
+        "whatsNext": text,
+        "atMs": unix_now_ms(),
+    });
+    trace_emit_payload(app, "session-suggest", &payload);
+    let _ = app.emit("session-suggest", payload);
+    (
+        200,
+        "application/json; charset=utf-8",
+        br#"{"ok":true}"#.to_vec(),
+    )
+}
+
+#[cfg(test)]
+mod sessions_suggest_tests {
+    use super::parse_sessions_suggest_body;
+
+    #[test]
+    fn valid_body_is_trimmed() {
+        let r = parse_sessions_suggest_body(br#"{"name":" fix-x ","whatsNext":"  do it\n"}"#);
+        assert_eq!(r, Ok(("fix-x".to_string(), "do it".to_string())));
+    }
+
+    #[test]
+    fn missing_or_blank_name_is_rejected() {
+        assert_eq!(
+            parse_sessions_suggest_body(br#"{"whatsNext":"x"}"#),
+            Err("name required")
+        );
+        assert_eq!(
+            parse_sessions_suggest_body(br#"{"name":"   "}"#),
+            Err("name required")
+        );
+    }
+
+    #[test]
+    fn missing_whats_next_is_empty() {
+        assert_eq!(
+            parse_sessions_suggest_body(br#"{"name":"a"}"#),
+            Ok(("a".to_string(), String::new()))
+        );
+    }
+
+    #[test]
+    fn invalid_json_is_rejected() {
+        assert_eq!(parse_sessions_suggest_body(b"nope"), Err("invalid json"));
+    }
+}
+
 fn handle_needs_you_dismiss<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
@@ -70942,6 +71107,16 @@ fn handle_http<R: tauri::Runtime>(app: &AppHandle<R>, mut request: tiny_http::Re
             let mut buf = Vec::new();
             let _ = request.as_reader().read_to_end(&mut buf);
             handle_needs_you_dismiss(app, &buf)
+        }
+    } else if path == "__sessions/suggest" {
+        // suggest-fresh-session: the agent asks the pane to open its New
+        // session dialog pre-filled. POST only; creates nothing.
+        if method != "POST" {
+            (405, "text/plain; charset=utf-8", b"POST only".to_vec())
+        } else {
+            let mut buf = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut buf);
+            handle_sessions_suggest(app, &buf)
         }
     } else if path == "__issue-close-queue/withdraw" {
         // issue-382-withdraw-queued-close: pane-initiated removal of a

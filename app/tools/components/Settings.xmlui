@@ -156,6 +156,36 @@
 
       <ContentSeparator />
 
+      <!-- suggest-fresh-session: the host serves sessions.{suggestOnNewItem,
+           suggestOnNewIssue,suggestOnTopicShift} from GET /__settings. Same
+           save-on-change shape as the hot-reload switch below; the read goes
+           through window.__bramSuggestSetting so the defaults (true/true/false)
+           live in one place. https://www.xmlui.org/docs/reference/components/Checkbox -->
+      <VStack gap="$space-2">
+        <Heading level="h3">Suggest a fresh session</Heading>
+        <Text
+          color="$textColor-secondary"
+          fontSize="$fontSize-sm"
+          value="The agent can offer to continue new work in a fresh session. It always asks first." />
+        <Checkbox
+          label="When the agent is about to propose a new worklist item"
+          labelPosition="end"
+          initialValue="{window.__bramSuggestSetting(settingsValue, 'suggestOnNewItem')}"
+          onDidChange="(v) => saveSettings.execute({ sessions: { suggestOnNewItem: v } })" />
+        <Checkbox
+          label="When the agent is about to file a new issue"
+          labelPosition="end"
+          initialValue="{window.__bramSuggestSetting(settingsValue, 'suggestOnNewIssue')}"
+          onDidChange="(v) => saveSettings.execute({ sessions: { suggestOnNewIssue: v } })" />
+        <Checkbox
+          label="When the conversation shifts to a significantly different topic"
+          labelPosition="end"
+          initialValue="{window.__bramSuggestSetting(settingsValue, 'suggestOnTopicShift')}"
+          onDidChange="(v) => saveSettings.execute({ sessions: { suggestOnTopicShift: v } })" />
+      </VStack>
+
+      <ContentSeparator />
+
       <VStack gap="$space-4">
         <HStack
           width="fit-content"

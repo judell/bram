@@ -9,6 +9,9 @@
   var.newSessionOpen="{false}"
   var.newSessionDraft=""
   var.newSessionNext=""
+  var.newSessionSuggested="{false}"
+  var.newSessionSuggestedName=""
+  var.newSessionSuggestedNext=""
   var.pendingDeletes="{loadPendingSessionDeletes()}"
   var.pendingRenames="{loadPendingSessionRenames()}"
   var.lastDeleteId="{null}"
@@ -115,36 +118,75 @@
     </VStack>
   </ModalDialog>
 
+  <!-- suggest-fresh-session: an agent suggestion (session-suggest) opens the
+       dialog pre-filled. The vars are set BEFORE newSessionOpen flips, because
+       the dialog mounts only when newSessionOpen and the fields take them as
+       initialValue (real editable text, not placeholders). Delivery is via a
+       helpers.js factory that also hands over a suggestion that arrived before
+       this tab mounted; consumed once, never replayed on reload.
+       https://www.xmlui.org/docs/reference/components/PushSource
+       https://www.xmlui.org/docs/reference/components/ChangeListener -->
+  <PushSource
+    id="sessionSuggestEvt"
+    initial="{null}"
+    subscribe="{window.__bramSubscribeSessionSuggest()}" />
+  <ChangeListener
+    listenTo="{sessionSuggestEvt.value &amp;&amp; sessionSuggestEvt.value.at}">
+    <event name="didChange">
+      const s = sessionSuggestEvt.value || null;
+      if (s) {
+        newSessionDraft = s.name;
+        newSessionNext = s.whatsNext;
+        newSessionSuggestedName = s.name;
+        newSessionSuggestedNext = s.whatsNext;
+        newSessionSuggested = true;
+        newSessionOpen = true;
+        window.__bramSuggestTrace('suggest-opened', true, s.name, s.whatsNext, s.name, s.whatsNext);
+      }
+    </event>
+  </ChangeListener>
+
   <ModalDialog
     id="newSessionDialog"
     when="{newSessionOpen}"
-    onClose="newSessionOpen = false; newSessionDraft = ''; newSessionNext = ''"
+    onClose="window.__bramSuggestTrace('suggest-cancelled', newSessionSuggested, newSessionDraft, newSessionNext, newSessionSuggestedName, newSessionSuggestedNext); newSessionOpen = false; newSessionSuggested = false; newSessionDraft = ''; newSessionNext = ''; window.__bramVoiceStopOnSend('new-session'); setWorklistVoiceTarget('message-agent')"
     title="New session">
     <VStack gap="$space-3" padding="$space-4">
+      <Text
+        when="{newSessionSuggested}"
+        fontWeight="$fontWeight-bold"
+        fontSize="$fontSize-sm"
+        value="Suggested by the agent. Edit the name and what's next to say it your way, then click Create." />
       <TextBox
         id="newSessionBox"
         width="*"
-        placeholder="Session name"
+        placeholder="Session name (descriptive: it's how you'll find this session later)"
+        initialValue="{newSessionDraft}"
         autoComplete="off"
         autoCorrect="{false}"
         spellCheck="{false}"
         autoCapitalize="off"
         onDidChange="(v) => newSessionDraft = v" />
-      <TextArea
-        width="*"
-        minRows="3"
+      <IsolatedDraftEditor
+        id="newSessionNextEditor"
         placeholder="What's next? (optional, in your own words)"
-        onDidChange="(v) => newSessionNext = v" />
+        initialValue="{newSessionNext}"
+        resize="vertical"
+        minRows="4"
+        maxRows="16"
+        width="100%"
+        voiceTarget="new-session"
+        voiceTooltip="Dictate what's next" />
       <Text
         color="$textColor-secondary"
         fontSize="$fontSize-sm"
         value="Create stops the running agent and starts a new session with this name. If you say what's next, the new session builds its context from your words (project history, and the session you're leaving), reports what it found, and waits for you to settle the framing together. The current session stays in the list, resumable." />
       <HStack horizontalAlignment="end" gap="$space-2">
-        <Button label="Cancel" variant="outlined" onClick="newSessionOpen = false; newSessionDraft = ''; newSessionNext = ''" />
+        <Button label="Cancel" variant="outlined" onClick="window.__bramSuggestTrace('suggest-cancelled', newSessionSuggested, newSessionDraft, newSessionNextEditor.getValue(), newSessionSuggestedName, newSessionSuggestedNext); newSessionOpen = false; newSessionSuggested = false; newSessionDraft = ''; newSessionNext = ''; window.__bramVoiceStopOnSend('new-session'); setWorklistVoiceTarget('message-agent')" />
         <Button
           label="Create"
           enabled="{newSessionDraft &amp;&amp; newSessionDraft.trim().length > 0}"
-          onClick="let name = newSessionDraft; let next = newSessionNext; newSessionOpen = false; newSessionDraft = ''; newSessionNext = ''; window.__bramCreateNewSessionClick(currentProvider, name, toast, next, window.__bramCurrentSessionOf(sessionsFirstPage.value))" />
+          onClick="let name = newSessionDraft; let next = newSessionNextEditor.getValue(); window.__bramSuggestTrace('suggest-created', newSessionSuggested, name, next, newSessionSuggestedName, newSessionSuggestedNext); newSessionOpen = false; newSessionSuggested = false; newSessionDraft = ''; newSessionNext = ''; window.__bramVoiceStopOnSend('new-session'); setWorklistVoiceTarget('message-agent'); window.__bramCreateNewSessionClick(currentProvider, name, toast, next, window.__bramCurrentSessionOf(sessionsFirstPage.value))" />
       </HStack>
     </VStack>
   </ModalDialog>
@@ -176,7 +218,7 @@
         variant="solid"
         size="sm"
         tooltip="Start a fresh session and make it current"
-        onClick="newSessionDraft = ''; newSessionNext = ''; newSessionOpen = true" />
+        onClick="newSessionSuggested = false; newSessionDraft = ''; newSessionNext = ''; newSessionOpen = true" />
     </HStack>
     <Text
       when="{sessionsMeta.value}"

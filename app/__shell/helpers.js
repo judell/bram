@@ -2912,7 +2912,7 @@ window.__bramEditorPlaceholder = function (lead, hasPaste, hasVoice) {
 
 window.__bramIsWorklistTextVoiceTarget = function (target) {
   var t = target || "";
-  return ["message-agent", "feedback", "new-item", "new-issue"].indexOf(t) !== -1
+  return ["message-agent", "feedback", "new-item", "new-issue", "new-session"].indexOf(t) !== -1
     || t.indexOf("feedback:") === 0
     || t.indexOf("queue-item:") === 0
     || t.indexOf("issue-comment:") === 0;
@@ -15256,3 +15256,91 @@ window.__bramSkipTip = function (id, tick) {
   if (id) window.__bramTipSkips[id] = true;
   return (Number(tick) || 0) + 1;
 };
+
+// suggest-fresh-session: sessions.* settings read for the Settings checkboxes.
+// Defaults mirror the host: new-item and new-issue on, topic-shift off.
+window.__bramSuggestSetting = function (settings, key) {
+  var s = settings && settings.sessions;
+  if (s && typeof s[key] === "boolean") return s[key];
+  return key !== "suggestOnTopicShift";
+};
+
+// suggest-fresh-session: the agent's session-suggest event (POST
+// /__sessions/suggest -> Tauri event {name, whatsNext, atMs}). Sessions is
+// mounted only while its tab shows, so the event may land first: it is held
+// in __bramSessionSuggestPending until Sessions subscribes, then handed over
+// once. Live-only subscription (replay=false) plus a staleness cap means a
+// pane reload or replayed event never re-opens a consumed suggestion.
+window.__bramSessionSuggestPending = null;
+window.__bramSessionSuggestSubscribers = new Set();
+window.__bramSessionSuggestLastAt = 0;
+window.__bramSessionSuggestIngest = function (payload) {
+  try {
+    var p = payload || {};
+    var at = Number(p.atMs) || 0;
+    if (!at || Date.now() - at > 60000 || at <= window.__bramSessionSuggestLastAt) return;
+    window.__bramSessionSuggestLastAt = at;
+    var sug = { at: at, name: String(p.name || ""), whatsNext: String(p.whatsNext || "") };
+    var delivered = false;
+    window.__bramSessionSuggestSubscribers.forEach(function (fn) {
+      try { fn(sug); delivered = true; } catch (e) {}
+    });
+    if (!delivered) window.__bramSessionSuggestPending = sug;
+    if (String(window.location.hash || "").indexOf("/sessions") < 0) window.location.hash = "#/sessions";
+  } catch (e) {}
+};
+// ONE factory, returned every time. The first version built a new function
+// per call, so the PushSource's `subscribe` prop changed identity on every
+// render of Sessions: it resubscribed and emitted on each one. Demo,
+// 2026-10-01 02:07–02:09Z: pane heartbeat drift 19–189 ms while Sessions
+// showed (10 ms idle elsewhere), and after the dialog closed the nav clicks
+// registered but the page never left Sessions until a reload. Every peer
+// (bramSubscribeTauriEvent, bramSubscribeAgentMenu) caches its factory.
+window.__bramSessionSuggestSubscribeCount = 0;
+window.__bramSubscribeSessionSuggest = function () {
+  return window.__bramSessionSuggestFactory;
+};
+window.__bramSessionSuggestFactory = function (emit) {
+  {
+    // Evidence for the loop above: a healthy mount subscribes once or twice.
+    var n = (window.__bramSessionSuggestSubscribeCount += 1);
+    if (n <= 5 || n % 100 === 0) {
+      window.__bramIframeTrace("new-session-client", { op: "suggest-subscribe", n: n });
+    }
+    var fire = function (sug) { emit(sug); };
+    window.__bramSessionSuggestSubscribers.add(fire);
+    var pending = window.__bramSessionSuggestPending;
+    window.__bramSessionSuggestPending = null;
+    // Hand a held suggestion over AFTER subscribe returns. Emitted inside
+    // subscribe it becomes the PushSource's starting value, which the
+    // ChangeListener never sees as a change (demo, 2026-10-01 01:57:26Z: the
+    // tab switched and the dialog stayed shut, no suggest-opened). The
+    // zero-delay timer is ordering, not a readiness guess.
+    var live = true;
+    if (pending && Date.now() - pending.at <= 60000) {
+      var handed = false;
+      setTimeout(function () { if (live) { handed = true; fire(pending); } }, 0);
+      // Unsubscribed before the handover (a mount that subscribes twice):
+      // put it back for the next subscriber rather than dropping it.
+      var putBack = function () {
+        if (!handed && !window.__bramSessionSuggestPending) window.__bramSessionSuggestPending = pending;
+      };
+      return function () { live = false; putBack(); window.__bramSessionSuggestSubscribers.delete(fire); };
+    }
+    return function () { live = false; window.__bramSessionSuggestSubscribers.delete(fire); };
+  };
+};
+// Lengths only, never the text. `edited` = name or text differs from the suggestion.
+window.__bramSuggestTrace = function (op, suggested, name, text, sugName, sugText) {
+  if (!suggested) return;
+  var n = String(name || ""), t = String(text || "");
+  var f = { op: op, name_len: n.length, text_len: t.length };
+  if (op === "suggest-created") {
+    f.suggested = true;
+    f.edited = n.trim() !== String(sugName || "").trim() || t.trim() !== String(sugText || "").trim();
+  }
+  window.__bramIframeTrace("new-session-client", f);
+};
+window.bramSubscribeTauriEvent("session-suggest", false)(function (snap) {
+  window.__bramSessionSuggestIngest(snap && snap.payload);
+});

@@ -425,6 +425,93 @@ or query state. The transcription HTTP server listens at `http://127.0.0.1:18080
 | `whisper_stop` | IPC | — | `Result<(), String>` | parent shell |
 | `whisper_status` | IPC | — | `WhisperStatusReport` | parent shell |
 
+### The dictation script (`/__shell/dictation.js`)
+
+Live dictation itself (capture, the sliding-window loop, pause repair, and
+writing into a field) is a host-neutral script, served to any page at
+`/__shell/dictation.js` with its capture worklet beside it at
+`/__shell/dictation-capture-worklet.js` (judell/bram#417). It defines
+`window.BramDictation` and uses no Tauri call, no `postMessage` and no
+`localStorage`. Bram's shell and pane are its first two callers; the
+`voice-start` / `voice-stop` / `voice-into-partial` / `voice-into-result` /
+`voice-edit-boundary` messages between them are Bram's own transport, not
+part of the script.
+
+| Entry point | Takes | Gives | Caller |
+| --- | --- | --- | --- |
+| `BramDictation.createLoop(options)` | `engine`, `trace(stage, fields)`, `requestId`, `pauseMs`, `workletUrl`, `onPartial(partial)` | `start(mediaStream)`, `finish()` → `{ text, errors, parts }`, `abort()`, `setEditBoundary(fromSeq)` | parent shell (`app/main.js`) |
+| `BramDictation.createField(options)` | `get()`, `set(text)`, `trace`, `onEditBoundary(fromSeq)` | `showLive(partial)`, `finalize(transcript, parts)`, `markStopped()` | agent pane (`helpers.js`) |
+| `BramDictation.attach(options)` | `get()`, `set(text)`, optional `onState(state, extra)`, `trace`, `pauseMs`, `audio`, `engine` | `start()`, `stop()` → transcript, `recording` | a project page |
+| `BramDictation.engines` | — | the engine adapters; `whisper` is the only one | all |
+
+A project page uses `attach`:
+
+```html
+<script src="/__shell/dictation.js"></script>
+<script>
+  const box = document.querySelector("textarea");
+  const dictation = BramDictation.attach({
+    get: () => box.value,
+    set: (text) => { box.value = text; },
+  });
+  // dictation.start() on a 🎤 click, dictation.stop() on the next.
+</script>
+```
+
+**`get` must return the field's text at the moment it is called.** A stale
+`get` fails silently and looks like a dictation that erases itself: every
+window reads as an edit back to the old text, and the final write empties
+the field. The script traces `live-get-stale-suspected` when it sees the
+pattern. In an XMLUI page the trap is specific: a component handed from
+markup to page script is a snapshot whose methods keep working but whose
+`value` stays frozen, so `get: () => box.value` is stale. Push the value
+from the field's `onDidChange` instead (reported by Bram Studio on
+judell/bram#417, where this bridge ran):
+
+```xml
+<TextArea id="box" onDidChange="(v) => window.noteValue(v)" />
+```
+
+```js
+var latest = "";
+window.noteValue = (v) => { latest = String(v || ""); };
+BramDictation.attach({
+  get: () => latest,
+  set: (text) => { latest = text; box.setValue(text); },
+});
+```
+
+The function the markup calls must exist before the XMLUI engine loads.
+Bram's own pane avoids the trap another way: its markup passes a fresh box
+on every partial.
+
+Two options a page may want:
+
+- `audio`: `getUserMedia` audio constraints, to choose a microphone
+  (`{ deviceId: { exact: id } }`). The default is the browser's default
+  input.
+- `engine`: an engine adapter. For a Whisper server at another address,
+  copy the built-in one: `Object.assign({}, BramDictation.engines.whisper,
+  { host: "http://127.0.0.1:8767", url: "http://127.0.0.1:8767/inference" })`.
+
+`start()` rejects with an error whose `code` is `engine-unavailable`,
+`no-microphone` or `capture-unavailable`. The script cannot start the
+speech engine: `whisper_start` is IPC-only, so a page gets dictation only
+while the engine on port 18080 is already running (after a first 🎤 click
+in Bram's pane). Each frame captures its own microphone; Bram's
+one-recording-at-a-time guard covers Bram's pane only.
+
+A working example is served by any running Bram at
+`/__shell/dictation-example.html` (`app/__shell/dictation-example.html`).
+
+Tests, both run with `node` and needing no microphone or Bram window:
+
+- `scripts/tests/dictation-logic.test.js`: the loop and the field, driven
+  by hand with a stubbed engine.
+- `scripts/tests/dictation-pane.test.js`: the real `helpers.js` loaded
+  under a stub window, with the pane's helper functions driven by the
+  messages `main.js` sends.
+
 ## 10. Static & hot-reload
 
 Static files served from the binary's on-disk `app/` (preferred) or

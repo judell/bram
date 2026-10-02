@@ -23,7 +23,9 @@
     <script>
       // Cachebust helpers.js using APP_VERSION (set above to dev-Date.now()).
       // Without this, browsers cache /__shell/helpers.js indefinitely and
-      // edits don't take effect across iframe reloads.
+      // edits don't take effect across iframe reloads. dictation.js comes
+      // first: helpers.js calls its field half (BramDictation.createField).
+      document.write('<script src="/__shell/dictation.js?v=' + window.APP_VERSION + '"><\/script>');
       document.write('<script src="/__shell/helpers.js?v=' + window.APP_VERSION + '"><\/script>');
     </script>
     <script>

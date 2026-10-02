@@ -1,0 +1,60 @@
+<!doctype html>
+<!-- A plain page using Bram's dictation script (judell/bram#417): no Tauri,
+     no XMLUI, no Bram pane. Served by any running Bram at
+     /__shell/dictation-example.html. It is the working reference for a
+     project page that wants BramDictation.attach, and a place to try the
+     page-side path by hand. -->
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dictation example</title>
+<style>
+  :root { --bg:#fff; --fg:#111; --dim:#666; --line:#ccc; --accent:#c62828; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#161616; --fg:#eee; --dim:#999; --line:#444; } }
+  body { background:var(--bg); color:var(--fg); font:16px/1.5 system-ui, sans-serif; margin:0; padding:24px 16px; }
+  main { max-width:720px; margin:0 auto; }
+  textarea { width:100%; box-sizing:border-box; min-height:9em; font:inherit; padding:10px; border:1px solid var(--line); border-radius:6px; background:transparent; color:inherit; }
+  button { font:inherit; padding:8px 18px; border-radius:6px; border:1px solid var(--line); background:transparent; color:inherit; cursor:pointer; }
+  button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  #status { margin-left:12px; color:var(--dim); }
+  #log { margin-top:16px; color:var(--dim); font:12px/1.4 ui-monospace, monospace; white-space:pre-wrap; max-height:16em; overflow:auto; }
+</style>
+</head>
+<body>
+<main>
+  <p>A plain page served by Bram, using <code>/__shell/dictation.js</code> and <code>BramDictation.attach</code>. Type something first if you like, then dictate. Typing while it records is fine.</p>
+  <p>The speech engine must already be running: click a 🎤 in Bram's own pane once first.</p>
+  <textarea id="box" placeholder="Dictated text lands here"></textarea>
+  <p><button id="mic">🎤 Start</button><span id="status">idle</span></p>
+  <div id="log"></div>
+</main>
+<script src="/__shell/dictation.js"></script>
+<script>
+  const box = document.getElementById("box");
+  const mic = document.getElementById("mic");
+  const status = document.getElementById("status");
+  const log = document.getElementById("log");
+  const dictation = BramDictation.attach({
+    get: () => box.value,
+    set: (text) => { box.value = text; },
+    onState: (state, extra) => {
+      status.textContent = state + (extra.error ? ": " + extra.error : "");
+      mic.classList.toggle("on", state === "recording");
+      mic.textContent = state === "recording" ? "⏹ Stop" : "🎤 Start";
+    },
+    // The loop's trace lines, newest first, so the page shows what Bram's
+    // own trace log would.
+    trace: (stage, fields) => {
+      const f = Object.assign({}, fields);
+      delete f.requestId;
+      log.textContent = stage + " " + JSON.stringify(f) + "\n" + log.textContent;
+    },
+  });
+  mic.addEventListener("click", () => {
+    if (dictation.recording) dictation.stop();
+    else dictation.start().catch(() => {});
+  });
+</script>
+</body>
+</html>

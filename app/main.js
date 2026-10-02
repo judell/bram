@@ -2811,6 +2811,16 @@ listen("pty-send-sent", (e) => {
     return best > 0 ? best : L.winLen;
   };
 
+  // A segment that starts before the pane's adopted edit (L.editSeq, from
+  // voice-edit-boundary) must not be repaired: the repaired text would land
+  // in a part the pane no longer reads while the parts it does read go
+  // empty, erasing everything spoken since the edit (2026-10-02: 264 chars
+  // delivered, 22 kept).
+  const liveSegmentBeforeEdit = (L, S) => {
+    const p = S && L.parts[S.firstPart];
+    return !!p && p.seq < L.editSeq;
+  };
+
   // Add a finalized window's audio to the current segment, or start a new
   // one; once a segment spans a boundary, a repair is due.
   const liveSegmentAdd = (L, samples, partIdx) => {
@@ -2818,6 +2828,7 @@ listen("pty-send-sent", (e) => {
     if (
       S &&
       S.lastPart === partIdx - 1 &&
+      !liveSegmentBeforeEdit(L, S) &&
       S.len + samples.length <= LIVE_RATE * LIVE_SEGMENT_MAX_S
     ) {
       S.audio.push(samples);
@@ -2830,13 +2841,14 @@ listen("pty-send-sent", (e) => {
   };
 
   // Transcribe the current segment again as one request. Its text goes in
-  // the segment's first part and the rest go empty; their seq numbers stay,
-  // so the pane's edit tracking still lines up.
+  // the segment's first part and the rest go empty; their seq numbers stay.
+  // The pane's edit tracking lines up only while no segment spans an
+  // adopted edit, which liveSegmentBeforeEdit guarantees.
   const liveRepair = async () => {
     const L = live;
     const S = L.segment;
     L.repairDue = false;
-    if (!S || S.lastPart <= S.firstPart) return;
+    if (!S || S.lastPart <= S.firstPart || liveSegmentBeforeEdit(L, S)) return;
     L.busy = true;
     const first = S.firstPart;
     const through = S.lastPart;
@@ -2860,6 +2872,7 @@ listen("pty-send-sent", (e) => {
     let timedOut = false;
     let applied = false;
     let silencePhrase = false;
+    let editBoundary = false;
     const abort = new AbortController();
     const timer = setTimeout(() => {
       timedOut = true;
@@ -2871,7 +2884,9 @@ listen("pty-send-sent", (e) => {
       const text = res.ok ? liveClean(voiceEngine.text(await res.json())) : "";
       if (live !== L) return;
       silencePhrase = liveIsSilencePhrase(text);
-      if (text && !silencePhrase) {
+      // An edit adopted while this request was out: drop the result.
+      editBoundary = liveSegmentBeforeEdit(L, S);
+      if (text && !silencePhrase && !editBoundary) {
         L.parts[first].text = text;
         for (let i = first + 1; i <= through; i++) L.parts[i].text = "";
         L.committed = L.parts.map((p) => p.text).filter(Boolean);
@@ -2888,6 +2903,7 @@ listen("pty-send-sent", (e) => {
         windows: through - first + 1,
         segmentS: Math.round((S.len / LIVE_RATE) * 10) / 10,
         applied,
+        ...(editBoundary ? { reason: "edit-boundary" } : {}),
         ...(silencePhrase ? { silencePhrase } : {}),
         ...(timedOut ? { timedOut } : {}),
         latencyMs: ms,
@@ -3052,6 +3068,8 @@ listen("pty-send-sent", (e) => {
       segment: null,
       repairDue: false,
       repairMs: [],
+      // Parts below this seq belong to text the pane adopted as an edit.
+      editSeq: 0,
     };
     try {
       const Ctx = window.AudioContext || window.webkitAudioContext;
@@ -3521,6 +3539,35 @@ listen("pty-send-sent", (e) => {
     if (d.kind === "voice-start") {
       voiceLog("iframe-voice-start", { requestId: d.requestId });
       startRecording({ source: ev.source, requestId: d.requestId, voiceTarget: d.target || "" });
+    } else if (d.kind === "voice-edit-boundary") {
+      // The pane adopted an edit (helpers.js __bramVoiceAdoptEdit): windows
+      // below fromSeq are the user's text now. Only the frame that started
+      // the current dictation may set it, and it only moves forward.
+      const L = live;
+      const fromSeq = Number(d.fromSeq);
+      const accepted =
+        !!L &&
+        !!L.target &&
+        !!ev.source &&
+        L.target.source === ev.source &&
+        L.requestId === d.requestId &&
+        Number.isFinite(fromSeq) &&
+        fromSeq > L.editSeq;
+      let segmentClosed = false;
+      if (accepted) {
+        L.editSeq = fromSeq;
+        if (liveSegmentBeforeEdit(L, L.segment)) {
+          L.segment = null;
+          L.repairDue = false;
+          segmentClosed = true;
+        }
+      }
+      voiceLog("voice-edit-boundary", {
+        requestId: d.requestId,
+        fromSeq: d.fromSeq,
+        accepted,
+        segmentClosed,
+      });
     } else if (d.kind === "voice-stop") {
       const stopAtMs = typeof d.stopAtMs === "number" ? d.stopAtMs : Date.now();
       voiceLog("iframe-voice-stop", {

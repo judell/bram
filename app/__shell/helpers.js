@@ -8730,6 +8730,13 @@ function __bramVoiceAdoptEdit(rec, box, target) {
   // written just before the last one isn't an edit either.
   // An empty box is never a lag, though: it's a send or a clear.
   if (cur === rec.written || (cur.trim() && cur === rec.prevWritten)) return false;
+  // Lengths and the first differing position, to tell a keystroke from the
+  // pane misreading its own write (2026-10-02: an adoption 14 ms after a
+  // window was committed, 117 -> 118 chars, cause unknown).
+  var was = String(rec.written || "");
+  var diffAt = 0;
+  while (diffAt < cur.length && diffAt < was.length && cur.charCodeAt(diffAt) === was.charCodeAt(diffAt)) diffAt++;
+  var prevLen = rec.prevWritten === undefined ? null : String(rec.prevWritten).length;
   rec.edited = true;
   // The window that showed as provisional text is part of what you edited;
   // skip it too, or its final text would bring the erased words back.
@@ -8737,7 +8744,15 @@ function __bramVoiceAdoptEdit(rec, box, target) {
   rec.base = cur;
   rec.written = cur;
   rec.prevWritten = undefined;
-  try { window.__bramIframeTrace && window.__bramIframeTrace("voice-trace", { stage: "live-edit-adopted", target: target, baseLen: cur.length, fromSeq: rec.fromSeq }); } catch (e) {}
+  // Tell main.js where the edit is, so a pause repair never folds later
+  // windows into a part below fromSeq (which this record no longer reads).
+  try {
+    window.parent.postMessage(
+      { type: "right-pane", kind: "voice-edit-boundary", requestId: rec.requestId, fromSeq: rec.fromSeq },
+      "*",
+    );
+  } catch (e) {}
+  try { window.__bramIframeTrace && window.__bramIframeTrace("voice-trace", { stage: "live-edit-adopted", target: target, baseLen: cur.length, writtenLen: was.length, prevWrittenLen: prevLen, diffAt: diffAt, fromSeq: rec.fromSeq }); } catch (e) {}
   return true;
 }
 // Sending while this box records stops the mic (the message box's send,

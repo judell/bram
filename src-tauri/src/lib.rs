@@ -18658,6 +18658,7 @@ fn write_pty_turn_intent<R: tauri::Runtime>(
     } else {
         Vec::new()
     };
+    let user_text = data;
     let with_notes;
     let data: &str = if pending_notes.is_empty() {
         data
@@ -18665,11 +18666,12 @@ fn write_pty_turn_intent<R: tauri::Runtime>(
         with_notes = prepend_host_notes(data, &pending_notes);
         &with_notes
     };
-    // Envelope switch (docs/turn-transport-redesign.md step 6): substantial
-    // or image-bearing sends are persisted as an outbound-turn envelope and
-    // the PTY carries only a compact frame. Inline sends get the whitespace
-    // collapse toTurn used to apply client-side.
-    let payload = match frame_outbound_turn(app, data) {
+    // Envelope switch (docs/turn-transport-redesign.md step 6): substantial,
+    // image-bearing or multi-line typed sends are persisted as an
+    // outbound-turn envelope and the PTY carries only a compact frame.
+    // One-line inline sends, `voice:` and lifecycle payloads get the
+    // whitespace collapse toTurn used to apply client-side.
+    let payload = match frame_outbound_turn(app, data, user_text) {
         Some(frame) => frame,
         None => st_collapse_whitespace(data),
     };
@@ -35377,7 +35379,9 @@ fn outbound_turn_display_source(turn: &serde_json::Value) -> String {
 
 // Equivalent of the whitespace collapse toTurn used to apply client-side
 // (\s+ → " " + trim). Applied host-side to INLINE sends only; envelope
-// text keeps full fidelity.
+// text keeps full fidelity. A typed send containing a line break no longer
+// goes inline (#416), so only one-line text, `voice:` sends and lifecycle
+// payloads reach this collapse.
 fn st_collapse_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -35385,15 +35389,58 @@ fn st_collapse_whitespace(text: &str) -> String {
 // Sends longer than this ride an envelope; short button/selector payloads
 // stay inline so their behavior (and the agent's view of them) is
 // unchanged. Long inline pastes are the Windows ConPTY truncation risk.
+// None ⇒ send inline: small one-line text-only sends, `voice:` sends,
+// worklist lifecycle payloads, or any envelope-write failure.
 const OUTBOUND_TURN_INLINE_MAX_CHARS: usize = 700;
+
+// Why a send rides an envelope, or None when it stays inline. Pure, so the
+// rule is unit-testable without an app handle. `user_text` is the turn as
+// the user sent it, BEFORE host notes are prepended: prepend_host_notes
+// joins a note with a blank line, and a one-line message carrying a note
+// must stay inline. `data` is the text that will actually be sent (notes
+// included), which is what the length limit measures.
+//
+// judell/bram#416: a typed message containing a line break rides an
+// envelope whatever its length, so the PTY payload stays one line on every
+// platform (a bare newline in a bracketed paste held the submit, cec0524;
+// on the Windows raw-injection path it would act as one, #300). `voice:`
+// sends are exempt: their newlines are Whisper pause artifacts (b0c4af4)
+// and stay collapsed inline.
+fn outbound_turn_envelope_reason(
+    user_text: &str,
+    data: &str,
+    has_images: bool,
+) -> Option<&'static str> {
+    let head = user_text.trim_start();
+    for verb in ["approved:", "drop:", "iterate:", "talk:"] {
+        if head.starts_with(verb) {
+            return None;
+        }
+    }
+    if has_images {
+        return Some("images");
+    }
+    if data.chars().count() > OUTBOUND_TURN_INLINE_MAX_CHARS {
+        return Some("long");
+    }
+    if !head.starts_with("voice:") && user_text.trim().contains('\n') {
+        return Some("multiline");
+    }
+    None
+}
 
 // The write half of the envelope contract. Given the raw toTurn text,
 // decide whether this send rides an envelope; if so, write
 // resources/outbound-turns/<id>.json and return the compact PTY frame to
-// inject instead. None ⇒ send inline (small text-only sends, worklist
-// lifecycle payloads, or any envelope-write failure — inline is always the
-// safe fallback; nothing is lost, only fidelity).
-fn frame_outbound_turn<R: tauri::Runtime>(app: &AppHandle<R>, data: &str) -> Option<String> {
+// inject instead. None ⇒ send inline (small one-line text-only sends,
+// `voice:` sends, worklist lifecycle payloads, or any envelope-write
+// failure — inline is always the safe fallback; nothing is lost, only
+// fidelity). `user_text` is the turn before host notes were prepended.
+fn frame_outbound_turn<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    data: &str,
+    user_text: &str,
+) -> Option<String> {
     let trimmed = data.trim_start();
     // Worklist lifecycle stays frozen (doc invariant 5): approved:/drop:/
     // iterate:/talk: payloads ride inline exactly as today. They are small
@@ -35409,9 +35456,7 @@ fn frame_outbound_turn<R: tauri::Runtime>(app: &AppHandle<R>, data: &str) -> Opt
     };
     let images = st_extract_image_paths(body);
     let text = st_strip_image_paths(body);
-    if images.is_empty() && data.chars().count() <= OUTBOUND_TURN_INLINE_MAX_CHARS {
-        return None;
-    }
+    let reason = outbound_turn_envelope_reason(user_text, data, !images.is_empty())?;
     let dir = outbound_turns_dir(app)?;
     if let Err(e) = std::fs::create_dir_all(&dir) {
         eprintln!("[outbound-turn] create dir failed, sending inline: {}", e);
@@ -35439,11 +35484,12 @@ fn frame_outbound_turn<R: tauri::Runtime>(app: &AppHandle<R>, data: &str) -> Opt
             app,
             "outbound-turn",
             &format!(
-                "op=write turn_id={} bytes={} images={} mode={}",
+                "op=write turn_id={} bytes={} images={} mode={} reason={}",
                 id,
                 body_bytes.len(),
                 images.len(),
-                mode
+                mode,
+                reason
             ),
         );
     }
@@ -55070,6 +55116,33 @@ mod session_turn_tests {
             "a b c".to_string()
         );
         assert_eq!(super::st_collapse_whitespace("\n \t"), "".to_string());
+    }
+
+    #[test]
+    fn outbound_turn_envelope_reason_cases() {
+        let r = |u: &str, d: &str, img: bool| super::outbound_turn_envelope_reason(u, d, img);
+        assert_eq!(r("one line", "one line", false), None);
+        let two = "line one\nline two";
+        assert_eq!(r(two, two, false), Some("multiline"));
+        let crlf = "line one\r\nline two";
+        assert_eq!(r(crlf, crlf, false), Some("multiline"));
+        let edge = "\n  one line\n";
+        assert_eq!(r(edge, edge, false), None);
+        let voice = "voice: line one\nline two";
+        assert_eq!(r(voice, voice, false), None);
+        for verb in ["approved:", "drop:", "iterate:", "talk:"] {
+            let t = format!("{} {{\"items\":[]}}\nx", verb);
+            assert_eq!(r(&t, &t, false), None);
+            assert_eq!(r(&t, &t, true), None);
+        }
+        let skip = "skip-worklist: a\nb";
+        assert_eq!(r(skip, skip, false), Some("multiline"));
+        let long = "x".repeat(701);
+        assert_eq!(r(&long, &long, false), Some("long"));
+        let edge_len = "x".repeat(700);
+        assert_eq!(r(&edge_len, &edge_len, false), None);
+        assert_eq!(r("hi", "hi", true), Some("images"));
+        assert_eq!(r("one line", "[bram: note]\n\none line", false), None);
     }
 
     #[test]

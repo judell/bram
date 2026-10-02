@@ -682,7 +682,11 @@ produces; see `docs/attribution-model.md` §4), `reedit-own-lines`
 (one item's file created then re-edited across two claim windows —
 judell/bram#367's double-count shape, kept as its regression fixture), `multi-file`
 (one begun item over five files: two modified, one new, one large diff,
-one listed but untouched, so its files table shows every row state), and
+one listed but untouched, so its files table shows every row state),
+`new-file-left-out` (judell/bram#419: one started item with a new file and
+a tracked file, a second started item that edited that tracked file without
+declaring it; committing the first alone reaches hunk-by-hunk staging with a
+never-tracked file), and
 `committed-outside` (judell/bram#406: one row whose work landed through a
 plain `git commit`, and one begun-then-reverted row that must not read as
 landed). For example, a focused board is:

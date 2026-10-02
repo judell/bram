@@ -146,6 +146,51 @@ class DemoInstanceTests(unittest.TestCase):
         self.assertFalse(apply_check(consume))
         self.assertTrue(apply_check(consume, [prepare]))
 
+    def test_every_starter_hydrates(self) -> None:
+        self.new("all", list(demo.STARTERS))
+        board = json.loads((self.repo / demo.WORKLIST).read_text())["items"]
+        for starter in demo.STARTERS:
+            self.assertTrue(
+                any(item["id"].startswith(starter) for item in board), starter
+            )
+
+    def test_new_file_left_out_has_untracked_file_and_shared_neighbour(self) -> None:
+        self.new("left-out", ["new-file-left-out"])
+        new = "demo/new-file-left-out-new.txt"
+        shared = "demo/new-file-left-out-shared.txt"
+        self.assertTrue((self.repo / new).is_file())
+        self.assertEqual(git(self.repo, "ls-files", "--", new), "")
+        self.assertIn(
+            new, git(self.repo, "ls-files", "--others", "--exclude-standard").splitlines()
+        )
+        # The shared file is tracked at HEAD and differs from it on disk.
+        self.assertEqual(git(self.repo, "ls-files", "--", shared), shared)
+        self.assertIn(shared, git(self.repo, "diff", "--name-only").splitlines())
+        # Two separable hunks: one per item.
+        diff = git(self.repo, "diff", "--unified=0", "--", shared)
+        self.assertEqual(diff.count("\n@@ "), 2)
+
+        items = {
+            item["id"]: item
+            for item in json.loads((self.repo / demo.WORKLIST).read_text())["items"]
+        }
+        self.assertEqual(
+            set(items), {"new-file-left-out-author", "new-file-left-out-neighbour"}
+        )
+        self.assertTrue(all(item["status"] == "applied" for item in items.values()))
+        self.assertEqual(items["new-file-left-out-author"]["files"], [new, shared])
+        # The neighbour edited the shared file without declaring it: declared
+        # sharing would make the pane isolate by hand and skip the
+        # hunk-by-hunk path this fixture exists to reach.
+        own = "demo/new-file-left-out-own.txt"
+        self.assertEqual(items["new-file-left-out-neighbour"]["files"], [own])
+        self.assertEqual(git(self.repo, "ls-files", "--", own), own)
+        self.assertNotIn(own, git(self.repo, "diff", "--name-only").splitlines())
+        claims = json.loads((self.repo / demo.CLAIMS).read_text())["intervals"]
+        windows = [record["ids"] for record in claims]
+        self.assertEqual(windows.count(["new-file-left-out-author"]), 2)
+        self.assertEqual(windows.count(["new-file-left-out-neighbour"]), 1)
+
     def test_reset_is_byte_and_ref_exact(self) -> None:
         self.new()
         (self.repo / "resources/.bram-port").write_text("55123\n")

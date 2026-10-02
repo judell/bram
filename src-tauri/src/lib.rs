@@ -46088,6 +46088,36 @@ fn residual_owner_label(
     owners.into_iter().collect::<Vec<_>>().join(",")
 }
 
+// issue-419: declared paths git has never tracked. `git diff HEAD -- <path>`
+// prints nothing for a never-tracked file, so the tracked-file residual pass
+// cannot see a new file the commit left out. `ls-files --others` can.
+// `--exclude-standard` means gitignored files are not reported, and a
+// declared DIRECTORY reports the untracked files under it. Returns
+// repo-relative paths. Fails open (empty) on spawn failure or non-zero exit:
+// this is a disclosure and the commit has already happened. An empty
+// `declared` returns empty without running git, since no pathspec would
+// list every untracked file in the repo.
+fn untracked_declared_paths(root: &std::path::Path, declared: &[String]) -> Vec<String> {
+    if declared.is_empty() {
+        return Vec::new();
+    }
+    let output = match std::process::Command::new("git")
+        .current_dir(root)
+        .args(["ls-files", "--others", "--exclude-standard", "-z", "--"])
+        .args(declared)
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+    output
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .collect()
+}
+
 #[cfg(test)]
 mod residual_disclosure_tests {
     use super::{diff_residual_lines, residual_owner_label, ResidualLines};
@@ -47956,7 +47986,7 @@ mod membership_acceptance_fixture_tests {
         item_joint_with, joint_owners_from_runs, membership_blob_matches_head,
         membership_candidate_base, membership_conservation_breach, membership_net_patch,
         membership_patch_footprint, membership_unowned, resolve_interval_path_owner,
-        IntervalPathOwner,
+        untracked_declared_paths, IntervalPathOwner,
     };
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -48205,6 +48235,41 @@ mod membership_acceptance_fixture_tests {
         assert_eq!(post_commit.added_lines.len(), 0);
         assert_eq!(post_commit.removed, 0);
         assert_eq!(unowned_only, ((1, 0), false));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn issue_419_untracked_declared_paths_are_reported_until_committed() {
+        let root = scratch_repo("i419");
+        std::fs::write(root.join("tracked.txt"), "one\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "ignored.log\n").unwrap();
+        commit_all(&root, "base");
+
+        std::fs::write(root.join("new.js"), "new\n").unwrap();
+        std::fs::create_dir_all(root.join("dir")).unwrap();
+        std::fs::write(root.join("dir/inner.txt"), "inner\n").unwrap();
+        std::fs::write(root.join("other.txt"), "not declared\n").unwrap();
+        std::fs::write(root.join("ignored.log"), "ignored\n").unwrap();
+        std::fs::write(root.join("tracked.txt"), "one\ntwo\n").unwrap();
+
+        // Why the old residual check missed it: git diff HEAD prints nothing
+        // for a file git has never tracked.
+        let patch = git(&root, None, &["diff", "HEAD", "--", "new.js"]);
+        assert!(patch.stdout.is_empty());
+
+        let declared: Vec<String> = ["tracked.txt", "new.js", "dir", "ignored.log"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut got = untracked_declared_paths(&root, &declared);
+        got.sort();
+        assert_eq!(got, vec!["dir/inner.txt".to_string(), "new.js".to_string()]);
+
+        // No pathspec must not mean "every untracked file in the repo".
+        assert!(untracked_declared_paths(&root, &[]).is_empty());
+
+        commit_all(&root, "land everything");
+        assert!(untracked_declared_paths(&root, &declared).is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -68269,8 +68334,8 @@ fn handle_worklist_commit<R: tauri::Runtime>(
     emit_replayable_signal(app, "git-status-changed");
 
     // issue-364 residual disclosure: only an interval-staged commit can leave
-    // residue in the requested items' declared files (whole-file staging
-    // commits their entire diff). Diff each declared path against the fresh
+    // residue in TRACKED declared files (whole-file staging commits their
+    // entire diff). Diff each declared path against the fresh
     // HEAD, classify leftovers by attribution, and disclose. A path with
     // UNOWNED residue means the requesting item's work is probably
     // incomplete — edited in unclaimed time, so no interval carried it into
@@ -68314,6 +68379,48 @@ fn handle_worklist_commit<R: tauri::Runtime>(
                 }
                 residual_paths.push(serde_json::json!({ "path": path, "owner": owner }));
             }
+        }
+    }
+    // issue-419: the pass above is blind to a declared file git never
+    // tracked (`git diff HEAD` prints nothing for it), so a new file the
+    // interval path skipped was pruned away silently. Check for declared
+    // paths still untracked after EVERY commit. On the whole-file path
+    // `git add -A` stages new files, so this should never fire there: a
+    // `stage=whole-file` trace line is a tripwire for a new bug. Findings
+    // retain the item exactly as unowned tracked residue does.
+    if let Some(root) = project_root(Some(app)) {
+        let mut declared: Vec<String> = Vec::new();
+        for id in &ids {
+            for p in item_files_map.get(id).cloned().unwrap_or_default() {
+                if !declared.contains(&p) {
+                    declared.push(p);
+                }
+            }
+        }
+        let stage = if needs_interval_stage {
+            "interval"
+        } else {
+            "whole-file"
+        };
+        for path in untracked_declared_paths(&root, &declared) {
+            append_bram_trace_line(
+                app,
+                "worklist-commit",
+                &format!(
+                    "op=residual-disclosed path={} owner=unowned untracked=true stage={}",
+                    path, stage
+                ),
+            );
+            for rid in &ids {
+                if item_files_map.get(rid).map_or(false, |fs| {
+                    fs.iter().any(|entry| staged_path_covered_by(entry, &path))
+                }) && !retained.contains(rid)
+                {
+                    retained.push(rid.clone());
+                }
+            }
+            residual_paths
+                .push(serde_json::json!({ "path": path, "owner": "unowned", "untracked": true }));
         }
     }
     if !retained.is_empty() {

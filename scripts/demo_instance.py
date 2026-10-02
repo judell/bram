@@ -59,6 +59,7 @@ STARTERS = (
     "reedit-own-lines",
     "multi-file",
     "committed-outside",
+    "new-file-left-out",
 )
 
 # The ambiguous-duplicate fixture's stanza pair. Geometry is load-bearing:
@@ -112,6 +113,18 @@ def _multi_file_seeds(prefix: str) -> list[tuple[str, str]]:
     ]
 
 
+# The new-file-left-out fixture's shared file: ten lines, with the author's
+# region at the top and the neighbour's at the bottom so the two hunks stay
+# separable. `edits` is 0 (HEAD), 1 (author's edit), 2 (author's and neighbour's).
+def _new_file_left_out_shared(prefix: str, edits: int) -> str:
+    lines = ["top: base"] + ["middle"] * 8 + ["bottom: base"]
+    if edits >= 1:
+        lines[0] = f"top: changed by {prefix}-author"
+    if edits >= 2:
+        lines[-1] = f"bottom: changed by {prefix}-neighbour"
+    return "".join(f"{line}\n" for line in lines)
+
+
 def starter_seeds(starter: str, prefix: str) -> list[tuple[str, str]]:
     if starter == "multi-file":
         return _multi_file_seeds(prefix)
@@ -119,6 +132,11 @@ def starter_seeds(starter: str, prefix: str) -> list[tuple[str, str]]:
         return [
             (f"demo/{prefix}-landed.txt", "landed: committed with plain git\n"),
             (f"demo/{prefix}-reverted.txt", "reverted: nothing of the item survives\n"),
+        ]
+    if starter == "new-file-left-out":
+        return [
+            (f"demo/{prefix}-shared.txt", _new_file_left_out_shared(prefix, 0)),
+            (f"demo/{prefix}-own.txt", "own: never changed by the neighbour\n"),
         ]
     return [starter_seed(starter, prefix)]
 
@@ -556,6 +574,48 @@ class StarterBuilder:
             "# Demo\n\n"
             + "".join(f"## Section {n}\n\nParagraph {n} of the longer readme.\n\n" for n in range(1, 21)),
         )
+        self.boundary([])
+
+    def starter_new_file_left_out(self, prefix: str) -> None:
+        # judell/bram#419's shape: the author item started a NEW, never-tracked
+        # file and also changed a tracked file. A neighbour item edited that
+        # same file during its own claim window WITHOUT declaring it, as
+        # issue-406-chat-commit-everything-ready did with helpers.js. That
+        # omission is load-bearing: the pane sees no shared declared path, so
+        # it sends no isolate instruction with the Commit click, while the
+        # host's replay still credits the neighbour with lines there and
+        # routes the author's commit to hunk-by-hunk staging - where a new
+        # file was silently left out of commits 30aa4d0 and fe84674. (With
+        # the path declared by both, the agent isolates by hand and the
+        # commit takes the whole-file path, which stages new files.) The
+        # author's second window re-edits the new file so it carries two
+        # windows of evidence, as in the real case.
+        new = f"demo/{prefix}-new.txt"
+        shared = f"demo/{prefix}-shared.txt"
+        own = f"demo/{prefix}-own.txt"
+        author, neighbour = f"{prefix}-author", f"{prefix}-neighbour"
+        self.item(
+            author,
+            [new, shared],
+            "The new file does not exist; the shared file's top line is unchanged.",
+            "Create the new file and change the shared file's top line.",
+        )
+        self.item(
+            neighbour,
+            own,
+            "The neighbour's own file is unchanged.",
+            "Declares only its own file, which it never changes; its one edit "
+            "lands in the author's shared file instead.",
+        )
+        self.boundary([author])
+        self.file(new, "".join(f"line {n}: first pass\n" for n in range(1, 4)))
+        self.file(shared, _new_file_left_out_shared(prefix, 1))
+        self.boundary([])
+        self.boundary([neighbour])
+        self.file(shared, _new_file_left_out_shared(prefix, 2))
+        self.boundary([])
+        self.boundary([author])
+        self.file(new, "".join(f"line {n}: second pass\n" for n in range(1, 4)))
         self.boundary([])
 
     def starter_committed_outside(self, prefix: str) -> None:

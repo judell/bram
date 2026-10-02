@@ -438,6 +438,19 @@ the discipline for completing them serially.
   fresh gate click) is the resume channel. Report the partial landing
   instead of announcing completion, and don't re-POST: the approval is
   consumed and the claim released.
+- **Untracked residue (#419).** A `residualPaths` entry with
+  `"untracked": true` means a new file the item declared did not land in
+  the commit (it is still untracked). It always comes with
+  `"owner":"unowned"` and the item in `retained`. Tell the user which
+  files were left out and that the row is still on the board. This check
+  runs after every commit, not only interval-staged ones. **Here the
+  Commit offer is not yet a working resume channel:** while another begun
+  item is still credited with lines in one of the item's files, a second
+  Commit is refused ("entirely shared with another begun item and it has
+  no claim interval to stage from"), and that reason is misleading. Say
+  so rather than sending the user to click Commit, and ask how they want
+  the left-out files landed (a direct commit of exactly those files, at
+  the user's direction, is what has worked). Tracked on judell/bram#419.
 - **`[bram: …]` notes** are host-written, e.g. `[bram: the queued close
   of #21 (commit 94f7666) was withdrawn … it will NOT fire on Push, and
   #21 stays open]`. They ride only plain message turns, never

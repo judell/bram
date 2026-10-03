@@ -1066,6 +1066,50 @@ window.__bramCreateNewSessionClick = function (provider, name, toastApi, words, 
   try { if (typeof window.__bramSetVisibleRange === "function") window.__bramSetVisibleRange(null); } catch (e) {}
   try { if (typeof window.__bramGateGoTranscript === "function") window.__bramGateGoTranscript(); } catch (e) {}
 };
+// item-last-session-switch-there: the session the ticked items were last
+// worked on in (the host's computed `lastSession`, from the state-mirror
+// ledger), when it is one session they all share and it is not the current
+// one. With several items ticked, any item with no record, or a different
+// session, means no line: offering one item's session would move the others
+// away from where they were worked on. null means the gate line renders
+// nothing. "Current" comes from the live /__sessions/list (refetched on
+// sessions-list-changed), so a switch updates the line without refetching
+// the board; the host's isCurrent is the fallback until that list loads.
+window.__bramGateLastSession = function (items, sel, sessions) {
+  var ids = Array.isArray(sel) ? sel : [];
+  if (!ids.length) return null;
+  var byId = {};
+  (Array.isArray(items) ? items : []).forEach(function (it) { if (it && it.id) byId[it.id] = it; });
+  var shared = null;
+  for (var i = 0; i < ids.length; i++) {
+    var it = byId[ids[i]];
+    var ls = it && it.lastSession;
+    if (!ls || !ls.sessionId) return null;
+    if (shared && (ls.sessionId !== shared.sessionId || ls.provider !== shared.provider)) return null;
+    if (!shared || (ls.atMs || 0) > (shared.atMs || 0)) shared = ls;
+  }
+  var cur = Array.isArray(sessions) && sessions.length ? window.__bramCurrentSessionOf(sessions) : null;
+  if (cur ? shared.sessionId === cur.id : shared.isCurrent) return null;
+  return { id: ids.join(","), provider: shared.provider, sessionId: shared.sessionId, atMs: shared.atMs, title: shared.title };
+};
+var __bramGateLastSessionShown = {};
+window.__bramGateLastSessionLine = function (items, sel, sessions) {
+  var b = window.__bramGateLastSession(items, sel, sessions);
+  if (!b) return "";
+  var key = b.id + ":" + b.sessionId;
+  if (!__bramGateLastSessionShown[key]) {
+    __bramGateLastSessionShown[key] = true;
+    window.__bramIframeTrace("worklist-last-session", { op: "shown", id: b.id, session: b.sessionId, provider: b.provider });
+  }
+  if (!b.title) return "Last worked on in another " + b.provider + " session.";
+  return "Last worked on in session: '" + b.title + "'.";
+};
+window.__bramGateSwitchToLastSession = function (items, sel, sessions, toastApi) {
+  var b = window.__bramGateLastSession(items, sel, sessions);
+  if (!b) return;
+  window.__bramIframeTrace("worklist-last-session", { op: "switch-click", id: b.id, session: b.sessionId, provider: b.provider });
+  window.__bramReloadAgentSessionClick(b.provider, b.sessionId, toastApi);
+};
 window.__bramReloadAgentSessionClick = function (provider, sessionId, toastApi) {
   var key = String(provider || "").toLowerCase() === "codex" ? "codex" : "claude";
   var id = String(sessionId || "");

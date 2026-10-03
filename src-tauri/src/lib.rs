@@ -8112,6 +8112,25 @@ fn askuserquestion_to_menu(value: &serde_json::Value, tool: &str) -> Option<PtyM
 }
 
 #[cfg(test)]
+mod item_turn_ids_tests {
+    use super::item_turn_ids as ids;
+    #[test]
+    fn reads_ids_from_each_item_turn_kind_and_nothing_else() {
+        assert_eq!(
+            ids(r#"approved: {"items":[{"id":"a","gate":"to apply"},{"id":"b"}]}"#),
+            vec!["a", "b"]
+        );
+        assert_eq!(ids(r#"drop: {"items":[{"id":"c"}]}"#), vec!["c"]);
+        assert_eq!(
+            ids(r#"  iterate: {"items":[{"id":"d","feedbackRef":"x"}]}"#),
+            vec!["d"]
+        );
+        assert!(ids("just a chat message").is_empty());
+        assert!(ids("approved: not json").is_empty());
+    }
+}
+
+#[cfg(test)]
 mod askuserquestion_menu_tests {
     use super::askuserquestion_to_menu;
 
@@ -18165,6 +18184,135 @@ fn record_iterate_inflight_sentinel<R: tauri::Runtime>(app: &AppHandle<R>, turn_
     record_prefixed_inflight_sentinel(app, turn_text, "iterate:", "iterate");
 }
 
+// item-last-session-switch-there: record, in the state-mirror ledger, which
+// session received an item's Start / Commit / Drop / feedback turn. This is
+// the write path (the turn is going to the PTY now), so the live session is
+// the receiving one. Ledger-only: worklist.json is untouched, and the ledger
+// writes nothing when the session matches the item's latest row.
+fn item_turn_ids(turn_text: &str) -> Vec<String> {
+    let trimmed = turn_text.trim_start();
+    let rest = ["approved:", "drop:", "iterate:"]
+        .iter()
+        .find_map(|p| trimmed.strip_prefix(p));
+    let Some(rest) = rest else {
+        return Vec::new();
+    };
+    serde_json::from_str::<serde_json::Value>(rest.trim_start())
+        .ok()
+        .and_then(|v| {
+            v.get("items").and_then(|a| a.as_array()).map(|arr| {
+                arr.iter()
+                    .filter_map(|it| it.get("id").and_then(|i| i.as_str()).map(String::from))
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
+fn record_item_session_stamp<R: tauri::Runtime>(app: &AppHandle<R>, turn_text: &str) {
+    let ids = item_turn_ids(turn_text);
+    if ids.is_empty() {
+        return;
+    }
+    let Some(provider) = current_provider(app) else {
+        return;
+    };
+    let Some(sid) = live_session_id(app, provider) else {
+        return;
+    };
+    let label = session_provider_label(provider);
+    let now = unix_now_ms();
+    let Some(conn) = worklist_state_open(app) else {
+        return;
+    };
+    let mut wrote = false;
+    for id in &ids {
+        let result = worklist_state::record_item_session(&conn, id, label, &sid, now);
+        if matches!(result, Ok(true)) {
+            wrote = true;
+        }
+        if bram_trace_enabled() {
+            match &result {
+                Ok(false) => {}
+                Ok(true) => append_bram_trace_line(
+                    app,
+                    "state-mirror",
+                    &format!(
+                        "op=session-stamp id={} session={} provider={} result=ok",
+                        id, sid, label
+                    ),
+                ),
+                Err(e) => append_bram_trace_line(
+                    app,
+                    "state-mirror",
+                    &format!(
+                        "op=session-stamp id={} session={} provider={} result=error detail={}",
+                        id, sid, label, e
+                    ),
+                ),
+            }
+        }
+    }
+    // lastSession rides the /__worklist payload but a stamp never touches
+    // worklist.json, so nothing else would tell the pane the board changed.
+    // Stamps are written only when the session differs, so this is rare.
+    if wrote {
+        emit_replayable_signal(app, "worklist-changed");
+    }
+}
+
+// Attach each item's recorded last session to the /__worklist payload as a
+// computed field (never written to the file): {provider, sessionId, atMs,
+// title, isCurrent}. A session that no longer resolves gets no field, so the
+// pane offers nothing rather than a dead switch.
+fn worklist_attach_last_sessions<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    doc: &mut serde_json::Value,
+) {
+    let Some(items) = doc.get_mut("items").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    if items.is_empty() {
+        return;
+    }
+    let Some(conn) = worklist_state_open(app) else {
+        return;
+    };
+    let cur_provider = current_provider(app);
+    let cur_sid = cur_provider.and_then(|p| live_session_id(app, p));
+    for item in items.iter_mut() {
+        let Some(id) = item.get("id").and_then(|v| v.as_str()).map(String::from) else {
+            continue;
+        };
+        let Ok(Some((label, sid, at))) = worklist_state::latest_item_session(&conn, &id) else {
+            continue;
+        };
+        let Some(provider) = SessionProvider::from_str(&label) else {
+            continue;
+        };
+        let Some(path) = session_path_for_id(app, provider, &sid) else {
+            continue;
+        };
+        let title = match provider {
+            SessionProvider::Claude => claude_session_title(&path).ok().flatten(),
+            SessionProvider::Codex => codex_session_title(&path).ok().flatten(),
+        };
+        let is_current = cur_provider == Some(provider) && cur_sid.as_deref() == Some(sid.as_str());
+        if let Some(obj) = item.as_object_mut() {
+            obj.insert(
+                "lastSession".to_string(),
+                serde_json::json!({
+                    "provider": label,
+                    "sessionId": sid,
+                    "atMs": at,
+                    "title": title,
+                    "isCurrent": is_current,
+                }),
+            );
+        }
+    }
+}
+
 /// Shared body for the prefix-triggered sentinel writers: strip `prefix`,
 /// parse `items[].id`, and write the inflight sentinel with `sentinel_kind`.
 /// Returns silently on any parse failure — non-matching or malformed
@@ -18647,6 +18795,7 @@ fn write_pty_turn_intent<R: tauri::Runtime>(
     // the lifecycle detectors see exactly what the user submitted.
     record_codex_direct_edit_authorization(app, data);
     record_iterate_inflight_sentinel(app, data);
+    record_item_session_stamp(app, data);
     record_skip_worklist_authorization(app, data);
     record_proposing_intent(app, data);
     record_turn_context(app, data);
@@ -65139,6 +65288,7 @@ fn route_request<R: tauri::Runtime>(
                 obj.insert("plan".to_string(), plan);
             }
         }
+        worklist_attach_last_sessions(app, &mut doc);
         let body = serde_json::to_vec(&doc).unwrap_or_default();
         return (200, "application/json; charset=utf-8", body);
     }

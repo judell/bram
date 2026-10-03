@@ -33,6 +33,16 @@
   <ChangeListener
     listenTo="{gateWorklistChanged.value}"
     onDidChange="() => { gateWorklist.refetch(); gateClaim.refetch(); }" />
+  <!-- item-last-session-switch-there: the current session, for the "Last
+       worked on in" line. The footer's small list fetch, refetched on the
+       same event, so a switch updates the line without a board refetch. -->
+  <DataSource id="gateSessions" url="/__sessions/list" queryParams="{{ limit: 20 }}" />
+  <PushSource
+    id="gateSessionsChanged"
+    subscribe="{window.bramSubscribeTauriEvent('sessions-list-changed')}" />
+  <ChangeListener
+    listenTo="{gateSessionsChanged.value}"
+    onDidChange="() => gateSessions.refetch()" />
   <!-- instrument-w2-selection-handoff (observe only, TRIPWIRE): the receiving
        half. `render` is the actual gate on the button row below - buttons are
        ABSENT when it is false, as opposed to greyed, since they gate on
@@ -89,6 +99,25 @@
     <Text
       width="100%"
       value="{window.__bramStartConsequence(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateClaim.value)}" />
+  </HStack>
+  <!-- item-last-session-switch-there: a ticked item last worked on in
+       another session offers to switch there. lastSession is computed by the
+       host from the state-mirror ledger; the switch is the Sessions tab's,
+       and lands on the Transcript. -->
+  <HStack
+    when="{!!window.__bramGateLastSession(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateSessions.value)}"
+    horizontalAlignment="center"
+    verticalAlignment="center"
+    gap="$space-2"
+    paddingHorizontal="$space-8"
+    paddingTop="$space-1">
+    <Text value="{window.__bramGateLastSessionLine(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateSessions.value)}" />
+    <Button
+      label="Switch there"
+      size="xs"
+      variant="outlined"
+      icon="swap"
+      onClick="window.__bramGateSwitchToLastSession(gateWorklist.value &amp;&amp; gateWorklist.value.items, gateSel.value, gateSessions.value, toast)" />
   </HStack>
   <!-- gate-remove-commit-share-radio: the commit-time "One commit / A commit
        each" radio is gone. For disjoint selections it changed nothing (the

@@ -1062,6 +1062,9 @@ window.__bramCreateNewSessionClick = function (provider, name, toastApi, words, 
       toastApi.error("Could not create session: " + String((e && e.message) || e));
     }
   });
+  // sessions-switch-icon-and-land-on-transcript: creating a session is a switch too; land on the Transcript.
+  try { if (typeof window.__bramSetVisibleRange === "function") window.__bramSetVisibleRange(null); } catch (e) {}
+  try { if (typeof window.__bramGateGoTranscript === "function") window.__bramGateGoTranscript(); } catch (e) {}
 };
 window.__bramReloadAgentSessionClick = function (provider, sessionId, toastApi) {
   var key = String(provider || "").toLowerCase() === "codex" ? "codex" : "claude";
@@ -1084,6 +1087,9 @@ window.__bramReloadAgentSessionClick = function (provider, sessionId, toastApi) 
   try {
     if (typeof toastApi === "function") toastApi("Reloading session - killing the running agent and resuming.");
   } catch (e) {}
+  // sessions-switch-icon-and-land-on-transcript: land on the Transcript after a switch starts.
+  try { if (typeof window.__bramSetVisibleRange === "function") window.__bramSetVisibleRange(null); } catch (e) {}
+  try { if (typeof window.__bramGateGoTranscript === "function") window.__bramGateGoTranscript(); } catch (e) {}
 };
 // Pick the live session from a /__sessions/list payload: the entry flagged
 // current, else the first returned. Shared by the Transcript header and the

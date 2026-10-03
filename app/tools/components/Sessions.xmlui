@@ -255,12 +255,13 @@
             paddingVertical="$space-2"
             verticalAlignment="start"
             opacity="{(pendingDeletes.includes($item.id) || pendingRenames.includes($item.id)) ? 0.5 : 1}">
+            <!-- sessions-switch-icon-and-land-on-transcript: icon-only switch/reload button -->
             <Button
-              label="⟳"
+              icon="{$item.current ? 'restart' : 'swap'}"
               variant="ghost"
               size="xs"
               enabled="{!$item.pending &amp;&amp; !(pendingDeletes.includes($item.id) || pendingRenames.includes($item.id))}"
-              tooltip="{$item.pending ? 'Available after the first message creates the Codex session' : (pendingDeletes.includes($item.id) ? 'delete pending' : (pendingRenames.includes($item.id) ? 'rename pending' : 'Reload: kill the running agent and resume this session'))}"
+              tooltip="{$item.pending ? 'Available after the first message creates the Codex session' : (pendingDeletes.includes($item.id) ? 'delete pending' : (pendingRenames.includes($item.id) ? 'rename pending' : ($item.current ? 'Reload this session (restarts the agent)' : 'Switch to this session (restarts the agent on it)')))}"
               onClick="window.__bramReloadAgentSessionClick($item.provider, $item.id, toast)" />
             <Button
               label="✕"

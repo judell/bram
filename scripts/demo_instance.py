@@ -60,6 +60,7 @@ STARTERS = (
     "multi-file",
     "committed-outside",
     "new-file-left-out",
+    "chat-edit-in-item-file",
 )
 
 # The ambiguous-duplicate fixture's stanza pair. Geometry is load-bearing:
@@ -125,6 +126,23 @@ def _new_file_left_out_shared(prefix: str, edits: int) -> str:
     return "".join(f"{line}\n" for line in lines)
 
 
+# The chat-edit-in-item-file fixture's file: ten distinct lines. `stage` is 0
+# (HEAD), 1 (the author's first window), 2 (a chat turn, no claim live) or 3
+# (the author's second window). Each changed line says who wrote it.
+def _chat_edit_file(stage: int) -> str:
+    lines = [f"line {n}: base" for n in range(1, 11)]
+    if stage >= 1:
+        lines[1] = "line 2: changed by the author"
+        lines[4] = "line 5: changed by the author"
+        lines += ["line 11: appended by the author", "line 12: appended by the author"]
+    if stage >= 2:
+        lines[4] = "line 5: rewritten in chat"
+        lines[7] = "line 8: changed in chat"
+    if stage >= 3:
+        lines[2] = "line 3: changed by the author, second window"
+    return "".join(f"{line}\n" for line in lines)
+
+
 def starter_seeds(starter: str, prefix: str) -> list[tuple[str, str]]:
     if starter == "multi-file":
         return _multi_file_seeds(prefix)
@@ -138,6 +156,8 @@ def starter_seeds(starter: str, prefix: str) -> list[tuple[str, str]]:
             (f"demo/{prefix}-shared.txt", _new_file_left_out_shared(prefix, 0)),
             (f"demo/{prefix}-own.txt", "own: never changed by the neighbour\n"),
         ]
+    if starter == "chat-edit-in-item-file":
+        return [(f"demo/{prefix}-file.txt", _chat_edit_file(0))]
     return [starter_seed(starter, prefix)]
 
 
@@ -616,6 +636,32 @@ class StarterBuilder:
         self.boundary([])
         self.boundary([author])
         self.file(new, "".join(f"line {n}: second pass\n" for n in range(1, 4)))
+        self.boundary([])
+
+    def starter_chat_edit_in_item_file(self, prefix: str) -> None:
+        # judell/bram#273's 2026-10-02 ruling. An item edits a file in its own
+        # claim window, a chat turn then edits the same file with no claim
+        # live, and the item edits it again in a second window. The membership
+        # engine used to credit the item with nothing in such a file, because
+        # the item's whole patch no longer reverse-applied; the line-level
+        # rule credits the item with its surviving lines (2, 3 and the two
+        # appended) and leaves the chat-turn lines (5 and 8) unowned. Each
+        # changed line's text names its writer, so the diff checks the board.
+        path = f"demo/{prefix}-file.txt"
+        author = f"{prefix}-author"
+        self.item(
+            author,
+            path,
+            "The file is unchanged.",
+            "Change lines 2, 3 and 5 and append two lines, across two claim "
+            "windows; a chat turn between them rewrites line 5 and line 8.",
+        )
+        self.boundary([author])
+        self.file(path, _chat_edit_file(1))
+        self.boundary([])
+        self.file(path, _chat_edit_file(2))
+        self.boundary([author])
+        self.file(path, _chat_edit_file(3))
         self.boundary([])
 
     def starter_committed_outside(self, prefix: str) -> None:

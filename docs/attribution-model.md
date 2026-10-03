@@ -278,6 +278,34 @@ item's `files`, reads as created within that interval. Tracked files are
 exempt, which is why tracked content stays unscoped. A new item declaring
 the file is unaffected, since its own Start cuts a fresh boundary.
 
+### 2.8 Whole-patch membership drops an item's own lines — the 17-of-19 receipt
+
+The first membership engine admitted an item's evidence for a path only if
+the item's whole concatenated interval patch passed `git apply --cached
+--check --reverse` against the present state, and otherwise gave the item
+nothing for that path. §4 said partially-applying evidence "contributes the
+chunks that still apply"; the engine never implemented the partial case.
+
+Ruled 2026-10-02 over the gate observer's record
+([#273](https://github.com/judell/bram/issues/273#issuecomment-5961109674),
+follow-up
+[here](https://github.com/judell/bram/issues/273#issuecomment-5961457006)):
+of 19 gate observations where the replay credited the committing item and
+membership credited no one, the item had uncommitted lines in the file from
+its own claim windows in 17. All 19 were files also edited in unclaimed time
+(a chat turn, or between windows). Over all 142 path-in-commit rows of the
+period, a file with own-window edits only was credited 101 times out of 101;
+a file with own-window and unclaimed edits, 4 times out of 19.
+
+The mechanism, replayed on the saved boundary trees of `0a78d0e`: the item's
+later windows reverse cleanly; its first window does not, because the
+chat-turn edits sit after it and are never reversed. One failing section
+forfeits the path. A 244-line first window in `lib.rs` was credited to no
+one.
+
+This is the one ruling in the record that went against membership, and it
+is why §4's owner assignment is now the line rule.
+
 ## 3. The status-quo model, stated precisely
 
 **Universe:** the ordered chain of boundary trees `refs/bram/claims/*` (per
@@ -331,20 +359,42 @@ attribution — a count R cannot currently produce trustworthily.
 untracked non-ignored files — exactly what a commit could take. Committed
 content is not in the universe; neither is any intermediate state.
 
-**Owner assignment:** the boundary store survives as the **evidence base**.
-For each *live, begun* item, derive its candidate patch from its claim
-intervals (as `claim_interval_diff` does today). A changed region of the
-current diff belongs to item X iff X's evidence *accounts for it in current
-content* — operationally, X's candidate patch reverse-applies from the
-current state (`git apply --reverse --check` against a scratch capture of
-the worktree, the same temp-index machinery as `capture_claim_tree`), and
-the region lies in the reverse-application's footprint. Joint evidence
-(same-click boundaries) yields joint membership, disambiguated per path by
-declaration exactly as `resolve_interval_path_owner` does now. Ghost
-intervals are not candidates (only live begun items are consulted — the
-ghost rule's answer, without the strip machinery). Everything in the
-universe that no candidate's evidence accounts for is **unowned — by
-subtraction, not by error term**.
+**Owner assignment (the line rule, since 2026-10-02):** the boundary store
+survives as the **evidence base**, read as a history. The boundary trees, in
+record order, form a linear chain rooted at HEAD and ending at the present
+state. Each step is held by whoever held the claim while the tree changed
+into it: the record that opens the step, when it is a claim; nobody when it
+is a `cleared` boundary, when it spans pruned boundaries, or for the first
+step (work present before the first boundary). Every line of the universe
+is credited to one step: an added line to the step that last wrote it, a
+removed HEAD line to the step that removed it. The step's lines go to its
+holder only if the holder is a *live, begun* item that declares the path.
+Joint holders (same-click boundaries) yield joint membership, disambiguated
+per path by declaration exactly as `resolve_interval_path_owner` does.
+Ghost holders take nothing (only live begun items are consulted — the ghost
+rule's answer, without the strip machinery). Everything else in the
+universe is **unowned — by subtraction, not by error term**.
+
+Operationally (`membership_line_credit`, `lib.rs`): one `git diff -U0`
+between each pair of consecutive trees whose content differs, scoped to the
+universe's paths, carries line origins forward; one `HEAD`-to-present diff
+reads them off. No patch is applied anywhere, so nothing can fail to apply.
+When a path's content at some step equals HEAD's, its history restarts
+there: a long-parked item keeps old boundaries alive, so the chain can begin
+before commits that have since landed, and without the restart a line those
+commits added would read as removed at the first step. A path that stays
+changed across partial commits still degrades that way for removed lines
+(they land unowned); added lines are unaffected.
+
+*What this replaced.* Until 2026-10-02 the test was per item, not per line:
+X's whole candidate patch had to reverse-apply from the current state
+(`git apply --reverse --check`), and a region belonged to X iff it lay in
+that reverse-application's footprint. §2.8 is the receipt for why it went:
+an unclaimed edit to the same lines failed the whole patch and erased X's
+credit for every line of the path. The helpers behind that test
+(`membership_candidate_base`, `membership_blob_matches_head` and their
+neighbours) remain in `lib.rs` with their tests, marked superseded, until
+replay retirement decides what the frozen staging path still needs.
 
 The conservation law this buys: *members + joint + unowned = `git diff
 HEAD`, per path, checkable on every render.* Residue stops being the
@@ -364,7 +414,31 @@ independence panel, and #364's residual pass (classifying `git diff HEAD`
 residue — currently against replay runs, the model's two halves bolted
 together).
 
-**Hard cases in H:**
+**Hard cases in H.** The bullets below were written for the reverse-apply
+test and are kept as the record of what it had to solve. Under the line
+rule three of them change, and each is pinned by a test in
+`membership_line_credit_tests`:
+
+- *Duplicate lines:* the `ambiguous` state is now structurally empty. A
+  line's origin is the step that wrote it, read from positional diffs
+  between real snapshots, never a content match that could land in two
+  places. The bucket stays on the wire as `(0, 0)`; the
+  `ambiguous-duplicate` starter's item now reads as single.
+- *Deletions:* a removed HEAD line is credited to the step that removed it.
+  Matrix cases 1, 4 and 5 give the same answers as before and are asserted;
+  case 3 (a same-click joint deletion) is unchanged by construction and
+  shows on the `many-claimants` starter as joint `(1,1)`. **Case 2
+  differs:** with H `[old]`, A `old→middle`, B `middle→new`, the removal of
+  `old` is A's `(0,1)` and the added `new` is B's `(1,0)`, where the old
+  rule left the deletion unowned. If A is no longer live, its `(0,1)` is
+  unowned, which is the old answer. `deletion_shapes_under_the_line_rule`
+  asserts the new answers; `matrix_2_deletion_after_prior_rewrite_lands_unowned`
+  still passes because it tests the superseded helpers.
+- *Supersession and drift:* per line, not per patch. When later work
+  rewrites X's line, that line goes to whoever rewrote it (another item, or
+  nobody for an unclaimed edit) and X keeps every other line it wrote.
+  X's number can still shrink when a neighbour rewrites its lines, which is
+  true; it no longer falls to zero for the path.
 
 - *Duplicate lines:* the danger the replay's comment warns about
   (`lib.rs:39896`) constrains the mechanism: membership must never be
@@ -504,12 +578,21 @@ together).
 
 **What H costs:**
 
-- Per-render `git apply` probes per begun item per contested path, against
-  a scratch worktree capture (untracked files force the temp-index form —
-  the same reason `git stash create` was rejected for boundaries). Begun
-  items are few and the probes are local plumbing, but the cost must be
-  *measured, not asserted* (#323 discipline; the replay's spawn-counting
-  precedent at `lib.rs:40331`).
+- Under the line rule, one `git diff -U0` per chain step whose tree
+  changed, plus one for the universe, plus the present-state capture
+  (untracked files force the temp-index form — the same reason `git stash
+  create` was rejected for boundaries). Cost follows the number of
+  boundaries, not items times paths. Measured 2026-10-02 on a demo
+  instance: a 22-item, 14-path, 33-step board computed in 204–241 ms with 30
+  spawns; a 2-path board in 60–105 ms with 13 spawns, where the
+  reverse-apply engine took 68–160 ms and 17–27 spawns on the same board.
+  The recorded baseline for the reverse-apply engine on a synthetic board
+  was 318–421 ms and 47 spawns. `op=membership-line-rule steps=` sits beside
+  `op=membership`'s `ms`/`spawns` so the driver is readable. A board render
+  never computes: the engine runs on the precompute thread and at the gate.
+  (The reverse-apply engine spawned `git apply` probes per begun item per
+  contested path; "measured, not asserted" was the #323 discipline then and
+  still is.)
 - Line-run rendering (the Ownership tab's colored runs) needs the
   reverse-apply footprint mapped to current line numbers — the same
   arithmetic `diff_residual_lines` already does for `+` lines, generalized.

@@ -191,6 +191,23 @@ class DemoInstanceTests(unittest.TestCase):
         self.assertEqual(windows.count(["new-file-left-out-author"]), 2)
         self.assertEqual(windows.count(["new-file-left-out-neighbour"]), 1)
 
+    def test_chat_edit_in_item_file_has_item_and_chat_lines_side_by_side(self) -> None:
+        self.new("chat-edit", ["chat-edit-in-item-file"])
+        path = "demo/chat-edit-in-item-file-file.txt"
+        self.assertEqual(git(self.repo, "ls-files", "--", path), path)
+        self.assertIn(path, git(self.repo, "diff", "--name-only").splitlines())
+        items = json.loads((self.repo / demo.WORKLIST).read_text())["items"]
+        self.assertEqual([item["id"] for item in items], ["chat-edit-in-item-file-author"])
+        claims = json.loads((self.repo / demo.CLAIMS).read_text())["intervals"]
+        author = ["chat-edit-in-item-file-author"]
+        self.assertEqual([record["ids"] for record in claims], [author, [], author, []])
+        trees = [record["tree"] for record in claims]
+        # First author window, the unclaimed chat turn, second author window.
+        for before, after in zip(trees, trees[1:]):
+            self.assertTrue(
+                git(self.repo, "diff", "--numstat", before, after, "--", path), (before, after)
+            )
+
     def test_reset_is_byte_and_ref_exact(self) -> None:
         self.new()
         (self.repo / "resources/.bram-port").write_text("55123\n")

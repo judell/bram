@@ -686,7 +686,10 @@ one listed but untouched, so its files table shows every row state),
 `new-file-left-out` (judell/bram#419: one started item with a new file and
 a tracked file, a second started item that edited that tracked file without
 declaring it; committing the first alone reaches hunk-by-hunk staging with a
-never-tracked file), and
+never-tracked file),
+`chat-edit-in-item-file` (judell/bram#273 — one item edits a file in two
+claim windows with a chat-turn edit to the same file in between, so the
+item's lines and the unowned chat lines sit side by side), and
 `committed-outside` (judell/bram#406: one row whose work landed through a
 plain `git commit`, and one begun-then-reverted row that must not read as
 landed). For example, a focused board is:

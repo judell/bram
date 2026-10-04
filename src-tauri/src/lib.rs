@@ -40056,12 +40056,39 @@ fn maybe_submit_nudge<R: tauri::Runtime>(app: &AppHandle<R>) {
     let Some((id, injected_at_ms, preview)) = candidate else {
         return;
     };
-    // Same composer-stuck fragment check the strand scene capture uses.
+    // submit-nudge-sees-a-busy-terminal: visibility is ADVISORY, not a
+    // precondition. This used to return early when the payload was not in the
+    // last 400 chars of PTY output.
+    //
+    // What that test actually keys on is the SHAPE of the agent's output, not
+    // whether it is busy — established by live probes 2026-10-04 that failed
+    // to reproduce before one did. When the TUI paints a full frame, the last
+    // 400 chars end at the bottom of the screen, which is where the composer
+    // is, so the payload IS in the tail and a nudge fires normally (observed:
+    // `basis=visible` on a send injected mid-turn that took 18 s to land). It
+    // is while the agent is THINKING — a tool running, output reduced to small
+    // spinner updates — that the composer never re-enters the tail. That is
+    // the case this exists to reach, and it is the one that bit: two dictated
+    // sends with a turn open, tails reading `…Slithering… ✢ Slithering… ●`,
+    // `payload_in_tail=false`, no nudge, both stranded at 60 s, their text
+    // delivered fused onto the user's next send. The old return neither traced
+    // nor latched, so the one path that silently did nothing was the one that
+    // fired.
+    //
+    // Widening the window was rejected: it moves a threshold that a longer
+    // repaint reinstates, and a wider flattened search can match a STALE copy
+    // of the same text from the scrollback — nudging on false evidence. The
+    // two genuinely dangerous cases have their own guards immediately below,
+    // and they still block. What is left after a failed visibility check is an
+    // agent composer that probably holds the text, where a CR either submits
+    // it or, if the composer is empty, does nothing.
     let tail = pty_tail_snippet(400);
     let frag = send_ledger_tail_fragment(&preview);
-    if frag.trim().is_empty() || !tail.contains(frag.trim()) {
-        return;
-    }
+    let basis = if !frag.trim().is_empty() && tail.contains(frag.trim()) {
+        "visible"
+    } else {
+        "not-visible"
+    };
     // new-session-handoff-race: never nudge a shell. A CR into a prompt (or
     // a PS2 quote-continuation) executes whatever stranded payload text sits
     // there — observed live 2026-08-28 as `bash: 00~We: command not found` /
@@ -40078,7 +40105,10 @@ fn maybe_submit_nudge<R: tauri::Runtime>(app: &AppHandle<R>) {
                 e.nudged = true;
             }
         }
-        let line = format!("op=submit-nudge-suppressed id={} reason={}", id, reason);
+        let line = format!(
+            "op=submit-nudge-suppressed id={} reason={} basis={}",
+            id, reason, basis
+        );
         if bram_trace_enabled() {
             append_bram_trace_line(app, "send-ledger", &line);
         }
@@ -40097,17 +40127,16 @@ fn maybe_submit_nudge<R: tauri::Runtime>(app: &AppHandle<R>) {
     let state = app.state::<AppState>();
     let dwell_ms = now - injected_at_ms;
     if pty_write_internal(app, &state, "\r", "send-ledger-submit-nudge").is_ok() {
-        if bram_trace_enabled() {
-            append_bram_trace_line(
-                app,
-                "send-ledger",
-                &format!("op=submit-nudge id={} dwell_ms={}", id, dwell_ms),
-            );
-        }
-        append_strand_forensics_line(
-            app,
-            &format!("op=submit-nudge id={} dwell_ms={}", id, dwell_ms),
+        // basis= says whether the payload was still on screen when we nudged.
+        // not-visible is the busy-terminal case this exists to reach.
+        let line = format!(
+            "op=submit-nudge id={} dwell_ms={} basis={}",
+            id, dwell_ms, basis
         );
+        if bram_trace_enabled() {
+            append_bram_trace_line(app, "send-ledger", &line);
+        }
+        append_strand_forensics_line(app, &line);
     }
 }
 

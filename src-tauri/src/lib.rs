@@ -17374,7 +17374,6 @@ fn pty_spawn(
         } else {
             format!("{} {}", base_command, args.trim())
         };
-        let payload = format!("{}\r", command);
         if launch.resume {
             if let Some(session_id) = launch.session_id.as_deref() {
                 clear_pending_session_title_for_resume(
@@ -17385,38 +17384,59 @@ fn pty_spawn(
                 );
             }
         }
-        if let Err(e) = pty_write_internal(&app, &state, &payload, "agent-autostart") {
-            eprintln!("[pty_spawn] failed to write agent autostart: {}", e);
-        } else {
-            if bram_trace_enabled() {
-                append_bram_trace_line(
-                    &app,
-                    "agent-switch",
-                    &format!(
-                        "op=autostart provider={} policy={} configured_policy={} first_unmanaged={} exact_session={} fallback={} command={}",
-                        provider,
-                        startup_policy.as_str(),
-                        configured_startup_policy.as_str(),
-                        first_unmanaged_launch,
-                        launch.session_id.as_deref().unwrap_or(""),
-                        launch.fallback,
-                        command
-                    ),
-                );
-            }
-            set_current_provider(&app, launch.provider, "autostart");
-            if let Some(session_id) = launch.session_id.as_deref() {
-                if launch.provider == SessionProvider::Codex {
-                    let _ = pin_codex_reload_target(&app, session_id);
+        let trace_command = command.clone();
+        let policy = startup_policy.as_str();
+        let configured_policy = configured_startup_policy.as_str();
+        let launch_provider = launch.provider;
+        let session_id = launch.session_id.clone();
+        let fallback = launch.fallback;
+        launch_agent_command(AgentLaunch {
+            app: app.clone(),
+            provider,
+            command,
+            source: "autostart",
+            trace_category: "agent-switch",
+            caller_hint: "agent-autostart",
+            // agent-launch-shared-routine: wait for the fresh shell's first
+            // prompt instead of typing ahead into it, where a prompt from a
+            // shell startup file could swallow the command. Windows sends no
+            // marker and keeps typing ahead, as before.
+            gate: !cfg!(windows),
+            first_command: true,
+            hook: Box::new(move |app, phase| {
+                if phase != LaunchPhase::Written {
+                    return;
                 }
-                // Make the exact resumed conversation current immediately;
-                // neither CLI is guaranteed to touch its JSONL before the
-                // tools pane asks for the first transcript.
-                resync_transcript_to_session(&app, launch.provider, session_id);
-            }
-            schedule_agent_switch_refresh(app.clone(), provider, "autostart");
-            schedule_agent_first_command(app.clone(), "autostart");
-        }
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        app,
+                        "agent-switch",
+                        &format!(
+                            "op=autostart provider={} policy={} configured_policy={} first_unmanaged={} exact_session={} fallback={} command={}",
+                            provider,
+                            policy,
+                            configured_policy,
+                            first_unmanaged_launch,
+                            session_id.as_deref().unwrap_or(""),
+                            fallback,
+                            trace_command
+                        ),
+                    );
+                }
+                set_current_provider(app, launch_provider, "autostart");
+                if let Some(session_id) = session_id.as_deref() {
+                    if launch_provider == SessionProvider::Codex {
+                        let _ = pin_codex_reload_target(app, session_id);
+                    }
+                    // Make the exact resumed conversation current
+                    // immediately; neither CLI is guaranteed to touch its
+                    // JSONL before the tools pane asks for the first
+                    // transcript.
+                    resync_transcript_to_session(app, launch_provider, session_id);
+                }
+                schedule_agent_switch_refresh(app.clone(), provider, "autostart");
+            }),
+        });
     }
     Ok(())
 }
@@ -18929,10 +18949,6 @@ const NEW_SESSION_PROMPT_TIMEOUT_MS: i64 = 45_000;
 const NEW_SESSION_PROMPT_POLL_MS: u64 = 100;
 const AGENT_RELAUNCH_SETTLE_MS: u64 = 1200;
 const AGENT_SESSION_REFRESH_MS: u64 = 3000;
-// Delay, measured from writing the launch command, before typing the
-// configured first command into the freshly-started agent's TUI. Gives the
-// CLI time to reach an interactive prompt; tune if /resume is dropped.
-const AGENT_FIRST_COMMAND_SETTLE_MS: u64 = 2500;
 // Delay after a cross-provider switch/reload before auto-reloading the agent
 // pane. Cross-provider has several independent provider caches (the active-agent
 // hint, mainAgentStatus.provider/verb, latest-session caches); flipping them all
@@ -18955,8 +18971,14 @@ const AGENT_CROSS_PROVIDER_RELOAD_MS: u64 = 2500;
 // shell-reports-prompt-and-exit-status: once the shell has sent a marker this
 // session, the marker decides (a `❯` prompt counts; agent output ending in `$`
 // doesn't). Ok carries which evidence fired: "marker" or "shape".
+//
+// agent-launch-shared-routine: the settle floor is for the shape guess only.
+// The marker state is already "busy" while the outgoing agent runs and turns
+// "at prompt" only when the shell reports it, so there is nothing to race.
 fn wait_for_shell_prompt_evidence() -> Result<(i64, &'static str), i64> {
-    std::thread::sleep(std::time::Duration::from_millis(AGENT_RELAUNCH_SETTLE_MS));
+    if !shell_foreground().seen {
+        std::thread::sleep(std::time::Duration::from_millis(AGENT_RELAUNCH_SETTLE_MS));
+    }
     let started = unix_now_ms();
     loop {
         if let Some(via) = shell_prompt_evidence(shell_foreground(), pty_tail_shows_shell_prompt())
@@ -18968,6 +18990,290 @@ fn wait_for_shell_prompt_evidence() -> Result<(i64, &'static str), i64> {
             return Err(waited);
         }
         std::thread::sleep(std::time::Duration::from_millis(NEW_SESSION_PROMPT_POLL_MS));
+    }
+}
+
+// agent-launch-shared-routine: the one way the host types an agent command
+// into the terminal. Five sites used to do this, each with its own idea of
+// when it was safe (autostart typed ahead, reload slept 1.2 s, the first
+// command slept 2.5 s, switch and New Session gated on the prompt shape), and
+// the bug class recurred one call site at a time (#314 fixed two and missed
+// reload; c3d6320 needed two passes). Every launch now goes:
+//   gate    wait for the shell's prompt (marker, or the shape guess when no
+//           marker has ever arrived); on timeout type nothing
+//   write   the command, then mark the shell busy
+//   confirm the shell's own report: a prompt after this launch's `exec`
+//           within AGENT_LAUNCH_CONFIRM_MS means the agent exited, with
+//           its status; no prompt means it is running
+//   report  trace + a `launch-outcome` event; the first command is typed
+//           only after a confirmed launch
+// The decision never depends on an agent's boot bytes (#305: Codex can't
+// always produce them), so Claude and Codex are judged the same way.
+const AGENT_LAUNCH_CONFIRM_MS: i64 = 8000;
+const AGENT_LAUNCH_CONFIRM_POLL_MS: u64 = 100;
+// Pause between typing the first command and its Enter (see
+// type_agent_first_command). Raw keystrokes, not a bracketed paste, so it
+// uses the Windows send path's 200 ms rather than the paste path's 50 ms.
+const AGENT_FIRST_COMMAND_SUBMIT_GAP_MS: u64 = 200;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LaunchConfirm {
+    // The shell came back after this launch's exec: the agent exited.
+    Exited(Option<i32>),
+    // No prompt since this launch's exec (or no exec yet).
+    Pending,
+    // No marker has ever arrived (Windows): exit can't be observed.
+    Unverifiable,
+}
+
+fn launch_confirm_state(fg: ShellForeground, written_from_ms: i64) -> LaunchConfirm {
+    if !fg.seen {
+        return LaunchConfirm::Unverifiable;
+    }
+    if fg.exec_ms >= written_from_ms && fg.at_prompt && fg.at_ms >= fg.exec_ms {
+        LaunchConfirm::Exited(fg.status)
+    } else {
+        LaunchConfirm::Pending
+    }
+}
+
+// The terminal's last words before the prompt that ended the agent: the
+// ANSI-stripped PTY tail minus its final (prompt) line, last 3 lines, one
+// line of text for the trace and the pane.
+fn launch_exit_tail(raw: &[u8]) -> String {
+    let stripped = strip_ansi(raw);
+    let text = String::from_utf8_lossy(&stripped);
+    let mut lines: Vec<&str> = text
+        .split(['\n', '\r'])
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    lines.pop();
+    let start = lines.len().saturating_sub(3);
+    let joined = lines[start..].join(" | ").replace('"', "'");
+    let mut out: String = joined.chars().take(240).collect();
+    if joined.chars().count() > 240 {
+        out.push('…');
+    }
+    out
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LaunchPhase {
+    // The gate passed; the command is about to be written.
+    BeforeWrite,
+    // The command was written.
+    Written,
+    // The gate timed out; nothing was written.
+    Timeout,
+}
+
+struct AgentLaunch<R: tauri::Runtime> {
+    app: AppHandle<R>,
+    provider: &'static str,
+    command: String,
+    // autostart | switch | reload | new-session
+    source: &'static str,
+    // The trace category the site has always used.
+    trace_category: &'static str,
+    caller_hint: &'static str,
+    gate: bool,
+    first_command: bool,
+    // The site's own work around the write (pins, refreshes, the boot hold).
+    hook: Box<dyn Fn(&AppHandle<R>, LaunchPhase) + Send>,
+}
+
+fn launch_agent_command<R: tauri::Runtime>(launch: AgentLaunch<R>) {
+    std::thread::spawn(move || run_agent_launch(launch));
+}
+
+fn emit_launch_outcome<R: tauri::Runtime>(
+    l: &AgentLaunch<R>,
+    outcome: &str,
+    status: Option<i32>,
+    tail: &str,
+) {
+    let _ = l.app.emit(
+        "launch-outcome",
+        serde_json::json!({
+            "provider": l.provider,
+            "source": l.source,
+            "outcome": outcome,
+            "status": status,
+            "tail": tail,
+            "atMs": unix_now_ms(),
+        }),
+    );
+}
+
+fn run_agent_launch<R: tauri::Runtime>(l: AgentLaunch<R>) {
+    let app = &l.app;
+    let state = app.state::<AppState>();
+    let trace = |detail: String| {
+        if bram_trace_enabled() {
+            append_bram_trace_line(app, l.trace_category, &detail);
+        }
+    };
+    if l.gate {
+        match wait_for_shell_prompt_evidence() {
+            Err(waited) => {
+                trace(format!(
+                    "op=launch-timeout provider={} source={} waited_ms={}",
+                    l.provider, l.source, waited
+                ));
+                (l.hook)(app, LaunchPhase::Timeout);
+                emit_launch_outcome(&l, "timeout", None, "");
+                return;
+            }
+            Ok((waited, via)) => trace(format!(
+                "op=launch-gated provider={} source={} waited_ms={} via={}",
+                l.provider, l.source, waited, via
+            )),
+        }
+    }
+    (l.hook)(app, LaunchPhase::BeforeWrite);
+    let written_from = unix_now_ms();
+    if let Err(error) = pty_write_internal(app, &state, &format!("{}\r", l.command), l.caller_hint)
+    {
+        trace(format!(
+            "op=launch-error provider={} source={} error={}",
+            l.provider, l.source, error
+        ));
+        emit_launch_outcome(&l, "error", None, &error);
+        return;
+    }
+    shell_foreground_note_launch_written(written_from);
+    (l.hook)(app, LaunchPhase::Written);
+    loop {
+        let elapsed = unix_now_ms().saturating_sub(written_from);
+        match launch_confirm_state(shell_foreground(), written_from) {
+            LaunchConfirm::Exited(status) => {
+                let raw = match pty_tail_cell().lock() {
+                    Ok(g) => g.clone(),
+                    Err(e) => e.into_inner().clone(),
+                };
+                let tail = launch_exit_tail(&raw);
+                trace(format!(
+                    "op=launch-exited provider={} source={} status={} after_ms={} tail=\"{}\"",
+                    l.provider,
+                    l.source,
+                    status.map(|s| s.to_string()).unwrap_or_else(|| "?".into()),
+                    elapsed,
+                    tail
+                ));
+                emit_launch_outcome(&l, "exited", status, &tail);
+                return;
+            }
+            LaunchConfirm::Pending if elapsed < AGENT_LAUNCH_CONFIRM_MS => {}
+            LaunchConfirm::Unverifiable if elapsed < AGENT_LAUNCH_CONFIRM_MS => {}
+            other => {
+                let via = if other == LaunchConfirm::Unverifiable {
+                    "no-marker"
+                } else {
+                    "no-prompt"
+                };
+                let exec_seen = shell_foreground().exec_ms >= written_from;
+                trace(format!(
+                    "op=launch-confirmed provider={} source={} via={} exec_seen={}",
+                    l.provider, l.source, via, exec_seen
+                ));
+                emit_launch_outcome(&l, "confirmed", None, "");
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(
+            AGENT_LAUNCH_CONFIRM_POLL_MS,
+        ));
+    }
+    if l.first_command {
+        type_agent_first_command(app, &state, l.source);
+    }
+}
+
+// A pinned Codex session is usable only while its rollout file exists. The
+// check used to happen as a side effect of latest_session_path_for_provider
+// (which clears a missing pin), so it held only while that lookup ran before
+// the pin was read; now the pin is checked where it is read.
+fn codex_pin_usable(target: &CodexReloadTarget) -> bool {
+    target.path.exists()
+}
+
+fn usable_codex_reload_target<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<CodexReloadTarget> {
+    let target = codex_reload_target(app)?;
+    if codex_pin_usable(&target) {
+        Some(target)
+    } else {
+        clear_codex_reload_target(app, &target.id, "target-missing", "");
+        None
+    }
+}
+
+#[cfg(test)]
+mod agent_launch_tests {
+    use super::{
+        codex_pin_usable, launch_confirm_state as confirm, launch_exit_tail, CodexReloadTarget,
+        LaunchConfirm, ShellForeground,
+    };
+
+    fn fg(at_prompt: bool, status: i32, at_ms: i64, exec_ms: i64) -> ShellForeground {
+        ShellForeground {
+            seen: true,
+            at_prompt,
+            status: Some(status),
+            at_ms,
+            exec_ms,
+        }
+    }
+
+    #[test]
+    fn prompt_after_this_launchs_exec_is_an_exit() {
+        assert_eq!(
+            confirm(fg(true, 1, 120, 110), 100),
+            LaunchConfirm::Exited(Some(1))
+        );
+    }
+
+    #[test]
+    fn running_agent_is_pending() {
+        assert_eq!(confirm(fg(false, 0, 90, 110), 100), LaunchConfirm::Pending);
+    }
+
+    #[test]
+    fn interrupt_prompts_before_the_write_are_not_an_exit() {
+        // The switch's Ctrl-C at a bare prompt draws prompts (status 1)
+        // before the launch is written; with no exec since, that's not an exit.
+        assert_eq!(confirm(fg(true, 1, 95, 50), 100), LaunchConfirm::Pending);
+    }
+
+    #[test]
+    fn no_marker_ever_is_unverifiable() {
+        assert_eq!(
+            confirm(ShellForeground::default(), 100),
+            LaunchConfirm::Unverifiable
+        );
+    }
+
+    #[test]
+    fn exit_tail_drops_the_prompt_line() {
+        let raw = b"\x1b[31mNo conversation found to continue\x1b[0m\r\n\x1b]7779;bram;prompt;1\x07bash-3.2$ ";
+        assert_eq!(launch_exit_tail(raw), "No conversation found to continue");
+    }
+
+    #[test]
+    fn missing_pin_file_is_not_usable() {
+        let dir = std::env::temp_dir().join(format!("bram-pin-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("rollout.jsonl");
+        std::fs::write(&path, b"{}").unwrap();
+        let target = CodexReloadTarget {
+            id: "x".into(),
+            path: path.clone(),
+            previous_path: None,
+            set_at: std::time::SystemTime::UNIX_EPOCH,
+        };
+        assert!(codex_pin_usable(&target));
+        std::fs::remove_file(&path).unwrap();
+        assert!(!codex_pin_usable(&target));
     }
 }
 
@@ -19016,7 +19322,7 @@ fn switch_agent(
         None
     };
     let pin = if provider_key == "codex" {
-        codex_reload_target(&app)
+        usable_codex_reload_target(&app)
     } else {
         None
     };
@@ -19098,79 +19404,50 @@ fn switch_agent(
     // issue-314: the launch is no longer typed blind after a fixed settle —
     // the outgoing CLI's shutdown scales with session size, and on Windows
     // the 1.2 s timer typed `codex resume …` into Claude's farewell, which
-    // swallowed it and stranded the session at bare PowerShell. Gate on
-    // shell-prompt evidence in a spawned waiter (the new-session pattern);
-    // on timeout, type nothing — the boot hold stays armed and a manual
-    // launch releases it.
+    // swallowed it and stranded the session at bare PowerShell. The shared
+    // launch routine gates on the shell's prompt, confirms the agent came up,
+    // and on timeout types nothing.
     let session_provider = if provider_key == "codex" {
         SessionProvider::Codex
     } else {
         SessionProvider::Claude
     };
-    let waiter_app = app.clone();
-    std::thread::spawn(move || {
-        let state = waiter_app.state::<AppState>();
-        match wait_for_shell_prompt_evidence() {
-            Err(waited) => {
-                if bram_trace_enabled() {
-                    append_bram_trace_line(
-                        &waiter_app,
-                        "agent-switch",
-                        &format!(
-                            "op=launch-timeout provider={} waited_ms={}",
-                            provider_key, waited
-                        ),
-                    );
-                }
+    launch_agent_command(AgentLaunch {
+        app: app.clone(),
+        provider: provider_key,
+        command,
+        source: "switch",
+        trace_category: "agent-switch",
+        caller_hint: "agent-switch-launch",
+        gate: true,
+        first_command: true,
+        hook: Box::new(move |app, phase| {
+            if phase != LaunchPhase::Written {
                 return;
             }
-            Ok((waited, via)) => {
-                if bram_trace_enabled() {
-                    append_bram_trace_line(
-                        &waiter_app,
-                        "agent-switch",
-                        &format!(
-                            "op=launch-gated provider={} waited_ms={} via={}",
-                            provider_key, waited, via
-                        ),
-                    );
-                }
+            if let Some(id) = pending_target.as_deref() {
+                let _ = pin_codex_reload_target(app, id);
             }
-        }
-        if let Err(error) = pty_write_internal(
-            &waiter_app,
-            &state,
-            &format!("{}\r", command),
-            "agent-switch-launch",
-        ) {
-            append_bram_trace_line(
-                &waiter_app,
-                "agent-switch",
-                &format!("op=launch-error provider={} error={}", provider_key, error),
-            );
-            return;
-        }
-        if let Some(id) = pending_target.as_deref() {
-            let _ = pin_codex_reload_target(&waiter_app, id);
-        }
-        trace_agent_pty_step(&waiter_app, "switch", provider_key, "launch");
-        // Switching providers must reset the transcript to the new provider's
-        // latest session, not diff against the old cursor. Without this, the
-        // scheduled refresh emits an empty incremental (reset:false, len:0)
-        // because the cursor still matches, and the transcript keeps showing the
-        // previous provider's conversation until a manual reload. Clearing the new
-        // provider's tail cursor makes schedule_agent_switch_refresh's emit a full
-        // reset, mirroring resync_transcript_to_session on the reload path.
-        let crossing = current_provider(&waiter_app) != Some(session_provider);
-        schedule_agent_switch_refresh(waiter_app.clone(), provider_key, "switch");
-        schedule_agent_first_command(waiter_app.clone(), "switch");
-        if crossing {
-            // Flip the active-provider hint now, then reload the agent pane once the
-            // new agent settles, so the sessions list, banner, agent name and verb
-            // all switch instead of staying stale on the prior provider.
-            set_current_provider(&waiter_app, session_provider, "switch");
-            schedule_cross_provider_pane_reload(waiter_app.clone());
-        }
+            trace_agent_pty_step(app, "switch", provider_key, "launch");
+            // Switching providers must reset the transcript to the new
+            // provider's latest session, not diff against the old cursor.
+            // Without this, the scheduled refresh emits an empty incremental
+            // (reset:false, len:0) because the cursor still matches, and the
+            // transcript keeps showing the previous provider's conversation
+            // until a manual reload. Clearing the new provider's tail cursor
+            // makes schedule_agent_switch_refresh's emit a full reset,
+            // mirroring resync_transcript_to_session on the reload path.
+            let crossing = current_provider(app) != Some(session_provider);
+            schedule_agent_switch_refresh(app.clone(), provider_key, "switch");
+            if crossing {
+                // Flip the active-provider hint now, then reload the agent
+                // pane once the new agent settles, so the sessions list,
+                // banner, agent name and verb all switch instead of staying
+                // stale on the prior provider.
+                set_current_provider(app, session_provider, "switch");
+                schedule_cross_provider_pane_reload(app.clone());
+            }
+        }),
     });
     Ok(())
 }
@@ -19508,7 +19785,28 @@ fn reload_agent_session(
     };
     clear_pending_session_title_for_resume(&app, session_provider, &session, "session-reload");
     cancel_agent_boot_hold(&app, "session-reload");
-    let command = agent_resume_command(provider_key, &session).ok_or("unknown agent provider")?;
+    // agent-launch-shared-routine precondition: the session named must still
+    // exist. Resuming a deleted one makes the CLI print an error and exit,
+    // leaving a bare shell; start the provider fresh instead, as the switch
+    // and autostart paths do (c3d6320).
+    let session_exists = session_path_for_id(&app, session_provider, &session).is_some();
+    let command = if session_exists {
+        agent_resume_command(provider_key, &session).ok_or("unknown agent provider")?
+    } else {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                &app,
+                "agent-switch",
+                &format!(
+                    "op=launch-fresh reason=no-session provider={} source=reload session={}",
+                    provider_key, session
+                ),
+            );
+        }
+        agent_launch_command(provider_key)
+            .ok_or("unknown agent provider")?
+            .to_string()
+    };
     if bram_trace_enabled() {
         append_bram_trace_line(
             &app,
@@ -19519,7 +19817,7 @@ fn reload_agent_session(
             ),
         );
     }
-    if provider_key == "codex" {
+    if provider_key == "codex" && session_exists {
         pin_codex_reload_target(&app, &session)?;
     }
     clear_stale_terminal_input_for_switch(&app, &state, "agent-reload");
@@ -19534,26 +19832,45 @@ fn reload_agent_session(
     std::thread::sleep(std::time::Duration::from_millis(AGENT_INTERRUPT_GAP_MS));
     pty_write_internal(&app, &state, "\x03", "agent-reload-interrupt-2")?;
     trace_agent_pty_step(&app, "reload", provider_key, "interrupt-2");
-    std::thread::sleep(std::time::Duration::from_millis(AGENT_RELAUNCH_SETTLE_MS));
-    pty_write_internal(
-        &app,
-        &state,
-        &format!("{}\r", command),
-        "agent-reload-launch",
-    )?;
-    trace_agent_pty_step(&app, "reload", provider_key, "launch");
-    // Point the transcript at the resumed session immediately rather than
-    // waiting for the agent's first write to make it most-recent (see
-    // resync_transcript_to_session).
-    let crossing = current_provider(&app) != Some(session_provider);
-    schedule_resync_transcript_to_session(app.clone(), session_provider, session.clone());
-    schedule_agent_switch_refresh(app.clone(), provider_key, "reload");
-    if crossing {
-        // The resync flips the active-provider hint; reload the agent pane once
-        // the resumed agent settles so the banner/verb and other per-provider
-        // caches re-derive cleanly instead of staying stale on the old provider.
-        schedule_cross_provider_pane_reload(app.clone());
-    }
+    // agent-launch-shared-routine: reload was the one interrupt-then-launch
+    // path #314 left on a fixed 1.2 s sleep; it now gates like the switch.
+    launch_agent_command(AgentLaunch {
+        app: app.clone(),
+        provider: provider_key,
+        command,
+        source: "reload",
+        trace_category: "agent-switch",
+        caller_hint: "agent-reload-launch",
+        gate: true,
+        first_command: false,
+        hook: Box::new(move |app, phase| {
+            if phase != LaunchPhase::Written {
+                return;
+            }
+            trace_agent_pty_step(app, "reload", provider_key, "launch");
+            // Point the transcript at the resumed session immediately rather
+            // than waiting for the agent's first write to make it
+            // most-recent (see resync_transcript_to_session).
+            let crossing = current_provider(app) != Some(session_provider);
+            if session_exists {
+                schedule_resync_transcript_to_session(
+                    app.clone(),
+                    session_provider,
+                    session.clone(),
+                );
+            } else {
+                set_current_provider(app, session_provider, "reload");
+            }
+            schedule_agent_switch_refresh(app.clone(), provider_key, "reload");
+            if crossing {
+                // The resync flips the active-provider hint; reload the agent
+                // pane once the resumed agent settles so the banner/verb and
+                // other per-provider caches re-derive cleanly instead of
+                // staying stale on the old provider.
+                schedule_cross_provider_pane_reload(app.clone());
+            }
+        }),
+    });
     Ok(())
 }
 
@@ -20222,47 +20539,29 @@ fn create_new_session(
     // provisional current row while the launch waits on the prompt.
     emit_replayable_signal(&app, "sessions-list-changed");
     let launch = new_session_launch_command(provider_key, &trimmed, session_id.as_deref());
-    let waiter_app = app.clone();
-    std::thread::spawn(move || {
-        let state = waiter_app.state::<AppState>();
-        // Shared evidence gate (issue-314 extracted it; behavior unchanged
-        // here). On timeout: no prompt — the shell never came back, or its
-        // prompt shape is one the gate can't recognize. Do NOT type blind —
-        // the command would land as tty type-ahead or into a wedged shell.
-        // The boot hold stays armed; a manual launch releases it, and the
-        // pending title expires on its own TTL.
-        match wait_for_shell_prompt_evidence() {
-            Err(waited) => {
-                if bram_trace_enabled() {
-                    append_bram_trace_line(
-                        &waiter_app,
-                        "session-new",
-                        &format!("op=launch-timeout waited_ms={}", waited),
-                    );
-                }
-                // A manual launch is now the only way on; let its boot
-                // bytes release the hold.
-                open_agent_boot_evidence(&waiter_app, "launch-timeout");
-                return;
+    // The shared launch routine gates on the shell's prompt. On timeout: no
+    // prompt — the shell never came back, or no marker and a prompt shape the
+    // guess can't recognize. Nothing is typed blind: the boot hold stays
+    // armed, a manual launch releases it, and the pending title expires on
+    // its own TTL.
+    launch_agent_command(AgentLaunch {
+        app: app.clone(),
+        provider: provider_key,
+        command: launch,
+        source: "new-session",
+        trace_category: "session-new",
+        caller_hint: "agent-new-launch",
+        gate: true,
+        first_command: false,
+        hook: Box::new(move |app, phase| match phase {
+            // A manual launch is now the only way on; let its boot bytes
+            // release the hold.
+            LaunchPhase::Timeout => open_agent_boot_evidence(app, "launch-timeout"),
+            LaunchPhase::BeforeWrite => open_agent_boot_evidence(app, "launch"),
+            LaunchPhase::Written => {
+                schedule_agent_switch_refresh(app.clone(), provider_key, "new-session")
             }
-            Ok((waited, via)) => {
-                if bram_trace_enabled() {
-                    append_bram_trace_line(
-                        &waiter_app,
-                        "session-new",
-                        &format!("op=launch-gated waited_ms={} via={}", waited, via),
-                    );
-                }
-            }
-        }
-        open_agent_boot_evidence(&waiter_app, "launch");
-        let _ = pty_write_internal(
-            &waiter_app,
-            &state,
-            &format!("{}\r", launch),
-            "agent-new-launch",
-        );
-        schedule_agent_switch_refresh(waiter_app.clone(), provider_key, "new-session");
+        }),
     });
     Ok(())
 }
@@ -20900,34 +21199,43 @@ fn configured_first_command<R: tauri::Runtime>(app: &AppHandle<R>) -> String {
         .unwrap_or_default()
 }
 
-// After a fresh launch (autostart / switch), wait for the agent's TUI to
-// settle, then type the configured first command (e.g. `/resume`). No-op when
-// the command is empty. Runs on its own thread; re-acquires AppState from the
-// handle to reach the PTY writer, mirroring schedule_agent_switch_refresh.
-fn schedule_agent_first_command<R: tauri::Runtime>(app: AppHandle<R>, source: &'static str) {
-    let command = configured_first_command(&app).trim().to_string();
+// Type the configured first command (e.g. `/resume`) into a freshly started
+// agent. No-op when the command is empty. Called by the launch routine only
+// after `launch-confirmed` (agent-launch-shared-routine), never after
+// `launch-exited`, so it can't land in the shell; it used to follow the
+// launch by a fixed 2.5 s whether or not the agent had started.
+fn type_agent_first_command<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &State<'_, AppState>,
+    source: &'static str,
+) {
+    let command = configured_first_command(app).trim().to_string();
     if command.is_empty() {
         return;
     }
-    thread::spawn(move || {
-        thread::sleep(std::time::Duration::from_millis(
-            AGENT_FIRST_COMMAND_SETTLE_MS,
+    // The command and its Enter ride separate writes, as pane sends do
+    // (split-paste-cr-and-submit-nudge): Codex reads "/status\r" arriving in
+    // one burst as a paste and keeps the CR as a newline in its composer, so
+    // the command sat unsubmitted (2026-10-04 demo). Claude submitted either
+    // way.
+    let written = pty_write_internal(app, state, &command, "agent-first-command").and_then(|()| {
+        std::thread::sleep(std::time::Duration::from_millis(
+            AGENT_FIRST_COMMAND_SUBMIT_GAP_MS,
         ));
-        let state = app.state::<AppState>();
-        let payload = format!("{}\r", command);
-        match pty_write_internal(&app, &state, &payload, "agent-first-command") {
-            Ok(()) => {
-                if bram_trace_enabled() {
-                    append_bram_trace_line(
-                        &app,
-                        "agent-switch",
-                        &format!("op=first-command source={} command={}", source, command),
-                    );
-                }
-            }
-            Err(e) => eprintln!("[agent-first-command] write failed: {}", e),
-        }
+        pty_write_internal(app, state, "\r", "agent-first-command-submit")
     });
+    match written {
+        Ok(()) => {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    app,
+                    "agent-switch",
+                    &format!("op=first-command source={} command={}", source, command),
+                );
+            }
+        }
+        Err(e) => eprintln!("[agent-first-command] write failed: {}", e),
+    }
 }
 
 fn schedule_agent_switch_refresh<R: tauri::Runtime>(
@@ -38192,6 +38500,9 @@ struct ShellForeground {
     at_prompt: bool,
     status: Option<i32>,
     at_ms: i64,
+    // When the last `exec` edge arrived; the launch routine's confirm step
+    // reads a prompt after its own launch's exec as "the agent exited".
+    exec_ms: i64,
 }
 
 fn shell_foreground_step(mut s: ShellForeground, m: ShellMarker, now_ms: i64) -> ShellForeground {
@@ -38202,7 +38513,10 @@ fn shell_foreground_step(mut s: ShellForeground, m: ShellMarker, now_ms: i64) ->
             s.at_prompt = true;
             s.status = Some(status);
         }
-        ShellMarker::Exec => s.at_prompt = false,
+        ShellMarker::Exec => {
+            s.at_prompt = false;
+            s.exec_ms = now_ms;
+        }
     }
     s
 }
@@ -38217,6 +38531,20 @@ fn shell_foreground() -> ShellForeground {
     match shell_foreground_cell().lock() {
         Ok(g) => g.0,
         Err(e) => e.into_inner().0,
+    }
+}
+
+// agent-launch-shared-routine: a launch command was just written. Until bash
+// reads it and reports `exec`, the shell is still "at its prompt" by the
+// markers, and a second launch in that window would type again. Mark it busy
+// now, unless the exec edge has already arrived since `written_from_ms`.
+fn shell_foreground_note_launch_written(written_from_ms: i64) {
+    let mut g = match shell_foreground_cell().lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    if g.0.seen && g.0.exec_ms < written_from_ms {
+        g.0.at_prompt = false;
     }
 }
 

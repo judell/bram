@@ -23433,6 +23433,7 @@ mod whisper_preflight_tests {
         assert_eq!(whisper_child_path("", Some(ff)), "/opt/homebrew/bin");
     }
 
+    // codex-session-title-lost-to-codex
     #[test]
     fn find_in_dirs_resolves_a_windows_exe() {
         let dir = std::env::temp_dir().join(format!("bram-whisper-find-{}", std::process::id()));
@@ -26125,6 +26126,89 @@ fn canonical_path_string(path: &Path) -> String {
         .into_owned()
 }
 
+// codex-session-title-lost-to-codex: which ids need their Bram-written name
+// put back. `~/.codex/session_index.jsonl` is append-only and read last-wins,
+// so when Codex renames a thread after Bram named it, Bram's name is simply
+// gone from every surface. Observed 2026-10-04: `thread_name:"test"` at
+// 20:57:57Z (whole seconds — Bram, whose rfc3339_now uses as_secs()), then
+// `thread_name:"Send first message"` at 20:57:59.7249145Z (Codex).
+//
+// Reconcile after the fact rather than trying to write last, which is a race
+// nobody wins. Pure for unit testing; takes the index's records in file order.
+//
+// One retry per name, by design: if our last entry for an id already carries
+// `reassert`, Codex has renamed over a reassertion and that is the user's
+// thread name now. A rename made inside Codex must stick.
+fn codex_titles_to_reassert(records: &[serde_json::Value]) -> Vec<(String, String)> {
+    let mut last_by_id: HashMap<&str, &serde_json::Value> = HashMap::new();
+    let mut last_ours: HashMap<&str, &serde_json::Value> = HashMap::new();
+    for rec in records {
+        let Some(id) = rec.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if rec.get("thread_name").and_then(|v| v.as_str()).is_none() {
+            continue;
+        }
+        last_by_id.insert(id, rec);
+        if rec.get("by").and_then(|v| v.as_str()) == Some("bram") {
+            last_ours.insert(id, rec);
+        }
+    }
+    let mut out = Vec::new();
+    for (id, ours) in last_ours {
+        let Some(last) = last_by_id.get(id) else {
+            continue;
+        };
+        // Ours is already the winning entry.
+        if std::ptr::eq(*last, ours) {
+            continue;
+        }
+        // We already spent this name's one retry.
+        if ours.get("reassert").and_then(|v| v.as_bool()) == Some(true) {
+            continue;
+        }
+        let Some(name) = ours.get("thread_name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        out.push((id.to_string(), name.to_string()));
+    }
+    out.sort();
+    out
+}
+
+// Read the index, put back any name Codex overwrote, and say so. Called from
+// the session list, which is where a stale title would otherwise be shown.
+fn reconcile_codex_titles<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let Some(home) = home_dir() else { return };
+    let path = home.join(".codex").join("session_index.jsonl");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let records: Vec<serde_json::Value> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    for (id, name) in codex_titles_to_reassert(&records) {
+        // The reconciler writes to a file another tool owns, so its action has
+        // to be auditable. The first cut used eprintln! alone, which reaches
+        // only a cargo-run console — invisible to the user and to an agent
+        // reading the trace. The live check on 2026-10-04 found the fix working
+        // with nothing in bram-trace.log to show for it.
+        let line = match append_codex_title_record(&id, &name, true) {
+            Ok(()) => format!("op=title-reasserted id={} ours={:?}", id, name),
+            Err(e) => format!(
+                "op=title-reassert-failed id={} ours={:?} err={}",
+                id, name, e
+            ),
+        };
+        if bram_trace_enabled() {
+            append_bram_trace_line(app, "codex-title", &line);
+        }
+        eprintln!("[codex-title] {}", line);
+    }
+}
+
 fn codex_session_index() -> Result<HashMap<String, String>, String> {
     let home = home_dir().ok_or("no HOME or USERPROFILE")?;
     let path = home.join(".codex").join("session_index.jsonl");
@@ -26375,8 +26459,25 @@ fn codex_session_title(path: &Path) -> std::io::Result<Option<String>> {
     codex_cached_read(codex_title_cache(), path, codex_session_title_read)
 }
 
+// The user's first real message in a rollout, for titling.
+//
+// codex-session-title-lost-to-codex: this used to match `event_msg` records
+// carrying `payload.type == "user_message"` with the text in `payload.message`.
+// Codex v0.147.0 writes neither — `grep -c user_message` over a 68 KB rollout
+// returns 0, and user turns now arrive as `response_item` records whose payload
+// is a `message` with `role: "user"` and `content[].input_text`. So the function
+// could only ever return None, and every caller fell through to the index, which
+// is the value Codex overwrites. Both halves failed in the same direction, which
+// is why the symptom read as a titling bug or a pairing bug depending on where
+// you looked.
+//
+// Both shapes are accepted: the old one so an archived rollout still reads, the
+// current one via codex_payload_has_real_user_activity, which already knows this
+// record shape and already skips Bram's injected startup context (without that
+// filter every Bram-launched session would be titled with its own preamble).
 fn codex_session_title_read(path: &Path) -> std::io::Result<Option<String>> {
     let reader = BufReader::new(std::fs::File::open(path)?);
+    let mut scanned = 0usize;
     for line in reader.lines() {
         let line = line?;
         if line.is_empty() {
@@ -26385,24 +26486,135 @@ fn codex_session_title_read(path: &Path) -> std::io::Result<Option<String>> {
         let Ok(record) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
-        if record.get("type").and_then(|v| v.as_str()) != Some("event_msg") {
-            continue;
-        }
+        scanned += 1;
         let Some(payload) = record.get("payload") else {
             continue;
         };
-        if payload.get("type").and_then(|v| v.as_str()) != Some("user_message") {
+        // Retired shape (pre-v0.147.0 rollouts).
+        if record.get("type").and_then(|v| v.as_str()) == Some("event_msg")
+            && payload.get("type").and_then(|v| v.as_str()) == Some("user_message")
+        {
+            if let Some(message) = payload.get("message").and_then(|v| v.as_str()) {
+                if !codex_startup_context_text(message) {
+                    return Ok(Some(message.chars().take(120).collect()));
+                }
+            }
             continue;
         }
-        let Some(message) = payload.get("message").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if codex_startup_context_text(message) {
+        // Current shape.
+        if !codex_payload_has_real_user_activity(payload) {
             continue;
         }
-        return Ok(Some(message.chars().take(120).collect()));
+        if let Some(text) = codex_payload_first_user_text(payload) {
+            return Ok(Some(text.chars().take(120).collect()));
+        }
+    }
+    // A rollout with records but no recognisable user turn is the fingerprint
+    // of another format drift. Say so rather than returning None silently, as
+    // the retired matcher did for every current rollout.
+    if scanned > 0 {
+        eprintln!(
+            "[codex-title] op=no-user-turn scanned={} path={}",
+            scanned,
+            path.display()
+        );
     }
     Ok(None)
+}
+
+// The display text of a current-shape user payload: a bare string, or the
+// first non-empty input_text/text part.
+fn codex_payload_first_user_text(payload: &serde_json::Value) -> Option<String> {
+    let content = payload.get("content")?;
+    if let Some(text) = content.as_str() {
+        let text = text.trim();
+        if !text.is_empty() && !codex_startup_context_text(text) {
+            return Some(text.to_string());
+        }
+        return None;
+    }
+    content.as_array()?.iter().find_map(|part| {
+        let part_type = part.get("type").and_then(|v| v.as_str());
+        if !matches!(part_type, Some("input_text") | Some("text")) {
+            return None;
+        }
+        let text = part.get("text").and_then(|v| v.as_str())?.trim();
+        if text.is_empty() || codex_startup_context_text(text) {
+            return None;
+        }
+        Some(text.to_string())
+    })
+}
+
+#[cfg(test)]
+mod codex_session_title_tests {
+    use super::*;
+
+    // codex-session-title-lost-to-codex: the retired matcher returned None for
+    // every current rollout, so the first-user-message fallback was dead and
+    // the index — the value Codex overwrites — was all that remained.
+    #[test]
+    fn codex_title_reads_both_rollout_shapes() {
+        let dir = std::env::temp_dir().join(format!("bram-codex-title-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+
+        let current = dir.join("current.jsonl");
+        std::fs::write(
+            &current,
+            concat!(
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\nignore me"}]}}"#,
+                "\n",
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"test"}]}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            super::codex_session_title_read(&current).unwrap(),
+            Some("test".to_string()),
+            "current shape, with Bram's injected context skipped"
+        );
+
+        let retired = dir.join("retired.jsonl");
+        std::fs::write(
+            &retired,
+            concat!(
+                r#"{"type":"event_msg","payload":{"type":"user_message","message":"older"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            super::codex_session_title_read(&retired).unwrap(),
+            Some("older".to_string()),
+            "an archived rollout must still read"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn codex_titles_reassert_only_what_codex_overwrote() {
+        let j = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
+        let ours = r#"{"id":"a","thread_name":"test","by":"bram","reassert":false}"#;
+        let theirs = r#"{"id":"a","thread_name":"Send first message"}"#;
+
+        // The observed case: Bram named it, Codex renamed over it.
+        assert_eq!(
+            super::codex_titles_to_reassert(&[j(ours), j(theirs)]),
+            vec![("a".to_string(), "test".to_string())]
+        );
+        // Ours is already winning — nothing to do.
+        assert!(super::codex_titles_to_reassert(&[j(theirs), j(ours)]).is_empty());
+        // A name Bram never wrote is Codex's business.
+        assert!(super::codex_titles_to_reassert(&[j(theirs)]).is_empty());
+        // One retry only: a rename made inside Codex after our reassertion wins.
+        let reasserted = r#"{"id":"a","thread_name":"test","by":"bram","reassert":true}"#;
+        assert!(
+            super::codex_titles_to_reassert(&[j(ours), j(theirs), j(reasserted), j(theirs)])
+                .is_empty()
+        );
+    }
 }
 
 /// Cheap enumeration of the current project's Claude session files:
@@ -26502,6 +26714,9 @@ fn discover_codex_sessions<R: tauri::Runtime>(
     let project_cwd = canonical_path_string(&project);
     let home = home_dir().ok_or("no HOME or USERPROFILE")?;
     let sessions_root = home.join(".codex").join("sessions");
+    // codex-session-title-lost-to-codex: put back any name Codex overwrote
+    // before reading titles, so the list shows what the user chose.
+    reconcile_codex_titles(app);
     let titles = codex_session_index()?;
     let mut paths = Vec::new();
     collect_codex_session_paths(&sessions_root, &mut paths)?;
@@ -30654,6 +30869,10 @@ fn rfc3339_now() -> String {
 // the id belongs to this project; keeping the append separate from visible
 // session discovery lets Bram name an explicitly created bootstrap rollout.
 fn append_codex_session_title(id: &str, title: &str) -> Result<(), String> {
+    append_codex_title_record(id, title, false)
+}
+
+fn append_codex_title_record(id: &str, title: &str, reassert: bool) -> Result<(), String> {
     if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return Err("invalid session id".to_string());
     }
@@ -30666,10 +30885,16 @@ fn append_codex_session_title(id: &str, title: &str) -> Result<(), String> {
     if let Some(parent) = index_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
+    // codex-session-title-lost-to-codex: `by` marks our own entries so the
+    // reconciler can tell a name Bram wrote from one Codex generated, and
+    // `reassert` bounds the reconciliation to a single retry per name. Codex
+    // reads `id` / `thread_name` and ignores the extra keys.
     let record = serde_json::json!({
         "id": id,
         "thread_name": trimmed,
         "updated_at": rfc3339_now(),
+        "by": "bram",
+        "reassert": reassert,
     });
     let mut line = serde_json::to_string(&record).map_err(|e| e.to_string())?;
     line.push('\n');

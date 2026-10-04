@@ -242,6 +242,15 @@
           labelPosition="end"
           initialValue="{settingsShowTargetApp(settingsValue)}"
           onDidChange="(v) => saveSettings.execute({ ui: { showTargetApp: v } })" />
+        <!-- terminal-open-at-startup-setting: per-user preference,
+             localStorage-backed like the tips and beep switches below. The
+             parent shell reads it at launch; the toolbar toggle is
+             session-only. -->
+        <Switch
+          label="Terminal open at startup"
+          labelPosition="end"
+          initialValue="{window.__bramTerminalOpenAtStartup ? window.__bramTerminalOpenAtStartup() : false}"
+          onDidChange="(v) => window.__bramSetTerminalOpenAtStartup(v)" />
         <Switch
           id="hotReloadSwitch"
           label="Agent-pane hot-reload"

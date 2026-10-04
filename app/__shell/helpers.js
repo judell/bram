@@ -2636,6 +2636,8 @@ window.settingsInfoBodies = {
   ui:
     "## Show target app\n\n" +
     "Show the embedded target-app preview pane. Usually off.\n\n" +
+    "## Terminal open at startup\n\n" +
+    "Open the terminal pane when Bram launches. Off by default: the agent pane's Worklist and Transcript are the main surface. The toolbar's terminal button still opens and closes it for the current session. Applies to every Bram window on this machine.\n\n" +
     "## Agent-pane hot-reload\n\n" +
     "Auto-reload the agent pane as you edit Bram's own source. For developing Bram.\n\n" +
     "## Show tips in the footer\n\n" +
@@ -15396,6 +15398,19 @@ window.__bramSearchBadgesInitialAllOn = function () {
 };
 window.__bramSetSearchBadgesInitialAllOn = function (on) {
   __bramWriteLS('bram.searchBadgesInitialAllOn', on ? '1' : '0');
+  return !!on;
+};
+
+// terminal-open-at-startup-setting: whether the terminal pane is open when Bram
+// launches. Default OFF (the agent pane is the primary surface). DECISION,
+// per-user and unscoped: a layout preference, not about any one project. The
+// parent shell (app/main.js) reads the same key at startup; it shares this
+// pane's tauri://localhost origin. The toolbar button no longer persists.
+window.__bramTerminalOpenAtStartup = function () {
+  return __bramReadLS('bram.terminal.openAtStartup', '0') === '1';
+};
+window.__bramSetTerminalOpenAtStartup = function (on) {
+  __bramWriteLS('bram.terminal.openAtStartup', on ? '1' : '0');
   return !!on;
 };
 

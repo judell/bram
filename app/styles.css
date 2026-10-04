@@ -131,3 +131,10 @@ body.terminal-hidden #splitter {
   display: none;
 }
 
+/* terminal-open-at-startup-setting: the font buttons only act on the
+   terminal, so they show only while it is open. */
+body.terminal-hidden #font-smaller,
+body.terminal-hidden #font-larger {
+  display: none;
+}
+

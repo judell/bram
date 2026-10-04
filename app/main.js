@@ -523,8 +523,11 @@ document
   ?.addEventListener("click", () => setTerminalFontSize(term.options.fontSize + 1));
 
 (() => {
-  const TERMINAL_HIDDEN_KEY = "bram.terminal.hidden";
-  const LEGACY_TERMINAL_HIDDEN_KEY = "xmlui-desktop.terminal.hidden";
+  // terminal-open-at-startup-setting: the Settings tab's "Terminal open at
+  // startup" switch (window.__bramSetTerminalOpenAtStartup in helpers.js)
+  // owns "bram.terminal.openAtStartup"; the toolbar toggle is session-only.
+  // The retired bram.terminal.hidden / xmlui-desktop.terminal.hidden keys
+  // are not read.
   const btn = document.getElementById("toggle-terminal");
   if (!btn) return;
   let dismissedSuspiciousEpisode = "";
@@ -607,17 +610,12 @@ document
     }, 4000);
   };
 
-  const apply = (hidden, source, persist) => {
+  const apply = (hidden, source) => {
     const wasHidden = document.body.classList.contains("terminal-hidden");
     document.body.classList.toggle("terminal-hidden", hidden);
     if (!hidden) {
       // Re-measure xterm.js once the layout settles.
       scheduleTerminalFit();
-    }
-    if (persist) {
-      try {
-        localStorage.setItem(TERMINAL_HIDDEN_KEY, hidden ? "1" : "0");
-      } catch {}
     }
     postTerminalVisibility(source);
     if (wasHidden !== hidden) {
@@ -633,20 +631,23 @@ document
     }
   };
 
-  let initial = false;
+  // Closed unless the user opted in: the agent pane is the primary surface.
+  // helpers.js's __bramWriteLS stores dotted keys nested and JSON-encoded:
+  // "bram.terminal.openAtStartup" lives at localStorage["bram"] ->
+  // .terminal.openAtStartup, so read it the same way __bramReadLS does.
+  let initial = true;
   try {
-    initial =
-      (localStorage.getItem(TERMINAL_HIDDEN_KEY) ??
-        localStorage.getItem(LEGACY_TERMINAL_HIDDEN_KEY)) === "1";
+    const root = JSON.parse(localStorage.getItem("bram") || "null");
+    initial = root?.terminal?.openAtStartup !== "1";
   } catch {}
-  apply(initial, "startup", false);
+  apply(initial, "startup");
   if (!initial) {
     scheduleStartupTerminalFit();
   }
 
   btn.addEventListener("click", (event) => {
     const hidden = !document.body.classList.contains("terminal-hidden");
-    apply(hidden, "toolbar-toggle", true);
+    apply(hidden, "toolbar-toggle");
     // A deliberate, inert self-test for the closed-terminal recovery path.
     // It exercises the parent/tools bridge and real footer action without
     // modifying the live turn or weakening the host detector.
@@ -681,7 +682,7 @@ document
       postTerminalVisibility("silence-dismissed");
       return;
     }
-    apply(false, "suspicious-silence-button", true);
+    apply(false, "suspicious-silence-button");
   });
 })();
 
@@ -1788,7 +1789,14 @@ const ptyShell = isWindows
 const _spawnPty = async () => {
   // Fit right before reading cols/rows so the PTY inherits the actual
   // container dimensions, not the xterm.js defaults.
+  // terminal-open-at-startup-setting: a closed terminal is display:none,
+  // so fit() has nothing to measure and the agent would start at 80x24.
+  // Lay the pane out for the measurement and hide it again in the same
+  // synchronous task — no frame paints in between, so nothing flickers.
+  const startsHidden = document.body.classList.contains("terminal-hidden");
+  if (startsHidden) document.body.classList.remove("terminal-hidden");
   fitAddon.fit();
+  if (startsHidden) document.body.classList.add("terminal-hidden");
   try {
     await invoke("pty_spawn", {
       ...ptyShell,

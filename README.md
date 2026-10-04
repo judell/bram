@@ -58,8 +58,11 @@ https://gist.github.com/judell/663ac00adf36a01096f2bdcdd08642ae
 
 ### Terminal (optional)
 
-A terminal where you run `claude` or `codex`. It can be hidden in favor of the
-agent pane's Worklist, Transcript, and Queue views.
+A terminal where you run `claude` or `codex`. It starts closed, in favor of the
+agent pane's Worklist, Transcript, and Queue views. The **terminal** button in
+the toolbar opens and closes it for the current session; to have it open every
+time Bram launches, turn on **Terminal open at startup** in the Settings tab's
+UI section.
 
 ### Agent pane
 

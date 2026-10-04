@@ -96,8 +96,26 @@ pub(crate) fn route_target(start: &Path, current: &Path) -> Option<(PathBuf, Pat
     if text.trim().is_empty() || !target.is_file() {
         return None;
     }
+    // guard-self-route-hardlink: this asks "is the target the binary already
+    // running?", and path comparison answers it wrongly on Windows. The
+    // per-machine link at ~/.bram/bram-guard.exe is a HARD link there (creating
+    // a symlink needs Developer Mode or elevation), and canonicalize resolves
+    // symlinks only — a hard link has no other name to collapse to, so the two
+    // paths never compared equal and every hook spawned a second guard to route
+    // to itself. Measured 2026-10-04 on Windows: 56.3 ms per hook routed vs
+    // 23.0 ms direct, on every file-mutating tool call, with a single build on
+    // the machine. 2ed8f2c's "about 5-7 ms, only while another build holds the
+    // link" described the symlink case only.
+    //
+    // is_same_file compares the volume serial and file index on Windows, and
+    // device+inode on Unix, so it recognises hard links, symlinks and plain
+    // paths alike. The cheap path comparison stays in front of it: the common
+    // cross-build case differs by path and needn't open two handles.
     let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     if canon(&target) == canon(current) {
+        return None;
+    }
+    if same_file::is_same_file(&target, current).unwrap_or(false) {
         return None;
     }
     Some((target, cur))
@@ -911,6 +929,39 @@ mod guard_mode_tests {
         assert_eq!(route_target(&root, &running_guard), None, "missing binary");
         std::fs::write(root.join(GUARD_TARGET_REL), "  \n").unwrap();
         assert_eq!(route_target(&root, &running_guard), None, "empty file");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // guard-self-route-hardlink: ~/.bram/bram-guard.exe is a hard link on
+    // Windows, and canonicalize cannot collapse one, so the self check above
+    // passed its own test while failing in the field — every hook spawned a
+    // guard to route to itself. This fails on the path-comparison-only code.
+    #[test]
+    fn route_target_declines_a_hard_link_to_itself() {
+        let root = scratch("route-declines-hardlink");
+        std::fs::create_dir_all(root.join("resources")).unwrap();
+        let running_guard = root.join("running-guard");
+        std::fs::write(&running_guard, "guard").unwrap();
+
+        // The per-machine link: a second name for the very same file.
+        let link = root.join("linked-guard");
+        if std::fs::hard_link(&running_guard, &link).is_err() {
+            // Some filesystems refuse hard links; nothing to assert there.
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        assert_ne!(link, running_guard, "the two names must differ");
+
+        std::fs::write(
+            root.join(GUARD_TARGET_REL),
+            format!("{}\n", running_guard.display()),
+        )
+        .unwrap();
+        assert_eq!(
+            route_target(&root, &link),
+            None,
+            "a hard link to the running guard is the running guard"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

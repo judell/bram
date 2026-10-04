@@ -303,6 +303,7 @@ dependencies = [
  "notify",
  "portable-pty",
  "rusqlite",
+ "same-file",
  "serde",
  "serde_json",
  "similar",

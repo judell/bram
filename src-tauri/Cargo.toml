@@ -27,6 +27,10 @@ portable-pty = "0.9.0"
 notify = "8.2.0"
 tiny_http = "0.12"
 include_dir = "0.7"
+# guard-self-route-hardlink: file identity (volume serial + file index on
+# Windows, device+inode on Unix) so the guard recognises a hard link to
+# itself. Already in Cargo.lock via walkdir, so this compiles nothing new.
+same-file = "1"
 ureq = "2"
 libc = "0.2"
 similar = "2"

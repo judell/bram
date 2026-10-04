@@ -3820,6 +3820,11 @@ fn emit_talk_session_changed_for_provider<R: tauri::Runtime>(
     app: &AppHandle<R>,
     provider: Option<SessionProvider>,
 ) {
+    // provider-session-counterparts: a fresh launch after a switch pairs once
+    // its session has an id.
+    if let Some(p) = provider {
+        resolve_pending_pair(app, p);
+    }
     let correlation_id = next_talk_session_correlation_id();
     let at_host_ms = unix_now_ms();
     let mut payload = serde_json::json!({
@@ -17431,6 +17436,7 @@ fn pty_spawn(
         let fallback = launch.fallback;
         launch_agent_command(AgentLaunch {
             app: app.clone(),
+            generation: begin_agent_launch(),
             provider,
             command,
             source: "autostart",
@@ -19125,6 +19131,26 @@ const AGENT_LAUNCH_CONFIRM_POLL_MS: u64 = 100;
 // older than the confirm window plus this slack counts as cleared anyway.
 static AGENT_LAUNCH_PENDING_SINCE_MS: std::sync::atomic::AtomicI64 =
     std::sync::atomic::AtomicI64::new(0);
+// Which launch generation armed the pending mark: a superseded launch's
+// guard must not clear the mark a newer launch set.
+static AGENT_LAUNCH_PENDING_GEN: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+// provider-session-counterparts (found driving it, 2026-10-04): a launch can
+// be replaced before it is confirmed (a Sessions-tab resume, then a header
+// switch 6.5 s later). The switch's interrupt then ended the older agent, and
+// the older routine reported `launch-exited` for a launch that hadn't failed.
+// Every launching site takes a generation BEFORE it writes its interrupts;
+// a routine whose generation is no longer the latest stops quietly.
+static AGENT_LAUNCH_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn begin_agent_launch() -> u64 {
+    AGENT_LAUNCH_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+}
+
+fn agent_launch_is_current(generation: u64) -> bool {
+    AGENT_LAUNCH_GENERATION.load(std::sync::atomic::Ordering::SeqCst) == generation
+}
 const AGENT_LAUNCH_PENDING_SLACK_MS: i64 = 2000;
 
 fn launch_pending_holds(since_ms: i64, now_ms: i64) -> bool {
@@ -19139,18 +19165,21 @@ fn agent_launch_pending() -> bool {
     )
 }
 
-struct LaunchPendingGuard;
+struct LaunchPendingGuard(u64);
 
 impl LaunchPendingGuard {
-    fn arm() -> Self {
-        AGENT_LAUNCH_PENDING_SINCE_MS.store(unix_now_ms(), std::sync::atomic::Ordering::Relaxed);
-        LaunchPendingGuard
+    fn arm(generation: u64) -> Self {
+        AGENT_LAUNCH_PENDING_GEN.store(generation, std::sync::atomic::Ordering::SeqCst);
+        AGENT_LAUNCH_PENDING_SINCE_MS.store(unix_now_ms(), std::sync::atomic::Ordering::SeqCst);
+        LaunchPendingGuard(generation)
     }
 }
 
 impl Drop for LaunchPendingGuard {
     fn drop(&mut self) {
-        AGENT_LAUNCH_PENDING_SINCE_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+        if AGENT_LAUNCH_PENDING_GEN.load(std::sync::atomic::Ordering::SeqCst) == self.0 {
+            AGENT_LAUNCH_PENDING_SINCE_MS.store(0, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 }
 // Pause between typing the first command and its Enter (see
@@ -19208,10 +19237,14 @@ enum LaunchPhase {
     Written,
     // The gate timed out; nothing was written.
     Timeout,
+    // The routine confirmed the agent is up (before the first command).
+    Confirmed,
 }
 
 struct AgentLaunch<R: tauri::Runtime> {
     app: AppHandle<R>,
+    // From begin_agent_launch(), taken before the site's interrupts.
+    generation: u64,
     provider: &'static str,
     command: String,
     // autostart | switch | reload | new-session
@@ -19277,11 +19310,18 @@ fn run_agent_launch<R: tauri::Runtime>(l: AgentLaunch<R>) {
             )),
         }
     }
+    if !agent_launch_is_current(l.generation) {
+        trace(format!(
+            "op=launch-superseded provider={} source={} stage=before-write",
+            l.provider, l.source
+        ));
+        return;
+    }
     (l.hook)(app, LaunchPhase::BeforeWrite);
     // Held pane sends wait for this to drop: after an exit they are then
     // refused (the shell is at its prompt) and handed back; after a confirm,
     // the first command is typed first and they flush behind it.
-    let _pending = LaunchPendingGuard::arm();
+    let _pending = LaunchPendingGuard::arm(l.generation);
     let written_from = unix_now_ms();
     if let Err(error) = pty_write_internal(app, &state, &format!("{}\r", l.command), l.caller_hint)
     {
@@ -19296,6 +19336,15 @@ fn run_agent_launch<R: tauri::Runtime>(l: AgentLaunch<R>) {
     (l.hook)(app, LaunchPhase::Written);
     loop {
         let elapsed = unix_now_ms().saturating_sub(written_from);
+        // Checked before the shell's state: a newer launch's interrupt is what
+        // ends this agent, and its prompt must not read as this one's exit.
+        if !agent_launch_is_current(l.generation) {
+            trace(format!(
+                "op=launch-superseded provider={} source={} stage=confirm after_ms={}",
+                l.provider, l.source, elapsed
+            ));
+            return;
+        }
         match launch_confirm_state(shell_foreground(), written_from) {
             LaunchConfirm::Exited(status) => {
                 let raw = match pty_tail_cell().lock() {
@@ -19328,6 +19377,7 @@ fn run_agent_launch<R: tauri::Runtime>(l: AgentLaunch<R>) {
                     l.provider, l.source, via, exec_seen
                 ));
                 emit_launch_outcome(&l, "confirmed", None, "");
+                (l.hook)(app, LaunchPhase::Confirmed);
                 break;
             }
         }
@@ -19486,6 +19536,38 @@ fn switch_agent(
     } else {
         None
     };
+    // provider-session-counterparts: the session being left, and its partner
+    // on the target side. A partner whose file is gone is skipped, and the
+    // switch falls back to today's order.
+    let target_provider = if provider_key == "codex" {
+        SessionProvider::Codex
+    } else {
+        SessionProvider::Claude
+    };
+    let leaving = current_provider(&app)
+        .filter(|p| *p != target_provider)
+        .and_then(|p| live_session_id(&app, p).map(|sid| (p, sid)));
+    let partner = leaving.as_ref().and_then(|(p, sid)| {
+        let conn = worklist_state_open(&app)?;
+        let id = worklist_state::session_partner(&conn, session_provider_label(*p), sid)
+            .ok()
+            .flatten()?;
+        if session_path_for_id(&app, target_provider, &id).is_some() {
+            Some(id)
+        } else {
+            if bram_trace_enabled() {
+                append_bram_trace_line(
+                    &app,
+                    "agent-switch",
+                    &format!(
+                        "op=partner-missing provider={} session={}",
+                        provider_key, id
+                    ),
+                );
+            }
+            None
+        }
+    });
     let pin = if provider_key == "codex" {
         usable_codex_reload_target(&app)
     } else {
@@ -19497,6 +19579,7 @@ fn switch_agent(
         pin.as_ref().map(|target| target.id.as_str()),
         pending.as_ref(),
         pending_target.as_deref(),
+        partner.as_deref(),
     );
     if !has_session && bram_trace_enabled() {
         append_bram_trace_line(
@@ -19508,6 +19591,17 @@ fn switch_agent(
             ),
         );
     }
+    let resume_reason: &'static str = if pending_disposition != "none" {
+        pending_disposition
+    } else if partner.is_some() {
+        "partner"
+    } else if pin.is_some() {
+        "pin"
+    } else if has_session {
+        "latest"
+    } else {
+        "fresh"
+    };
     let args = configured_agent_args(&app);
     let command = if args.trim().is_empty() {
         base_command
@@ -19519,7 +19613,7 @@ fn switch_agent(
             &app,
             "agent-switch",
             &format!(
-                "op=start provider={} command={} pending={} requested_sid={} resume_sid={}",
+                "op=start provider={} command={} pending={} requested_sid={} resume_sid={} resume_reason={}",
                 provider_key,
                 command,
                 pending_disposition,
@@ -19533,12 +19627,30 @@ fn switch_agent(
                 } else {
                     pending_target
                         .as_deref()
+                        .or(partner.as_deref())
                         .or_else(|| pin.as_ref().map(|target| target.id.as_str()))
                         .unwrap_or("latest-or-fresh")
-                }
+                },
+                resume_reason
             ),
         );
     }
+    // provider-session-counterparts: the session this launch resumes, when
+    // it is known now; a fresh launch's session gets its id only once its
+    // file appears, so that pair waits for the id to change (PENDING_PAIR).
+    let target_sid: Option<String> = match resume_reason {
+        "resume-pending" => pending_target.clone(),
+        "partner" => partner.clone(),
+        "pin" => pin.as_ref().map(|t| t.id.clone()),
+        "latest" => live_session_id(&app, target_provider),
+        _ => None,
+    };
+    let pair_from = leaving.clone();
+    let pair_baseline = if target_sid.is_none() {
+        live_session_id(&app, target_provider)
+    } else {
+        None
+    };
     // The boot hold is NOT armed here, deliberately (#305, reverting the arm
     // added by 597935b): its release condition is boot bytes, and Codex emits
     // none it accepts, so holding made every Codex switch swallow pane sends
@@ -19549,6 +19661,7 @@ fn switch_agent(
     // the message box whenever the shell's own marker says it is at its
     // prompt, which needs nothing from either provider. (This comment used to
     // defer to issue-305-boot-hold-unsatisfiable, which was dropped.)
+    let generation = begin_agent_launch();
     clear_stale_terminal_input_for_switch(&app, &state, "agent-switch");
     // Dismiss any open agent menu/picker first (e.g. a Claude `/resume` list
     // left open by a prior first-command). Claude exits only on two Ctrl+C at
@@ -19576,6 +19689,7 @@ fn switch_agent(
     };
     launch_agent_command(AgentLaunch {
         app: app.clone(),
+        generation,
         provider: provider_key,
         command,
         source: "switch",
@@ -19584,6 +19698,28 @@ fn switch_agent(
         gate: true,
         first_command: true,
         hook: Box::new(move |app, phase| {
+            if phase == LaunchPhase::Confirmed {
+                if let Some(from) = pair_from.as_ref() {
+                    match target_sid.as_ref() {
+                        Some(id) => {
+                            record_pair_for(app, from, &(target_provider, id.clone()), "switch")
+                        }
+                        None => {
+                            let mut guard = match PENDING_PAIR.lock() {
+                                Ok(g) => g,
+                                Err(e) => e.into_inner(),
+                            };
+                            *guard = Some(PendingPair {
+                                from: from.clone(),
+                                to: target_provider,
+                                baseline: pair_baseline.clone(),
+                                at_ms: unix_now_ms(),
+                            });
+                        }
+                    }
+                }
+                return;
+            }
             if phase != LaunchPhase::Written {
                 return;
             }
@@ -19618,12 +19754,90 @@ fn switch_agent(
 // was interrupted before creating a rollout, there is nothing new to resume:
 // launch fresh again, keeping the title for its first confirmed session. Never
 // silently turn that request into `resume <previous>` or `resume --last`.
+// provider-session-counterparts: record that two sessions of different
+// providers go together (worklist_state::record_session_pair). Called once a
+// switch's launch is confirmed, or when an explicit cross-provider resume is.
+fn record_pair_for<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    a: &(SessionProvider, String),
+    b: &(SessionProvider, String),
+    source: &str,
+) {
+    if a.0 == b.0 {
+        return;
+    }
+    let (claude, codex) = match a.0 {
+        SessionProvider::Claude => (a.1.as_str(), b.1.as_str()),
+        SessionProvider::Codex => (b.1.as_str(), a.1.as_str()),
+    };
+    let Some(conn) = worklist_state_open(app) else {
+        return;
+    };
+    let result = worklist_state::record_session_pair(&conn, claude, codex, unix_now_ms());
+    if bram_trace_enabled() {
+        let outcome = match &result {
+            Ok(true) => "ok".to_string(),
+            Ok(false) => "unchanged".to_string(),
+            Err(e) => format!("error detail={}", e),
+        };
+        append_bram_trace_line(
+            app,
+            "state-mirror",
+            &format!(
+                "op=pair-stamp claude={} codex={} source={} result={}",
+                claude, codex, source, outcome
+            ),
+        );
+    }
+}
+
+// A switch whose target session isn't known at launch (a fresh launch: the
+// new session has no id until its file appears) pairs when the provider's
+// live session first differs from what it was before the switch.
+struct PendingPair {
+    from: (SessionProvider, String),
+    to: SessionProvider,
+    baseline: Option<String>,
+    at_ms: i64,
+}
+
+static PENDING_PAIR: Mutex<Option<PendingPair>> = Mutex::new(None);
+const PENDING_PAIR_TTL_MS: i64 = 15 * 60 * 1000;
+
+fn resolve_pending_pair<R: tauri::Runtime>(app: &AppHandle<R>, provider: SessionProvider) {
+    let mut guard = match PENDING_PAIR.lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    let Some(pending) = guard.as_ref() else {
+        return;
+    };
+    if pending.to != provider {
+        return;
+    }
+    if unix_now_ms().saturating_sub(pending.at_ms) > PENDING_PAIR_TTL_MS {
+        *guard = None;
+        return;
+    }
+    let Some(live) = live_session_id(app, provider) else {
+        return;
+    };
+    if pending.baseline.as_deref() == Some(live.as_str()) {
+        return;
+    }
+    let from = pending.from.clone();
+    *guard = None;
+    drop(guard);
+    record_pair_for(app, &from, &(provider, live), "switch-new-session");
+}
+
 fn provider_switch_launch(
     provider: &str,
     has_session: bool,
     pinned_id: Option<&str>,
     pending: Option<&PendingSessionTitle>,
     pending_target: Option<&str>,
+    partner_id: Option<&str>,
 ) -> (String, &'static str) {
     if provider == "codex" {
         if let Some(rec) = pending.filter(|rec| rec.provider == "codex") {
@@ -19638,6 +19852,14 @@ fn provider_switch_launch(
                 ),
             };
         }
+    }
+    // provider-session-counterparts: the session that goes with the one being
+    // left outranks the Codex pin and "most recent". A pending named session
+    // (above) still wins: the user just asked for it.
+    if let Some(id) = partner_id {
+        return (agent_resume_command(provider, id).unwrap(), "none");
+    }
+    if provider == "codex" {
         if let Some(id) = pinned_id {
             return (agent_resume_command(provider, id).unwrap(), "none");
         }
@@ -19947,6 +20169,11 @@ fn reload_agent_session(
     };
     clear_pending_session_title_for_resume(&app, session_provider, &session, "session-reload");
     cancel_agent_boot_hold(&app, "session-reload");
+    // provider-session-counterparts: an explicit resume always wins over a
+    // pairing, and a cross-provider one re-pairs with the session being left.
+    let leaving = current_provider(&app)
+        .filter(|p| *p != session_provider)
+        .and_then(|p| live_session_id(&app, p).map(|sid| (p, sid)));
     // agent-launch-shared-routine precondition: the session named must still
     // exist. Resuming a deleted one makes the CLI print an error and exit,
     // leaving a bare shell; start the provider fresh instead, as the switch
@@ -19982,6 +20209,7 @@ fn reload_agent_session(
     if provider_key == "codex" && session_exists {
         pin_codex_reload_target(&app, &session)?;
     }
+    let generation = begin_agent_launch();
     clear_stale_terminal_input_for_switch(&app, &state, "agent-reload");
     // Dismiss any open agent menu/picker first so both Ctrl+C land on an empty
     // prompt and the agent actually exits (see switch_agent for the full
@@ -19998,6 +20226,7 @@ fn reload_agent_session(
     // path #314 left on a fixed 1.2 s sleep; it now gates like the switch.
     launch_agent_command(AgentLaunch {
         app: app.clone(),
+        generation,
         provider: provider_key,
         command,
         source: "reload",
@@ -20006,6 +20235,17 @@ fn reload_agent_session(
         gate: true,
         first_command: false,
         hook: Box::new(move |app, phase| {
+            if phase == LaunchPhase::Confirmed {
+                if let (Some(from), true) = (leaving.as_ref(), session_exists) {
+                    record_pair_for(
+                        app,
+                        from,
+                        &(session_provider, session.clone()),
+                        "explicit-resume",
+                    );
+                }
+                return;
+            }
             if phase != LaunchPhase::Written {
                 return;
             }
@@ -20068,6 +20308,7 @@ fn start_agent_fresh(
             ),
         );
     }
+    let generation = begin_agent_launch();
     clear_stale_terminal_input_for_switch(&app, &state, "agent-start-fresh");
     pty_write_internal(&app, &state, "\x1b", "agent-fresh-escape")?;
     std::thread::sleep(std::time::Duration::from_millis(AGENT_INTERRUPT_GAP_MS));
@@ -20081,6 +20322,7 @@ fn start_agent_fresh(
     };
     launch_agent_command(AgentLaunch {
         app: app.clone(),
+        generation,
         provider: provider_key,
         command,
         source: "start-fresh",
@@ -20441,7 +20683,7 @@ mod pending_session_title_tests {
         );
         // Switching away must not consume a different provider's request.
         assert_eq!(
-            provider_switch_launch("claude", true, None, Some(&rec), None),
+            provider_switch_launch("claude", true, None, Some(&rec), None, None),
             ("claude --continue".into(), "none")
         );
         assert!(!pending_session_title_abandoned_by_resume(
@@ -20452,7 +20694,7 @@ mod pending_session_title_tests {
         // Both a persisted old pin and the --last fallback used to defeat New.
         for pin in [Some("old-codex"), None] {
             assert_eq!(
-                provider_switch_launch("codex", true, pin, Some(&rec), None),
+                provider_switch_launch("codex", true, pin, Some(&rec), None, None),
                 ("codex".into(), "restart-pending")
             );
         }
@@ -20479,7 +20721,8 @@ mod pending_session_title_tests {
                 true,
                 Some("old-codex"),
                 Some(&rec),
-                Some("fresh-codex")
+                Some("fresh-codex"),
+                None
             ),
             ("codex resume fresh-codex".into(), "resume-pending")
         );
@@ -20563,16 +20806,16 @@ mod pending_session_title_tests {
             ("codex", "codex resume --last"),
         ] {
             assert_eq!(
-                provider_switch_launch(provider, true, None, None, None).0,
+                provider_switch_launch(provider, true, None, None, None, None).0,
                 expected
             );
             assert_eq!(
-                provider_switch_launch(provider, false, None, None, None).0,
+                provider_switch_launch(provider, false, None, None, None, None).0,
                 provider
             );
         }
         assert_eq!(
-            provider_switch_launch("codex", true, Some("pinned"), None, None).0,
+            provider_switch_launch("codex", true, Some("pinned"), None, None, None).0,
             "codex resume pinned"
         );
         let rec = PendingSessionTitle {
@@ -20593,8 +20836,35 @@ mod pending_session_title_tests {
             "reserved"
         ));
         assert_eq!(
-            provider_switch_launch("codex", true, Some("old-codex"), Some(&rec), None).0,
+            provider_switch_launch("codex", true, Some("old-codex"), Some(&rec), None, None).0,
             "codex resume old-codex"
+        );
+    }
+
+    // provider-session-counterparts: the resume order on a header switch is
+    // pending named session, then partner, then the Codex pin, then most
+    // recent.
+    #[test]
+    fn switch_resume_order_puts_the_partner_after_pending_and_before_pin() {
+        assert_eq!(
+            provider_switch_launch("claude", true, None, None, None, Some("c-partner")).0,
+            "claude --resume c-partner"
+        );
+        assert_eq!(
+            provider_switch_launch("codex", true, Some("pinned"), None, None, Some("x-partner")).0,
+            "codex resume x-partner"
+        );
+        let rec = pending_codex();
+        assert_eq!(
+            provider_switch_launch(
+                "codex",
+                true,
+                Some("pinned"),
+                Some(&rec),
+                Some("named"),
+                Some("x-partner")
+            ),
+            ("codex resume named".to_string(), "resume-pending")
         );
     }
 
@@ -20756,6 +21026,7 @@ fn create_new_session(
     // typed blind after a fixed settle any more (new-session-handoff-race):
     // hold pane sends until the new CLI shows boot bytes, and gate the launch
     // command itself on shell-prompt evidence in a spawned waiter below.
+    let generation = begin_agent_launch();
     arm_agent_boot_hold(&app, provider_key);
     clear_stale_terminal_input_for_switch(&app, &state, "agent-new-session");
     pty_write_internal(&app, &state, "\x1b", "agent-new-escape")?;
@@ -20775,6 +21046,7 @@ fn create_new_session(
     // its own TTL.
     launch_agent_command(AgentLaunch {
         app: app.clone(),
+        generation,
         provider: provider_key,
         command: launch,
         source: "new-session",
@@ -20790,6 +21062,7 @@ fn create_new_session(
             LaunchPhase::Written => {
                 schedule_agent_switch_refresh(app.clone(), provider_key, "new-session")
             }
+            LaunchPhase::Confirmed => {}
         }),
     });
     Ok(())

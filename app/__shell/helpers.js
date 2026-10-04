@@ -2247,20 +2247,28 @@ window.__bramPlanLine = function (board) {
 };
 // plan-recommends-feedback-in-one-click: a feedback step's full text goes in
 // the tooltip, so the user reads exactly what one click will send.
+// plan-feedback-shown-in-row-not-tooltip: the closing lines help the user
+// decide, and are not part of the message, so they sit under a rule in
+// italics, one short line per sentence. XMLUI's Tooltip has no width limit, so a long
+// paragraph would run off the edge instead of wrapping (8045e8f).
 window.__bramPlanTooltip = function (board) {
   var plan = board && board.plan;
   var summary = String((plan && plan.summary) || "").trim();
-  var feedback = __bramPlanSteps(board)
+  var steps = __bramPlanSteps(board);
+  var feedback = steps
     .filter(function (s) { return s.verb === "feedback"; })
     .map(function (s) {
       return "**Feedback to " + (s.ids || []).join(", ") + ":**\n\n> " + String(s.text || "").split("\n").join("\n> ");
     });
-  var how = "Drops happen at once, like the Drop button. Commits go to the agent, like the Commit button. " +
-    "Feedback is sent to the agent as if you had ticked those rows and typed it.";
+  // What helps decide (Jon, 2026-10-04): it's all or nothing, and the
+  // feedback goes as written. Not the mechanics of each step.
+  var decide = ["*One click does all of it.*", "*Skip it if you disagree with any step" +
+    (feedback.length ? " or would word the feedback differently" : "") + "; × dismisses it.*"];
   var parts = [];
   if (summary) parts.push(summary);
   parts = parts.concat(feedback);
-  parts.push(how);
+  parts.push("---");
+  parts.push(decide.join("  \n"));
   return parts.join("\n\n");
 };
 // Runs the plan through the gate buttons' own paths, for exactly the named

@@ -162,7 +162,25 @@
            through window.__bramSuggestSetting so the defaults (true/true/false)
            live in one place. https://www.xmlui.org/docs/reference/components/Checkbox -->
       <VStack gap="$space-2">
-        <Heading level="h3">Suggest a fresh session</Heading>
+        <!-- settings-info-says-storage-and-default: the same heading-with-info
+             chip as the other cards, so this card's settings say their kind
+             and default too. -->
+        <HStack
+          width="fit-content"
+          gap="$space-1"
+          verticalAlignment="center"
+          paddingHorizontal="$space-2"
+          paddingVertical="$space-1"
+          borderRadius="$borderRadius"
+          backgroundColor="$color-surface-100">
+          <Button
+            icon="info"
+            size="xs"
+            variant="ghost"
+            tooltip="About Suggest a fresh session"
+            onClick="infoTitle = 'Suggest a fresh session'; infoBody = window.settingsInfoBodies.sessions; settingInfoDialog.open()" />
+          <Heading level="h3">Suggest a fresh session</Heading>
+        </HStack>
         <Text
           color="$textColor-secondary"
           fontSize="$fontSize-sm"

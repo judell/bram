@@ -2632,34 +2632,19 @@ window.__bramSaveSplitterSize = function (key, sizes) {
 // Body strings for the Settings tab info dialogs. Lifted out of
 // Settings.xmlui to keep the markup readable; the dialog itself
 // stays inline in Settings since it's a single consumer.
+// settings-info-says-storage-and-default: each setting's subsection ends with
+// its kind (project .bram.json, or per-user on this machine) and its default.
+// The project defaults are pinned by settings_default_view_tests in lib.rs;
+// change a default there and here together.
 window.settingsInfoBodies = {
   shell:
-    "## Agent\n\n" +
-    "The default agent used by agent-scoped launch choices and as the fallback when no valid last-active Bram session exists.\n\n" +
-    "## On Bram launch\n\n" +
-    "**Resume selected agent's most recent session** uses the Agent selection above.\n\n" +
-    "**Resume most-recently-active agent's session** reopens the exact Claude or Codex session Bram was actually using before shutdown.\n\n" +
-    "**Start a new session** starts the selected Agent fresh.\n\n" +
-    "## Advanced\n\n" +
-    "Launch arguments are extra CLI flags. First command is sent to the agent's TUI after startup. Both apply whichever startup choice is used.",
+    "## Agent\n\nThe default agent used by agent-scoped launch choices and as the fallback when no valid last-active Bram session exists.\n\n*Project setting, saved in `.bram.json` as `shell.agent` and shared with everyone who works in this repo. Default: Claude.*\n\n## On Bram launch\n\n**Resume selected agent's most recent session** uses the Agent selection above.\n\n**Resume most-recently-active agent's session** reopens the exact Claude or Codex session Bram was actually using before shutdown.\n\n**Start a new session** starts the selected Agent fresh.\n\n*Project setting, saved in `.bram.json` as `shell.startupPolicy` and shared with everyone who works in this repo. Default: Resume selected agent's most recent session.*\n\n## Launch arguments\n\nExtra CLI flags for the agent. They apply whichever startup choice is used.\n\n*Project setting, saved in `.bram.json` as `shell.args` and shared with everyone who works in this repo. Default: empty.*\n\n## First command\n\nSent to the agent's TUI after startup, whichever startup choice is used.\n\n*Project setting, saved in `.bram.json` as `shell.firstCommand` and shared with everyone who works in this repo. Default: empty.*",
+  sessions:
+    "The agent can offer to continue a new line of work in a fresh session. It always asks first, in one line, and at most once per topic; saying no keeps the work here.\n\n## When the agent is about to propose a new worklist item\n\n*Project setting, saved in `.bram.json` as `sessions.suggestOnNewItem` and shared with everyone who works in this repo. Default: on.*\n\n## When the agent is about to file a new issue\n\n*Project setting, saved in `.bram.json` as `sessions.suggestOnNewIssue` and shared with everyone who works in this repo. Default: on.*\n\n## When the conversation shifts to a significantly different topic\n\nThe agent judges when a topic has shifted, so this one asks more often than the other two.\n\n*Project setting, saved in `.bram.json` as `sessions.suggestOnTopicShift` and shared with everyone who works in this repo. Default: off.*",
   batchCommitActions:
-    "## Mirror Worklist lifecycle to GitHub issues\n\n" +
-    "Post Worklist lifecycle comments to linked GitHub issues.",
+    "## Mirror Worklist lifecycle to GitHub issues\n\nPost Worklist lifecycle comments to linked GitHub issues.\n\n*Project setting, saved in `.bram.json` as `mirrorWorklistLifecycleToIssue` and shared with everyone who works in this repo. Default: off.*",
   ui:
-    "## Show target app\n\n" +
-    "Show the embedded target-app preview pane. Usually off.\n\n" +
-    "## Terminal open at startup\n\n" +
-    "Open the terminal pane when Bram launches. Off by default: the agent pane's Worklist and Transcript are the main surface. The toolbar's terminal button still opens and closes it for the current session. Applies to every Bram window on this machine.\n\n" +
-    "## Agent-pane hot-reload\n\n" +
-    "Auto-reload the agent pane as you edit Bram's own source. For developing Bram.\n\n" +
-    "## Show tips in the footer\n\n" +
-    "Show rotating tips in the footer.\n\n" +
-    "## Soft beep on menus and turn completion\n\n" +
-    "Play a soft beep when a permission menu appears or a turn finishes.\n\n" +
-    "## Dismissed tips return after\n\n" +
-    "How long a dismissed tip stays hidden before showing again.\n\n" +
-    "## Search badges start all on\n\n" +
-    "Whether the Search tab opens with all facet badges selected, or none.",
+    "## Show target app\n\nShow the embedded target-app preview pane. Usually off.\n\n*Project setting, saved in `.bram.json` as `ui.showTargetApp` and shared with everyone who works in this repo. Default: off.*\n\n## Terminal open at startup\n\nOpen the terminal pane when Bram launches. The agent pane's Worklist and Transcript are the main surface; the toolbar's terminal button still opens and closes it for the current session.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: off.*\n\n## Agent-pane hot-reload\n\nAuto-reload the agent pane as you edit Bram's own source. For developing Bram.\n\n*Project setting, saved in `.bram.json` as `ui.toolsPaneHotReload` and shared with everyone who works in this repo. Default: off.*\n\n## Show tips in the footer\n\nShow rotating tips in the footer.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: on.*\n\n## Soft beep on menus and turn completion\n\nPlay a soft beep when a permission menu appears or a turn finishes.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: on.*\n\n## Dismissed tips return after\n\nHow long a dismissed tip stays hidden before showing again.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: 1 week.*\n\n## Search badges start all on\n\nWhether the Search tab opens with all facet badges selected, or none.\n\n*Your setting, saved on this machine for every Bram window, not in the repo. Default: on.*",
   ai:
     "## Tool Descriptions\n\n" +
     "The one-line intent header on Transcript tool rows.\n\n" +
@@ -2675,26 +2660,11 @@ window.settingsInfoBodies = {
     "Credentials are redacted heuristically, not guaranteed. If Claude Code " +
     "also accepts the key, run `/config` → turn off \"Use custom API key\" " +
     "to keep it Bram-only.\n\n" +
-    "Stored in `.bram.json` as `ai.describeCommands`.",
+    "*Project setting, saved in `.bram.json` as `ai.describeCommands` and shared with everyone who works in this repo. Default: off.*",
   search:
-    "## Commit depth\n\n" +
-    "How many of the newest commits the search index covers, messages and " +
-    "diffs (100–20,000, default 2,000); deeper indexing lengthens the next " +
-    "cold rebuild proportionally.\n\n" +
-    "## Issue limit\n\n" +
-    "How many forge issues the Issues tab and search index fetch " +
-    "(50–2,000, default 500).",
+    "## Commit depth\n\nHow many of the newest commits the search index covers, messages and diffs (100\u201320,000); deeper indexing lengthens the next cold rebuild proportionally.\n\n*Project setting, saved in `.bram.json` as `search.commitDepth` and shared with everyone who works in this repo. Default: 2,000.*\n\n## Issue limit\n\nHow many forge issues the Issues tab and search index fetch (50\u20132,000).\n\n*Project setting, saved in `.bram.json` as `search.issueLimit` and shared with everyone who works in this repo. Default: 500.*",
   traces:
-    "## Tracing enabled\n\n" +
-    "Master switch for writes to `bram-trace.log`. **On by default** — " +
-    "switch it off here to silence traces for this project. `BRAM_TRACE` " +
-    "in the environment overrides either way.\n\n" +
-    "## Inspector trace tap\n\n" +
-    "Forward XMLUI Inspector events into the trace log. Requires Tracing " +
-    "enabled.\n\n" +
-    "## Keep raw traces for (days)\n\n" +
-    "Raw archives older than this are sanitized and gzipped at startup " +
-    "(1–3650, default 14). Compressed history is kept indefinitely.",
+    "## Tracing enabled\n\nMaster switch for writes to `bram-trace.log`. Switch it off here to silence traces for this project. `BRAM_TRACE` in the environment overrides either way.\n\n*Project setting, saved in `.bram.json` as `traces.enabled` and shared with everyone who works in this repo. Default: on.*\n\n## Inspector trace tap\n\nForward XMLUI Inspector events into the trace log. Requires Tracing enabled.\n\n*Project setting, saved in `.bram.json` as `traces.inspectorTap` and shared with everyone who works in this repo. Default: off.*\n\n## Keep raw traces for (days)\n\nRaw archives older than this are sanitized and gzipped at startup (1\u20133650). Compressed history is kept indefinitely.\n\n*Project setting, saved in `.bram.json` as `traces.archiveAfterDays` and shared with everyone who works in this repo. Default: 14.*",
 };
 
 // Settings.xmlui owns its explicit-save drafts with scoped Forms. This is the

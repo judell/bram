@@ -20811,6 +20811,41 @@ mod agent_startup_policy_tests {
         assert_eq!(view["sessions"]["suggestOnTopicShift"], true);
         assert_eq!(view["ui"]["showTargetApp"], true);
     }
+
+    // settings-info-says-storage-and-default: every project default a repo
+    // with no .bram.json gets. The Settings tab's info modals state each one
+    // (window.settingsInfoBodies in app/__shell/helpers.js), so a default
+    // changed here must be changed there too.
+    #[test]
+    fn project_defaults_match_the_settings_info_modals() {
+        let expected = serde_json::json!({
+            "mirrorWorklistLifecycleToIssue": false,
+            "shell": {
+                "agent": "claude",
+                "args": "",
+                "firstCommand": "",
+                "startupPolicy": "agentRecent",
+                "continueLast": true
+            },
+            "worklist": { "batchCommitActions": false },
+            "ui": { "showTargetApp": false, "toolsPaneHotReload": false },
+            "sessions": {
+                "suggestOnNewItem": true,
+                "suggestOnNewIssue": true,
+                "suggestOnTopicShift": false
+            },
+            "traces": { "enabled": true, "inspectorTap": false, "archiveAfterDays": 14 },
+            "menus": { "parseAndDisplay": false },
+            "ai": { "describeCommands": false },
+            "search": { "commitDepth": 2000, "issueLimit": 500 }
+        });
+        assert_eq!(
+            settings_view_from_config(None),
+            expected,
+            "a project default changed: update its line in window.settingsInfoBodies \
+             (app/__shell/helpers.js) to match, then this expectation"
+        );
+    }
 }
 
 fn trace_agent_pty_step<R: tauri::Runtime>(

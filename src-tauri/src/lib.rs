@@ -18987,6 +18987,21 @@ fn sanitize_pty_turn_payload(data: &str) -> String {
         .collect()
 }
 
+// The bytes that clear whatever sits in the agent's composer before a turn
+// payload goes in. Escape first, then Ctrl-U: Ctrl-U clears a traditional
+// readline composer, while Claude Code's Ink/React input ignores Ctrl-U and
+// treats Escape as "discard current input". Belt and suspenders, because
+// `shell.agent` can point at either shape.
+//
+// windows-send-clear-loses-text: ONE constant for every platform. The Windows
+// branch used to send "\x15" alone — the key the line above says CC ignores —
+// so the clear did not clear and left pre-existing composer text to fuse with
+// the payload. Worse, it destroyed part of what it left: observed 2026-10-04,
+// a 76-byte stranded send reached the agent 19 characters short, with CC's
+// "Ctrl+Y to paste deleted text" hint in the settle frame. The two branches
+// drifted because the Escape was added here in a later fix and never mirrored.
+const COMPOSER_CLEAR: &str = "\x1b\x15";
+
 // split-paste-cr-and-submit-nudge: NO trailing CR here. The paste
 // (with terminator) and the submitting CR ride separate PTY writes —
 // a single burst let the CLI's paste parser coalesce the CR into paste
@@ -18994,7 +19009,7 @@ fn sanitize_pty_turn_payload(data: &str) -> String {
 // the payload sat rendered-but-unsubmitted in the composer for 61s
 // until a manual Enter; Knorrasaurus/pa11-campaign-app#7).
 fn bracketed_paste_turn_payload(data: &str) -> String {
-    format!("\x1b\x15\x1b[200~{}\x1b[201~", data)
+    format!("{}\x1b[200~{}\x1b[201~", COMPOSER_CLEAR, data)
 }
 
 // The raw PTY injection for a turn payload. Shared by the normal send
@@ -19005,16 +19020,18 @@ fn inject_turn_payload<R: tauri::Runtime>(
     data: &str,
 ) -> Result<(), String> {
     if cfg!(windows) {
-        pty_write_internal(app, state, "\x15", "pty-intent-toTurn-windows-clear")?;
+        // The payload rides raw rather than bracketed here (#300), but the
+        // clear is the same on every platform — see COMPOSER_CLEAR.
+        pty_write_internal(
+            app,
+            state,
+            COMPOSER_CLEAR,
+            "pty-intent-toTurn-windows-clear",
+        )?;
         pty_write_internal(app, state, data, "pty-intent-toTurn-windows-payload")?;
         std::thread::sleep(std::time::Duration::from_millis(200));
         pty_write_internal(app, state, "\r", "pty-intent-toTurn-windows-submit")
     } else {
-        // Ctrl-U for traditional readline shells; \x1b (Escape) for CC's
-        // Ink/React-based input which ignores Ctrl-U but treats Escape
-        // as "discard current input." Belt and suspenders so partial
-        // text typed into CC's input doesn't get concatenated with our
-        // bracketed paste.
         let wrapped = bracketed_paste_turn_payload(data);
         pty_write_internal(app, state, &wrapped, "pty-intent-toTurn")?;
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -58040,6 +58057,25 @@ mod session_turn_tests {
 
         assert!(!inner.contains("\x1b[201~"));
         assert_eq!(wrapped.matches("\x1b[201~").count(), 1);
+    }
+
+    // windows-send-clear-loses-text: the two platforms must agree on the
+    // clear. They drifted once — Windows sent Ctrl-U alone, the key Claude
+    // Code's Ink input ignores — and the result was a composer that did not
+    // clear and user text truncated on its way to the agent. Pin both the
+    // bytes and the fact that the bracketed path is built from the same
+    // constant the Windows path writes.
+    #[test]
+    fn composer_clear_is_escape_then_ctrl_u_on_every_platform() {
+        assert_eq!(
+            super::COMPOSER_CLEAR,
+            "\x1b\x15",
+            "Escape must precede Ctrl-U: Ink ignores Ctrl-U, readline ignores Escape"
+        );
+        assert!(
+            bracketed_paste_turn_payload("x").starts_with(super::COMPOSER_CLEAR),
+            "the bracketed paste must carry the same clear the raw path writes"
+        );
     }
 
     #[test]

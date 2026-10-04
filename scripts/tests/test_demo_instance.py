@@ -348,6 +348,29 @@ class DemoInstanceTests(unittest.TestCase):
         )
         self.assertEqual(json.loads(proc.stdout)["activeScenario"], "wrapper")
 
+    def test_process_alive_answers_live_dead_and_unqueryable(self) -> None:
+        """demo-instance-liveness-on-windows.
+
+        `os.kill(pid, 0)` has no meaning on Windows and raised an uncaught
+        OSError, so `stop` and `launch` both died before acting — `stop`
+        without stopping anything. Both branches must keep one contract:
+        True when the process exists (including when it cannot be queried),
+        False when it does not.
+        """
+        self.assertTrue(demo._process_alive(os.getpid()), "this interpreter is live")
+
+        reaped = subprocess.Popen([sys.executable, "-c", "pass"])
+        reaped.wait()
+        self.assertFalse(demo._process_alive(reaped.pid), "an exited child is not live")
+
+        self.assertFalse(demo._process_alive(999_999), "an absurd pid is not live")
+
+        if os.name == "nt":
+            # pid 4 is the Windows System process: live, and not queryable by
+            # an unprivileged caller. This is the arm that mirrors POSIX's
+            # PermissionError, and the one a naive port gets wrong.
+            self.assertTrue(demo._process_alive(4), "System is live but unqueryable")
+
     def test_windows_launcher_carries_disk_serving_and_build_guards(self) -> None:
         script = SCRIPT.with_name("demo-instance.ps1").read_text()
         self.assertIn("New-Item -ItemType Junction", script)

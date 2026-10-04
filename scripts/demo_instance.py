@@ -985,6 +985,47 @@ def assert_binary_current(binary: Path) -> None:
 
 
 def _process_alive(pid: int) -> bool:
+    """Whether `pid` names a live process.
+
+    True when the process exists, including when it exists but cannot be
+    queried; False when it does not. Both branches keep that contract, because
+    callers treat False as "safe to proceed without stopping anything".
+
+    demo-instance-liveness-on-windows: signal 0 has no meaning on Windows, so
+    the POSIX probe below raised OSError [WinError 87] there — neither of the
+    exceptions it catches — and propagated. Both `stop` and `launch` call this
+    before doing anything useful, so each died before acting; `stop` failed
+    *without stopping anything*, which read as a broken verb rather than a
+    broken check. The rest of the file already branches on os.name (the SIGKILL
+    escalation in _stop_recorded is guarded that way for the same reason); this
+    call site was missed.
+    """
+    if os.name == "nt":
+        import ctypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        ERROR_ACCESS_DENIED = 5
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            # Exists but not queryable → alive, matching the PermissionError
+            # arm below. Any other failure (notably ERROR_INVALID_PARAMETER,
+            # which is what a dead PID gives) means gone.
+            return ctypes.get_last_error() == ERROR_ACCESS_DENIED
+        try:
+            code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            # A process that exited with code 259 is indistinguishable from a
+            # running one here — the standard STILL_ACTIVE wart. For a launcher
+            # of one known binary that is not worth a WaitForSingleObject call;
+            # swap to that if a real 259 ever shows up.
+            return code.value == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

@@ -39493,8 +39493,11 @@ fn pty_tail_shows_shell_prompt_or_continuation() -> bool {
 // app/shell/claude-code-shellrc): `prompt;<status>` when the shell is back at
 // its prompt, `exec` when a command line starts. Standard OSC 133 was
 // rejected because an agent TUI could emit it itself; nothing else emits
-// 7779 with the `bram` tag. Windows (claude-code-profile.ps1) sends no
-// markers, so it stays on the prompt-shape guess.
+// 7779 with the `bram` tag. Windows sends the same two edges from
+// app/shell/claude-code-profile.ps1 (a `prompt` function carrying
+// $LASTEXITCODE, and an exec edge from a PSConsoleHostReadLine wrapper), so
+// both platforms run this path; the prompt-shape guess remains only for a
+// shell with no hook at all.
 const SHELL_MARKER_PREFIX: &[u8] = b"\x1b]7779;bram;";
 // Longest well-formed marker is `prompt;-2147483648` plus terminator; a
 // prefix with no terminator within this many bytes is not ours.
@@ -39554,8 +39557,9 @@ fn shell_markers_scan(buf: &[u8]) -> (Vec<ShellMarker>, usize) {
 }
 
 // What the shell has reported about its foreground. `seen` is false until the
-// first marker, which keeps shells without the hook (Windows, an old rc) on
-// the shape guess.
+// first marker, which keeps a shell with no hook (an old rc, a profile that
+// failed to load) on the shape guess. Both bash and PowerShell emit the
+// markers now, so this is a degradation path rather than the Windows path.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct ShellForeground {
     seen: bool,

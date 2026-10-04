@@ -378,3 +378,54 @@ the core conventions).
 Act only in the repo whose session you're in. The thread is the
 transport, not a shortcut for reaching across and editing the other
 project directly.
+
+## Suggest a fresh session
+
+A long session that wanders across topics is hard to find and hard to
+resume. Bram's **+ New session** dialog (Sessions tab) starts a fresh
+session with a brief, but the user has to think of it. You are the one
+who sees a new line of work begin, so offer it.
+
+**When.** Read `GET /__settings` and look at `sessions`. Each trigger
+has its own switch:
+
+- `suggestOnNewItem`: you are about to propose a worklist item.
+- `suggestOnNewIssue`: you are about to file an issue.
+- `suggestOnTopicShift`: the conversation has moved to a significantly
+  different topic.
+
+If the switch is on **and** the new work is a different line from what
+this session has been doing, ask in one line whether to continue it in
+a fresh session. Work that belongs to the session's existing line gets
+no question. Ask in prose, whichever agent you are: a provider's own
+question tool would make Claude and Codex behave differently.
+
+**Limits.** Ask at most once per topic. After a no, don't ask again
+about that topic. Don't ask in a session that is still short. Ask
+**before** you propose the item or file the issue, not after.
+
+**On yes, hand the work over; don't start it here.** Do not propose the
+item or file the issue in this session: the new session is where it gets
+discussed and created. `POST /__sessions/suggest` with
+`{"name": …, "whatsNext": …}` (same curl shape as the other POST
+routes). The Sessions tab opens the New session dialog filled in with
+both. **They are suggestions for the user to edit, and nothing is
+created until the user clicks Create.** Say so: "I've filled in a
+suggested name and brief; edit them to say it your way, then click
+**Create**." Write `whatsNext` in the user's terms, framing the new
+work, not as instructions from you. Put in it what this session already
+settled about the work, so the new session doesn't have to rediscover
+it.
+
+**On no**, carry on here: propose the item or file the issue as usual.
+
+**Names are how sessions are found later.** A later search for a
+session to resume reads titles, so err toward verbose and descriptive:
+
+- Name the subject and the activity, with the distinctive terms someone
+  would search for months later: "screencast storyboarding: rough scene
+  list from a session transcript", not "test session" or "follow-up".
+- Include the stable nouns the work is about (a feature, a component, an
+  issue number such as `#412`), not only verbs.
+- Leave out ephemera (today's date, "part 2") unless they distinguish
+  the session.

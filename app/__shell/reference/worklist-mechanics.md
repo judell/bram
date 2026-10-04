@@ -680,3 +680,31 @@ same agent across machines. The hostname also makes the signature
 machine-readable provenance: Awaiting You classifies a same-account
 comment by it — unsigned means the human typed it, this host's name
 means this machine's agent, any other means your agent elsewhere moved.
+
+## Reminder items
+
+One item shape carries no diff yet and is still legitimate: a
+**reminder** (placeholder) for an action already decided but gated on
+an external condition — an upstream merge, a release being cut, another
+agent's verdict — that resolves after this session ends. Chat dies with
+the session; the reminder carries it across.
+
+- **Name.** A reminder's id **begins with `reminder-`**
+  (`reminder-revendor-after-xmlui-release`); after the prefix the
+  ordinary id rules apply. When the gate is a **date**, put it at the
+  end of the id (`reminder-rerun-census-after-2026-09-19`). The rule is
+  mechanical on purpose: surfaces such as the Awaiting You inbox key on
+  the prefix. Ids are immutable, so an older reminder keeps its name;
+  the only conversion is the user Dropping it and you re-proposing it
+  verbatim under a `reminder-` id. Don't push that, but say plainly
+  that prefix-keyed surfaces won't see the old row.
+- **Shape.** `Before` states the awaited condition plus enough
+  self-contained context to act with no conversation history. `After`
+  states the action Approve green-lights and what condition would make
+  Drop the right verdict. `files` lists what the eventual action will
+  touch (empty for issue-only actions).
+- **Lifecycle.** Approve = condition met; do the action, then it
+  behaves like any approved item. Drop = mooted or superseded — an
+  expected, honorable ending, not a failure.
+- **Boundary.** Not a door back to investigation items: a reminder
+  records a *decided future action*; an open question is chat's job.

@@ -35,7 +35,8 @@ lives beside this file in `.claude/bram-reference/`:
 `worklist-mechanics.md` (transports, entangled commits, delegation,
 enforcement), `diagnostics.md` (stuck spinners, traces, logs, evidence,
 Bram's guards) and `environment.md` (target-app helpers, `/query`, forge
-CLI, test suites, Windows, voice input setup, cross-project work). Each section below says
+CLI, test suites, Windows, voice input setup, cross-project work,
+fresh-session suggestions). Each section below says
 when to read which. Setup refreshes these files and Bram-bundled skills
 (`.claude/skills/<name>/SKILL.md` carrying a `<!-- bram-managed` marker);
 don't make functional edits to installed copies, since the next Setup
@@ -159,31 +160,12 @@ to someone else.
 
 ### Reminder items (placeholders you can drop)
 
-One item shape carries no diff yet and is still legitimate: a
-**reminder** (placeholder) for an action already decided but gated on
-an external condition — an upstream merge, a release being cut, another
-agent's verdict — that resolves after this session ends. Chat dies with
-the session; the reminder carries it across.
+A **reminder** carries an action already decided but gated on an external
+condition (an upstream merge, a release, another agent's verdict) past the
+end of this session. Its id **begins with `reminder-`**; surfaces such as
+the Awaiting You inbox key on that prefix.
 
-- **Name.** A reminder's id **begins with `reminder-`**
-  (`reminder-revendor-after-xmlui-release`); after the prefix the
-  ordinary id rules apply. When the gate is a **date**, put it at the
-  end of the id (`reminder-rerun-census-after-2026-09-19`). The rule is
-  mechanical on purpose: surfaces such as the Awaiting You inbox key on
-  the prefix. Ids are immutable, so an older reminder keeps its name;
-  the only conversion is the user Dropping it and you re-proposing it
-  verbatim under a `reminder-` id. Don't push that, but say plainly
-  that prefix-keyed surfaces won't see the old row.
-- **Shape.** `Before` states the awaited condition plus enough
-  self-contained context to act with no conversation history. `After`
-  states the action Approve green-lights and what condition would make
-  Drop the right verdict. `files` lists what the eventual action will
-  touch (empty for issue-only actions).
-- **Lifecycle.** Approve = condition met; do the action, then it
-  behaves like any approved item. Drop = mooted or superseded — an
-  expected, honorable ending, not a failure.
-- **Boundary.** Not a door back to investigation items: a reminder
-  records a *decided future action*; an open question is chat's job.
+- **Proposing, approving or dropping a reminder** → read `.claude/bram-reference/worklist-mechanics.md` (§Reminder items).
 
 ### Schema and draft layout
 
@@ -579,54 +561,9 @@ self-contained, carrying the evidence inline.
 
 ### Suggest a fresh session for a new line of work
 
-A long session that wanders across topics is hard to find and hard to
-resume. Bram's **+ New session** dialog (Sessions tab) starts a fresh
-session with a brief, but the user has to think of it. You are the one
-who sees a new line of work begin, so offer it.
-
-**When.** Read `GET /__settings` and look at `sessions`. Each trigger
-has its own switch:
-
-- `suggestOnNewItem`: you are about to propose a worklist item.
-- `suggestOnNewIssue`: you are about to file an issue.
-- `suggestOnTopicShift`: the conversation has moved to a significantly
-  different topic.
-
-If the switch is on **and** the new work is a different line from what
-this session has been doing, ask in one line whether to continue it in
-a fresh session. Work that belongs to the session's existing line gets
-no question. Ask in prose, whichever agent you are: a provider's own
-question tool would make Claude and Codex behave differently.
-
-**Limits.** Ask at most once per topic. After a no, don't ask again
-about that topic. Don't ask in a session that is still short. Ask
-**before** you propose the item or file the issue, not after.
-
-**On yes, hand the work over; don't start it here.** Do not propose the
-item or file the issue in this session: the new session is where it gets
-discussed and created. `POST /__sessions/suggest` with
-`{"name": …, "whatsNext": …}` (same curl shape as the other POST
-routes). The Sessions tab opens the New session dialog filled in with
-both. **They are suggestions for the user to edit, and nothing is
-created until the user clicks Create.** Say so: "I've filled in a
-suggested name and brief; edit them to say it your way, then click
-**Create**." Write `whatsNext` in the user's terms, framing the new
-work, not as instructions from you. Put in it what this session already
-settled about the work, so the new session doesn't have to rediscover
-it.
-
-**On no**, carry on here: propose the item or file the issue as usual.
-
-**Names are how sessions are found later.** A later search for a
-session to resume reads titles, so err toward verbose and descriptive:
-
-- Name the subject and the activity, with the distinctive terms someone
-  would search for months later: "screencast storyboarding: rough scene
-  list from a session transcript", not "test session" or "follow-up".
-- Include the stable nouns the work is about (a feature, a component, an
-  issue number such as `#412`), not only verbs.
-- Leave out ephemera (today's date, "part 2") unless they distinguish
-  the session.
+**Before you propose an item, file an issue, or follow a big topic shift,**
+check whether to offer the user a fresh session for it → read
+`.claude/bram-reference/environment.md` (§Suggest a fresh session).
 
 
 ## Signing agent-authored forge artifacts

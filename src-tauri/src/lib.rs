@@ -37106,48 +37106,21 @@ fn read_session_size<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, S
         Some(SessionProvider::Claude) => "claude",
         None => "unknown",
     };
-    // Per-agent reset guidance. Both Claude and Codex re-attach to the
-    // current session JSONL by default when the wrapper script
-    // remembers a session id; the user-facing fix is the same shape
-    // for both — exit the current agent process and re-launch without
-    // the resume flag — but the exact command differs by agent. Keep
-    // the wording calm and the command copy-pasteable.
-    let (reset_command, guidance) = match (provider_label, state) {
-        ("claude", "amber") => (
-            "claude",
-            format!(
-                "Session is {} (warming up). Approaching iframe slowdown — \
-                 consider starting fresh: exit the agent (Ctrl-C twice) and \
-                 run `claude` in the terminal.",
-                human_bytes
-            ),
-        ),
-        ("claude", "red") => (
-            "claude",
-            format!(
-                "Session is {} (over 15 MB). Recommend starting fresh: exit \
-                 the agent (Ctrl-C twice) and run `claude` in the terminal.",
-                human_bytes
-            ),
-        ),
-        ("codex", "amber") => (
-            "codex",
-            format!(
-                "Session is {} (warming up). Approaching iframe slowdown — \
-                 consider starting fresh: exit the agent (Ctrl-C twice) and \
-                 run `codex` in the terminal.",
-                human_bytes
-            ),
-        ),
-        ("codex", "red") => (
-            "codex",
-            format!(
-                "Session is {} (over 15 MB). Recommend starting fresh: exit \
-                 the agent (Ctrl-C twice) and run `codex` in the terminal.",
-                human_bytes
-            ),
-        ),
-        _ => ("", String::new()),
+    // session-size-note-not-warning (Jon, 2026-10-04): size is information,
+    // not a warning. Past the green band the note says why smaller sessions
+    // help, and points at New session (exiting and typing `claude` by hand
+    // bypassed the launch routine and pairing). `state` stays as data.
+    let reset_command = "";
+    let guidance = if bytes > SESSION_SIZE_GREEN_MAX_BYTES {
+        format!(
+            "Session is {}. Larger sessions aren't necessarily a problem, but \
+             keeping each one smaller and on one theme makes it easier to \
+             find, resume and search later. To start one, use New session on \
+             the Sessions tab.",
+            human_bytes
+        )
+    } else {
+        String::new()
     };
     let body = serde_json::json!({
         "bytes": bytes,
@@ -37185,11 +37158,10 @@ fn session_size_status_row<R: tauri::Runtime>(app: &AppHandle<R>) -> serde_json:
     serde_json::json!({
         "signal": "Session size",
         "level": match state {
-            "red" | "amber" => "warn",
-            "green" => "ok",
-            _ => "none",
+            "unknown" => "none",
+            _ => "ok",
         },
-        "state": format!("{} {}", human_bytes, state),
+        "state": human_bytes,
         "detail": if guidance.is_empty() {
             format!("Active {} session is {}", provider, human_bytes)
         } else {

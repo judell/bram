@@ -65,10 +65,6 @@
       <HStack gap="$space-3" verticalAlignment="center">
         <Text fontWeight="$fontWeight-bold" value="{sessionSize.value.humanBytes}" />
         <Text
-          fontWeight="$fontWeight-bold"
-          color="{sessionSize.value.state === 'red' ? '$color-danger-700' : (sessionSize.value.state === 'amber' ? '$color-warn-700' : '$color-success-700')}"
-          value="{sessionSize.value.state}" />
-        <Text
           when="{sessionSize.value.provider}"
           fontSize="$fontSize-sm"
           color="$textColor-secondary"

@@ -5891,12 +5891,33 @@ fn terminal_attention_prompt_shape(stripped_tail: &str) -> Option<&'static str> 
         "trust all and continue",
         "press enter to confirm or esc to go back",
     ];
-    let lower = stripped_tail.to_lowercase();
+    // terminal-attention-slash-panel (#423): a Claude slash-command panel
+    // left open with no turn running. Specimen: Claude's /status panel,
+    // opened by `shell.firstCommand` on 2026-10-04 (demo trace 16:35:37Z,
+    // op=candidate preview="❯ /status ─── Se tings Status Config Usage Stats
+    // Version: 2.1.289 …"; footer "Esc to cancel" in Jon's screenshot).
+    // Claude's permission menus also say "Esc to cancel", but they appear
+    // inside an open turn, where the tracker never evaluates. Codex's /status
+    // prints and returns to its composer, so it has no entry here.
+    const SLASH_PANEL_MARKERS: &[&str] = &["esc to cancel", "status config usage stats"];
+    // Whitespace collapsed: the grid lays out tabs and footers with cursor
+    // moves that strip to irregular runs of spaces and line breaks.
+    let lower = stripped_tail
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
     if HOOKS_TRUST_MARKERS
         .iter()
         .any(|marker| lower.contains(marker))
     {
         return Some("hooks-trust");
+    }
+    if SLASH_PANEL_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
+        return Some("slash-panel");
     }
     None
 }
@@ -6103,6 +6124,24 @@ mod terminal_attention_tests {
             assert_eq!(
                 terminal_attention_prompt_shape(line),
                 Some("hooks-trust"),
+                "{line:?} should classify on its own"
+            );
+        }
+    }
+
+    // The 2026-10-04 specimen: Claude's /status panel, typed as the first
+    // command, left open with the terminal hidden. Pinned as the candidate
+    // line logged it plus the footer from the screenshot, with the grid's
+    // irregular spacing.
+    #[test]
+    fn slash_panel_claude_status_specimen_2026_10_04() {
+        const TAIL: &str = "\u{276f} /status \u{2500}\u{2500}\u{2500}\u{2500}\n  Se tings   Status   Config   Usage   Stats\n\n  Version:          2.1.289\n  Session name:     Worklist item for concurrent messaging\n\n  Esc to cancel";
+        assert_eq!(terminal_attention_prompt_shape(TAIL), Some("slash-panel"));
+        for line in ["Esc to cancel", "Status   Config   Usage   Stats"] {
+            assert!(TAIL.contains(line), "specimen no longer contains {line:?}");
+            assert_eq!(
+                terminal_attention_prompt_shape(line),
+                Some("slash-panel"),
                 "{line:?} should classify on its own"
             );
         }

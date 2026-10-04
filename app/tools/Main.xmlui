@@ -1239,7 +1239,7 @@
             fontSize="$fontSize-sm"
             width="*"
             color="$color-warn-700"
-            value="The terminal is waiting at a prompt Bram can't answer." />
+            value="{window.__bramTerminalAttentionText(terminalAttentionEvt.value)}" />
           <Button
             label="Open terminal"
             variant="outlined"

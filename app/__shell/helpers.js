@@ -8580,6 +8580,15 @@ window.__bramMakeTerminalVisibilityBridge = function (spec) {
   window.__bramOpenTerminalForAttention = function () {
     window.parent.postMessage({ type: "bram-open-terminal" }, "*");
   };
+
+  // terminal-attention-slash-panel (#423): the banner's words follow the
+  // host's classified shape. The hooks prompt keeps the original line.
+  window.__bramTerminalAttentionText = function (value) {
+    if (value && value.shape === "slash-panel") {
+      return "Claude has a panel open in the terminal. Press Esc there to close it.";
+    }
+    return "The terminal is waiting at a prompt Bram can't answer.";
+  };
 })();
 
 // Host compaction + parent terminal-visibility join

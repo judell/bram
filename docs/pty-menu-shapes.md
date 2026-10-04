@@ -37,10 +37,17 @@ vocabulary in `bram-trace.log`
   grid (records-stacked / manual-approval / compound cases).
 - `op=build-picker` — build of a grid-classified **picker** (Family C
   session-resume-picker et al): no pending tool call, `tool=Picker`.
-- `op=hold-nosig` — a signature-less frame that is **not** a Bash menu
-  (Edit/Write awaiting their signature, or a phantom prose / tool-bullet
-  frame); held so the signature path classifies it. See *Signature-less
-  discrimination* below.
+- `op=build-claude-nosig tool=Edit|Write` — signature-less build of an
+  **Edit or Write** menu from its header or allow-all label
+  (`grid_menu_edit_write_tool`, `src-tauri/src/lib.rs:5352`; trace at
+  `:11396`).
+- `op=hold-nosig reason=no-tool-box` — a signature-less frame that is none
+  of the above (a phantom prose / tool-bullet frame); held so the signature
+  path classifies it. Codex has its own `op=hold-codex-nosig`. See
+  *Signature-less discrimination* below. _(Corrected 2026-10-03: this
+  bullet said Edit/Write frames were held here; they have been built
+  directly since the 2026-07-05 fix described in the code comment above
+  `grid_menu_edit_write_tool`.)_
 - `op=override` — grid options corrected a host-detected menu.
 
 The old `op=fire` (byte-scanner era) no longer exists. The byte-scanner axes
@@ -64,13 +71,38 @@ machine `excerpt=` / `menu_bearing=` trace intake feed it).
 **Read the anchoring note first.** CodeExam strings are *source
 literals*; the on-screen sentences embed runtime values
 (`<file>`/`<host>`/`<key>`), so detection anchors on **fragments**, never
-whole sentences. The scanner reads ANSI-stripped PTY bytes — CodeExam's
+whole sentences. The grid reader sees xterm.js's rendered cells as text
+(`__gridReadLiveRows`, `app/main.js:1146`); it once read ANSI-stripped
+PTY bytes. Either way, CodeExam's
 structured `option.type` / `feedbackConfig.type` fields never reach the
 screen and are not matchable.
 
 ## Detection axes (columns)
 
-The booleans the `[pty-menu-scan]` trace already emits, plus the two
+> **Historical vocabulary.** These axes come from the retired byte
+> scanner. The functions named below (`pty_menu_anchor_pos`,
+> `line_is_menu_footer`, `pty_text_looks_like_permission_menu`,
+> `pty_skip_buffer_looks_menu_bearing`) and the `[pty-menu-scan]` trace no
+> longer exist. They are kept because the shape table below is written in
+> their terms.
+>
+> **The live grid gate** is in `__gridDetectMenu` (`app/main.js:1169`).
+> It searches the last 200 grid rows for runs of numbered options
+> (bottom-up, tolerating stale cells and rejoining wrapped labels) and
+> admits a run when:
+>
+> - the first option is `Yes` (or `Allow`, with a rendered cursor;
+>   `:1269-1279`) **and** there is a header (`Do you want to|requires
+>   approval|Would you like to run|wants to`, `:1230`), a footer below
+>   (`Esc to cancel|Press enter to confirm`, `:1256`) or a Codex signal
+>   (`(y)`, `(p)`, `(esc)`, `tell Codex`, `Yes, proceed`, `:1258`); or
+> - it is a picker: **both** `Enter to confirm` and `Esc to cancel` below
+>   the block plus a rendered cursor (`pickerSignal`, `:1288`).
+>
+> The cursor, header and footer columns map onto that gate; the `1./2.
+> pair`, keyword-guard and menu_bearing columns have no live equivalent.
+
+The booleans the `[pty-menu-scan]` trace emitted, plus the two
 added for #197:
 
 - **cursor** — `❯` selection anchor before an option (`pty_menu_anchor_pos`).
@@ -91,7 +123,8 @@ added for #197:
 | Claude Code | `2.1.179` | `2026-06-14` (`.cli_js_from_exe_split_NEW`) |
 | Codex | `codex-cli 0.142.2` | none yet |
 
-Strings drift between builds — re-pin on a new version.
+Strings drift between builds — re-pin on a new version. Not re-pinned
+since 2026-06-25.
 
 ---
 
@@ -108,7 +141,7 @@ Strings drift between builds — re-pin on a new version.
 | proceed — manual-approval safety (2-option) | `Do you want to proceed?` | ✓ | ✓ | ✓ | ✓ | various compound / obfuscation patterns: `cd` + output redirection, or quoted / heredoc data (e.g. `cat > f <<'EOF'`) | Only **two** options — `1. Yes` / `2. No`, no "don't ask again" allow-all. The body reason **varies**: "Compound command contains cd with output redirection — manual approval required to prevent path resolution bypass", "Contains data within quote character (expansion obfuscation)", and likely others. All share the `Do you want to proceed?` header, which is why the **header** — not the option count, the box title, or the variable body reason — is the reliable Bash discriminator. See *Signature-less discrimination*. |
 | connection | `Do you want to allow this connection?` | ✓ | ✓ | ✓ | ✓ | a tool/command reaching a host outside the sandbox (e.g. `curl https://example.com`) | Hard to evoke deterministically. |
 | API key | `Do you want to use this API key?` | ✓ | ✓ | ✓ | ✓ | a tool that wants to use a stored API key | Hard to evoke deterministically. |
-| **skill** | `Use skill "<skill>"?` / `from this Skill` | ✓ | **✗** | ✓ | ✓ | "Use the `<skill>` skill to …" | **No `Do you want` header.** Was reaching the keyword guard with no match → `op=skip`. Fixed #197: `use skill` / `from this skill` added to `pty_text_looks_like_permission_menu`. Regression guard — must stay `op=fire`. |
+| **skill** | `Use skill "<skill>"?` / `from this Skill` | ✓ | **✗** | ✓ | ✓ | "Use the `<skill>` skill to …" | **No `Do you want` header.** Was reaching the keyword guard with no match → `op=skip`. Fixed #197: `use skill` / `from this skill` added to `pty_text_looks_like_permission_menu`. Regression guard from the byte-scanner era (`op=fire` no longer exists). |
 
 ### Exclusions (must NOT fire as tool-permission menus)
 
@@ -149,8 +182,12 @@ Bash on any of three signals, in priority order:
 3. **A `Bash command` box title** — fallback, only on frames where it is
    captured.
 
-Edit/Write frames match none of these → `op=hold-nosig` → resolved as
-Edit/Write once the signature lands. Phantom frames (prose, tool bullets)
+Edit/Write frames match none of these, and go to the counterpart
+`grid_menu_edit_write_tool` (`src-tauri/src/lib.rs:5352`), which builds
+them from their header (`Do you want to make this edit to …` / `Do you
+want to create …`) or allow-all label (`op=build-claude-nosig
+tool=Edit|Write`). _(Corrected 2026-10-03: this said Edit/Write were held
+until the signature landed.)_ Phantom frames (prose, tool bullets)
 also match none → held → no phantom menu, no spurious NavPanel pulse.
 
 Two discriminators were tried and rejected (the recurrence the header
@@ -187,7 +224,7 @@ instead. First specimen:
 | --- | --- | --- | --- | --- | --- | --- |
 | allow-deny-dialog | "… wants to …" (e.g. "Claude in Chrome wants to create a browser window and read your tabs") | ✓ required | ✓ ("wants to") | ✓ | ✗ (Deny's "(esc)" hint serves as the keystroke signal) | Extension/connector consent dialog (claude-in-chrome first specimen). First option `Allow` fails the Yes-gate; admitted by the Allow family (cursor REQUIRED so numbered prose can't false-fire). Not a picker; surfaces via grid-rescue with the terminal's own labels. Undetected it froze the pane on a mismatched hook menu — see `docs/pty-menu-specimens/2026-07-21-claude-in-chrome-allow-deny.md`. |
 | session-resume-picker | "This session is … old and … tokens." (free prose — no permission header) | ✓ | ✗ | ✓ | ✓ strict ("Enter to confirm · Esc to cancel") | Claude Code CLI-level picker, not a tool approval — no hook fires and no pending tool_use exists. Option 1 is not "Yes…", so the permission Yes-gate excludes it; admitted by the picker rule instead (strict footer — BOTH "Enter to confirm" AND "Esc to cancel" below the block — plus a rendered cursor). Surfaces as `tool=Picker` (`[grid-menu] op=build-picker`, or grid-rescue on default settings) and arms the send-gate hold. Undetected it eats pasted sends and the CR confirms option 1 (Eric 2026-07-19 20:08 strand). Specimen: `docs/pty-menu-specimens/2026-07-19-claude-session-resume-picker.md`. Structural twins expected: trust dialog, `/resume` session list. |
-| model-picker (Claude) | "Select model" (plain title — no permission header) | ✓ (`›`; a separate `✓` marks the CURRENT model independently) | ✗ | ✓ | ✗ **fails strict** — has "Esc to cancel" but says "Enter to set as **default**", not "Enter to confirm" | `/model`. **Undetected today**: `pickerSignal` (`app/main.js:1267`) requires BOTH "Enter to confirm" AND "Esc to cancel" below the block; this footer supplies only the second. Same consequence class as session-resume-picker before its fix — a pasted send can be swallowed and the CR act on the highlighted row, here silently setting a default model. **Not a plain picker**: three commit semantics (`Enter` default / `s` session-only / `Esc` cancel) and a second non-list axis on the same screen (`● High effort` adjusted with `←/→`), so "send a number and Enter" does not express the interaction. Specimen: `docs/pty-menu-specimens/2026-09-09-claude-model-picker.md`. |
+| model-picker (Claude) | "Select model" (plain title — no permission header) | ✓ (`›`; a separate `✓` marks the CURRENT model independently) | ✗ | ✓ | ✗ **fails strict** — has "Esc to cancel" but says "Enter to set as **default**", not "Enter to confirm" | `/model`. **Undetected today**: `pickerSignal` (`app/main.js:1288`) requires BOTH "Enter to confirm" AND "Esc to cancel" below the block; this footer supplies only the second. Same consequence class as session-resume-picker before its fix — a pasted send can be swallowed and the CR act on the highlighted row, here silently setting a default model. **Not a plain picker**: three commit semantics (`Enter` default / `s` session-only / `Esc` cancel) and a second non-list axis on the same screen (`● High effort` adjusted with `←/→`), so "send a number and Enter" does not express the interaction. Specimen: `docs/pty-menu-specimens/2026-09-09-claude-model-picker.md`. |
 | model-picker (Codex) | "Select Model and Effort" (plain title) | ✓ (`›`; CURRENT marked in the label text as `(current)`, no glyph) | ✗ | ✓ | ✗ **fails strict** — has "Press enter to confirm" but says "esc to go **back**", not "Esc to cancel" | First Codex picker specimen. **Undetected today**, failing the OPPOSITE clause of the same two-part test as its Claude sibling — the test encodes one CLI's exact footer wording rather than the shape of a confirm/cancel footer. Two commit semantics, and "go back" implies this list is one page of a multi-step flow (the title promises *Effort*, which this screen never shows — that screen is still uncaptured). Right column **clips** rather than wraps: a distinct grid hazard from the wrap corruption named above, and it can truncate the text a detector keys on. Specimen: `docs/pty-menu-specimens/2026-09-09-codex-model-picker.md`. |
 
 ## Known edge — option label blends with the command box (narrow column)

@@ -7,15 +7,22 @@ catalogs what went wrong, what was done, why recent fixes hold, and what
 remains structurally open. Shape docs: `docs/pty-menu-shapes.md`,
 `docs/pty-menu-hook-catalog.md`, `docs/menu-detection-audit.md`.
 
+> **Status (2026-10-03):** a retrospective, kept as written through
+> 2026-07-18 except for the corrections noted inline. For current behavior,
+> see the menu rows of `docs/trace-vocabulary.md` and
+> `docs/xterm-grid-screen-reading.md`.
+
 ## The generations
 
 Successive architectures, each subsuming (not merely patching) its
-predecessor:
+predecessor. `docs/menu.md` numbers the first four 1–4 (JSONL = 1, PTY
+scan = 2, grid = 3, hook = 4); this table's Gen 0–3 are the same four, one
+lower.
 
 | Gen | Approach | Representative commits | Fate |
 | --- | --- | --- | --- |
 | 0 | Poll the session JSONL for pending `tool_use` | `545ba14`, `9be1bea`, `3904c84` | Too laggy; blind to non-transcript prompts. Survives as the signature/enrichment oracle. |
-| 1 | Scan raw PTY bytes for menu-shaped text | `591ab1a`, `3816a16`, `e5faacf` | Flappy; Gen-2 deletions retired its diagnostics (`b9bc27a`). Byte-pattern detect survives as a fast hint. |
+| 1 | Scan raw PTY bytes for menu-shaped text | `591ab1a`, `3816a16`, `e5faacf` | Flappy; Gen-2 deletions retired its diagnostics (`b9bc27a`). Byte-pattern menu detection is gone: `pty_menu_update` starts from `None` and only the grid sets it (`src-tauri/src/lib.rs:11086`). _(Corrected 2026-10-03; this cell said it survived as a fast hint.)_ Raw bytes are still scanned for spinner glyphs, Codex status and cancel markers, not menus. |
 | 2 | Parse the rendered xterm grid (on-screen cells) | `65882f1`, `0442e95`, `6693f5e` | Ground-truth channel to this day; the labels/scene joins anchor on it. |
 | 3 | Hook-primary: PermissionRequest/PostToolUse POST structured menus | `78d5702`, `250b69a`, `b7d0386`, `1f17e3d` | Semantic richness (previews, diffs); introduced the coordination bug family. |
 | 4 | Causal discipline: clocks and tuned windows replaced by invariants | `f55cd2a` (absence fence), `c5161ab`, `3c41db4` (tool_use identity), `d407a14` (outcome anchoring) | The turning point: fixes stopped regressing. |

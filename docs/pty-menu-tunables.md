@@ -1,5 +1,14 @@
 # PTY menu survival tunables (host-side)
 
+> **Status (2026-10-03): historical.** This describes the byte-scanning
+> detector of June 2026. `MENU_EVICTION_GRACE_MS`, the `hold-start` /
+> `holding` / `hold-expired` / `buffer-evicted` states and the 10 s
+> post-click suppression no longer exist: byte detection was retired in
+> favor of the xterm.js grid, and dismissal is now decided by the absence
+> fence (see `docs/menu-detection-audit.md`). Only the 64 KB tail cap
+> survives. The thresholds that govern behavior today are in
+> [Current thresholds](#current-thresholds-2026-10-03) at the end.
+
 Two constants in `src-tauri/src/lib.rs` govern how long the host
 keeps a detected permission menu visible to the agent pane after
 the menu's bytes scroll past the detector's view in the PTY tail.
@@ -96,3 +105,28 @@ bytes truly are no longer in the tail.
   the agent pane.
 - Issue #182 incident #17:
   https://github.com/judell/bram/issues/182#issuecomment-4674505038
+
+## Current thresholds (2026-10-03)
+
+Verified against the code on this date. All in `src-tauri/src/lib.rs`
+unless noted.
+
+| What | Value | Where |
+|---|---|---|
+| PTY tail kept for raw-byte scans | 64 KB | `tail.len() > 65536` in `pty_menu_update` (`:11059`) |
+| Spinner silence that counts as turn activity stopping | 800 ms | `AGENT_TURN_IDLE_THRESHOLD_MS` (`:9867`) |
+| Silence before the busy spinner is cleared | 3 s | `MIN_SILENCE_FOR_SENTINEL_CLEAR_MS` (`:9874`) |
+| Re-emit cooldown for turn-activity events | 5 s | `AGENT_TURN_EMIT_COOLDOWN_MS` (`:9883`) |
+| Silence before the status row is cleared (never while a menu is pending) | 10 s | `ROW_HARD_KILL_MIN_SILENCE_MS` (`:9895`) |
+| Grid menu report counts as fresh for building a menu | 1.5 s | literal in `pty_menu_update` (`:11152`) |
+| Grid snapshot counts as fresh for joining a hook claim | 2.5 s | `CLAIM_JOIN_GRID_FRESH_MS` (`:1209`) |
+| Hook claim coalesce window | 50 ms | `MENU_HOOK_CLAIM_COALESCE_MS` (`:1215`) |
+| Hook ownership timeout | 300 s | `MENU_HOOK_OWNER_TIMEOUT_MS` (`:975`) |
+| Hook claim TTL | 300 s | `MENU_HOOK_CLAIM_TTL_MS` (`:1016`) |
+| Pending menu answer TTL | 60 s | `PENDING_MENU_ANSWER_TTL_MS` (`:40404`) |
+| Send-gate stale warning | 120 s | `SEND_GATE_STALE_WARN_MS` (`:37165`) |
+| Grid menu keep-alive re-report while a menu is up | 1 s | `setInterval` in `app/main.js:1611-1625` |
+
+Whether turn-finished is final comes from the provider's transcript
+(Claude `end_turn`, Codex `task_complete`), not from these silence
+windows.

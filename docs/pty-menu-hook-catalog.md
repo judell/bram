@@ -6,7 +6,9 @@ axes: `cursor` / `header` / `1./2. pair` / `footer` / `keyword guard`). This
 doc catalogs the same menus by their *structured hook payload* — what a Claude
 Code `PreToolUse` / `PermissionRequest` hook sees at pose-time, before the
 prompt renders. The hook-driven permission-menu surfacing (`menus.hookDriven`,
-`app/provider-hooks/claude-permission-menu-hook.py`, `/__menu/permission`) builds the
+the `bram-guard` binary's menu relay, `src-tauri/src/guard.rs:521`, which
+replaced `app/provider-hooks/claude-permission-menu-hook.py` in `1378e3e`;
+`/__menu/permission`) builds the
 agent-pane menu from these fields instead of scraping the grid.
 
 **Claude and Codex.** Claude contributes permission prompts plus
@@ -143,18 +145,20 @@ normal work accumulates real payloads; periodically we grep the log for new
 *Frontier* into *Confirmed*. Remove the hook (and this section) once the union
 is settled.
 
-Codex capture is built into `app/provider-hooks/codex-permission-menu-hook.py`: every
-`PermissionRequest` appends a compact shape record to
-`resources/codex-permission-hook-capture.jsonl` while also forwarding the menu
-payload to Bram.
+Codex capture was built into `app/provider-hooks/codex-permission-menu-hook.py`,
+which appended a compact shape record per `PermissionRequest` to
+`resources/codex-permission-hook-capture.jsonl`. That script was deleted in
+`1378e3e` (2026-08-29) when `bram-guard` took over, and `bram-guard` does not
+capture, so the file's last record is from that day. _(Updated 2026-10-03.)_
 
 ## Confirmed shapes (Codex)
 
 Codex is hook-primary for permission menus when `menus.hookDriven` is on. The
-Codex hook forwards `PermissionRequest` payloads to `/__menu/permission` and
-uses `PostToolUse` / `PermissionDenied` as clear signals. The hook records
-compact payload shapes in `resources/codex-permission-hook-capture.jsonl`;
-the human-visible option labels are cataloged in
+Codex hook (`bram-guard`, `guard.rs:533-536`) forwards `PermissionRequest`
+payloads to `/__menu/permission` and uses `PostToolUse` as the clear signal;
+Codex has no `PermissionDenied` event, so a denied menu is cleared by the
+host's PTY cancel detection. Payload shapes captured until 2026-08-29 are in
+`resources/codex-permission-hook-capture.jsonl`; the human-visible option labels are cataloged in
 [`docs/codex-permissions.md`](./codex-permissions.md).
 
 | Family / shape | event | `tool_name` | rendered opts | evidence |

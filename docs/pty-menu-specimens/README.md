@@ -14,7 +14,13 @@ Curated model vs. raw corpus:
 
 Both terminate here, then feed curated rows in `../pty-menu-shapes.md`:
 
-1. **Machine** — the `[pty-menu-scan]` trace in
+1. **Machine** — _retired 2026-07-06 (#214): the `[pty-menu-scan]` trace
+   and the byte scanner that emitted it were deleted, so this intake
+   produces nothing today. Recent specimens are taken from `[pty-out]` and
+   `send-capture` trace lines, and from `iframe-trace
+   subkind=xterm-grid-miss` lines when the grid gate rejects a menu-shaped
+   block (see `../pty-menu-tools.md`). The original description follows._
+   The `[pty-menu-scan]` trace in
    `resources/bram-traces/bram-trace.log`. On `op=fire` it carries a
    stripped `excerpt='…'`; on `op=skip` it carries `menu_bearing=` and,
    when that is `true`, an `excerpt='…'` (the "looks cataloged but the

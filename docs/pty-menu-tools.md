@@ -6,7 +6,7 @@ companion to the *data* docs:
 
 - `pty-menu-shapes.md` — the curated shape catalog (one row per shape, by detection axis).
 - `pty-menu-specimens/` — the raw specimen corpus (one file per observation).
-- `pty-menu-tunables.md` — the detector knobs.
+- `pty-menu-tunables.md` — the detector knobs (historical; its last section lists current thresholds).
 
 This file catalogs the **tools**, not the data. It will grow as we build
 more; add a row + a section when you add a script. Keep tools in
@@ -14,9 +14,26 @@ more; add a row + a section when you add a script. Keep tools in
 
 ## Source of evidence
 
-All tools read the `[pty-menu-scan]` trace lines in
+> **Status (2026-10-03):** both scripts below read `[pty-menu-scan]`
+> trace lines, which are **no longer emitted** (deleted in delete-phase
+> tranche 2, #214, 2026-07-06, along with the byte scanner). They work only
+> against rotated logs from before that date. Menu evidence today comes
+> from:
+>
+> - `[grid-menu]` lines (`op=report` / `op=build` / `op=hold-nosig` …;
+>   vocabulary in `pty-menu-shapes.md`);
+> - `[hook-menu]` lines (hook claims, joins, rejects; see
+>   `trace-vocabulary.md`);
+> - `iframe-trace subkind=xterm-grid-miss` (a grid block that looked like
+>   a menu but failed the gate, with its rows; `app/main.js:1511`);
+> - `[pty-out]` and `send-capture` lines, which recent specimens are taken
+>   from.
+>
+> No script analyzes these yet.
+
+The scripts read the `[pty-menu-scan]` trace lines in
 `resources/bram-traces/bram-trace.log` (and rotated `bram-trace-*.log`).
-Each scan line carries the detection axes (`cursor`, `header`,
+Each scan line carried the detection axes (`cursor`, `header`,
 `numbered`, `needle2_after_anchor`, `anchor_distance_ok`, …), `op=fire` |
 `op=skip`, `menu_bearing=`, and — on fires and menu-bearing skips — a
 stripped `excerpt='…'`.
@@ -26,7 +43,7 @@ stripped `excerpt='…'`.
 | Tool | Question it answers | Granularity | Output |
 | --- | --- | --- | --- |
 | `pty-menu-scan-report.py` | **RETIRED** — its data source (`[pty-menu-scan]` lines) was deleted in delete-phase tranche 2 (#214, 2026-07-06); useful only against pre-deletion rotated logs. *Original question: which menus did we cover / miss / not recognize?* | per-excerpt | covered/missed/unknown classification; `--write-specimens` drafts specimen files |
-| `pty-menu-timeline.py` | *Do menus interfere across time (succession hazards)?* | per-menu **episode** (temporal) | episode timeline + DISTINCT-SHAPE-MISS / SAME-SHAPE-SKIP-TAIL flags |
+| `pty-menu-timeline.py` | **RETIRED** — reads the same deleted `[pty-menu-scan]` lines; useful only against pre-2026-07-06 rotated logs. *Original question: do menus interfere across time (succession hazards)?* | per-menu **episode** (temporal) | episode timeline + DISTINCT-SHAPE-MISS / SAME-SHAPE-SKIP-TAIL flags |
 
 Supporting trace infrastructure (general, not menu-specific):
 
@@ -57,7 +74,7 @@ anchors. The **machine intake** half of the specimen pipeline (see
 
 ## `pty-menu-timeline.py`
 
-Reconstructs the temporal sequence the per-excerpt report can't see.
+**Retired** (see *Source of evidence*). Reconstructs the temporal sequence the per-excerpt report can't see.
 Groups scan lines into per-menu **episodes** (new episode on identity
 change or a >2.5 s gap), marks each FIRED vs skip-only, and flags two
 succession hazards:

@@ -56,8 +56,10 @@ tool calls, and tool outputs. JSONL is better for deciding whether a
 turn is truly complete, but it can lag or be observed after the next
 turn has already begun.
 
-Permission-menu detection is a hybrid. PTY bytes identify the visible
-menu quickly; JSONL can provide signatures and tool-call context that
+Permission-menu detection is a hybrid. Provider hooks (via `bram-guard`)
+post the structured menu, and the xterm.js grid confirms which menu is
+actually on screen; PTY bytes are no longer scanned for menus. JSONL can
+provide signatures and tool-call context that
 make the menu actionable. The spine carries the current `pendingMenu`
 so consumers do not each have to rediscover or dismiss it.
 
@@ -145,8 +147,9 @@ Useful trace families:
 - `[agent-status]`: records status-specific decisions such as
   skipped finished emits, stale Codex spinner suppression, and PTY
   active-state clears.
-- `[pty-menu]`, `[pty-menu-scan]`, and `[pty-menu-options]`: explain
-  menu detection, holding, dismissal, and option parsing.
+- `[pty-menu]`, `[grid-menu]`, `[hook-menu]` and `[pty-menu-options]`:
+  explain menu detection, joins, dismissal, and option parsing.
+  (`[pty-menu-scan]` was deleted with the byte scanner in #214.)
 - `[iframe] subkind=subscriber-fired`: proves whether the XMLUI side
   received and handled an event.
 

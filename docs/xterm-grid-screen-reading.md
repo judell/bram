@@ -60,7 +60,7 @@ heuristic screen read and still coordinated with PTY timing and JSONL state.
 `pty_tail` is a **time-ordered byte stream of the TUI's repaints**. The
 terminal turns that stream into a 2-D grid using cursor-positioning escape
 codes ("move to row 12 col 3, write `o`, move back, overwrite with a spinner
-frame") hundreds of times a second. `strip_ansi` (`lib.rs:4928`) **deletes
+frame") hundreds of times a second. `strip_ansi` (`lib.rs:12409`) **deletes
 exactly those positioning codes**. The visible glyphs then collapse together
 in *stream* order rather than *screen* order, interleaved with spinner-
 animation frames. Two consequences:

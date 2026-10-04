@@ -300,6 +300,7 @@ pub fn record_session_pair(
     claude: &str,
     codex: &str,
     at_ms: i64,
+    source: &str,
 ) -> Result<bool> {
     let plain_or_empty = |s: &str| s.is_empty() || session_id_is_plain(s);
     if !plain_or_empty(claude) || !plain_or_empty(codex) || (claude.is_empty() && codex.is_empty())
@@ -312,7 +313,10 @@ pub fn record_session_pair(
         }
     }
     let detail = format!("{{\"claude\":\"{}\",\"codex\":\"{}\"}}", claude, codex);
-    append_transition(conn, at_ms, None, "pair", &detail, "switch")?;
+    // The row's `source` says how the pair came about (offer-keep,
+    // offer-create, explicit-resume, unpair, …), so the ledger alone can
+    // explain a pairing; it was hard-coded to "switch" before.
+    append_transition(conn, at_ms, None, "pair", &detail, source)?;
     Ok(true)
 }
 
@@ -1626,7 +1630,7 @@ mod tests {
     fn session_pairs_follow_the_latest_row_on_both_sides() {
         let conn = open_in_memory().unwrap();
         assert_eq!(session_partner(&conn, "claude", "c1").unwrap(), None);
-        assert!(record_session_pair(&conn, "c1", "x1", 1).unwrap());
+        assert!(record_session_pair(&conn, "c1", "x1", 1, "test").unwrap());
         assert_eq!(
             session_partner(&conn, "claude", "c1").unwrap().as_deref(),
             Some("x1")
@@ -1636,16 +1640,16 @@ mod tests {
             Some("c1")
         );
         // Re-recording the same pair writes nothing.
-        assert!(!record_session_pair(&conn, "c1", "x1", 2).unwrap());
+        assert!(!record_session_pair(&conn, "c1", "x1", 2, "test").unwrap());
         // x1 re-pairs with c2: c1 no longer has a partner (one per side).
-        assert!(record_session_pair(&conn, "c2", "x1", 3).unwrap());
+        assert!(record_session_pair(&conn, "c2", "x1", 3, "test").unwrap());
         assert_eq!(session_partner(&conn, "claude", "c1").unwrap(), None);
         assert_eq!(
             session_partner(&conn, "codex", "x1").unwrap().as_deref(),
             Some("c2")
         );
         // Unpair c2.
-        assert!(record_session_pair(&conn, "c2", "", 4).unwrap());
+        assert!(record_session_pair(&conn, "c2", "", 4, "test").unwrap());
         assert_eq!(session_partner(&conn, "claude", "c2").unwrap(), None);
         assert_eq!(session_partner(&conn, "codex", "x1").unwrap(), None);
     }
@@ -1653,8 +1657,8 @@ mod tests {
     #[test]
     fn session_pairs_refuse_ids_they_would_have_to_escape() {
         let conn = open_in_memory().unwrap();
-        assert!(!record_session_pair(&conn, "a\"b", "x1", 1).unwrap());
-        assert!(!record_session_pair(&conn, "", "", 1).unwrap());
+        assert!(!record_session_pair(&conn, "a\"b", "x1", 1, "test").unwrap());
+        assert!(!record_session_pair(&conn, "", "", 1, "test").unwrap());
         assert_eq!(session_partner(&conn, "claude", "a\"b").unwrap(), None);
     }
 

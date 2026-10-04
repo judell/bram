@@ -994,6 +994,46 @@
           fontSize="$fontSize-sm"
           value="{launchFailure.value &amp;&amp; launchFailure.value.tail}" />
       </VStack>
+      <!-- provider-session-pair-offer: a header switch found no session that
+           goes with the one being left, so the host resumed the target's
+           most recent (or pinned) session. Pairs are explicit only: Keep
+           these together pairs the two, or start a new session instead. Driven by the host's replayable `pair-offer`; the
+           next switch replaces it. Info palette: nothing went wrong. -->
+      <PushSource
+        id="pairOffer"
+        initial="{null}"
+        subscribe="{window.bramSubscribePairOffer()}" />
+      <HStack
+        when="{!!pairOffer.value}"
+        gap="$space-2"
+        verticalAlignment="center"
+        paddingHorizontal="$space-2"
+        paddingVertical="$space-1"
+        backgroundColor="$color-info-50"
+        border="1px solid $color-info-200"
+        borderRadius="$borderRadius">
+        <Text
+          width="*"
+          fontSize="$fontSize-sm"
+          value="{pairOffer.value &amp;&amp; pairOffer.value.message}" />
+        <Button
+          label="Keep these together"
+          tooltip="{pairOffer.value &amp;&amp; pairOffer.value.keepTooltip}"
+          variant="outlined"
+          size="xs"
+          onClick="window.__bramPairOfferKeep(pairOffer.value, toast)" />
+        <Button
+          label="{pairOffer.value &amp;&amp; pairOffer.value.actionLabel}"
+          tooltip="{pairOffer.value &amp;&amp; pairOffer.value.actionTooltip}"
+          variant="outlined"
+          size="xs"
+          onClick="window.__bramPairOfferStart(pairOffer.value)" />
+        <Button
+          label="Dismiss"
+          variant="ghost"
+          size="xs"
+          onClick="window.__bramPairOfferDismiss(pairOffer.value)" />
+      </HStack>
       <!-- The hot TextArea is isolated from this App-scope footer. Props flow
            down only when provider state changes; the low-frequency Skills
            request flows up as a component event. -->

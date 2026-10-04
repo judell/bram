@@ -149,7 +149,7 @@
   <ModalDialog
     id="newSessionDialog"
     when="{newSessionOpen}"
-    onClose="window.__bramSuggestTrace('suggest-cancelled', newSessionSuggested, newSessionDraft, newSessionNext, newSessionSuggestedName, newSessionSuggestedNext); newSessionOpen = false; newSessionSuggested = false; newSessionDraft = ''; newSessionNext = ''; window.__bramVoiceStopOnSend('new-session'); setWorklistVoiceTarget('message-agent')"
+    onClose="window.__bramClearPairOfferForCreate(); window.__bramSuggestTrace('suggest-cancelled', newSessionSuggested, newSessionDraft, newSessionNext, newSessionSuggestedName, newSessionSuggestedNext); newSessionOpen = false; newSessionSuggested = false; newSessionDraft = ''; newSessionNext = ''; window.__bramVoiceStopOnSend('new-session'); setWorklistVoiceTarget('message-agent')"
     title="New session">
     <VStack gap="$space-3" padding="$space-4">
       <Text
@@ -182,7 +182,7 @@
         fontSize="$fontSize-sm"
         value="Create stops the running agent and starts a new session with this name. If you say what's next, the new session builds its context from your words (project history, and the session you're leaving), reports what it found, and waits for you to settle the framing together. The current session stays in the list, resumable." />
       <HStack horizontalAlignment="end" gap="$space-2">
-        <Button label="Cancel" variant="outlined" onClick="window.__bramSuggestTrace('suggest-cancelled', newSessionSuggested, newSessionDraft, newSessionNextEditor.getValue(), newSessionSuggestedName, newSessionSuggestedNext); newSessionOpen = false; newSessionSuggested = false; newSessionDraft = ''; newSessionNext = ''; window.__bramVoiceStopOnSend('new-session'); setWorklistVoiceTarget('message-agent')" />
+        <Button label="Cancel" variant="outlined" onClick="window.__bramClearPairOfferForCreate(); window.__bramSuggestTrace('suggest-cancelled', newSessionSuggested, newSessionDraft, newSessionNextEditor.getValue(), newSessionSuggestedName, newSessionSuggestedNext); newSessionOpen = false; newSessionSuggested = false; newSessionDraft = ''; newSessionNext = ''; window.__bramVoiceStopOnSend('new-session'); setWorklistVoiceTarget('message-agent')" />
         <Button
           label="Create"
           enabled="{newSessionDraft &amp;&amp; newSessionDraft.trim().length > 0}"
@@ -294,6 +294,34 @@
               value="{'[requested] ' + ($item.title || '(untitled)') + ' — session not yet confirmed'}" />
             <Text width="140px" fontSize="$fontSize-sm" value="{formatDateTime(new Date($item.mtime * 1000), 'yyyy-MM-dd HH:mm')}" />
             <Text width="70px" fontSize="$fontSize-sm" value="{$item.pending ? 'Pending' : (Math.round($item.size / 1024) + ' KB')}" />
+          </HStack>
+          <!-- provider-session-pair-offer: the session's partner on the other
+               provider (switching providers moves between the two), with
+               Unpair for when one side has drifted. -->
+          <HStack
+            when="{!!$item.partner}"
+            gap="$space-2"
+            paddingHorizontal="$space-3"
+            paddingBottom="$space-2"
+            verticalAlignment="center">
+            <Text
+              width="*"
+              fontSize="$fontSize-sm"
+              color="$textColor-secondary"
+              value="{window.__bramPairedWithLabel($item.partner)}" />
+            <Button
+              when="{!!window.__bramPairMatchTitle($item)}"
+              label="Match name"
+              variant="ghost"
+              size="xs"
+              tooltip="{window.__bramPairMatchTooltip($item)}"
+              onClick="window.__bramPairMatchName($item, toast)" />
+            <Button
+              label="Unpair"
+              variant="ghost"
+              size="xs"
+              tooltip="Stop moving between these two sessions when you switch providers"
+              onClick="window.__bramUnpairSession($item.provider, $item.id, toast)" />
           </HStack>
           <VStack when="{expandedId === $item.id}" paddingBottom="$space-2">
             <SessionDetail sessionId="{$item.id}" provider="{$item.provider}"

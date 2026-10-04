@@ -456,6 +456,10 @@ struct SessionsConfig {
     suggest_on_new_issue: Option<bool>,
     #[serde(default, rename = "suggestOnTopicShift")]
     suggest_on_topic_shift: Option<bool>,
+    // provider-session-pair-offer: whether a switch that finds no partner
+    // offers to pair the two sessions or start a new one. Default on.
+    #[serde(default, rename = "pairAcrossProviders")]
+    pair_across_providers: Option<bool>,
 }
 
 #[derive(Default, Clone, serde::Deserialize)]
@@ -19646,11 +19650,6 @@ fn switch_agent(
         _ => None,
     };
     let pair_from = leaving.clone();
-    let pair_baseline = if target_sid.is_none() {
-        live_session_id(&app, target_provider)
-    } else {
-        None
-    };
     // The boot hold is NOT armed here, deliberately (#305, reverting the arm
     // added by 597935b): its release condition is boot bytes, and Codex emits
     // none it accepts, so holding made every Codex switch swallow pane sends
@@ -19699,25 +19698,19 @@ fn switch_agent(
         first_command: true,
         hook: Box::new(move |app, phase| {
             if phase == LaunchPhase::Confirmed {
-                if let Some(from) = pair_from.as_ref() {
-                    match target_sid.as_ref() {
-                        Some(id) => {
-                            record_pair_for(app, from, &(target_provider, id.clone()), "switch")
-                        }
-                        None => {
-                            let mut guard = match PENDING_PAIR.lock() {
-                                Ok(g) => g,
-                                Err(e) => e.into_inner(),
-                            };
-                            *guard = Some(PendingPair {
-                                from: from.clone(),
-                                to: target_provider,
-                                baseline: pair_baseline.clone(),
-                                at_ms: unix_now_ms(),
-                            });
-                        }
-                    }
-                }
+                // Pairs are explicit only (the draft's decided answer): a
+                // switch never pairs on its own. When it fell back (no
+                // partner, no pending name), the pane offers Keep these
+                // together / Start a new session, if the setting is on.
+                let offer = matches!(resume_reason, "latest" | "pin") && pair_offers_enabled(app);
+                emit_pair_offer(
+                    app,
+                    pair_from.as_ref().filter(|_| offer),
+                    target_sid
+                        .clone()
+                        .filter(|_| offer)
+                        .map(|id| (target_provider, id)),
+                );
                 return;
             }
             if phase != LaunchPhase::Written {
@@ -19773,7 +19766,7 @@ fn record_pair_for<R: tauri::Runtime>(
     let Some(conn) = worklist_state_open(app) else {
         return;
     };
-    let result = worklist_state::record_session_pair(&conn, claude, codex, unix_now_ms());
+    let result = worklist_state::record_session_pair(&conn, claude, codex, unix_now_ms(), source);
     if bram_trace_enabled() {
         let outcome = match &result {
             Ok(true) => "ok".to_string(),
@@ -19789,6 +19782,173 @@ fn record_pair_for<R: tauri::Runtime>(
             ),
         );
     }
+}
+
+// provider-session-pair-offer: `sessions.pairAcrossProviders` (default on).
+fn pair_offers_enabled<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
+    project_root(Some(app))
+        .and_then(|root| load_project_config(&root))
+        .and_then(|c| c.sessions)
+        .and_then(|s| s.pair_across_providers)
+        .unwrap_or(true)
+}
+
+// provider-session-pair-offer: Keep these together, from the pair offer.
+fn pair_sessions_route<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    query: &str,
+) -> Result<Vec<u8>, String> {
+    let mut claude = String::new();
+    let mut codex = String::new();
+    for pair in query.split('&') {
+        if let Some(v) = pair.strip_prefix("claude=") {
+            claude = percent_decode(v);
+        } else if let Some(v) = pair.strip_prefix("codex=") {
+            codex = percent_decode(v);
+        }
+    }
+    if claude.is_empty() || codex.is_empty() {
+        return Err("claude and codex ids required".to_string());
+    }
+    record_pair_for(
+        app,
+        &(SessionProvider::Claude, claude),
+        &(SessionProvider::Codex, codex),
+        "offer-keep",
+    );
+    emit_pair_offer(app, None, None);
+    emit_replayable_signal(app, "sessions-list-changed");
+    Ok(br#"{"ok":true}"#.to_vec())
+}
+
+// provider-session-pair-offer: a session's title by id, for the offer line
+// and the Sessions tab's "paired with" label. None when the file is gone.
+fn session_title_by_id<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    provider: SessionProvider,
+    id: &str,
+) -> Option<String> {
+    let path = session_path_for_id(app, provider, id)?;
+    match provider {
+        SessionProvider::Claude => claude_session_title(&path).ok().flatten(),
+        // The thread name (Bram's or Codex's own, last entry wins) is what the
+        // Sessions list shows; the first user message is only a fallback.
+        SessionProvider::Codex => codex_session_index()
+            .ok()
+            .and_then(|titles| titles.get(id).cloned())
+            .or_else(|| codex_session_title(&path).ok().flatten()),
+    }
+}
+
+// provider-session-pair-offer: each /__sessions/list row whose session has a
+// partner gets `partner: {provider, id, title}` (computed, never stored).
+fn attach_session_partners<R: tauri::Runtime>(app: &AppHandle<R>, rows: &mut serde_json::Value) {
+    let Some(list) = rows.as_array_mut() else {
+        return;
+    };
+    let Some(conn) = worklist_state_open(app) else {
+        return;
+    };
+    for row in list.iter_mut() {
+        let provider = row
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let id = row
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let other = match provider.as_str() {
+            "claude" => SessionProvider::Codex,
+            "codex" => SessionProvider::Claude,
+            _ => continue,
+        };
+        let Ok(Some(partner)) = worklist_state::session_partner(&conn, &provider, &id) else {
+            continue;
+        };
+        let title = session_title_by_id(app, other, &partner);
+        if let Some(obj) = row.as_object_mut() {
+            obj.insert(
+                "partner".to_string(),
+                serde_json::json!({
+                    "provider": session_provider_label(other),
+                    "id": partner,
+                    "title": title,
+                }),
+            );
+        }
+    }
+}
+
+// provider-session-pair-offer: the Sessions tab's Unpair. Records an empty
+// partner for the session, which ends the pairing from both sides.
+fn unpair_session<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    session_id: &str,
+    provider: Option<SessionProvider>,
+) -> Result<Vec<u8>, String> {
+    let provider = provider.ok_or("provider required")?;
+    let conn = worklist_state_open(app).ok_or("state db unavailable")?;
+    let (claude, codex) = match provider {
+        SessionProvider::Claude => (session_id, ""),
+        SessionProvider::Codex => ("", session_id),
+    };
+    let wrote = worklist_state::record_session_pair(&conn, claude, codex, unix_now_ms(), "unpair")
+        .map_err(|e| e.to_string())?;
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "state-mirror",
+            &format!(
+                "op=pair-stamp claude={} codex={} source=unpair result={}",
+                claude,
+                codex,
+                if wrote { "ok" } else { "unchanged" }
+            ),
+        );
+    }
+    emit_replayable_signal(app, "sessions-list-changed");
+    Ok(br#"{"ok":true}"#.to_vec())
+}
+
+// provider-session-pair-offer: after a header switch that fell back to the
+// Codex pin or the most recent session (no partner), the pane offers to start
+// a new session for the one being left instead. Replayable, because a
+// cross-provider switch reloads the pane; any other switch clears it.
+fn emit_pair_offer<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    from: Option<&(SessionProvider, String)>,
+    to: Option<(SessionProvider, String)>,
+) {
+    let payload = match (from, to) {
+        (Some((fp, fid)), Some((tp, tid))) => serde_json::json!({
+            "active": true,
+            "fromProvider": session_provider_label(*fp),
+            "fromSessionId": fid,
+            "fromTitle": session_title_by_id(app, *fp, fid),
+            "toProvider": session_provider_label(tp),
+            "toSessionId": tid,
+            "toTitle": session_title_by_id(app, tp, &tid),
+            "atMs": unix_now_ms(),
+        }),
+        _ => serde_json::json!({ "active": false, "atMs": unix_now_ms() }),
+    };
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "agent-switch",
+            &format!(
+                "op=pair-offer active={}",
+                payload
+                    .get("active")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            ),
+        );
+    }
+    emit_replayable_payload(app, "pair-offer", payload);
 }
 
 // A switch whose target session isn't known at launch (a fresh launch: the
@@ -20990,6 +21150,8 @@ fn create_new_session(
     app: AppHandle,
     provider: String,
     title: String,
+    pair_with_provider: Option<String>,
+    pair_with_session: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let provider_key = match provider.trim().to_ascii_lowercase().as_str() {
@@ -21026,6 +21188,24 @@ fn create_new_session(
     // typed blind after a fixed settle any more (new-session-handoff-race):
     // hold pane sends until the new CLI shows boot bytes, and gate the launch
     // command itself on shell-prompt evidence in a spawned waiter below.
+    // provider-session-pair-offer: Create from the pane's pair offer pairs
+    // the new session with the session it was offered for (another provider's).
+    let new_provider = if provider_key == "codex" {
+        SessionProvider::Codex
+    } else {
+        SessionProvider::Claude
+    };
+    let pair_with: Option<(SessionProvider, String)> = pair_with_provider
+        .as_deref()
+        .and_then(SessionProvider::from_str)
+        .filter(|p| *p != new_provider)
+        .zip(pair_with_session.filter(|s| !s.is_empty()));
+    let pair_known_sid = session_id.clone();
+    let pair_baseline = if pair_with.is_some() && pair_known_sid.is_none() {
+        live_session_id(&app, new_provider)
+    } else {
+        None
+    };
     let generation = begin_agent_launch();
     arm_agent_boot_hold(&app, provider_key);
     clear_stale_terminal_input_for_switch(&app, &state, "agent-new-session");
@@ -21062,7 +21242,29 @@ fn create_new_session(
             LaunchPhase::Written => {
                 schedule_agent_switch_refresh(app.clone(), provider_key, "new-session")
             }
-            LaunchPhase::Confirmed => {}
+            LaunchPhase::Confirmed => {
+                let Some(from) = pair_with.as_ref() else {
+                    return;
+                };
+                match pair_known_sid.as_ref() {
+                    Some(id) => {
+                        record_pair_for(app, from, &(new_provider, id.clone()), "offer-create")
+                    }
+                    None => {
+                        let mut guard = match PENDING_PAIR.lock() {
+                            Ok(g) => g,
+                            Err(e) => e.into_inner(),
+                        };
+                        *guard = Some(PendingPair {
+                            from: from.clone(),
+                            to: new_provider,
+                            baseline: pair_baseline.clone(),
+                            at_ms: unix_now_ms(),
+                        });
+                    }
+                }
+                emit_pair_offer(app, None, None);
+            }
         }),
     });
     Ok(())
@@ -21600,6 +21802,7 @@ mod agent_startup_policy_tests {
         assert_eq!(view["sessions"]["suggestOnNewItem"], true);
         assert_eq!(view["sessions"]["suggestOnNewIssue"], true);
         assert_eq!(view["sessions"]["suggestOnTopicShift"], false);
+        assert_eq!(view["sessions"]["pairAcrossProviders"], true);
 
         let existing = serde_json::json!({
             "ui": { "showTargetApp": true },
@@ -21640,7 +21843,8 @@ mod agent_startup_policy_tests {
             "sessions": {
                 "suggestOnNewItem": true,
                 "suggestOnNewIssue": true,
-                "suggestOnTopicShift": false
+                "suggestOnTopicShift": false,
+                "pairAcrossProviders": true
             },
             "traces": { "enabled": true, "inspectorTap": false, "archiveAfterDays": 14 },
             "menus": { "parseAndDisplay": false },
@@ -21819,6 +22023,10 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
         .as_ref()
         .and_then(|s| s.suggest_on_topic_shift)
         .unwrap_or(false);
+    let pair_across_providers = sessions_cfg
+        .as_ref()
+        .and_then(|s| s.pair_across_providers)
+        .unwrap_or(true);
     let (
         agent,
         args,
@@ -21911,7 +22119,8 @@ fn settings_view_from_config(config: Option<ProjectConfig>) -> serde_json::Value
         "sessions": {
             "suggestOnNewItem": suggest_on_new_item,
             "suggestOnNewIssue": suggest_on_new_issue,
-            "suggestOnTopicShift": suggest_on_topic_shift
+            "suggestOnTopicShift": suggest_on_topic_shift,
+            "pairAcrossProviders": pair_across_providers
         },
         "traces": {
             "enabled": tracing_enabled,
@@ -65822,8 +66031,21 @@ fn route_request<R: tauri::Runtime>(
         } else if rest == "list" {
             (
                 "application/json; charset=utf-8",
-                list_sessions(app, provider, limit)
-                    .and_then(|entries| serde_json::to_vec(&entries).map_err(|e| e.to_string())),
+                list_sessions(app, provider, limit).and_then(|entries| {
+                    let mut rows = serde_json::to_value(&entries).map_err(|e| e.to_string())?;
+                    attach_session_partners(app, &mut rows);
+                    serde_json::to_vec(&rows).map_err(|e| e.to_string())
+                }),
+            )
+        } else if rest == "pair" {
+            (
+                "application/json; charset=utf-8",
+                pair_sessions_route(app, query),
+            )
+        } else if rest == "unpair" {
+            (
+                "application/json; charset=utf-8",
+                unpair_session(app, &session_id, provider),
             )
         } else if rest == "latest" {
             (
@@ -65851,10 +66073,13 @@ fn route_request<R: tauri::Runtime>(
                 delete_session(app, &session_id, provider),
             )
         } else if rest == "rename" {
-            (
-                "application/json; charset=utf-8",
-                rename_session(app, &session_id, provider, &title),
-            )
+            // provider-session-pair-offer: refresh the list after a rename, so
+            // Match name (and the ✎ rename) show the new title without a reload.
+            let r = rename_session(app, &session_id, provider, &title);
+            if r.is_ok() {
+                emit_replayable_signal(app, "sessions-list-changed");
+            }
+            ("application/json; charset=utf-8", r)
         } else {
             (
                 "text/plain; charset=utf-8",

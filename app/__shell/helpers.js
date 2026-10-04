@@ -1058,6 +1058,195 @@ window.__bramSwitchAgent = function (provider) {
     });
   };
 })();
+// provider-session-pair-offer: after a header switch that found no partner
+// (the host resumed the target's pin or most recent session, and pairs only
+// on an explicit act), offer to keep the two sessions together or to start a
+// new session for the one being left. Driven by the
+// host's replayable `pair-offer`; a later switch replaces it. Dismiss is
+// focus (sessionStorage, keyed by offer time). "Start a new one" opens the
+// New session dialog pre-filled (the suggest path) and holds the offer until
+// Create, which pairs the new session with it (__bramTakePairOfferForCreate);
+// Cancel drops it (__bramClearPairOfferForCreate).
+(function () {
+  var DISMISS_KEY = "bram.pairOfferDismissedAt";
+  var CREATE_TTL_MS = 10 * 60 * 1000;
+  var subscribers = new Set();
+  var latest = null;
+  var lastValue = null;
+  var dismissedAt = 0;
+  var hooked = false;
+  var forCreate = null;
+  try { dismissedAt = Number(window.sessionStorage.getItem(DISMISS_KEY)) || 0; } catch (e) {}
+
+  var name = function (p) { return p === "codex" ? "Codex" : "Claude"; };
+  // A session with no title is named by its short id, which the Sessions
+  // tab can find, never "(untitled)".
+  var quoted = function (t, id) { return t ? "'" + t + "'" : String(id || "").slice(0, 8); };
+  var derive = function () {
+    var p = latest;
+    if (!p || !p.active) return null;
+    if (Number(p.atMs) && Number(p.atMs) <= dismissedAt) return null;
+    return {
+      atMs: p.atMs,
+      fromProvider: p.fromProvider,
+      fromSessionId: p.fromSessionId,
+      fromTitle: p.fromTitle || "",
+      toProvider: p.toProvider,
+      toSessionId: p.toSessionId,
+      message: "No " + name(p.toProvider) + " session goes with " + name(p.fromProvider) + " session " +
+        quoted(p.fromTitle, p.fromSessionId) + ". " + name(p.toProvider) + " resumed its most recent, " +
+        quoted(p.toTitle, p.toSessionId) + ".",
+      keepTooltip: "Pair these two, so switching between Claude and Codex moves between them.",
+      actionLabel: "Start a new " + name(p.toProvider) + " session",
+      actionTooltip: "Opens New session to start a " + name(p.toProvider) + " session that goes with " +
+        quoted(p.fromTitle, p.fromSessionId) + "; switching back and forth will then move between those two.",
+    };
+  };
+  var notify = function (reason) {
+    var next = derive();
+    var was = !!lastValue;
+    lastValue = next;
+    if (was !== !!next) {
+      try {
+        window.__bramIframeTrace("pair-offer", {
+          op: next ? "shown" : "cleared",
+          reason: reason,
+          to: next ? next.toProvider : "",
+        });
+      } catch (e) {}
+    }
+    subscribers.forEach(function (fn) {
+      try { fn(); } catch (e) { console.error("[bram] pair-offer subscriber threw:", e); }
+    });
+  };
+  var ensureHooked = function () {
+    if (hooked) return;
+    hooked = true;
+    window.bramSubscribeTauriEvent("pair-offer")(function (snapshot) {
+      latest = (snapshot && snapshot.payload) || null;
+      notify(latest && latest.active ? "offer" : "host-clear");
+    });
+  };
+  window.bramSubscribePairOffer = (function () {
+    var factory;
+    return function () {
+      if (factory) return factory;
+      ensureHooked();
+      factory = function (emit) {
+        var fire = function () { emit(lastValue); };
+        subscribers.add(fire);
+        fire();
+        return function () { subscribers.delete(fire); };
+      };
+      return factory;
+    };
+  })();
+  var dismiss = function (value, reason) {
+    if (!value) return;
+    dismissedAt = Number(value.atMs) || Date.now();
+    try { window.sessionStorage.setItem(DISMISS_KEY, String(dismissedAt)); } catch (e) {}
+    notify(reason);
+  };
+  window.__bramPairOfferDismiss = function (value) { dismiss(value, "dismiss-click"); };
+  window.__bramPairOfferKeep = function (value, toastApi) {
+    if (!value) return;
+    var claude = value.fromProvider === "claude" ? value.fromSessionId : value.toSessionId;
+    var codex = value.fromProvider === "codex" ? value.fromSessionId : value.toSessionId;
+    dismiss(value, "keep-click");
+    window.fetch("/__sessions/pair?claude=" + encodeURIComponent(claude || "") +
+      "&codex=" + encodeURIComponent(codex || ""), { cache: "no-store" }).then(function (r) {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+    }).catch(function (e) {
+      if (toastApi && typeof toastApi.error === "function") {
+        toastApi.error("Could not pair: " + String((e && e.message) || e));
+      }
+    });
+  };
+  window.__bramPairOfferStart = function (value) {
+    if (!value) return;
+    forCreate = {
+      provider: value.fromProvider,
+      id: value.fromSessionId,
+      title: value.fromTitle,
+      toProvider: value.toProvider,
+      at: Date.now(),
+    };
+    dismiss(value, "start-click");
+    window.__bramSessionSuggestIngest({
+      name: (value.fromTitle || (name(value.fromProvider) + " session " + String(value.fromSessionId || "").slice(0, 8))) +
+        " (" + name(value.toProvider) + ")",
+      whatsNext: "Pick up the work of the " + name(value.fromProvider) + " session " +
+        quoted(value.fromTitle, value.fromSessionId) + " here in " + name(value.toProvider) + ".",
+      atMs: Date.now(),
+    });
+  };
+  window.__bramTakePairOfferForCreate = function (provider) {
+    var o = forCreate;
+    forCreate = null;
+    if (!o || Date.now() - o.at > CREATE_TTL_MS) return null;
+    if (String(provider || "").toLowerCase() !== o.toProvider) return null;
+    try { window.__bramIframeTrace("pair-offer", { op: "create", to: o.toProvider }); } catch (e) {}
+    return o;
+  };
+  window.__bramClearPairOfferForCreate = function () { forCreate = null; };
+})();
+
+// provider-session-pair-offer: the Sessions row's "paired with" label.
+window.__bramPairedWithLabel = function (partner) {
+  if (!partner) return "";
+  var who = partner.provider === "codex" ? "Codex" : "Claude";
+  return "Paired with " + who + " session " +
+    (partner.title ? "'" + partner.title + "'" : String(partner.id || "").slice(0, 8));
+};
+
+// provider-session-pair-offer: Match name. The name this row's session would
+// take to match its partner: "<partner title> (<this provider>)". Empty when
+// there's nothing to match (no partner title) or the names already match,
+// ignoring a trailing "(Claude)" / "(Codex)".
+window.__bramPairMatchTitle = function (item) {
+  var p = item && item.partner;
+  if (!p || !p.title) return "";
+  var mine = item.provider === "codex" ? "Codex" : "Claude";
+  var strip = function (t) { return String(t || "").replace(/ \((Claude|Codex)\)$/, ""); };
+  var base = strip(p.title);
+  // Already matching, suffix aside: nothing to offer on either row.
+  if (strip(item.title) === base) return "";
+  return base + " (" + mine + ")";
+};
+window.__bramPairMatchTooltip = function (item) {
+  var t = window.__bramPairMatchTitle(item);
+  return t ? "Rename this session to '" + t + "'" : "";
+};
+window.__bramPairMatchName = function (item, toastApi) {
+  var t = window.__bramPairMatchTitle(item);
+  if (!t) return;
+  var url = "/__sessions/rename?provider=" + encodeURIComponent(item.provider || "") +
+    "&id=" + encodeURIComponent(item.id || "") + "&title=" + encodeURIComponent(t);
+  try { window.__bramIframeTrace("pair-offer", { op: "match-name", provider: item.provider || "" }); } catch (e) {}
+  window.fetch(url, { cache: "no-store" }).then(function (r) {
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    if (typeof toastApi === "function") toastApi("Renamed to '" + t + "'");
+  }).catch(function (e) {
+    if (toastApi && typeof toastApi.error === "function") {
+      toastApi.error("Could not rename: " + String((e && e.message) || e));
+    }
+  });
+};
+
+// provider-session-pair-offer: the Sessions tab's Unpair. The host records
+// the unpair and signals sessions-list-changed, which refetches the list.
+window.__bramUnpairSession = function (provider, id, toastApi) {
+  var url = "/__sessions/unpair?provider=" + encodeURIComponent(provider || "") +
+    "&id=" + encodeURIComponent(id || "");
+  window.fetch(url, { cache: "no-store" }).then(function (r) {
+    if (!r.ok) throw new Error("HTTP " + r.status);
+  }).catch(function (e) {
+    if (toastApi && typeof toastApi.error === "function") {
+      toastApi.error("Could not unpair: " + String((e && e.message) || e));
+    }
+  });
+};
+
 window.__bramHandleAgentSwitcherChange = function (next, previous, select, toastApi) {
   var key = String(next || "").toLowerCase() === "codex" ? "codex" : (String(next || "").toLowerCase() === "claude" ? "claude" : "");
   var prev = String(previous || "").toLowerCase() === "codex" ? "codex" : "claude";
@@ -1121,7 +1310,7 @@ window.__bramReloadAgentSession = function (provider, sessionId) {
 // sessions-new-named-session: start a fresh session for the current provider,
 // optionally naming it. The host kills+relaunches the agent without --continue
 // and applies the name when the new session's JSONL surfaces.
-window.__bramCreateNewSession = function (provider, title) {
+window.__bramCreateNewSession = function (provider, title, pairWith) {
   var key = String(provider || "").toLowerCase() === "codex" ? "codex" : "claude";
   var invoke = getTauriInvoke();
   // dismiss-click-evidence-before-guard audit: __bramCreateNewSessionClick
@@ -1131,8 +1320,15 @@ window.__bramCreateNewSession = function (provider, title) {
   // bram-trace.log. Same anti-pattern as #343 (gitPush, __bramCloseIssue).
   window.__bramIframeTrace("new-session-client", { op: invoke ? "act" : "no-invoke", provider: key });
   if (!invoke) return Promise.reject(new Error("Tauri IPC unavailable"));
+  // provider-session-pair-offer: Create from the pair offer pairs the new
+  // session with the session it was offered for.
+  var args = { provider: key, title: String(title || "") };
+  if (pairWith && pairWith.provider && pairWith.id) {
+    args.pairWithProvider = String(pairWith.provider);
+    args.pairWithSession = String(pairWith.id);
+  }
   return window.__bramWithAgentCommandTimeout(
-    invoke("create_new_session", { provider: key, title: String(title || "") }),
+    invoke("create_new_session", args),
     "new session"
   );
 };
@@ -1161,8 +1357,12 @@ window.__bramNewSessionBrief = function (words, predecessor) {
 };
 window.__bramCreateNewSessionClick = function (provider, name, toastApi, words, predecessor) {
   var said = String(words || "").trim();
+  // provider-session-pair-offer: a dialog opened from the pair offer creates
+  // a session that goes with the offered one, and its brief points there.
+  var offer = window.__bramTakePairOfferForCreate(provider);
+  if (offer) predecessor = { provider: offer.provider, id: offer.id, title: offer.title };
   if (typeof toastApi === "function") toastApi("Starting a new session…");
-  window.__bramCreateNewSession(provider, name).then(function () {
+  window.__bramCreateNewSession(provider, name, offer).then(function () {
     if (!said) return;
     var brief = window.__bramNewSessionBrief(said, predecessor);
     window.__bramIframeTrace("new-session-client", {
@@ -2791,7 +2991,7 @@ window.settingsInfoBodies = {
   shell:
     "## Agent\n\nThe default agent used by agent-scoped launch choices and as the fallback when no valid last-active Bram session exists.\n\n*Project setting, saved in `.bram.json` as `shell.agent` and shared with everyone who works in this repo. Default: Claude.*\n\n## On Bram launch\n\n**Resume selected agent's most recent session** uses the Agent selection above.\n\n**Resume most-recently-active agent's session** reopens the exact Claude or Codex session Bram was actually using before shutdown.\n\n**Start a new session** starts the selected Agent fresh.\n\n*Project setting, saved in `.bram.json` as `shell.startupPolicy` and shared with everyone who works in this repo. Default: Resume selected agent's most recent session.*\n\n## Launch arguments\n\nExtra CLI flags for the agent. They apply whichever startup choice is used.\n\n*Project setting, saved in `.bram.json` as `shell.args` and shared with everyone who works in this repo. Default: empty.*\n\n## First command\n\nSent to the agent's TUI after startup, whichever startup choice is used.\n\n*Project setting, saved in `.bram.json` as `shell.firstCommand` and shared with everyone who works in this repo. Default: empty.*",
   sessions:
-    "The agent can offer to continue a new line of work in a fresh session. It always asks first, in one line, and at most once per topic; saying no keeps the work here.\n\n## When the agent is about to propose a new worklist item\n\n*Project setting, saved in `.bram.json` as `sessions.suggestOnNewItem` and shared with everyone who works in this repo. Default: on.*\n\n## When the agent is about to file a new issue\n\n*Project setting, saved in `.bram.json` as `sessions.suggestOnNewIssue` and shared with everyone who works in this repo. Default: on.*\n\n## When the conversation shifts to a significantly different topic\n\nThe agent judges when a topic has shifted, so this one asks more often than the other two.\n\n*Project setting, saved in `.bram.json` as `sessions.suggestOnTopicShift` and shared with everyone who works in this repo. Default: off.*",
+    "The agent can offer to continue a new line of work in a fresh session. It always asks first, in one line, and at most once per topic; saying no keeps the work here.\n\n## When the agent is about to propose a new worklist item\n\n*Project setting, saved in `.bram.json` as `sessions.suggestOnNewItem` and shared with everyone who works in this repo. Default: on.*\n\n## When the agent is about to file a new issue\n\n*Project setting, saved in `.bram.json` as `sessions.suggestOnNewIssue` and shared with everyone who works in this repo. Default: on.*\n\n## When the conversation shifts to a significantly different topic\n\nThe agent judges when a topic has shifted, so this one asks more often than the other two.\n\n*Project setting, saved in `.bram.json` as `sessions.suggestOnTopicShift` and shared with everyone who works in this repo. Default: off.*\n\n## Pair new sessions across providers\n\nWhen you switch between Claude and Codex and the session you're leaving has no partner on the other side, the other agent resumes its most recent session and Bram asks what you want: **Keep these together** pairs the two, so switching back and forth moves between them; **Start a new … session** starts one for the session you left. Bram never pairs sessions on its own. Turning this off stops the question; pairs you already made keep working, and **Unpair** on the Sessions tab ends one.\n\n*Project setting, saved in `.bram.json` as `sessions.pairAcrossProviders` and shared with everyone who works in this repo. Default: on.*",
   batchCommitActions:
     "## Mirror Worklist lifecycle to GitHub issues\n\nPost Worklist lifecycle comments to linked GitHub issues.\n\n*Project setting, saved in `.bram.json` as `mirrorWorklistLifecycleToIssue` and shared with everyone who works in this repo. Default: off.*",
   ui:
@@ -15657,7 +15857,8 @@ window.__bramSkipTip = function (id, tick) {
 };
 
 // suggest-fresh-session: sessions.* settings read for the Settings checkboxes.
-// Defaults mirror the host: new-item and new-issue on, topic-shift off.
+// Defaults mirror the host: new-item, new-issue and pairAcrossProviders on,
+// topic-shift off.
 window.__bramSuggestSetting = function (settings, key) {
   var s = settings && settings.sessions;
   if (s && typeof s[key] === "boolean") return s[key];

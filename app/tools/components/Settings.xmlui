@@ -200,6 +200,18 @@
           labelPosition="end"
           initialValue="{window.__bramSuggestSetting(settingsValue, 'suggestOnTopicShift')}"
           onDidChange="(v) => saveSettings.execute({ sessions: { suggestOnTopicShift: v } })" />
+        <!-- provider-session-pair-offer: a Switch, not a fourth checkbox,
+             because it isn't a "when to suggest" trigger: it turns the pair
+             offer after a provider switch on or off. Default on, read through
+             __bramSuggestSetting like its neighbours. label/labelPosition as
+             on the Mirror switch below: input-level label props, per
+             https://www.xmlui.org/docs/howto/arrange-form-fields-side-by-side
+             https://www.xmlui.org/docs/reference/components/Switch -->
+        <Switch
+          label="Pair new sessions across providers"
+          labelPosition="end"
+          initialValue="{window.__bramSuggestSetting(settingsValue, 'pairAcrossProviders')}"
+          onDidChange="(v) => saveSettings.execute({ sessions: { pairAcrossProviders: v } })" />
       </VStack>
 
       <ContentSeparator />

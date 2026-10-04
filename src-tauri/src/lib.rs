@@ -11012,6 +11012,8 @@ fn pty_menu_update<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
     // new-session-handoff-race: while pane sends are held awaiting a fresh
     // agent CLI, watch each chunk for TUI boot bytes (no-op when unarmed).
     agent_boot_evidence_scan(app, chunk);
+    // shell-reports-prompt-and-exit-status: the shell's own prompt/exec edges.
+    shell_marker_scan(app, chunk);
     // issue-305 (observe-only): track terminal-modal mode bytes.
     term_modal_scan(app, chunk);
     // codex-trust-menu-arm-until-settled: boot-prompt classification arms
@@ -18949,12 +18951,17 @@ const AGENT_CROSS_PROVIDER_RELOAD_MS: u64 = 2500;
 // Claude's farewell, #314). Extracted from the new-session waiter
 // (new-session-handoff-race) so the switch path stops being the one caller
 // that types on a timer.
-fn wait_for_shell_prompt_evidence() -> Result<i64, i64> {
+//
+// shell-reports-prompt-and-exit-status: once the shell has sent a marker this
+// session, the marker decides (a `❯` prompt counts; agent output ending in `$`
+// doesn't). Ok carries which evidence fired: "marker" or "shape".
+fn wait_for_shell_prompt_evidence() -> Result<(i64, &'static str), i64> {
     std::thread::sleep(std::time::Duration::from_millis(AGENT_RELAUNCH_SETTLE_MS));
     let started = unix_now_ms();
     loop {
-        if pty_tail_shows_shell_prompt() {
-            return Ok(unix_now_ms().saturating_sub(started));
+        if let Some(via) = shell_prompt_evidence(shell_foreground(), pty_tail_shows_shell_prompt())
+        {
+            return Ok((unix_now_ms().saturating_sub(started), via));
         }
         let waited = unix_now_ms().saturating_sub(started);
         if waited >= NEW_SESSION_PROMPT_TIMEOUT_MS {
@@ -19117,14 +19124,14 @@ fn switch_agent(
                 }
                 return;
             }
-            Ok(waited) => {
+            Ok((waited, via)) => {
                 if bram_trace_enabled() {
                     append_bram_trace_line(
                         &waiter_app,
                         "agent-switch",
                         &format!(
-                            "op=launch-gated provider={} waited_ms={}",
-                            provider_key, waited
+                            "op=launch-gated provider={} waited_ms={} via={}",
+                            provider_key, waited, via
                         ),
                     );
                 }
@@ -20238,12 +20245,12 @@ fn create_new_session(
                 open_agent_boot_evidence(&waiter_app, "launch-timeout");
                 return;
             }
-            Ok(waited) => {
+            Ok((waited, via)) => {
                 if bram_trace_enabled() {
                     append_bram_trace_line(
                         &waiter_app,
                         "session-new",
-                        &format!("op=launch-gated waited_ms={}", waited),
+                        &format!("op=launch-gated waited_ms={} via={}", waited, via),
                     );
                 }
             }
@@ -38111,6 +38118,222 @@ fn pty_tail_shows_shell_prompt_or_continuation() -> bool {
     line_is_shell_prompt_or_continuation(&pty_tail_last_line())
 }
 
+// shell-reports-prompt-and-exit-status: Bram's shellrc reports the shell's
+// foreground edges as private OSC 7779 sequences (see
+// app/shell/claude-code-shellrc): `prompt;<status>` when the shell is back at
+// its prompt, `exec` when a command line starts. Standard OSC 133 was
+// rejected because an agent TUI could emit it itself; nothing else emits
+// 7779 with the `bram` tag. Windows (claude-code-profile.ps1) sends no
+// markers, so it stays on the prompt-shape guess.
+const SHELL_MARKER_PREFIX: &[u8] = b"\x1b]7779;bram;";
+// Longest well-formed marker is `prompt;-2147483648` plus terminator; a
+// prefix with no terminator within this many bytes is not ours.
+const SHELL_MARKER_MAX_LEN: usize = 48;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShellMarker {
+    Prompt(i32),
+    Exec,
+}
+
+// Complete markers in `buf`, plus the index from which `buf` must be kept as
+// carry because a marker may be split across PTY chunks.
+fn shell_markers_scan(buf: &[u8]) -> (Vec<ShellMarker>, usize) {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < buf.len() {
+        let Some(off) = buf[i..]
+            .windows(SHELL_MARKER_PREFIX.len())
+            .position(|w| w == SHELL_MARKER_PREFIX)
+        else {
+            break;
+        };
+        let start = i + off;
+        let body = start + SHELL_MARKER_PREFIX.len();
+        let term = buf[body..]
+            .iter()
+            .position(|&b| b == 0x07 || b == 0x1b)
+            .map(|p| body + p);
+        match term {
+            Some(t) => {
+                let payload = String::from_utf8_lossy(&buf[body..t]);
+                if payload == "exec" {
+                    out.push(ShellMarker::Exec);
+                } else if let Some(n) = payload.strip_prefix("prompt;") {
+                    if let Ok(status) = n.parse::<i32>() {
+                        out.push(ShellMarker::Prompt(status));
+                    }
+                }
+                i = t + 1;
+            }
+            None if buf.len() - start < SHELL_MARKER_MAX_LEN => return (out, start),
+            None => i = body,
+        }
+    }
+    // A prefix cut off at the chunk boundary: keep its partial head.
+    let tail_from = buf
+        .len()
+        .saturating_sub(SHELL_MARKER_PREFIX.len() - 1)
+        .max(i);
+    for k in tail_from..buf.len() {
+        if SHELL_MARKER_PREFIX.starts_with(&buf[k..]) {
+            return (out, k);
+        }
+    }
+    (out, buf.len())
+}
+
+// What the shell has reported about its foreground. `seen` is false until the
+// first marker, which keeps shells without the hook (Windows, an old rc) on
+// the shape guess.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ShellForeground {
+    seen: bool,
+    at_prompt: bool,
+    status: Option<i32>,
+    at_ms: i64,
+}
+
+fn shell_foreground_step(mut s: ShellForeground, m: ShellMarker, now_ms: i64) -> ShellForeground {
+    s.seen = true;
+    s.at_ms = now_ms;
+    match m {
+        ShellMarker::Prompt(status) => {
+            s.at_prompt = true;
+            s.status = Some(status);
+        }
+        ShellMarker::Exec => s.at_prompt = false,
+    }
+    s
+}
+
+static SHELL_FOREGROUND: OnceLock<Mutex<(ShellForeground, Vec<u8>)>> = OnceLock::new();
+
+fn shell_foreground_cell() -> &'static Mutex<(ShellForeground, Vec<u8>)> {
+    SHELL_FOREGROUND.get_or_init(|| Mutex::new((ShellForeground::default(), Vec::new())))
+}
+
+fn shell_foreground() -> ShellForeground {
+    match shell_foreground_cell().lock() {
+        Ok(g) => g.0,
+        Err(e) => e.into_inner().0,
+    }
+}
+
+fn shell_marker_scan<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
+    let markers = {
+        let mut g = match shell_foreground_cell().lock() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+        // Cheap prefilter: no ESC byte in the chunk and no pending carry.
+        if g.1.is_empty() && !chunk.contains(&0x1b) {
+            return;
+        }
+        let mut buf = std::mem::take(&mut g.1);
+        buf.extend_from_slice(chunk);
+        let (markers, keep_from) = shell_markers_scan(&buf);
+        g.1 = buf[keep_from..].to_vec();
+        let now = unix_now_ms();
+        for m in &markers {
+            g.0 = shell_foreground_step(g.0, *m, now);
+        }
+        markers
+    };
+    if !bram_trace_enabled() {
+        return;
+    }
+    for m in markers {
+        let detail = match m {
+            ShellMarker::Prompt(status) => format!("op=marker edge=prompt status={}", status),
+            ShellMarker::Exec => "op=marker edge=exec".to_string(),
+        };
+        append_bram_trace_line(app, "shell-prompt", &detail);
+    }
+}
+
+// The gate's evidence: the shell's own report when it has ever sent one,
+// otherwise the prompt-shape guess. None = no evidence the shell is up.
+fn shell_prompt_evidence(fg: ShellForeground, tail_is_prompt: bool) -> Option<&'static str> {
+    if fg.seen {
+        fg.at_prompt.then_some("marker")
+    } else {
+        tail_is_prompt.then_some("shape")
+    }
+}
+
+#[cfg(test)]
+mod shell_marker_tests {
+    use super::{
+        shell_foreground_step as step, shell_markers_scan as scan, shell_prompt_evidence,
+        ShellForeground, ShellMarker,
+    };
+
+    #[test]
+    fn parses_prompt_status_and_exec() {
+        let buf = b"x\x1b]7779;bram;exec\x07hi\r\n\x1b]7779;bram;prompt;1\x07bash-3.2$ ";
+        let (m, keep) = scan(buf);
+        assert_eq!(m, vec![ShellMarker::Exec, ShellMarker::Prompt(1)]);
+        assert_eq!(keep, buf.len());
+    }
+
+    #[test]
+    fn st_terminator_is_accepted() {
+        let (m, _) = scan(b"\x1b]7779;bram;prompt;0\x1b\\");
+        assert_eq!(m, vec![ShellMarker::Prompt(0)]);
+    }
+
+    #[test]
+    fn marker_split_across_chunks_is_kept_as_carry() {
+        let first = b"output\x1b]7779;bram;pro";
+        let (m, keep) = scan(first);
+        assert!(m.is_empty());
+        let mut buf = first[keep..].to_vec();
+        buf.extend_from_slice(b"mpt;130\x07$ ");
+        assert_eq!(scan(&buf).0, vec![ShellMarker::Prompt(130)]);
+    }
+
+    #[test]
+    fn partial_prefix_at_chunk_end_is_kept() {
+        let first = b"output\x1b]77";
+        let (_, keep) = scan(first);
+        assert_eq!(&first[keep..], b"\x1b]77");
+        let (_, keep) = scan(b"plain text");
+        assert_eq!(keep, 10);
+    }
+
+    #[test]
+    fn other_oscs_and_untagged_7779_are_ignored() {
+        let (m, _) = scan(b"\x1b]133;D;0\x07\x1b]7779;evil;prompt;0\x07\x1b]0;title\x07");
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn foreground_follows_the_edges() {
+        let s = ShellForeground::default();
+        let s = step(s, ShellMarker::Prompt(0), 1);
+        assert!(s.seen && s.at_prompt);
+        let s = step(s, ShellMarker::Exec, 2);
+        assert!(!s.at_prompt);
+        let s = step(s, ShellMarker::Prompt(1), 3);
+        assert_eq!((s.at_prompt, s.status), (true, Some(1)));
+    }
+
+    #[test]
+    fn evidence_prefers_the_marker_once_seen() {
+        let none = ShellForeground::default();
+        assert_eq!(shell_prompt_evidence(none, true), Some("shape"));
+        assert_eq!(shell_prompt_evidence(none, false), None);
+        // An agent running after `exec`: its output can end in `$` or `%`,
+        // but the marker says the shell is not in the foreground.
+        let running = step(step(none, ShellMarker::Prompt(0), 1), ShellMarker::Exec, 2);
+        assert_eq!(shell_prompt_evidence(running, true), None);
+        // A `❯` prompt the shape guess rejects is still a prompt.
+        let back = step(running, ShellMarker::Prompt(0), 3);
+        assert_eq!(shell_prompt_evidence(back, false), Some("marker"));
+    }
+}
+
 #[cfg(test)]
 mod project_managed_tests {
     use super::{has_project_settings, project_is_managed, WORKLIST_AUTH_REL};
@@ -38290,7 +38513,7 @@ mod shell_prompt_shape_tests {
         let res = wait_for_shell_prompt_evidence();
         *pty_tail_cell().lock().unwrap() = prev;
         assert!(
-            matches!(res, Ok(w) if w < 2000),
+            matches!(res, Ok((w, "shape")) if w < 2000),
             "gate should fire immediately on a PowerShell prompt tail: {res:?}"
         );
     }

@@ -7,3 +7,29 @@
 # No shell functions wrap claude/codex any more: the host owns current-agent
 # state and types launch commands itself.
 echo "Bram manages the agent here - use the header switcher to change providers."
+
+# shell-reports-prompt-and-exit-status: report the shell's own foreground
+# edges to the host as private OSC 7779 sequences, which xterm.js ignores
+# (no handler is registered for 7779) and strip_ansi removes:
+#   ESC ] 7779 ; bram ; prompt ; <status> BEL  -- back at the prompt; the
+#                                                previous command exited <status>
+#   ESC ] 7779 ; bram ; exec BEL               -- a command line just started
+# The host reads these instead of guessing a prompt from the last line's
+# shape. The DEBUG trap fires per simple command; the flag limits it to the
+# first command after each prompt, and skips PROMPT_COMMAND itself and
+# completion. $? survives the trap into PROMPT_COMMAND (checked on bash 3.2).
+__bram_at_prompt=1
+__bram_preexec() {
+  [ -n "$__bram_at_prompt" ] || return 0
+  [ -n "$COMP_LINE" ] && return 0
+  case "$BASH_COMMAND" in __bram_prompt*) return 0 ;; esac
+  __bram_at_prompt=
+  printf '\033]7779;bram;exec\007'
+}
+__bram_prompt() {
+  local s=$?
+  printf '\033]7779;bram;prompt;%s\007' "$s"
+  __bram_at_prompt=1
+}
+PROMPT_COMMAND=__bram_prompt
+trap '__bram_preexec' DEBUG

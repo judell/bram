@@ -13727,7 +13727,10 @@ window.__bramToastIssuesClosed = function (evtValue, toastApi) {
   toastApi("Closed " + list + " on push");
 };
 
-window.__bramApplySendRestore = function (snapshot, box) {
+// pane-send-refuses-bare-shell: `toastApi` is XMLUI's toast()
+// (https://www.xmlui.org/docs/howto/show-toast-notifications-from-code), used
+// to say why a refused send came back (p.reason === "shell-foreground").
+window.__bramApplySendRestore = function (snapshot, box, toastApi) {
   try {
     window.__bramIframeTrace("send-restore", {
       stage: "enter",
@@ -13765,8 +13768,15 @@ window.__bramApplySendRestore = function (snapshot, box) {
     try { box.setValue(merged); } catch (e) {}
   }
   try {
-    window.__bramIframeTrace("send-restore", { chars: text.length, merged: existing.trim().length > 0 });
+    window.__bramIframeTrace("send-restore", {
+      chars: text.length,
+      merged: existing.trim().length > 0,
+      reason: (p && p.reason) || "",
+    });
   } catch (e) {}
+  if (p && p.reason === "shell-foreground" && typeof toastApi === "function") {
+    toastApi("No agent is running in the terminal, so your message wasn't sent. It's back in the message box.");
+  }
 };
 
 // Stable identity key for the Transcript's pending-menu row: present /

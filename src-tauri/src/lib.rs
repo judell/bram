@@ -17889,6 +17889,17 @@ fn drain_pty_intents<R: tauri::Runtime>(
     let mut held: usize = 0;
     let mut boot_restores: Vec<(String, String)> = Vec::new();
     let mut expire_boot_hold = false;
+    // pane-send-refuses-bare-shell: the shell's own report says it is back at
+    // its prompt and nothing has started since, so no agent is reading the
+    // terminal. A send typed now goes to bash, which runs it as commands
+    // (2026-08-28 04:16Z: a queued message wedged bash at PS2 and its
+    // fragments ran as `command not found`). Such sends are handed back to
+    // the message box instead. Judged by the shell, not by an agent's boot
+    // bytes, so it holds the same for Claude and Codex. Shells that send no
+    // marker (Windows) are never refused.
+    let shell_fg = shell_foreground();
+    let shell_in_foreground = shell_refuses_pane_send(shell_fg);
+    let mut shell_restores: Vec<(String, String)> = Vec::new();
 
     for line in content.lines() {
         if line.is_empty() {
@@ -18017,6 +18028,30 @@ fn drain_pty_intents<R: tauri::Runtime>(
                 held += 1;
                 remaining.push(line.to_string());
                 continue;
+            } else if shell_in_foreground {
+                let id = intent
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("intent")
+                    .to_string();
+                if bram_trace_enabled() {
+                    append_bram_trace_line(
+                        app,
+                        "send-gate",
+                        &format!(
+                            "op=refused reason=shell-foreground id={} kind={} status={} chars={}",
+                            id,
+                            kind,
+                            shell_fg
+                                .status
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| "?".into()),
+                            data.chars().count()
+                        ),
+                    );
+                }
+                shell_restores.push((id, data.to_string()));
+                continue;
             }
         }
         let write_result = match kind {
@@ -18106,30 +18141,52 @@ fn drain_pty_intents<R: tauri::Runtime>(
     if expire_boot_hold {
         cancel_agent_boot_hold(app, "expired");
     }
-    if !boot_restores.is_empty() {
-        let ids = boot_restores
-            .iter()
+    // One emit for both kinds of hand-back: two rapid `send-restore` emits
+    // coalesce in the iframe and drop all but the last text (#306).
+    if !boot_restores.is_empty() || !shell_restores.is_empty() {
+        let all = boot_restores.iter().chain(shell_restores.iter());
+        let ids = all
+            .clone()
             .map(|(id, _)| id.as_str())
             .collect::<Vec<_>>()
             .join("+");
-        let text = boot_restores
-            .iter()
+        let text = all
             .map(|(_, text)| text.as_str())
             .filter(|t| !t.is_empty())
             .collect::<Vec<_>>()
             .join("\n\n");
+        // `reason` lets the pane say why the text came back.
+        let reason = if shell_restores.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!("shell-foreground")
+        };
         let _ = app.emit(
             "send-restore",
-            serde_json::json!({"id":ids,"text":text,"aborted":false}),
+            serde_json::json!({"id":ids,"text":text,"aborted":false,"reason":reason}),
         );
-        append_strand_forensics_line(
-            app,
-            &format!(
-                "op=boot-held-restore entries={} chars={}",
-                boot_restores.len(),
-                text.chars().count()
-            ),
-        );
+        if !boot_restores.is_empty() {
+            append_strand_forensics_line(
+                app,
+                &format!(
+                    "op=boot-held-restore entries={} chars={}",
+                    boot_restores.len(),
+                    boot_restores
+                        .iter()
+                        .map(|(_, t)| t.chars().count())
+                        .sum::<usize>()
+                ),
+            );
+        }
+        if !shell_restores.is_empty() {
+            append_strand_forensics_line(
+                app,
+                &format!(
+                    "op=send-refused-shell-foreground entries={}",
+                    shell_restores.len()
+                ),
+            );
+        }
     }
     if held > 0 {
         // Keep the original hold start across repeated drains so the
@@ -19374,19 +19431,16 @@ fn switch_agent(
             ),
         );
     }
-    // NOT armed here, deliberately (#305, reverting the arm added by 597935b).
-    // The exposure is real — during the interrupt→launch window the foreground
-    // is (or becomes) a bare shell, and a pane send landing there EXECUTES —
-    // but the hold's release condition is unsatisfiable for Codex: it emits
-    // none of AGENT_BOOT_EVIDENCE's byte patterns, and the `session-surfaced`
-    // escape hatch waits for a rollout file Codex does not write until its
-    // first user turn, which is the very message being held. Holding here made
-    // every Codex switch swallow pane sends and flush them into the NEXT
-    // agent, silently — strictly worse than the shell exposure it prevents.
-    // `new_session` still arms it (that gap predates this release and its
-    // kickoff-into-PS2 failure is worse); both are fixed properly by
-    // issue-305-boot-hold-unsatisfiable, which releases on the prompt going
-    // away rather than on bytes one provider never sends.
+    // The boot hold is NOT armed here, deliberately (#305, reverting the arm
+    // added by 597935b): its release condition is boot bytes, and Codex emits
+    // none it accepts, so holding made every Codex switch swallow pane sends
+    // and flush them into the NEXT agent. The exposure it was meant to close —
+    // a pane send landing on the bare shell between the outgoing agent's exit
+    // and the new launch, where it would EXECUTE — is closed by
+    // pane-send-refuses-bare-shell instead: the send gate hands a send back to
+    // the message box whenever the shell's own marker says it is at its
+    // prompt, which needs nothing from either provider. (This comment used to
+    // defer to issue-305-boot-hold-unsatisfiable, which was dropped.)
     clear_stale_terminal_input_for_switch(&app, &state, "agent-switch");
     // Dismiss any open agent menu/picker first (e.g. a Claude `/resume` list
     // left open by a prior first-command). Claude exits only on two Ctrl+C at
@@ -38580,6 +38634,13 @@ fn shell_marker_scan<R: tauri::Runtime>(app: &AppHandle<R>, chunk: &[u8]) {
     }
 }
 
+// pane-send-refuses-bare-shell: true only when the shell has reported its
+// prompt and nothing has started since. No marker ever (Windows) is never a
+// refusal; an `exec` (a launch, or `claude` typed by hand) ends it.
+fn shell_refuses_pane_send(fg: ShellForeground) -> bool {
+    fg.seen && fg.at_prompt
+}
+
 // The gate's evidence: the shell's own report when it has ever sent one,
 // otherwise the prompt-shape guess. None = no evidence the shell is up.
 fn shell_prompt_evidence(fg: ShellForeground, tail_is_prompt: bool) -> Option<&'static str> {
@@ -38645,6 +38706,17 @@ mod shell_marker_tests {
         assert!(!s.at_prompt);
         let s = step(s, ShellMarker::Prompt(1), 3);
         assert_eq!((s.at_prompt, s.status), (true, Some(1)));
+    }
+
+    #[test]
+    fn pane_send_is_refused_only_at_a_reported_prompt() {
+        use super::shell_refuses_pane_send as refuses;
+        let none = ShellForeground::default();
+        assert!(!refuses(none), "no marker ever: never refuse (Windows)");
+        let at_prompt = step(none, ShellMarker::Prompt(0), 1);
+        assert!(refuses(at_prompt), "agent exited: bash is reading");
+        let launched = step(at_prompt, ShellMarker::Exec, 2);
+        assert!(!refuses(launched), "an agent started, by Bram or by hand");
     }
 
     #[test]

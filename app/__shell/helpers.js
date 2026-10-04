@@ -9019,6 +9019,225 @@ window.__bramToastWhisperNotice = function (notice, toastApi) {
   );
 };
 
+// voice-setup-dialog: when a 🎤 click finds whisper-server, the model or
+// ffmpeg missing, main.js posts { type: "bram-voice-setup", missing,
+// blocking, report } (report is whisper_preflight's). This replaces the
+// README pointer with a dialog: what each component is for, whether it was
+// found and where, one button to have the agent install what's missing,
+// and the commands to do it yourself (Jon: "don't make people jump through
+// hoops"). Same bridge shape as bram-whisper-unavailable above.
+window.addEventListener("message", function (event) {
+  var data = event && event.data;
+  if (!data || data.type !== "bram-voice-setup") return;
+  try {
+    window.dispatchEvent(new CustomEvent("bram:voice-setup", {
+      detail: {
+        missing: Array.isArray(data.missing) ? data.missing.slice() : [],
+        blocking: !!data.blocking,
+        report: data.report || {},
+        at: Date.now(),
+      },
+    }));
+  } catch (e) {
+    console.error("[bram] voice-setup dispatch failed:", e);
+  }
+});
+
+window.bramSubscribeVoiceSetup = (function () {
+  var factory;
+  return function () {
+    if (factory) return factory;
+    var subscribers = new Set();
+    var lastEvent = null;
+    window.addEventListener("bram:voice-setup", function (evt) {
+      lastEvent = (evt && evt.detail) || null;
+      subscribers.forEach(function (fn) {
+        try { fn(); } catch (e) { console.error("[bram] voice-setup subscriber threw:", e); }
+      });
+    });
+    factory = function (emit) {
+      var fire = function () { emit(lastEvent); };
+      subscribers.add(fire);
+      fire();
+      return function () { subscribers.delete(fire); };
+    };
+    return factory;
+  };
+})();
+
+function __bramVoiceSetupTrace(stage, info) {
+  try {
+    window.__bramIframeTrace && window.__bramIframeTrace("voice-setup", Object.assign({ stage: stage }, info || {}));
+  } catch (e) {}
+}
+
+// "Not now" on the ffmpeg-only notice is focus, not a decision: it lasts
+// the session (docs/developing-bram.md, Client storage). Dictation works
+// without ffmpeg, so that notice shows once per session; a missing engine
+// or model blocks dictation and shows on every click.
+var __BRAM_VOICE_SETUP_FFMPEG_SHOWN = "bram.voiceSetupFfmpegShown";
+window.__bramVoiceSetupLast = null;
+window.__bramVoiceSetupDialogRef = null;
+
+window.__bramOpenVoiceSetup = function (notice, dialog) {
+  if (!notice || !dialog || typeof dialog.open !== "function") return;
+  if (!notice.blocking) {
+    var shown = false;
+    try { shown = sessionStorage.getItem(__BRAM_VOICE_SETUP_FFMPEG_SHOWN) === "1"; } catch (e) {}
+    if (shown) {
+      __bramVoiceSetupTrace("dialog-skipped", { missing: notice.missing, reason: "shown-this-session" });
+      return;
+    }
+    try { sessionStorage.setItem(__BRAM_VOICE_SETUP_FFMPEG_SHOWN, "1"); } catch (e) {}
+  }
+  window.__bramVoiceSetupLast = notice;
+  window.__bramVoiceSetupDialogRef = dialog;
+  __bramVoiceSetupTrace("dialog-open", {
+    missing: notice.missing,
+    blocking: notice.blocking,
+    platform: (notice.report && notice.report.platform) || "",
+  });
+  try { dialog.open(notice); } catch (e) {
+    __bramVoiceSetupTrace("dialog-open-error", { error: String(e) });
+  }
+};
+
+var __BRAM_WHISPER_MODEL_URL =
+  "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin";
+
+// Everything the dialog shows, from one notice: the intro, a row per
+// component, and the do-it-yourself commands for what's missing on this
+// platform. Pure, so the markup stays a set of bindings.
+window.__bramVoiceSetupView = function (notice) {
+  var n = notice || {};
+  var r = n.report || {};
+  var missing = Array.isArray(n.missing) ? n.missing : [];
+  var has = function (name) { return missing.indexOf(name) >= 0; };
+  var row = function (name, c, purpose) {
+    var found = !!(c && c.found);
+    return {
+      name: name,
+      status: found ? "Found: " + (c.path || "") : "Missing",
+      found: found,
+      purpose: purpose,
+    };
+  };
+  var components = [
+    row("whisper-server", r.binary,
+      "The speech engine. It turns your voice into text, on your own machine."),
+    row("The model (ggml-small.en.bin, 466 MB)", r.model,
+      "What the engine has learned about English speech. It loads this file when it starts" +
+      (r.model && r.model.path ? ", from " + r.model.path + "." : ".")),
+    row("ffmpeg", r.ffmpeg,
+      "Converts audio. Bram uses it only for the safety pass: when live dictation fails, " +
+      "Bram transcribes the whole recording in one go, and that recording needs converting first. " +
+      "Without ffmpeg, dictation works, but a failed dictation can't be rescued."),
+  ];
+  // Name only what blocks dictation in the first sentence; ffmpeg doesn't.
+  var label = { "whisper-server": "whisper-server", model: "the model", ffmpeg: "ffmpeg" };
+  var blockers = missing.filter(function (m) { return m !== "ffmpeg"; }).map(function (m) { return label[m] || m; });
+  var list = blockers.length > 1
+    ? blockers.slice(0, -1).join(", ") + " and " + blockers[blockers.length - 1]
+    : blockers.join("");
+  var intro = n.blocking
+    ? "Voice input can't start: " + list + (blockers.length > 1 ? " are" : " is") +
+      " missing. Install " + (blockers.length > 1 ? "them" : "it") + ", then click 🎤 again." +
+      (has("ffmpeg") ? " ffmpeg is missing too; dictation works without it, but the safety pass is off." : "")
+    : "Voice input works, but ffmpeg is missing, so the safety pass is off. " +
+      "Install it whenever you like; this notice won't show again this session.";
+  var commands = [];
+  var linux = r.platform === "linux";
+  if (!linux) {
+    var pkgs = [];
+    if (has("whisper-server")) pkgs.push("whisper-cpp");
+    if (has("ffmpeg")) pkgs.push("ffmpeg");
+    if (pkgs.length) {
+      commands.push({
+        id: "brew",
+        label: "Install with Homebrew",
+        text: "brew install " + pkgs.join(" "),
+      });
+    }
+  } else {
+    if (has("ffmpeg")) {
+      commands.push({
+        id: "apt-ffmpeg",
+        label: "Install ffmpeg (Debian or Ubuntu; use your distribution's package manager otherwise)",
+        text: "sudo apt install -y ffmpeg",
+      });
+    }
+    if (has("whisper-server")) {
+      commands.push({
+        id: "build-whisper",
+        label: "Build whisper-server from source (a few minutes)",
+        text: [
+          "sudo apt install -y build-essential cmake git curl",
+          "git clone https://github.com/ggml-org/whisper.cpp.git",
+          "cd whisper.cpp",
+          "cmake -B build",
+          "cmake --build build -j --config Release",
+          "sudo cp build/bin/whisper-server /usr/local/bin/",
+        ].join("\n"),
+      });
+    }
+  }
+  if (has("model")) {
+    commands.push({
+      id: "model",
+      label: "Download the model (466 MB)",
+      text: "mkdir -p ~/.local/share/whisper-models\n" +
+        "curl -L -o ~/.local/share/whisper-models/ggml-small.en.bin \\\n  " +
+        __BRAM_WHISPER_MODEL_URL,
+    });
+  }
+  commands.forEach(function (c) { c.md = "```\n" + c.text + "\n```"; });
+  return {
+    intro: intro,
+    components: components,
+    commands: commands,
+    hasCommands: commands.length > 0,
+  };
+};
+
+window.__bramVoiceSetupCopy = function (id, text, toastApi) {
+  __bramVoiceSetupTrace("copy", { command: String(id || "") });
+  window.__bramCopyText(text, toastApi);
+};
+
+// The install button: hand the agent a turn naming what's missing and
+// where Bram looked (convention-voice-setup-repair says what it does with
+// it), and close the dialog.
+window.__bramVoiceSetupInstall = function () {
+  var n = window.__bramVoiceSetupLast || {};
+  var r = n.report || {};
+  var found = {};
+  [["whisper-server", r.binary], ["model", r.model], ["ffmpeg", r.ffmpeg]].forEach(function (p) {
+    if (p[1] && p[1].found) found[p[0]] = p[1].path || "";
+  });
+  var payload = {
+    missing: n.missing || [],
+    found: found,
+    platform: r.platform || "",
+    arch: r.arch || "",
+    modelPath: (r.model && r.model.path) || "",
+    searched: r.searched || [],
+    loginShell: r.loginShell || "",
+  };
+  __bramVoiceSetupTrace("install-with-agent", { missing: payload.missing });
+  try {
+    window.toTurn("voice-setup: " + JSON.stringify(payload));
+  } catch (e) {
+    __bramVoiceSetupTrace("install-with-agent-error", { error: String(e) });
+  }
+  var d = window.__bramVoiceSetupDialogRef;
+  try { if (d && typeof d.close === "function") d.close(); } catch (e) {}
+};
+
+window.__bramVoiceSetupClosed = function () {
+  var n = window.__bramVoiceSetupLast || {};
+  __bramVoiceSetupTrace("dialog-closed", { missing: n.missing || [] });
+};
+
 window.bramSubscribeVoiceBusy = (function () {
   var factory;
   return function () {

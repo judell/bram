@@ -21673,6 +21673,330 @@ fn handle_project_config_reload<R: tauri::Runtime>(app_handle: &AppHandle<R>, pr
     emit_settings_changed(app_handle, &settings);
 }
 
+// voice-setup-check-and-log: what a 🎤 click needs before the engine can
+// start (whisper-server, the model file, ffmpeg) and where Bram looked.
+// Before this, all three missing cases ended in one "not running" toast
+// (Raymond Yee, 2026-10-02). An app opened from the Dock or Finder gets
+// launchd's minimal PATH, so Bram's own PATH can miss Homebrew; the
+// well-known prefixes and the user's login shell cover that. ffmpeg is
+// needed only for --convert: the safety pass that transcribes the whole
+// compressed recording when live dictation fails. Live dictation sends WAV.
+const WHISPER_TOOL_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin"];
+const WHISPER_LOGIN_SHELL_TIMEOUT_MS: u64 = 2000;
+
+#[derive(serde::Serialize, Clone, Debug, Default, PartialEq)]
+struct WhisperComponent {
+    found: bool,
+    path: Option<String>,
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct WhisperPreflightReport {
+    // false on Windows, where the engine runs inside WSL and isn't checked.
+    checked: bool,
+    platform: String,
+    arch: String,
+    binary: WhisperComponent,
+    model: WhisperComponent,
+    ffmpeg: WhisperComponent,
+    searched: Vec<String>,
+    login_shell: String,
+    path_env: String,
+}
+
+// Directories to search, in order: Bram's PATH, then the well-known
+// prefixes not already on it. Pure for unit testing.
+fn whisper_search_dirs(path_env: &str, extra: &[&str]) -> Vec<std::path::PathBuf> {
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    for d in std::env::split_paths(std::ffi::OsStr::new(path_env)) {
+        if !d.as_os_str().is_empty() && !out.contains(&d) {
+            out.push(d);
+        }
+    }
+    for e in extra {
+        let d = std::path::PathBuf::from(e);
+        if !out.contains(&d) {
+            out.push(d);
+        }
+    }
+    out
+}
+
+fn whisper_find_in_dirs(name: &str, dirs: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    dirs.iter().map(|d| d.join(name)).find(|p| p.is_file())
+}
+
+// What the last preflight's login-shell lookups found, so whisper_start
+// can use a tool found only there without blocking on the shell again.
+fn whisper_login_shell_cache(
+) -> &'static Mutex<std::collections::HashMap<String, Option<std::path::PathBuf>>> {
+    static CACHE: std::sync::OnceLock<
+        Mutex<std::collections::HashMap<String, Option<std::path::PathBuf>>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+// `command -v <name>` in the user's login shell, bounded by
+// WHISPER_LOGIN_SHELL_TIMEOUT_MS. Status: used | failed | timeout.
+fn whisper_login_shell_lookup(name: &str) -> (Option<std::path::PathBuf>, &'static str) {
+    let shell = std::env::var("SHELL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/bin/zsh".to_string());
+    let mut child = match std::process::Command::new(&shell)
+        .arg("-lc")
+        .arg(format!("command -v {}", shell_single_quote(name)))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return (None, "failed"),
+    };
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if started.elapsed()
+                    >= std::time::Duration::from_millis(WHISPER_LOGIN_SHELL_TIMEOUT_MS)
+                {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return (None, "timeout");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(_) => return (None, "failed"),
+        }
+    }
+    let mut out = String::new();
+    if let Some(mut s) = child.stdout.take() {
+        let _ = s.read_to_string(&mut out);
+    }
+    (
+        whisper_last_abs_path_line(&out).filter(|p| p.is_file()),
+        "used",
+    )
+}
+
+// The last line of shell output that is an absolute path: profile scripts
+// can print before `command -v` answers. Pure for unit testing.
+fn whisper_last_abs_path_line(out: &str) -> Option<std::path::PathBuf> {
+    out.lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| l.starts_with('/'))
+        .map(std::path::PathBuf::from)
+}
+
+fn whisper_component(p: Option<std::path::PathBuf>) -> WhisperComponent {
+    WhisperComponent {
+        found: p.is_some(),
+        path: p.map(|p| p.display().to_string()),
+    }
+}
+
+// The check itself. Runs the login shell only for a tool not found on
+// PATH or the well-known prefixes, and records what it found for
+// whisper_start.
+fn whisper_preflight_report(model_path: &str) -> WhisperPreflightReport {
+    let path_env = std::env::var("PATH").unwrap_or_default();
+    let dirs = whisper_search_dirs(&path_env, WHISPER_TOOL_DIRS);
+    let searched: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
+    let model = std::path::PathBuf::from(expand_tilde(model_path));
+    let model_c = WhisperComponent {
+        found: model.is_file(),
+        path: Some(model.display().to_string()),
+    };
+    if cfg!(target_os = "windows") {
+        return WhisperPreflightReport {
+            checked: false,
+            platform: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+            binary: WhisperComponent::default(),
+            model: WhisperComponent::default(),
+            ffmpeg: WhisperComponent::default(),
+            searched,
+            login_shell: "skipped".to_string(),
+            path_env,
+        };
+    }
+    let mut login_shell = "skipped";
+    let mut find = |name: &str| -> Option<std::path::PathBuf> {
+        if let Some(p) = whisper_find_in_dirs(name, &dirs) {
+            return Some(p);
+        }
+        let (p, status) = whisper_login_shell_lookup(name);
+        if let Ok(mut cache) = whisper_login_shell_cache().lock() {
+            cache.insert(name.to_string(), p.clone());
+        }
+        if login_shell != "used" {
+            login_shell = status;
+        }
+        p
+    };
+    let binary = find("whisper-server");
+    let ffmpeg = find("ffmpeg");
+    WhisperPreflightReport {
+        checked: true,
+        platform: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+        binary: whisper_component(binary),
+        model: model_c,
+        ffmpeg: whisper_component(ffmpeg),
+        searched,
+        login_shell: login_shell.to_string(),
+        path_env,
+    }
+}
+
+// One trace line per check. Pure for unit testing.
+fn whisper_preflight_trace_body(r: &WhisperPreflightReport) -> String {
+    let c = |w: &WhisperComponent| match (w.found, &w.path) {
+        (true, Some(p)) => format!("found:{}", p),
+        (false, Some(p)) => format!("missing:{}", p),
+        _ => "missing".to_string(),
+    };
+    if !r.checked {
+        return format!("preflight checked=false platform={}", r.platform);
+    }
+    format!(
+        "preflight binary={} model={} ffmpeg={} searched={} login_shell={} path={:?}",
+        c(&r.binary),
+        c(&r.model),
+        c(&r.ffmpeg),
+        r.searched.join(","),
+        r.login_shell,
+        r.path_env
+    )
+}
+
+// The engine's PATH: Bram's, with ffmpeg's directory in front when it was
+// found somewhere Bram's PATH doesn't reach (a Dock launch). Pure for unit
+// testing.
+fn whisper_child_path(path_env: &str, ffmpeg: Option<&std::path::Path>) -> String {
+    let Some(dir) = ffmpeg.and_then(|p| p.parent()) else {
+        return path_env.to_string();
+    };
+    let on_path = std::env::split_paths(std::ffi::OsStr::new(path_env)).any(|d| d == dir);
+    if on_path || dir.as_os_str().is_empty() {
+        return path_env.to_string();
+    }
+    if path_env.is_empty() {
+        return dir.display().to_string();
+    }
+    format!("{}:{}", dir.display(), path_env)
+}
+
+// whisper_start's view of a tool: PATH and the well-known prefixes, then
+// whatever the last preflight's login shell found. Never runs the shell.
+fn whisper_resolve_tool(name: &str, dirs: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    whisper_find_in_dirs(name, dirs).or_else(|| {
+        whisper_login_shell_cache()
+            .lock()
+            .ok()
+            .and_then(|c| c.get(name).cloned().flatten())
+            .filter(|p| p.is_file())
+    })
+}
+
+#[cfg(test)]
+mod whisper_preflight_tests {
+    use super::*;
+
+    #[test]
+    fn search_dirs_put_path_first_and_add_prefixes_once() {
+        let dirs = whisper_search_dirs("/usr/bin:/opt/homebrew/bin::/bin", WHISPER_TOOL_DIRS);
+        let s: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
+        assert_eq!(
+            s,
+            vec!["/usr/bin", "/opt/homebrew/bin", "/bin", "/usr/local/bin"]
+        );
+    }
+
+    #[test]
+    fn search_dirs_from_a_dock_launch_still_reach_homebrew() {
+        // launchd's minimal PATH, as an app opened from the Dock sees it.
+        let dirs = whisper_search_dirs("/usr/bin:/bin:/usr/sbin:/sbin", WHISPER_TOOL_DIRS);
+        let s: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
+        assert!(s.contains(&"/opt/homebrew/bin".to_string()));
+        assert!(s.contains(&"/usr/local/bin".to_string()));
+    }
+
+    #[test]
+    fn last_abs_path_line_skips_profile_noise() {
+        let out = "Welcome!\n/usr/local/etc/motd\n/opt/homebrew/bin/ffmpeg\n";
+        assert_eq!(
+            whisper_last_abs_path_line(out),
+            Some(PathBuf::from("/opt/homebrew/bin/ffmpeg"))
+        );
+        assert_eq!(whisper_last_abs_path_line("ffmpeg not found\n"), None);
+    }
+
+    #[test]
+    fn child_path_prepends_ffmpeg_dir_only_when_missing() {
+        let ff = Path::new("/opt/homebrew/bin/ffmpeg");
+        assert_eq!(
+            whisper_child_path("/usr/bin:/bin", Some(ff)),
+            "/opt/homebrew/bin:/usr/bin:/bin"
+        );
+        assert_eq!(
+            whisper_child_path("/opt/homebrew/bin:/usr/bin", Some(ff)),
+            "/opt/homebrew/bin:/usr/bin"
+        );
+        assert_eq!(whisper_child_path("/usr/bin", None), "/usr/bin");
+        assert_eq!(whisper_child_path("", Some(ff)), "/opt/homebrew/bin");
+    }
+
+    #[test]
+    fn trace_body_names_each_component() {
+        let r = WhisperPreflightReport {
+            checked: true,
+            platform: "macos".into(),
+            arch: "aarch64".into(),
+            binary: WhisperComponent {
+                found: true,
+                path: Some("/opt/homebrew/bin/whisper-server".into()),
+            },
+            model: WhisperComponent {
+                found: false,
+                path: Some("/Users/x/.local/share/whisper-models/ggml-small.en.bin".into()),
+            },
+            ffmpeg: WhisperComponent::default(),
+            searched: vec!["/usr/bin".into(), "/opt/homebrew/bin".into()],
+            login_shell: "used".into(),
+            path_env: "/usr/bin".into(),
+        };
+        let body = whisper_preflight_trace_body(&r);
+        assert!(body.contains("binary=found:/opt/homebrew/bin/whisper-server"));
+        assert!(
+            body.contains("model=missing:/Users/x/.local/share/whisper-models/ggml-small.en.bin")
+        );
+        assert!(body.contains("ffmpeg=missing"));
+        assert!(body.contains("searched=/usr/bin,/opt/homebrew/bin"));
+        assert!(body.contains("login_shell=used"));
+        let mut w = r.clone();
+        w.checked = false;
+        assert_eq!(
+            whisper_preflight_trace_body(&w),
+            "preflight checked=false platform=macos"
+        );
+    }
+}
+
+#[tauri::command]
+async fn whisper_preflight(
+    model_path: String,
+    app: AppHandle,
+) -> Result<WhisperPreflightReport, String> {
+    let report = whisper_preflight_report(&model_path);
+    whisper_trace(&app, &whisper_preflight_trace_body(&report));
+    Ok(report)
+}
+
 #[derive(serde::Serialize)]
 struct WhisperStatusReport {
     running: bool,
@@ -21734,16 +22058,67 @@ fn whisper_start(
         };
         candidates.push((label, cmd));
     }
-    for bin in ["whisper-server", "/opt/homebrew/bin/whisper-server"] {
-        let mut cmd = std::process::Command::new(bin);
-        cmd.arg("-m")
-            .arg(&model)
-            .arg("--convert")
-            .arg("--tmp-dir")
+    // voice-setup-check-and-log: spawn the binary where it was found, and
+    // pass --convert only when ffmpeg exists. With --convert and no ffmpeg
+    // the engine refuses to start, which blocked all dictation to protect
+    // the safety pass alone. Windows (the WSL branch above) is unchanged.
+    let path_env = std::env::var("PATH").unwrap_or_default();
+    let (bins, convert, child_path): (Vec<String>, bool, Option<String>) =
+        if cfg!(target_os = "windows") {
+            (
+                vec![
+                    "whisper-server".to_string(),
+                    "/opt/homebrew/bin/whisper-server".to_string(),
+                ],
+                true,
+                None,
+            )
+        } else {
+            let dirs = whisper_search_dirs(&path_env, WHISPER_TOOL_DIRS);
+            let binary = whisper_resolve_tool("whisper-server", &dirs);
+            let ffmpeg = whisper_resolve_tool("ffmpeg", &dirs);
+            whisper_trace(
+                &app,
+                &format!(
+                    "start convert={}{} binary={}",
+                    ffmpeg.is_some(),
+                    match &ffmpeg {
+                        Some(p) => format!(" ffmpeg={}", p.display()),
+                        None => " reason=ffmpeg-missing".to_string(),
+                    },
+                    binary
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "unresolved".to_string())
+                ),
+            );
+            let bins = match &binary {
+                Some(p) => vec![p.display().to_string()],
+                None => vec![
+                    "whisper-server".to_string(),
+                    "/opt/homebrew/bin/whisper-server".to_string(),
+                ],
+            };
+            (
+                bins,
+                ffmpeg.is_some(),
+                Some(whisper_child_path(&path_env, ffmpeg.as_deref())),
+            )
+        };
+    for bin in bins {
+        let mut cmd = std::process::Command::new(&bin);
+        cmd.arg("-m").arg(&model);
+        if convert {
+            cmd.arg("--convert");
+        }
+        cmd.arg("--tmp-dir")
             .arg(&tmp_dir_str)
             .arg("--port")
             .arg("18080");
-        candidates.push((bin.to_string(), cmd));
+        if let Some(p) = &child_path {
+            cmd.env("PATH", p);
+        }
+        candidates.push((bin, cmd));
     }
     let mut last_err = String::new();
     for (label, mut cmd) in candidates {
@@ -72966,6 +73341,7 @@ pub fn run() {
             whisper_start,
             whisper_stop,
             whisper_status,
+            whisper_preflight,
         ])
         .setup(move |app| {
             // issue-405: SIGTERM/SIGINT/SIGHUP run shutdown_children, so a

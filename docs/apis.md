@@ -424,6 +424,29 @@ or query state. The transcription HTTP server listens at `http://127.0.0.1:18080
 | `whisper_start` | IPC | `{ modelPath }` | `Result<u32, String>` | parent shell |
 | `whisper_stop` | IPC | — | `Result<(), String>` | parent shell |
 | `whisper_status` | IPC | — | `WhisperStatusReport` | parent shell |
+| `whisper_preflight` | IPC | `{ modelPath }` | `WhisperPreflightReport` | parent shell |
+
+`whisper_preflight` runs on a 🎤 click when the engine isn't already
+answering, before `whisper_start`. It reports, for `whisper-server`, the
+model file and `ffmpeg`, whether each was found and where (`{ found, path }`),
+plus the directories searched, whether the user's login shell was used, and
+Bram's PATH. It searches Bram's PATH, then `/opt/homebrew/bin` and
+`/usr/local/bin`, then the login shell (`command -v`, 2 s limit), so a Bram
+opened from the Dock still finds Homebrew installs. It traces one line,
+`[whisper] preflight binary=… model=… ffmpeg=… searched=… login_shell=… path=…`.
+On Windows it returns `checked: false` (the engine runs inside WSL).
+
+`whisper_start` spawns the binary where the check found it and passes
+`--convert` only when `ffmpeg` was found, putting `ffmpeg`'s directory on
+the engine's PATH if Bram's lacks it. `--convert` serves only the safety
+pass (the whole compressed recording, transcribed when live dictation
+fails); without `ffmpeg` live dictation works and the safety pass is off.
+It traces `[whisper] start convert=<bool> …`.
+
+When something is missing, the shell posts `{ type: "bram-voice-setup",
+missing, blocking, report }` to the agent pane, which opens its setup
+dialog. `blocking` is true when `whisper-server` or the model is missing,
+and then the engine is not started.
 
 ### The dictation script (`/__shell/dictation.js`)
 

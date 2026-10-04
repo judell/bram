@@ -2462,6 +2462,25 @@ listen("pty-send-sent", (e) => {
       });
       return { ready: true, reason: "status" };
     }
+    // voice-setup-check-and-log: check whisper-server, the model and ffmpeg
+    // before starting (the host traces what it found and where it looked).
+    // Engine or model missing: don't start; the pane opens its setup dialog.
+    // Only ffmpeg missing: the host starts without --convert, so dictation
+    // works, and the pane says the safety pass is off.
+    let setup = null;
+    try {
+      setup = await invoke("whisper_preflight", { modelPath: MODEL_PATH });
+    } catch (e) {
+      voiceLog("setup-check-error", { error: String(e) });
+    }
+    if (setup && setup.checked) {
+      const missing = voiceSetupMissing(setup);
+      voiceLog("setup-check", { missing });
+      if (missing.length) notifyVoiceSetup(setup, missing);
+      if (missing.includes("whisper-server") || missing.includes("model")) {
+        return { ready: false, reason: "setup-missing" };
+      }
+    }
     try {
       voiceLog("ensure-server-start-invoked", { modelPath: MODEL_PATH });
       const pid = await invoke("whisper_start", { modelPath: MODEL_PATH });
@@ -2513,6 +2532,35 @@ listen("pty-send-sent", (e) => {
   // mic origin — the agent pane or any target-app iframe. Startup
   // failures retain the original reason-only payload; post-recording failures
   // add a kind and server detail so the toast can explain what broke.
+  // The components a preflight report found missing, by the names the
+  // setup dialog shows.
+  const voiceSetupMissing = (setup) =>
+    [
+      ["whisper-server", setup.binary],
+      ["model", setup.model],
+      ["ffmpeg", setup.ffmpeg],
+    ]
+      .filter(([, c]) => !(c && c.found))
+      .map(([name]) => name);
+
+  // Send the setup report to the agent pane, which opens its setup dialog.
+  // `blocking` is true when dictation can't start.
+  const notifyVoiceSetup = (setup, missing) => {
+    const blocking = missing.includes("whisper-server") || missing.includes("model");
+    voiceLog("setup-notice", { missing, blocking });
+    try {
+      const tools = document.getElementById("tools-pane");
+      if (tools && tools.contentWindow) {
+        tools.contentWindow.postMessage(
+          { type: "bram-voice-setup", missing, blocking, report: setup },
+          "*",
+        );
+      }
+    } catch (e) {
+      voiceLog("setup-notice-error", { error: String(e) });
+    }
+  };
+
   const notifyWhisperUnavailable = (reason, kind, detail) => {
     voiceLog("whisper-unavailable-notice", {
       reason: String(reason || ""),
@@ -2756,7 +2804,9 @@ listen("pty-send-sent", (e) => {
         requestId: incomingId,
         reason: serverResult.reason,
       });
-      notifyWhisperUnavailable(serverResult.reason);
+      // A missing component already opened the setup dialog; the generic
+      // "not running" toast would only repeat it less usefully.
+      if (serverResult.reason !== "setup-missing") notifyWhisperUnavailable(serverResult.reason);
       postIframeVoiceState("idle", { reason: serverResult.reason || "whisper-unavailable" });
       const t = active;
       resetActiveState();

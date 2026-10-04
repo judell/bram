@@ -1,0 +1,43 @@
+<!-- voice-setup-dialog: the body of the setup dialog that opens when a 🎤
+     click finds whisper-server, the model or ffmpeg missing. Everything it
+     shows comes from window.__bramVoiceSetupView(notice) in helpers.js, so
+     the markup is bindings only: what each component is for and whether it
+     was found, one button to have the agent install what's missing, and the
+     commands to do it yourself, each with a Copy button. Mounted inside
+     voiceSetupDialog in Main.xmlui, which passes the notice as $param. -->
+<Component name="VoiceSetupDialog">
+  <VStack gap="$space-3" padding="$space-2">
+    <Text value="{window.__bramVoiceSetupView($props.notice).intro}" />
+    <Items data="{window.__bramVoiceSetupView($props.notice).components}">
+      <VStack gap="$space-1">
+        <HStack gap="$space-2" verticalAlignment="center" wrapContent="true">
+          <Text fontWeight="bold" value="{$item.name}" />
+          <Text value="{$item.status}" />
+        </HStack>
+        <Text color="$textColor-secondary" value="{$item.purpose}" />
+      </VStack>
+    </Items>
+    <VStack gap="$space-2" when="{window.__bramVoiceSetupView($props.notice).hasCommands}">
+      <Text fontWeight="bold">Have the agent install it</Text>
+      <Text>The agent shows you the commands and asks before running anything.</Text>
+      <HStack>
+        <Button label="Install with the agent" onClick="window.__bramVoiceSetupInstall()" />
+      </HStack>
+      <Text fontWeight="bold">Or do it yourself</Text>
+      <Items data="{window.__bramVoiceSetupView($props.notice).commands}">
+        <VStack gap="$space-1">
+          <Text value="{$item.label}" />
+          <Markdown content="{$item.md}" interpolateBindings="false" allowHtml="false" />
+          <HStack>
+            <Button
+              label="Copy"
+              size="sm"
+              variant="outlined"
+              onClick="window.__bramVoiceSetupCopy($item.id, $item.text, toast)" />
+          </HStack>
+        </VStack>
+      </Items>
+      <Text>Then click 🎤 again.</Text>
+    </VStack>
+  </VStack>
+</Component>

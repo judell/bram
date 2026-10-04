@@ -39,6 +39,15 @@
   <ChangeListener
     listenTo="{whisperNotice.value &amp;&amp; whisperNotice.value.at}"
     onDidChange="() => window.__bramToastWhisperNotice(whisperNotice.value, toast)" />
+  <!-- voice-setup-dialog: a 🎤 click found whisper-server, the model or
+       ffmpeg missing; open voiceSetupDialog (helpers.js decides whether). -->
+  <PushSource
+    id="voiceSetupNotice"
+    initial="{null}"
+    subscribe="{window.bramSubscribeVoiceSetup()}" />
+  <ChangeListener
+    listenTo="{voiceSetupNotice.value &amp;&amp; voiceSetupNotice.value.at}"
+    onDidChange="() => window.__bramOpenVoiceSetup(voiceSetupNotice.value, voiceSetupDialog)" />
   <ChangeListener
     listenTo="{voiceBusyNotice.value &amp;&amp; voiceBusyNotice.value.at}"
     onDidChange="(c) => { if (c.newValue) { toast('A voice recording is already in progress. Return to that recording to stop it. If you can\'t find it, reload Bram to clear it.'); } }" />
@@ -287,6 +296,13 @@
         <Text>Later launches of any supported agent in this repo will not prompt again unless the setup artifacts are removed. Additional agent adapters can plug into the same flow in the future.</Text>
       </VStack>
     </VStack>
+  </ModalDialog>
+
+  <ModalDialog
+    id="voiceSetupDialog"
+    title="Set up voice input"
+    onClose="window.__bramVoiceSetupClosed()">
+    <VoiceSetupDialog notice="{$param}" />
   </ModalDialog>
 
   <!-- issue-221-skill-launcher: pick a project skill, add an optional argument,

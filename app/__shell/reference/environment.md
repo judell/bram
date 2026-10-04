@@ -183,6 +183,55 @@ hit, this is the advice protocol (user-facing twin: the Bram README's
   security decision; the agent names the control and the consequences,
   the user clicks.
 
+## Voice input setup
+
+Bram's 🎤 dictation needs three things on the user's machine:
+
+- **`whisper-server`**, the speech engine (from whisper.cpp);
+- **the model**, `~/.local/share/whisper-models/ggml-small.en.bin`
+  (466 MB), which the engine loads at start;
+- **`ffmpeg`**, used only for the safety pass: when live dictation fails,
+  Bram transcribes the whole compressed recording, which `ffmpeg` converts
+  first. Without it dictation works; the rescue doesn't.
+
+When a 🎤 click finds one missing, Bram opens a setup dialog. Its
+**Install with the agent** button sends you a turn:
+
+```
+voice-setup: {"missing":["model","ffmpeg"],"found":{"whisper-server":"/opt/homebrew/bin/whisper-server"},"platform":"macos","arch":"aarch64","modelPath":"…","searched":["…"],"loginShell":"used"}
+```
+
+It means: the user asked you to install what's missing. Handle it this way:
+
+- **It's environment work, not a repo change.** No worklist item.
+- **Confirm first.** Re-check each missing component in the user's shell:
+  `command -v whisper-server`, `command -v ffmpeg`, and `ls` the
+  `modelPath`. If something the turn calls missing is installed after all,
+  say where. Bram looked in its own PATH, `/opt/homebrew/bin`,
+  `/usr/local/bin` and the login shell (`searched`, `loginShell`), so a
+  tool it missed is a Bram bug to report, not something to install twice.
+- **Show the commands, then ask once** before running them. Installing
+  software and downloading 466 MB are the user's to approve.
+  - macOS: `brew install whisper-cpp` for the engine, `brew install ffmpeg`.
+    If `brew` itself is missing, say so and stop: installing Homebrew is
+    the user's call.
+  - The model, any platform:
+    `mkdir -p ~/.local/share/whisper-models && curl -L -o ~/.local/share/whisper-models/ggml-small.en.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin`
+  - Linux: the package manager for `ffmpeg`; the README's source build
+    (Voice input section) for `whisper-server`.
+  - Windows: the engine runs inside WSL. Point to the README's WSL recipe
+    and don't run installs inside WSL without asking.
+- **Report what happened,** then ask the user to click 🎤 again.
+- **If it still fails,** read the trace: each click writes
+  `[whisper] preflight binary=… model=… ffmpeg=… searched=… path=…` and
+  `[whisper] start convert=…` to `resources/bram-traces/bram-trace.log`,
+  and the pane writes `[iframe] subkind=voice-setup` lines for the dialog.
+  Those lines name what was found and where Bram looked.
+
+The same steps apply when a user says voice input won't start and no
+`voice-setup:` turn came (an older Bram, or the dialog was closed): grep
+the trace for `[whisper]` lines first.
+
 ## Working across project boundaries
 
 Some of the best work happens between two sessions that each hold

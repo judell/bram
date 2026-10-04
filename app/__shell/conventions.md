@@ -35,7 +35,7 @@ lives beside this file in `.claude/bram-reference/`:
 `worklist-mechanics.md` (transports, entangled commits, delegation,
 enforcement), `diagnostics.md` (stuck spinners, traces, logs, evidence,
 Bram's guards) and `environment.md` (target-app helpers, `/query`, forge
-CLI, test suites, Windows, cross-project work). Each section below says
+CLI, test suites, Windows, voice input setup, cross-project work). Each section below says
 when to read which. Setup refreshes these files and Bram-bundled skills
 (`.claude/skills/<name>/SKILL.md` carrying a `<!-- bram-managed` marker);
 don't make functional edits to installed copies, since the next Setup
@@ -882,3 +882,4 @@ instead of a fix; for a plain change, just make it. Log-line shape →
 - **Binding live views to a project SQLite database** → read `.claude/bram-reference/environment.md` (§Live SQL views via `/query`).
 - **Running a multi-worker browser test suite** → read `.claude/bram-reference/environment.md` (§Resource-heavy test suites).
 - **Windows refuses Bram or its hooks fail** → read `.claude/bram-reference/environment.md` (§Windows: Smart App Control).
+- **A `voice-setup:` turn arrives, or the user says voice input won't start** → offer to repair it: read `.claude/bram-reference/environment.md` (§Voice input setup).

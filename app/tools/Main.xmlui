@@ -632,19 +632,27 @@
     </property>
     <!-- worklist2 cutover complete: the legacy Workspace tab and its
          Show legacy Worklist setting were retired in the 0.5.3 run. -->
-    <NavLink label="Awaiting You" to="/needs-you" />
     <NavLink label="Worklist" to="/worklist2" />
     <NavLink label="Transcript" to="/transcript" />
-    <NavLink label="Search" to="/search" />
+    <NavLink label="Sessions" to="/sessions" />
     <NavLink label="Issues" to="/issues" />
     <NavLink label="Commits" to="/commits" />
     <NavLink label="Queue" to="/queue" />
-    <NavLink label="History" to="/history" />
-    <NavLink label="Sessions" to="/sessions" />
-    <NavLink label="Tips" to="/tips" />
-    <NavLink label="Context" to="/context" />
-    <NavLink label="Status" to="/status" />
+    <NavLink label="Search" to="/search" />
+    <NavLink label="Awaiting You" to="/needs-you" />
     <NavLink label="Settings" to="/settings" />
+    <!-- nav-primary-list-and-more-group: less-used pages, collapsed by
+         default (initiallyExpanded unset;
+         https://www.xmlui.org/docs/reference/components/NavGroup). The group
+         opens itself when one of its pages becomes the active route (the
+         Worklist tab's History button relies on this; NavGroupReact.tsx,
+         the pathname effect looking for .xmlui-navlink-active). -->
+    <NavGroup label="More">
+      <NavLink label="History" to="/history" />
+      <NavLink label="Tips" to="/tips" />
+      <NavLink label="Context" to="/context" />
+      <NavLink label="Status" to="/status" />
+    </NavGroup>
   </NavPanel>
 
   <!-- Mis-launch notices. Bram manages whatever directory it is launched from,

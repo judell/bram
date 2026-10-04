@@ -178,6 +178,13 @@
         label="+ New item"
         size="xs"
         onClick="worklist2NewItemOpen = !worklist2NewItemOpen" />
+      <!-- nav-primary-list-and-more-group: History lives under More in the
+           nav; this is the discoverable way in. -->
+      <Button
+        label="History"
+        size="xs"
+        tooltip="Open the Worklist history: what landed and why (also under More in the nav)"
+        onClick="navigate('/history')" />
       <!-- issue-278 rung 1: the board states its own overlap total, so a
            reader knows the per-row marks are exhaustive without reading every
            row. Says "no shared files" when there are none - the absence is

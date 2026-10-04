@@ -942,6 +942,122 @@ window.__bramSwitchAgent = function (provider) {
     throw e;
   });
 };
+// agent-launch-failure-in-pane: the host's `launch-outcome` (from the shared
+// launch routine, replayable so a provider switch's pane reload doesn't lose
+// it) becomes a notice above the message box when a launch failed: the agent
+// exited right after launch, or the terminal never came back to a prompt.
+// The notice is the LATEST outcome only, so the next confirmed launch clears
+// it. Dismiss is focus, not decision (docs/developing-bram.md §Client
+// storage): sessionStorage, keyed by the outcome's time, so a reload doesn't
+// bring back a notice already dismissed.
+(function () {
+  var DISMISS_KEY = "bram.launchFailureDismissedAt";
+  var subscribers = new Set();
+  var latest = null;
+  var dismissedAt = 0;
+  var lastValue = null;
+  var hooked = false;
+  try { dismissedAt = Number(window.sessionStorage.getItem(DISMISS_KEY)) || 0; } catch (e) {}
+
+  var providerName = function (p) { return p === "codex" ? "Codex" : "Claude"; };
+  var derive = function () {
+    var p = latest;
+    if (!p || (p.outcome !== "exited" && p.outcome !== "timeout")) return null;
+    if (Number(p.atMs) && Number(p.atMs) <= dismissedAt) return null;
+    var name = providerName(p.provider);
+    if (p.outcome === "exited") {
+      var hasStatus = p.status !== null && p.status !== undefined;
+      return {
+        kind: "exited",
+        provider: p.provider,
+        atMs: p.atMs,
+        message: name + " exited right after launch" + (hasStatus ? " (status " + p.status + ")" : "") +
+          (p.tail ? ". The terminal said:" : "."),
+        tail: p.tail || "",
+        actionLabel: "Start " + name + " fresh",
+        actionTooltip: "Starts " + p.provider + " as a new session, without resuming and without extra arguments.",
+      };
+    }
+    return {
+      kind: "timeout",
+      provider: p.provider,
+      atMs: p.atMs,
+      message: "Bram didn't start " + name + ": the terminal never came back to a prompt.",
+      tail: "",
+      actionLabel: "Try again",
+      actionTooltip: "Switches to " + name + " again.",
+    };
+  };
+  var notify = function (reason) {
+    var next = derive();
+    var was = !!lastValue;
+    lastValue = next;
+    if (was !== !!next) {
+      try {
+        window.__bramIframeTrace("launch-failure", {
+          op: next ? "shown" : "cleared",
+          reason: reason,
+          provider: (next || latest || {}).provider || "",
+          // Not `kind`: __bramIframeTrace copies fields over its payload,
+          // and `kind` is the envelope the host routes on.
+          failure: next ? next.kind : "",
+        });
+      } catch (e) {}
+    }
+    subscribers.forEach(function (fn) {
+      try { fn(); } catch (e) { console.error("[bram] launch-failure subscriber threw:", e); }
+    });
+  };
+  var ensureHooked = function () {
+    if (hooked) return;
+    hooked = true;
+    var source = window.bramSubscribeTauriEvent("launch-outcome");
+    source(function (snapshot) {
+      latest = (snapshot && snapshot.payload) || null;
+      notify((latest && latest.outcome) || "outcome");
+    });
+  };
+
+  window.bramSubscribeLaunchFailure = (function () {
+    var factory;
+    return function () {
+      if (factory) return factory;
+      ensureHooked();
+      factory = function (emit) {
+        var fire = function () { emit(lastValue); };
+        subscribers.add(fire);
+        fire();
+        return function () { subscribers.delete(fire); };
+      };
+      return factory;
+    };
+  })();
+
+  var dismiss = function (value, reason) {
+    if (!value) return;
+    dismissedAt = Number(value.atMs) || Date.now();
+    try { window.sessionStorage.setItem(DISMISS_KEY, String(dismissedAt)); } catch (e) {}
+    notify(reason);
+  };
+  window.__bramLaunchFailureDismiss = function (value) { dismiss(value, "dismiss-click"); };
+  window.__bramLaunchFailureAction = function (value, toastApi) {
+    if (!value) return;
+    dismiss(value, "action-click");
+    var done = value.kind === "exited"
+      ? (function () {
+          var invoke = getTauriInvoke();
+          if (!invoke) return Promise.reject(new Error("Tauri IPC unavailable"));
+          return window.__bramWithAgentCommandTimeout(
+            invoke("start_agent_fresh", { provider: value.provider }), "start fresh");
+        })()
+      : window.__bramSwitchAgent(value.provider);
+    done.catch(function (e) {
+      if (toastApi && typeof toastApi.error === "function") {
+        toastApi.error("Could not start " + providerName(value.provider) + ": " + String((e && e.message) || e));
+      }
+    });
+  };
+})();
 window.__bramHandleAgentSwitcherChange = function (next, previous, select, toastApi) {
   var key = String(next || "").toLowerCase() === "codex" ? "codex" : (String(next || "").toLowerCase() === "claude" ? "claude" : "");
   var prev = String(previous || "").toLowerCase() === "codex" ? "codex" : "claude";
@@ -1337,7 +1453,12 @@ window.__bramIframeTrace = function (subkind, fields) {
     var payload = { kind: "iframe-trace", subkind: subkind, at: new Date().toISOString() };
     if (fields && typeof fields === "object") {
       Object.keys(fields).forEach(function (key) {
-        payload[key] = window.__bramTraceSafeValue(fields[key], 0);
+        // `kind` and `subkind` are the envelope the host routes on; a field
+        // with either name used to overwrite it and send the line to stderr
+        // instead of the trace (agent-launch-failure-in-pane, 2026-10-04).
+        // Keep the caller's value under a prefixed name.
+        var safeKey = key === "kind" || key === "subkind" ? "field_" + key : key;
+        payload[safeKey] = window.__bramTraceSafeValue(fields[key], 0);
       });
     }
     window.logToHost(payload);

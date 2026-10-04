@@ -19150,7 +19150,11 @@ fn emit_launch_outcome<R: tauri::Runtime>(
     status: Option<i32>,
     tail: &str,
 ) {
-    let _ = l.app.emit(
+    // agent-launch-failure-in-pane: replayable, because a cross-provider
+    // launch reloads the pane ~2.5 s later and an exit is reported ~0.2 s in;
+    // the pane's PushSource replays the latest outcome after that reload.
+    emit_replayable_payload(
+        &l.app,
         "launch-outcome",
         serde_json::json!({
             "provider": l.provider,
@@ -19921,6 +19925,73 @@ fn reload_agent_session(
                 // pane once the resumed agent settles so the banner/verb and
                 // other per-provider caches re-derive cleanly instead of
                 // staying stale on the old provider.
+                schedule_cross_provider_pane_reload(app.clone());
+            }
+        }),
+    });
+    Ok(())
+}
+
+// agent-launch-failure-in-pane: the pane notice's "Start <provider> fresh"
+// after a launch exited. A plain launch through the shared routine: no
+// resume (the session may be what failed) and no configured `shell.args`
+// (a bad argument is the other common cause), so it is the launch most
+// likely to come up. Interrupts first, like a switch, in case an agent is in
+// the foreground after all; at a bash prompt they are harmless.
+#[tauri::command]
+fn start_agent_fresh(
+    app: AppHandle,
+    provider: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let provider_key = match provider.trim().to_ascii_lowercase().as_str() {
+        "codex" => "codex",
+        "claude" | "claud" => "claude",
+        other => return Err(format!("unknown agent provider: {}", other)),
+    };
+    refuse_agent_typing_if_policy_none(&app, "start-fresh")?;
+    cancel_agent_boot_hold(&app, "start-fresh");
+    let command = agent_launch_command(provider_key)
+        .ok_or("unknown agent provider")?
+        .to_string();
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            &app,
+            "agent-switch",
+            &format!(
+                "op=start-fresh provider={} command={}",
+                provider_key, command
+            ),
+        );
+    }
+    clear_stale_terminal_input_for_switch(&app, &state, "agent-start-fresh");
+    pty_write_internal(&app, &state, "\x1b", "agent-fresh-escape")?;
+    std::thread::sleep(std::time::Duration::from_millis(AGENT_INTERRUPT_GAP_MS));
+    pty_write_internal(&app, &state, "\x03", "agent-fresh-interrupt-1")?;
+    std::thread::sleep(std::time::Duration::from_millis(AGENT_INTERRUPT_GAP_MS));
+    pty_write_internal(&app, &state, "\x03", "agent-fresh-interrupt-2")?;
+    let session_provider = if provider_key == "codex" {
+        SessionProvider::Codex
+    } else {
+        SessionProvider::Claude
+    };
+    launch_agent_command(AgentLaunch {
+        app: app.clone(),
+        provider: provider_key,
+        command,
+        source: "start-fresh",
+        trace_category: "agent-switch",
+        caller_hint: "agent-fresh-launch",
+        gate: true,
+        first_command: true,
+        hook: Box::new(move |app, phase| {
+            if phase != LaunchPhase::Written {
+                return;
+            }
+            let crossing = current_provider(app) != Some(session_provider);
+            set_current_provider(app, session_provider, "start-fresh");
+            schedule_agent_switch_refresh(app.clone(), provider_key, "start-fresh");
+            if crossing {
                 schedule_cross_provider_pane_reload(app.clone());
             }
         }),
@@ -74182,6 +74253,7 @@ pub fn run() {
             pty_spawn,
             pty_write,
             switch_agent,
+            start_agent_fresh,
             reload_agent_session,
             create_new_session,
             queue_pty_intent,

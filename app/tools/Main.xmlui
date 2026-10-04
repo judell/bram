@@ -949,6 +949,51 @@
            Worklist-dock mount (AgentMenuView is self-gating on menu and
            owns its preview modal, so the footer mount is drop-in). -->
       <AgentMenuView menu="{footerAgentMenuEvt.value}" surface="footer" />
+      <!-- agent-launch-failure-in-pane: a launch that failed (the agent
+           exited right after launch, or the terminal never came back to a
+           prompt) is said here, above the message box, where the user is
+           about to type into a terminal no agent is reading. Driven by the
+           host's replayable `launch-outcome`; the next confirmed launch
+           clears it. The terminal's last lines use Text variant="sample"
+           (program output), per
+           https://www.xmlui.org/docs/reference/components/Text#variant .
+           Warn styling matches FooterAgentStatus's suspicious-silence notice. -->
+      <PushSource
+        id="launchFailure"
+        initial="{null}"
+        subscribe="{window.bramSubscribeLaunchFailure()}" />
+      <VStack
+        when="{!!launchFailure.value}"
+        gap="$space-1"
+        paddingHorizontal="$space-2"
+        paddingVertical="$space-1"
+        backgroundColor="$color-warn-50"
+        border="1px solid $color-warn-200"
+        borderRadius="$borderRadius">
+        <HStack width="100%" gap="$space-2" verticalAlignment="center">
+          <Text
+            width="*"
+            fontSize="$fontSize-sm"
+            color="$color-warn-700"
+            value="{launchFailure.value &amp;&amp; launchFailure.value.message}" />
+          <Button
+            label="{launchFailure.value &amp;&amp; launchFailure.value.actionLabel}"
+            tooltip="{launchFailure.value &amp;&amp; launchFailure.value.actionTooltip}"
+            variant="outlined"
+            size="xs"
+            onClick="window.__bramLaunchFailureAction(launchFailure.value, toast)" />
+          <Button
+            label="Dismiss"
+            variant="ghost"
+            size="xs"
+            onClick="window.__bramLaunchFailureDismiss(launchFailure.value)" />
+        </HStack>
+        <Text
+          when="{!!(launchFailure.value &amp;&amp; launchFailure.value.tail)}"
+          variant="sample"
+          fontSize="$fontSize-sm"
+          value="{launchFailure.value &amp;&amp; launchFailure.value.tail}" />
+      </VStack>
       <!-- The hot TextArea is isolated from this App-scope footer. Props flow
            down only when provider state changes; the low-frequency Skills
            request flows up as a component event. -->

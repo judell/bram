@@ -244,54 +244,17 @@ fn shell_single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-fn wsl_model_path_arg(model_path: &str) -> String {
-    if let Some(rest) = model_path.strip_prefix("~/") {
-        format!(
-            "\"$HOME/{}\"",
-            rest.replace('\\', "\\\\").replace('"', "\\\"")
-        )
-    } else {
-        shell_single_quote(model_path)
-    }
-}
-
-fn wsl_distro_args() -> Vec<String> {
-    match first_nonempty_env(&["BRAM_WSL_DISTRO"]) {
-        Some(distro) => vec!["-d".to_string(), distro, "--".to_string()],
-        None => Vec::new(),
-    }
-}
-
-fn command_output_lossy(output: &std::process::Output) -> String {
-    let mut text = String::new();
-    text.push_str(&String::from_utf8_lossy(&output.stdout));
-    text.push_str(&String::from_utf8_lossy(&output.stderr));
-    text.replace('\0', "").trim().to_string()
-}
-
 fn whisper_trace<R: tauri::Runtime>(app: &AppHandle<R>, body: &str) {
     eprintln!("[whisper] {}", body);
     append_bram_trace_line(app, "whisper", body);
 }
 
 fn trace_whisper_env<R: tauri::Runtime>(app: &AppHandle<R>) {
-    let mut body = format!(
+    let body = format!(
         "env platform={} arch={}",
         std::env::consts::OS,
         std::env::consts::ARCH
     );
-    if cfg!(target_os = "windows") {
-        let distro =
-            first_nonempty_env(&["BRAM_WSL_DISTRO"]).unwrap_or_else(|| "(default)".to_string());
-        let version = std::process::Command::new("wsl.exe")
-            .arg("--version")
-            .output()
-            .ok()
-            .map(|out| command_output_lossy(&out))
-            .and_then(|s| s.lines().next().map(|line| line.to_string()))
-            .unwrap_or_else(|| "(unavailable)".to_string());
-        body.push_str(&format!(" wsl_distro={} wsl_version={:?}", distro, version));
-    }
     whisper_trace(app, &body);
 }
 
@@ -23124,6 +23087,27 @@ fn handle_project_config_reload<R: tauri::Runtime>(app_handle: &AppHandle<R>, pr
 const WHISPER_TOOL_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin"];
 const WHISPER_LOGIN_SHELL_TIMEOUT_MS: u64 = 2000;
 
+// windows-native-whisper: the well-known prefixes, per platform. Unix gets
+// the Homebrew/local pair above; Windows gets where winget and scoop put
+// executables, since there is no login shell to interrogate here and PATH
+// plus these directories is the whole story. Returned owned because the
+// Windows paths are built from the environment rather than being literals.
+fn whisper_tool_dirs() -> Vec<String> {
+    if cfg!(target_os = "windows") {
+        let mut dirs = Vec::new();
+        if let Some(local) = first_nonempty_env(&["LOCALAPPDATA"]) {
+            dirs.push(format!("{}\\Microsoft\\WindowsApps", local));
+            dirs.push(format!("{}\\Programs", local));
+        }
+        if let Some(home) = first_nonempty_env(&["USERPROFILE"]) {
+            dirs.push(format!("{}\\scoop\\shims", home));
+        }
+        dirs
+    } else {
+        WHISPER_TOOL_DIRS.iter().map(|d| d.to_string()).collect()
+    }
+}
+
 #[derive(serde::Serialize, Clone, Debug, Default, PartialEq)]
 struct WhisperComponent {
     found: bool,
@@ -23133,7 +23117,9 @@ struct WhisperComponent {
 #[derive(serde::Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 struct WhisperPreflightReport {
-    // false on Windows, where the engine runs inside WSL and isn't checked.
+    // Always true now that every platform runs the engine natively. Kept in
+    // the payload because the pane branches on it and older reports set it
+    // false on Windows, where the engine used to run inside WSL.
     checked: bool,
     platform: String,
     arch: String,
@@ -23163,8 +23149,25 @@ fn whisper_search_dirs(path_env: &str, extra: &[&str]) -> Vec<std::path::PathBuf
     out
 }
 
+// windows-native-whisper: on Windows the tool on disk is `whisper-server.exe`,
+// so a bare-name `is_file()` check never matches. The old Windows branch never
+// met this because it handed bare names to Command::new, which applies PATHEXT
+// at spawn time; resolving by filesystem probe has to apply it here instead.
+// Found live 2026-10-04: a correctly installed engine reported as missing.
 fn whisper_find_in_dirs(name: &str, dirs: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
-    dirs.iter().map(|d| d.join(name)).find(|p| p.is_file())
+    dirs.iter().find_map(|d| {
+        let direct = d.join(name);
+        if direct.is_file() {
+            return Some(direct);
+        }
+        if cfg!(target_os = "windows") {
+            let exe = d.join(format!("{}.exe", name));
+            if exe.is_file() {
+                return Some(exe);
+            }
+        }
+        None
+    })
 }
 
 // What the last preflight's login-shell lookups found, so whisper_start
@@ -23244,30 +23247,24 @@ fn whisper_component(p: Option<std::path::PathBuf>) -> WhisperComponent {
 // whisper_start.
 fn whisper_preflight_report(model_path: &str) -> WhisperPreflightReport {
     let path_env = std::env::var("PATH").unwrap_or_default();
-    let dirs = whisper_search_dirs(&path_env, WHISPER_TOOL_DIRS);
+    let tool_dirs = whisper_tool_dirs();
+    let tool_dir_refs: Vec<&str> = tool_dirs.iter().map(|s| s.as_str()).collect();
+    let dirs = whisper_search_dirs(&path_env, &tool_dir_refs);
     let searched: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
     let model = std::path::PathBuf::from(expand_tilde(model_path));
     let model_c = WhisperComponent {
         found: model.is_file(),
         path: Some(model.display().to_string()),
     };
-    if cfg!(target_os = "windows") {
-        return WhisperPreflightReport {
-            checked: false,
-            platform: std::env::consts::OS.to_string(),
-            arch: std::env::consts::ARCH.to_string(),
-            binary: WhisperComponent::default(),
-            model: WhisperComponent::default(),
-            ffmpeg: WhisperComponent::default(),
-            searched,
-            login_shell: "skipped".to_string(),
-            path_env,
-        };
-    }
     let mut login_shell = "skipped";
     let mut find = |name: &str| -> Option<std::path::PathBuf> {
         if let Some(p) = whisper_find_in_dirs(name, &dirs) {
             return Some(p);
+        }
+        // windows-native-whisper: no login shell to interrogate on Windows, so
+        // PATH plus the well-known directories is the whole search there.
+        if cfg!(target_os = "windows") {
+            return None;
         }
         let (p, status) = whisper_login_shell_lookup(name);
         if let Ok(mut cache) = whisper_login_shell_cache().lock() {
@@ -23328,7 +23325,15 @@ fn whisper_child_path(path_env: &str, ffmpeg: Option<&std::path::Path>) -> Strin
     if path_env.is_empty() {
         return dir.display().to_string();
     }
-    format!("{}:{}", dir.display(), path_env)
+    // windows-native-whisper: join with the platform separator, matching the
+    // split_paths membership check above. The hardcoded ":" was unreachable
+    // while this ran on Unix only; it would have built a malformed PATH here.
+    let sep = if cfg!(target_os = "windows") {
+        ";"
+    } else {
+        ":"
+    };
+    format!("{}{}{}", dir.display(), sep, path_env)
 }
 
 // whisper_start's view of a tool: PATH and the well-known prefixes, then
@@ -23347,9 +23352,26 @@ fn whisper_resolve_tool(name: &str, dirs: &[std::path::PathBuf]) -> Option<std::
 mod whisper_preflight_tests {
     use super::*;
 
+    // windows-native-whisper: these fixtures feed PATH strings to
+    // std::env::split_paths, which splits on ';' on Windows and ':' elsewhere.
+    // Hardcoding ':' made two of these fail on Windows for a reason that had
+    // nothing to do with what they assert, so build the fixture the way the
+    // platform reads it.
+    fn pjoin(parts: &[&str]) -> String {
+        let sep = if cfg!(target_os = "windows") {
+            ";"
+        } else {
+            ":"
+        };
+        parts.join(sep)
+    }
+
     #[test]
     fn search_dirs_put_path_first_and_add_prefixes_once() {
-        let dirs = whisper_search_dirs("/usr/bin:/opt/homebrew/bin::/bin", WHISPER_TOOL_DIRS);
+        let dirs = whisper_search_dirs(
+            &pjoin(&["/usr/bin", "/opt/homebrew/bin", "", "/bin"]),
+            WHISPER_TOOL_DIRS,
+        );
         let s: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
         assert_eq!(
             s,
@@ -23360,7 +23382,10 @@ mod whisper_preflight_tests {
     #[test]
     fn search_dirs_from_a_dock_launch_still_reach_homebrew() {
         // launchd's minimal PATH, as an app opened from the Dock sees it.
-        let dirs = whisper_search_dirs("/usr/bin:/bin:/usr/sbin:/sbin", WHISPER_TOOL_DIRS);
+        let dirs = whisper_search_dirs(
+            &pjoin(&["/usr/bin", "/bin", "/usr/sbin", "/sbin"]),
+            WHISPER_TOOL_DIRS,
+        );
         let s: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
         assert!(s.contains(&"/opt/homebrew/bin".to_string()));
         assert!(s.contains(&"/usr/local/bin".to_string()));
@@ -23380,15 +23405,56 @@ mod whisper_preflight_tests {
     fn child_path_prepends_ffmpeg_dir_only_when_missing() {
         let ff = Path::new("/opt/homebrew/bin/ffmpeg");
         assert_eq!(
-            whisper_child_path("/usr/bin:/bin", Some(ff)),
-            "/opt/homebrew/bin:/usr/bin:/bin"
+            whisper_child_path(&pjoin(&["/usr/bin", "/bin"]), Some(ff)),
+            pjoin(&["/opt/homebrew/bin", "/usr/bin", "/bin"])
         );
         assert_eq!(
-            whisper_child_path("/opt/homebrew/bin:/usr/bin", Some(ff)),
-            "/opt/homebrew/bin:/usr/bin"
+            whisper_child_path(&pjoin(&["/opt/homebrew/bin", "/usr/bin"]), Some(ff)),
+            pjoin(&["/opt/homebrew/bin", "/usr/bin"])
         );
         assert_eq!(whisper_child_path("/usr/bin", None), "/usr/bin");
         assert_eq!(whisper_child_path("", Some(ff)), "/opt/homebrew/bin");
+    }
+
+    #[test]
+    fn find_in_dirs_resolves_a_windows_exe() {
+        let dir = std::env::temp_dir().join(format!("bram-whisper-find-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let suffix = if cfg!(target_os = "windows") {
+            ".exe"
+        } else {
+            ""
+        };
+        let planted = dir.join(format!("whisper-server{}", suffix));
+        std::fs::write(&planted, b"x").expect("plant the tool");
+        let found = whisper_find_in_dirs("whisper-server", &[dir.clone()]);
+        assert_eq!(
+            found.as_deref(),
+            Some(planted.as_path()),
+            "a tool named with the platform's executable suffix must resolve"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tool_dirs_are_per_platform() {
+        let dirs = whisper_tool_dirs();
+        if cfg!(target_os = "windows") {
+            // Homebrew prefixes are unreachable here; the Windows list names
+            // where winget and scoop put executables. It can legitimately be
+            // empty when neither environment variable is set.
+            assert!(
+                !dirs.iter().any(|d| d.starts_with('/')),
+                "unix prefixes leaked into the Windows list: {:?}",
+                dirs
+            );
+            if std::env::var_os("LOCALAPPDATA").is_some() {
+                assert!(dirs.iter().any(|d| d.ends_with("\\Microsoft\\WindowsApps")));
+                assert!(dirs.iter().any(|d| d.ends_with("\\Programs")));
+            }
+        } else {
+            assert_eq!(dirs, vec!["/opt/homebrew/bin", "/usr/local/bin"]);
+        }
     }
 
     #[test]
@@ -23474,77 +23540,52 @@ fn whisper_start(
     let model = expand_tilde(&model_path);
     whisper_trace(
         &app,
-        &format!(
-            "start requested model_path={} port=18080 wsl_distro={}",
-            model_path,
-            first_nonempty_env(&["BRAM_WSL_DISTRO"]).unwrap_or_else(|| "(default)".to_string())
-        ),
+        &format!("start requested model_path={} port=18080", model_path),
     );
     let mut candidates: Vec<(String, std::process::Command)> = Vec::new();
-    if cfg!(target_os = "windows") {
-        let wsl_tmp_dir = "/tmp/bram-whisper";
-        let script = format!(
-            "mkdir -p {} && exec whisper-server -m {} --convert --tmp-dir {} --port 18080",
-            shell_single_quote(wsl_tmp_dir),
-            wsl_model_path_arg(&model_path),
-            shell_single_quote(wsl_tmp_dir)
-        );
-        let mut cmd = std::process::Command::new("wsl.exe");
-        let distro_args = wsl_distro_args();
-        cmd.args(&distro_args).arg("bash").arg("-lc").arg(script);
-        let label = match first_nonempty_env(&["BRAM_WSL_DISTRO"]) {
-            Some(distro) => format!("wsl.exe -d {} -- bash -lc whisper-server", distro),
-            None => "wsl.exe bash -lc whisper-server".to_string(),
-        };
-        candidates.push((label, cmd));
-    }
     // voice-setup-check-and-log: spawn the binary where it was found, and
     // pass --convert only when ffmpeg exists. With --convert and no ffmpeg
     // the engine refuses to start, which blocked all dictation to protect
-    // the safety pass alone. Windows (the WSL branch above) is unchanged.
+    // the safety pass alone.
+    //
+    // windows-native-whisper: one arm for every platform. Windows used to
+    // take a wsl.exe branch first and then an unfinished native fallback that
+    // forced --convert on and looked for a Homebrew path, so a missing ffmpeg
+    // silently blocked dictation here while Unix degraded gracefully.
     let path_env = std::env::var("PATH").unwrap_or_default();
-    let (bins, convert, child_path): (Vec<String>, bool, Option<String>) =
-        if cfg!(target_os = "windows") {
-            (
-                vec![
-                    "whisper-server".to_string(),
-                    "/opt/homebrew/bin/whisper-server".to_string(),
-                ],
-                true,
-                None,
-            )
-        } else {
-            let dirs = whisper_search_dirs(&path_env, WHISPER_TOOL_DIRS);
-            let binary = whisper_resolve_tool("whisper-server", &dirs);
-            let ffmpeg = whisper_resolve_tool("ffmpeg", &dirs);
-            whisper_trace(
-                &app,
-                &format!(
-                    "start convert={}{} binary={}",
-                    ffmpeg.is_some(),
-                    match &ffmpeg {
-                        Some(p) => format!(" ffmpeg={}", p.display()),
-                        None => " reason=ffmpeg-missing".to_string(),
-                    },
-                    binary
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "unresolved".to_string())
-                ),
-            );
-            let bins = match &binary {
-                Some(p) => vec![p.display().to_string()],
-                None => vec![
-                    "whisper-server".to_string(),
-                    "/opt/homebrew/bin/whisper-server".to_string(),
-                ],
-            };
-            (
-                bins,
+    let (bins, convert, child_path): (Vec<String>, bool, Option<String>) = {
+        let tool_dirs = whisper_tool_dirs();
+        let tool_dir_refs: Vec<&str> = tool_dirs.iter().map(|s| s.as_str()).collect();
+        let dirs = whisper_search_dirs(&path_env, &tool_dir_refs);
+        let binary = whisper_resolve_tool("whisper-server", &dirs);
+        let ffmpeg = whisper_resolve_tool("ffmpeg", &dirs);
+        whisper_trace(
+            &app,
+            &format!(
+                "start convert={}{} binary={}",
                 ffmpeg.is_some(),
-                Some(whisper_child_path(&path_env, ffmpeg.as_deref())),
-            )
+                match &ffmpeg {
+                    Some(p) => format!(" ffmpeg={}", p.display()),
+                    None => " reason=ffmpeg-missing".to_string(),
+                },
+                binary
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "unresolved".to_string())
+            ),
+        );
+        // Unresolved falls back to the bare name so PATH still gets a chance
+        // at spawn time; the well-known directories are already in `dirs`.
+        let bins = match &binary {
+            Some(p) => vec![p.display().to_string()],
+            None => vec!["whisper-server".to_string()],
         };
+        (
+            bins,
+            ffmpeg.is_some(),
+            Some(whisper_child_path(&path_env, ffmpeg.as_deref())),
+        )
+    };
     for bin in bins {
         let mut cmd = std::process::Command::new(&bin);
         cmd.arg("-m").arg(&model);

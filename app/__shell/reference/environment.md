@@ -207,9 +207,13 @@ It means: the user asked you to install what's missing. Handle it this way:
 - **Confirm first.** Re-check each missing component in the user's shell:
   `command -v whisper-server`, `command -v ffmpeg`, and `ls` the
   `modelPath`. If something the turn calls missing is installed after all,
-  say where. Bram looked in its own PATH, `/opt/homebrew/bin`,
-  `/usr/local/bin` and the login shell (`searched`, `loginShell`), so a
-  tool it missed is a Bram bug to report, not something to install twice.
+  say where. Bram looked in its own PATH plus the well-known directories
+  for the platform — `/opt/homebrew/bin` and `/usr/local/bin` on Unix, the
+  winget and scoop locations on Windows — and, on Unix only, the login
+  shell (`searched`, `loginShell`). A tool it missed there is a Bram bug to
+  report, not something to install twice. **A copy inside WSL does not
+  count as installed:** the engine runs natively on every platform, and
+  Bram cannot reach anything inside a WSL distro.
 - **Show the commands, then ask once** before running them. Installing
   software and downloading 466 MB are the user's to approve.
   - macOS: `brew install whisper-cpp` for the engine, `brew install ffmpeg`.
@@ -219,8 +223,14 @@ It means: the user asked you to install what's missing. Handle it this way:
     `mkdir -p ~/.local/share/whisper-models && curl -L -o ~/.local/share/whisper-models/ggml-small.en.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin`
   - Linux: the package manager for `ffmpeg`; the README's source build
     (Voice input section) for `whisper-server`.
-  - Windows: the engine runs inside WSL. Point to the README's WSL recipe
-    and don't run installs inside WSL without asking.
+  - Windows: `winget install Gyan.FFmpeg` for `ffmpeg`; for the engine,
+    the whisper.cpp release asset `whisper-blas-bin-x64.zip` extracted to a
+    directory on PATH (`%LOCALAPPDATA%\Programs\whisper\` is a reasonable
+    home — the exe needs its DLLs beside it, so it can't sit loose in a
+    searched directory). The CUDA assets are NVIDIA-only; don't suggest
+    them without checking the GPU. **A PATH change needs Bram relaunched**
+    before the 🎤 sees it, since a running process keeps its launch-time
+    environment.
 - **Report what happened,** then ask the user to click 🎤 again.
 - **If it still fails,** read the trace: each click writes
   `[whisper] preflight binary=… model=… ffmpeg=… searched=… path=…` and

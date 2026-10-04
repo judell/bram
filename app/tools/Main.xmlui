@@ -999,6 +999,38 @@
            most recent (or pinned) session. Pairs are explicit only: Keep
            these together pairs the two, or start a new session instead. Driven by the host's replayable `pair-offer`; the
            next switch replaces it. Info palette: nothing went wrong. -->
+      <!-- provider-session-digest-for-codex: after a switch that resumed a
+           partner (or Keep these together), offer one turn telling the
+           running agent to read what it missed in the other session. -->
+      <PushSource
+        id="catchUpOffer"
+        initial="{null}"
+        subscribe="{window.bramSubscribeCatchUpOffer()}" />
+      <HStack
+        when="{!!catchUpOffer.value}"
+        gap="$space-2"
+        verticalAlignment="center"
+        paddingHorizontal="$space-2"
+        paddingVertical="$space-1"
+        backgroundColor="$color-info-50"
+        border="1px solid $color-info-200"
+        borderRadius="$borderRadius">
+        <Text
+          width="*"
+          fontSize="$fontSize-sm"
+          value="{catchUpOffer.value &amp;&amp; catchUpOffer.value.message}" />
+        <Button
+          label="{catchUpOffer.value &amp;&amp; catchUpOffer.value.actionLabel}"
+          tooltip="{catchUpOffer.value &amp;&amp; catchUpOffer.value.actionTooltip}"
+          variant="outlined"
+          size="xs"
+          onClick="window.__bramCatchUpSend(catchUpOffer.value)" />
+        <Button
+          label="Dismiss"
+          variant="ghost"
+          size="xs"
+          onClick="window.__bramCatchUpDismiss(catchUpOffer.value)" />
+      </HStack>
       <PushSource
         id="pairOffer"
         initial="{null}"

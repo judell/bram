@@ -48,6 +48,7 @@ resources/feedback-drafts/
 resources/feedback-history/
 resources/message-drafts/
 resources/outbound-turns/
+resources/session-digests/
 resources/.bram-port
 resources/.bram-port.json
 resources/.bram-guard-target

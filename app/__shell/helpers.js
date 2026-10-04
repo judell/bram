@@ -1154,7 +1154,8 @@ window.__bramSwitchAgent = function (provider) {
     var codex = value.fromProvider === "codex" ? value.fromSessionId : value.toSessionId;
     dismiss(value, "keep-click");
     window.fetch("/__sessions/pair?claude=" + encodeURIComponent(claude || "") +
-      "&codex=" + encodeURIComponent(codex || ""), { cache: "no-store" }).then(function (r) {
+      "&codex=" + encodeURIComponent(codex || "") +
+      "&from=" + encodeURIComponent(value.fromProvider || ""), { cache: "no-store" }).then(function (r) {
       if (!r.ok) throw new Error("HTTP " + r.status);
     }).catch(function (e) {
       if (toastApi && typeof toastApi.error === "function") {
@@ -1246,6 +1247,90 @@ window.__bramUnpairSession = function (provider, id, toastApi) {
     }
   });
 };
+
+// provider-session-digest-for-codex ("catch the partner up"): after a switch
+// that resumed a partner (or Keep these together), the host wrote what the
+// partner missed to a digest file and emits `catch-up-offer`. The pane offers
+// one turn telling the now-running agent to read it. A button, not an
+// automatic turn: a turn on every switch costs tokens and arrives unasked.
+// Same shape as the pair-offer bridge above; dismiss is focus (sessionStorage).
+(function () {
+  var DISMISS_KEY = "bram.catchUpDismissedAt";
+  var subscribers = new Set();
+  var latest = null;
+  var lastValue = null;
+  var dismissedAt = 0;
+  var hooked = false;
+  try { dismissedAt = Number(window.sessionStorage.getItem(DISMISS_KEY)) || 0; } catch (e) {}
+  var name = function (p) { return p === "codex" ? "Codex" : "Claude"; };
+  var label = function (title, id) { return title ? "'" + title + "'" : String(id || "").slice(0, 8); };
+  var derive = function () {
+    var p = latest;
+    if (!p || !p.active || !p.path) return null;
+    if (Number(p.atMs) && Number(p.atMs) <= dismissedAt) return null;
+    var n = Number(p.turns) || 0;
+    var from = name(p.fromProvider) + " session " + label(p.fromTitle, p.fromSessionId);
+    return {
+      atMs: p.atMs,
+      toProvider: p.toProvider,
+      message: name(p.toProvider) + " doesn't know what happened in " + from + " since it last ran (" +
+        n + " turn" + (n === 1 ? "" : "s") + ").",
+      actionLabel: "Catch " + name(p.toProvider) + " up",
+      actionTooltip: "Sends " + name(p.toProvider) + " one message asking it to read " + p.path +
+        " and say what changed.",
+      // Written by the host (catch_up_turn_text), so a later digest can
+      // recognise this exchange and leave it out.
+      turn: p.turnText || "",
+    };
+  };
+  var notify = function (reason) {
+    var next = derive();
+    var was = !!lastValue;
+    lastValue = next;
+    if (was !== !!next) {
+      try {
+        window.__bramIframeTrace("catch-up-offer", { op: next ? "shown" : "cleared", reason: reason, to: next ? next.toProvider : "" });
+      } catch (e) {}
+    }
+    subscribers.forEach(function (fn) {
+      try { fn(); } catch (e) { console.error("[bram] catch-up subscriber threw:", e); }
+    });
+  };
+  var ensureHooked = function () {
+    if (hooked) return;
+    hooked = true;
+    window.bramSubscribeTauriEvent("catch-up-offer")(function (snapshot) {
+      latest = (snapshot && snapshot.payload) || null;
+      notify(latest && latest.active ? "offer" : "host-clear");
+    });
+  };
+  window.bramSubscribeCatchUpOffer = (function () {
+    var factory;
+    return function () {
+      if (factory) return factory;
+      ensureHooked();
+      factory = function (emit) {
+        var fire = function () { emit(lastValue); };
+        subscribers.add(fire);
+        fire();
+        return function () { subscribers.delete(fire); };
+      };
+      return factory;
+    };
+  })();
+  var dismiss = function (value, reason) {
+    if (!value) return;
+    dismissedAt = Number(value.atMs) || Date.now();
+    try { window.sessionStorage.setItem(DISMISS_KEY, String(dismissedAt)); } catch (e) {}
+    notify(reason);
+  };
+  window.__bramCatchUpDismiss = function (value) { dismiss(value, "dismiss-click"); };
+  window.__bramCatchUpSend = function (value) {
+    if (!value || !value.turn) return;
+    dismiss(value, "send-click");
+    window.toTurn(value.turn);
+  };
+})();
 
 window.__bramHandleAgentSwitcherChange = function (next, previous, select, toastApi) {
   var key = String(next || "").toLowerCase() === "codex" ? "codex" : (String(next || "").toLowerCase() === "claude" ? "claude" : "");
@@ -1345,6 +1430,13 @@ window.__bramNewSessionBrief = function (words, predecessor) {
     ? "the session I just left (" + String(predecessor.provider || "") + " " + predecessor.id +
       (predecessor.title ? ', "' + predecessor.title + '"' : "") + ")"
     : "the session I just left (see the Sessions list)";
+  // provider-session-digest-for-codex: a partner on the other provider may
+  // not be able to read that session directly (Codex can't reach /__turns),
+  // so name the digest Bram wrote; its header names the full transcript.
+  if (predecessor && predecessor.digest) {
+    prev += ", whose latest turns Bram wrote to `" + predecessor.digest +
+      "` (its header names the full transcript if you need more)";
+  }
   return [
     "You're starting a new session for this line of work, in my words:",
     "",
@@ -1360,7 +1452,15 @@ window.__bramCreateNewSessionClick = function (provider, name, toastApi, words, 
   // provider-session-pair-offer: a dialog opened from the pair offer creates
   // a session that goes with the offered one, and its brief points there.
   var offer = window.__bramTakePairOfferForCreate(provider);
-  if (offer) predecessor = { provider: offer.provider, id: offer.id, title: offer.title };
+  if (offer) {
+    predecessor = {
+      provider: offer.provider,
+      id: offer.id,
+      title: offer.title,
+      // provider-session-digest-for-codex: the host writes this before launch.
+      digest: "resources/session-digests/" + offer.provider + "-" + offer.id + ".md",
+    };
+  }
   if (typeof toastApi === "function") toastApi("Starting a new session…");
   window.__bramCreateNewSession(provider, name, offer).then(function () {
     if (!said) return;

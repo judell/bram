@@ -17453,6 +17453,12 @@ fn pty_spawn(
             gate: !cfg!(windows),
             first_command: true,
             hook: Box::new(move |app, phase| {
+                if phase == LaunchPhase::Confirmed {
+                    if let Some(id) = live_session_id(app, launch_provider) {
+                        mark_session_entered(app, launch_provider, &id);
+                    }
+                    return;
+                }
                 if phase != LaunchPhase::Written {
                     return;
                 }
@@ -19478,6 +19484,56 @@ mod agent_launch_tests {
         );
     }
 
+    // provider-session-digest-for-codex: the header names the full
+    // transcript, so a partner can go past the digest when it needs to.
+    #[test]
+    fn catch_up_exchanges_are_not_new_work() {
+        use super::{catch_up_turn_text, drop_catch_up_exchanges};
+        let catch_up = catch_up_turn_text(
+            "Codex session 'X'",
+            4,
+            "resources/session-digests/codex-x.md",
+        );
+        let turns = vec![
+            serde_json::json!({"role": "user", "text": "real question"}),
+            serde_json::json!({"role": "assistant", "text": "real answer"}),
+            serde_json::json!({"role": "user", "text": catch_up}),
+            serde_json::json!({"role": "assistant", "text": "", "entries": [{"name": "Read"}]}),
+            serde_json::json!({"role": "assistant", "text": "Nothing substantive changed."}),
+        ];
+        let kept = drop_catch_up_exchanges(&turns);
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[1]["text"], "real answer");
+        // Only a catch-up exchange: nothing new, so no digest and no notice.
+        assert!(drop_catch_up_exchanges(&turns[2..]).is_empty());
+    }
+
+    #[test]
+    fn session_digest_names_the_full_transcript_and_shows_turns() {
+        use super::{render_session_digest, SessionProvider};
+        let turns = vec![
+            serde_json::json!({"role": "user", "text": "fix the gate", "entries": []}),
+            serde_json::json!({"role": "assistant", "text": "Done.", "entries": [
+                {"name": "Edit", "description": "lib.rs: guard the gate"}
+            ]}),
+        ];
+        let body = render_session_digest(
+            SessionProvider::Claude,
+            "abc-123",
+            Some("Gate work"),
+            Some(std::path::Path::new(
+                "/home/u/.claude/projects/p/abc-123.jsonl",
+            )),
+            57,
+            &turns,
+        );
+        assert!(body.contains("# Claude session digest"));
+        assert!(body.contains("- Full transcript: /home/u/.claude/projects/p/abc-123.jsonl"));
+        assert!(body.contains("Turns in the session: 57; shown here: the last 2"));
+        assert!(body.contains("## user\n\nfix the gate"));
+        assert!(body.contains("- Edit: lib.rs: guard the gate"));
+    }
+
     #[test]
     fn missing_pin_file_is_not_usable() {
         let dir = std::env::temp_dir().join(format!("bram-pin-{}", std::process::id()));
@@ -19711,6 +19767,20 @@ fn switch_agent(
                         .filter(|_| offer)
                         .map(|id| (target_provider, id)),
                 );
+                // provider-session-digest-for-codex: resuming a partner, write
+                // what it missed in the session being left, and offer the
+                // catch-up turn. Then mark the entered session.
+                let digest = if resume_reason == "partner" {
+                    pair_from
+                        .as_ref()
+                        .and_then(|(p, id)| write_session_digest(app, *p, id, true))
+                } else {
+                    None
+                };
+                emit_catch_up_offer(app, pair_from.as_ref(), Some(target_provider), digest);
+                if let Some(id) = target_sid.as_deref() {
+                    mark_session_entered(app, target_provider, id);
+                }
                 return;
             }
             if phase != LaunchPhase::Written {
@@ -19800,11 +19870,16 @@ fn pair_sessions_route<R: tauri::Runtime>(
 ) -> Result<Vec<u8>, String> {
     let mut claude = String::new();
     let mut codex = String::new();
+    // provider-session-digest-for-codex: the side the offer was about (the
+    // session you switched away from), whose digest the other side reads.
+    let mut from: Option<SessionProvider> = None;
     for pair in query.split('&') {
         if let Some(v) = pair.strip_prefix("claude=") {
             claude = percent_decode(v);
         } else if let Some(v) = pair.strip_prefix("codex=") {
             codex = percent_decode(v);
+        } else if let Some(v) = pair.strip_prefix("from=") {
+            from = SessionProvider::from_str(&percent_decode(v));
         }
     }
     if claude.is_empty() || codex.is_empty() {
@@ -19812,11 +19887,19 @@ fn pair_sessions_route<R: tauri::Runtime>(
     }
     record_pair_for(
         app,
-        &(SessionProvider::Claude, claude),
-        &(SessionProvider::Codex, codex),
+        &(SessionProvider::Claude, claude.clone()),
+        &(SessionProvider::Codex, codex.clone()),
         "offer-keep",
     );
     emit_pair_offer(app, None, None);
+    if let Some(fp) = from {
+        let (fid, tp) = match fp {
+            SessionProvider::Claude => (claude.clone(), SessionProvider::Codex),
+            SessionProvider::Codex => (codex.clone(), SessionProvider::Claude),
+        };
+        let digest = write_session_digest(app, fp, &fid, true);
+        emit_catch_up_offer(app, Some(&(fp, fid)), Some(tp), digest);
+    }
     emit_replayable_signal(app, "sessions-list-changed");
     Ok(br#"{"ok":true}"#.to_vec())
 }
@@ -19949,6 +20032,294 @@ fn emit_pair_offer<R: tauri::Runtime>(
         );
     }
     emit_replayable_payload(app, "pair-offer", payload);
+}
+
+// provider-session-digest-for-codex ("catch the partner up"): pairing brings
+// you back to the right session but not up to date. When you leave a session
+// for its partner, Bram writes what the partner missed to
+// resources/session-digests/<provider>-<id>.md (gitignored) and the pane
+// offers one turn telling the partner to read it. The projection carries no
+// timestamps, so "what it missed" is counted: each switch that enters a
+// session records its turn total as an entry mark; leaving it later, the new
+// turns are total - mark. No mark yet: the latest SESSION_DIGEST_CAP turns.
+const SESSION_DIGEST_CAP: usize = 40;
+
+// The catch-up turn is written here, not in the pane, so the digest can
+// recognise it. Its exchange (the turn and the agent's replies up to the next
+// user turn) is left out of a later digest: otherwise each catch-up counts as
+// new work in the session that read it, and the partners catch each other up
+// on catching up (demo, 2026-10-04 18:51-18:53).
+const CATCH_UP_TURN_MARK: &str = "continued while you were away";
+
+fn catch_up_turn_text(from: &str, turns: usize, path: &str) -> String {
+    format!(
+        "Your partner {} {} ({} turn{}). Read `{}` (its header names the full transcript if you need more), then tell me in a few lines what changed before we go on.",
+        from,
+        CATCH_UP_TURN_MARK,
+        turns,
+        if turns == 1 { "" } else { "s" },
+        path
+    )
+}
+
+fn is_catch_up_turn(text: &str) -> bool {
+    text.trim_start().starts_with("Your partner ") && text.contains(CATCH_UP_TURN_MARK)
+}
+
+// Drop each catch-up exchange: the catch-up user turn and every turn up to
+// the next user turn.
+fn drop_catch_up_exchanges(turns: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    let mut skipping = false;
+    for t in turns {
+        if t.get("role").and_then(|r| r.as_str()) == Some("user") {
+            let text = t.get("text").and_then(|x| x.as_str()).unwrap_or("");
+            skipping = is_catch_up_turn(text);
+        }
+        if !skipping {
+            out.push(t.clone());
+        }
+    }
+    out
+}
+const SESSION_DIGEST_TEXT_CHARS: usize = 2000;
+
+fn session_digest_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    project_resource_path(app, "session-digests")
+}
+
+fn session_digest_rel_path(provider: SessionProvider, id: &str) -> String {
+    format!(
+        "resources/session-digests/{}-{}.md",
+        session_provider_label(provider),
+        id
+    )
+}
+
+fn session_digest_marks_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    session_digest_dir(app).map(|d| d.join(".marks.json"))
+}
+
+fn read_session_digest_marks<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> serde_json::Map<String, serde_json::Value> {
+    session_digest_marks_path(app)
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+}
+
+fn session_turns<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    provider: SessionProvider,
+    id: &str,
+) -> Option<(usize, Vec<serde_json::Value>)> {
+    let bytes = read_projected_turns(app, id, Some(provider), Some(SESSION_DIGEST_CAP)).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let total = v.get("total").and_then(|t| t.as_u64()).unwrap_or(0) as usize;
+    let turns = v
+        .get("turns")
+        .and_then(|t| t.as_array())
+        .cloned()
+        .unwrap_or_default();
+    Some((total, turns))
+}
+
+// Record a session's turn total as it is entered.
+fn mark_session_entered<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    provider: SessionProvider,
+    id: &str,
+) {
+    let Some((total, _)) = session_turns(app, provider, id) else {
+        return;
+    };
+    let Some(path) = session_digest_marks_path(app) else {
+        return;
+    };
+    let mut marks = read_session_digest_marks(app);
+    marks.insert(
+        format!("{}-{}", session_provider_label(provider), id),
+        serde_json::json!(total),
+    );
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&path, serde_json::Value::Object(marks).to_string());
+}
+
+fn clip_chars(s: &str, n: usize) -> String {
+    let mut out: String = s.chars().take(n).collect();
+    if s.chars().count() > n {
+        out.push_str(" …");
+    }
+    out
+}
+
+// The digest body: a header naming the full transcript, then the turns.
+fn render_session_digest(
+    provider: SessionProvider,
+    id: &str,
+    title: Option<&str>,
+    transcript: Option<&Path>,
+    total: usize,
+    turns: &[serde_json::Value],
+) -> String {
+    let who = if provider == SessionProvider::Codex {
+        "Codex"
+    } else {
+        "Claude"
+    };
+    let mut out = format!(
+        "# {} session digest\n\n- Title: {}\n- Session id: {}\n- Full transcript: {}\n- Turns in the session: {}; shown here: the last {}\n\nWritten by Bram for the partner session on the other provider. The full transcript is JSONL; read it only if this digest isn't enough.\n",
+        who,
+        title.unwrap_or("(none)"),
+        id,
+        transcript.map(|p| p.display().to_string()).unwrap_or_else(|| "(not found)".to_string()),
+        total,
+        turns.len()
+    );
+    for turn in turns {
+        let role = turn.get("role").and_then(|r| r.as_str()).unwrap_or("?");
+        out.push_str(&format!("\n## {}\n\n", role));
+        let text = turn
+            .get("text")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .trim();
+        if !text.is_empty() {
+            out.push_str(&clip_chars(text, SESSION_DIGEST_TEXT_CHARS));
+            out.push('\n');
+        }
+        if let Some(entries) = turn.get("entries").and_then(|e| e.as_array()) {
+            for e in entries {
+                let name = e.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                if name.is_empty() {
+                    continue;
+                }
+                let what = e
+                    .get("description")
+                    .or_else(|| e.get("nameDetail"))
+                    .or_else(|| e.get("summary"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                out.push_str(&format!("- {}: {}\n", name, clip_chars(what.trim(), 200)));
+            }
+        }
+    }
+    out
+}
+
+// Write the digest of the session being left. `since_mark`: count only the
+// turns added since it was entered (the partner's catch-up); otherwise the
+// latest SESSION_DIGEST_CAP. Returns (relative path, turns written); None
+// when nothing new happened or the session can't be read.
+fn write_session_digest<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    provider: SessionProvider,
+    id: &str,
+    since_mark: bool,
+) -> Option<(String, usize)> {
+    let (total, window) = session_turns(app, provider, id)?;
+    let mark = if since_mark {
+        read_session_digest_marks(app)
+            .get(&format!("{}-{}", session_provider_label(provider), id))
+            .and_then(|v| v.as_u64())
+            .map(|m| m as usize)
+    } else {
+        None
+    };
+    let new = match mark {
+        Some(m) => total.saturating_sub(m),
+        None => window.len(),
+    };
+    let candidates = drop_catch_up_exchanges(&window[window.len() - new.min(window.len())..]);
+    let take = candidates.len();
+    if bram_trace_enabled() && take == 0 {
+        append_bram_trace_line(
+            app,
+            "agent-switch",
+            &format!(
+                "op=digest-written provider={} session={} turns=0",
+                session_provider_label(provider),
+                id
+            ),
+        );
+    }
+    if take == 0 {
+        return None;
+    }
+    let turns = &candidates[..];
+    let title = session_title_by_id(app, provider, id);
+    let transcript = session_path_for_id(app, provider, id);
+    let body = render_session_digest(
+        provider,
+        id,
+        title.as_deref(),
+        transcript.as_deref(),
+        total,
+        turns,
+    );
+    let dir = session_digest_dir(app)?;
+    let _ = std::fs::create_dir_all(&dir);
+    let file = dir.join(format!("{}-{}.md", session_provider_label(provider), id));
+    std::fs::write(&file, body.as_bytes()).ok()?;
+    if bram_trace_enabled() {
+        append_bram_trace_line(
+            app,
+            "agent-switch",
+            &format!(
+                "op=digest-written provider={} session={} turns={} bytes={}",
+                session_provider_label(provider),
+                id,
+                take,
+                body.len()
+            ),
+        );
+    }
+    Some((session_digest_rel_path(provider, id), take))
+}
+
+// The pane's "Catch <partner> up" notice. Replayable (a cross-provider switch
+// reloads the pane); any switch without a digest clears it.
+fn emit_catch_up_offer<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    from: Option<&(SessionProvider, String)>,
+    to: Option<SessionProvider>,
+    digest: Option<(String, usize)>,
+) {
+    let payload = match (from, to, digest) {
+        (Some((fp, fid)), Some(tp), Some((path, turns))) => {
+            let title = session_title_by_id(app, *fp, fid);
+            let who = if *fp == SessionProvider::Codex {
+                "Codex"
+            } else {
+                "Claude"
+            };
+            let from = match title.as_deref() {
+                Some(t) => format!("{} session '{}'", who, t),
+                None => format!(
+                    "{} session {}",
+                    who,
+                    fid.chars().take(8).collect::<String>()
+                ),
+            };
+            serde_json::json!({
+                "active": true,
+                "fromProvider": session_provider_label(*fp),
+                "fromSessionId": fid,
+                "fromTitle": title,
+                "toProvider": session_provider_label(tp),
+                "path": path,
+                "turns": turns,
+                "turnText": catch_up_turn_text(&from, turns, &path),
+                "atMs": unix_now_ms(),
+            })
+        }
+        _ => serde_json::json!({ "active": false, "atMs": unix_now_ms() }),
+    };
+    emit_replayable_payload(app, "catch-up-offer", payload);
 }
 
 // A switch whose target session isn't known at launch (a fresh launch: the
@@ -20396,6 +20767,9 @@ fn reload_agent_session(
         first_command: false,
         hook: Box::new(move |app, phase| {
             if phase == LaunchPhase::Confirmed {
+                if session_exists {
+                    mark_session_entered(app, session_provider, &session);
+                }
                 if let (Some(from), true) = (leaving.as_ref(), session_exists) {
                     record_pair_for(
                         app,
@@ -21206,6 +21580,11 @@ fn create_new_session(
     } else {
         None
     };
+    // provider-session-digest-for-codex: the new partner has no history, so
+    // its brief points at the latest turns of the session it was created for.
+    if let Some((p, id)) = pair_with.as_ref() {
+        let _ = write_session_digest(&app, *p, id, false);
+    }
     let generation = begin_agent_launch();
     arm_agent_boot_hold(&app, provider_key);
     clear_stale_terminal_input_for_switch(&app, &state, "agent-new-session");
@@ -55095,6 +55474,7 @@ fn is_bram_owned_path(path: &str) -> bool {
             "bram-traces/",
             "outbound-turns/",
             "message-drafts/",
+            "session-digests/",
             "worklist",
             "feedback-",
         ]

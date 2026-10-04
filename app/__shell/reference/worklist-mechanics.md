@@ -510,6 +510,27 @@ routes.
 - An empty `steps` list clears the plan. Push, PRs and other non-board steps
   don't belong in it.
 
+**Recommending feedback.** When you'd tell the user to tick an item and send
+it some text as feedback ("tick `x` and send: name your prerequisites"),
+post a `feedback` step instead of asking them to copy your words into the
+message box:
+
+```
+{"summary": "why, in a sentence", "steps": [
+  {"verb": "feedback", "ids": ["x"], "text": "the feedback, as the user would send it"}
+]}
+```
+
+- The pane shows "Recommended: Send feedback to x", with the full text in the
+  tooltip. **Do recommended** sends it exactly as the message box would with
+  those rows ticked: it arrives as an ordinary `iterate:` turn with a
+  feedback draft, which you handle as usual.
+- `text` is required. A plan can include drops and feedback, but not
+  feedback and commit, since both start agent turns; the host refuses that
+  mix, so post them as separate plans.
+- Say in chat what the feedback will send. It goes into the item's history as
+  the user's feedback, so write it as something they'd put their name to.
+
 ## Rows committed outside the Worklist
 
 When work lands through a plain `git commit` (typed in chat, or from a

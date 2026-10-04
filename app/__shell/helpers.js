@@ -2230,8 +2230,10 @@ var __bramPlanShown = {};
 window.__bramPlanLine = function (board) {
   var steps = __bramPlanSteps(board);
   var parts = steps.map(function (s) {
+    var ids = (s.ids || []).join(", ");
+    if (s.verb === "feedback") return "Send feedback to " + ids;
     var verb = s.verb === "drop" ? "Drop" : s.verb === "commit" ? "Commit" : String(s.verb || "");
-    return verb + " " + (s.ids || []).join(", ");
+    return verb + " " + ids;
   });
   if (parts.length) {
     var key = String((board.plan && board.plan.postedAtMs) || "");
@@ -2243,11 +2245,23 @@ window.__bramPlanLine = function (board) {
   }
   return parts.length ? "Recommended: " + parts.join(" · ") : "";
 };
+// plan-recommends-feedback-in-one-click: a feedback step's full text goes in
+// the tooltip, so the user reads exactly what one click will send.
 window.__bramPlanTooltip = function (board) {
   var plan = board && board.plan;
   var summary = String((plan && plan.summary) || "").trim();
-  var how = "Drops happen at once, like the Drop button. Commits go to the agent, like the Commit button.";
-  return summary ? summary + "\n\n" + how : how;
+  var feedback = __bramPlanSteps(board)
+    .filter(function (s) { return s.verb === "feedback"; })
+    .map(function (s) {
+      return "**Feedback to " + (s.ids || []).join(", ") + ":**\n\n> " + String(s.text || "").split("\n").join("\n> ");
+    });
+  var how = "Drops happen at once, like the Drop button. Commits go to the agent, like the Commit button. " +
+    "Feedback is sent to the agent as if you had ticked those rows and typed it.";
+  var parts = [];
+  if (summary) parts.push(summary);
+  parts = parts.concat(feedback);
+  parts.push(how);
+  return parts.join("\n\n");
 };
 // Runs the plan through the gate buttons' own paths, for exactly the named
 // ids: feedback-less drops host-direct (POST /__worklist/drop, as Drop does),
@@ -2262,19 +2276,27 @@ window.__bramDoRecommended = function (board, claim) {
   var steps = __bramPlanSteps(board);
   var dropIds = [];
   var commitIds = [];
+  var feedbackSteps = [];
   steps.forEach(function (s) {
     var ids = s.ids || [];
     if (s.verb === "drop") dropIds = dropIds.concat(ids);
     else if (s.verb === "commit") commitIds = commitIds.concat(ids);
+    else if (s.verb === "feedback" && ids.length && s.text) feedbackSteps.push(s);
   });
   window.__bramIframeTrace("click", {
     target: "gatebar-do-recommended",
     drop: dropIds.length,
     commit: commitIds.length,
+    feedback: feedbackSteps.length,
   });
   var items = (board && board.items) || [];
+  // After any drops, like commits. The host refuses a plan that mixes
+  // feedback with commit, so at most one of the two runs.
   var commit = function () {
     if (commitIds.length) window.__bramGateAct("commit", items, commitIds, "together", claim);
+    feedbackSteps.forEach(function (s) {
+      window.__bramWorklist2BatchIterate(s.ids, String(s.text));
+    });
   };
   window.__bramDismissPlan();
   if (!dropIds.length) {

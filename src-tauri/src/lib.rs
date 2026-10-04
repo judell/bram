@@ -66827,6 +66827,148 @@ mod worklist_plan_withheld_tests {
     }
 }
 
+// The plan's steps, checked against the board. Pure, so the rules are
+// testable. Returns the cleaned steps and their trace summary, or the
+// refusal message.
+//
+// plan-recommends-feedback-in-one-click: besides drop and commit, a step can
+// send feedback to items ({verb: "feedback", ids, text}), so the agent can
+// recommend feedback the user approves in one click instead of copying it
+// into the message box. Feedback and commit can't share a plan: both start
+// agent turns, and the second would queue behind the first.
+fn plan_step_verb(step: &serde_json::Value) -> &str {
+    step.get("verb").and_then(|v| v.as_str()).unwrap_or("")
+}
+
+fn validate_worklist_plan_steps(
+    steps: &[serde_json::Value],
+    doc: &serde_json::Value,
+) -> Result<(Vec<serde_json::Value>, Vec<String>), String> {
+    let mut clean_steps = Vec::new();
+    let mut summary_parts = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if steps.iter().any(|s| plan_step_verb(s) == "feedback")
+        && steps.iter().any(|s| plan_step_verb(s) == "commit")
+    {
+        return Err(
+            "a plan can't both send feedback and commit: both start agent turns, so post them \
+             as separate plans"
+                .to_string(),
+        );
+    }
+    for step in steps {
+        let verb = plan_step_verb(step);
+        if verb != "drop" && verb != "commit" && verb != "feedback" {
+            return Err(format!(
+                "step verb must be \"drop\", \"commit\" or \"feedback\", got {:?}",
+                verb
+            ));
+        }
+        let ids: Vec<String> = step
+            .get("ids")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if ids.is_empty() {
+            return Err(format!("a {} step names no ids", verb));
+        }
+        let text = step
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if verb == "feedback" && text.is_empty() {
+            return Err("a feedback step needs non-empty text".to_string());
+        }
+        for id in &ids {
+            // One step per id: "drop and commit X" can't both be meant.
+            if !seen.insert(id.clone()) {
+                return Err(format!("{} is named in more than one step", id));
+            }
+            let Some(item) = worklist_plan_item(doc, id) else {
+                return Err(format!("{} is not on the board", id));
+            };
+            // Commit needs work to commit: the item has begun or is applied.
+            if verb == "commit" {
+                let applied = item.get("status").and_then(|v| v.as_str()) == Some("applied");
+                if !applied && item.get("begunAtMs").is_none() {
+                    return Err(format!(
+                        "{} hasn't started, so there is nothing to commit",
+                        id
+                    ));
+                }
+            }
+        }
+        summary_parts.push(format!("{}={}", verb, ids.join(",")));
+        if verb == "feedback" {
+            clean_steps.push(serde_json::json!({ "verb": verb, "ids": ids, "text": text }));
+        } else {
+            clean_steps.push(serde_json::json!({ "verb": verb, "ids": ids }));
+        }
+    }
+    Ok((clean_steps, summary_parts))
+}
+
+#[cfg(test)]
+mod validate_worklist_plan_steps_tests {
+    use serde_json::json;
+
+    fn board() -> serde_json::Value {
+        json!({"version": 3, "items": [
+            {"id": "a", "status": "proposed"},
+            {"id": "b", "status": "applied"},
+            {"id": "c", "status": "proposed"}
+        ]})
+    }
+
+    fn check(steps: serde_json::Value) -> Result<Vec<serde_json::Value>, String> {
+        super::validate_worklist_plan_steps(steps.as_array().unwrap(), &board()).map(|(s, _)| s)
+    }
+
+    #[test]
+    fn feedback_steps_carry_their_text_and_need_it() {
+        let ok = check(
+            json!([{"verb": "feedback", "ids": ["a"], "text": "  name your prerequisites  "}]),
+        )
+        .unwrap();
+        assert_eq!(ok[0]["text"], "name your prerequisites");
+        assert!(check(json!([{"verb": "feedback", "ids": ["a"], "text": "  "}])).is_err());
+        assert!(check(json!([{"verb": "feedback", "ids": ["a"]}])).is_err());
+        assert!(check(json!([{"verb": "feedback", "ids": ["gone"], "text": "x"}])).is_err());
+    }
+
+    #[test]
+    fn feedback_mixes_with_drop_but_not_commit() {
+        assert!(check(json!([
+            {"verb": "drop", "ids": ["c"]},
+            {"verb": "feedback", "ids": ["a"], "text": "x"}
+        ]))
+        .is_ok());
+        let mixed = check(json!([
+            {"verb": "commit", "ids": ["b"]},
+            {"verb": "feedback", "ids": ["a"], "text": "x"}
+        ]));
+        assert!(mixed.unwrap_err().contains("separate plans"));
+    }
+
+    #[test]
+    fn drop_and_commit_rules_are_unchanged() {
+        let ok = check(json!([{"verb": "drop", "ids": ["a"]}, {"verb": "commit", "ids": ["b"]}]))
+            .unwrap();
+        assert!(ok[0].get("text").is_none());
+        assert!(check(json!([{"verb": "commit", "ids": ["a"]}])).is_err());
+        assert!(
+            check(json!([{"verb": "drop", "ids": ["a"]}, {"verb": "drop", "ids": ["a"]}])).is_err()
+        );
+        assert!(check(json!([{"verb": "rename", "ids": ["a"]}])).is_err());
+    }
+}
+
 fn handle_worklist_plan<R: tauri::Runtime>(
     app: &AppHandle<R>,
     body: &[u8],
@@ -66865,51 +67007,10 @@ fn handle_worklist_plan<R: tauri::Runtime>(
         );
     }
     let doc = worklist_doc(app);
-    let mut clean_steps = Vec::new();
-    let mut summary_parts = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for step in &steps {
-        let verb = step.get("verb").and_then(|v| v.as_str()).unwrap_or("");
-        if verb != "drop" && verb != "commit" {
-            return refuse(format!(
-                "step verb must be \"drop\" or \"commit\", got {:?}",
-                verb
-            ));
-        }
-        let ids: Vec<String> = step
-            .get("ids")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        if ids.is_empty() {
-            return refuse(format!("a {} step names no ids", verb));
-        }
-        for id in &ids {
-            // One step per id: "drop and commit X" can't both be meant.
-            if !seen.insert(id.clone()) {
-                return refuse(format!("{} is named in more than one step", id));
-            }
-            let Some(item) = worklist_plan_item(&doc, id) else {
-                return refuse(format!("{} is not on the board", id));
-            };
-            // Commit needs work to commit: the item has begun or is applied.
-            if verb == "commit" {
-                let applied = item.get("status").and_then(|v| v.as_str()) == Some("applied");
-                if !applied && item.get("begunAtMs").is_none() {
-                    return refuse(format!(
-                        "{} hasn't started, so there is nothing to commit",
-                        id
-                    ));
-                }
-            }
-        }
-        summary_parts.push(format!("{}={}", verb, ids.join(",")));
-        clean_steps.push(serde_json::json!({ "verb": verb, "ids": ids }));
-    }
+    let (clean_steps, summary_parts) = match validate_worklist_plan_steps(&steps, &doc) {
+        Ok(v) => v,
+        Err(msg) => return refuse(msg),
+    };
     let version = doc.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
     let plan = serde_json::json!({
         "summary": req.get("summary").and_then(|v| v.as_str()).unwrap_or(""),

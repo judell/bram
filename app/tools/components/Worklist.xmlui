@@ -715,7 +715,11 @@
                   fontSize="$fontSize-sm"
                   value="{window.__bramFileChangesCell($item, rowBegun)}" />
               </Column>
-              <Column header="shared with" width="3*" headerHorizontalAlignment="start">
+              <!-- worklist-files-column-wider: 1* (was 3*), so the files column's 2*
+                   gets two thirds of the flexible width, about half the table
+                   at the usual pane width. Column width takes no percentages
+                   (https://www.xmlui.org/docs/reference/components/Column#width). -->
+              <Column header="shared with" width="1*" headerHorizontalAlignment="start">
                 <!-- worklist-surface-planned-overlap: two tenses, carried by
                      LEADING LABELS in plain text, not by style (Jon,
                      2026-09-04: "don't use color. lead with done: or

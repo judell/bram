@@ -2224,11 +2224,23 @@ function __bramPlanSteps(board) {
   var plan = board && board.plan;
   return (plan && Array.isArray(plan.steps)) ? plan.steps : [];
 }
+// issue-420: once per plan, so a plan the host served but nobody saw can be
+// told apart from one the host withheld (op=plan-withheld, host side).
+var __bramPlanShown = {};
 window.__bramPlanLine = function (board) {
-  var parts = __bramPlanSteps(board).map(function (s) {
+  var steps = __bramPlanSteps(board);
+  var parts = steps.map(function (s) {
     var verb = s.verb === "drop" ? "Drop" : s.verb === "commit" ? "Commit" : String(s.verb || "");
     return verb + " " + (s.ids || []).join(", ");
   });
+  if (parts.length) {
+    var key = String((board.plan && board.plan.postedAtMs) || "");
+    if (!__bramPlanShown[key]) {
+      __bramPlanShown[key] = true;
+      var ids = steps.reduce(function (n, s) { return n + (s.ids || []).length; }, 0);
+      window.__bramIframeTrace("plan-line", { op: "shown", steps: steps.length, ids: ids, version: board.plan.version });
+    }
+  }
   return parts.length ? "Recommended: " + parts.join(" · ") : "";
 };
 window.__bramPlanTooltip = function (board) {

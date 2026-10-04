@@ -66670,23 +66670,126 @@ fn worklist_plan_item<'a>(doc: &'a serde_json::Value, id: &str) -> Option<&'a se
         .find(|i| i.get("id").and_then(|v| v.as_str()) == Some(id))
 }
 
+// issue-420: why a saved plan is not served, or None when it is. Pure, so
+// the reasons are testable; worklist_plan_current traces them. Same checks,
+// same order, as before the reasons were named.
+fn worklist_plan_withheld(
+    plan: &serde_json::Value,
+    doc: &serde_json::Value,
+) -> Option<(&'static str, String)> {
+    let board_version = doc.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
+    if plan.get("version").and_then(|v| v.as_u64()) != Some(board_version) {
+        return Some(("version-mismatch", String::new()));
+    }
+    let Some(steps) = plan.get("steps").and_then(|v| v.as_array()) else {
+        return Some(("unreadable", String::new()));
+    };
+    for step in steps {
+        let Some(ids) = step.get("ids").and_then(|v| v.as_array()) else {
+            return Some(("unreadable", String::new()));
+        };
+        for id in ids {
+            let Some(id) = id.as_str() else {
+                return Some(("unreadable", String::new()));
+            };
+            if worklist_plan_item(doc, id).is_none() {
+                return Some(("id-missing", id.to_string()));
+            }
+        }
+    }
+    None
+}
+
+// issue-420: a plan the agent posted but the board doesn't serve used to
+// vanish without a trace. Once per plan and reason, since the board is
+// served many times.
+fn trace_worklist_plan_withheld<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    plan: &serde_json::Value,
+    doc: &serde_json::Value,
+    reason: &str,
+    missing: &str,
+) {
+    static REPORTED: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    let posted = plan.get("postedAtMs").and_then(|v| v.as_u64()).unwrap_or(0);
+    let key = format!("{}|{}", posted, reason);
+    if let Ok(mut g) = REPORTED
+        .get_or_init(|| Mutex::new(Default::default()))
+        .lock()
+    {
+        if !g.insert(key) {
+            return;
+        }
+    }
+    let plan_version = plan
+        .get("version")
+        .and_then(|v| v.as_u64())
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let board_version = doc.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
+    append_bram_trace_line(
+        app,
+        "worklist",
+        &format!(
+            "op=plan-withheld reason={} plan_version={} board_version={} missing={}",
+            reason,
+            plan_version,
+            board_version,
+            if missing.is_empty() { "-" } else { missing }
+        ),
+    );
+}
+
 fn worklist_plan_current<R: tauri::Runtime>(
     app: &AppHandle<R>,
     doc: &serde_json::Value,
 ) -> Option<serde_json::Value> {
     let path = project_resource_path(app, WORKLIST_PLAN_FILE)?;
-    let plan: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
-    let board_version = doc.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
-    if plan.get("version").and_then(|v| v.as_u64()) != Some(board_version) {
+    // No file is the ordinary case: nothing posted, or cleared.
+    let bytes = std::fs::read(&path).ok()?;
+    let plan: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(_) => {
+            trace_worklist_plan_withheld(app, &serde_json::Value::Null, doc, "unreadable", "");
+            return None;
+        }
+    };
+    if let Some((reason, missing)) = worklist_plan_withheld(&plan, doc) {
+        trace_worklist_plan_withheld(app, &plan, doc, reason, &missing);
         return None;
     }
-    let steps = plan.get("steps")?.as_array()?;
-    for step in steps {
-        for id in step.get("ids")?.as_array()? {
-            worklist_plan_item(doc, id.as_str()?)?;
-        }
-    }
     Some(plan)
+}
+
+#[cfg(test)]
+mod worklist_plan_withheld_tests {
+    use serde_json::json;
+
+    #[test]
+    fn names_each_reason_and_serves_a_current_plan() {
+        let board = json!({"version": 7, "items": [{"id": "a"}, {"id": "b"}]});
+        let plan = |v: u64, ids: serde_json::Value| json!({"version": v, "steps": [{"verb": "drop", "ids": ids}]});
+        assert_eq!(
+            super::worklist_plan_withheld(&plan(7, json!(["a", "b"])), &board),
+            None
+        );
+        assert_eq!(
+            super::worklist_plan_withheld(&plan(6, json!(["a"])), &board),
+            Some(("version-mismatch", String::new()))
+        );
+        assert_eq!(
+            super::worklist_plan_withheld(&plan(7, json!(["a", "gone"])), &board),
+            Some(("id-missing", "gone".to_string()))
+        );
+        assert_eq!(
+            super::worklist_plan_withheld(&json!({"version": 7}), &board),
+            Some(("unreadable", String::new()))
+        );
+        assert_eq!(
+            super::worklist_plan_withheld(&plan(7, json!([1])), &board),
+            Some(("unreadable", String::new()))
+        );
+    }
 }
 
 fn handle_worklist_plan<R: tauri::Runtime>(

@@ -17899,6 +17899,8 @@ fn drain_pty_intents<R: tauri::Runtime>(
     // marker (Windows) are never refused.
     let shell_fg = shell_foreground();
     let shell_in_foreground = shell_refuses_pane_send(shell_fg);
+    let launch_pending = agent_launch_pending();
+    let mut launch_held: usize = 0;
     let mut shell_restores: Vec<(String, String)> = Vec::new();
 
     for line in content.lines() {
@@ -18052,6 +18054,11 @@ fn drain_pty_intents<R: tauri::Runtime>(
                 }
                 shell_restores.push((id, data.to_string()));
                 continue;
+            } else if launch_pending {
+                held += 1;
+                launch_held += 1;
+                remaining.push(line.to_string());
+                continue;
             }
         }
         let write_result = match kind {
@@ -18200,6 +18207,8 @@ fn drain_pty_intents<R: tauri::Runtime>(
         if bram_trace_enabled() {
             let reason = if blocking_tool.is_some() {
                 "menu-present"
+            } else if launch_held == held {
+                "launch-pending"
             } else {
                 "awaiting-agent-boot"
             };
@@ -19068,6 +19077,43 @@ fn wait_for_shell_prompt_evidence() -> Result<(i64, &'static str), i64> {
 // always produce them), so Claude and Codex are judged the same way.
 const AGENT_LAUNCH_CONFIRM_MS: i64 = 8000;
 const AGENT_LAUNCH_CONFIRM_POLL_MS: u64 = 100;
+
+// pane-send-held-until-launch-confirmed: from the launch write until the
+// routine settles it, pane sends are held. Until the agent is confirmed up,
+// bytes typed into the terminal may never be read by it: if it exits, they
+// stay in the tty and bash reads them as commands. The routine clears the
+// mark on every ending (a drop guard, so a panic can't leave it set); a mark
+// older than the confirm window plus this slack counts as cleared anyway.
+static AGENT_LAUNCH_PENDING_SINCE_MS: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+const AGENT_LAUNCH_PENDING_SLACK_MS: i64 = 2000;
+
+fn launch_pending_holds(since_ms: i64, now_ms: i64) -> bool {
+    since_ms > 0
+        && now_ms.saturating_sub(since_ms) < AGENT_LAUNCH_CONFIRM_MS + AGENT_LAUNCH_PENDING_SLACK_MS
+}
+
+fn agent_launch_pending() -> bool {
+    launch_pending_holds(
+        AGENT_LAUNCH_PENDING_SINCE_MS.load(std::sync::atomic::Ordering::Relaxed),
+        unix_now_ms(),
+    )
+}
+
+struct LaunchPendingGuard;
+
+impl LaunchPendingGuard {
+    fn arm() -> Self {
+        AGENT_LAUNCH_PENDING_SINCE_MS.store(unix_now_ms(), std::sync::atomic::Ordering::Relaxed);
+        LaunchPendingGuard
+    }
+}
+
+impl Drop for LaunchPendingGuard {
+    fn drop(&mut self) {
+        AGENT_LAUNCH_PENDING_SINCE_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+}
 // Pause between typing the first command and its Enter (see
 // type_agent_first_command). Raw keystrokes, not a bracketed paste, so it
 // uses the Windows send path's 200 ms rather than the paste path's 50 ms.
@@ -19193,6 +19239,10 @@ fn run_agent_launch<R: tauri::Runtime>(l: AgentLaunch<R>) {
         }
     }
     (l.hook)(app, LaunchPhase::BeforeWrite);
+    // Held pane sends wait for this to drop: after an exit they are then
+    // refused (the shell is at its prompt) and handed back; after a confirm,
+    // the first command is typed first and they flush behind it.
+    let _pending = LaunchPendingGuard::arm();
     let written_from = unix_now_ms();
     if let Err(error) = pty_write_internal(app, &state, &format!("{}\r", l.command), l.caller_hint)
     {
@@ -19318,6 +19368,21 @@ mod agent_launch_tests {
     fn exit_tail_drops_the_prompt_line() {
         let raw = b"\x1b[31mNo conversation found to continue\x1b[0m\r\n\x1b]7779;bram;prompt;1\x07bash-3.2$ ";
         assert_eq!(launch_exit_tail(raw), "No conversation found to continue");
+    }
+
+    #[test]
+    fn launch_pending_holds_until_cleared_or_stale() {
+        use super::{launch_pending_holds as holds, AGENT_LAUNCH_CONFIRM_MS};
+        assert!(!holds(0, 1_000), "no launch pending");
+        assert!(holds(1_000, 1_500), "just written");
+        assert!(
+            holds(1_000, 1_000 + AGENT_LAUNCH_CONFIRM_MS),
+            "confirm window"
+        );
+        assert!(
+            !holds(1_000, 1_000 + AGENT_LAUNCH_CONFIRM_MS + 2_000),
+            "a mark the routine never cleared expires"
+        );
     }
 
     #[test]

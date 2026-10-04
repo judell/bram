@@ -86,7 +86,8 @@ screen and are not matchable.
 > longer exist. They are kept because the shape table below is written in
 > their terms.
 >
-> **The live grid gate** is in `__gridDetectMenu` (`app/main.js:1169`).
+> **The live grid gate** is in `__gridDetectMenu` (`app/main.js:1169`);
+> how it fits with the hook path is in [`docs/menu.md`](menu.md).
 > It searches the last 200 grid rows for runs of numbered options
 > (bottom-up, tolerating stale cells and rejoining wrapped labels) and
 > admits a run when:

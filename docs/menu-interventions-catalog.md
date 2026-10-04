@@ -2,15 +2,14 @@
 
 A retrospective across the ~195 menu-related commits (through 2026-07-18),
 prompted by the question "is this Sisyphean?" The companion architecture
-doc is `docs/menu.md` (mechanism map, current to its own date); this one
+doc is `docs/menu.md` (the current mechanism, rewritten 2026-10-03); this one
 catalogs what went wrong, what was done, why recent fixes hold, and what
 remains structurally open. Shape docs: `docs/pty-menu-shapes.md`,
 `docs/pty-menu-hook-catalog.md`, `docs/menu-detection-audit.md`.
 
 > **Status (2026-10-03):** a retrospective, kept as written through
 > 2026-07-18 except for the corrections noted inline. For current behavior,
-> see the menu rows of `docs/trace-vocabulary.md` and
-> `docs/xterm-grid-screen-reading.md`.
+> start at [`docs/menu.md`](menu.md).
 
 ## The generations
 

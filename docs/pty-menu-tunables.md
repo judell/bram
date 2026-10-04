@@ -7,7 +7,8 @@
 > favor of the xterm.js grid, and dismissal is now decided by the absence
 > fence (see `docs/menu-detection-audit.md`). Only the 64 KB tail cap
 > survives. The thresholds that govern behavior today are in
-> [Current thresholds](#current-thresholds-2026-10-03) at the end.
+> [Current thresholds](#current-thresholds-2026-10-03) at the end; the
+> mechanism they govern is described in [`docs/menu.md`](menu.md).
 
 Two constants in `src-tauri/src/lib.rs` govern how long the host
 keeps a detected permission menu visible to the agent pane after

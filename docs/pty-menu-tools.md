@@ -29,7 +29,8 @@ more; add a row + a section when you add a script. Keep tools in
 > - `[pty-out]` and `send-capture` lines, which recent specimens are taken
 >   from.
 >
-> No script analyzes these yet.
+> No script analyzes these yet. The mechanism that emits them is
+> described in [`docs/menu.md`](menu.md).
 
 The scripts read the `[pty-menu-scan]` trace lines in
 `resources/bram-traces/bram-trace.log` (and rotated `bram-trace-*.log`).

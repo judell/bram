@@ -7,8 +7,8 @@ for scoping the post-dismiss suppressor out of the hook-covered common case._
 > **Status (2026-10-03):** a dated audit, kept as written. Citations were
 > refreshed to function names and current `src-tauri/src/lib.rs` lines, and
 > the Python hook scripts it named were replaced by the Rust `bram-guard`
-> binary in `1378e3e`. For current behavior, see the menu rows of
-> `docs/trace-vocabulary.md` and `docs/xterm-grid-screen-reading.md`.
+> binary in `1378e3e`. For current behavior, start at
+> [`docs/menu.md`](menu.md).
 
 ## Premise correction: byte-pattern scraping is already retired
 

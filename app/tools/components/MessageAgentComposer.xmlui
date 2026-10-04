@@ -42,7 +42,7 @@
     subscribe="{window.bramSubscribeTauriEvent('send-restore')}" />
   <ChangeListener
     listenTo="{sendRestore.value &amp;&amp; sendRestore.value.tick}"
-    onDidChange="() => window.__bramApplySendRestore(sendRestore.value, composerBox)" />
+    onDidChange="() => window.__bramApplySendRestore(sendRestore.value, composerBox, toast)" />
 
   <!-- Form is retained only for TextArea.enterSubmits. Draft persistence is
        debounced in helpers.js; blur and submit flush/clear explicitly. -->

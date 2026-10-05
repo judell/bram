@@ -719,7 +719,10 @@ class Scratch:
         real = git.run("rev-parse", "--path-format=absolute", "--git-path", "objects")
         objects = Path(self.tmp.name) / "objects"
         (objects / "info").mkdir(parents=True)
-        (objects / "info" / "alternates").write_text((real or "").strip() + "\n")
+        # Bytes, not write_text: on Windows write_text ends the line "\r\n",
+        # git then reads the path with a trailing "\r", can't reach the
+        # repo's objects, and read-tree fails silently (v0.7.3 build).
+        (objects / "info" / "alternates").write_bytes(((real or "").strip() + "\n").encode("utf-8"))
         self.env = dict(os.environ)
         self.env["GIT_INDEX_FILE"] = str(Path(self.tmp.name) / "index")
         self.env["GIT_OBJECT_DIRECTORY"] = str(objects)

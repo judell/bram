@@ -101,15 +101,19 @@ class Git:
         env: dict[str, str] | None = None,
         input: str | None = None,
     ) -> str | None:
+        # Bytes both ways, never text mode: on Windows text mode turns every
+        # "\n" written to stdin into "\r\n" (subprocess docs, "Frequently
+        # Used Arguments"), so a patch handed to `git apply` no longer
+        # matches and probe reversed nothing (v0.7.3 release build).
         proc = subprocess.run(
             ["git", "-c", "core.quotePath=false", "-C", self.repo, *args],
             capture_output=True,
-            text=True,
-            errors="replace",
-            input=input,
+            input=input.encode("utf-8") if input is not None else None,
             env=env,
         )
-        return proc.stdout if proc.returncode == 0 else None
+        if proc.returncode != 0:
+            return None
+        return proc.stdout.decode("utf-8", errors="replace")
 
     def has_tree(self, tree: str) -> bool:
         if tree not in self._tree_cache:

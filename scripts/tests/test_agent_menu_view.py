@@ -24,15 +24,23 @@ class AgentMenuViewTests(unittest.TestCase):
         self.assertEqual([child.tag for child in items], ["HStack"])
         row = items[0]
         self.assertEqual(row.get("width"), "100%")
+        # fe84674: every row but Claude's "Type something." row still
+        # answers through __bramSendMenuAnswer (inside __bramMenuRowClick);
+        # that row opens a text box instead.
         self.assertEqual(
             row.get("onClick"),
-            "window.__bramSendMenuAnswer(answerKeys, promptId)",
+            "typeSomethingFor = window.__bramMenuRowClick($props.menu, $item, answerKeys, promptId, typeSomethingFor)",
         )
 
         number_button = row.find("Button")
         self.assertIsNotNone(number_button)
         self.assertEqual(number_button.get("label"), "{($item.key || '')}")
-        self.assertEqual(number_button.get("variant"), "outlined")
+        # outlined, or solid for the chosen "Type something." row while its
+        # box is open (fe84674).
+        self.assertEqual(
+            number_button.get("variant"),
+            "{window.__bramMenuRowVariant($props.menu, $item, typeSomethingFor, promptId)}",
+        )
         self.assertEqual(number_button.get("size"), "sm")
         self.assertIsNone(number_button.get("onClick"))
 

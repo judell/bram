@@ -12,47 +12,7 @@ Bram runs agents mindfully.
 
 Anyone who uses Claude Code and/or Codex.
 
-<img width="1078" height="1034" alt="v0 6 6" src="https://github.com/user-attachments/assets/cac26927-a65a-4e11-b72c-78be758fd19c" />
-
-
-## Demo
-
-This storyboard shows Bram and XMLUI co-evolving on August 26, 2026. In the ~/xmlui repo we burn down a set of issues and stress-test Bram's ability to manage file entanglement across items being handled by parallel subagents. In the ~/bram repo we burn down issues raised in response to findings from ~/xmlui. Real work happened on both sides while each helped improve the other.
-
-https://gist.github.com/judell/663ac00adf36a01096f2bdcdd08642ae
-
-
-## Blog
-
-<a href="https://blog.jonudell.net/2026/06/02/how-to-make-best-use-of-git-and-github-for-ai-assisted-software-development/">How to make best use of git and GitHub for AI-assisted software development</a>
-
-<a href="https://blog.jonudell.net/2026/06/17/vibe-coding-as-a-team-sport/">Vibe coding as a team sport</a>
-
-<a href="https://blog.jonudell.net/2026/06/28/doctor-it-hurts-when-agents-create-unreviewable-prs-dont-do-that/">“Doctor, it hurts when agents create unreviewable PRs.” “Don’t do that.”</a>
-
-<a href="https://blog.jonudell.net/2026/07/01/what-is-the-terminal/">"What is the terminal?"</a>
-
-<a href="https://blog.jonudell.net/2026/07/08/dont-infer-behavior-from-code-observe-it-in-logs/">Don’t infer behavior from code, observe it in logs</a>
-
-<a href="https://blog.jonudell.net/2026/07/16/talking-to-claude-code-and-codex/">Talking to Claude Code and Codex</a>
-
-<a href="https://blog.jonudell.net/2026/07/12/small-models-can-solve-big-problems/">Small models can solve big problems</a>
-
-<a href="https://blog.jonudell.net/2026/07/23/agents-that-narrate-their-work-are-the-best-team-players/">Agents that narrate their work are the best team players</a>
-
-<a href="https://blog.jonudell.net/2026/08/01/make-agent-memory-searchable/">Make agent memory searchable</a>
-
-### Elsewhere
-
-<a href="https://www.infoworld.com/article/4224587/the-agent-coordination-protocol-hiding-in-plain-sight-github-issues.html">The agent coordination protocol hiding in plain sight: GitHub issues</a>
-
-<a href="https://www.infoworld.com/article/4211198/when-an-ai-agent-goes-off-the-rails-file-a-bug-to-fix-the-documentation-then-test-the-fix.html">When an AI agent goes off the rails, file a bug to fix the documentation – then test the fix</a>
-
-<a href="https://www.downes.ca/post/79474">What is the terminal?</a> 
-
-<a href="https://waltzweb.wordpress.com/2026/07/02/github-for-todays-hybrid-teams/">Technical or not, human or AI – could Bram be the missing link?</a>
-
-<a href="https://arxiv.org/abs/2607.25975">Who is scientific code for? Maintaining human-readable landmarks in agent-written code</a>
+<a href="https://judell.github.io/bram/"><img alt="Bram demo video: a six-minute tour of Bram tackling and completing a GitHub issue. Click to watch on the Bram homepage." src="site/poster.jpg" /></a>
 
 ## How does it work?
 

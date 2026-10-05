@@ -42,59 +42,50 @@
     color: var(--fg);
     font: 17px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
   }
-  main { max-width: 760px; margin: 0 auto; padding: 48px 16px 80px; }
-  h1 { font-size: 2.6rem; line-height: 1.1; margin: 0 0 12px; letter-spacing: -0.02em; }
-  h2 { font-size: 1.25rem; margin: 48px 0 12px; padding-top: 24px; border-top: 1px solid var(--rule); }
+  main { max-width: 760px; margin: 0 auto; padding: 20px 16px 80px; }
+  h1 {
+    font-size: 2.6rem; line-height: 1.1; margin: 0 0 12px; letter-spacing: -0.02em;
+    display: flex; flex-wrap: wrap; align-items: center; column-gap: 12px;
+  }
+  h2 { font-size: 1.25rem; margin: 20px 0 8px; }
   h3 { font-size: 1rem; margin: 28px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
   p { margin: 0 0 14px; }
   a { color: var(--accent); }
+  h3.first { margin-top: 48px; padding-top: 24px; border-top: 1px solid var(--rule); }
   .lede { font-size: 1.2rem; margin-bottom: 8px; }
-  .tagline { color: var(--muted); font-style: italic; }
-  .actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 24px 0 8px; }
+  .tagline { font-size: 1.1rem; font-weight: 400; letter-spacing: 0; }
   .btn {
-    display: inline-block; padding: 10px 18px; border-radius: 8px;
-    text-decoration: none; font-weight: 600; border: 1px solid var(--accent);
+    display: inline-block; margin-left: 6px; padding: 2px 10px; border-radius: 6px; vertical-align: 2px;
+    font-size: 0.85rem; font-weight: 600; text-decoration: none; white-space: nowrap;
+    background: var(--accent); color: var(--accent-fg);
   }
-  .btn.primary { background: var(--accent); color: var(--accent-fg); }
-  .btn.secondary { color: var(--accent); }
+  /* The demo is near-square, so full column width would push its controls
+     below the fold; cap height to the viewport minus the header above it. */
   video {
-    display: block; width: 100%; height: auto; margin-top: 8px;
+    display: block; width: auto; max-width: 100%; height: auto; margin-top: 8px;
+    max-height: max(320px, calc(100svh - 230px));
     border: 1px solid var(--rule); border-radius: 10px; background: var(--card);
   }
   .caption { color: var(--muted); font-size: 0.92rem; margin-top: 8px; }
   ul.links { list-style: none; padding: 0; margin: 0; }
-  ul.links li { padding: 8px 0; border-bottom: 1px solid var(--rule); }
-  ul.links li:last-child { border-bottom: none; }
-  ul.links .src { color: var(--muted); font-size: 0.88rem; margin-left: 6px; white-space: nowrap; }
-  footer { margin-top: 56px; color: var(--muted); font-size: 0.9rem; }
-</style>
+  ul.links li { padding: 6px 0; }
+  ul.links .src { color: var(--muted); font-size: 0.88rem; margin-left: 6px; white-space: nowrap; }</style>
 </head>
 <body>
 <main>
 
-  <h1>Bram</h1>
-  <p class="lede">A desktop app that embeds Claude Code and/or Codex. It makes agentic software development legible, orderly, accountable, and collaborative.</p>
-  <p class="tagline">Bram runs agents mindfully.</p>
-  <p>For anyone who uses Claude Code and/or Codex.</p>
-
-  <div class="actions">
-    <a class="btn primary" href="https://github.com/judell/bram/releases/latest">Download the latest release</a>
-    <a class="btn secondary" href="https://github.com/judell/bram">Source &amp; docs on GitHub</a>
-  </div>
+  <h1>Bram <span class="tagline">(Bram runs agents mindfully)</span></h1>
+  <p class="lede">A desktop app that embeds Claude Code and/or Codex. It makes agentic software development legible, orderly, accountable, and collaborative. <a class="btn" href="https://github.com/judell/bram/releases/latest">Download</a></p>
 
   <h2>Demo</h2>
   <video controls preload="metadata" playsinline
-         poster="https://github.com/user-attachments/assets/cac26927-a65a-4e11-b72c-78be758fd19c">
+         poster="poster.jpg">
     <source src="https://jonudell.info/video/bram-demo-01.mp4" type="video/mp4">
     Your browser can't play this video. <a href="https://jonudell.info/video/bram-demo-01.mp4">Download it</a> instead.
   </video>
-  <p class="caption">A six-minute tour of Bram.</p>
+  <p class="caption">A six-minute tour of Bram tackling and completing a GitHub issue.</p>
 
-  <p>Also: <a href="https://gist.github.com/judell/663ac00adf36a01096f2bdcdd08642ae">a storyboard of Bram and XMLUI co-evolving</a> on August 26, 2026. In the ~/xmlui repo we burn down a set of issues and stress-test Bram's ability to manage file entanglement across items handled by parallel subagents; in the ~/bram repo we burn down issues raised by findings from ~/xmlui. Real work happened on both sides while each helped improve the other.</p>
-
-  <h2>Writing about Bram</h2>
-
-  <h3>Blog</h3>
+  <h3 class="first">Blog</h3>
   <ul class="links">
     <li><a href="https://blog.jonudell.net/2026/06/02/how-to-make-best-use-of-git-and-github-for-ai-assisted-software-development/">How to make best use of git and GitHub for AI-assisted software development</a></li>
     <li><a href="https://blog.jonudell.net/2026/06/17/vibe-coding-as-a-team-sport/">Vibe coding as a team sport</a></li>
@@ -115,10 +106,6 @@
     <li><a href="https://waltzweb.wordpress.com/2026/07/02/github-for-todays-hybrid-teams/">Technical or not, human or AI – could Bram be the missing link?</a><span class="src">waltzweb</span></li>
     <li><a href="https://arxiv.org/abs/2607.25975">Who is scientific code for? Maintaining human-readable landmarks in agent-written code</a><span class="src">arXiv</span></li>
   </ul>
-
-  <footer>
-    Bram is open source: <a href="https://github.com/judell/bram">github.com/judell/bram</a>
-  </footer>
 
 </main>
 </body>

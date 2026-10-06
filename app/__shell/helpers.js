@@ -15195,8 +15195,32 @@ window.__bramQueueEditedLabel = function (updatedAtMs) {
 // are reachable only from Bram's same-origin agent pane (loopback curl and
 // the C1-isolated target pane cannot call them), so the H5 close-authority
 // contract holds: a clicked button, never an agent channel.
-window.__bramCloseIssue = function (number, comment, onDone, onError) {
+//
+// issues-tab-optimistic-close: the click no longer waits on the forge. It
+// records the number as a pending close and returns the pending list at once
+// (the caller closes the detail modal and renders the row CLOSED from that
+// list); the invoke runs in the background. On success the host re-indexes
+// the issue (refresh_issue_now) and emits issues-changed, so the cached
+// /__issues list catches up on its own. On failure the pending entry is
+// dropped, onPendingChange hands the caller the shrunken list, and a toast
+// names the issue, so a failed close never passes silently.
+//
+// The pending map is module state, not a component var, so it outlives the
+// Issues tab unmounting: reopen the tab seconds later and the row still reads
+// closed. Pending is focus, not decision (docs/developing-bram.md, Client
+// storage), so it is deliberately not persisted.
+var __bramPendingIssueCloses = {}; // number -> startedAtMs
+var __BRAM_PENDING_CLOSE_MAX_MS = 120000;
+window.__bramPendingIssueCloseList = function () {
+  return Object.keys(__bramPendingIssueCloses).map(Number);
+};
+window.__bramCloseIssue = function (number, comment, toastApi, onPendingChange) {
   var invoke = getTauriInvoke();
+  var say = function (msg) {
+    if (!toastApi) return;
+    if (typeof toastApi.error === "function") toastApi.error(msg);
+    else if (typeof toastApi === "function") toastApi(msg);
+  };
   // issue-343: same treatment as gitPush — trace first, and a dead bridge
   // reports through the caller's error surface instead of vanishing.
   window.__bramIframeTrace("click", {
@@ -15205,19 +15229,57 @@ window.__bramCloseIssue = function (number, comment, onDone, onError) {
     number: number,
   });
   if (!invoke) {
-    if (typeof onError === "function") {
-      onError("Close could not reach the host (IPC unavailable) — reload the pane or restart Bram");
-    }
-    return;
+    say("Couldn't close #" + number + ": the host is unreachable (IPC unavailable). Reload the pane or restart Bram.");
+    return window.__bramPendingIssueCloseList();
   }
+  var startedAt = Date.now();
+  __bramPendingIssueCloses[number] = startedAt;
   invoke("issue_close_manual", { number: number, comment: comment || "" })
     .then(function () {
-      if (typeof onDone === "function") onDone();
+      // The entry stays until the refetched list itself reads CLOSED
+      // (__bramReconcilePendingIssueCloses), so the row never flickers back
+      // to open between this resolve and the issues-changed refetch.
+      window.__bramIframeTrace("issue-close", { op: "ok", number: number, elapsedMs: Date.now() - startedAt });
     })
     .catch(function (e) {
+      delete __bramPendingIssueCloses[number];
+      window.__bramIframeTrace("issue-close", { op: "err", number: number, elapsedMs: Date.now() - startedAt, error: String(e) });
       window.logToHost({ kind: "issue-close-manual", phase: "err", error: String(e) });
-      if (typeof onError === "function") onError(String(e));
+      say("Couldn't close #" + number + ": " + String(e));
+      if (typeof onPendingChange === "function") onPendingChange(window.__bramPendingIssueCloseList());
     });
+  return window.__bramPendingIssueCloseList();
+};
+// Rows as the Issues tab should show them: any row with a close in flight
+// reads CLOSED, so the state filter and the row badge agree with the click.
+window.__bramApplyPendingIssueCloses = function (rows, pending) {
+  if (!Array.isArray(rows) || !Array.isArray(pending) || pending.length === 0) return rows || [];
+  return rows.map(function (r) {
+    if (r && r.state === "OPEN" && pending.indexOf(Number(r.number)) !== -1) {
+      return Object.assign({}, r, { state: "CLOSED" });
+    }
+    return r;
+  });
+};
+// Called with the RAW fetched rows: drop pending entries the data now
+// confirms, and any older than the cap (a close whose re-index never landed
+// shouldn't mask the forge's truth for the rest of the session).
+window.__bramReconcilePendingIssueCloses = function (rows) {
+  var now = Date.now();
+  (rows || []).forEach(function (r) {
+    var n = r && Number(r.number);
+    if (n && __bramPendingIssueCloses[n] && r.state !== "OPEN") {
+      window.__bramIframeTrace("issue-close", { op: "confirmed", number: n, elapsedMs: now - __bramPendingIssueCloses[n] });
+      delete __bramPendingIssueCloses[n];
+    }
+  });
+  Object.keys(__bramPendingIssueCloses).forEach(function (k) {
+    if (now - __bramPendingIssueCloses[k] > __BRAM_PENDING_CLOSE_MAX_MS) {
+      window.__bramIframeTrace("issue-close", { op: "expired", number: Number(k), elapsedMs: now - __bramPendingIssueCloses[k] });
+      delete __bramPendingIssueCloses[k];
+    }
+  });
+  return window.__bramPendingIssueCloseList();
 };
 
 // Sessions tab: pending-delete and pending-rename ids persist across

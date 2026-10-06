@@ -24052,8 +24052,21 @@ async fn issue_close_manual(
 ) -> Result<(), String> {
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let _guard = forge_action_cell().lock();
-        gh_issue_close(&app, number, comment.as_deref().unwrap_or("")).map(|_| ())
+        {
+            let _guard = forge_action_cell().lock();
+            gh_issue_close(&app, number, comment.as_deref().unwrap_or(""))?;
+        }
+        // issues-tab-optimistic-close: re-index the closed issue now, as the
+        // close-on-push path does. refresh_issue_now upserts the cached
+        // issues:list row and emits issues-changed, so /__issues stops
+        // serving the pre-close OPEN row (it otherwise waited for the next
+        // background issues pass). Outside the forge lock: a queued push
+        // shouldn't wait on a read. A refresh failure doesn't fail the
+        // close — the close happened; the next issues pass catches up.
+        if let Err(e) = refresh_issue_now(&app, number) {
+            eprintln!("[issue close manual #{}] refresh failed: {}", number, e);
+        }
+        Ok(())
     })
     .await
     .map_err(|e| format!("issue_close_manual task panicked: {}", e))?

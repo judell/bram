@@ -1,4 +1,9 @@
-<Component name="ResultList" var.selectedHit="{null}">
+<Component name="ResultList" var.selectedHit="{null}"
+  method.closeDetail="() => { selectedHit = null }">
+  <!-- issues-tab-optimistic-close: closeDetail() lets a consumer's
+       detailFooterTemplate dismiss the modal (selectedHit is internal, and
+       vars don't cross the component boundary) —
+       https://www.xmlui.org/docs/howto/delegate-a-method -->
   <!-- browse-tabs-adopt-searchresults: the shared result-surface shell,
        extracted from SearchResults.xmlui where each mechanism earned its
        receipts this release. Consumers (SearchResults, Issues, Commits,

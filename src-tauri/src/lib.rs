@@ -18461,6 +18461,7 @@ fn worklist_attach_last_sessions<R: tauri::Runtime>(
     };
     let cur_provider = current_provider(app);
     let cur_sid = cur_provider.and_then(|p| live_session_id(app, p));
+    let mut codex_titles: Option<HashMap<String, String>> = None;
     for item in items.iter_mut() {
         let Some(id) = item.get("id").and_then(|v| v.as_str()).map(String::from) else {
             continue;
@@ -18474,9 +18475,18 @@ fn worklist_attach_last_sessions<R: tauri::Runtime>(
         let Some(path) = session_path_for_id(app, provider, &sid) else {
             continue;
         };
+        // item-last-session-names-provider-and-session: resolve a Codex title
+        // the way the Sessions list does (session_index name first, then the
+        // first-message scan), so the gate line names the session as the user
+        // named it — not "Read and follow this Bram turn: …". The index is read
+        // at most once per board build, and only if some item needs it.
         let title = match provider {
             SessionProvider::Claude => claude_session_title(&path).ok().flatten(),
-            SessionProvider::Codex => codex_session_title(&path).ok().flatten(),
+            SessionProvider::Codex => codex_titles
+                .get_or_insert_with(|| codex_session_index().unwrap_or_default())
+                .get(&sid)
+                .cloned()
+                .or_else(|| codex_session_title(&path).ok().flatten()),
         };
         let is_current = cur_provider == Some(provider) && cur_sid.as_deref() == Some(sid.as_str());
         if let Some(obj) = item.as_object_mut() {

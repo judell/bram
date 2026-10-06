@@ -1517,8 +1517,24 @@ window.__bramGateLastSessionLine = function (items, sel, sessions) {
     __bramGateLastSessionShown[key] = true;
     window.__bramIframeTrace("worklist-last-session", { op: "shown", id: b.id, session: b.sessionId, provider: b.provider });
   }
-  if (!b.title) return "Last worked on in another " + b.provider + " session.";
-  return "Last worked on in session: '" + b.title + "'.";
+  // item-last-session-names-provider-and-session: name the agent when it's
+  // the other one ("by Codex"), and show the session's own name. Paired
+  // sessions carry a provider suffix ("General (Oct 5, 0.7.3) (Codex)");
+  // drop it here, where the line already names the provider, so the shared
+  // name reads the same from both sides.
+  var cur = Array.isArray(sessions) && sessions.length ? window.__bramCurrentSessionOf(sessions) : null;
+  var prov = String(b.provider || "").toLowerCase();
+  var provName = prov === "codex" ? "Codex" : prov === "claude" ? "Claude" : String(b.provider || "");
+  var otherAgent = !!(cur && cur.provider && String(cur.provider).toLowerCase() !== prov);
+  var title = String(b.title || "").replace(/\s*\((?:Codex|Claude)\)\s*$/i, "").trim();
+  if (otherAgent) {
+    return title
+      ? "Last worked on by " + provName + " in '" + title + "'."
+      : "Last worked on by " + provName + " in another session.";
+  }
+  return title
+    ? "Last worked on in another session: '" + title + "'."
+    : "Last worked on in another " + provName + " session.";
 };
 window.__bramGateSwitchToLastSession = function (items, sel, sessions, toastApi) {
   var b = window.__bramGateLastSession(items, sel, sessions);

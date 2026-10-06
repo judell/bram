@@ -236,10 +236,11 @@
            Without it, once the list virtualizes against the App scroller,
            virtua re-anchors on a previously visible row and drags the page
            down the new list — open→closed landed at row 362 of 388
-           (2026-10-06 03:46Z). The visible jump-then-back on transitions
-           that change the first row is upstream: List's useShift reads any
-           first-key change as a prepend (xmlui-org/xmlui#3936); the pin stays
-           either way, but the flash should go when that lands.
+           (2026-10-06 03:46Z). That drag was List's useShift reading any
+           first-row change as a prepend (xmlui-org/xmlui#3936), fixed in the
+           vendored List: switches from the top now land on row 0 on their
+           own (retest, #3936). The pin stays as intent — a filter, sort or
+           search change starts at the top — and fires immediately.
            issues-single-fetch-no-load-jump: the load phase is in the key too,
            so the pin also fires once when the data first arrives. -->
 

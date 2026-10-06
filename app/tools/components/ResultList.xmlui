@@ -36,11 +36,14 @@
        lineage): NOT List.scrollToTop — its outside-scroll startMargin goes
        stale when content appears above the list after mount and the pin
        lands short (useStartMargin, ListReact.tsx; upstream candidate).
-       window.__bramScrollMainToTop pins the App scroller itself. Debounced
-       past virtua's re-anchor (undebounced pins fired 1-16ms after the data
-       recompute and the re-anchor dragged the page back — 2026-08-15 trace). -->
+       window.__bramScrollMainToTop pins the App scroller itself. It used to be
+       debounced 250 ms past virtua's re-anchor (undebounced pins fired 1-16ms
+       after the data recompute and the re-anchor dragged the page back —
+       2026-08-15 trace). That re-anchor was List's useShift reading any
+       first-row change as a prepend (xmlui-org/xmlui#3936); with the fixed
+       List vendored, a wholesale change no longer shifts, so the pin fires
+       immediately and has nothing to fight. -->
   <ChangeListener listenTo="{$props.pinKey || ''}"
-    debounceWaitInMs="250"
     onDidChange="() => { window.__bramScrollMainToTop(); window.__bramIframeTrace('search-date', {op: 'pin-top', via: $props.pinVia || 'result-list'}) }" />
 
   <!-- Virtualized List in outside-scroll mode against the whole-page App

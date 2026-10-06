@@ -67609,10 +67609,28 @@ fn route_request<R: tauri::Runtime>(
             // across all paths and undercounted the button (live case
             // 2026-09-04: "Will commit +185 −1" while an exclusive
             // Inbox.xmlui alone carried +32 −15 its commit would take).
+            // issue-425-gate-routes-by-membership: the prediction must follow
+            // the routing the gate now uses. The gate decides entanglement by
+            // line-level membership, REQUEST-WIDE: if any declared path has
+            // lines a begun outside item owns, every path is interval-staged;
+            // otherwise every path is taken whole-file, unowned lines included.
+            // Routing this per path from the replay (as before) predicted an
+            // interval take the gate no longer makes — the gate-425-r2 demo,
+            // 2026-10-06, whose agent wrote its message from that expectation.
+            // Display tolerates a stale partition; with none, fall back to the
+            // replay's owners, per path, as before.
+            let wc_partition = membership_partition(app).map(|(p, _)| p);
             if let Some(items) = doc.get_mut("items").and_then(|v| v.as_array_mut()) {
+                // Begun the way the gate counts it (handle_worklist_commit's
+                // begun_outside): `applied` OR a host-stamped begunAtMs. Keying
+                // on begunAtMs alone left applied items with no prediction and
+                // let prediction and gate disagree about who entangles.
                 let begun: std::collections::HashSet<String> = items
                     .iter()
-                    .filter(|it| it.get("begunAtMs").is_some())
+                    .filter(|it| {
+                        it.get("status").and_then(|v| v.as_str()) == Some("applied")
+                            || it.get("begunAtMs").and_then(|v| v.as_i64()).unwrap_or(0) > 0
+                    })
                     .filter_map(|it| it.get("id").and_then(|v| v.as_str()).map(String::from))
                     .collect();
                 for item in items.iter_mut() {
@@ -67622,6 +67640,27 @@ fn route_request<R: tauri::Runtime>(
                     if !begun.contains(&id) {
                         continue;
                     }
+                    let declared = worklist_item_files(item);
+                    let item_entangled: Option<bool> = wc_partition.as_ref().map(|p| {
+                        let outside: std::collections::HashSet<String> =
+                            begun.iter().filter(|b| **b != id).cloned().collect();
+                        !membership_entangling_owners(p, &declared, &[id.clone()], &outside)
+                            .is_empty()
+                    });
+                    let unowned_whole: Vec<(String, usize, usize)> =
+                        match (&wc_partition, item_entangled) {
+                            (Some(p), Some(false)) => {
+                                let paths: Vec<String> = p
+                                    .keys()
+                                    .filter(|path| {
+                                        declared.iter().any(|d| declared_covers(d, path))
+                                    })
+                                    .cloned()
+                                    .collect();
+                                membership_unowned_taken(p, &paths)
+                            }
+                            _ => Vec::new(),
+                        };
                     let Some(records) = item.get_mut("changedFiles").and_then(|v| v.as_array_mut())
                     else {
                         continue;
@@ -67638,10 +67677,15 @@ fn route_request<R: tauri::Runtime>(
                         else {
                             continue;
                         };
-                        let entangled = owners_by_path
-                            .get(&path)
-                            .map(|o| o.iter().any(|owner| *owner != id && begun.contains(owner)))
-                            .unwrap_or(false);
+                        let entangled = match item_entangled {
+                            Some(e) => e,
+                            None => owners_by_path
+                                .get(&path)
+                                .map(|o| {
+                                    o.iter().any(|owner| *owner != id && begun.contains(owner))
+                                })
+                                .unwrap_or(false),
+                        };
                         // issue-273 postscript: the residue-driven interval
                         // branch (and its two successor corrections) were
                         // withdrawn the same evening they shipped — three
@@ -67689,6 +67733,23 @@ fn route_request<R: tauri::Runtime>(
                             "willCommit".to_string(),
                             serde_json::json!({ "added": wc.0, "removed": wc.1 }),
                         );
+                        // issue-425-gate-routes-by-membership: what a whole-file
+                        // commit of this item would take that no item wrote —
+                        // the same lines the commit response will disclose as
+                        // `unownedTaken`, available BEFORE committing.
+                        if !unowned_whole.is_empty() {
+                            obj.insert(
+                                "willCommitUnowned".to_string(),
+                                serde_json::Value::Array(
+                                    unowned_whole
+                                        .iter()
+                                        .map(|(p, a, r)| {
+                                            serde_json::json!({ "path": p, "added": a, "removed": r })
+                                        })
+                                        .collect(),
+                                ),
+                            );
+                        }
                     }
                 }
             }
@@ -71314,12 +71375,18 @@ fn gate_membership_comparison(
 // unavailable); until then it is the pre-flip soak's instrument: gate-time
 // cost (criterion 7 has serve-time baselines only) and agreement at the
 // moment a commit actually happens.
+//
+// issue-425-gate-routes-by-membership: no longer observe-only. It returns the
+// fresh partition so the gate can ROUTE by it (see
+// membership_entangling_owners); None means membership had no answer, which
+// the gate refuses on rather than falling back to the replay. The divergence
+// traces stay, so disagreements remain visible until the replay retires.
 fn gate_membership_observe<R: tauri::Runtime>(
     app: &AppHandle<R>,
     ids: &[String],
     requested_files: &[String],
     runs_by_path: &std::collections::HashMap<String, Vec<serde_json::Value>>,
-) {
+) -> Option<std::collections::BTreeMap<String, MembershipPathBuckets>> {
     let started = std::time::Instant::now();
     let Some((partition, fresh)) = membership_partition_engine(app, true) else {
         append_bram_trace_line(
@@ -71331,7 +71398,7 @@ fn gate_membership_observe<R: tauri::Runtime>(
                 started.elapsed().as_millis()
             ),
         );
-        return;
+        return None;
     };
     let replay_owners = replay_owners_from_runs(runs_by_path);
     let replay_joint = joint_owners_from_runs(runs_by_path);
@@ -71369,6 +71436,253 @@ fn gate_membership_observe<R: tauri::Runtime>(
             diverged.is_empty()
         ),
     );
+    Some(partition)
+}
+
+// issue-425-gate-routes-by-membership: the begun items OUTSIDE the request
+// that membership credits with lines on a requested path. Non-empty routes
+// the whole request to interval staging (staging is request-wide: one
+// entangled path sends every requested file through interval patches). A
+// replay "owner" with no lines here routes nothing — the 21-of-21 #419 shape.
+fn membership_entangling_owners(
+    partition: &std::collections::BTreeMap<String, MembershipPathBuckets>,
+    requested_files: &[String],
+    requested_ids: &[String],
+    begun_outside: &std::collections::HashSet<String>,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (path, m) in partition {
+        if !requested_files.iter().any(|d| declared_covers(d, path)) {
+            continue;
+        }
+        for owner in &m.owners {
+            if requested_ids.iter().any(|r| r == owner) {
+                continue;
+            }
+            if begun_outside.contains(owner) {
+                out.push((path.clone(), owner.clone()));
+            }
+        }
+    }
+    out
+}
+
+// issue-425-gate-routes-by-membership: lines a whole-file commit takes that
+// membership credits to NO item (chat-turn edits, edits between windows, a
+// neighbour's lines on a path it does not declare). Disclosed, not refused
+// (decided 2026-10-02). Only committed paths with a nonzero unowned bucket.
+fn membership_unowned_taken(
+    partition: &std::collections::BTreeMap<String, MembershipPathBuckets>,
+    committed_paths: &[String],
+) -> Vec<(String, usize, usize)> {
+    let mut out = Vec::new();
+    for path in committed_paths {
+        let Some(m) = partition.get(path) else {
+            continue;
+        };
+        let attributed = (
+            m.single.0 + m.joint.0 + m.ambiguous.0,
+            m.single.1 + m.joint.1 + m.ambiguous.1,
+        );
+        let ((a, r), _clamped) = membership_unowned(m.universe, attributed);
+        if a + r > 0 {
+            out.push((path.clone(), a, r));
+        }
+    }
+    out
+}
+
+// issue-425-gate-routes-by-membership (Codex review: "one state for
+// classification and staging"): the worktree content of every changed path
+// under the request's files, captured BEFORE membership classifies them.
+// Whole-file staging then checks the index against it, so an edit landing
+// between classification and `git add` is refused, never silently absorbed
+// into a commit membership did not see. Values are blob ids, "-" for a
+// deleted path.
+fn gate_worktree_snapshot<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    files: &[String],
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let mut out = std::collections::BTreeMap::new();
+    if files.is_empty() {
+        return Ok(out);
+    }
+    let root = project_root(Some(app)).ok_or_else(|| "no project root".to_string())?;
+    let mut paths: std::collections::BTreeSet<String> = Default::default();
+    let mut diff = vec![
+        "diff".to_string(),
+        "HEAD".to_string(),
+        "--name-only".to_string(),
+        "--no-renames".to_string(),
+        "--".to_string(),
+    ];
+    diff.extend(files.iter().cloned());
+    for l in git_run_owned(app, &diff)?.lines() {
+        if !l.trim().is_empty() {
+            paths.insert(l.trim().to_string());
+        }
+    }
+    let mut others = vec![
+        "ls-files".to_string(),
+        "--others".to_string(),
+        "--exclude-standard".to_string(),
+        "--".to_string(),
+    ];
+    others.extend(files.iter().cloned());
+    for l in git_run_owned(app, &others)?.lines() {
+        if !l.trim().is_empty() {
+            paths.insert(l.trim().to_string());
+        }
+    }
+    for p in paths {
+        let blob = if root.join(&p).exists() {
+            git_run(app, &["hash-object", "--", &p])?.trim().to_string()
+        } else {
+            "-".to_string()
+        };
+        out.insert(p, blob);
+    }
+    Ok(out)
+}
+
+// The index side of the same comparison: the staged blob id of each path,
+// "-" when the index does not carry it (a staged deletion).
+fn gate_index_blobs<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    paths: &[String],
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let mut out = std::collections::BTreeMap::new();
+    for p in paths {
+        let line = git_run(app, &["ls-files", "-s", "--", p])?;
+        let blob = line
+            .split_whitespace()
+            .nth(1)
+            .map(str::to_string)
+            .unwrap_or_else(|| "-".to_string());
+        out.insert(p.clone(), blob);
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod gate_routes_by_membership_tests {
+    use super::*;
+    use std::collections::{BTreeMap, BTreeSet, HashSet};
+
+    fn bucket(
+        owners: &[&str],
+        universe: (usize, usize),
+        single: (usize, usize),
+    ) -> MembershipPathBuckets {
+        MembershipPathBuckets {
+            owners: owners
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<BTreeSet<_>>(),
+            universe,
+            single,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn outside_begun_owner_with_lines_entangles() {
+        let mut p = BTreeMap::new();
+        p.insert("a.rs".to_string(), bucket(&["A", "B"], (10, 0), (10, 0)));
+        let begun: HashSet<String> = ["B".to_string()].into_iter().collect();
+        let got =
+            membership_entangling_owners(&p, &["a.rs".to_string()], &["A".to_string()], &begun);
+        assert_eq!(got, vec![("a.rs".to_string(), "B".to_string())]);
+    }
+
+    #[test]
+    fn replay_only_neighbour_does_not_entangle() {
+        // #419's 21-of-21 shape: the neighbour is begun and declares the path
+        // but owns no lines, so membership does not list it as an owner.
+        let mut p = BTreeMap::new();
+        p.insert("a.rs".to_string(), bucket(&["A"], (5, 1), (5, 1)));
+        let begun: HashSet<String> = ["B".to_string()].into_iter().collect();
+        assert!(membership_entangling_owners(
+            &p,
+            &["a.rs".to_string()],
+            &["A".to_string()],
+            &begun
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn co_requested_and_unbegun_owners_do_not_entangle() {
+        let mut p = BTreeMap::new();
+        p.insert("a.rs".to_string(), bucket(&["A", "B", "C"], (9, 0), (9, 0)));
+        // B is in the request (committing together is safe); C never began.
+        let begun: HashSet<String> = HashSet::new();
+        let ids = vec!["A".to_string(), "B".to_string()];
+        assert!(membership_entangling_owners(&p, &["a.rs".to_string()], &ids, &begun).is_empty());
+    }
+
+    #[test]
+    fn directory_declaration_covers_paths_and_unrequested_paths_are_ignored() {
+        let mut p = BTreeMap::new();
+        p.insert("src/x.rs".to_string(), bucket(&["B"], (1, 0), (1, 0)));
+        p.insert("other/y.rs".to_string(), bucket(&["C"], (1, 0), (1, 0)));
+        let begun: HashSet<String> = ["B".to_string(), "C".to_string()].into_iter().collect();
+        let got =
+            membership_entangling_owners(&p, &["src/".to_string()], &["A".to_string()], &begun);
+        assert_eq!(got, vec![("src/x.rs".to_string(), "B".to_string())]);
+    }
+
+    #[test]
+    fn unowned_taken_reports_only_committed_paths_with_unowned_lines() {
+        let mut p = BTreeMap::new();
+        p.insert("a.rs".to_string(), bucket(&["A"], (12, 3), (10, 1))); // 2+, 2- unowned
+        p.insert("b.rs".to_string(), bucket(&["A"], (4, 0), (4, 0))); // fully owned
+        p.insert("c.rs".to_string(), bucket(&[], (1, 1), (0, 0))); // unowned, not committed
+        let got = membership_unowned_taken(&p, &["a.rs".to_string(), "b.rs".to_string()]);
+        assert_eq!(got, vec![("a.rs".to_string(), 2, 2)]);
+    }
+
+    #[test]
+    fn drift_catches_changed_new_and_reverted_paths() {
+        let snap: BTreeMap<String, String> = [("a".into(), "h1".into()), ("b".into(), "h2".into())]
+            .into_iter()
+            .collect();
+        let same: BTreeMap<String, String> = snap.clone();
+        assert!(gate_state_drift(&snap, &same).is_empty());
+        let changed: BTreeMap<String, String> =
+            [("a".into(), "h9".into()), ("b".into(), "h2".into())]
+                .into_iter()
+                .collect();
+        assert_eq!(gate_state_drift(&snap, &changed), vec!["a".to_string()]);
+        let extra: BTreeMap<String, String> = [
+            ("a".into(), "h1".into()),
+            ("b".into(), "h2".into()),
+            ("c".into(), "h3".into()),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(gate_state_drift(&snap, &extra), vec!["c".to_string()]);
+        let missing: BTreeMap<String, String> = [("a".into(), "h1".into())].into_iter().collect();
+        assert_eq!(gate_state_drift(&snap, &missing), vec!["b".to_string()]);
+        let deleted: BTreeMap<String, String> = [("a".into(), "-".into())].into_iter().collect();
+        let del_staged = deleted.clone();
+        assert!(gate_state_drift(&deleted, &del_staged).is_empty());
+    }
+}
+
+// Paths whose staged content differs from the pre-classification snapshot,
+// over the union of both sides: a path changed after the snapshot, a path
+// that newly appeared, or one that changed back.
+fn gate_state_drift(
+    snapshot: &std::collections::BTreeMap<String, String>,
+    staged: &std::collections::BTreeMap<String, String>,
+) -> Vec<String> {
+    let mut keys: std::collections::BTreeSet<&String> = snapshot.keys().collect();
+    keys.extend(staged.keys());
+    keys.into_iter()
+        .filter(|k| snapshot.get(*k) != staged.get(*k))
+        .cloned()
+        .collect()
 }
 
 fn handle_worklist_commit<R: tauri::Runtime>(
@@ -71577,21 +71891,52 @@ fn handle_worklist_commit<R: tauri::Runtime>(
     // across the commit because interval staging never touches the worktree
     // the replay is positioned against.
     let (runs_by_path, _, _, _unowned_by_path) = claim_attribution_runs(app);
-    // gate-computes-membership-fresh: observe-only, before any staging
-    // decision. See gate_membership_observe.
-    {
-        let requested_files: Vec<String> = items
-            .iter()
-            .filter(|it| {
-                it.get("id")
-                    .and_then(|v| v.as_str())
-                    .map(|id| ids.iter().any(|r| r == id))
-                    .unwrap_or(false)
-            })
-            .flat_map(worklist_item_files)
-            .collect();
-        gate_membership_observe(app, &ids, &requested_files, &runs_by_path);
-    }
+    // issue-425-gate-routes-by-membership: the worktree snapshot comes
+    // FIRST, so any edit after it — even one membership then sees — shows up
+    // as drift at staging instead of being absorbed. Twins are included
+    // because whole-file staging auto-stages them below.
+    let worktree_snapshot = {
+        let mut snap_files = files.clone();
+        snap_files.extend(installed_twins_for(&files));
+        match gate_worktree_snapshot(app, &snap_files) {
+            Ok(s) => s,
+            Err(e) => {
+                release_claim_on_commit_refusal(app, &ids);
+                return worklist_json_error(500, format!("worktree snapshot failed: {}", e));
+            }
+        }
+    };
+    // gate-computes-membership-fresh, now acting (issue-425-gate-routes-by-
+    // membership): the fresh partition decides entanglement below.
+    let requested_files: Vec<String> = items
+        .iter()
+        .filter(|it| {
+            it.get("id")
+                .and_then(|v| v.as_str())
+                .map(|id| ids.iter().any(|r| r == id))
+                .unwrap_or(false)
+        })
+        .flat_map(worklist_item_files)
+        .collect();
+    let Some(partition) = gate_membership_observe(app, &ids, &requested_files, &runs_by_path)
+    else {
+        // Refuse rather than fall back to the replay: the replay is the
+        // model that named 21 wrong neighbours (#419), and why membership
+        // occasionally has no answer is not yet established.
+        append_bram_trace_line(
+            app,
+            "worklist-commit",
+            &format!("op=refuse-membership-unavailable ids={}", ids.join(",")),
+        );
+        release_claim_on_commit_refusal(app, &ids);
+        return worklist_json_error(
+            409,
+            "commit refused: Bram couldn't work out which lines belong to which item right \
+             now, so it can't tell whether this commit would take another item's work. \
+             Nothing was committed. Try the commit again in a moment."
+                .to_string(),
+        );
+    };
     let begun_outside: std::collections::HashSet<String> = items
         .iter()
         .filter_map(|it| {
@@ -71606,7 +71951,7 @@ fn handle_worklist_commit<R: tauri::Runtime>(
         .collect();
     {
         let requested: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
-        'scan: for path in &files {
+        for path in &files {
             let Some(runs) = runs_by_path.get(path) else {
                 continue;
             };
@@ -71684,30 +72029,30 @@ fn handle_worklist_commit<R: tauri::Runtime>(
                     }
                     continue;
                 }
-                let Some(owner) = run.get("itemId").and_then(|v| v.as_str()) else {
-                    continue;
-                };
-                if requested.contains(owner) {
-                    continue;
-                }
-                let owner_begun = items.iter().any(|it| {
-                    it.get("id").and_then(|v| v.as_str()) == Some(owner)
-                        && (it.get("status").and_then(|v| v.as_str()) == Some("applied")
-                            || it.get("begunAtMs").and_then(|v| v.as_i64()).unwrap_or(0) > 0)
-                });
-                if owner_begun {
-                    if bram_trace_enabled() {
-                        append_bram_trace_line(
-                            app,
-                            "worklist-commit",
-                            &format!("op=entangled-interval-stage path={} owner={}", path, owner),
-                        );
-                    }
-                    needs_interval_stage = true;
-                    break 'scan;
-                }
+                // issue-425-gate-routes-by-membership: a single-owner replay
+                // run no longer routes anything — membership decides below.
+                // (The replay named an outside item with no lines of its own
+                // 21 of 21 times in #419's adjudication.)
             }
         }
+    }
+    // issue-425-gate-routes-by-membership: entangled iff membership credits
+    // lines on a requested path to a begun item outside the request. Routing
+    // stays request-wide: one entangled path interval-stages every file.
+    for (path, owner) in
+        membership_entangling_owners(&partition, &requested_files, &ids, &begun_outside)
+    {
+        if bram_trace_enabled() {
+            append_bram_trace_line(
+                app,
+                "worklist-commit",
+                &format!(
+                    "op=entangled-interval-stage path={} owner={} source=membership",
+                    path, owner
+                ),
+            );
+        }
+        needs_interval_stage = true;
     }
     // issue-327: per-id declared files, for the interval-staging patch builder.
     let mut item_files_map: std::collections::HashMap<String, Vec<String>> = Default::default();
@@ -71875,6 +72220,40 @@ fn handle_worklist_commit<R: tauri::Runtime>(
                 "commit refused: this item's declared files carry no changes to commit \
                  (its work may be parked or already committed)."
                     .to_string(),
+            );
+        }
+
+        // issue-425-gate-routes-by-membership: one state for classification
+        // and staging. What was just staged must be exactly what the snapshot
+        // (taken before membership classified the paths) saw; otherwise an
+        // edit landed in between and the commit would carry lines no
+        // classification covered. Unstage and refuse — a retry re-snapshots.
+        let staged_blobs = match gate_index_blobs(app, &staged_after) {
+            Ok(b) => b,
+            Err(e) => return worklist_json_error(500, e),
+        };
+        let drift = gate_state_drift(&worktree_snapshot, &staged_blobs);
+        if !drift.is_empty() {
+            let mut unstage = vec!["reset".to_string(), "-q".to_string(), "--".to_string()];
+            unstage.extend(staged_after.iter().cloned());
+            let _ = git_run_owned(app, &unstage);
+            append_bram_trace_line(
+                app,
+                "worklist-commit",
+                &format!(
+                    "op=refuse-state-drift paths={}",
+                    drift.iter().take(5).cloned().collect::<Vec<_>>().join(",")
+                ),
+            );
+            release_claim_on_commit_refusal(app, &ids);
+            return worklist_json_error(
+                409,
+                format!(
+                    "commit refused: {} changed while the commit was being prepared, so \
+                     the commit would have included edits Bram hadn't checked. Nothing was \
+                     committed and nothing was left staged. Commit again.",
+                    drift.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
+                ),
             );
         }
 
@@ -72168,6 +72547,31 @@ fn handle_worklist_commit<R: tauri::Runtime>(
     let mut response = serde_json::json!({ "ok": true, "sha": sha, "queuedCloses": queued_closes });
     if !residual_paths.is_empty() {
         response["residualPaths"] = serde_json::Value::Array(residual_paths);
+    }
+    // issue-425-gate-routes-by-membership: disclose, don't refuse. A
+    // whole-file commit took every line on its paths, including lines
+    // membership credits to no item; name them so the agent can say so.
+    // (Interval staging takes only the requested items' own hunks.)
+    if !needs_interval_stage {
+        let taken = membership_unowned_taken(&partition, &committed_paths);
+        if !taken.is_empty() {
+            for (path, a, r) in &taken {
+                append_bram_trace_line(
+                    app,
+                    "worklist-commit",
+                    &format!(
+                        "op=commit-took-unowned path={} added={} removed={}",
+                        path, a, r
+                    ),
+                );
+            }
+            response["unownedTaken"] = serde_json::Value::Array(
+                taken
+                    .iter()
+                    .map(|(p, a, r)| serde_json::json!({ "path": p, "added": a, "removed": r }))
+                    .collect(),
+            );
+        }
     }
     if !retained.is_empty() {
         response["retained"] = serde_json::json!(retained);

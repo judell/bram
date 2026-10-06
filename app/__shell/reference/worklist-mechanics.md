@@ -95,7 +95,9 @@ claim, not that it failed.
 ## Interval staging and entangled commits
 
 When a commit would stage a path carrying lines attributed to a begun
-item *outside the request*, `worklist-commit` doesn't refuse — it
+item *outside the request* — decided by line-level membership (each
+changed line credited to the claim window that last wrote it), not by
+which items merely declare the path — `worklist-commit` doesn't refuse — it
 stages only the requested items' OWN hunks: their claim-interval
 patches applied to a scratch index seeded from `HEAD`, committed via
 `git commit-tree` + `update-ref`, with the worktree and the real index
@@ -448,6 +450,30 @@ the discipline for completing them serially.
   fresh gate click) is the resume channel. Report the partial landing
   instead of announcing completion, and don't re-POST: the approval is
   consumed and the claim released.
+- **Lines taken that no item wrote.** A whole-file commit takes every
+  line on its paths. When some of those lines belong to no item (chat-turn
+  edits, edits between claim windows, a neighbour's lines on a file it
+  doesn't declare), the success body carries `unownedTaken: [{path, added,
+  removed}]`. The commit went through: this is a disclosure, not a refusal.
+  Tell the user which files carried lines no item wrote and that they
+  landed in this commit, so the history doesn't silently credit them to
+  the item.
+- **Write the commit message from the prediction, not from memory.**
+  Before posting `worklist-commit`, read the item's `willCommit` from
+  `GET /__worklist`: it follows the gate's routing (whole-file on every
+  declared path unless another begun item owns lines on one of them,
+  then the item's own hunks on all of them). `willCommitUnowned`
+  (`[{path, added, removed}]`) lists the lines no item wrote that a
+  whole-file commit would take; say so in the message. An agent that
+  wrote "the new file and the top hunk only" before a whole-file commit
+  that also took a neighbour's unowned line (demo, 2026-10-06) is the
+  case this prevents.
+- **Refusals that mean "try again".** `commit refused: Bram couldn't work
+  out which lines belong to which item right now…` (membership had no
+  answer) and `commit refused: <path> changed while the commit was being
+  prepared…` (an edit landed between classification and staging; nothing
+  was committed or left staged) are both safe to retry with a fresh
+  **Commit** click. Say so; don't re-POST the consumed approval.
 - **Untracked residue (#419).** A `residualPaths` entry with
   `"untracked": true` means a new file the item declared did not land in
   the commit (it is still untracked). It always comes with

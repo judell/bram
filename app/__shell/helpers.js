@@ -13911,33 +13911,6 @@ window.__bramWorklistOverlapGroups = function (items, claim) {
   return out;
 };
 
-// Appends the shared-file commit choice to the feedback the gate buttons send.
-// Folded into the existing actions rather than given its own submit button --
-// the same reasoning as the close-on-commit dialog's `close-issue:` lines, and
-// the pane convention against a third decision point beside Approve/Drop.
-//
-// Selection remains literal. If an unselected begun claimant shares a path,
-// the agent must isolate that neighbour before committing exactly the chosen
-// ids. With several selected ids, `split` additionally asks for one commit per
-// selected item; `together` keeps the selected set in one commit.
-window.__bramSelectionHasUnselectedShared = function (items, sel, claim) {
-  var list = items || [];
-  var chosen = {};
-  (sel || []).forEach(function (id) { chosen[id] = true; });
-  if (!Object.keys(chosen).length) return false;
-  var byId = {};
-  list.forEach(function (item) { if (item) byId[item.id] = item; });
-  return list.some(function (item) {
-    if (!item || !chosen[item.id]) return false;
-    return (item.changedFiles || []).some(function (file) {
-      return (file.sharedWith || []).some(function (otherId) {
-        var other = byId[otherId];
-        return !chosen[otherId] && other && window.__bramWorklist2Begun(other, claim);
-      });
-    });
-  });
-};
-
 window.__bramSelectionHasBegunShared = function (items, sel, claim) {
   var list = items || [];
   var chosen = sel || [];
@@ -13948,18 +13921,22 @@ window.__bramSelectionHasBegunShared = function (items, sel, claim) {
 };
 
 window.__bramWithShareMode = function (text, mode, items, sel, claim) {
-  var body = text || "";
-  var chosen = sel || [];
   // gate-remove-commit-share-radio: no "split" mode any more. The radio that
   // chose it is gone; its only effect was the split-shared-files hunk
-  // separation #273 froze. `mode` is kept for the call shape.
-  if (!window.__bramSelectionHasUnselectedShared(items, chosen, claim)) return body;
-  return (
-    (body ? body + "\n\n" : "") +
-    "selected-only-shared-files: isolate the selected items' shared-file changes from " +
-    "unselected claimants before committing; commit exactly the selected item ids" +
-    (chosen.length > 1 ? " together." : ".")
-  );
+  // separation #273 froze. `mode`, `items`, `sel`, `claim` are kept for the
+  // call shape.
+  //
+  // retire-selected-only-shared-files-instruction: this used to append
+  // "selected-only-shared-files: isolate the selected items' shared-file
+  // changes from unselected claimants before committing" whenever the
+  // selection shared a file with an unselected begun item. Agents obeyed by
+  // hand: revert the neighbour's lines, commit, restore them (demo gate-425,
+  // 2026-10-06 07:11:18-35Z). That hid the shared lines from the gate — which
+  // since #327 interval-stages them itself, and since issue-425 decides
+  // entanglement by line-level membership — and rewrote another item's lines
+  // inside the committing item's claim window. The host owns isolation now;
+  // the body passes through unchanged.
+  return text || "";
 };
 
 // One ROW per entangled path, for the banner's table: { path, disk,

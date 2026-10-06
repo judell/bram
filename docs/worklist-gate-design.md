@@ -105,15 +105,15 @@ item claims: the path, what is on disk (`+added −removed`, or `nothing yet`),
 and the claiming items' badges. It is a plain fact panel, not a dismissible
 banner — dismissing it once used to suppress it for every later selection.
 
-A selection-scoped `RadioGroup` (`__bramSelectionCommitSweepsShared`) appears
-only when the current selection could commit **and** that commit would sweep a
-path another begun item claims:
-
-- **One commit** — claimants of a shared file land together (default).
-- **A commit each** — the agent separates the shared changes first.
-
-The pick rides along with whichever gate button is pressed next
-(`__bramWithShareMode`); there is no separate submit step.
+Historical: a selection-scoped `RadioGroup` once chose between **one commit** for
+a shared file's claimants and **a commit each** (the agent separating the shared
+changes first), and `__bramWithShareMode` appended a matching
+`selected-only-shared-files` instruction to the approval. The radio retired with
+gate-remove-commit-share-radio; the instruction retired with
+retire-selected-only-shared-files-instruction (2026-10-06), because agents obeyed it
+by hand-reverting a neighbour's lines around the commit, hiding them from the gate.
+The host isolates shared files itself: entanglement is decided by line-level
+membership and entangled commits are interval-staged (#327, #425).
 
 ### The selection gate
 

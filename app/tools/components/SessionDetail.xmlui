@@ -128,7 +128,7 @@
           </VStack>
           <!-- tool call (foldable) -->
           <VStack when="{$item.kind === 'tool'}" gap="$space-0_5">
-            <Link noIndicator="true" onClick="expanded = window.__bramExpandTool(expanded, $item)">
+            <Link noIndicator="true" onClick="expanded = window.__bramExpandTool(expanded, $item, '', 'session-detail')">
               <HStack gap="$space-1" verticalAlignment="center">
                 <Text
                   fontSize="$fontSize-sm"

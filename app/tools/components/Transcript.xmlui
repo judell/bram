@@ -297,7 +297,7 @@
                rows (describe-edit-write-rows made every edit row a describe
                target — 4 repins/1.5s on one expand, 2026-07-24 trace). Follow
                resumes when the user scrolls back to the bottom. -->
-          <Link noIndicator="true" onClick="expanded = window.__bramExpandTool(expanded, $item); atBottom = window.__bramFollowTransition(false, 'tool-expand', $props.agentId)">
+          <Link noIndicator="true" onClick="expanded = window.__bramExpandTool(expanded, $item, $props.agentId, 'transcript'); atBottom = window.__bramFollowTransition(false, 'tool-expand', $props.agentId)">
             <HStack gap="$space-1" verticalAlignment="center">
               <!-- promote-tool-descriptions-to-row (inverted): the row leads
                    with intent; hover shows the RAW command line — the

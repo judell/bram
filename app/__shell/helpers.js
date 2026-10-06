@@ -14433,7 +14433,7 @@ window.__bramDescribeMaterial = function (item) {
   var summary = item.summary || "";
   return summary && summary !== item.name ? summary : "";
 };
-window.__bramExpandTool = function (arr, item) {
+window.__bramExpandTool = function (arr, item, agentId, surface) {
   // Arm the xmlui freeze-probe window (xmlui-eval-probe-vendor): for 1.5s
   // after an expansion click, the instrumented vendored engine emits
   // xmlui-probe trace lines (op=eval|stmt|action) synchronously via
@@ -14446,6 +14446,25 @@ window.__bramExpandTool = function (arr, item) {
   // = true from the console to restore the expand-trigger while hunting.
   try { if (window.__bramEvalProbeArm) window.__xmluiEvalTraceUntil = performance.now() + 1500; } catch (e) {}
   var next = window.__bramToggleInArray(arr, item && item.id);
+  // trace-tool-expand: one line per tool-row toggle, so screencast and
+  // attention tooling (Bram Studio's auto-screencast) can see when the user
+  // opened or closed a tool call. The generic dom-click line can't tell an
+  // expand from any other click. Fields per docs/trace-vocabulary.md.
+  try {
+    if (item && item.id) {
+      var fields = {
+        op: (next || []).indexOf(item.id) >= 0 ? "open" : "close",
+        // Where the click happened: the live Transcript or a past session's
+        // detail view (Sessions / Search). Both share this function.
+        surface: String(surface || "unknown"),
+        id: String(item.id),
+        name: String(item.name || ""),
+      };
+      if (item.nameDetail) fields.detail = String(item.nameDetail).slice(0, 80);
+      if (agentId) fields.agentId = String(agentId);
+      window.__bramIframeTrace("tool-expand", fields);
+    }
+  } catch (e) { /* tracing must never break the expand */ }
   try {
     var opening = item && item.id && (next || []).indexOf(item.id) >= 0;
     if (opening && window.__bramDescribeMaterial(item)) {

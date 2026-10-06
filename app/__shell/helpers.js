@@ -15236,9 +15236,13 @@ window.__bramCloseIssue = function (number, comment, toastApi, onPendingChange) 
   __bramPendingIssueCloses[number] = startedAt;
   invoke("issue_close_manual", { number: number, comment: comment || "" })
     .then(function () {
-      // The entry stays until the refetched list itself reads CLOSED
-      // (__bramReconcilePendingIssueCloses), so the row never flickers back
-      // to open between this resolve and the issues-changed refetch.
+      // issue-close-pending-retires-on-host-ok: the close is complete here,
+      // whether or not an Issues tab is mounted. The host has already run
+      // refresh_issue_now, so the cached /__issues row reads CLOSED and any
+      // remount sees the truth. Deliberately NO onPendingChange: a mounted
+      // tab's pendingCloses var keeps its override until its own
+      // issues-changed refetch reconciles, so the row never flickers open.
+      delete __bramPendingIssueCloses[number];
       window.__bramIframeTrace("issue-close", { op: "ok", number: number, elapsedMs: Date.now() - startedAt });
     })
     .catch(function (e) {
